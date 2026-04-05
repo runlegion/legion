@@ -584,6 +584,25 @@ enum ScheduleAction {
         #[arg(long)]
         id: String,
     },
+
+    /// Update a schedule's active window or cron expression
+    Update {
+        /// Schedule ID
+        #[arg(long)]
+        id: String,
+
+        /// New cron expression
+        #[arg(long)]
+        cron: Option<String>,
+
+        /// Active window start time (HH:MM UTC)
+        #[arg(long)]
+        active_start: Option<String>,
+
+        /// Active window end time (HH:MM UTC)
+        #[arg(long)]
+        active_end: Option<String>,
+    },
 }
 
 fn data_dir() -> error::Result<PathBuf> {
@@ -1373,6 +1392,32 @@ fn main() -> error::Result<()> {
                         info!("[legion] schedule deleted: {}", id);
                     } else {
                         eprintln!("[legion] schedule not found: {}", id);
+                    }
+                }
+                ScheduleAction::Update {
+                    id,
+                    cron,
+                    active_start,
+                    active_end,
+                } => {
+                    if let Some(ref c) = cron {
+                        db::validate_hhmm(c).ok();
+                    }
+                    if let Some(ref s) = active_start {
+                        db::validate_hhmm(s)?;
+                    }
+                    if let Some(ref e) = active_end {
+                        db::validate_hhmm(e)?;
+                    }
+                    if database.update_schedule(
+                        &id,
+                        cron.as_deref(),
+                        active_start.as_deref(),
+                        active_end.as_deref(),
+                    )? {
+                        eprintln!("[legion] schedule updated: {}", id);
+                    } else {
+                        eprintln!("[legion] schedule not found or nothing to update: {}", id);
                     }
                 }
             }
