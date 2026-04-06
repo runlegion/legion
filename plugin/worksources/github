@@ -118,8 +118,37 @@ case "${1:-}" in
     jq -n --arg url "$URL" --argjson number "${NUMBER:-0}" '{"url":$url,"number":$number}'
     ;;
 
+  comment)
+    NUMBER="${LEGION_WS_NUMBER:-}"
+    BODY="${LEGION_WS_BODY:-}"
+    if [ -z "$REPO" ] || [ -z "$NUMBER" ] || [ -z "$BODY" ]; then
+      echo "LEGION_WS_REPO, LEGION_WS_NUMBER, and LEGION_WS_BODY required" >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo "gh CLI not found" >&2
+      exit 1
+    fi
+    gh issue comment "$NUMBER" --repo "$REPO" --body "$BODY" >/dev/null || { echo "gh comment failed" >&2; exit 1; }
+    echo '{"ok":true}'
+    ;;
+
+  pr-list)
+    if [ -z "$REPO" ]; then
+      echo "[]"
+      exit 0
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo "[]"
+      exit 0
+    fi
+    gh pr list --repo "$REPO" --state open \
+      --json number,title,createdAt,updatedAt,headRefName,reviewDecision,isDraft \
+      --limit 50 2>/dev/null || echo "[]"
+    ;;
+
   *)
-    echo "Usage: github <list|close N|detect|create-issue|create-pr>" >&2
+    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list>" >&2
     exit 1
     ;;
 esac

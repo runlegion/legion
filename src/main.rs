@@ -318,6 +318,21 @@ enum Commands {
         action: IssueAction,
     },
 
+    /// Post a comment on an issue or PR via work source plugins
+    Comment {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// Issue or PR number
+        #[arg(long)]
+        number: u64,
+
+        /// Comment body
+        #[arg(long)]
+        body: String,
+    },
+
     /// Manage pull requests via work source plugins
     Pr {
         #[command(subcommand)]
@@ -682,6 +697,13 @@ enum PrAction {
         /// Kanban card ID to link (stores PR URL on the card)
         #[arg(long)]
         task: Option<String>,
+    },
+
+    /// List open pull requests with review status
+    List {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
     },
 }
 
@@ -1579,7 +1601,42 @@ fn main() -> error::Result<()> {
                 println!("{}", created.url);
                 eprintln!("[legion] created PR #{} on {}", created.number, source_repo);
             }
+            PrAction::List { repo } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let prs = worksource::list_prs(&plugin_name, &source_repo)?;
+                if prs.is_empty() {
+                    eprintln!("[legion] no open PRs on {}", source_repo);
+                } else {
+                    for pr in &prs {
+                        let review = pr.review_decision.as_deref().unwrap_or("PENDING");
+                        let draft = if pr.is_draft { " [draft]" } else { "" };
+                        println!(
+                            "#{} {} ({}) {}{}",
+                            pr.number, pr.title, pr.head_ref_name, review, draft
+                        );
+                    }
+                }
+            }
         },
+        Commands::Comment { repo, number, body } => {
+            let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                .ok_or_else(|| {
+                    error::LegionError::WorkSource(format!(
+                        "no work source configured for repo '{}' in watch.toml",
+                        repo
+                    ))
+                })?;
+
+            worksource::comment(&plugin_name, &source_repo, number, &body)?;
+            eprintln!("[legion] commented on #{} on {}", number, source_repo);
+        }
         Commands::Watch => {
             let base = data_dir()?;
             watch::run(&base)?;

@@ -210,6 +210,56 @@ pub fn create_pr(
     Ok(created)
 }
 
+/// Post a comment on an issue or PR via a work source plugin.
+pub fn comment(plugin_name: &str, github_repo: &str, number: u64, body: &str) -> Result<()> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    call_plugin(
+        &plugin_path,
+        &["comment"],
+        &[
+            ("LEGION_WS_REPO", github_repo),
+            ("LEGION_WS_NUMBER", &number.to_string()),
+            ("LEGION_WS_BODY", body),
+        ],
+    )?;
+
+    Ok(())
+}
+
+/// A PR from an external tracker with review status.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalPR {
+    pub number: u64,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub head_ref_name: String,
+    pub review_decision: Option<String>,
+    pub is_draft: bool,
+}
+
+/// List open PRs from a work source plugin.
+pub fn list_prs(plugin_name: &str, github_repo: &str) -> Result<Vec<ExternalPR>> {
+    let plugin_path = match find_plugin(plugin_name) {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+
+    let output = call_plugin(
+        &plugin_path,
+        &["pr-list"],
+        &[("LEGION_WS_REPO", github_repo)],
+    )?;
+
+    let prs: Vec<ExternalPR> =
+        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
+
+    Ok(prs)
+}
+
 /// Detect the external repo identifier from a workdir.
 #[allow(dead_code)]
 pub fn detect_repo(plugin_name: &str, workdir: &str) -> Result<Option<String>> {
