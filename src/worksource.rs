@@ -260,6 +260,59 @@ pub fn list_prs(plugin_name: &str, github_repo: &str) -> Result<Vec<ExternalPR>>
     Ok(prs)
 }
 
+/// Post a review on a PR via a work source plugin.
+pub fn review_pr(
+    plugin_name: &str,
+    github_repo: &str,
+    pr_number: u64,
+    event: &str,
+    body: Option<&str>,
+    comments_file: Option<&str>,
+) -> Result<()> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let pr_num_str = pr_number.to_string();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_PR_NUMBER", &pr_num_str),
+        ("LEGION_WS_EVENT", event),
+    ];
+    if let Some(b) = body {
+        env.push(("LEGION_WS_BODY", b));
+    }
+    if let Some(c) = comments_file {
+        env.push(("LEGION_WS_COMMENTS", c));
+    }
+
+    call_plugin(&plugin_path, &["review"], &env)?;
+    Ok(())
+}
+
+/// Merge a PR via a work source plugin. Refuses if not approved.
+pub fn merge_pr(
+    plugin_name: &str,
+    github_repo: &str,
+    pr_number: u64,
+    strategy: &str,
+    delete_branch: bool,
+) -> Result<()> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let pr_num_str = pr_number.to_string();
+    let delete_str = if delete_branch { "true" } else { "false" };
+    let env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_PR_NUMBER", &pr_num_str),
+        ("LEGION_WS_STRATEGY", strategy),
+        ("LEGION_WS_DELETE_BRANCH", delete_str),
+    ];
+
+    call_plugin(&plugin_path, &["merge"], &env)?;
+    Ok(())
+}
+
 /// Detect the external repo identifier from a workdir.
 #[allow(dead_code)]
 pub fn detect_repo(plugin_name: &str, workdir: &str) -> Result<Option<String>> {

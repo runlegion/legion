@@ -147,8 +147,72 @@ case "${1:-}" in
       --limit 50 2>/dev/null || echo "[]"
     ;;
 
+  review)
+    PR_NUMBER="${LEGION_WS_PR_NUMBER:-}"
+    EVENT="${LEGION_WS_EVENT:-APPROVE}"
+    BODY="${LEGION_WS_BODY:-}"
+    COMMENTS_FILE="${LEGION_WS_COMMENTS:-}"
+    if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_PR_NUMBER required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    if [ -n "$COMMENTS_FILE" ] && [ -f "$COMMENTS_FILE" ]; then
+      # Review with inline comments via API
+      OWNER="${REPO%%/*}"
+      REPO_NAME="${REPO##*/}"
+      gh api "repos/${OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/reviews" \
+        --method POST --input "$COMMENTS_FILE" >/dev/null \
+        || { echo "gh api review failed" >&2; exit 1; }
+    else
+      # Simple review via CLI
+      case "$EVENT" in
+        APPROVE)          ARGS=(pr review "$PR_NUMBER" --repo "$REPO" --approve) ;;
+        REQUEST_CHANGES)  ARGS=(pr review "$PR_NUMBER" --repo "$REPO" --request-changes) ;;
+        COMMENT)          ARGS=(pr review "$PR_NUMBER" --repo "$REPO" --comment) ;;
+        *)                echo "Unknown event: $EVENT" >&2; exit 1 ;;
+      esac
+      [ -n "$BODY" ] && ARGS+=(--body "$BODY")
+      gh "${ARGS[@]}" >/dev/null || { echo "gh pr review failed" >&2; exit 1; }
+    fi
+    echo '{"ok":true}'
+    ;;
+
+  merge)
+    PR_NUMBER="${LEGION_WS_PR_NUMBER:-}"
+    STRATEGY="${LEGION_WS_STRATEGY:-squash}"
+    DELETE_BRANCH="${LEGION_WS_DELETE_BRANCH:-true}"
+    if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_PR_NUMBER required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    # Check review status before merging
+    REVIEW_STATUS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json reviewDecision -q '.reviewDecision' 2>/dev/null)
+    if [ "$REVIEW_STATUS" != "APPROVED" ]; then
+      echo "{\"error\":\"PR #${PR_NUMBER} not approved (status: ${REVIEW_STATUS:-NONE})\"}" >&2
+      exit 1
+    fi
+    ARGS=(pr merge "$PR_NUMBER" --repo "$REPO")
+    case "$STRATEGY" in
+      squash) ARGS+=(--squash) ;;
+      merge)  ARGS+=(--merge) ;;
+      rebase) ARGS+=(--rebase) ;;
+      *)      echo "Unknown strategy: $STRATEGY" >&2; exit 1 ;;
+    esac
+    [ "$DELETE_BRANCH" = "true" ] && ARGS+=(--delete-branch)
+    gh "${ARGS[@]}" >/dev/null || { echo "gh pr merge failed" >&2; exit 1; }
+    echo '{"ok":true}'
+    ;;
+
   *)
-    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list>" >&2
+    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge>" >&2
     exit 1
     ;;
 esac

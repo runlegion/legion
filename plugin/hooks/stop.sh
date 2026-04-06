@@ -1,6 +1,6 @@
 #!/bin/bash
-# Legion Stop hook: prompt the agent to reflect before closing
-# Mutex: only fires once per session AND only if the session did real work.
+# Legion Stop hook: one reflection if you learned something non-obvious.
+# Full wind-down belongs in /snooze, not here.
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
@@ -17,40 +17,15 @@ if [ -f "$MARKER" ]; then
   exit 0
 fi
 
-# Mutex: skip if session had no real work (no work marker from recall-first or other hooks)
+# Skip if session had no real work
 WORK_MARKER="/tmp/legion-work-${CWD_HASH}"
 if [ ! -f "$WORK_MARKER" ]; then
   exit 0
 fi
 
-# Create marker. SessionStart hook cleans these up on next session.
 touch "$MARKER"
 
-# Check for unread bullpen posts
-BOARD_COUNT=$(legion bullpen --count --repo "$REPO" 2>/dev/null)
-BOARD_MSG=""
-if [ -n "$BOARD_COUNT" ]; then
-  BOARD_MSG="
-
-(3) You have unread board posts: ${BOARD_COUNT}. Run legion bullpen --repo ${REPO} to read and respond before leaving."
-fi
-
-# Check for active kanban cards
-ACTIVE_CARD=$(legion work --repo "$REPO" --peek 2>/dev/null)
-CARD_MSG=""
-if [ -n "$ACTIVE_CARD" ]; then
-  CARD_MSG="
-
-(4) You have an active kanban card. Run legion done --repo ${REPO} --text '<what you completed>' --id <card-id> if finished, or legion kanban block --id <card-id> --reason '<reason>' if blocked."
-fi
-
-jq -n --arg reason "Before you stop:
-
-(1) TEAM FIRST: Did you help a teammate this session? Did you respond to board posts directed at you? If someone asked for help and you ignored it, that is the thing to fix next session.
-
-(2) REFLECT: What would you tell another agent who hits this same problem tomorrow? Store it: legion reflect --repo $REPO --text '<your reflection here>'
-
-(3) BOOST what helped: legion boost --id <id>. SIGNAL what is unresolved: legion signal --repo $REPO --to <agent> --verb question --note '<question>'${BOARD_MSG}${CARD_MSG}" '{
+jq -n --arg reason "What would you tell another agent who hits this same problem tomorrow? Store it: legion reflect --repo $REPO --text '<your reflection>'. Skip if nothing surprising happened." '{
   "decision": "block",
   "reason": $reason
 }'
