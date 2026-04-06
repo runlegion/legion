@@ -567,6 +567,12 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let poll_interval = Duration::from_secs(config.poll_interval_secs);
     let health_interval = Duration::from_secs(config.health_poll_secs);
     let retention_cutoff = chrono::Duration::days(config.retention_days as i64);
+    // On startup, only look back 24 hours for unhandled signals.
+    // Prevents historical flood when watch restarts after downtime.
+    // The watch_handled table prevents re-processing, but without a
+    // lookback window, the first poll returns every unhandled signal
+    // ever created, overwhelming agents with stale notifications.
+    let lookback = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
 
     let mut poll_timer = Instant::now() - poll_interval; // poll immediately on start
     let mut health_timer = Instant::now() - health_interval; // sample immediately on start
@@ -605,7 +611,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
         // Spawn check on the poll interval
         if poll_timer.elapsed() >= poll_interval {
             if sampler.can_spawn(config.health_threshold_pct) {
-                match poll_cycle(&db, &config, &mut cooldown, &mut tracker, None) {
+                match poll_cycle(&db, &config, &mut cooldown, &mut tracker, Some(&lookback)) {
                     Ok(n) if n > 0 => {
                         eprintln!("[legion watch] cycle complete: {} agent(s) spawned", n);
                     }
