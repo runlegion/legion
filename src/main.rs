@@ -312,6 +312,12 @@ enum Commands {
         action: ScheduleAction,
     },
 
+    /// Manage pull requests via work source plugins
+    Pr {
+        #[command(subcommand)]
+        action: PrAction,
+    },
+
     /// Watch for signals and auto-wake sleeping agents
     Watch,
 
