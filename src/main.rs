@@ -339,6 +339,25 @@ enum Commands {
         action: PrAction,
     },
 
+    /// View the audit log of work source actions
+    Audit {
+        /// Filter by agent name
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Filter by action type (create-issue, create-pr, review, merge, comment, close)
+        #[arg(long)]
+        action: Option<String>,
+
+        /// Maximum entries to show
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Watch for signals and auto-wake sleeping agents
     Watch,
 
@@ -1599,6 +1618,30 @@ fn main() -> error::Result<()> {
                     assignee.as_deref(),
                 )?;
 
+                // Audit log (best-effort)
+                if let Ok(db_base) = data_dir()
+                    && let Ok(database) = db::Database::open(&db_base.join("legion.db"))
+                {
+                    let details = serde_json::json!({
+                        "title": title,
+                        "labels": labels,
+                        "assignee": assignee,
+                    });
+                    let details_str = details.to_string();
+                    if let Err(e) = database.insert_audit_entry(&db::AuditInput {
+                        agent: &repo,
+                        action: "create-issue",
+                        target_type: "issue",
+                        target_ref: &created.number.to_string(),
+                        task_id: None,
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    }) {
+                        eprintln!("[legion] warning: audit log failed: {}", e);
+                    }
+                }
+
                 println!("{}", created.url);
                 eprintln!(
                     "[legion] created issue #{} on {}",
@@ -1645,6 +1688,31 @@ fn main() -> error::Result<()> {
                     // Update the card's context with the PR URL
                     if let Some(_card) = database.get_card_by_id(task_id)? {
                         eprintln!("[legion] linked PR #{} to card {}", created.number, task_id);
+                    }
+                }
+
+                // Audit log (best-effort)
+                if let Ok(db_base) = data_dir()
+                    && let Ok(database) = db::Database::open(&db_base.join("legion.db"))
+                {
+                    let details = serde_json::json!({
+                        "title": title,
+                        "base": base,
+                        "head": head,
+                        "draft": draft,
+                    });
+                    let details_str = details.to_string();
+                    if let Err(e) = database.insert_audit_entry(&db::AuditInput {
+                        agent: &repo,
+                        action: "create-pr",
+                        target_type: "pr",
+                        target_ref: &created.number.to_string(),
+                        task_id: task.as_deref(),
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    }) {
+                        eprintln!("[legion] warning: audit log failed: {}", e);
                     }
                 }
 
@@ -1782,7 +1850,56 @@ fn main() -> error::Result<()> {
                 })?;
 
             worksource::comment(&plugin_name, &source_repo, number, &body)?;
+
+            // Audit log (best-effort)
+            if let Ok(db_base) = data_dir()
+                && let Ok(database) = db::Database::open(&db_base.join("legion.db"))
+                && let Err(e) = database.insert_audit_entry(&db::AuditInput {
+                    agent: &repo,
+                    action: "comment",
+                    target_type: "comment",
+                    target_ref: &number.to_string(),
+                    task_id: None,
+                    source_type: &plugin_name,
+                    details: None,
+                    outcome: "success",
+                })
+            {
+                eprintln!("[legion] warning: audit log failed: {}", e);
+            }
+
             eprintln!("[legion] commented on #{} on {}", number, source_repo);
+        }
+        Commands::Audit {
+            repo,
+            action,
+            limit,
+            json,
+        } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let entries = database.query_audit_log(repo.as_deref(), action.as_deref(), limit)?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else if entries.is_empty() {
+                eprintln!("[legion] no audit entries found");
+            } else {
+                for entry in &entries {
+                    let task = entry.task_id.as_deref().unwrap_or("-");
+                    let ts = entry.timestamp.get(..19).unwrap_or(&entry.timestamp);
+                    println!(
+                        "{} {} {} {} #{} [{}] task:{}",
+                        ts,
+                        entry.agent,
+                        entry.action,
+                        entry.target_type,
+                        entry.target_ref,
+                        entry.outcome,
+                        task
+                    );
+                }
+            }
         }
         Commands::Watch => {
             let base = data_dir()?;

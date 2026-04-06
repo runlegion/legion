@@ -50,6 +50,10 @@ legion pr review --repo <name> --number <n> --request-changes --body "..."
 legion pr merge --repo <name> --number <n>   # merge approved PR (refuses if not approved)
 legion pr merge --repo <name> --number <n> --task <card-id>  # merge + transition card to done
 legion comment --repo <name> --number <n> --body "..."       # comment on issue or PR
+legion audit                                 # view recent audit log entries
+legion audit --repo <name>                   # filter by agent
+legion audit --action create-pr              # filter by action type
+legion audit --json                          # output as JSON
 legion watch                                 # auto-wake sleeping agents on signal arrival
 legion -v <command>                          # show informational messages (quiet by default)
 ```
