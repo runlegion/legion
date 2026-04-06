@@ -312,6 +312,12 @@ enum Commands {
         action: ScheduleAction,
     },
 
+    /// Manage issues via work source plugins
+    Issue {
+        #[command(subcommand)]
+        action: IssueAction,
+    },
+
     /// Watch for signals and auto-wake sleeping agents
     Watch,
 
@@ -602,6 +608,32 @@ enum ScheduleAction {
         /// Active window end time (HH:MM UTC)
         #[arg(long)]
         active_end: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum IssueAction {
+    /// Create an issue via the configured work source
+    Create {
+        /// Repository name (used to resolve work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// Issue title
+        #[arg(long)]
+        title: String,
+
+        /// Issue body
+        #[arg(long)]
+        body: Option<String>,
+
+        /// Comma-separated labels
+        #[arg(long)]
+        labels: Option<String>,
+
+        /// Assignee login
+        #[arg(long)]
+        assignee: Option<String>,
     },
 }
 
@@ -1422,6 +1454,38 @@ fn main() -> error::Result<()> {
                 }
             }
         }
+        Commands::Issue { action } => match action {
+            IssueAction::Create {
+                repo,
+                title,
+                body,
+                labels,
+                assignee,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let created = worksource::create_issue(
+                    &plugin_name,
+                    &source_repo,
+                    &title,
+                    body.as_deref(),
+                    labels.as_deref(),
+                    assignee.as_deref(),
+                )?;
+
+                println!("{}", created.url);
+                eprintln!(
+                    "[legion] created issue #{} on {}",
+                    created.number, source_repo
+                );
+            }
+        },
         Commands::Watch => {
             let base = data_dir()?;
             watch::run(&base)?;

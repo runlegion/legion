@@ -60,8 +60,34 @@ case "${1:-}" in
     fi
     ;;
 
+  create-issue)
+    TITLE="${LEGION_WS_TITLE:-}"
+    BODY="${LEGION_WS_BODY:-}"
+    LABELS="${LEGION_WS_LABELS:-}"
+    ASSIGNEE="${LEGION_WS_ASSIGNEE:-}"
+    if [ -z "$REPO" ] || [ -z "$TITLE" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_TITLE required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    ARGS=(issue create --repo "$REPO" --title "$TITLE")
+    [ -n "$BODY" ] && ARGS+=(--body "$BODY")
+    [ -n "$LABELS" ] && ARGS+=(--label "$LABELS")
+    [ -n "$ASSIGNEE" ] && ARGS+=(--assignee "$ASSIGNEE")
+    URL=$(gh "${ARGS[@]}") || { echo "gh issue create failed" >&2; exit 1; }
+    if [ -z "$URL" ]; then
+      echo "gh returned empty URL" >&2
+      exit 1
+    fi
+    NUMBER=$(echo "$URL" | grep -oE '[0-9]+$' || echo "0")
+    jq -n --arg url "$URL" --argjson number "${NUMBER:-0}" '{"url":$url,"number":$number}'
+    ;;
+
   *)
-    echo "Usage: github <list|close N|detect>" >&2
+    echo "Usage: github <list|close N|detect|create-issue>" >&2
     exit 1
     ;;
 esac
