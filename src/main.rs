@@ -705,6 +705,56 @@ enum PrAction {
         #[arg(long)]
         repo: String,
     },
+
+    /// Post a review on a pull request
+    Review {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR number
+        #[arg(long)]
+        number: u64,
+
+        /// Approve the PR
+        #[arg(long, group = "verdict")]
+        approve: bool,
+
+        /// Request changes on the PR
+        #[arg(long, group = "verdict")]
+        request_changes: bool,
+
+        /// Review body text
+        #[arg(long)]
+        body: Option<String>,
+
+        /// Path to JSON file with inline comments (GitHub API format)
+        #[arg(long)]
+        comments: Option<String>,
+    },
+
+    /// Merge an approved pull request
+    Merge {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR number
+        #[arg(long)]
+        number: u64,
+
+        /// Merge strategy: squash (default), merge, rebase
+        #[arg(long, default_value = "squash", value_parser = ["squash", "merge", "rebase"])]
+        strategy: String,
+
+        /// Keep the branch after merging (default: delete)
+        #[arg(long)]
+        keep_branch: bool,
+
+        /// Kanban card ID to transition to done
+        #[arg(long)]
+        task: Option<String>,
+    },
 }
 
 fn data_dir() -> error::Result<PathBuf> {
@@ -1623,6 +1673,97 @@ fn main() -> error::Result<()> {
                         );
                     }
                 }
+            }
+            PrAction::Review {
+                repo,
+                number,
+                approve,
+                request_changes,
+                body,
+                comments,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let event = if approve {
+                    "APPROVE"
+                } else if request_changes {
+                    "REQUEST_CHANGES"
+                } else {
+                    "COMMENT"
+                };
+
+                worksource::review_pr(
+                    &plugin_name,
+                    &source_repo,
+                    number,
+                    event,
+                    body.as_deref(),
+                    comments.as_deref(),
+                )?;
+
+                eprintln!(
+                    "[legion] posted {} review on PR #{} on {}",
+                    event, number, source_repo
+                );
+            }
+            PrAction::Merge {
+                repo,
+                number,
+                strategy,
+                keep_branch,
+                task,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                worksource::merge_pr(&plugin_name, &source_repo, number, &strategy, !keep_branch)?;
+
+                // Transition kanban card to done if linked
+                if let Some(ref task_id) = task {
+                    let db_base = data_dir()?;
+                    let database = db::Database::open(&db_base.join("legion.db"))?;
+                    match kanban::transition_card(
+                        &database,
+                        task_id,
+                        kanban::Action::Done,
+                        Some(&format!("PR #{} merged", number)),
+                    ) {
+                        Ok(_) => eprintln!("[legion] card {} marked done", task_id),
+                        Err(e) => eprintln!(
+                            "[legion] warning: could not complete card {}: {}",
+                            task_id, e
+                        ),
+                    }
+
+                    // Close linked issue if the card has a source URL
+                    if let Some(card) = database.get_card_by_id(task_id)?
+                        && let Some(ref url) = card.source_url
+                        && let Some(issue_num) = worksource::extract_issue_number(url)
+                        && let Some(ref source) = card.source_type
+                    {
+                        if let Err(e) = worksource::close_issue(source, &source_repo, issue_num) {
+                            eprintln!(
+                                "[legion] warning: could not close issue #{}: {}",
+                                issue_num, e
+                            );
+                        } else {
+                            eprintln!("[legion] closed issue #{}", issue_num);
+                        }
+                    }
+                }
+
+                println!("PR #{} merged on {}", number, source_repo);
             }
         },
         Commands::Comment { repo, number, body } => {
