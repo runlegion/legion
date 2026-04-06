@@ -58,6 +58,11 @@ pub struct WatchConfig {
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
 
+    /// Whether this node serves the web dashboard.
+    /// Only one node per network should have this set to true.
+    #[serde(default)]
+    pub serve: bool,
+
     #[serde(default)]
     pub repos: Vec<WatchRepoConfig>,
 }
@@ -102,9 +107,30 @@ impl Default for WatchConfig {
             health_poll_secs: default_health_poll_secs(),
             health_window_size: default_health_window_size(),
             retention_days: default_retention_days(),
+            serve: false,
             repos: Vec::new(),
         }
     }
+}
+
+/// Rename a repo in watch.toml. Does string replacement to preserve comments
+/// and formatting. Returns true if the file was modified.
+pub fn rename_in_config(path: &Path, from: &str, to: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let contents = std::fs::read_to_string(path)?;
+    let needle = format!("name = \"{}\"", from);
+    let replacement = format!("name = \"{}\"", to);
+
+    if !contents.contains(&needle) {
+        return Ok(false);
+    }
+
+    let updated = contents.replace(&needle, &replacement);
+    std::fs::write(path, updated)?;
+    Ok(true)
 }
 
 /// Load watch config from the given path. Returns a default config if the
@@ -541,7 +567,12 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let poll_interval = Duration::from_secs(config.poll_interval_secs);
     let health_interval = Duration::from_secs(config.health_poll_secs);
     let retention_cutoff = chrono::Duration::days(config.retention_days as i64);
-    let start_time = chrono::Utc::now().to_rfc3339();
+    // On startup, only look back 24 hours for unhandled signals.
+    // Prevents historical flood when watch restarts after downtime.
+    // The watch_handled table prevents re-processing, but without a
+    // lookback window, the first poll returns every unhandled signal
+    // ever created, overwhelming agents with stale notifications.
+    let lookback = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
 
     let mut poll_timer = Instant::now() - poll_interval; // poll immediately on start
     let mut health_timer = Instant::now() - health_interval; // sample immediately on start
@@ -580,7 +611,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
         // Spawn check on the poll interval
         if poll_timer.elapsed() >= poll_interval {
             if sampler.can_spawn(config.health_threshold_pct) {
-                match poll_cycle(&db, &config, &mut cooldown, &mut tracker, Some(&start_time)) {
+                match poll_cycle(&db, &config, &mut cooldown, &mut tracker, Some(&lookback)) {
                     Ok(n) if n > 0 => {
                         eprintln!("[legion watch] cycle complete: {} agent(s) spawned", n);
                     }

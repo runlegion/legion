@@ -60,8 +60,95 @@ case "${1:-}" in
     fi
     ;;
 
+  create-issue)
+    TITLE="${LEGION_WS_TITLE:-}"
+    BODY="${LEGION_WS_BODY:-}"
+    LABELS="${LEGION_WS_LABELS:-}"
+    ASSIGNEE="${LEGION_WS_ASSIGNEE:-}"
+    if [ -z "$REPO" ] || [ -z "$TITLE" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_TITLE required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    ARGS=(issue create --repo "$REPO" --title "$TITLE")
+    [ -n "$BODY" ] && ARGS+=(--body "$BODY")
+    [ -n "$LABELS" ] && ARGS+=(--label "$LABELS")
+    [ -n "$ASSIGNEE" ] && ARGS+=(--assignee "$ASSIGNEE")
+    URL=$(gh "${ARGS[@]}") || { echo "gh issue create failed" >&2; exit 1; }
+    if [ -z "$URL" ]; then
+      echo "gh returned empty URL" >&2
+      exit 1
+    fi
+    NUMBER=$(echo "$URL" | grep -oE '[0-9]+$' || echo "0")
+    jq -n --arg url "$URL" --argjson number "${NUMBER:-0}" '{"url":$url,"number":$number}'
+    ;;
+
+  create-pr)
+    TITLE="${LEGION_WS_TITLE:-}"
+    BODY="${LEGION_WS_BODY:-}"
+    BASE="${LEGION_WS_BASE:-}"
+    HEAD="${LEGION_WS_HEAD:-}"
+    DRAFT="${LEGION_WS_DRAFT:-}"
+    LABELS="${LEGION_WS_LABELS:-}"
+    REVIEWER="${LEGION_WS_REVIEWER:-}"
+    if [ -z "$REPO" ] || [ -z "$TITLE" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_TITLE required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    ARGS=(pr create --repo "$REPO" --title "$TITLE")
+    [ -n "$BODY" ] && ARGS+=(--body "$BODY")
+    [ -n "$BASE" ] && ARGS+=(--base "$BASE")
+    [ -n "$HEAD" ] && ARGS+=(--head "$HEAD")
+    [ "$DRAFT" = "true" ] && ARGS+=(--draft)
+    [ -n "$LABELS" ] && ARGS+=(--label "$LABELS")
+    [ -n "$REVIEWER" ] && ARGS+=(--reviewer "$REVIEWER")
+    URL=$(gh "${ARGS[@]}") || { echo "gh pr create failed" >&2; exit 1; }
+    if [ -z "$URL" ]; then
+      echo "gh returned empty URL" >&2
+      exit 1
+    fi
+    NUMBER=$(echo "$URL" | grep -oE '[0-9]+$' || echo "0")
+    jq -n --arg url "$URL" --argjson number "${NUMBER:-0}" '{"url":$url,"number":$number}'
+    ;;
+
+  comment)
+    NUMBER="${LEGION_WS_NUMBER:-}"
+    BODY="${LEGION_WS_BODY:-}"
+    if [ -z "$REPO" ] || [ -z "$NUMBER" ] || [ -z "$BODY" ]; then
+      echo "LEGION_WS_REPO, LEGION_WS_NUMBER, and LEGION_WS_BODY required" >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo "gh CLI not found" >&2
+      exit 1
+    fi
+    gh issue comment "$NUMBER" --repo "$REPO" --body "$BODY" >/dev/null || { echo "gh comment failed" >&2; exit 1; }
+    echo '{"ok":true}'
+    ;;
+
+  pr-list)
+    if [ -z "$REPO" ]; then
+      echo "[]"
+      exit 0
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo "[]"
+      exit 0
+    fi
+    gh pr list --repo "$REPO" --state open \
+      --json number,title,createdAt,updatedAt,headRefName,reviewDecision,isDraft \
+      --limit 50 2>/dev/null || echo "[]"
+    ;;
+
   *)
-    echo "Usage: github <list|close N|detect>" >&2
+    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list>" >&2
     exit 1
     ;;
 esac

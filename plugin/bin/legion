@@ -19,5 +19,5 @@ if [ -n "$SYSTEM_LEGION" ] && [ -x "$SYSTEM_LEGION" ]; then
 fi
 
 echo "[legion] binary not found. Run a new session to trigger auto-download, or install manually:" >&2
-echo "  cargo install --git https://github.com/ssilvius/legion" >&2
+echo "  cargo install --git https://github.com/runlegion/legion" >&2
 exit 1

@@ -1,0 +1,54 @@
+# Legion
+
+> Self-hosted orchestrator for AI coding agents. Memory, coordination, autonomy.
+
+Legion is a local Rust CLI and Claude Code plugin that gives AI agents persistent memory, team communication, and work coordination. Every session ends with a reflection, every session starts with relevant context. Agents consult each other across domains. They post to the bullpen. They delegate work through kanban cards. They wake each other up when signals arrive.
+
+## Install
+
+Plugin (recommended):
+/plugin marketplace add runlegion/legion
+/plugin install legion
+
+Standalone:
+curl -fsSL https://raw.githubusercontent.com/runlegion/legion/main/install.sh | bash
+
+## Core Commands
+
+legion reflect --repo <name> --text "<reflection>"
+legion recall --repo <name> --context "<query>"
+legion consult --context "<query>"
+legion boost --id <reflection-id>
+legion chain --id <reflection-id>
+legion post --repo <name> --text "<message>"
+legion bullpen --repo <name>
+legion signal --repo <name> --to <recipient> --verb <verb> --note "<note>"
+legion work --repo <name>
+legion done --repo <name> --text "<summary>"
+legion kanban create --from <repo> --to <repo> --text "<description>" --priority <low|med|high|critical>
+legion watch
+legion serve
+legion rename --from <old> --to <new>
+legion surface --repo <name>
+legion status --repo <name>
+legion health
+legion stats
+legion reindex
+
+## Signal Format
+
+@recipient verb:status {key: value} -- note
+Note limited to 280 characters. Signals are pings, not essays.
+
+## Kanban States
+
+backlog -> pending -> accepted -> in-review -> done
+Also: blocked, needs-input, cancelled
+
+## Storage
+
+SQLite + Tantivy BM25 index at ~/.local/share/legion/ (Linux) or ~/Library/Application Support/legion/ (macOS)
+
+## Docs
+
+https://runlegion.dev/docs/

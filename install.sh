@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# install.sh: Installer for Legion (https://github.com/ssilvius/legion)
+# install.sh: Installer for Legion (https://github.com/runlegion/legion)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ssilvius/legion/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/runlegion/legion/main/install.sh | bash
 #   curl -fsSL ... | bash -s v0.1.1
 #   LEGION_VERSION=v0.1.1 bash install.sh
 
 set -euo pipefail
 
-REPO="ssilvius/legion"
+REPO="runlegion/legion"
 INSTALL_DIR="${HOME}/.local/bin"
 BINARY_NAME="legion"
 

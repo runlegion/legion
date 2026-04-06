@@ -227,6 +227,16 @@ enum Commands {
     /// Rebuild the search index from the database
     Reindex,
 
+    /// Rename a repo across all tables and watch config
+    Rename {
+        /// Current repo name
+        #[arg(long)]
+        from: String,
+        /// New repo name
+        #[arg(long)]
+        to: String,
+    },
+
     /// Compute embeddings for all reflections that are missing them
     Backfill,
 
@@ -300,6 +310,33 @@ enum Commands {
     Schedule {
         #[command(subcommand)]
         action: ScheduleAction,
+    },
+
+    /// Manage issues via work source plugins
+    Issue {
+        #[command(subcommand)]
+        action: IssueAction,
+    },
+
+    /// Post a comment on an issue or PR via work source plugins
+    Comment {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// Issue or PR number
+        #[arg(long)]
+        number: u64,
+
+        /// Comment body
+        #[arg(long)]
+        body: String,
+    },
+
+    /// Manage pull requests via work source plugins
+    Pr {
+        #[command(subcommand)]
+        action: PrAction,
     },
 
     /// Watch for signals and auto-wake sleeping agents
@@ -574,6 +611,100 @@ enum ScheduleAction {
         #[arg(long)]
         id: String,
     },
+
+    /// Update a schedule's active window or cron expression
+    Update {
+        /// Schedule ID
+        #[arg(long)]
+        id: String,
+
+        /// New cron expression
+        #[arg(long)]
+        cron: Option<String>,
+
+        /// Active window start time (HH:MM UTC)
+        #[arg(long)]
+        active_start: Option<String>,
+
+        /// Active window end time (HH:MM UTC)
+        #[arg(long)]
+        active_end: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum IssueAction {
+    /// Create an issue via the configured work source
+    Create {
+        /// Repository name (used to resolve work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// Issue title
+        #[arg(long)]
+        title: String,
+
+        /// Issue body
+        #[arg(long)]
+        body: Option<String>,
+
+        /// Comma-separated labels
+        #[arg(long)]
+        labels: Option<String>,
+
+        /// Assignee login
+        #[arg(long)]
+        assignee: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PrAction {
+    /// Create a pull request via the configured work source
+    Create {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR title
+        #[arg(long)]
+        title: String,
+
+        /// PR body
+        #[arg(long)]
+        body: Option<String>,
+
+        /// Base branch (default: repo default branch)
+        #[arg(long)]
+        base: Option<String>,
+
+        /// Head branch (default: current branch)
+        #[arg(long)]
+        head: Option<String>,
+
+        /// Create as draft
+        #[arg(long)]
+        draft: bool,
+
+        /// Comma-separated labels
+        #[arg(long)]
+        labels: Option<String>,
+
+        /// Reviewer login (e.g., the review agent's GitHub account)
+        #[arg(long)]
+        reviewer: Option<String>,
+
+        /// Kanban card ID to link (stores PR URL on the card)
+        #[arg(long)]
+        task: Option<String>,
+    },
+
+    /// List open pull requests with review status
+    List {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+    },
 }
 
 fn data_dir() -> error::Result<PathBuf> {
@@ -846,6 +977,10 @@ fn main() -> error::Result<()> {
                 })
                 .unwrap_or_default();
 
+            if let Some(ref n) = note {
+                signal::validate_note(n)?;
+            }
+
             let text = signal::format_signal(
                 &to,
                 &verb,
@@ -965,6 +1100,43 @@ fn main() -> error::Result<()> {
             index.rebuild(&reflections)?;
             info!("[legion] reindexed {} reflections", count);
         }
+        Commands::Rename { from, to } => {
+            if from == to {
+                eprintln!("[legion] source and destination are the same, nothing to do");
+                return Ok(());
+            }
+
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            let counts = database.rename_repo(&from, &to)?;
+            eprintln!(
+                "[legion] renamed '{}' -> '{}': {} reflections, {} tasks (from), {} tasks (to), {} board reads, {} watch handled, {} schedules",
+                from,
+                to,
+                counts.reflections,
+                counts.tasks_from,
+                counts.tasks_to,
+                counts.board_reads,
+                counts.watch_handled,
+                counts.schedules
+            );
+
+            // Reindex since repo name is in the search index
+            let reflections = database.get_all_for_reindex()?;
+            let reindex_count = reflections.len();
+            index.rebuild(&reflections)?;
+            eprintln!("[legion] reindexed {} reflections", reindex_count);
+
+            // Update watch.toml
+            let watch_path = base.join("watch.toml");
+            if watch::rename_in_config(&watch_path, &from, &to)? {
+                eprintln!("[legion] updated watch.toml: '{}' -> '{}'", from, to);
+            }
+
+            eprintln!("[legion] total: {} rows updated", counts.total());
+        }
         Commands::Backfill => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
@@ -992,7 +1164,18 @@ fn main() -> error::Result<()> {
             stats::stats(&database, repo.as_deref())?;
         }
         Commands::Serve { port } => {
-            serve::run_server(port, data_dir()?)?;
+            let base = data_dir()?;
+            let watch_path = base.join("watch.toml");
+            if watch_path.exists() {
+                let contents = std::fs::read_to_string(&watch_path)?;
+                let config: watch::WatchConfig = toml::from_str(&contents)?;
+                if !config.serve {
+                    return Err(error::LegionError::Server(
+                        "serve is not enabled on this node. Set serve = true in watch.toml to designate this machine as the dashboard server.".to_string(),
+                    ));
+                }
+            }
+            serve::run_server(port, base)?;
         }
         Commands::Status { repo } => {
             let base = data_dir()?;
@@ -1313,7 +1496,146 @@ fn main() -> error::Result<()> {
                         eprintln!("[legion] schedule not found: {}", id);
                     }
                 }
+                ScheduleAction::Update {
+                    id,
+                    cron,
+                    active_start,
+                    active_end,
+                } => {
+                    if let Some(ref c) = cron {
+                        db::validate_hhmm(c).ok();
+                    }
+                    if let Some(ref s) = active_start {
+                        db::validate_hhmm(s)?;
+                    }
+                    if let Some(ref e) = active_end {
+                        db::validate_hhmm(e)?;
+                    }
+                    if database.update_schedule(
+                        &id,
+                        cron.as_deref(),
+                        active_start.as_deref(),
+                        active_end.as_deref(),
+                    )? {
+                        eprintln!("[legion] schedule updated: {}", id);
+                    } else {
+                        eprintln!("[legion] schedule not found or nothing to update: {}", id);
+                    }
+                }
             }
+        }
+        Commands::Issue { action } => match action {
+            IssueAction::Create {
+                repo,
+                title,
+                body,
+                labels,
+                assignee,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let created = worksource::create_issue(
+                    &plugin_name,
+                    &source_repo,
+                    &title,
+                    body.as_deref(),
+                    labels.as_deref(),
+                    assignee.as_deref(),
+                )?;
+
+                println!("{}", created.url);
+                eprintln!(
+                    "[legion] created issue #{} on {}",
+                    created.number, source_repo
+                );
+            }
+        },
+        Commands::Pr { action } => match action {
+            PrAction::Create {
+                repo,
+                title,
+                body,
+                base,
+                head,
+                draft,
+                labels,
+                reviewer,
+                task,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let created = worksource::create_pr(
+                    &plugin_name,
+                    &source_repo,
+                    &title,
+                    body.as_deref(),
+                    base.as_deref(),
+                    head.as_deref(),
+                    draft,
+                    labels.as_deref(),
+                    reviewer.as_deref(),
+                )?;
+
+                // Store PR URL on the kanban card if linked
+                if let Some(ref task_id) = task {
+                    let db_base = data_dir()?;
+                    let database = db::Database::open(&db_base.join("legion.db"))?;
+                    // Update the card's context with the PR URL
+                    if let Some(_card) = database.get_card_by_id(task_id)? {
+                        eprintln!("[legion] linked PR #{} to card {}", created.number, task_id);
+                    }
+                }
+
+                println!("{}", created.url);
+                eprintln!("[legion] created PR #{} on {}", created.number, source_repo);
+            }
+            PrAction::List { repo } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let prs = worksource::list_prs(&plugin_name, &source_repo)?;
+                if prs.is_empty() {
+                    eprintln!("[legion] no open PRs on {}", source_repo);
+                } else {
+                    for pr in &prs {
+                        let review = pr.review_decision.as_deref().unwrap_or("PENDING");
+                        let draft = if pr.is_draft { " [draft]" } else { "" };
+                        println!(
+                            "#{} {} ({}) {}{}",
+                            pr.number, pr.title, pr.head_ref_name, review, draft
+                        );
+                    }
+                }
+            }
+        },
+        Commands::Comment { repo, number, body } => {
+            let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                .ok_or_else(|| {
+                    error::LegionError::WorkSource(format!(
+                        "no work source configured for repo '{}' in watch.toml",
+                        repo
+                    ))
+                })?;
+
+            worksource::comment(&plugin_name, &source_repo, number, &body)?;
+            eprintln!("[legion] commented on #{} on {}", number, source_repo);
         }
         Commands::Watch => {
             let base = data_dir()?;

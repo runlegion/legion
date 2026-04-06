@@ -1,5 +1,21 @@
 use std::collections::HashMap;
 
+use crate::error;
+
+/// Maximum length for a signal note (bytes). Signals are pings, not content delivery.
+pub const MAX_SIGNAL_NOTE_LENGTH: usize = 280;
+
+/// Validate that a signal note is within the length limit.
+pub fn validate_note(note: &str) -> error::Result<()> {
+    if note.len() > MAX_SIGNAL_NOTE_LENGTH {
+        return Err(error::LegionError::SignalNoteTooLong {
+            len: note.len(),
+            max: MAX_SIGNAL_NOTE_LENGTH,
+        });
+    }
+    Ok(())
+}
+
 /// A parsed signal from a bullpen post.
 ///
 /// Signals follow the format: `@recipient verb:status {key: value, key: value}`
@@ -351,6 +367,21 @@ mod tests {
         assert_eq!(parsed.recipient, "platform");
         assert_eq!(parsed.verb, "request");
         assert_eq!(parsed.status.as_deref(), Some("help"));
+    }
+
+    #[test]
+    fn validate_note_rejects_long_notes() {
+        let long = "a".repeat(MAX_SIGNAL_NOTE_LENGTH + 1);
+        let result = validate_note(&long);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("legion post"));
+    }
+
+    #[test]
+    fn validate_note_accepts_short_notes() {
+        assert!(validate_note("short note").is_ok());
+        assert!(validate_note(&"a".repeat(MAX_SIGNAL_NOTE_LENGTH)).is_ok());
     }
 
     #[test]

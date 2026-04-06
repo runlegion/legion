@@ -585,7 +585,7 @@ mod tests {
             "high",
             Some("backend,search"),
             None,
-            Some("https://github.com/ssilvius/legion/issues/42"),
+            Some("https://github.com/runlegion/legion/issues/42"),
             Some("github"),
         )
         .expect("create");
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(card.labels.as_deref(), Some("backend,search"));
         assert_eq!(
             card.source_url.as_deref(),
-            Some("https://github.com/ssilvius/legion/issues/42")
+            Some("https://github.com/runlegion/legion/issues/42")
         );
         assert_eq!(card.source_type.as_deref(), Some("github"));
     }
@@ -849,7 +849,7 @@ mod tests {
             note: None,
             labels: Some("backend,search".to_string()),
             parent_card_id: None,
-            source_url: Some("https://github.com/ssilvius/legion/issues/42".to_string()),
+            source_url: Some("https://github.com/runlegion/legion/issues/42".to_string()),
             source_type: Some("github".to_string()),
             sort_order: 0,
             created_at: "2026-04-03T00:00:00Z".to_string(),

@@ -63,6 +63,11 @@ pub enum LegionError {
     #[error("schedule not found: {0}")]
     ScheduleNotFound(String),
 
+    #[error(
+        "signal note too long ({len} chars, max {max}). Signals are pings, not essays. Post the content first with `legion post`, then signal with a short note."
+    )]
+    SignalNoteTooLong { len: usize, max: usize },
+
     #[error("watch config error: {0}")]
     WatchConfig(String),
 
@@ -131,6 +136,15 @@ mod tests {
     fn error_display_no_data_dir() {
         let err = LegionError::NoDataDir;
         assert_eq!(err.to_string(), "data directory not available");
+    }
+
+    #[test]
+    fn error_display_signal_note_too_long() {
+        let err = LegionError::SignalNoteTooLong { len: 500, max: 280 };
+        let msg = err.to_string();
+        assert!(msg.contains("500 chars"));
+        assert!(msg.contains("max 280"));
+        assert!(msg.contains("legion post"));
     }
 
     #[test]

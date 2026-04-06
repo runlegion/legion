@@ -121,6 +121,145 @@ pub fn close_issue(plugin_name: &str, github_repo: &str, number: u64) -> Result<
     Ok(())
 }
 
+/// Result of creating an issue via a work source plugin.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CreatedIssue {
+    pub url: String,
+    pub number: u64,
+}
+
+/// Create an issue via a work source plugin.
+pub fn create_issue(
+    plugin_name: &str,
+    github_repo: &str,
+    title: &str,
+    body: Option<&str>,
+    labels: Option<&str>,
+    assignee: Option<&str>,
+) -> Result<CreatedIssue> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let mut env: Vec<(&str, &str)> =
+        vec![("LEGION_WS_REPO", github_repo), ("LEGION_WS_TITLE", title)];
+    if let Some(b) = body {
+        env.push(("LEGION_WS_BODY", b));
+    }
+    if let Some(l) = labels {
+        env.push(("LEGION_WS_LABELS", l));
+    }
+    if let Some(a) = assignee {
+        env.push(("LEGION_WS_ASSIGNEE", a));
+    }
+
+    let output = call_plugin(&plugin_path, &["create-issue"], &env)?;
+    let created: CreatedIssue =
+        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
+
+    Ok(created)
+}
+
+/// Result of creating a PR via a work source plugin.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CreatedPR {
+    pub url: String,
+    pub number: u64,
+}
+
+/// Create a PR via a work source plugin.
+#[allow(clippy::too_many_arguments)]
+pub fn create_pr(
+    plugin_name: &str,
+    github_repo: &str,
+    title: &str,
+    body: Option<&str>,
+    base: Option<&str>,
+    head: Option<&str>,
+    draft: bool,
+    labels: Option<&str>,
+    reviewer: Option<&str>,
+) -> Result<CreatedPR> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let mut env: Vec<(&str, &str)> =
+        vec![("LEGION_WS_REPO", github_repo), ("LEGION_WS_TITLE", title)];
+    if let Some(b) = body {
+        env.push(("LEGION_WS_BODY", b));
+    }
+    if let Some(b) = base {
+        env.push(("LEGION_WS_BASE", b));
+    }
+    if let Some(h) = head {
+        env.push(("LEGION_WS_HEAD", h));
+    }
+    if draft {
+        env.push(("LEGION_WS_DRAFT", "true"));
+    }
+    if let Some(l) = labels {
+        env.push(("LEGION_WS_LABELS", l));
+    }
+    if let Some(r) = reviewer {
+        env.push(("LEGION_WS_REVIEWER", r));
+    }
+
+    let output = call_plugin(&plugin_path, &["create-pr"], &env)?;
+    let created: CreatedPR =
+        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
+
+    Ok(created)
+}
+
+/// Post a comment on an issue or PR via a work source plugin.
+pub fn comment(plugin_name: &str, github_repo: &str, number: u64, body: &str) -> Result<()> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    call_plugin(
+        &plugin_path,
+        &["comment"],
+        &[
+            ("LEGION_WS_REPO", github_repo),
+            ("LEGION_WS_NUMBER", &number.to_string()),
+            ("LEGION_WS_BODY", body),
+        ],
+    )?;
+
+    Ok(())
+}
+
+/// A PR from an external tracker with review status.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalPR {
+    pub number: u64,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub head_ref_name: String,
+    pub review_decision: Option<String>,
+    pub is_draft: bool,
+}
+
+/// List open PRs from a work source plugin.
+pub fn list_prs(plugin_name: &str, github_repo: &str) -> Result<Vec<ExternalPR>> {
+    let plugin_path = match find_plugin(plugin_name) {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+
+    let output = call_plugin(
+        &plugin_path,
+        &["pr-list"],
+        &[("LEGION_WS_REPO", github_repo)],
+    )?;
+
+    let prs: Vec<ExternalPR> =
+        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
+
+    Ok(prs)
+}
+
 /// Detect the external repo identifier from a workdir.
 #[allow(dead_code)]
 pub fn detect_repo(plugin_name: &str, workdir: &str) -> Result<Option<String>> {
@@ -257,7 +396,7 @@ mod tests {
     #[test]
     fn extract_issue_number_from_url() {
         assert_eq!(
-            extract_issue_number("https://github.com/ssilvius/legion/issues/42"),
+            extract_issue_number("https://github.com/runlegion/legion/issues/42"),
             Some(42)
         );
         assert_eq!(extract_issue_number("not-a-url"), None);

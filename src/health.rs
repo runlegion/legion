@@ -219,14 +219,14 @@ fn compute_pressure(snapshot: &HealthSnapshot) -> f64 {
     // Memory pressure takes priority if higher
     pressure = pressure.max(snapshot.mem_usage_pct);
 
-    // Swap usage is a red flag -- any significant swap adds pressure
+    // Swap usage contributes directly -- no penalty multiplier.
+    // On workstations (16GB Macs), swap at 70-85% is normal during
+    // multi-agent sessions, not an emergency.
     if let (Some(total), Some(used)) = (snapshot.swap_total_bytes, snapshot.swap_used_bytes)
         && total > 0
     {
         let swap_pct: f64 = (used as f64 / total as f64) * 100.0;
-        if swap_pct > 10.0 {
-            pressure = pressure.max(swap_pct + 20.0);
-        }
+        pressure = pressure.max(swap_pct);
     }
 
     // Thermal throttling -- if CPU temp > 90C, hard pressure
@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn swap_penalty_increases_pressure() {
+    fn swap_contributes_to_pressure() {
         let snap = HealthSnapshot {
             cpu_usage_pct: 30.0,
             load_avg_1: None,
@@ -337,8 +337,12 @@ mod tests {
             cpu_temp_celsius: None,
         };
         let p: f64 = compute_pressure(&snap);
-        // 50% swap + 20 penalty = 70, which is > max(30 cpu, 37.5 mem)
-        assert!(p >= 70.0, "pressure {} should be >= 70.0 (swap penalty)", p);
+        // 50% swap is the highest metric, no penalty added
+        assert!(
+            (p - 50.0).abs() < 0.1,
+            "pressure {} should be ~50.0 (swap direct)",
+            p
+        );
     }
 
     #[test]

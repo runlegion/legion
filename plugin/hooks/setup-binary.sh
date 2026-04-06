@@ -4,7 +4,7 @@
 # or version mismatch. Uses CLAUDE_PLUGIN_DATA for persistent storage.
 set -euo pipefail
 
-REPO="ssilvius/legion"
+REPO="runlegion/legion"
 BINARY_NAME="legion"
 EXPECTED_VERSION="0.1.1"
 

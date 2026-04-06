@@ -1662,7 +1662,7 @@ fn kanban_with_source_url() {
             "--text",
             "github issue",
             "--source-url",
-            "https://github.com/ssilvius/legion/issues/42",
+            "https://github.com/runlegion/legion/issues/42",
             "--source-type",
             "github",
         ])
