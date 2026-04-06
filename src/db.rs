@@ -1469,6 +1469,49 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// Update a schedule's cron expression and/or active window.
+    pub fn update_schedule(
+        &self,
+        id: &str,
+        cron: Option<&str>,
+        active_start: Option<&str>,
+        active_end: Option<&str>,
+    ) -> Result<bool> {
+        let mut updates: Vec<String> = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+
+        if let Some(c) = cron {
+            updates.push(format!("cron = ?{}", params.len() + 1));
+            params.push(c.to_string());
+        }
+        if let Some(s) = active_start {
+            updates.push(format!("active_start = ?{}", params.len() + 1));
+            params.push(s.to_string());
+        }
+        if let Some(e) = active_end {
+            updates.push(format!("active_end = ?{}", params.len() + 1));
+            params.push(e.to_string());
+        }
+
+        if updates.is_empty() {
+            return Ok(false);
+        }
+
+        let query = format!(
+            "UPDATE schedules SET {} WHERE id = ?{}",
+            updates.join(", "),
+            params.len() + 1
+        );
+        params.push(id.to_string());
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = self.conn.execute(&query, param_refs.as_slice())?;
+        Ok(rows > 0)
+    }
+
     /// Get recently extended learning chains.
     ///
     /// Returns reflections that have a parent_id and were created within
