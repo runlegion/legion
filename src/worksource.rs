@@ -442,6 +442,29 @@ pub fn resolve_config(legion_repo: &str) -> Option<(String, String, String)> {
     None
 }
 
+/// Review agent configuration from watch.toml.
+pub struct ReviewConfig {
+    pub agent: String,
+    pub auto_signal: bool,
+}
+
+/// Read the review agent configuration from watch.toml.
+pub fn resolve_review_config() -> Option<ReviewConfig> {
+    let data_dir = crate::data_dir().ok()?;
+    let config_path = data_dir.join("watch.toml");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config: toml::Table = content.parse().ok()?;
+
+    let review = config.get("review")?;
+    let agent = review.get("agent")?.as_str()?.to_string();
+    let auto_signal = review
+        .get("auto_signal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    Some(ReviewConfig { agent, auto_signal })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
