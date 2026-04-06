@@ -121,6 +121,44 @@ pub fn close_issue(plugin_name: &str, github_repo: &str, number: u64) -> Result<
     Ok(())
 }
 
+/// Result of creating an issue via a work source plugin.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CreatedIssue {
+    pub url: String,
+    pub number: u64,
+}
+
+/// Create an issue via a work source plugin.
+pub fn create_issue(
+    plugin_name: &str,
+    github_repo: &str,
+    title: &str,
+    body: Option<&str>,
+    labels: Option<&str>,
+    assignee: Option<&str>,
+) -> Result<CreatedIssue> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let mut env: Vec<(&str, &str)> =
+        vec![("LEGION_WS_REPO", github_repo), ("LEGION_WS_TITLE", title)];
+    if let Some(b) = body {
+        env.push(("LEGION_WS_BODY", b));
+    }
+    if let Some(l) = labels {
+        env.push(("LEGION_WS_LABELS", l));
+    }
+    if let Some(a) = assignee {
+        env.push(("LEGION_WS_ASSIGNEE", a));
+    }
+
+    let output = call_plugin(&plugin_path, &["create-issue"], &env)?;
+    let created: CreatedIssue =
+        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
+
+    Ok(created)
+}
+
 /// Detect the external repo identifier from a workdir.
 #[allow(dead_code)]
 pub fn detect_repo(plugin_name: &str, workdir: &str) -> Result<Option<String>> {
