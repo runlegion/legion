@@ -1618,25 +1618,29 @@ fn main() -> error::Result<()> {
                     assignee.as_deref(),
                 )?;
 
-                // Audit log
-                let db_base = data_dir()?;
-                let database = db::Database::open(&db_base.join("legion.db"))?;
-                let details = serde_json::json!({
-                    "title": title,
-                    "labels": labels,
-                    "assignee": assignee,
-                });
-                let details_str = details.to_string();
-                database.insert_audit_entry(&db::AuditInput {
-                    agent: &repo,
-                    action: "create-issue",
-                    target_type: "issue",
-                    target_ref: &created.number.to_string(),
-                    task_id: None,
-                    source_type: &plugin_name,
-                    details: Some(&details_str),
-                    outcome: "success",
-                })?;
+                // Audit log (best-effort)
+                if let Ok(db_base) = data_dir()
+                    && let Ok(database) = db::Database::open(&db_base.join("legion.db"))
+                {
+                    let details = serde_json::json!({
+                        "title": title,
+                        "labels": labels,
+                        "assignee": assignee,
+                    });
+                    let details_str = details.to_string();
+                    if let Err(e) = database.insert_audit_entry(&db::AuditInput {
+                        agent: &repo,
+                        action: "create-issue",
+                        target_type: "issue",
+                        target_ref: &created.number.to_string(),
+                        task_id: None,
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    }) {
+                        eprintln!("[legion] warning: audit log failed: {}", e);
+                    }
+                }
 
                 println!("{}", created.url);
                 eprintln!(
@@ -1687,10 +1691,10 @@ fn main() -> error::Result<()> {
                     }
                 }
 
-                // Audit log
+                // Audit log (best-effort)
+                if let Ok(db_base) = data_dir()
+                    && let Ok(database) = db::Database::open(&db_base.join("legion.db"))
                 {
-                    let db_base = data_dir()?;
-                    let database = db::Database::open(&db_base.join("legion.db"))?;
                     let details = serde_json::json!({
                         "title": title,
                         "base": base,
@@ -1698,7 +1702,7 @@ fn main() -> error::Result<()> {
                         "draft": draft,
                     });
                     let details_str = details.to_string();
-                    database.insert_audit_entry(&db::AuditInput {
+                    if let Err(e) = database.insert_audit_entry(&db::AuditInput {
                         agent: &repo,
                         action: "create-pr",
                         target_type: "pr",
@@ -1707,7 +1711,9 @@ fn main() -> error::Result<()> {
                         source_type: &plugin_name,
                         details: Some(&details_str),
                         outcome: "success",
-                    })?;
+                    }) {
+                        eprintln!("[legion] warning: audit log failed: {}", e);
+                    }
                 }
 
                 println!("{}", created.url);
@@ -1845,19 +1851,22 @@ fn main() -> error::Result<()> {
 
             worksource::comment(&plugin_name, &source_repo, number, &body)?;
 
-            // Audit log
-            let db_base = data_dir()?;
-            let database = db::Database::open(&db_base.join("legion.db"))?;
-            database.insert_audit_entry(&db::AuditInput {
-                agent: &repo,
-                action: "comment",
-                target_type: "comment",
-                target_ref: &number.to_string(),
-                task_id: None,
-                source_type: &plugin_name,
-                details: None,
-                outcome: "success",
-            })?;
+            // Audit log (best-effort)
+            if let Ok(db_base) = data_dir()
+                && let Ok(database) = db::Database::open(&db_base.join("legion.db"))
+                && let Err(e) = database.insert_audit_entry(&db::AuditInput {
+                    agent: &repo,
+                    action: "comment",
+                    target_type: "comment",
+                    target_ref: &number.to_string(),
+                    task_id: None,
+                    source_type: &plugin_name,
+                    details: None,
+                    outcome: "success",
+                })
+            {
+                eprintln!("[legion] warning: audit log failed: {}", e);
+            }
 
             eprintln!("[legion] commented on #{} on {}", number, source_repo);
         }
@@ -1878,7 +1887,7 @@ fn main() -> error::Result<()> {
             } else {
                 for entry in &entries {
                     let task = entry.task_id.as_deref().unwrap_or("-");
-                    let ts = &entry.timestamp[..19]; // trim sub-seconds
+                    let ts = entry.timestamp.get(..19).unwrap_or(&entry.timestamp);
                     println!(
                         "{} {} {} {} #{} [{}] task:{}",
                         ts,
