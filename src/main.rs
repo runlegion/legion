@@ -318,6 +318,12 @@ enum Commands {
         action: IssueAction,
     },
 
+    /// Manage pull requests via work source plugins
+    Pr {
+        #[command(subcommand)]
+        action: PrAction,
+    },
+
     /// Watch for signals and auto-wake sleeping agents
     Watch,
 
@@ -634,6 +640,48 @@ enum IssueAction {
         /// Assignee login
         #[arg(long)]
         assignee: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PrAction {
+    /// Create a pull request via the configured work source
+    Create {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR title
+        #[arg(long)]
+        title: String,
+
+        /// PR body
+        #[arg(long)]
+        body: Option<String>,
+
+        /// Base branch (default: repo default branch)
+        #[arg(long)]
+        base: Option<String>,
+
+        /// Head branch (default: current branch)
+        #[arg(long)]
+        head: Option<String>,
+
+        /// Create as draft
+        #[arg(long)]
+        draft: bool,
+
+        /// Comma-separated labels
+        #[arg(long)]
+        labels: Option<String>,
+
+        /// Reviewer login (e.g., the review agent's GitHub account)
+        #[arg(long)]
+        reviewer: Option<String>,
+
+        /// Kanban card ID to link (stores PR URL on the card)
+        #[arg(long)]
+        task: Option<String>,
     },
 }
 
@@ -1484,6 +1532,52 @@ fn main() -> error::Result<()> {
                     "[legion] created issue #{} on {}",
                     created.number, source_repo
                 );
+            }
+        },
+        Commands::Pr { action } => match action {
+            PrAction::Create {
+                repo,
+                title,
+                body,
+                base,
+                head,
+                draft,
+                labels,
+                reviewer,
+                task,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let created = worksource::create_pr(
+                    &plugin_name,
+                    &source_repo,
+                    &title,
+                    body.as_deref(),
+                    base.as_deref(),
+                    head.as_deref(),
+                    draft,
+                    labels.as_deref(),
+                    reviewer.as_deref(),
+                )?;
+
+                // Store PR URL on the kanban card if linked
+                if let Some(ref task_id) = task {
+                    let db_base = data_dir()?;
+                    let database = db::Database::open(&db_base.join("legion.db"))?;
+                    // Update the card's context with the PR URL
+                    if let Some(_card) = database.get_card_by_id(task_id)? {
+                        eprintln!("[legion] linked PR #{} to card {}", created.number, task_id);
+                    }
+                }
+
+                println!("{}", created.url);
+                eprintln!("[legion] created PR #{} on {}", created.number, source_repo);
             }
         },
         Commands::Watch => {
