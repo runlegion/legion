@@ -1695,6 +1695,12 @@ fn main() -> error::Result<()> {
                 } else if request_changes {
                     "REQUEST_CHANGES"
                 } else {
+                    // COMMENT requires a body or inline comments
+                    if body.is_none() && comments.is_none() {
+                        return Err(error::LegionError::WorkSource(
+                            "comment review requires --body or --comments".to_string(),
+                        ));
+                    }
                     "COMMENT"
                 };
 
