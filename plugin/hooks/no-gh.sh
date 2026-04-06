@@ -9,7 +9,7 @@ if [ -z "$COMMAND" ]; then
 fi
 
 # Check if the command starts with gh (ignoring leading whitespace)
-TRIMMED=$(echo "$COMMAND" | sed 's/^[[:space:]]*//')
+TRIMMED="${COMMAND#"${COMMAND%%[![:space:]]*}"}"
 case "$TRIMMED" in
   gh\ *|gh)
     jq -n --arg reason "Do not use gh directly. Use legion commands instead:
