@@ -1079,25 +1079,21 @@ async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQu
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
     };
 
-    let index_dir = state.data_dir.join("index");
-    let index = match SearchIndex::open(&index_dir) {
+    let index = match open_search_index(&state.data_dir) {
         Ok(idx) => idx,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("search index error: {e}"),
-            );
+        Err(_) => {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "search index error");
         }
     };
 
     let limit = params.limit.unwrap_or(10).min(50);
 
-    let search_results = match &params.repo {
+    let hits = match &params.repo {
         Some(repo) => index.search(repo, q, limit),
         None => index.search_all(q, limit),
     };
 
-    let hits = match search_results {
+    let hits = match hits {
         Ok(hits) => hits,
         Err(e) => {
             return json_error(
@@ -1107,21 +1103,39 @@ async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQu
         }
     };
 
-    // Join search hits with full reflection data
-    let mut results: Vec<serde_json::Value> = Vec::with_capacity(hits.len());
-    for hit in &hits {
-        if let Ok(Some(r)) = db.get_reflection_by_id(&hit.id) {
-            results.push(serde_json::json!({
+    let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+    let reflections = match db.get_reflections_by_ids(&ids) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("reflection lookup error: {e}"),
+            );
+        }
+    };
+
+    // Build score map from search hits, then return reflections in score order
+    let score_map: HashMap<&str, f32> = hits.iter().map(|h| (h.id.as_str(), h.score)).collect();
+    let mut results: Vec<serde_json::Value> = reflections
+        .into_iter()
+        .map(|r| {
+            let score = score_map.get(r.id.as_str()).copied().unwrap_or(0.0);
+            serde_json::json!({
                 "id": r.id,
                 "repo": r.repo,
                 "text": r.text,
-                "score": hit.score,
+                "score": score,
                 "created_at": r.created_at,
                 "domain": r.domain,
                 "tags": r.tags,
-            }));
-        }
-    }
+            })
+        })
+        .collect();
+    results.sort_by(|a, b| {
+        let sa = a["score"].as_f64().unwrap_or(0.0);
+        let sb = b["score"].as_f64().unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Json(results).into_response()
 }
