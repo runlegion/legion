@@ -654,6 +654,26 @@ impl Database {
         }
     }
 
+    /// Retrieve reflections by a list of IDs. Returns them in the order found
+    /// (not necessarily the input order). Missing IDs are silently skipped.
+    pub fn get_reflections_by_ids(&self, ids: &[&str]) -> Result<Vec<Reflection>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, \
+             last_recalled_at, parent_id FROM reflections WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     /// Retrieve all reflections for a repository, ordered newest first.
     #[cfg(test)]
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {

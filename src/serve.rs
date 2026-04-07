@@ -14,6 +14,7 @@ use tokio::signal;
 
 use crate::db::{Database, ReflectionMeta};
 use crate::error;
+use crate::health::HealthSample;
 use crate::search::SearchIndex;
 use crate::signal as sig;
 use crate::status;
@@ -66,10 +67,13 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/tasks/{id}/unblock", post(api_task_unblock))
             .route("/api/chat", get(api_chat))
             .route("/api/boost/{id}", post(api_boost))
+            .route("/api/health", get(api_health))
+            .route("/api/health/history", get(api_health_history))
+            .route("/api/search", get(api_search))
+            .route("/api/audit", get(api_audit))
             .route("/api/schedules", get(api_schedules))
             .route("/api/schedules/create", post(api_create_schedule))
             .route("/api/schedules/{id}/toggle", post(api_toggle_schedule))
-            .route("/api/search", get(api_search))
             .route("/api/kanban", get(api_kanban))
             .route("/api/kanban/{id}/move", post(api_kanban_move))
             .route("/api/kanban/workloads", get(api_kanban_workloads))
@@ -941,44 +945,229 @@ async fn api_toggle_schedule(
     }
 }
 
+/// Query parameters for GET /api/health.
+#[derive(serde::Deserialize)]
+struct HealthQuery {
+    /// Minutes of history to return (default 60).
+    minutes: Option<u64>,
+}
+
+/// GET /api/health -- latest health samples per host + recent history.
+async fn api_health(State(state): State<AppState>, Query(params): Query<HealthQuery>) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let minutes = params.minutes.unwrap_or(60);
+    let since = chrono::Utc::now() - chrono::Duration::minutes(minutes as i64);
+    let since_str = since.to_rfc3339();
+
+    let samples: Vec<HealthSample> = match db.get_health_all_hosts(&since_str) {
+        Ok(s) => s,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("health query error: {e}"),
+            );
+        }
+    };
+
+    // Group by hostname, return latest + history
+    let mut by_host: HashMap<String, Vec<&HealthSample>> = HashMap::new();
+    for sample in &samples {
+        by_host
+            .entry(sample.hostname.clone())
+            .or_default()
+            .push(sample);
+    }
+
+    let hosts: Vec<serde_json::Value> = by_host
+        .into_iter()
+        .map(|(hostname, mut host_samples)| {
+            host_samples.sort_by(|a, b| b.sampled_at.cmp(&a.sampled_at));
+            let latest = host_samples.first().map(|s| {
+                serde_json::json!({
+                    "cpu_usage_pct": s.cpu_usage_pct,
+                    "mem_usage_pct": s.mem_usage_pct,
+                    "mem_total_bytes": s.mem_total_bytes,
+                    "mem_used_bytes": s.mem_used_bytes,
+                    "swap_total_bytes": s.swap_total_bytes,
+                    "swap_used_bytes": s.swap_used_bytes,
+                    "load_avg_1": s.load_avg_1,
+                    "load_avg_5": s.load_avg_5,
+                    "load_avg_15": s.load_avg_15,
+                    "cpu_core_count": s.cpu_core_count,
+                    "cpu_temp_celsius": s.cpu_temp_celsius,
+                    "agents_active": s.agents_active,
+                    "pressure": s.pressure,
+                    "sampled_at": s.sampled_at,
+                })
+            });
+            let history: Vec<serde_json::Value> = host_samples
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "sampled_at": s.sampled_at,
+                        "cpu_usage_pct": s.cpu_usage_pct,
+                        "mem_usage_pct": s.mem_usage_pct,
+                        "pressure": s.pressure,
+                        "agents_active": s.agents_active,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "hostname": hostname,
+                "latest": latest,
+                "history": history,
+            })
+        })
+        .collect();
+
+    Json(hosts).into_response()
+}
+
+/// Query parameters for GET /api/health/history.
+#[derive(serde::Deserialize)]
+struct HealthHistoryQuery {
+    /// Hostname to filter by.
+    hostname: String,
+    /// Minutes of history to return (default 60).
+    minutes: Option<u64>,
+}
+
+/// GET /api/health/history -- time-series health samples for a single host.
+async fn api_health_history(
+    State(state): State<AppState>,
+    Query(params): Query<HealthHistoryQuery>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let minutes = params.minutes.unwrap_or(60);
+    let since = chrono::Utc::now() - chrono::Duration::minutes(minutes as i64);
+    let since_str = since.to_rfc3339();
+
+    match db.get_health_history(&params.hostname, &since_str) {
+        Ok(samples) => Json(samples).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("health history error: {e}"),
+        ),
+    }
+}
+
 /// Query parameters for GET /api/search.
 #[derive(serde::Deserialize)]
 struct SearchQuery {
+    /// Search query string.
     q: String,
+    /// Optional repo filter (omit to search all).
     repo: Option<String>,
+    /// Max results (default 10).
     limit: Option<usize>,
 }
 
-/// GET /api/search -- search reflections via BM25.
+/// GET /api/search -- BM25-ranked reflection search.
 async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQuery>) -> Response {
+    let q = params.q.trim();
+    if q.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "q parameter is required");
+    }
+
     let db = match open_db(&state.data_dir) {
         Ok(db) => db,
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
     };
 
     let index = match open_search_index(&state.data_dir) {
-        Ok(i) => i,
+        Ok(idx) => idx,
         Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to open search index",
-            );
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "search index error");
         }
     };
 
     let limit = params.limit.unwrap_or(10).min(50);
 
-    let result = if let Some(ref repo) = params.repo {
-        crate::recall::recall_bm25(&db, &index, repo, &params.q, limit)
-    } else {
-        crate::recall::consult_bm25(&db, &index, &params.q, limit)
+    let hits = match &params.repo {
+        Some(repo) => index.search(repo, q, limit),
+        None => index.search_all(q, limit),
     };
 
-    match result {
-        Ok(r) => Json(r.reflections).into_response(),
+    let hits = match hits {
+        Ok(hits) => hits,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("search error: {e}"),
+            );
+        }
+    };
+
+    let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+    let reflections = match db.get_reflections_by_ids(&ids) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("reflection lookup error: {e}"),
+            );
+        }
+    };
+
+    // Build score map from search hits, then return reflections in score order
+    let score_map: HashMap<&str, f32> = hits.iter().map(|h| (h.id.as_str(), h.score)).collect();
+    let mut results: Vec<serde_json::Value> = reflections
+        .into_iter()
+        .map(|r| {
+            let score = score_map.get(r.id.as_str()).copied().unwrap_or(0.0);
+            serde_json::json!({
+                "id": r.id,
+                "repo": r.repo,
+                "text": r.text,
+                "score": score,
+                "created_at": r.created_at,
+                "domain": r.domain,
+                "tags": r.tags,
+            })
+        })
+        .collect();
+    results.sort_by(|a, b| {
+        let sa = a["score"].as_f64().unwrap_or(0.0);
+        let sb = b["score"].as_f64().unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Json(results).into_response()
+}
+
+/// Query parameters for GET /api/audit.
+#[derive(serde::Deserialize)]
+struct AuditQuery {
+    /// Filter by agent name.
+    agent: Option<String>,
+    /// Filter by action type.
+    action: Option<String>,
+    /// Max results (default 50).
+    limit: Option<usize>,
+}
+
+/// GET /api/audit -- recent audit log entries.
+async fn api_audit(State(state): State<AppState>, Query(params): Query<AuditQuery>) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let limit = params.limit.unwrap_or(50).min(200);
+
+    match db.query_audit_log(params.agent.as_deref(), params.action.as_deref(), limit) {
+        Ok(entries) => Json(entries).into_response(),
         Err(e) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("search error: {e}"),
+            &format!("audit query error: {e}"),
         ),
     }
 }
@@ -1046,7 +1235,6 @@ async fn api_kanban_workloads(State(state): State<AppState>) -> Response {
         ),
     }
 }
-
 async fn shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()

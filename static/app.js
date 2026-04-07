@@ -1,9 +1,6 @@
 (function () {
   "use strict";
 
-  var tabs = document.querySelectorAll(".tab");
-  var content = document.getElementById("content");
-
   // -- State --
 
   var state = {
@@ -12,10 +9,7 @@
     tasks: [],
     stats: [],
     signals: [],
-    chatMessages: [],
-    chatAgent: "",
-    feedFilter: "all",
-    feedRepo: "all",
+    health: [],
     taskFormOpen: false,
   };
 
@@ -23,42 +17,27 @@
 
   function relativeTime(isoStr) {
     if (!isoStr) return "";
-    var then = new Date(isoStr).getTime();
-    var now = Date.now();
-    var diff = Math.floor((now - then) / 1000);
-    if (diff < 0) return "just now";
-    if (diff < 60) return diff + "s ago";
-    if (diff < 3600) return Math.floor(diff / 60) + "m ago";
-    if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
-    return Math.floor(diff / 86400) + "d ago";
+    var diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
+    if (diff < 0) return "now";
+    if (diff < 60) return diff + "s";
+    if (diff < 3600) return Math.floor(diff / 60) + "m";
+    if (diff < 86400) return Math.floor(diff / 3600) + "h";
+    return Math.floor(diff / 86400) + "d";
   }
 
   function truncate(text, max) {
-    if (text.length <= max) return text;
-    return text.slice(0, max) + "...";
+    return text.length <= max ? text : text.slice(0, max) + "...";
   }
 
-  function el(tag, className, textContent) {
+  function el(tag, className, text) {
     var e = document.createElement(tag);
     if (className) e.className = className;
-    if (textContent !== undefined) e.textContent = textContent;
+    if (text !== undefined) e.textContent = text;
     return e;
   }
 
   function isPathLike(name) {
     return name.indexOf("/") !== -1 || name.indexOf("agent-") === 0;
-  }
-
-  function unreadClass(count) {
-    if (count === 0) return "unread-green";
-    if (count <= 5) return "unread-yellow";
-    return "unread-red";
-  }
-
-  function priorityBadgeClass(priority) {
-    if (priority === "high") return "badge badge-red";
-    if (priority === "med") return "badge badge-yellow";
-    return "badge badge-gray";
   }
 
   function verbColor(verb) {
@@ -68,8 +47,21 @@
       blocker: "red",
       request: "yellow",
       announce: "purple",
+      answer: "cyan",
     };
     return map[verb] || "gray";
+  }
+
+  function meterColor(pct) {
+    if (pct < 60) return "meter-green";
+    if (pct < 85) return "meter-yellow";
+    return "meter-red";
+  }
+
+  function healthColor(pct) {
+    if (pct < 60) return "health-ok";
+    if (pct < 85) return "health-warn";
+    return "health-crit";
   }
 
   function postToApi(url, body) {
@@ -80,257 +72,173 @@
     });
   }
 
-  // -- Tab routing --
-
-  function currentTab() {
-    var hash = window.location.hash.replace("#", "");
-    return hash || "feed";
+  function priorityBadgeClass(priority) {
+    if (priority === "high") return "badge badge-red";
+    if (priority === "med") return "badge badge-yellow";
+    return "badge badge-gray";
   }
 
-  function updateActive() {
-    var current = currentTab();
-    tabs.forEach(function (tab) {
-      var target = tab.getAttribute("href").replace("#", "");
-      if (target === current) {
-        tab.classList.add("active");
-      } else {
-        tab.classList.remove("active");
-      }
-    });
-  }
+  // -- Agent strip (header bar) --
 
-  function renderPlaceholder(name) {
-    return el("p", "placeholder", name + " -- coming soon");
-  }
-
-  // -- Agents tab --
-
-  function renderAgents() {
-    var container = el("div");
-    var grid = el("div", "agent-grid");
+  function renderAgentStrip() {
+    var strip = document.getElementById("agent-strip");
+    strip.replaceChildren();
 
     var agents = state.agents
       .filter(function (a) { return !isPathLike(a.repo); })
-      .sort(function (a, b) {
-        if (a.last_activity > b.last_activity) return -1;
-        if (a.last_activity < b.last_activity) return 1;
-        return 0;
-      });
-
-    if (agents.length === 0) {
-      return el("p", "placeholder", "No agents found");
-    }
+      .sort(function (a, b) { return b.last_activity.localeCompare(a.last_activity); });
 
     agents.forEach(function (agent) {
-      var card = el("div", "agent-card");
+      // Consider "active" if last activity within 10 minutes
+      var diff = (Date.now() - new Date(agent.last_activity).getTime()) / 60000;
+      var active = diff < 10;
 
-      var header = el("div", "agent-card-header");
-      var name = el("span", "agent-card-name", agent.repo);
-      var badge = el("span", "unread-badge " + unreadClass(agent.unread), String(agent.unread));
-      header.appendChild(name);
-      header.appendChild(badge);
-      card.appendChild(header);
-
-      var stats = el("div", "agent-card-stats");
-
-      var refStat = el("span", "agent-card-stat");
-      refStat.appendChild(el("span", null, "reflections:"));
-      refStat.appendChild(el("span", "agent-card-stat-value", String(agent.reflection_count)));
-      stats.appendChild(refStat);
-
-      var boostStat = el("span", "agent-card-stat");
-      boostStat.appendChild(el("span", null, "boosts:"));
-      boostStat.appendChild(el("span", "agent-card-stat-value", String(agent.boost_sum)));
-      stats.appendChild(boostStat);
-
-      var teamStat = el("span", "agent-card-stat");
-      teamStat.appendChild(el("span", null, "posts:"));
-      teamStat.appendChild(el("span", "agent-card-stat-value", String(agent.team_post_count)));
-      stats.appendChild(teamStat);
-
-      card.appendChild(stats);
-
-      var time = el("div", "agent-card-time", relativeTime(agent.last_activity));
-      card.appendChild(time);
-
-      grid.appendChild(card);
+      var pill = el("div", "agent-pill" + (active ? " active" : ""));
+      pill.appendChild(el("span", "dot"));
+      pill.appendChild(el("span", null, agent.repo));
+      if (agent.unread > 0) {
+        pill.appendChild(el("span", "unread", String(agent.unread)));
+      }
+      strip.appendChild(pill);
     });
-
-    container.appendChild(grid);
-    return container;
   }
 
-  // -- Feed tab --
+  // -- Health strip (header bar) --
 
-  function renderFeed() {
-    var container = el("div");
+  function renderHealthStrip() {
+    var strip = document.getElementById("health-strip");
+    strip.replaceChildren();
 
-    // Command input
-    var bar = el("div", "broadcast-bar");
-    var barRow = el("div", "broadcast-row");
+    if (state.health.length === 0) return;
 
-    var textarea = document.createElement("textarea");
-    textarea.className = "broadcast-input";
-    textarea.placeholder = "@agent message... or just post to the bullpen";
-    textarea.rows = 2;
-    barRow.appendChild(textarea);
+    var host = state.health[0];
+    if (!host || !host.latest) return;
+    var h = host.latest;
 
-    // Hint line
-    var hint = el("div", "broadcast-hint");
-    textarea.addEventListener("input", function () {
-      var text = textarea.value.trim();
-      var match = text.match(/^@(\w+)\s/);
-      if (match) {
-        hint.textContent = "signal to " + match[1] + " as meatbag";
-        hint.className = "broadcast-hint active";
-      } else if (text) {
-        hint.textContent = "post to bullpen as meatbag";
-        hint.className = "broadcast-hint active";
-      } else {
-        hint.textContent = "";
-        hint.className = "broadcast-hint";
-      }
+    var items = [
+      { label: "CPU", value: Math.round(h.cpu_usage_pct) + "%", pct: h.cpu_usage_pct },
+      { label: "MEM", value: Math.round(h.mem_usage_pct) + "%", pct: h.mem_usage_pct },
+      { label: "PRS", value: h.pressure.toFixed(1), pct: h.pressure * 100 },
+      { label: "AGT", value: String(h.agents_active), pct: 0 },
+    ];
+
+    items.forEach(function (item) {
+      var metric = el("span", "health-metric");
+      metric.appendChild(el("span", "health-label", item.label));
+      var cls = item.label === "AGT" ? "health-ok" : healthColor(item.pct);
+      metric.appendChild(el("span", "health-value " + cls, item.value));
+      strip.appendChild(metric);
     });
-    barRow.appendChild(hint);
+  }
 
-    var barActions = el("div", "broadcast-actions");
+  // -- Kanban board --
 
-    var postBtn = el("button", "broadcast-btn", "Send");
-    postBtn.addEventListener("click", function () {
-      var text = textarea.value.trim();
-      if (!text) return;
-      postBtn.disabled = true;
-      postToApi("/api/post", { repo: "meatbag", text: text })
-        .then(function (r) {
-          if (r.ok) {
-            textarea.value = "";
-            hint.textContent = "";
-            hint.className = "broadcast-hint";
-          } else {
-            console.error("[legion] post failed:", r.status);
-          }
-        })
-        .catch(function (err) {
-          console.error("[legion] post error:", err);
-        })
-        .finally(function () {
-          postBtn.disabled = false;
-        });
-    });
+  function getTaskActions(status) {
+    switch (status) {
+      case "pending": return [{ type: "accept", label: "Accept" }];
+      case "accepted": return [
+        { type: "done", label: "Done" },
+        { type: "block", label: "Block" },
+      ];
+      case "blocked": return [{ type: "unblock", label: "Unblock" }];
+      default: return [];
+    }
+  }
 
-    // Ctrl+Enter to send
-    textarea.addEventListener("keydown", function (e) {
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-        e.preventDefault();
-        postBtn.click();
-      }
-    });
+  function renderKanban() {
+    var board = document.getElementById("kanban-board");
+    board.replaceChildren();
 
-    barActions.appendChild(postBtn);
-    barRow.appendChild(barActions);
-    bar.appendChild(barRow);
-    container.appendChild(bar);
+    var columns = [
+      { key: "pending", label: "Pending" },
+      { key: "accepted", label: "Active" },
+      { key: "blocked", label: "Blocked" },
+      { key: "done", label: "Done" },
+    ];
 
-    // Controls row
-    var controls = el("div", "feed-controls");
+    columns.forEach(function (col) {
+      var colEl = el("div", "kanban-col col-" + col.key);
+      var tasks = state.tasks.filter(function (t) { return t.status === col.key; });
 
-    var filters = ["all", "signals", "musings"];
-    filters.forEach(function (f) {
-      var btn = el("button", "feed-btn" + (state.feedFilter === f ? " active" : ""), f);
-      btn.addEventListener("click", function () {
-        state.feedFilter = f;
-        render();
+      var header = el("div", "kanban-col-header");
+      header.appendChild(el("span", null, col.label));
+      header.appendChild(el("span", "count", String(tasks.length)));
+      colEl.appendChild(header);
+
+      var cards = el("div", "kanban-cards");
+
+      tasks.forEach(function (task) {
+        var card = el("div", "kanban-card");
+
+        card.appendChild(el("div", "kanban-card-route", task.from_repo + " -> " + task.to_repo));
+        card.appendChild(el("div", "kanban-card-text", truncate(task.text, 100)));
+
+        var footer = el("div", "kanban-card-footer");
+        footer.appendChild(el("span", priorityBadgeClass(task.priority), task.priority));
+        footer.appendChild(el("span", null, relativeTime(task.created_at)));
+        card.appendChild(footer);
+
+        var actions = getTaskActions(task.status);
+        if (actions.length > 0) {
+          var actionsEl = el("div", "kanban-card-actions");
+          actions.forEach(function (action) {
+            var btn = el("button", "kanban-action-btn kanban-action-" + action.type, action.label);
+            (function (taskId, actionType, button) {
+              button.addEventListener("click", function () {
+                button.disabled = true;
+                postToApi("/api/tasks/" + taskId + "/" + actionType)
+                  .then(function (r) {
+                    if (r.ok) refreshTasks();
+                    else button.disabled = false;
+                  })
+                  .catch(function () { button.disabled = false; });
+              });
+            })(task.id, action.type, btn);
+            actionsEl.appendChild(btn);
+          });
+          card.appendChild(actionsEl);
+        }
+
+        cards.appendChild(card);
       });
-      controls.appendChild(btn);
-    });
 
-    // Repo dropdown
-    var repos = [];
-    state.feed.forEach(function (item) {
-      if (repos.indexOf(item.repo) === -1) repos.push(item.repo);
+      colEl.appendChild(cards);
+      board.appendChild(colEl);
     });
-    repos.sort();
-
-    var select = document.createElement("select");
-    var allOpt = document.createElement("option");
-    allOpt.value = "all";
-    allOpt.textContent = "all repos";
-    select.appendChild(allOpt);
-    repos.forEach(function (r) {
-      var opt = document.createElement("option");
-      opt.value = r;
-      opt.textContent = r;
-      if (state.feedRepo === r) opt.selected = true;
-      select.appendChild(opt);
-    });
-    select.addEventListener("change", function () {
-      state.feedRepo = select.value;
-      render();
-    });
-    controls.appendChild(select);
-
-    container.appendChild(controls);
-
-    // Feed list
-    var list = el("div", "feed-list");
-    list.id = "feed-list-container";
-    list.appendChild(buildFeedItems());
-    container.appendChild(list);
-    return container;
   }
 
-  // -- Tasks tab (kanban) --
-
-  function getAgentNames() {
-    var names = [];
-    state.agents.forEach(function (a) {
-      if (!isPathLike(a.repo)) names.push(a.repo);
-    });
-    names.sort();
-    return names;
-  }
+  // -- Task creation form --
 
   function renderTaskForm() {
-    var wrapper = el("div", "task-form-wrapper");
+    var container = document.getElementById("task-form-container");
+    container.replaceChildren();
 
-    var toggleBtn = el("button", "task-form-toggle", state.taskFormOpen ? "Cancel" : "+ New Task");
-    toggleBtn.addEventListener("click", function () {
-      state.taskFormOpen = !state.taskFormOpen;
-      render();
-    });
-    wrapper.appendChild(toggleBtn);
-
-    if (!state.taskFormOpen) return wrapper;
+    if (!state.taskFormOpen) return;
 
     var form = el("div", "task-form");
 
-    // To field
-    var toLabel = el("label", "task-form-label", "Assign to");
+    var row1 = el("div", "task-form-row");
+
+    var toWrap = el("div");
+    toWrap.style.flex = "1";
+    toWrap.appendChild(el("label", null, "Assign to"));
     var toSelect = document.createElement("select");
-    toSelect.className = "task-form-select";
-    var agents = getAgentNames();
-    agents.forEach(function (name) {
+    var agents = state.agents
+      .filter(function (a) { return !isPathLike(a.repo); })
+      .sort(function (a, b) { return a.repo.localeCompare(b.repo); });
+    agents.forEach(function (a) {
       var opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
+      opt.value = a.repo;
+      opt.textContent = a.repo;
       toSelect.appendChild(opt);
     });
-    form.appendChild(toLabel);
-    form.appendChild(toSelect);
+    toWrap.appendChild(toSelect);
+    row1.appendChild(toWrap);
 
-    // Text field
-    var textLabel = el("label", "task-form-label", "Task description");
-    var textArea = document.createElement("textarea");
-    textArea.className = "task-form-textarea";
-    textArea.rows = 3;
-    textArea.placeholder = "What needs to be done?";
-    form.appendChild(textLabel);
-    form.appendChild(textArea);
-
-    // Priority field
-    var prioLabel = el("label", "task-form-label", "Priority");
+    var prioWrap = el("div");
+    prioWrap.style.flex = "1";
+    prioWrap.appendChild(el("label", null, "Priority"));
     var prioSelect = document.createElement("select");
-    prioSelect.className = "task-form-select";
     ["low", "med", "high"].forEach(function (p) {
       var opt = document.createElement("option");
       opt.value = p;
@@ -338,343 +246,291 @@
       if (p === "med") opt.selected = true;
       prioSelect.appendChild(opt);
     });
-    form.appendChild(prioLabel);
-    form.appendChild(prioSelect);
+    prioWrap.appendChild(prioSelect);
+    row1.appendChild(prioWrap);
 
-    // Context field
-    var ctxLabel = el("label", "task-form-label", "Context (optional)");
-    var ctxArea = document.createElement("textarea");
-    ctxArea.className = "task-form-textarea";
-    ctxArea.rows = 2;
-    ctxArea.placeholder = "Additional context...";
-    form.appendChild(ctxLabel);
-    form.appendChild(ctxArea);
+    form.appendChild(row1);
 
-    // Error display
+    form.appendChild(el("label", null, "Description"));
+    var textArea = document.createElement("textarea");
+    textArea.rows = 2;
+    textArea.placeholder = "What needs to be done?";
+    form.appendChild(textArea);
+
     var errorEl = el("div", "task-form-error");
     form.appendChild(errorEl);
 
-    // Submit
-    var submitBtn = el("button", "broadcast-btn", "Create Task");
+    var submitRow = el("div", "task-form-row");
+    var submitBtn = el("button", "broadcast-btn", "Create");
     submitBtn.addEventListener("click", function () {
       var text = textArea.value.trim();
-      if (!text) {
-        errorEl.textContent = "Task description is required";
-        return;
-      }
+      if (!text) { errorEl.textContent = "Description required"; return; }
       submitBtn.disabled = true;
-      errorEl.textContent = "";
-      var body = {
+      postToApi("/api/tasks/create", {
         from: "meatbag",
         to: toSelect.value,
         text: text,
         priority: prioSelect.value,
-        context: ctxArea.value.trim() || null,
-      };
-      postToApi("/api/tasks/create", body)
+      })
         .then(function (r) {
           if (r.ok) {
             state.taskFormOpen = false;
-            render();
+            renderTaskForm();
+            refreshTasks();
           } else {
-            return r.json().then(function (data) {
-              errorEl.textContent = data.error || "Failed to create task";
-            });
+            return r.json().then(function (d) { errorEl.textContent = d.error; });
           }
         })
-        .catch(function (err) {
-          errorEl.textContent = "Network error: " + err;
-        })
-        .finally(function () {
-          submitBtn.disabled = false;
-        });
+        .catch(function (e) { errorEl.textContent = String(e); })
+        .finally(function () { submitBtn.disabled = false; });
     });
-    form.appendChild(submitBtn);
+    submitRow.appendChild(submitBtn);
 
-    wrapper.appendChild(form);
-    return wrapper;
+    var cancelBtn = el("button", "panel-action-btn", "Cancel");
+    cancelBtn.addEventListener("click", function () {
+      state.taskFormOpen = false;
+      renderTaskForm();
+    });
+    submitRow.appendChild(cancelBtn);
+    form.appendChild(submitRow);
+
+    container.appendChild(form);
   }
 
-  function renderTasks() {
-    var container = el("div");
+  // -- Agent detail sidebar --
 
-    container.appendChild(renderTaskForm());
+  function renderAgentDetail() {
+    var container = document.getElementById("agent-detail");
+    container.replaceChildren();
 
-    var kanban = el("div", "kanban");
-    kanban.id = "kanban-container";
-    kanban.appendChild(buildKanbanColumns());
-    container.appendChild(kanban);
-    return container;
-  }
-
-  // -- Stats tab --
-
-  function renderStats() {
-    var container = el("div");
-    var table = el("table", "stats-table");
-
-    var thead = document.createElement("thead");
-    var headerRow = document.createElement("tr");
-    ["Repo", "Reflections", "Boosts", "Team Posts", "Last Active"].forEach(function (h) {
-      headerRow.appendChild(el("th", null, h));
-    });
-    thead.appendChild(headerRow);
-    table.appendChild(thead);
-
-    var tbody = document.createElement("tbody");
-
-    var rows = state.stats
-      .filter(function (s) { return !isPathLike(s.repo); })
-      .sort(function (a, b) {
-        if (a.last_activity > b.last_activity) return -1;
-        if (a.last_activity < b.last_activity) return 1;
-        return 0;
-      });
-
-    rows.forEach(function (s) {
-      var tr = document.createElement("tr");
-      tr.appendChild(el("td", null, s.repo));
-      tr.appendChild(el("td", null, String(s.reflection_count)));
-      tr.appendChild(el("td", null, String(s.boost_sum)));
-      tr.appendChild(el("td", null, String(s.team_post_count)));
-      tr.appendChild(el("td", null, relativeTime(s.last_activity)));
-      tbody.appendChild(tr);
-    });
-
-    table.appendChild(tbody);
-    container.appendChild(table);
-
-    if (rows.length === 0) {
-      container.appendChild(el("p", "placeholder", "No stats available"));
+    // Machine performance card first
+    if (state.health.length > 0 && state.health[0].latest) {
+      container.appendChild(buildPerfCard(state.health[0]));
     }
 
-    return container;
+    var agents = state.agents
+      .filter(function (a) { return !isPathLike(a.repo); })
+      .sort(function (a, b) { return b.last_activity.localeCompare(a.last_activity); });
+
+    agents.forEach(function (agent) {
+      var card = el("div", "agent-card");
+
+      var header = el("div", "agent-card-header");
+      var diff = (Date.now() - new Date(agent.last_activity).getTime()) / 60000;
+      var statusBadge = diff < 10 ? "badge badge-green" : "badge badge-gray";
+      var statusText = diff < 10 ? "active" : "idle";
+      header.appendChild(el("span", "agent-card-name", agent.repo));
+      header.appendChild(el("span", statusBadge, statusText));
+      card.appendChild(header);
+
+      var stats = el("div", "agent-card-stats");
+
+      var pairs = [
+        ["reflections", String(agent.reflection_count)],
+        ["boosts", String(agent.boost_sum)],
+        ["posts", String(agent.team_post_count)],
+        ["unread", String(agent.unread)],
+      ];
+      pairs.forEach(function (p) {
+        var row = el("div", "agent-stat");
+        row.appendChild(el("span", "agent-stat-label", p[0]));
+        row.appendChild(el("span", "agent-stat-value", p[1]));
+        stats.appendChild(row);
+      });
+      card.appendChild(stats);
+
+      // Task dots for this agent
+      var agentTasks = state.tasks.filter(function (t) {
+        return t.to_repo === agent.repo && t.status !== "done";
+      });
+      if (agentTasks.length > 0) {
+        var dotsRow = el("div", "agent-tasks");
+        agentTasks.forEach(function (t) {
+          dotsRow.appendChild(el("span", "agent-task-dot task-dot-" + t.status));
+        });
+        card.appendChild(dotsRow);
+      }
+
+      card.appendChild(el("div", "agent-card-time", relativeTime(agent.last_activity) + " ago"));
+
+      container.appendChild(card);
+    });
   }
 
-  // -- Signals tab --
+  function buildPerfCard(hostData) {
+    var card = el("div", "perf-card");
+    card.appendChild(el("h3", null, "Machine: " + hostData.hostname));
+
+    var h = hostData.latest;
+
+    var rows = [
+      { label: "CPU", value: Math.round(h.cpu_usage_pct) + "%", pct: h.cpu_usage_pct },
+      { label: "Memory", value: Math.round(h.mem_usage_pct) + "%", pct: h.mem_usage_pct },
+      { label: "Pressure", value: (h.pressure * 1).toFixed(2), pct: h.pressure * 100 },
+    ];
+
+    if (h.load_avg_1 !== null) {
+      rows.push({
+        label: "Load",
+        value: h.load_avg_1.toFixed(1) + " / " + (h.load_avg_5 || 0).toFixed(1) + " / " + (h.load_avg_15 || 0).toFixed(1),
+        pct: (h.load_avg_1 / h.cpu_core_count) * 100,
+      });
+    }
+
+    rows.push({ label: "Agents", value: String(h.agents_active), pct: 0 });
+
+    if (h.cpu_temp_celsius !== null && h.cpu_temp_celsius !== undefined) {
+      rows.push({
+        label: "Temp",
+        value: Math.round(h.cpu_temp_celsius) + "C",
+        pct: h.cpu_temp_celsius > 80 ? 90 : h.cpu_temp_celsius > 60 ? 70 : 40,
+      });
+    }
+
+    rows.forEach(function (row) {
+      var perfRow = el("div", "perf-row");
+      perfRow.appendChild(el("span", "perf-label", row.label));
+      var valEl = el("span", "perf-value " + healthColor(row.pct), row.value);
+      perfRow.appendChild(valEl);
+      card.appendChild(perfRow);
+
+      if (row.label !== "Agents" && row.label !== "Load") {
+        var meter = el("div", "meter");
+        var fill = el("div", "meter-fill " + meterColor(row.pct));
+        fill.style.width = Math.min(row.pct, 100) + "%";
+        meter.appendChild(fill);
+        card.appendChild(meter);
+      }
+    });
+
+    return card;
+  }
+
+  // -- Signals feed --
 
   function renderSignals() {
-    var container = el("div");
+    var feed = document.getElementById("signals-feed");
+    feed.replaceChildren();
 
     if (state.signals.length === 0) {
-      return el("p", "placeholder", "No signals");
+      feed.appendChild(el("div", "bullpen-item", "No signals yet"));
+      return;
     }
 
-    // Group by recipient
-    var groups = {};
-    state.signals.forEach(function (sig) {
-      var key = sig.to;
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(sig);
+    state.signals.slice(0, 30).forEach(function (sig) {
+      var color = verbColor(sig.verb);
+      var item = el("div", "signal-item signal-border-" + color);
+
+      var header = el("div", "signal-item-header");
+      header.appendChild(el("span", "badge badge-green", sig.from_repo));
+      header.appendChild(el("span", "signal-arrow", "->"));
+      header.appendChild(el("span", "badge badge-" + color, sig.verb));
+      if (sig.status) {
+        header.appendChild(el("span", "badge badge-gray", sig.status));
+      }
+      header.appendChild(el("span", "badge badge-blue", "@" + sig.to));
+      header.appendChild(el("span", "signal-time", relativeTime(sig.created_at)));
+      item.appendChild(header);
+
+      var text = el("div", "signal-text signal-text-truncated", sig.text);
+      item.appendChild(text);
+
+      // Click to expand
+      (function (textEl, fullText) {
+        textEl.addEventListener("click", function () {
+          if (textEl.classList.contains("signal-text-truncated")) {
+            textEl.classList.remove("signal-text-truncated");
+          } else {
+            textEl.classList.add("signal-text-truncated");
+          }
+        });
+        textEl.style.cursor = "pointer";
+      })(text, sig.text);
+
+      feed.appendChild(item);
     });
-
-    var recipients = Object.keys(groups).sort();
-
-    recipients.forEach(function (recipient) {
-      var section = el("div", "signal-group");
-      var header = el("div", "signal-group-header", "@" + recipient);
-      section.appendChild(header);
-
-      var list = el("div", "signal-list");
-
-      groups[recipient].forEach(function (sig) {
-        var color = verbColor(sig.verb);
-        var card = el("div", "signal-card signal-border-" + color);
-
-        var cardHeader = el("div", "signal-card-header");
-        cardHeader.appendChild(el("span", "badge badge-green", sig.from_repo));
-        cardHeader.appendChild(el("span", "signal-arrow", "->"));
-        cardHeader.appendChild(el("span", "badge badge-" + color, sig.verb));
-        if (sig.status) {
-          cardHeader.appendChild(el("span", "badge badge-gray", sig.status));
-        }
-        cardHeader.appendChild(el("span", "signal-time", relativeTime(sig.created_at)));
-        card.appendChild(cardHeader);
-
-        var text = el("div", "signal-card-text", sig.text);
-        card.appendChild(text);
-
-        list.appendChild(card);
-      });
-
-      section.appendChild(list);
-      container.appendChild(section);
-    });
-
-    return container;
   }
 
-  // -- Chat tab --
+  // -- Bullpen feed --
 
-  function fetchChat(agent) {
-    if (!agent) return;
-    fetch("/api/chat?agent=" + encodeURIComponent(agent))
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        state.chatMessages = data;
-        if (currentTab() === "chat") {
-          if (!updateChatMessages()) render();
-        }
-      })
-      .catch(function (err) {
-        console.error("[legion] chat fetch error:", err);
-      });
-  }
+  function renderBullpen() {
+    var bar = document.getElementById("broadcast-bar");
+    bar.replaceChildren();
 
-  function renderChat() {
-    var container = el("div", "chat-container");
-
-    // Agent selector
-    var header = el("div", "chat-header");
-    var label = el("span", null, "Chat with: ");
-    header.appendChild(label);
-
-    var select = document.createElement("select");
-    select.className = "task-form-select";
-    var emptyOpt = document.createElement("option");
-    emptyOpt.value = "";
-    emptyOpt.textContent = "-- select agent --";
-    select.appendChild(emptyOpt);
-
-    var agents = getAgentNames().filter(function (n) { return n !== "meatbag"; });
-    agents.forEach(function (name) {
-      var opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      if (state.chatAgent === name) opt.selected = true;
-      select.appendChild(opt);
-    });
-    select.addEventListener("change", function () {
-      state.chatAgent = select.value;
-      state.chatMessages = [];
-      fetchChat(state.chatAgent);
-    });
-    header.appendChild(select);
-    container.appendChild(header);
-
-    if (!state.chatAgent) {
-      container.appendChild(el("p", "placeholder", "Select an agent to start a conversation"));
-      return container;
-    }
-
-    // Message list
-    var messageList = el("div", "chat-messages");
-    messageList.id = "chat-messages-container";
-    container.appendChild(messageList);
-
-    // Populate via shared builder (also handles scroll)
-    updateChatMessages();
-
-    // Input area
-    var inputBar = el("div", "chat-input");
+    var row = el("div", "broadcast-row");
     var textarea = document.createElement("textarea");
     textarea.className = "broadcast-input";
-    textarea.placeholder = "Message @" + state.chatAgent + "...";
-    textarea.rows = 2;
-    inputBar.appendChild(textarea);
+    textarea.rows = 1;
+    textarea.placeholder = "@agent message... or post to bullpen";
+    row.appendChild(textarea);
 
     var sendBtn = el("button", "broadcast-btn", "Send");
     sendBtn.addEventListener("click", function () {
-      var raw = textarea.value.trim();
-      if (!raw) return;
+      var text = textarea.value.trim();
+      if (!text) return;
       sendBtn.disabled = true;
-      // Auto-prefix @agent if not already present
-      var text = raw;
-      var prefix = "@" + state.chatAgent;
-      if (text.toLowerCase().indexOf(prefix.toLowerCase()) === -1) {
-        text = prefix + " " + text;
-      }
       postToApi("/api/post", { repo: "meatbag", text: text })
-        .then(function (r) {
-          if (r.ok) {
-            textarea.value = "";
-            fetchChat(state.chatAgent);
-          } else {
-            console.error("[legion] chat send failed:", r.status);
-          }
-        })
-        .catch(function (err) {
-          console.error("[legion] chat send error:", err);
-        })
-        .finally(function () {
-          sendBtn.disabled = false;
-        });
+        .then(function (r) { if (r.ok) textarea.value = ""; })
+        .catch(function () {})
+        .finally(function () { sendBtn.disabled = false; });
     });
-
     textarea.addEventListener("keydown", function (e) {
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
         sendBtn.click();
       }
     });
+    row.appendChild(sendBtn);
+    bar.appendChild(row);
 
-    inputBar.appendChild(sendBtn);
-    container.appendChild(inputBar);
+    // Feed items (musings only -- signals have their own panel)
+    var feed = document.getElementById("bullpen-feed");
+    feed.replaceChildren();
 
-    return container;
-  }
+    var musings = state.feed.filter(function (item) { return !item.is_signal; });
 
-  // -- Targeted update helpers --
-
-  function buildFeedItems() {
-    var frag = document.createDocumentFragment();
-
-    var items = state.feed.filter(function (item) {
-      if (state.feedRepo !== "all" && item.repo !== state.feedRepo) return false;
-      if (state.feedFilter === "signals" && !item.is_signal) return false;
-      if (state.feedFilter === "musings" && item.is_signal) return false;
-      return true;
-    });
-
-    if (items.length === 0) {
-      frag.appendChild(el("p", "placeholder", "No posts"));
+    if (musings.length === 0) {
+      feed.appendChild(el("div", "bullpen-item", "No posts yet"));
+      return;
     }
 
-    items.forEach(function (item) {
-      var card = el("div", "feed-item" + (item.is_signal ? " signal" : ""));
+    musings.slice(0, 30).forEach(function (item) {
+      var card = el("div", "bullpen-item");
 
-      var header = el("div", "feed-item-header");
+      var header = el("div", "bullpen-item-header");
       header.appendChild(el("span", "badge badge-green", item.repo));
-      header.appendChild(el("span", null, relativeTime(item.created_at)));
-      if (item.is_signal) {
-        header.appendChild(el("span", "badge badge-blue", "signal"));
-      }
+      header.appendChild(el("span", "bullpen-time", relativeTime(item.created_at)));
 
       var boostBtn = el("button", "boost-btn", "+boost");
-      (function (postId, btn) {
+      (function (id, btn) {
         btn.addEventListener("click", function () {
           btn.disabled = true;
-          postToApi("/api/boost/" + postId)
+          postToApi("/api/boost/" + id)
             .then(function (r) {
-              if (r.ok) {
-                btn.textContent = "boosted";
-                btn.classList.add("boosted");
-              } else {
-                btn.disabled = false;
-              }
+              if (r.ok) { btn.textContent = "boosted"; btn.classList.add("boosted"); }
+              else btn.disabled = false;
             })
-            .catch(function () {
-              btn.disabled = false;
-            });
+            .catch(function () { btn.disabled = false; });
         });
       })(item.id, boostBtn);
       header.appendChild(boostBtn);
 
       card.appendChild(header);
 
-      var textEl = el("div", "feed-item-text");
+      var textEl = el("div", "bullpen-text");
       var full = item.text;
-      var short = truncate(full, 200);
-      var expanded = false;
+      var short = truncate(full, 180);
       textEl.textContent = short;
 
-      if (full.length > 200) {
-        var toggle = el("button", "feed-item-toggle", "show more");
+      if (full.length > 180) {
+        textEl.classList.add("bullpen-text-truncated");
+        var toggle = el("button", "show-more-btn", "more");
+        var expanded = false;
         toggle.addEventListener("click", function () {
           expanded = !expanded;
           textEl.textContent = expanded ? full : short;
-          toggle.textContent = expanded ? "show less" : "show more";
-          card.appendChild(toggle);
+          textEl.classList.toggle("bullpen-text-truncated", !expanded);
+          toggle.textContent = expanded ? "less" : "more";
         });
         card.appendChild(textEl);
         card.appendChild(toggle);
@@ -682,280 +538,146 @@
         card.appendChild(textEl);
       }
 
-      frag.appendChild(card);
+      feed.appendChild(card);
     });
-
-    return frag;
   }
 
-  function updateFeedList() {
-    var container = document.getElementById("feed-list-container");
-    if (!container) return false;
-    container.replaceChildren();
-    container.appendChild(buildFeedItems());
-    return true;
-  }
+  // -- Live boosts cloud --
 
-  function getTaskActions(status) {
-    switch (status) {
-      case "pending":
-        return [{ type: "accept", label: "Accept" }];
-      case "accepted":
-        return [
-          { type: "done", label: "Done" },
-          { type: "block", label: "Block" },
-        ];
-      case "blocked":
-        return [{ type: "unblock", label: "Unblock" }];
-      default:
-        return [];
-    }
-  }
+  function renderBoostCloud() {
+    var cloud = document.getElementById("boost-cloud");
+    cloud.replaceChildren();
 
-  function buildKanbanColumns() {
-    var frag = document.createDocumentFragment();
-    var columns = ["pending", "accepted", "done", "blocked"];
-    var labels = { pending: "Pending", accepted: "Accepted", done: "Done", blocked: "Blocked" };
+    // Build boost data from agents
+    var boosts = state.agents
+      .filter(function (a) { return !isPathLike(a.repo) && a.boost_sum > 0; })
+      .sort(function (a, b) { return b.boost_sum - a.boost_sum; });
 
-    columns.forEach(function (status) {
-      var col = el("div", "kanban-col");
-      var tasks = state.tasks.filter(function (t) { return t.status === status; });
-
-      var header = el("div", "kanban-col-header");
-      header.textContent = labels[status] + " ";
-      var count = el("span", "kanban-col-count", "(" + tasks.length + ")");
-      header.appendChild(count);
-      col.appendChild(header);
-
-      var cards = el("div", "kanban-cards");
-
-      tasks.forEach(function (task) {
-        var card = el("div", "kanban-card");
-
-        var route = el("div", "kanban-card-route", task.from_repo + " -> " + task.to_repo);
-        card.appendChild(route);
-
-        var text = el("div", "kanban-card-text", truncate(task.text, 120));
-        card.appendChild(text);
-
-        if (task.context) {
-          var ctx = el("div", "kanban-card-context", truncate(task.context, 80));
-          card.appendChild(ctx);
-        }
-
-        if (task.note) {
-          var note = el("div", "kanban-card-note", task.note);
-          card.appendChild(note);
-        }
-
-        var footer = el("div", "kanban-card-footer");
-        footer.appendChild(el("span", priorityBadgeClass(task.priority), task.priority));
-        footer.appendChild(el("span", null, relativeTime(task.created_at)));
-        card.appendChild(footer);
-
-        var actions = el("div", "kanban-card-actions");
-        var taskActions = getTaskActions(task.status);
-        taskActions.forEach(function (action) {
-          var btn = el("button", "kanban-action-btn kanban-action-" + action.type, action.label);
-          (function (taskId, actionType, button) {
-            button.addEventListener("click", function () {
-              button.disabled = true;
-              postToApi("/api/tasks/" + taskId + "/" + actionType)
-                .then(function (r) {
-                  if (r.ok) {
-                    fetch("/api/tasks")
-                      .then(function (r) { return r.json(); })
-                      .then(function (data) {
-                        state.tasks = data;
-                        updateKanban();
-                      });
-                  } else {
-                    button.disabled = false;
-                    r.json().then(function (data) {
-                      console.error("[legion] task action failed:", data.error);
-                    });
-                  }
-                })
-                .catch(function () {
-                  button.disabled = false;
-                });
-            });
-          })(task.id, action.type, btn);
-          actions.appendChild(btn);
-        });
-        if (taskActions.length > 0) {
-          card.appendChild(actions);
-        }
-
-        cards.appendChild(card);
-      });
-
-      if (tasks.length === 0) {
-        cards.appendChild(el("p", "placeholder", "none"));
-      }
-
-      col.appendChild(cards);
-      frag.appendChild(col);
-    });
-
-    return frag;
-  }
-
-  function updateKanban() {
-    var container = document.getElementById("kanban-container");
-    if (!container) return false;
-    container.replaceChildren();
-    container.appendChild(buildKanbanColumns());
-    return true;
-  }
-
-  function updateChatMessages() {
-    var container = document.getElementById("chat-messages-container");
-    if (!container) return false;
-    container.replaceChildren();
-
-    if (state.chatMessages.length === 0) {
-      container.appendChild(el("p", "placeholder", "No messages with @" + state.chatAgent));
+    if (boosts.length === 0) {
+      cloud.appendChild(el("span", "boost-tag", "No boosts yet"));
+      return;
     }
 
-    state.chatMessages.forEach(function (msg) {
-      var isMeatbag = msg.repo.toLowerCase() === "meatbag";
-      var msgEl = el("div", "chat-msg" + (isMeatbag ? " meatbag" : " agent"));
+    var maxBoost = boosts[0].boost_sum;
 
-      var senderBadge = el("span", "badge " + (isMeatbag ? "badge-green" : "badge-blue"), msg.repo);
-      var time = el("span", "chat-msg-time", relativeTime(msg.created_at));
-
-      var msgHeader = el("div", "chat-msg-header");
-      msgHeader.appendChild(senderBadge);
-      msgHeader.appendChild(time);
-      msgEl.appendChild(msgHeader);
-
-      var textEl = el("div", "chat-msg-text", msg.text);
-      msgEl.appendChild(textEl);
-
-      container.appendChild(msgEl);
+    boosts.forEach(function (agent) {
+      var hot = agent.boost_sum > maxBoost * 0.5;
+      var tag = el("span", "boost-tag" + (hot ? " boost-tag-hot" : ""));
+      tag.appendChild(el("span", null, agent.repo));
+      tag.appendChild(el("span", "boost-count", String(agent.boost_sum)));
+      cloud.appendChild(tag);
     });
-
-    setTimeout(function () {
-      container.scrollTop = container.scrollHeight;
-    }, 0);
-
-    return true;
   }
 
-  // -- Renderers --
+  // -- Full render --
 
-  var renderers = {
-    feed: renderFeed,
-    signals: renderSignals,
-    tasks: renderTasks,
-    stats: renderStats,
-    chat: renderChat,
-  };
-
-  function render() {
-    var tab = currentTab();
-    var fn = renderers[tab];
-    content.replaceChildren();
-    if (fn) {
-      content.appendChild(fn());
-    } else {
-      content.appendChild(renderPlaceholder("Unknown"));
-    }
-    updateActive();
+  function renderAll() {
+    renderAgentStrip();
+    renderHealthStrip();
+    renderKanban();
+    renderTaskForm();
+    renderAgentDetail();
+    renderSignals();
+    renderBullpen();
+    renderBoostCloud();
   }
-
-  window.addEventListener("hashchange", render);
 
   // -- Data fetching --
 
-  function fetchJSON(url, key) {
+  function fetchJSON(url, key, callback) {
     fetch(url)
       .then(function (r) { return r.json(); })
       .then(function (data) {
         state[key] = data;
-        render();
+        if (callback) callback();
       })
       .catch(function (err) {
         console.error("[legion] fetch " + url + " failed:", err);
       });
   }
 
-  // Initial load
-  fetchJSON("/api/agents", "agents");
-  fetchJSON("/api/feed", "feed");
-  fetchJSON("/api/tasks", "tasks");
-  fetchJSON("/api/stats", "stats");
-  fetchJSON("/api/signals", "signals");
+  function refreshTasks() {
+    fetchJSON("/api/tasks", "tasks", function () {
+      renderKanban();
+      renderAgentDetail();
+    });
+  }
 
-  // Initial render (shows loading until data arrives)
-  render();
+  // Initial fetches
+  var loaded = 0;
+  var totalFetches = 6;
 
-  // -- SSE connection with reconnect --
+  function onLoaded() {
+    loaded++;
+    if (loaded >= totalFetches) renderAll();
+  }
+
+  fetchJSON("/api/agents", "agents", onLoaded);
+  fetchJSON("/api/feed", "feed", onLoaded);
+  fetchJSON("/api/tasks", "tasks", onLoaded);
+  fetchJSON("/api/stats", "stats", onLoaded);
+  fetchJSON("/api/signals", "signals", onLoaded);
+  fetchJSON("/api/health", "health", onLoaded);
+
+  // Task create button
+  document.getElementById("task-create-btn").addEventListener("click", function () {
+    state.taskFormOpen = !state.taskFormOpen;
+    renderTaskForm();
+  });
+
+  // -- SSE real-time updates --
 
   var retryDelay = 1000;
-  var maxRetryDelay = 30000;
 
   function connectSSE() {
     var source = new EventSource("/sse");
 
     source.onopen = function () {
       retryDelay = 1000;
-      console.log("[legion] SSE connected");
     };
 
     source.addEventListener("agents", function (event) {
       try {
         state.agents = JSON.parse(event.data);
-      } catch (e) {
-        console.error("[legion] agents parse error:", e);
-      }
+        renderAgentStrip();
+        renderAgentDetail();
+        renderBoostCloud();
+      } catch (e) {}
     });
 
     source.addEventListener("feed", function (event) {
       try {
         state.feed = JSON.parse(event.data);
-        if (currentTab() === "feed") {
-          if (!updateFeedList()) render();
-        }
-        if (currentTab() === "chat" && state.chatAgent) fetchChat(state.chatAgent);
-        // Refresh signals when feed changes (signals come from feed data)
-        fetch("/api/signals")
-          .then(function (r) { return r.json(); })
-          .then(function (data) {
-            state.signals = data;
-            if (currentTab() === "signals") render();
-          })
-          .catch(function (err) {
-            console.error("[legion] signals fetch error:", err);
-          });
-      } catch (e) {
-        console.error("[legion] feed parse error:", e);
-      }
+        renderBullpen();
+        // Re-fetch signals since they come from feed
+        fetchJSON("/api/signals", "signals", renderSignals);
+      } catch (e) {}
     });
 
     source.addEventListener("tasks", function (event) {
       try {
         state.tasks = JSON.parse(event.data);
-        if (currentTab() === "tasks") {
-          if (!updateKanban()) render();
-        }
-      } catch (e) {
-        console.error("[legion] tasks parse error:", e);
-      }
+        renderKanban();
+        renderAgentDetail();
+      } catch (e) {}
     });
 
-    source.addEventListener("ping", function () {
-      // keepalive, nothing to do
-    });
+    source.addEventListener("ping", function () {});
 
     source.onerror = function () {
       source.close();
-      console.log("[legion] SSE disconnected, retrying in " + retryDelay + "ms");
       setTimeout(connectSSE, retryDelay);
-      retryDelay = Math.min(retryDelay * 2, maxRetryDelay);
+      retryDelay = Math.min(retryDelay * 2, 30000);
     };
   }
 
   connectSSE();
+
+  // Periodic health refresh (every 30s)
+  setInterval(function () {
+    fetchJSON("/api/health", "health", function () {
+      renderHealthStrip();
+      renderAgentDetail();
+    });
+  }, 30000);
 })();
