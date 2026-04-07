@@ -69,6 +69,7 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/schedules", get(api_schedules))
             .route("/api/schedules/create", post(api_create_schedule))
             .route("/api/schedules/{id}/toggle", post(api_toggle_schedule))
+            .route("/api/search", get(api_search))
             .route("/api/kanban", get(api_kanban))
             .route("/api/kanban/{id}/move", post(api_kanban_move))
             .route("/api/kanban/workloads", get(api_kanban_workloads))
@@ -937,6 +938,48 @@ async fn api_toggle_schedule(
                 ),
             }
         }
+    }
+}
+
+/// Query parameters for GET /api/search.
+#[derive(serde::Deserialize)]
+struct SearchQuery {
+    q: String,
+    repo: Option<String>,
+    limit: Option<usize>,
+}
+
+/// GET /api/search -- search reflections via BM25.
+async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQuery>) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let index = match open_search_index(&state.data_dir) {
+        Ok(i) => i,
+        Err(_) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to open search index",
+            );
+        }
+    };
+
+    let limit = params.limit.unwrap_or(10).min(50);
+
+    let result = if let Some(ref repo) = params.repo {
+        crate::recall::recall_bm25(&db, &index, repo, &params.q, limit)
+    } else {
+        crate::recall::consult_bm25(&db, &index, &params.q, limit)
+    };
+
+    match result {
+        Ok(r) => Json(r.reflections).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("search error: {e}"),
+        ),
     }
 }
 
