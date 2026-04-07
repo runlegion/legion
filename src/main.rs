@@ -912,6 +912,19 @@ fn raise_fd_limit() {
 }
 
 fn main() -> error::Result<()> {
+    // Windows default stack (1MB) is too small for clap + Tantivy init.
+    // Spawn with 8MB stack to match macOS/Linux defaults.
+    const STACK_SIZE: usize = 8 * 1024 * 1024;
+    let builder = std::thread::Builder::new().stack_size(STACK_SIZE);
+    let handler = builder.spawn(run).map_err(error::LegionError::Io)?;
+    handler.join().unwrap_or_else(|_| {
+        Err(error::LegionError::Io(std::io::Error::other(
+            "thread panicked",
+        )))
+    })
+}
+
+fn run() -> error::Result<()> {
     raise_fd_limit();
     let cli = Cli::parse();
     VERBOSE.store(cli.verbose, Ordering::Relaxed);
