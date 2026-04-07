@@ -1,9 +1,5 @@
 # Legion Plugin Changelog
 
-## 1.2.2
-
-- Add work source workflow guide to SessionStart hook context: agents now get legion command reference on every session start, explaining the gh -> legion migration and --task flag for kanban integration
-
 ## 1.2.1
 
 - Slim down Stop hook: removed TEAM FIRST checklist, bullpen count check, and boost reminders. Now just prompts for one reflection if the session did real work. Full wind-down belongs in /snooze.
