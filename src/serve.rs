@@ -14,6 +14,7 @@ use tokio::signal;
 
 use crate::db::{Database, ReflectionMeta};
 use crate::error;
+use crate::health::HealthSample;
 use crate::search::SearchIndex;
 use crate::signal as sig;
 use crate::status;
@@ -66,6 +67,7 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/tasks/{id}/unblock", post(api_task_unblock))
             .route("/api/chat", get(api_chat))
             .route("/api/boost/{id}", post(api_boost))
+            .route("/api/health", get(api_health))
             .route("/api/schedules", get(api_schedules))
             .route("/api/schedules/create", post(api_create_schedule))
             .route("/api/schedules/{id}/toggle", post(api_toggle_schedule))
@@ -935,6 +937,88 @@ async fn api_toggle_schedule(
             }
         }
     }
+}
+
+/// Query parameters for GET /api/health.
+#[derive(serde::Deserialize)]
+struct HealthQuery {
+    /// Hours of history to return (default 1).
+    hours: Option<u64>,
+}
+
+/// GET /api/health -- latest health samples per host + recent history.
+async fn api_health(State(state): State<AppState>, Query(params): Query<HealthQuery>) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let hours = params.hours.unwrap_or(1);
+    let since = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
+    let since_str = since.to_rfc3339();
+
+    let samples: Vec<HealthSample> = match db.get_health_all_hosts(&since_str) {
+        Ok(s) => s,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("health query error: {e}"),
+            );
+        }
+    };
+
+    // Group by hostname, return latest + history
+    let mut by_host: HashMap<String, Vec<&HealthSample>> = HashMap::new();
+    for sample in &samples {
+        by_host
+            .entry(sample.hostname.clone())
+            .or_default()
+            .push(sample);
+    }
+
+    let hosts: Vec<serde_json::Value> = by_host
+        .into_iter()
+        .map(|(hostname, mut host_samples)| {
+            host_samples.sort_by(|a, b| b.sampled_at.cmp(&a.sampled_at));
+            let latest = host_samples.first().map(|s| {
+                serde_json::json!({
+                    "cpu_usage_pct": s.cpu_usage_pct,
+                    "mem_usage_pct": s.mem_usage_pct,
+                    "mem_total_bytes": s.mem_total_bytes,
+                    "mem_used_bytes": s.mem_used_bytes,
+                    "swap_total_bytes": s.swap_total_bytes,
+                    "swap_used_bytes": s.swap_used_bytes,
+                    "load_avg_1": s.load_avg_1,
+                    "load_avg_5": s.load_avg_5,
+                    "load_avg_15": s.load_avg_15,
+                    "cpu_core_count": s.cpu_core_count,
+                    "cpu_temp_celsius": s.cpu_temp_celsius,
+                    "agents_active": s.agents_active,
+                    "pressure": s.pressure,
+                    "sampled_at": s.sampled_at,
+                })
+            });
+            let history: Vec<serde_json::Value> = host_samples
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "sampled_at": s.sampled_at,
+                        "cpu_usage_pct": s.cpu_usage_pct,
+                        "mem_usage_pct": s.mem_usage_pct,
+                        "pressure": s.pressure,
+                        "agents_active": s.agents_active,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "hostname": hostname,
+                "latest": latest,
+                "history": history,
+            })
+        })
+        .collect();
+
+    Json(hosts).into_response()
 }
 
 async fn shutdown_signal() {

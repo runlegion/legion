@@ -7,18 +7,37 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <nav id="nav">
+  <header id="header">
     <span class="logo">legion</span>
-    <div class="tabs">
-      <a href="#feed" class="tab active">Feed</a>
-      <a href="#signals" class="tab">Signals</a>
-      <a href="#tasks" class="tab">Tasks</a>
-      <a href="#stats" class="tab">Stats</a>
-      <a href="#chat" class="tab">Chat</a>
-    </div>
-  </nav>
-  <main id="content">
-    <p class="placeholder">Loading...</p>
+    <div id="agent-strip"></div>
+    <div id="health-strip"></div>
+  </header>
+  <main id="dashboard">
+    <section id="panel-kanban" class="panel panel-wide">
+      <div class="panel-header">
+        <h2>Kanban</h2>
+        <button id="task-create-btn" class="panel-action-btn">+ Task</button>
+      </div>
+      <div id="task-form-container"></div>
+      <div id="kanban-board" class="kanban"></div>
+    </section>
+    <section id="panel-agents" class="panel panel-narrow">
+      <div class="panel-header"><h2>Agents</h2></div>
+      <div id="agent-detail"></div>
+    </section>
+    <section id="panel-signals" class="panel">
+      <div class="panel-header"><h2>Signals</h2></div>
+      <div id="signals-feed" class="feed-scroll"></div>
+    </section>
+    <section id="panel-bullpen" class="panel">
+      <div class="panel-header"><h2>Bullpen</h2></div>
+      <div id="broadcast-bar"></div>
+      <div id="bullpen-feed" class="feed-scroll"></div>
+    </section>
+    <section id="panel-boosts" class="panel panel-full">
+      <div class="panel-header"><h2>Live Boosts</h2></div>
+      <div id="boost-cloud"></div>
+    </section>
   </main>
   <script src="/app.js"></script>
 </body>
