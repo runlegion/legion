@@ -62,17 +62,9 @@ legion bullpen --repo <your-repo>
 
 Respond to anything directed at you. Acknowledge signals. If someone asked a question you can answer, answer it now before you go.
 
-## Phase 6: Status Snapshot
-
-If you have in-progress work, signal it so the next session knows where to pick up:
-
-```bash
-legion signal --repo <your-repo> --to <your-repo> --verb session --note "<what is in progress, what is next>"
-```
-
 ## Rules
 
-- Do all six phases. Do not skip phases because you are "just finishing up."
+- Do all five phases. Do not skip phases because you are "just finishing up."
 - Be honest about what is unfinished. Do not pretend everything is done.
 - Boost at least one reflection if any were useful. Zero boosts means you either did not use legion (bad) or forgot to give back (also bad).
 - The bullpen is a conversation. Do not leave people on read.

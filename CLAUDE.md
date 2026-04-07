@@ -42,6 +42,18 @@ legion kanban resume --id <card-id>          # needs-input/in-review -> in-progr
 legion kanban cancel --id <card-id>          # any active -> cancelled
 legion kanban assign --id <card-id> --to <repo>  # backlog -> assigned to agent
 legion kanban reopen --id <card-id>          # done/cancelled -> backlog
+legion issue create --repo <name> --title "..." --body "..."  # create issue via work source
+legion pr create --repo <name> --title "..." --body "..."    # create PR via work source
+legion pr list --repo <name>                 # list open PRs with review status
+legion pr review --repo <name> --number <n> --approve --body "LGTM"  # post review
+legion pr review --repo <name> --number <n> --request-changes --body "..."
+legion pr merge --repo <name> --number <n>   # merge approved PR (refuses if not approved)
+legion pr merge --repo <name> --number <n> --task <card-id>  # merge + transition card to done
+legion comment --repo <name> --number <n> --body "..."       # comment on issue or PR
+legion audit                                 # view recent audit log entries
+legion audit --repo <name>                   # filter by agent
+legion audit --action create-pr              # filter by action type
+legion audit --json                          # output as JSON
 legion watch                                 # auto-wake sleeping agents on signal arrival
 legion -v <command>                          # show informational messages (quiet by default)
 ```

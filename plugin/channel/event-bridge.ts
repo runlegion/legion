@@ -12,9 +12,7 @@ function truncateIfNeeded(content: string, id?: string): string {
   const hint = id
     ? `\n\n[truncated -- full content on bullpen, id: ${id}]`
     : "\n\n[truncated -- full content on bullpen]";
-  const maxContent = Math.max(0, MAX_NOTIFICATION_LENGTH - hint.length);
-  const truncated = content.slice(0, maxContent);
-  return truncated + hint;
+  return content.slice(0, Math.max(0, MAX_NOTIFICATION_LENGTH - hint.length)) + hint;
 }
 
 // Format an event into a human-readable channel message.
