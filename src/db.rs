@@ -703,7 +703,7 @@ impl Database {
     /// number of results are needed, since the database handles the LIMIT.
     pub fn get_latest_reflections(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 ORDER BY created_at DESC LIMIT ?2",
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 AND audience = 'self' ORDER BY created_at DESC LIMIT ?2",
         )?;
 
         let rows = stmt.query_map(rusqlite::params![repo, limit], map_reflection_row)?;

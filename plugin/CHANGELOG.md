@@ -1,5 +1,22 @@
 # Legion Changelog
 
+## 0.5.0
+
+### Context Reduction
+
+Session startup was 14.5KB and getting truncated. Now 2.9KB.
+
+- Session startup slimmed to last self-reflection + status only (#175)
+- Removed surface, next card peek, and LEGION_HELP static text from startup hook
+- Status YOUR WORK section shows task count instead of listing every task individually
+- `recall --latest` now filters to self-audience only (no team posts from other agents)
+- Removed recall-first PreToolUse hook (fired on every Grep/Glob/WebFetch/WebSearch)
+- Plugin installs legion instructions to `~/.claude/CLAUDE.md` on setup -- loaded once by Claude Code, not per tool call
+
+### Internals
+- setup-binary.sh restructured: binary download failures no longer skip CLAUDE.md setup
+- CLAUDE.md injection is idempotent (HTML comment markers)
+
 ## 0.4.0
 
 ### Features

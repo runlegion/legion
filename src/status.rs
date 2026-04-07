@@ -131,21 +131,33 @@ fn format_section(out: &mut String, header: &str, items: &[StatusItem]) {
     }
 }
 
-/// YOUR WORK: pending, accepted, and blocked tasks assigned to this repo.
+/// YOUR WORK: summary count of active tasks assigned to this repo.
+/// Shows blocked tasks individually (they need attention), everything else as a count.
 fn get_your_work(db: &Database, repo: &str) -> Result<Vec<StatusItem>> {
     let tasks: Vec<Task> = db.get_active_tasks_for_repo(repo)?;
-    let mut items: Vec<StatusItem> = Vec::with_capacity(tasks.len());
+    let mut items: Vec<StatusItem> = Vec::new();
+    let mut blocked: Vec<&Task> = Vec::new();
+    let total: usize = tasks.len();
 
     for t in &tasks {
-        let category = format!("TASK:{}", t.priority);
-        let text = match t.status.as_str() {
-            "blocked" => format!("{} [BLOCKED]", t.text),
-            "accepted" => format!("{} [in progress]", t.text),
-            _ => t.text.clone(),
-        };
+        if t.status == "blocked" {
+            blocked.push(t);
+        }
+    }
+
+    if total > 0 {
         items.push(StatusItem {
-            category,
-            text,
+            category: "BACKLOG".to_string(),
+            text: format!("{} tasks (`legion kanban list` for details)", total),
+            from: repo.to_string(),
+            age: String::new(),
+        });
+    }
+
+    for t in blocked {
+        items.push(StatusItem {
+            category: format!("TASK:{}", t.priority),
+            text: format!("{} [BLOCKED]", t.text),
             from: t.from_repo.clone(),
             age: relative_time(&t.created_at),
         });
@@ -497,16 +509,35 @@ mod tests {
     }
 
     #[test]
-    fn your_work_shows_tasks() {
+    fn your_work_shows_count_summary() {
         let (db, _index, _dir) = test_storage();
         crate::task::create_task(&db, "platform", "kelex", "build the thing", None, "high")
+            .expect("create");
+        crate::task::create_task(&db, "platform", "kelex", "another task", None, "med")
             .expect("create");
 
         let items = get_your_work(&db, "kelex").expect("your_work");
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].category, "TASK:high");
-        assert!(items[0].text.contains("build the thing"));
-        assert_eq!(items[0].from, "platform");
+        assert_eq!(items[0].category, "BACKLOG");
+        assert!(items[0].text.contains("2 tasks"));
+    }
+
+    #[test]
+    fn your_work_shows_blocked_plus_count() {
+        let (db, _index, _dir) = test_storage();
+        let id = crate::task::create_task(&db, "platform", "kelex", "stuck work", None, "high")
+            .expect("create");
+        crate::task::accept_task(&db, &id).expect("accept");
+        crate::task::block_task(&db, &id, Some("waiting")).expect("block");
+        crate::task::create_task(&db, "platform", "kelex", "other work", None, "med")
+            .expect("create");
+
+        let items = get_your_work(&db, "kelex").expect("your_work");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].category, "BACKLOG");
+        assert!(items[0].text.contains("2 tasks"));
+        assert_eq!(items[1].category, "TASK:high");
+        assert!(items[1].text.contains("[BLOCKED]"));
     }
 
     #[test]
@@ -518,8 +549,10 @@ mod tests {
         crate::task::block_task(&db, &id, Some("waiting")).expect("block");
 
         let items = get_your_work(&db, "kelex").expect("your_work");
-        assert_eq!(items.len(), 1);
-        assert!(items[0].text.contains("[BLOCKED]"));
+        // Count line + blocked line
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].category, "BACKLOG");
+        assert!(items[1].text.contains("[BLOCKED]"));
     }
 
     #[test]

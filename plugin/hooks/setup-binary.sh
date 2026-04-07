@@ -32,104 +32,142 @@ DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLAUDE_PLUGIN_ROOT:-.}}"
 BINARY_PATH="${DATA_DIR}/${BINARY_NAME}"
 
 # Check if we already have the right version
+NEED_BINARY=true
 if [ -x "$BINARY_PATH" ]; then
   INSTALLED=$("$BINARY_PATH" --version 2>/dev/null | awk '{print $2}' || echo "")
   if [ "$INSTALLED" = "$EXPECTED_VERSION" ]; then
-    exit 0
+    NEED_BINARY=false
   fi
 fi
 
 # Also check system PATH for an existing installation
-SYSTEM_LEGION=$(command -v legion 2>/dev/null || true)
-if [ -n "$SYSTEM_LEGION" ] && [ -x "$SYSTEM_LEGION" ]; then
-  SYSTEM_VER=$("$SYSTEM_LEGION" --version 2>/dev/null | awk '{print $2}' || echo "")
-  if [ "$SYSTEM_VER" = "$EXPECTED_VERSION" ]; then
-    exit 0
+if [ "$NEED_BINARY" = true ]; then
+  SYSTEM_LEGION=$(command -v legion 2>/dev/null || true)
+  if [ -n "$SYSTEM_LEGION" ] && [ -x "$SYSTEM_LEGION" ]; then
+    SYSTEM_VER=$("$SYSTEM_LEGION" --version 2>/dev/null | awk '{print $2}' || echo "")
+    if [ "$SYSTEM_VER" = "$EXPECTED_VERSION" ]; then
+      NEED_BINARY=false
+    fi
   fi
 fi
 
-# Detect platform
-detect_platform() {
+# Download and install binary (failures are non-fatal -- CLAUDE.md setup still runs)
+install_binary() {
+  # Detect platform
+  local platform arch
   case "$(uname -s)" in
-    Linux)  echo "linux" ;;
-    Darwin) echo "macos" ;;
-    *)      echo "unsupported" ;;
+    Linux)  platform="linux" ;;
+    Darwin) platform="macos" ;;
+    *)
+      echo "[legion] unsupported platform: $(uname -s) $(uname -m)" >&2
+      echo "[legion] install manually: cargo install --git https://github.com/${REPO}" >&2
+      return 0
+      ;;
   esac
-}
 
-# Detect architecture with Rosetta 2 awareness
-detect_arch() {
-  local platform="$1"
   if [ "$platform" = "macos" ]; then
     local translated
     translated="$(sysctl -n sysctl.proc_translated 2>/dev/null || echo "0")"
     if [ "$translated" = "1" ]; then
-      echo "arm64"
-      return
+      arch="arm64"
     fi
   fi
-  case "$(uname -m)" in
-    x86_64|amd64)  echo "x64" ;;
-    arm64|aarch64)  echo "arm64" ;;
-    *)              echo "unsupported" ;;
-  esac
+  if [ -z "${arch:-}" ]; then
+    case "$(uname -m)" in
+      x86_64|amd64)   arch="x64" ;;
+      arm64|aarch64)   arch="arm64" ;;
+      *)
+        echo "[legion] unsupported arch: $(uname -m)" >&2
+        return 0
+        ;;
+    esac
+  fi
+
+  local artifact="${BINARY_NAME}-${platform}-${arch}"
+  local version_tag="v${EXPECTED_VERSION}"
+  local base_url="https://github.com/${REPO}/releases/download/${version_tag}"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  echo "[legion] downloading ${artifact} ${version_tag}..." >&2
+
+  if ! curl -fsSL -o "${tmpdir}/${artifact}.tar.gz" "${base_url}/${artifact}.tar.gz"; then
+    echo "[legion] download failed -- install manually: cargo install --git https://github.com/${REPO}" >&2
+    rm -rf "$tmpdir"
+    return 0
+  fi
+
+  if ! curl -fsSL -o "${tmpdir}/checksums.txt" "${base_url}/checksums.txt"; then
+    echo "[legion] checksum download failed -- refusing to install unverified binary" >&2
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  local expected_sum actual_sum
+  expected_sum=$(grep -F "${artifact}.tar.gz" "${tmpdir}/checksums.txt" | awk '{print $1}')
+  if [ -z "$expected_sum" ]; then
+    echo "[legion] no checksum found for ${artifact}.tar.gz" >&2
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    actual_sum=$(shasum -a 256 "${tmpdir}/${artifact}.tar.gz" | awk '{print $1}')
+  else
+    actual_sum=$(sha256sum "${tmpdir}/${artifact}.tar.gz" | awk '{print $1}')
+  fi
+
+  if [ "$expected_sum" != "$actual_sum" ]; then
+    echo "[legion] checksum mismatch -- download may be corrupted" >&2
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  mkdir -p "$DATA_DIR"
+  tar xzf "${tmpdir}/${artifact}.tar.gz" -C "$tmpdir"
+  mv "${tmpdir}/${BINARY_NAME}" "$BINARY_PATH"
+  chmod +x "$BINARY_PATH"
+  rm -rf "$tmpdir"
+
+  echo "[legion] installed ${BINARY_NAME} ${version_tag} to ${BINARY_PATH}" >&2
 }
 
-PLATFORM=$(detect_platform)
-ARCH=$(detect_arch "$PLATFORM")
-
-# Exit 0 on unsupported platform so the hook does not block the session.
-# The user can still install manually via cargo.
-if [ "$PLATFORM" = "unsupported" ] || [ "$ARCH" = "unsupported" ]; then
-  echo "[legion] unsupported platform: $(uname -s) $(uname -m)" >&2
-  echo "[legion] install manually: cargo install --git https://github.com/${REPO}" >&2
-  exit 0
+if [ "$NEED_BINARY" = true ]; then
+  install_binary || true
 fi
 
-ARTIFACT="${BINARY_NAME}-${PLATFORM}-${ARCH}"
-VERSION_TAG="v${EXPECTED_VERSION}"
-BASE_URL="https://github.com/${REPO}/releases/download/${VERSION_TAG}"
-ARCHIVE_URL="${BASE_URL}/${ARTIFACT}.tar.gz"
-CHECKSUM_URL="${BASE_URL}/checksums.txt"
+# -- CLAUDE.md instructions ----------------------------------------------------
 
-echo "[legion] downloading ${ARTIFACT} ${VERSION_TAG}..." >&2
+# Append legion instructions to ~/.claude/CLAUDE.md if not present.
+# Idempotent: checks for marker before writing.
+CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+MARKER="<!-- legion-plugin -->"
 
-TMPDIR_SETUP=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_SETUP"' EXIT
-
-# Download archive and checksums
-if ! curl -fsSL -o "${TMPDIR_SETUP}/${ARTIFACT}.tar.gz" "$ARCHIVE_URL"; then
-  echo "[legion] download failed -- release may not exist yet for ${VERSION_TAG}" >&2
-  echo "[legion] install manually: cargo install --git https://github.com/${REPO}" >&2
-  exit 0
-fi
-
-if ! curl -fsSL -o "${TMPDIR_SETUP}/checksums.txt" "$CHECKSUM_URL"; then
-  echo "[legion] checksum download failed -- refusing to install unverified binary" >&2
-  exit 1
-fi
-
-EXPECTED=$(grep -F "${ARTIFACT}.tar.gz" "${TMPDIR_SETUP}/checksums.txt" | awk '{print $1}')
-if [ -z "$EXPECTED" ]; then
-  echo "[legion] no checksum found for ${ARTIFACT}.tar.gz" >&2
-  exit 1
-fi
-
-if command -v shasum >/dev/null 2>&1; then
-  ACTUAL=$(shasum -a 256 "${TMPDIR_SETUP}/${ARTIFACT}.tar.gz" | awk '{print $1}')
+if [ -f "$CLAUDE_MD" ] && grep -qF "$MARKER" "$CLAUDE_MD" 2>/dev/null; then
+  # Already installed -- nothing to do
+  :
 else
-  ACTUAL=$(sha256sum "${TMPDIR_SETUP}/${ARTIFACT}.tar.gz" | awk '{print $1}')
+  mkdir -p "$HOME/.claude"
+  cat >> "$CLAUDE_MD" << 'LEGION_EOF'
+
+<!-- legion-plugin -->
+## Legion
+
+You have institutional memory. Check it before grepping for decisions or patterns.
+
+- `legion recall --repo <name> --context "problem"` -- search your reflections
+- `legion consult --context "problem"` -- search all agents across repos
+- `legion bullpen --repo <name>` -- read team posts
+- `legion kanban list --repo <name>` -- your task board
+
+Work source commands (required -- direct `gh` is blocked):
+- `legion issue create --repo <name> --title '...' --body '...'`
+- `legion pr create --repo <name> --title '...' --body '...'`
+- `legion pr list --repo <name>`
+- `legion pr review --repo <name> --number <n> --approve --body 'LGTM'`
+- `legion pr merge --repo <name> --number <n> --task <card-id>`
+- `legion comment --repo <name> --number <n> --body '...'`
+<!-- /legion-plugin -->
+LEGION_EOF
+  echo "[legion] added instructions to ${CLAUDE_MD}" >&2
 fi
-
-if [ "$EXPECTED" != "$ACTUAL" ]; then
-  echo "[legion] checksum mismatch -- download may be corrupted" >&2
-  exit 1
-fi
-
-# Extract and install
-mkdir -p "$DATA_DIR"
-tar xzf "${TMPDIR_SETUP}/${ARTIFACT}.tar.gz" -C "$TMPDIR_SETUP"
-mv "${TMPDIR_SETUP}/${BINARY_NAME}" "$BINARY_PATH"
-chmod +x "$BINARY_PATH"
-
-echo "[legion] installed ${BINARY_NAME} ${VERSION_TAG} to ${BINARY_PATH}" >&2

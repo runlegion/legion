@@ -1,5 +1,5 @@
 {
-  "description": "Legion hooks: recall on start, reflect on stop, checkpoint on compact, bullpen awareness on tool use",
+  "description": "Legion hooks: recall on start, reflect on stop, checkpoint on compact",
   "hooks": {
     "SessionStart": [
       {
@@ -51,46 +51,6 @@
       }
     ],
     "PreToolUse": [
-      {
-        "matcher": "Grep",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/recall-first.sh",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": "Glob",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/recall-first.sh",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": "WebFetch",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/recall-first.sh",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": "WebSearch",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/recall-first.sh",
-            "timeout": 5
-          }
-        ]
-      },
       {
         "matcher": "Bash",
         "hooks": [
