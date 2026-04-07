@@ -202,8 +202,8 @@ enum Commands {
     #[command(alias = "bp", alias = "board")]
     Bullpen {
         /// Repository name (identifies who is reading)
-        #[arg(long)]
-        repo: String,
+        #[arg(long, required_unless_present_any = ["archive"])]
+        repo: Option<String>,
 
         /// Only show unread count instead of full bullpen
         #[arg(long)]
@@ -1162,30 +1162,34 @@ fn main() -> error::Result<()> {
                 if !output.is_empty() {
                     print!("{output}");
                 }
-            } else if count {
-                let post_count = board::bullpen_count(&database, &repo)?;
-                let task_count = task::count_pending_inbound(&database, &repo)?;
-                let output = board::format_bullpen_count(post_count, task_count);
-                if !output.is_empty() {
-                    println!("{output}");
-                }
             } else {
-                let filter = if signals {
-                    board::BullpenFilter::SignalsOnly
-                } else if musings {
-                    board::BullpenFilter::MusingsOnly
+                // repo is guaranteed by clap's required_unless_present_any
+                let repo = repo.expect("--repo required for this path");
+                if count {
+                    let post_count = board::bullpen_count(&database, &repo)?;
+                    let task_count = task::count_pending_inbound(&database, &repo)?;
+                    let output = board::format_bullpen_count(post_count, task_count);
+                    if !output.is_empty() {
+                        println!("{output}");
+                    }
                 } else {
-                    board::BullpenFilter::All
-                };
-                let posts = board::bullpen_filtered(&database, &repo, filter)?;
-                let mut output = board::format_bullpen(&posts);
-                if filter == board::BullpenFilter::All {
-                    let pending_tasks = task::get_pending_inbound(&database, &repo)?;
-                    let task_output = task::format_pending_for_surface(&pending_tasks);
-                    output.push_str(&task_output);
-                }
-                if !output.is_empty() {
-                    print!("{output}");
+                    let filter = if signals {
+                        board::BullpenFilter::SignalsOnly
+                    } else if musings {
+                        board::BullpenFilter::MusingsOnly
+                    } else {
+                        board::BullpenFilter::All
+                    };
+                    let posts = board::bullpen_filtered(&database, &repo, filter)?;
+                    let mut output = board::format_bullpen(&posts);
+                    if filter == board::BullpenFilter::All {
+                        let pending_tasks = task::get_pending_inbound(&database, &repo)?;
+                        let task_output = task::format_pending_for_surface(&pending_tasks);
+                        output.push_str(&task_output);
+                    }
+                    if !output.is_empty() {
+                        print!("{output}");
+                    }
                 }
             }
         }

@@ -18,6 +18,8 @@ legion bullpen --repo <name>               # aliases: bp, board
 legion bullpen --count --repo <name>
 legion bullpen --repo <name> --signals     # show only signals
 legion bullpen --repo <name> --musings     # show only musings
+legion bullpen --archive                   # archive posts all readers have read
+legion bullpen --archived --repo <name>    # view archived posts
 legion signal --repo <name> --to <recipient> --verb <verb> --status <status>
 legion signal --repo <name> --to all --verb announce --note "PR merged"
 legion signal --repo <name> --to <recipient> --verb review --status approved --details "surface:cap-output,chain:confirmed"
