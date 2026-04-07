@@ -27,7 +27,7 @@ case "${1:-}" in
       exit 0
     fi
     gh issue list --repo "$REPO" --state open \
-      --json url,number,title,body,labels,assignees,state \
+      --json url,number,title,body,labels,assignees,state,createdAt \
       --limit 50 2>/dev/null || echo "[]"
     ;;
 

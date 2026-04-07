@@ -16,6 +16,8 @@ pub struct ExternalIssue {
     pub labels: Vec<serde_json::Value>,
     pub assignees: Option<Vec<serde_json::Value>>,
     pub state: String,
+    #[serde(default, alias = "createdAt")]
+    pub created_at: Option<String>,
 }
 
 /// Discover work source plugin paths.
@@ -396,6 +398,7 @@ pub fn sync_issues(
             None,
             Some(&issue.url),
             Some(plugin_name),
+            issue.created_at.as_deref(),
         )?;
         created += 1;
     }

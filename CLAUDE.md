@@ -78,6 +78,20 @@ agent may have already solved it.
 - **Search**: Tantivy BM25 full-text index (Phase 1)
 - **Future**: model2vec-rs embeddings in nullable BLOB column (Phase 2)
 
+## Dev Workflow
+
+Each step is mandatory. Do not skip steps or combine them.
+
+1. **Plan** -- Propose approach, get user confirmation before coding.
+2. **Issue** -- Create a GitHub issue via `legion issue create` if one doesn't exist.
+3. **Build** -- Implement on a feature branch (`feat/<issue#>-<short-desc>`). Write tests alongside code. Run `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check`. All must pass.
+4. **Simplify** -- Run `/simplify` on all changed files. Accept structural improvements, flatten unnecessary abstractions, remove dead code.
+5. **PR** -- Create the PR via `legion pr create`. Reference the issue number.
+6. **Review** -- Run `/review-pr` which launches parallel review agents. Do not merge yet.
+7. **Fix** -- Address every issue the review found. Re-run tests after fixes.
+8. **Consensus** -- For big changes, post to the bullpen and get team input before merging.
+9. **Ask for merge** -- Do not merge to main without explicit user approval.
+
 ## Rules
 
 - No emoji in code, comments, or documentation

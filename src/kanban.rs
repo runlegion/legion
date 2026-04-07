@@ -260,6 +260,7 @@ pub fn create_card(
     parent_card_id: Option<&str>,
     source_url: Option<&str>,
     source_type: Option<&str>,
+    created_at: Option<&str>,
 ) -> Result<String> {
     db.insert_card(
         from_repo,
@@ -271,6 +272,7 @@ pub fn create_card(
         parent_card_id,
         source_url,
         source_type,
+        created_at,
     )
 }
 
@@ -562,6 +564,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("create");
         assert_eq!(id.len(), 36);
@@ -587,6 +590,7 @@ mod tests {
             None,
             Some("https://github.com/runlegion/legion/issues/42"),
             Some("github"),
+            None,
         )
         .expect("create");
 
@@ -612,6 +616,7 @@ mod tests {
             "do the thing",
             None,
             "med",
+            None,
             None,
             None,
             None,
@@ -644,6 +649,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("create");
 
@@ -671,6 +677,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("create low");
         create_card(
@@ -684,6 +691,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("create high");
         create_card(
@@ -693,6 +701,7 @@ mod tests {
             "med priority",
             None,
             "med",
+            None,
             None,
             None,
             None,
@@ -727,6 +736,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("create");
 
@@ -749,6 +759,7 @@ mod tests {
             "force move",
             None,
             "med",
+            None,
             None,
             None,
             None,
@@ -784,6 +795,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("create");
 
@@ -796,11 +808,11 @@ mod tests {
         let (db, _index, _dir) = test_storage();
 
         create_card(
-            &db, "kelex", "legion", "task one", None, "med", None, None, None, None,
+            &db, "kelex", "legion", "task one", None, "med", None, None, None, None, None,
         )
         .expect("create");
         create_card(
-            &db, "kelex", "legion", "task two", None, "high", None, None, None, None,
+            &db, "kelex", "legion", "task two", None, "high", None, None, None, None, None,
         )
         .expect("create");
 
@@ -821,6 +833,7 @@ mod tests {
             None,
             "high",
             Some("backend"),
+            None,
             None,
             None,
             None,
@@ -870,15 +883,15 @@ mod tests {
         let (db, _index, _dir) = test_storage();
 
         create_card(
-            &db, "sean", "kelex", "task 1", None, "med", None, None, None, None,
+            &db, "sean", "kelex", "task 1", None, "med", None, None, None, None, None,
         )
         .expect("create");
         create_card(
-            &db, "sean", "kelex", "task 2", None, "high", None, None, None, None,
+            &db, "sean", "kelex", "task 2", None, "high", None, None, None, None, None,
         )
         .expect("create");
         create_card(
-            &db, "sean", "rafters", "task 3", None, "med", None, None, None, None,
+            &db, "sean", "rafters", "task 3", None, "med", None, None, None, None, None,
         )
         .expect("create");
 
@@ -901,6 +914,7 @@ mod tests {
             "backlog item",
             None,
             "med",
+            None,
             None,
             None,
             None,
@@ -932,6 +946,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("create");
         transition_card(&db, &id, Action::Accept, None).expect("accept");
@@ -957,6 +972,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("create");
         let card = transition_card(&db, &id, Action::Accept, None).expect("accept");
@@ -969,6 +985,70 @@ mod tests {
             card.started_at, started,
             "started_at should not change on block/unblock"
         );
+    }
+
+    #[test]
+    fn created_at_override_preserves_source_timestamp() {
+        let (db, _index, _dir) = test_storage();
+        let source_date = "2026-04-03T10:00:00Z";
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "old issue",
+            None,
+            "med",
+            None,
+            None,
+            None,
+            None,
+            Some(source_date),
+        )
+        .expect("create");
+
+        let card = db.get_card_by_id(&id).expect("get").expect("exists");
+        assert_eq!(card.created_at, source_date);
+    }
+
+    #[test]
+    fn created_at_override_affects_scheduling_order() {
+        let (db, _index, _dir) = test_storage();
+
+        // Create a "new" issue first (inserted first, but newer date)
+        create_card(
+            &db,
+            "sean",
+            "kelex",
+            "new issue",
+            None,
+            "med",
+            None,
+            None,
+            None,
+            None,
+            Some("2026-04-07T00:00:00Z"),
+        )
+        .expect("create new");
+
+        // Create an "old" issue second (inserted second, but older date)
+        create_card(
+            &db,
+            "sean",
+            "kelex",
+            "old issue",
+            None,
+            "med",
+            None,
+            None,
+            None,
+            None,
+            Some("2026-04-03T00:00:00Z"),
+        )
+        .expect("create old");
+
+        // Scheduler should pick the older issue first
+        let card = peek_work(&db, "kelex").expect("peek").expect("has work");
+        assert_eq!(card.text, "old issue");
     }
 
     // --- Cancel idempotency ---
