@@ -69,6 +69,9 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/schedules", get(api_schedules))
             .route("/api/schedules/create", post(api_create_schedule))
             .route("/api/schedules/{id}/toggle", post(api_toggle_schedule))
+            .route("/api/kanban", get(api_kanban))
+            .route("/api/kanban/{id}/move", post(api_kanban_move))
+            .route("/api/kanban/workloads", get(api_kanban_workloads))
             .route("/{*path}", get(static_handler))
             .with_state(state);
 
@@ -934,6 +937,70 @@ async fn api_toggle_schedule(
                 ),
             }
         }
+    }
+}
+
+/// GET /api/kanban -- all kanban cards for the board view.
+async fn api_kanban(State(state): State<AppState>) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    match crate::kanban::board_cards(&db) {
+        Ok(cards) => Json(cards).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("query error: {e}"),
+        ),
+    }
+}
+
+/// Request body for POST /api/kanban/{id}/move.
+#[derive(serde::Deserialize)]
+struct KanbanMoveRequest {
+    status: String,
+    sort_order: Option<i32>,
+}
+
+/// POST /api/kanban/{id}/move -- drag-and-drop: force-move a card to a new status/position.
+async fn api_kanban_move(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<KanbanMoveRequest>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let new_status = match body.status.parse::<crate::kanban::CardStatus>() {
+        Ok(s) => s,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid status: {e}")),
+    };
+
+    match crate::kanban::force_move(&db, &id, new_status, body.sort_order) {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("move failed: {e}"),
+        ),
+    }
+}
+
+/// GET /api/kanban/workloads -- per-agent workload summary for the agent strip.
+async fn api_kanban_workloads(State(state): State<AppState>) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    match crate::kanban::agent_workloads(&db) {
+        Ok(workloads) => Json(workloads).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("query error: {e}"),
+        ),
     }
 }
 
