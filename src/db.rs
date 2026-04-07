@@ -1121,9 +1121,11 @@ impl Database {
         parent_card_id: Option<&str>,
         source_url: Option<&str>,
         source_type: Option<&str>,
+        created_at_override: Option<&str>,
     ) -> Result<String> {
         let id = uuid::Uuid::now_v7().to_string();
         let now = chrono::Utc::now().to_rfc3339();
+        let created_at = created_at_override.unwrap_or(&now);
         self.conn.execute(
             "INSERT INTO tasks (id, from_repo, to_repo, text, context, priority, status, \
              labels, parent_card_id, source_url, source_type, created_at, updated_at) \
@@ -1139,7 +1141,7 @@ impl Database {
                 parent_card_id,
                 source_url,
                 source_type,
-                now,
+                created_at,
                 now
             ],
         )?;
