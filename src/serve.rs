@@ -68,6 +68,9 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/chat", get(api_chat))
             .route("/api/boost/{id}", post(api_boost))
             .route("/api/health", get(api_health))
+            .route("/api/health/history", get(api_health_history))
+            .route("/api/search", get(api_search))
+            .route("/api/audit", get(api_audit))
             .route("/api/schedules", get(api_schedules))
             .route("/api/schedules/create", post(api_create_schedule))
             .route("/api/schedules/{id}/toggle", post(api_toggle_schedule))
@@ -1019,6 +1022,137 @@ async fn api_health(State(state): State<AppState>, Query(params): Query<HealthQu
         .collect();
 
     Json(hosts).into_response()
+}
+
+/// Query parameters for GET /api/health/history.
+#[derive(serde::Deserialize)]
+struct HealthHistoryQuery {
+    /// Hostname to filter by.
+    hostname: String,
+    /// Minutes of history to return (default 60).
+    minutes: Option<u64>,
+}
+
+/// GET /api/health/history -- time-series health samples for a single host.
+async fn api_health_history(
+    State(state): State<AppState>,
+    Query(params): Query<HealthHistoryQuery>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let minutes = params.minutes.unwrap_or(60);
+    let since = chrono::Utc::now() - chrono::Duration::minutes(minutes as i64);
+    let since_str = since.to_rfc3339();
+
+    match db.get_health_history(&params.hostname, &since_str) {
+        Ok(samples) => Json(samples).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("health history error: {e}"),
+        ),
+    }
+}
+
+/// Query parameters for GET /api/search.
+#[derive(serde::Deserialize)]
+struct SearchQuery {
+    /// Search query string.
+    q: String,
+    /// Optional repo filter (omit to search all).
+    repo: Option<String>,
+    /// Max results (default 10).
+    limit: Option<usize>,
+}
+
+/// GET /api/search -- BM25-ranked reflection search.
+async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQuery>) -> Response {
+    let q = params.q.trim();
+    if q.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "q parameter is required");
+    }
+
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let index_dir = state.data_dir.join("index");
+    let index = match SearchIndex::open(&index_dir) {
+        Ok(idx) => idx,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("search index error: {e}"),
+            );
+        }
+    };
+
+    let limit = params.limit.unwrap_or(10).min(50);
+
+    let search_results = match &params.repo {
+        Some(repo) => index.search(repo, q, limit),
+        None => index.search_all(q, limit),
+    };
+
+    let hits = match search_results {
+        Ok(hits) => hits,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("search error: {e}"),
+            );
+        }
+    };
+
+    // Join search hits with full reflection data
+    let mut results: Vec<serde_json::Value> = Vec::with_capacity(hits.len());
+    for hit in &hits {
+        if let Ok(Some(r)) = db.get_reflection_by_id(&hit.id) {
+            results.push(serde_json::json!({
+                "id": r.id,
+                "repo": r.repo,
+                "text": r.text,
+                "score": hit.score,
+                "created_at": r.created_at,
+                "domain": r.domain,
+                "tags": r.tags,
+            }));
+        }
+    }
+
+    Json(results).into_response()
+}
+
+/// Query parameters for GET /api/audit.
+#[derive(serde::Deserialize)]
+struct AuditQuery {
+    /// Filter by agent name.
+    agent: Option<String>,
+    /// Filter by action type.
+    action: Option<String>,
+    /// Max results (default 50).
+    limit: Option<usize>,
+}
+
+/// GET /api/audit -- recent audit log entries.
+async fn api_audit(State(state): State<AppState>, Query(params): Query<AuditQuery>) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let limit = params.limit.unwrap_or(50).min(200);
+
+    match db.query_audit_log(params.agent.as_deref(), params.action.as_deref(), limit) {
+        Ok(entries) => Json(entries).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("audit query error: {e}"),
+        ),
+    }
 }
 
 async fn shutdown_signal() {
