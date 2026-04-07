@@ -17,6 +17,12 @@ rm -f "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
 rm -f "/tmp/legion-recall-nudge-${CWD_HASH}" 2>/dev/null
 rm -f "/tmp/legion-channel-${REPO}" 2>/dev/null
 
+# Mark session as having done work (used by stop hook to decide if reflect prompt fires).
+# Set once at session start -- if a session started, it did work.
+# Previously this was in recall-first.sh (PreToolUse) which caused false positives:
+# any Grep/Glob touch would set it, then stop hook would fire mid-conversation.
+touch "/tmp/legion-work-${CWD_HASH}"
+
 # Try BM25 search with git branch context first
 BRANCH=$(cd "$CWD" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 
