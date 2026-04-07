@@ -73,6 +73,8 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/kanban", get(api_kanban))
             .route("/api/kanban/{id}/move", post(api_kanban_move))
             .route("/api/kanban/workloads", get(api_kanban_workloads))
+            .route("/api/health/history", get(api_health_history))
+            .route("/api/health/latest", get(api_health_latest))
             .route("/{*path}", get(static_handler))
             .with_state(state);
 
@@ -1040,6 +1042,67 @@ async fn api_kanban_workloads(State(state): State<AppState>) -> Response {
 
     match crate::kanban::agent_workloads(&db) {
         Ok(workloads) => Json(workloads).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("query error: {e}"),
+        ),
+    }
+}
+
+/// Query parameters for GET /api/health/history.
+#[derive(serde::Deserialize)]
+struct HealthHistoryQuery {
+    hostname: Option<String>,
+    minutes: Option<u64>,
+}
+
+/// GET /api/health/history -- time-series health samples for dashboard sparklines.
+async fn api_health_history(
+    State(state): State<AppState>,
+    Query(params): Query<HealthHistoryQuery>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let minutes = params.minutes.unwrap_or(60);
+    let since = (chrono::Utc::now() - chrono::Duration::minutes(minutes as i64)).to_rfc3339();
+
+    let samples = if let Some(ref hostname) = params.hostname {
+        db.get_health_history(hostname, &since)
+    } else {
+        db.get_health_all_hosts(&since)
+    };
+
+    match samples {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("query error: {e}"),
+        ),
+    }
+}
+
+/// Query parameters for GET /api/health/latest.
+#[derive(serde::Deserialize)]
+struct HealthLatestQuery {
+    hostname: String,
+}
+
+/// GET /api/health/latest -- most recent health sample for a host.
+async fn api_health_latest(
+    State(state): State<AppState>,
+    Query(params): Query<HealthLatestQuery>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    match db.get_latest_health(&params.hostname) {
+        Ok(Some(sample)) => Json(sample).into_response(),
+        Ok(None) => json_error(StatusCode::NOT_FOUND, "no samples for host"),
         Err(e) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("query error: {e}"),
