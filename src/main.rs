@@ -40,7 +40,8 @@ macro_rules! info {
 #[derive(Parser)]
 #[command(
     name = "legion",
-    about = "Agent specialization through deliberate practice"
+    about = "Agent specialization through deliberate practice",
+    version
 )]
 struct Cli {
     /// Show informational messages on stderr (quiet by default)
