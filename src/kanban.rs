@@ -1051,6 +1051,47 @@ mod tests {
         assert_eq!(card.text, "old issue");
     }
 
+    #[test]
+    fn synced_card_with_old_date_beats_manual_card() {
+        let (db, _index, _dir) = test_storage();
+
+        // Manual card created now (no override, gets Utc::now())
+        create_card(
+            &db,
+            "sean",
+            "kelex",
+            "manual card",
+            None,
+            "med",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create manual");
+
+        // Synced card with an older GitHub creation date
+        create_card(
+            &db,
+            "sean",
+            "kelex",
+            "old github issue",
+            None,
+            "med",
+            None,
+            None,
+            None,
+            None,
+            Some("2026-03-01T00:00:00Z"),
+        )
+        .expect("create synced");
+
+        // Synced card's older date should win over manual card's recent date
+        let card = peek_work(&db, "kelex").expect("peek").expect("has work");
+        assert_eq!(card.text, "old github issue");
+    }
+
     // --- Cancel idempotency ---
 
     #[test]
