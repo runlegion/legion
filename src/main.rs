@@ -202,8 +202,8 @@ enum Commands {
     #[command(alias = "bp", alias = "board")]
     Bullpen {
         /// Repository name (identifies who is reading)
-        #[arg(long)]
-        repo: String,
+        #[arg(long, required_unless_present_any = ["archive", "archived"])]
+        repo: Option<String>,
 
         /// Only show unread count instead of full bullpen
         #[arg(long)]
@@ -216,6 +216,14 @@ enum Commands {
         /// Show only musings (natural language posts)
         #[arg(long, conflicts_with = "signals")]
         musings: bool,
+
+        /// Archive posts that all readers have read
+        #[arg(long, conflicts_with_all = ["count", "signals", "musings", "archived"])]
+        archive: bool,
+
+        /// Show archived posts instead of active ones
+        #[arg(long, conflicts_with_all = ["count", "signals", "musings", "archive"])]
+        archived: bool,
     },
 
     /// Surface cross-repo highlights for a session start
@@ -904,6 +912,19 @@ fn raise_fd_limit() {
 }
 
 fn main() -> error::Result<()> {
+    // Windows default stack (1MB) is too small for clap + Tantivy init.
+    // Spawn with 8MB stack to match macOS/Linux defaults.
+    const STACK_SIZE: usize = 8 * 1024 * 1024;
+    let builder = std::thread::Builder::new().stack_size(STACK_SIZE);
+    let handler = builder.spawn(run).map_err(error::LegionError::Io)?;
+    handler.join().unwrap_or_else(|_| {
+        Err(error::LegionError::Io(std::io::Error::other(
+            "thread panicked",
+        )))
+    })
+}
+
+fn run() -> error::Result<()> {
     raise_fd_limit();
     let cli = Cli::parse();
     VERBOSE.store(cli.verbose, Ordering::Relaxed);
@@ -1139,34 +1160,49 @@ fn main() -> error::Result<()> {
             count,
             signals,
             musings,
+            archive,
+            archived,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
 
-            if count {
-                let post_count = board::bullpen_count(&database, &repo)?;
-                let task_count = task::count_pending_inbound(&database, &repo)?;
-                let output = board::format_bullpen_count(post_count, task_count);
-                if !output.is_empty() {
-                    println!("{output}");
-                }
-            } else {
-                let filter = if signals {
-                    board::BullpenFilter::SignalsOnly
-                } else if musings {
-                    board::BullpenFilter::MusingsOnly
-                } else {
-                    board::BullpenFilter::All
-                };
-                let posts = board::bullpen_filtered(&database, &repo, filter)?;
-                let mut output = board::format_bullpen(&posts);
-                if filter == board::BullpenFilter::All {
-                    let pending_tasks = task::get_pending_inbound(&database, &repo)?;
-                    let task_output = task::format_pending_for_surface(&pending_tasks);
-                    output.push_str(&task_output);
-                }
+            if archive {
+                let count = board::archive_read_posts(&database)?;
+                eprintln!("[legion] archived {count} posts");
+            } else if archived {
+                let posts = board::bullpen_archived(&database)?;
+                let output = board::format_bullpen(&posts);
                 if !output.is_empty() {
                     print!("{output}");
+                }
+            } else {
+                // repo is guaranteed by clap's required_unless_present_any
+                let repo = repo.expect("--repo required for this path");
+                if count {
+                    let post_count = board::bullpen_count(&database, &repo)?;
+                    let task_count = task::count_pending_inbound(&database, &repo)?;
+                    let output = board::format_bullpen_count(post_count, task_count);
+                    if !output.is_empty() {
+                        println!("{output}");
+                    }
+                } else {
+                    let filter = if signals {
+                        board::BullpenFilter::SignalsOnly
+                    } else if musings {
+                        board::BullpenFilter::MusingsOnly
+                    } else {
+                        board::BullpenFilter::All
+                    };
+                    let posts = board::bullpen_filtered(&database, &repo, filter)?;
+                    let mut output = board::format_bullpen(&posts);
+                    if filter == board::BullpenFilter::All {
+                        let pending_tasks = task::get_pending_inbound(&database, &repo)?;
+                        let task_output = task::format_pending_for_surface(&pending_tasks);
+                        output.push_str(&task_output);
+                    }
+                    if !output.is_empty() {
+                        print!("{output}");
+                    }
                 }
             }
         }
