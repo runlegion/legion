@@ -1155,7 +1155,7 @@ fn main() -> error::Result<()> {
 
             if archive {
                 let count = board::archive_read_posts(&database)?;
-                eprintln!("[Legion] Archived {count} posts");
+                eprintln!("[legion] archived {count} posts");
             } else if archived {
                 let posts = board::bullpen_archived(&database)?;
                 let output = board::format_bullpen(&posts);
