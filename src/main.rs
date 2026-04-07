@@ -216,6 +216,14 @@ enum Commands {
         /// Show only musings (natural language posts)
         #[arg(long, conflicts_with = "signals")]
         musings: bool,
+
+        /// Archive posts that all readers have read
+        #[arg(long, conflicts_with_all = ["count", "signals", "musings", "archived"])]
+        archive: bool,
+
+        /// Show archived posts instead of active ones
+        #[arg(long, conflicts_with_all = ["count", "signals", "musings", "archive"])]
+        archived: bool,
     },
 
     /// Surface cross-repo highlights for a session start
@@ -1139,11 +1147,22 @@ fn main() -> error::Result<()> {
             count,
             signals,
             musings,
+            archive,
+            archived,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
 
-            if count {
+            if archive {
+                let count = board::archive_read_posts(&database)?;
+                eprintln!("[Legion] Archived {count} posts");
+            } else if archived {
+                let posts = board::bullpen_archived(&database)?;
+                let output = board::format_bullpen(&posts);
+                if !output.is_empty() {
+                    print!("{output}");
+                }
+            } else if count {
                 let post_count = board::bullpen_count(&database, &repo)?;
                 let task_count = task::count_pending_inbound(&database, &repo)?;
                 let output = board::format_bullpen_count(post_count, task_count);

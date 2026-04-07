@@ -442,7 +442,16 @@ impl Database {
              WHERE status != 'backlog' AND assigned_at IS NULL;",
         )?;
 
-        // Migration 10: Audit log for work source actions (#142).
+        // Migration 10: Bullpen archive -- nullable archived_at on reflections (#168).
+        if !Self::has_column(conn, "reflections", "archived_at")? {
+            conn.execute_batch("ALTER TABLE reflections ADD COLUMN archived_at TEXT;")?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_reflections_archived \
+             ON reflections(archived_at, created_at);",
+        )?;
+
+        // Migration 11: Audit log for work source actions (#142).
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS audit_log (
                 id TEXT PRIMARY KEY,
@@ -702,10 +711,11 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
-    /// Retrieve all bullpen posts (audience = "team"), ordered newest first.
+    /// Retrieve active (non-archived) bullpen posts, ordered newest first.
     pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE audience = 'team' ORDER BY created_at DESC",
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE audience = 'team' AND archived_at IS NULL ORDER BY created_at DESC",
         )?;
 
         let rows = stmt.query_map([], map_reflection_row)?;
@@ -713,12 +723,45 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Retrieve archived bullpen posts, ordered newest first.
+    pub fn get_archived_posts(&self) -> Result<Vec<Reflection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE audience = 'team' AND archived_at IS NOT NULL ORDER BY created_at DESC",
+        )?;
+
+        let rows = stmt.query_map([], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Archive bullpen posts that all known readers have read.
+    ///
+    /// A post is archivable when every repo in board_reads has last_read_at
+    /// after the post's created_at. Uses a single UPDATE with subquery to
+    /// avoid race conditions between SELECT and UPDATE.
+    /// Returns the number of posts archived.
+    pub fn archive_read_posts(&self) -> Result<u64> {
+        let now = Utc::now().to_rfc3339();
+
+        let count = self.conn.execute(
+            "UPDATE reflections SET archived_at = ?1 \
+             WHERE audience = 'team' AND archived_at IS NULL \
+             AND created_at < (SELECT MIN(last_read_at) FROM board_reads)",
+            rusqlite::params![now],
+        )?;
+
+        Ok(count as u64)
+    }
+
     /// Count team posts that are unread by the given reader repo.
     ///
     /// If the reader has no entry in board_reads, all team posts are unread.
+    /// Only counts non-archived posts.
     pub fn get_unread_count(&self, reader_repo: &str) -> Result<u64> {
         let mut stmt = self.conn.prepare(
             "SELECT COUNT(*) FROM reflections WHERE audience = 'team' \
+             AND archived_at IS NULL \
              AND created_at > COALESCE( \
                  (SELECT last_read_at FROM board_reads WHERE reader_repo = ?1), \
                  '' \
@@ -880,7 +923,7 @@ impl Database {
         let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND created_at > ?1 ORDER BY created_at DESC",
+             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND created_at > ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([&cutoff], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()

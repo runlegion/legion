@@ -116,6 +116,17 @@ pub fn bullpen_count(db: &Database, reader_repo: &str) -> Result<u64> {
     db.get_unread_count(reader_repo)
 }
 
+/// Archive bullpen posts that all known readers have read.
+/// Returns the count of newly archived posts.
+pub fn archive_read_posts(db: &Database) -> Result<u64> {
+    db.archive_read_posts()
+}
+
+/// Retrieve archived bullpen posts for forensic viewing.
+pub fn bullpen_archived(db: &Database) -> Result<Vec<Reflection>> {
+    db.get_archived_posts()
+}
+
 /// Format bullpen posts for display.
 ///
 /// Signals are rendered as compact one-liners. Musings get full text.
@@ -345,6 +356,116 @@ mod tests {
             0,
             "unfiltered view should mark all as read"
         );
+    }
+
+    #[test]
+    fn archive_moves_read_posts() {
+        let (db, index, _dir) = test_storage();
+        post_from_text(&db, &index, "kelex", "old post").expect("post");
+
+        // Two readers read the bullpen
+        bullpen(&db, "platform").expect("platform reads");
+        bullpen(&db, "legion").expect("legion reads");
+
+        // Archive should move the post
+        let archived = archive_read_posts(&db).expect("archive");
+        assert_eq!(archived, 1);
+
+        // Active bullpen should be empty
+        let posts = db.get_board_posts().expect("active");
+        assert_eq!(posts.len(), 0);
+
+        // Archived view should have the post
+        let archived_posts = bullpen_archived(&db).expect("archived");
+        assert_eq!(archived_posts.len(), 1);
+        assert_eq!(archived_posts[0].text, "old post");
+    }
+
+    #[test]
+    fn archive_skips_unread_posts() {
+        let (db, index, _dir) = test_storage();
+        post_from_text(&db, &index, "kelex", "unread post").expect("post");
+
+        // One reader reads, but another hasn't
+        bullpen(&db, "platform").expect("platform reads");
+        // "legion" has never read the bullpen
+
+        // Post new post after platform read -- this tests the min_read logic
+        post_from_text(&db, &index, "rafters", "newer post").expect("post 2");
+
+        // Only the first post is older than platform's read, but legion hasn't
+        // read at all. Since legion has no board_reads entry, min_read_at comes
+        // only from platform. Posts before platform's read time get archived.
+        let archived = archive_read_posts(&db).expect("archive");
+        assert_eq!(
+            archived, 1,
+            "only the post before platform's read should archive"
+        );
+
+        let posts = db.get_board_posts().expect("active");
+        assert_eq!(posts.len(), 1, "newer post should remain active");
+        assert_eq!(posts[0].text, "newer post");
+    }
+
+    #[test]
+    fn archive_with_no_readers_archives_nothing() {
+        let (db, index, _dir) = test_storage();
+        post_from_text(&db, &index, "kelex", "lonely post").expect("post");
+
+        let archived = archive_read_posts(&db).expect("archive");
+        assert_eq!(archived, 0, "no readers means nothing to archive");
+
+        let posts = db.get_board_posts().expect("active");
+        assert_eq!(posts.len(), 1);
+    }
+
+    #[test]
+    fn new_posts_after_archive_visible() {
+        let (db, index, _dir) = test_storage();
+        post_from_text(&db, &index, "kelex", "old post").expect("post");
+
+        bullpen(&db, "platform").expect("read");
+        archive_read_posts(&db).expect("archive");
+
+        // New post after archive
+        post_from_text(&db, &index, "rafters", "fresh post").expect("new post");
+
+        let posts = db.get_board_posts().expect("active");
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].text, "fresh post");
+    }
+
+    #[test]
+    fn consult_finds_archived_posts() {
+        let (db, index, _dir) = test_storage();
+        post_from_text(&db, &index, "kelex", "archived knowledge about tokens").expect("post");
+
+        bullpen(&db, "platform").expect("read");
+        archive_read_posts(&db).expect("archive");
+
+        // consult searches all reflections regardless of archive status
+        let result = recall::consult_bm25(&db, &index, "tokens", 5).expect("consult");
+        assert_eq!(result.reflections.len(), 1);
+        assert!(result.reflections[0].text.contains("tokens"));
+    }
+
+    #[test]
+    fn unread_count_excludes_archived() {
+        let (db, index, _dir) = test_storage();
+        post_from_text(&db, &index, "kelex", "post one").expect("post");
+
+        // Platform reads it
+        bullpen(&db, "platform").expect("read");
+
+        // New post arrives
+        post_from_text(&db, &index, "rafters", "post two").expect("post 2");
+
+        // Archive (post one is read by platform, gets archived)
+        archive_read_posts(&db).expect("archive");
+
+        // Platform should see 1 unread (post two), not 0 or 2
+        let count = bullpen_count(&db, "platform").expect("count");
+        assert_eq!(count, 1, "only non-archived unread posts should count");
     }
 
     #[test]

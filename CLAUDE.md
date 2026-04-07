@@ -87,10 +87,13 @@ Each step is mandatory. Do not skip steps or combine them.
 3. **Build** -- Implement on a feature branch (`feat/<issue#>-<short-desc>`). Write tests alongside code. Run `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check`. All must pass.
 4. **Simplify** -- Run `/simplify` on all changed files. Accept structural improvements, flatten unnecessary abstractions, remove dead code.
 5. **PR** -- Create the PR via `legion pr create`. Reference the issue number.
-6. **Review** -- Run `/review-pr` which launches parallel review agents. Do not merge yet.
-7. **Fix** -- Address every issue the review found. Re-run tests after fixes.
-8. **Consensus** -- For big changes, post to the bullpen and get team input before merging.
-9. **Ask for merge** -- Do not merge to main without explicit user approval.
+6. **Automated review** -- Run `/review-pr` which launches parallel review agents (code quality, silent failures, etc.).
+7. **Fix** -- Address every issue the automated review found. Re-run tests after fixes.
+8. **Team review** -- Request reviews from two agents via `legion pr review`:
+   - **vault** -- validates work against the issue spec and acceptance criteria.
+   - **smugglr** -- reviews Rust code content (patterns, idioms, correctness).
+9. **Consensus** -- For big changes, post to the bullpen and get team input before merging.
+10. **Ask for merge** -- Do not merge to main without explicit user approval.
 
 ## Rules
 
