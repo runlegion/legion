@@ -202,7 +202,7 @@ enum Commands {
     #[command(alias = "bp", alias = "board")]
     Bullpen {
         /// Repository name (identifies who is reading)
-        #[arg(long, required_unless_present_any = ["archive"])]
+        #[arg(long, required_unless_present_any = ["archive", "archived"])]
         repo: Option<String>,
 
         /// Only show unread count instead of full bullpen
