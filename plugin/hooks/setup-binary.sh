@@ -6,7 +6,13 @@ set -euo pipefail
 
 REPO="runlegion/legion"
 BINARY_NAME="legion"
-EXPECTED_VERSION="0.1.1"
+
+# Read version from plugin.json -- one version for binary and plugin.
+PLUGIN_JSON="${CLAUDE_PLUGIN_ROOT:-}/.claude-plugin/plugin.json"
+if [ -f "$PLUGIN_JSON" ]; then
+  EXPECTED_VERSION=$(grep '"version"' "$PLUGIN_JSON" | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+fi
+EXPECTED_VERSION="${EXPECTED_VERSION:-0.3.0}"
 
 # -- Channel dependencies ----------------------------------------------------
 
