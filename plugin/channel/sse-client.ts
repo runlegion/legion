@@ -72,15 +72,22 @@ function taskToEvent(task: LegacyTask): LegionEvent {
 
 // Check if a feed item is relevant to this agent on startup.
 // Only deliver: signals addressed to this agent, or @all blockers.
+function startsWithMention(text: string, mention: string): boolean {
+  if (!text.startsWith(mention)) return false;
+  // Next char must be whitespace or end-of-string (prevents @legion matching @legion-prime)
+  const next = text[mention.length];
+  return next === undefined || next === " " || next === "\t" || next === "\n";
+}
+
 function isRelevantBacklog(item: LegacyFeedItem, repo: string): boolean {
   const text = item.text.toLowerCase();
   const atMe = `@${repo.toLowerCase()}`;
 
   // Direct signal to this agent
-  if (text.startsWith(atMe)) return true;
+  if (startsWithMention(text, atMe)) return true;
 
   // @all blocker
-  if (text.startsWith("@all") && (text.includes("blocker") || text.includes("blocked"))) {
+  if (startsWithMention(text, "@all") && (text.includes("blocker") || text.includes("blocked"))) {
     return true;
   }
 

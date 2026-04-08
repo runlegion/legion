@@ -1018,9 +1018,12 @@ fn run() -> error::Result<()> {
             follows,
         } => {
             // Redirect @self posts to reflect -- they're private, not for the team
-            let is_self_post = text
-                .as_deref()
-                .is_some_and(|t| t.trim_start().to_lowercase().starts_with("@self"));
+            let is_self_post = text.as_deref().is_some_and(|t| {
+                let lower = t.trim_start().to_lowercase();
+                lower.starts_with("@self ")
+                    || lower.starts_with("@self\t")
+                    || lower == "@self"
+            });
             if is_self_post {
                 eprintln!("[legion] @self posts are private -- redirecting to reflect");
             }
