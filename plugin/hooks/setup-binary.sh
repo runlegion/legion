@@ -133,7 +133,7 @@ install_binary() {
 }
 
 if [ "$NEED_BINARY" = true ]; then
-  install_binary || true
+  install_binary || echo "[legion] binary install failed (exit $?) -- continuing with CLAUDE.md setup" >&2
 fi
 
 # -- CLAUDE.md instructions ----------------------------------------------------

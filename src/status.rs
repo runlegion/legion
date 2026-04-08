@@ -136,25 +136,17 @@ fn format_section(out: &mut String, header: &str, items: &[StatusItem]) {
 fn get_your_work(db: &Database, repo: &str) -> Result<Vec<StatusItem>> {
     let tasks: Vec<Task> = db.get_active_tasks_for_repo(repo)?;
     let mut items: Vec<StatusItem> = Vec::new();
-    let mut blocked: Vec<&Task> = Vec::new();
-    let total: usize = tasks.len();
 
-    for t in &tasks {
-        if t.status == "blocked" {
-            blocked.push(t);
-        }
-    }
-
-    if total > 0 {
+    if !tasks.is_empty() {
         items.push(StatusItem {
-            category: "BACKLOG".to_string(),
-            text: format!("{} tasks (`legion kanban list` for details)", total),
+            category: "TASKS".to_string(),
+            text: format!("{} tasks (`legion kanban list` for details)", tasks.len()),
             from: repo.to_string(),
             age: String::new(),
         });
     }
 
-    for t in blocked {
+    for t in tasks.iter().filter(|t| t.status == "blocked") {
         items.push(StatusItem {
             category: format!("TASK:{}", t.priority),
             text: format!("{} [BLOCKED]", t.text),
@@ -518,7 +510,7 @@ mod tests {
 
         let items = get_your_work(&db, "kelex").expect("your_work");
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].category, "BACKLOG");
+        assert_eq!(items[0].category, "TASKS");
         assert!(items[0].text.contains("2 tasks"));
     }
 
@@ -534,7 +526,7 @@ mod tests {
 
         let items = get_your_work(&db, "kelex").expect("your_work");
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].category, "BACKLOG");
+        assert_eq!(items[0].category, "TASKS");
         assert!(items[0].text.contains("2 tasks"));
         assert_eq!(items[1].category, "TASK:high");
         assert!(items[1].text.contains("[BLOCKED]"));
@@ -551,7 +543,7 @@ mod tests {
         let items = get_your_work(&db, "kelex").expect("your_work");
         // Count line + blocked line
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].category, "BACKLOG");
+        assert_eq!(items[0].category, "TASKS");
         assert!(items[1].text.contains("[BLOCKED]"));
     }
 
