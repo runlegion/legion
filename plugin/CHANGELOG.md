@@ -1,8 +1,15 @@
 # Legion Changelog
 
+## 0.4.6
+
+### MCP Server Registration (actually fixed this time)
+- Claude Code reads `.mcp.json` from `.claude-plugin/`, not the plugin root -- 0.4.5 had it backwards
+- Fixed `.claude-plugin/.mcp.json` to use `bash` + `bin/legion-channel` wrapper instead of bare `bun` with unexpanded `${CLAUDE_PLUGIN_ROOT}`
+- Removed orphaned `plugin/.mcp.json` (root level -- never read by Claude Code)
+
 ## 0.4.5
 
-### MCP Server Registration (fixed)
+### MCP Server Registration (broken -- see 0.4.6)
 - Moved `.mcp.json` from `.claude-plugin/` to plugin root -- Claude Code only looks at the root level
 - MCP command now uses `bin/legion-channel` wrapper instead of bare `bun` with `${CLAUDE_PLUGIN_ROOT}` in args
 - Wrapper resolves its own path to find `channel/index.ts` -- works regardless of how Claude Code spawns the process
