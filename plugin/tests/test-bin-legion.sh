@@ -39,13 +39,14 @@ assert_contains() {
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# Create a fake binary that prints its path
+# Create a fake binary that prints its path and env
 FAKE_BINARY="${TMPDIR}/data/legion"
 mkdir -p "${TMPDIR}/data"
 cat > "$FAKE_BINARY" << 'SCRIPT'
 #!/bin/bash
 echo "BINARY_PATH=$0"
 echo "ARGS=$*"
+echo "PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT:-unset}"
 SCRIPT
 chmod +x "$FAKE_BINARY"
 
@@ -104,6 +105,12 @@ chmod +x "$OTHER_BINARY"
 echo "${OTHER_BINARY}" > "${FAKE_PLUGIN}/.legion-binary-path"
 OUTPUT=$(CLAUDE_PLUGIN_DATA="${TMPDIR}/data" CLAUDE_PLUGIN_ROOT="$FAKE_PLUGIN" bash "${FAKE_PLUGIN}/bin/legion" 2>/dev/null)
 assert_contains "uses CLAUDE_PLUGIN_DATA not path file" "BINARY_PATH=${TMPDIR}/data/legion" "$OUTPUT"
+
+# -- Test 6: wrapper exports CLAUDE_PLUGIN_ROOT to the binary -----------------
+
+echo "Test 6: CLAUDE_PLUGIN_ROOT exported to child process"
+OUTPUT=$(unset CLAUDE_PLUGIN_ROOT; CLAUDE_PLUGIN_DATA="${TMPDIR}/data" bash "${FAKE_PLUGIN}/bin/legion" 2>/dev/null)
+assert_contains "binary sees CLAUDE_PLUGIN_ROOT" "PLUGIN_ROOT=${FAKE_PLUGIN}" "$OUTPUT"
 
 # -- Summary ------------------------------------------------------------------
 

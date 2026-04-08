@@ -4,8 +4,8 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$SELF_DIR")}"
-PATH_FILE="${PLUGIN_ROOT}/.legion-binary-path"
+export CLAUDE_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$SELF_DIR")}"
+PATH_FILE="${CLAUDE_PLUGIN_ROOT}/.legion-binary-path"
 
 # CLAUDE_PLUGIN_DATA is available in hook context -- use it directly
 if [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ -x "${CLAUDE_PLUGIN_DATA}/legion" ]; then

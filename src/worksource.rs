@@ -22,6 +22,7 @@ pub struct ExternalIssue {
 
 /// Discover work source plugin paths.
 /// Resolves a work source plugin from CLAUDE_PLUGIN_ROOT/worksources/.
+/// Set by Claude Code in hook context, or exported by bin/legion wrapper.
 fn find_plugin(name: &str) -> Option<PathBuf> {
     let plugin_root = std::env::var("CLAUDE_PLUGIN_ROOT").ok()?;
     let path = PathBuf::from(&plugin_root).join("worksources").join(name);
