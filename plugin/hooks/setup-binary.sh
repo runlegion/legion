@@ -177,3 +177,24 @@ Work source commands (required -- direct `gh` is blocked):
 LEGION_EOF
   echo "[legion] added instructions to ${CLAUDE_MD}" >&2
 fi
+
+# -- Long-lived services -------------------------------------------------------
+# Channel MCP and watch should always be running. They outlive agent sessions
+# so signals can wake sleeping agents even when no session is active.
+LEGION_PORT="${LEGION_PORT:-3131}"
+
+# Channel MCP server
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/channel/index.ts" ]; then
+  if ! lsof -iTCP:"$LEGION_PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    if command -v bun >/dev/null 2>&1; then
+      nohup bun run "${CLAUDE_PLUGIN_ROOT}/channel/index.ts" >/dev/null 2>&1 &
+    fi
+  fi
+fi
+
+# Watch (auto-wake agents on signal arrival)
+if command -v legion >/dev/null 2>&1; then
+  if ! pgrep -f "legion watch" >/dev/null 2>&1; then
+    nohup legion watch >/dev/null 2>&1 &
+  fi
+fi
