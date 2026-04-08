@@ -1028,6 +1028,15 @@ fn run() -> error::Result<()> {
             tags,
             follows,
         } => {
+            // Redirect @self posts to reflect -- they're private, not for the team
+            let is_self_post = text.as_deref().is_some_and(|t| {
+                let lower = t.trim_start().to_lowercase();
+                lower.starts_with("@self ") || lower.starts_with("@self\t") || lower == "@self"
+            });
+            if is_self_post {
+                eprintln!("[legion] @self posts are private -- redirecting to reflect");
+            }
+
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
@@ -1037,17 +1046,31 @@ fn run() -> error::Result<()> {
                 parent_id: follows,
             };
 
-            run_compound_command_with_meta(
-                &database,
-                &index,
-                &repo,
-                &text,
-                &transcript,
-                &meta,
-                board::post_from_text_with_meta,
-                board::post_from_transcript_with_meta,
-                "posting",
-            )?;
+            if is_self_post {
+                run_compound_command_with_meta(
+                    &database,
+                    &index,
+                    &repo,
+                    &text,
+                    &transcript,
+                    &meta,
+                    reflect::reflect_from_text_with_meta,
+                    reflect::reflect_from_transcript_with_meta,
+                    "reflecting",
+                )?;
+            } else {
+                run_compound_command_with_meta(
+                    &database,
+                    &index,
+                    &repo,
+                    &text,
+                    &transcript,
+                    &meta,
+                    board::post_from_text_with_meta,
+                    board::post_from_transcript_with_meta,
+                    "posting",
+                )?;
+            }
 
             // Compute embeddings for new posts
             if let Some(model) = try_load_embed_model() {
