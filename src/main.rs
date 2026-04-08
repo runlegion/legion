@@ -1708,9 +1708,7 @@ fn run() -> error::Result<()> {
                     })?;
 
                 let issue = worksource::view_issue(&plugin_name, &source_repo, number)?;
-                let parsed = card_parse::parse_issue_body(
-                    issue.body.as_deref().unwrap_or(""),
-                );
+                let parsed = card_parse::parse_issue_body(issue.body.as_deref().unwrap_or(""));
 
                 // Structured output
                 println!("# {} #{}\n", issue.title, issue.number);
