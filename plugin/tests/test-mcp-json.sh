@@ -87,6 +87,7 @@ with open('${PLUGIN_ROOT}/.mcp.json') as f:
     d = json.load(f)
 print(d['legion']['args'][0])
 ")
+# shellcheck disable=SC2016
 assert_eq "args reference bin/legion-channel" '${CLAUDE_PLUGIN_ROOT}/bin/legion-channel' "$COMMAND"
 
 # -- Test 5: wrapper script exists and is executable --------------------------
