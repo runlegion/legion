@@ -1,4 +1,5 @@
 mod board;
+mod card_parse;
 mod db;
 mod embed;
 mod error;
@@ -683,6 +684,16 @@ enum IssueAction {
         /// Assignee login
         #[arg(long)]
         assignee: Option<String>,
+    },
+    /// View an issue (local card data + live GitHub state)
+    View {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// Issue number
+        #[arg(long)]
+        number: u64,
     },
 }
 
@@ -1709,6 +1720,44 @@ fn run() -> error::Result<()> {
                     "[legion] created issue #{} on {}",
                     created.number, source_repo
                 );
+            }
+            IssueAction::View { repo, number } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let issue = worksource::view_issue(&plugin_name, &source_repo, number)?;
+                let parsed = card_parse::parse_issue_body(issue.body.as_deref().unwrap_or(""));
+
+                // Structured output
+                println!("# {} #{}\n", issue.title, issue.number);
+
+                if let Some(ref problem) = parsed.problem {
+                    println!("Problem: {}\n", problem);
+                }
+                if let Some(ref solution) = parsed.solution {
+                    println!("Solution: {}\n", solution);
+                }
+                if !parsed.acceptance.is_empty() {
+                    println!("Acceptance criteria:");
+                    for item in &parsed.acceptance {
+                        println!("  - {}", item);
+                    }
+                    println!();
+                }
+                for (heading, content) in &parsed.sections {
+                    println!("{}:\n{}\n", heading, content);
+                }
+                if let Some(ref body) = parsed.body {
+                    println!("{}\n", body);
+                }
+
+                println!("State: {}", issue.state);
+                println!("URL: {}", issue.url);
             }
         },
         Commands::Pr { action } => match action {
