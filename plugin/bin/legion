@@ -1,21 +1,14 @@
 #!/bin/bash
 # Legion plugin bin wrapper: dispatches to the platform binary in CLAUDE_PLUGIN_DATA.
-# Falls back to PATH lookup if the plugin binary is not available.
 set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+export CLAUDE_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$SELF_DIR")}"
 
 DATA_DIR="${CLAUDE_PLUGIN_DATA:-}"
 
 if [ -n "$DATA_DIR" ] && [ -x "${DATA_DIR}/legion" ]; then
   exec "${DATA_DIR}/legion" "$@"
-fi
-
-# Fall back to system-installed legion (cargo install).
-# Exclude our own directory from PATH to avoid infinite recursion.
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-SEARCH_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^${SELF_DIR}$" | tr '\n' ':')
-SYSTEM_LEGION=$(PATH="$SEARCH_PATH" command -v legion 2>/dev/null || true)
-if [ -n "$SYSTEM_LEGION" ] && [ -x "$SYSTEM_LEGION" ]; then
-  exec "$SYSTEM_LEGION" "$@"
 fi
 
 echo "[legion] binary not found. Run a new session to trigger auto-download, or install manually:" >&2

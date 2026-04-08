@@ -21,43 +21,13 @@ pub struct ExternalIssue {
 }
 
 /// Discover work source plugin paths.
-///
-/// Searches:
-/// 1. Plugin directory (alongside legion binary or in the legion plugin dir)
-/// 2. $PATH for executables named `legion-worksource-*`
+/// Resolves a work source plugin from CLAUDE_PLUGIN_ROOT/worksources/.
 fn find_plugin(name: &str) -> Option<PathBuf> {
-    // Check the plugin directory from CLAUDE_PLUGIN_ROOT
-    if let Ok(plugin_root) = std::env::var("CLAUDE_PLUGIN_ROOT") {
-        let path = PathBuf::from(&plugin_root).join("worksources").join(name);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
-    // Check alongside the legion binary
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let path = dir.join("worksources").join(name);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
-    // Check $PATH for legion-worksource-{name}
-    let bin_name = format!("legion-worksource-{name}");
-    let found_in_path = Command::new("which")
-        .arg(&bin_name)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
-    if let Some(path) = found_in_path {
+    let plugin_root = std::env::var("CLAUDE_PLUGIN_ROOT").ok()?;
+    let path = PathBuf::from(&plugin_root).join("worksources").join(name);
+    if path.exists() {
         return Some(path);
     }
-
     None
 }
 

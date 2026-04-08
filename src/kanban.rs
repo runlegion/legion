@@ -143,6 +143,9 @@ pub struct Card {
     pub assigned_at: Option<String>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    pub problem: Option<String>,
+    pub solution: Option<String>,
+    pub acceptance: Option<String>,
 }
 
 /// Per-agent workload summary for the dashboard agent strip.
@@ -179,6 +182,9 @@ pub fn map_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
         assigned_at: row.get(15)?,
         started_at: row.get(16)?,
         completed_at: row.get(17)?,
+        problem: row.get(18)?,
+        solution: row.get(19)?,
+        acceptance: row.get(20)?,
     })
 }
 
@@ -350,12 +356,12 @@ pub fn format_card_list(cards: &[Card], repo: &str, direction: Direction) -> Str
             c.status, c.text, prio, source_part, peer, date, note_part, c.id
         ));
 
-        // Show structured summary if context is parseable
-        if let Some(ref ctx) = c.context {
-            let parsed = crate::card_parse::parse_issue_body(ctx);
-            if let Some(summary) = crate::card_parse::format_summary(&parsed) {
-                output.push_str(&format!("  {}\n", summary));
-            }
+        if let Some(summary) = crate::card_parse::card_summary(
+            c.problem.as_deref(),
+            c.acceptance.as_deref(),
+            c.context.as_deref(),
+        ) {
+            output.push_str(&format!("  {}\n", summary));
         }
     }
 
@@ -872,6 +878,9 @@ mod tests {
             assigned_at: None,
             started_at: None,
             completed_at: None,
+            problem: None,
+            solution: None,
+            acceptance: None,
         };
         let output = format_work_card(&card);
         assert!(output.contains("Priority: high"));
@@ -1169,6 +1178,9 @@ mod tests {
             assigned_at: None,
             started_at: None,
             completed_at: None,
+            problem: None,
+            solution: None,
+            acceptance: None,
         };
         let output = format_work_card(&card);
         assert!(output.contains("minimal card"));
