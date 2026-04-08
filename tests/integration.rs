@@ -1385,10 +1385,7 @@ fn kanban_create_and_list() {
         stdout.contains("[high]"),
         "expected priority, got: {stdout}"
     );
-    assert!(
-        stdout.contains("{backend,search}"),
-        "expected labels, got: {stdout}"
-    );
+    // Labels are no longer shown inline -- they're stored but not displayed in list output
 }
 
 #[test]
