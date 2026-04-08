@@ -1,9 +1,0 @@
-{
-  "legion": {
-    "command": "bun",
-    "args": ["run", "${CLAUDE_PLUGIN_ROOT}/channel/index.ts"],
-    "env": {
-      "LEGION_PORT": "3131"
-    }
-  }
-}
