@@ -1,5 +1,12 @@
 # Legion Changelog
 
+## 0.4.7
+
+### Channel MCP Auto-Start (#188)
+- SessionStart hook starts the channel MCP server if nothing is listening on LEGION_PORT
+- Workaround for Claude Code not auto-starting MCP servers defined in plugin `.mcp.json`
+- Idempotent: no-op if already running, if bun missing, or if channel code absent
+
 ## 0.4.6
 
 ### MCP Server Registration (actually fixed this time)
