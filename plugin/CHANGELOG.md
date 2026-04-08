@@ -1,5 +1,13 @@
 # Legion Changelog
 
+## 0.4.7
+
+### Long-Lived Services Auto-Start (#188)
+- SessionStart hook starts channel MCP server and watch as long-lived background processes
+- Both outlive agent sessions so signals can wake sleeping agents when no session is active
+- Channel: starts if nothing listening on LEGION_PORT; watch: starts if no `legion watch` process found
+- Idempotent: no-op per service if already running or dependencies missing
+
 ## 0.4.6
 
 ### MCP Server Registration (actually fixed this time)

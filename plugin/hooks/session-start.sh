@@ -1,5 +1,5 @@
 #!/bin/bash
-# Legion SessionStart hook: last reflection + status
+# Legion SessionStart hook: last reflection + status + channel server
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
@@ -18,6 +18,28 @@ rm -f "/tmp/legion-channel-${REPO}" 2>/dev/null
 
 # Mark session as having done work (used by stop hook)
 touch "/tmp/legion-work-${CWD_HASH}"
+
+# -- Long-lived services -------------------------------------------------------
+# Channel MCP and watch should always be running. They outlive agent sessions
+# so signals can wake sleeping agents even when no session is active.
+LEGION_PORT="${LEGION_PORT:-3131}"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+
+# Channel MCP server
+if [ -n "$PLUGIN_ROOT" ] && [ -f "$PLUGIN_ROOT/channel/index.ts" ]; then
+  if ! lsof -iTCP:"$LEGION_PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    if command -v bun >/dev/null 2>&1; then
+      nohup bun run "$PLUGIN_ROOT/channel/index.ts" >/dev/null 2>&1 &
+    fi
+  fi
+fi
+
+# Watch (auto-wake agents on signal arrival)
+if command -v legion >/dev/null 2>&1; then
+  if ! pgrep -f "legion watch" >/dev/null 2>&1; then
+    nohup legion watch >/dev/null 2>&1 &
+  fi
+fi
 
 # Append non-empty text to OUTPUT, separated by double newlines
 append() {
