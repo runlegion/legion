@@ -1,16 +1,24 @@
 #!/bin/bash
-# Legion plugin bin wrapper: dispatches to the platform binary in CLAUDE_PLUGIN_DATA.
+# Legion plugin bin wrapper: dispatches to the platform binary.
+# Path is resolved at install time by setup-binary.sh and persisted to .legion-binary-path.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-export CLAUDE_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$SELF_DIR")}"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$SELF_DIR")}"
+PATH_FILE="${PLUGIN_ROOT}/.legion-binary-path"
 
-DATA_DIR="${CLAUDE_PLUGIN_DATA:-}"
-
-if [ -n "$DATA_DIR" ] && [ -x "${DATA_DIR}/legion" ]; then
-  exec "${DATA_DIR}/legion" "$@"
+# CLAUDE_PLUGIN_DATA is available in hook context -- use it directly
+if [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ -x "${CLAUDE_PLUGIN_DATA}/legion" ]; then
+  exec "${CLAUDE_PLUGIN_DATA}/legion" "$@"
 fi
 
-echo "[legion] binary not found. Run a new session to trigger auto-download, or install manually:" >&2
-echo "  cargo install --git https://github.com/runlegion/legion" >&2
+# Outside hook context, read the path setup-binary.sh persisted at install time
+if [ -f "$PATH_FILE" ]; then
+  BINARY="$(cat "$PATH_FILE")"
+  if [ -x "$BINARY" ]; then
+    exec "$BINARY" "$@"
+  fi
+fi
+
+echo "[legion] binary not found. Start a new Claude Code session to trigger install." >&2
 exit 1

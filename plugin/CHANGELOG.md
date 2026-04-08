@@ -1,5 +1,22 @@
 # Legion Changelog
 
+## 0.4.5
+
+### MCP Server Registration (fixed)
+- Moved `.mcp.json` from `.claude-plugin/` to plugin root -- Claude Code only looks at the root level
+- MCP command now uses `bin/legion-channel` wrapper instead of bare `bun` with `${CLAUDE_PLUGIN_ROOT}` in args
+- Wrapper resolves its own path to find `channel/index.ts` -- works regardless of how Claude Code spawns the process
+
+### Binary Path Resolution
+- `setup-binary.sh` now persists the resolved binary path to `.legion-binary-path` at install time
+- `bin/legion` wrapper reads `.legion-binary-path` when `CLAUDE_PLUGIN_DATA` is unavailable (MCP server context, direct invocation)
+- No hardcoded paths, no fallback guessing -- single source of truth written at install time
+
+### Tests
+- Added `plugin/tests/test-bin-legion.sh` -- wrapper dispatch, priority, failure modes (7 tests)
+- Added `plugin/tests/test-setup-binary-path.sh` -- path persistence on install (3 tests)
+- Added `plugin/tests/test-mcp-json.sh` -- file location, format, wrapper reference (8 tests)
+
 ## 0.4.4
 
 ### MCP Server Registration

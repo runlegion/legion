@@ -1,0 +1,9 @@
+{
+  "legion": {
+    "command": "bash",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/bin/legion-channel"],
+    "env": {
+      "LEGION_PORT": "3131"
+    }
+  }
+}

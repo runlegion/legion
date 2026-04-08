@@ -1,0 +1,8 @@
+#!/bin/bash
+# Legion MCP channel server: resolves its own path to find channel/index.ts.
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$SELF_DIR")}"
+
+exec bun run "${PLUGIN_ROOT}/channel/index.ts"
