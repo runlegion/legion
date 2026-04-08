@@ -1,5 +1,12 @@
 # Legion Changelog
 
+## 0.4.4
+
+### MCP Server Registration
+- Added `.mcp.json` to plugin root so Claude Code discovers the channel MCP server
+- Without this file, legion_post, legion_reply, legion_signal, and legion_task_respond tools were invisible
+- The `channel` field in plugin.json is a separate mechanism; `.mcp.json` is how plugins register MCP servers
+
 ## 0.4.3
 
 ### Structured Card Storage
