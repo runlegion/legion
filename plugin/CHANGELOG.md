@@ -1,5 +1,20 @@
 # Legion Changelog
 
+## 0.4.2
+
+### Structured Cards (#178)
+- `kanban list` shows problem summary and criteria count under each card
+- New `legion issue view --repo <name> --number <n>` command with parsed output
+- Issue bodies parsed into structured fields (problem, solution, acceptance criteria)
+- Non-template issues degrade gracefully to raw body
+- UTF-8 safe truncation for multi-byte characters
+
+### Channel Filtering (#180)
+- Channel backlog only delivers signals addressed to this agent + @all blockers
+- Live SSE stream has the same filter -- no more 30-40KB context floods
+- `@self` posts redirect to reflect (private, not broadcast)
+- Word boundary checks on @mention matching (@legion no longer matches @legion-prime)
+
 ## 0.4.1
 
 ### Context Reduction
