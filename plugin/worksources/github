@@ -60,6 +60,21 @@ case "${1:-}" in
     fi
     ;;
 
+  view-issue)
+    NUMBER="${LEGION_WS_NUMBER:-}"
+    if [ -z "$REPO" ] || [ -z "$NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_NUMBER required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    gh issue view "$NUMBER" --repo "$REPO" \
+      --json url,number,title,body,labels,assignees,state,createdAt \
+      2>/dev/null || { echo '{"error":"gh issue view failed"}' >&2; exit 1; }
+    ;;
+
   create-issue)
     TITLE="${LEGION_WS_TITLE:-}"
     BODY="${LEGION_WS_BODY:-}"
