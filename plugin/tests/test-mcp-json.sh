@@ -42,16 +42,16 @@ assert_file_not_exists() {
   fi
 }
 
-# -- Test 1: .mcp.json at plugin root, not inside .claude-plugin/ ------------
+# -- Test 1: .mcp.json inside .claude-plugin/ (where Claude Code reads it) ----
 
 echo "Test 1: .mcp.json location"
-assert_file_exists ".mcp.json exists at plugin root" "${PLUGIN_ROOT}/.mcp.json"
-assert_file_not_exists ".mcp.json not inside .claude-plugin" "${PLUGIN_ROOT}/.claude-plugin/.mcp.json"
+assert_file_exists ".mcp.json exists in .claude-plugin" "${PLUGIN_ROOT}/.claude-plugin/.mcp.json"
+assert_file_not_exists ".mcp.json not at plugin root" "${PLUGIN_ROOT}/.mcp.json"
 
 # -- Test 2: .mcp.json is valid JSON -----------------------------------------
 
 echo "Test 2: .mcp.json is valid JSON"
-if python3 -c "import json; json.load(open('${PLUGIN_ROOT}/.mcp.json'))" 2>/dev/null; then
+if python3 -c "import json; json.load(open('${PLUGIN_ROOT}/.claude-plugin/.mcp.json'))" 2>/dev/null; then
   echo "  PASS: valid JSON"
   PASS=$((PASS + 1))
 else
@@ -64,7 +64,7 @@ fi
 echo "Test 3: flat format (server name as top-level key)"
 HAS_LEGION=$(python3 -c "
 import json
-with open('${PLUGIN_ROOT}/.mcp.json') as f:
+with open('${PLUGIN_ROOT}/.claude-plugin/.mcp.json') as f:
     d = json.load(f)
 print('yes' if 'legion' in d else 'no')
 ")
@@ -72,7 +72,7 @@ assert_eq "has 'legion' as top-level key" "yes" "$HAS_LEGION"
 
 HAS_WRAPPER=$(python3 -c "
 import json
-with open('${PLUGIN_ROOT}/.mcp.json') as f:
+with open('${PLUGIN_ROOT}/.claude-plugin/.mcp.json') as f:
     d = json.load(f)
 print('yes' if 'mcpServers' in d else 'no')
 ")
@@ -83,7 +83,7 @@ assert_eq "no mcpServers wrapper" "no" "$HAS_WRAPPER"
 echo "Test 4: MCP command uses wrapper script"
 COMMAND=$(python3 -c "
 import json
-with open('${PLUGIN_ROOT}/.mcp.json') as f:
+with open('${PLUGIN_ROOT}/.claude-plugin/.mcp.json') as f:
     d = json.load(f)
 print(d['legion']['args'][0])
 ")
