@@ -126,17 +126,22 @@ fn extract_checklist(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Truncate a string to at most `max` characters, appending "..." if truncated.
+/// Safe for multi-byte UTF-8.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let end: String = s.chars().take(max - 3).collect();
+    format!("{end}...")
+}
+
 /// Format a parsed issue for display on kanban list.
 pub fn format_summary(parsed: &ParsedIssue) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(ref problem) = parsed.problem {
-        let truncated = if problem.len() > 120 {
-            format!("{}...", &problem[..117])
-        } else {
-            problem.clone()
-        };
-        parts.push(truncated);
+        parts.push(truncate_chars(problem, 120));
     }
 
     if !parsed.acceptance.is_empty() {
@@ -145,12 +150,7 @@ pub fn format_summary(parsed: &ParsedIssue) -> Option<String> {
 
     if parts.is_empty() {
         if let Some(ref body) = parsed.body {
-            let truncated = if body.len() > 120 {
-                format!("{}...", &body[..117])
-            } else {
-                body.clone()
-            };
-            return Some(truncated);
+            return Some(truncate_chars(body, 120));
         }
         return None;
     }
