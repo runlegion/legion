@@ -2,10 +2,11 @@
 
 ## 0.4.7
 
-### Channel MCP Auto-Start (#188)
-- SessionStart hook starts the channel MCP server if nothing is listening on LEGION_PORT
-- Workaround for Claude Code not auto-starting MCP servers defined in plugin `.mcp.json`
-- Idempotent: no-op if already running, if bun missing, or if channel code absent
+### Long-Lived Services Auto-Start (#188)
+- SessionStart hook starts channel MCP server and watch as long-lived background processes
+- Both outlive agent sessions so signals can wake sleeping agents when no session is active
+- Channel: starts if nothing listening on LEGION_PORT; watch: starts if no `legion watch` process found
+- Idempotent: no-op per service if already running or dependencies missing
 
 ## 0.4.6
 
