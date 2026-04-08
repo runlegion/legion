@@ -1,5 +1,18 @@
 # Legion Changelog
 
+## 0.4.3
+
+### Structured Card Storage
+- Parsed fields (problem, solution, acceptance) now stored in DB on insert, not re-parsed on every read
+- Migration backfills existing cards on first run
+- New `card_summary()` reads stored fields directly -- no intermediate struct reconstruction
+- Removed `format_summary()` (dead code after storage change)
+
+### Plugin Fixes
+- Plugin wrapper sets `CLAUDE_PLUGIN_ROOT` from its own location -- work source sync works without env var
+- Removed PATH fallback from plugin wrapper and `find_plugin` -- plugin is the install method, no fallbacks
+- Stale doc comment on `find_plugin` cleaned up
+
 ## 0.4.2
 
 ### Structured Cards (#178)
