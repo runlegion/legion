@@ -136,6 +136,12 @@ if [ "$NEED_BINARY" = true ]; then
   install_binary || echo "[legion] binary install failed (exit $?) -- continuing with CLAUDE.md setup" >&2
 fi
 
+# Persist resolved binary path so bin/legion can find it outside hook context.
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -x "$BINARY_PATH" ]; then
+  echo "$BINARY_PATH" > "${PLUGIN_DIR}/.legion-binary-path"
+fi
+
 # -- CLAUDE.md instructions ----------------------------------------------------
 
 # Append legion instructions to ~/.claude/CLAUDE.md if not present.
