@@ -99,6 +99,11 @@ enum Commands {
         /// Return most recent reflections instead of BM25 search
         #[arg(long)]
         latest: bool,
+
+        /// Truncate each reflection text to this many characters. Used by
+        /// hooks to keep injected context compact.
+        #[arg(long)]
+        preview: Option<usize>,
     },
 
     /// Search reflections across all repos for cross-agent consultation
@@ -987,6 +992,7 @@ fn run() -> error::Result<()> {
             context,
             limit,
             latest,
+            preview,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
@@ -1003,7 +1009,7 @@ fn run() -> error::Result<()> {
                     None => recall::recall_bm25(&database, &index, &repo, &context, limit)?,
                 }
             };
-            let output = recall::format_for_hook(&result);
+            let output = recall::format_for_hook(&result, preview);
             if !output.is_empty() {
                 print!("{output}");
             }
