@@ -21,7 +21,6 @@ REPO=$(basename "$CWD")
 # Clean up per-session markers from prior session
 CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
 rm -f "/tmp/legion-reflected-${CWD_HASH}" 2>/dev/null
-rm -f "/tmp/legion-recall-nudge-${CWD_HASH}" 2>/dev/null
 rm -f "/tmp/legion-channel-${REPO}" 2>/dev/null
 
 # Mark session as having done work (used by Stop hook to decide if reflect prompt fires)

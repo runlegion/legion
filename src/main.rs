@@ -811,29 +811,40 @@ enum PrAction {
 /// 1. `LEGION_DATA_DIR` env var (explicit override, used by tests)
 /// 2. `CLAUDE_PLUGIN_DATA` env var set by Claude Code when running under the
 ///    plugin (plugin-scoped data dir, stable across plugin updates)
-/// 3. Hardcoded `$HOME/.claude/plugins/data/legion-legion/` (same location
-///    Claude Code uses, discoverable when running outside the plugin context)
+/// 3. `$HOME/.claude/plugins/data/legion-legion/` (same location Claude
+///    Code uses, discoverable when running outside the plugin context)
 ///
-/// If the resolved directory does not yet contain a legion.db but legacy
-/// paths do, migrate the database, Tantivy index, and watch.toml from the
-/// legacy location on first run. Legacy paths checked:
-/// - `ProjectDirs::from("","","legion").data_dir()` (macOS:
-///   ~/Library/Application Support/legion, Linux: ~/.local/share/legion)
+/// Result is cached via OnceLock after first successful resolution: commands
+/// like `audit()` re-enter this dozens of times and the path never changes
+/// inside a single process. Tests that manipulate `LEGION_DATA_DIR` between
+/// calls should use a fresh subprocess.
+///
+/// On the first successful resolution, if the target has no `legion.db` but
+/// the legacy `ProjectDirs` location does (macOS: ~/Library/Application
+/// Support/legion, Linux: ~/.local/share/legion), the database, Tantivy
+/// index, and watch.toml are migrated across. One-way, best-effort, leaves
+/// the legacy path in place as a safety net.
 fn data_dir() -> error::Result<PathBuf> {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<PathBuf> = OnceLock::new();
+
+    if let Some(cached) = CACHED.get() {
+        return Ok(cached.clone());
+    }
+
     let path = if let Ok(dir) = std::env::var("LEGION_DATA_DIR") {
         PathBuf::from(dir)
     } else if let Ok(dir) = std::env::var("CLAUDE_PLUGIN_DATA")
         && !dir.is_empty()
     {
         PathBuf::from(dir)
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home)
+    } else {
+        dirs::home_dir()
+            .ok_or(error::LegionError::NoHomeDir)?
             .join(".claude")
             .join("plugins")
             .join("data")
             .join("legion-legion")
-    } else {
-        return Err(error::LegionError::NoDataDir);
     };
 
     std::fs::create_dir_all(&path)?;
@@ -844,6 +855,9 @@ fn data_dir() -> error::Result<PathBuf> {
         migrate_from_legacy(&path);
     }
 
+    // Cache for subsequent calls within this process. Tests using LEGION_DATA_DIR
+    // will only pick up changes in fresh subprocesses.
+    let _ = CACHED.set(path.clone());
     Ok(path)
 }
 

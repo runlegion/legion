@@ -316,8 +316,9 @@ struct FeedQuery {
     filter: Option<String>,
     /// When set, return only posts unread by this reader repo AND atomically
     /// mark them as read. Used by the channel backlog fetch so agents only
-    /// see each post once. Mutually exclusive with `repo` filter -- unread_for
-    /// implies all repos other than the reader's own.
+    /// see each post once. The reader's own posts are excluded from the
+    /// response regardless of other filters. Combining with `repo` narrows
+    /// unread posts to that repo (not mutually exclusive).
     unread_for: Option<String>,
 }
 

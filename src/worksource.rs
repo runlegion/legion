@@ -1,10 +1,21 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use crate::db::Database;
 use crate::error::{LegionError, Result};
 use crate::kanban;
+
+/// Per-process cache of resolved work source plugin paths. Each (name) is
+/// resolved once via find_plugin_uncached and memoized. Work source commands
+/// (issue create, pr create, list, comment, review, merge) all hit find_plugin
+/// on every invocation -- the fallback cache scan can cost ~40 stat syscalls,
+/// so caching is worth a tiny mutex.
+fn plugin_cache() -> &'static Mutex<std::collections::HashMap<String, PathBuf>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
 
 /// An issue from an external work tracker.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -20,7 +31,7 @@ pub struct ExternalIssue {
     pub created_at: Option<String>,
 }
 
-/// Discover work source plugin paths.
+/// Discover work source plugin paths. Results are memoized per process.
 ///
 /// Resolution order:
 /// 1. `CLAUDE_PLUGIN_ROOT/worksources/<name>` -- the env var Claude Code sets
@@ -33,6 +44,22 @@ pub struct ExternalIssue {
 ///    string in Bash subprocess context -- the plugin cache is always in a
 ///    predictable location regardless of what the env var says.
 fn find_plugin(name: &str) -> Option<PathBuf> {
+    if let Ok(cache) = plugin_cache().lock()
+        && let Some(cached) = cache.get(name)
+    {
+        return Some(cached.clone());
+    }
+
+    let resolved = resolve_plugin(name)?;
+
+    if let Ok(mut cache) = plugin_cache().lock() {
+        cache.insert(name.to_string(), resolved.clone());
+    }
+    Some(resolved)
+}
+
+/// Uncached plugin resolution. See [`find_plugin`] for the resolution order.
+fn resolve_plugin(name: &str) -> Option<PathBuf> {
     // 1. CLAUDE_PLUGIN_ROOT (primary)
     if let Ok(plugin_root) = std::env::var("CLAUDE_PLUGIN_ROOT")
         && !plugin_root.is_empty()
@@ -66,8 +93,7 @@ fn find_plugin(name: &str) -> Option<PathBuf> {
 /// Scan the Claude Code plugin cache for the highest version of legion that
 /// ships the requested worksource. Returns None if no cached version has it.
 fn find_in_plugin_cache(name: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let cache_root = PathBuf::from(home)
+    let cache_root = dirs::home_dir()?
         .join(".claude")
         .join("plugins")
         .join("cache");

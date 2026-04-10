@@ -768,6 +768,10 @@ impl Database {
     /// Used by the channel backlog fetch so agents only see each post once.
     /// Race-safe: uses a single timestamp for both the SELECT filter upper
     /// bound and the mark_read UPDATE, inside a transaction.
+    ///
+    /// Fast path: when there are no unread posts, skips the INSERT entirely --
+    /// every idle channel connect would otherwise pay a write-lock acquire on
+    /// board_reads for no reason.
     pub fn get_and_mark_unread_board_posts(&self, reader_repo: &str) -> Result<Vec<Reflection>> {
         let now = Utc::now().to_rfc3339();
 
@@ -792,6 +796,18 @@ impl Database {
 
         drop(stmt);
 
+        if posts.is_empty() {
+            // Nothing to mark. Dropping the txn is a rollback of a pure read,
+            // no write-lock pressure on board_reads.
+            return Ok(posts);
+        }
+
+        // The WHERE guard on last_read_at is defensive against concurrent
+        // writers or clock skew: if another process somehow wrote a later
+        // timestamp between our SELECT and this UPDATE, we do not stomp it.
+        // Under normal single-writer use this branch never fires, but it
+        // preserves "last_read_at is monotonic non-decreasing" under any
+        // future concurrent access.
         txn.execute(
             "INSERT INTO board_reads (reader_repo, last_read_at) VALUES (?1, ?2) \
              ON CONFLICT(reader_repo) DO UPDATE SET last_read_at = excluded.last_read_at \

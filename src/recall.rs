@@ -315,8 +315,10 @@ pub fn consult_bm25(
 ///
 /// Produces concise, human-readable output. Returns an empty string
 /// when there are no results. When `preview` is `Some(n)`, each reflection
-/// text is truncated to the first `n` characters (UTF-8 safe) with an
-/// ellipsis marker, keeping session start and PreToolUse injections small.
+/// text is truncated to the first `n` characters (UTF-8 safe) via
+/// [`card_parse::truncate_chars`], keeping session-start and PreToolUse
+/// injections small. When preview is None, the reflection text is borrowed
+/// in place -- no per-reflection allocation.
 pub fn format_for_hook(result: &RecallResult, preview: Option<usize>) -> String {
     if result.reflections.is_empty() {
         return String::new();
@@ -325,9 +327,11 @@ pub fn format_for_hook(result: &RecallResult, preview: Option<usize>) -> String 
     let mut output = format!("[Legion] Relevant reflections for {}:\n", result.repo);
 
     for r in &result.reflections {
-        let text = match preview {
-            Some(n) => truncate_preview(&r.text, n),
-            None => r.text.clone(),
+        let text: std::borrow::Cow<'_, str> = match preview {
+            Some(n) if r.text.chars().count() > n => {
+                std::borrow::Cow::Owned(crate::card_parse::truncate_chars(&r.text, n))
+            }
+            _ => std::borrow::Cow::Borrowed(&r.text),
         };
         output.push_str(&format!(
             "- {} (id: {}, score: {:.2})\n",
@@ -336,26 +340,6 @@ pub fn format_for_hook(result: &RecallResult, preview: Option<usize>) -> String 
     }
 
     output
-}
-
-/// Truncate a string to at most `max_chars` characters, appending " [...]"
-/// if it was shortened. UTF-8 safe: iterates char boundaries rather than
-/// byte-slicing.
-fn truncate_preview(s: &str, max_chars: usize) -> String {
-    let mut iter = s.char_indices();
-    for _ in 0..max_chars {
-        if iter.next().is_none() {
-            return s.to_string();
-        }
-    }
-    let end = iter.next().map(|(i, _)| i).unwrap_or(s.len());
-    if end >= s.len() {
-        s.to_string()
-    } else {
-        let mut out = s[..end].trim_end().to_string();
-        out.push_str(" [...]");
-        out
-    }
 }
 
 /// Format recall results for cross-repo consultation output.
@@ -533,30 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_preview_leaves_short_strings_alone() {
-        assert_eq!(truncate_preview("hello", 10), "hello");
-        assert_eq!(truncate_preview("exactly10!", 10), "exactly10!");
-    }
-
-    #[test]
-    fn truncate_preview_adds_ellipsis_when_shortened() {
-        let long = "one two three four five six seven eight";
-        let truncated = truncate_preview(long, 10);
-        assert!(truncated.ends_with(" [...]"));
-        assert!(truncated.len() < long.len());
-    }
-
-    #[test]
-    fn truncate_preview_handles_multibyte_chars() {
-        // Each emoji is multiple bytes; naive byte slicing would panic
-        let s = "abc\u{1F914}\u{1F4A1}\u{1F680}def";
-        let result = truncate_preview(s, 4);
-        assert!(result.ends_with(" [...]"));
-        // Should not panic and should return valid UTF-8
-        assert!(result.is_char_boundary(result.len()));
-    }
-
-    #[test]
     fn format_for_hook_truncates_when_preview_set() {
         let result = RecallResult {
             query: "q".into(),
@@ -570,8 +530,27 @@ mod tests {
             }],
         };
         let output = format_for_hook(&result, Some(50));
-        assert!(output.contains("[...]"));
+        // Delegates to card_parse::truncate_chars which appends "..."
+        assert!(output.contains("..."));
         assert!(output.len() < 200);
+    }
+
+    #[test]
+    fn format_for_hook_preview_none_does_not_truncate() {
+        let long_text = "a".repeat(500);
+        let result = RecallResult {
+            query: "q".into(),
+            repo: "legion".into(),
+            reflections: vec![RecalledReflection {
+                id: "abc".into(),
+                repo: "legion".into(),
+                text: long_text.clone(),
+                score: 0.9,
+                created_at: "2026-04-10".into(),
+            }],
+        };
+        let output = format_for_hook(&result, None);
+        assert!(output.contains(&long_text));
     }
 
     #[test]
