@@ -22,19 +22,28 @@ pub struct ExternalIssue {
 
 /// Discover work source plugin paths.
 ///
-/// Searches:
-/// 1. Plugin directory (alongside legion binary or in the legion plugin dir)
-/// 2. $PATH for executables named `legion-worksource-*`
+/// Resolution order:
+/// 1. `CLAUDE_PLUGIN_ROOT/worksources/<name>` -- the env var Claude Code sets
+///    when running hooks. Primary path during normal plugin execution.
+/// 2. Alongside the current executable, for dev checkouts where the binary
+///    lives in `plugin/bin/` next to `worksources/`.
+/// 3. Glob `~/.claude/plugins/cache/*/legion/*/worksources/<name>` and pick
+///    the highest version that has the worksource. This is the fallback
+///    that survives Claude Code 2.1.97 setting CLAUDE_PLUGIN_ROOT to empty
+///    string in Bash subprocess context -- the plugin cache is always in a
+///    predictable location regardless of what the env var says.
 fn find_plugin(name: &str) -> Option<PathBuf> {
-    // Check the plugin directory from CLAUDE_PLUGIN_ROOT
-    if let Ok(plugin_root) = std::env::var("CLAUDE_PLUGIN_ROOT") {
+    // 1. CLAUDE_PLUGIN_ROOT (primary)
+    if let Ok(plugin_root) = std::env::var("CLAUDE_PLUGIN_ROOT")
+        && !plugin_root.is_empty()
+    {
         let path = PathBuf::from(&plugin_root).join("worksources").join(name);
         if path.exists() {
             return Some(path);
         }
     }
 
-    // Check alongside the legion binary
+    // 2. Alongside the executable (dev checkout: plugin/bin/legion)
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
@@ -42,23 +51,57 @@ fn find_plugin(name: &str) -> Option<PathBuf> {
         if path.exists() {
             return Some(path);
         }
+        if let Some(grand) = dir.parent() {
+            let path = grand.join("worksources").join(name);
+            if path.exists() {
+                return Some(path);
+            }
+        }
     }
 
-    // Check $PATH for legion-worksource-{name}
-    let bin_name = format!("legion-worksource-{name}");
-    let found_in_path = Command::new("which")
-        .arg(&bin_name)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
-    if let Some(path) = found_in_path {
-        return Some(path);
+    // 3. Plugin cache scan: ~/.claude/plugins/cache/*/legion/*/worksources/<name>
+    find_in_plugin_cache(name)
+}
+
+/// Scan the Claude Code plugin cache for the highest version of legion that
+/// ships the requested worksource. Returns None if no cached version has it.
+fn find_in_plugin_cache(name: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let cache_root = PathBuf::from(home).join(".claude").join("plugins").join("cache");
+
+    let mut best: Option<(Vec<u32>, PathBuf)> = None;
+
+    // Iterate marketplaces under cache_root.
+    for marketplace in std::fs::read_dir(&cache_root).ok()?.flatten() {
+        let legion_dir = marketplace.path().join("legion");
+        let Ok(versions) = std::fs::read_dir(&legion_dir) else {
+            continue;
+        };
+        for version in versions.flatten() {
+            let vpath = version.path();
+            let candidate = vpath.join("worksources").join(name);
+            if !candidate.exists() {
+                continue;
+            }
+            let Some(vname) = vpath.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let parsed = parse_semver(vname);
+            match &best {
+                Some((best_v, _)) if parsed <= *best_v => {}
+                _ => best = Some((parsed, candidate)),
+            }
+        }
     }
 
-    None
+    best.map(|(_, p)| p)
+}
+
+/// Parse a version string like "0.4.7" into [0, 4, 7] for comparison.
+/// Non-numeric segments become 0, which sorts them first. Good enough for the
+/// x.y.z scheme we actually ship.
+fn parse_semver(v: &str) -> Vec<u32> {
+    v.split('.').map(|s| s.parse().unwrap_or(0)).collect()
 }
 
 /// Call a work source plugin with the given subcommand.
@@ -506,5 +549,14 @@ mod tests {
     fn find_plugin_returns_none_for_nonexistent() {
         let result = find_plugin("nonexistent-plugin-xyz");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_semver_orders_versions() {
+        assert!(parse_semver("0.4.7") > parse_semver("0.4.3"));
+        assert!(parse_semver("0.5.0") > parse_semver("0.4.99"));
+        assert!(parse_semver("1.0.0") > parse_semver("0.99.99"));
+        assert_eq!(parse_semver("0.4.7"), vec![0, 4, 7]);
+        assert_eq!(parse_semver("garbage"), vec![0]);
     }
 }
