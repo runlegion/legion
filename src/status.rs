@@ -104,6 +104,44 @@ pub fn format_needs(repo: &str, items: &[StatusItem]) -> String {
     out
 }
 
+/// JSON-friendly summary with counts only. Used by hooks to inject minimal context.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StatusSummary {
+    pub repo: String,
+    pub tasks: usize,
+    pub blocked: usize,
+    pub team_needs: usize,
+    pub what_changed: usize,
+}
+
+/// Produce a compact summary with counts only.
+pub fn format_summary(output: &StatusOutput) -> StatusSummary {
+    let blocked: usize = output
+        .your_work
+        .iter()
+        .filter(|i| i.text.contains("[BLOCKED]"))
+        .count();
+    let tasks: usize = output
+        .your_work
+        .first()
+        .and_then(|i| {
+            if i.category == "TASKS" {
+                i.text.split_whitespace().next()?.parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+
+    StatusSummary {
+        repo: output.repo.clone(),
+        tasks,
+        blocked,
+        team_needs: output.team_needs.len(),
+        what_changed: output.what_changed.len(),
+    }
+}
+
 /// Format status output for terminal display.
 pub fn format_status(output: &StatusOutput) -> String {
     if output.your_work.is_empty() && output.team_needs.is_empty() && output.what_changed.is_empty()

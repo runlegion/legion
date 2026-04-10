@@ -269,6 +269,10 @@ enum Commands {
         /// Repository name
         #[arg(long)]
         repo: String,
+
+        /// Output as JSON with counts only (for hooks/scripts)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show what the team needs help with
@@ -1327,18 +1331,25 @@ fn run() -> error::Result<()> {
             }
             serve::run_server(port, base)?;
         }
-        Commands::Status { repo } => {
+        Commands::Status { repo, json } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             let output = status::get_status(&database, &repo)?;
-            let formatted = status::format_status(&output);
-            if formatted.is_empty() {
+            if json {
                 println!(
-                    "[Legion] Status for {}: all clear. Check `gh issue list` for GitHub issues.",
-                    repo
+                    "{}",
+                    serde_json::to_string(&status::format_summary(&output))?
                 );
             } else {
-                print!("{formatted}");
+                let formatted = status::format_status(&output);
+                if formatted.is_empty() {
+                    println!(
+                        "[Legion] Status for {}: all clear. Check `gh issue list` for GitHub issues.",
+                        repo
+                    );
+                } else {
+                    print!("{formatted}");
+                }
             }
         }
         Commands::Needs { repo } => {
