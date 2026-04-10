@@ -270,7 +270,7 @@ pub fn consult(
 /// is available yet. Returns results ordered newest first. Uses SQL
 /// LIMIT for efficiency instead of fetching all and truncating.
 pub fn recall_latest(db: &Database, repo: &str, limit: usize) -> Result<RecallResult> {
-    let latest = db.get_latest_reflections(repo, limit)?;
+    let latest = db.get_latest_self_reflections(repo, limit)?;
 
     let reflections: Vec<RecalledReflection> = latest
         .into_iter()
