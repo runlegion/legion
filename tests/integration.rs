@@ -2077,3 +2077,59 @@ fn kanban_list_json_labels_are_array() {
     assert!(labels.iter().any(|l| l.as_str() == Some("backend")));
     assert!(labels.iter().any(|l| l.as_str() == Some("api")));
 }
+
+/// Verify `legion pr close` fails with a clear error when the repo has no
+/// work source config in watch.toml. Network access is not available in tests,
+/// so we confirm the CLI is correctly wired without invoking `gh`.
+#[test]
+fn pr_close_errors_without_worksource_config() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["pr", "close", "--repo", "no-such-repo", "--number", "42"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "expected failure when no work source configured"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected 'no work source configured' in stderr, got: {stderr}"
+    );
+}
+
+/// Verify `legion pr close --delete-branch` flag is accepted by the CLI parser.
+/// Errors at the worksource level (no config) rather than at argument parsing.
+#[test]
+fn pr_close_delete_branch_flag_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "pr",
+            "close",
+            "--repo",
+            "no-such-repo",
+            "--number",
+            "42",
+            "--reason",
+            "superseded",
+            "--delete-branch",
+        ])
+        .output()
+        .unwrap();
+
+    // Fails at worksource resolution, not arg parsing -- confirms all flags parse
+    assert!(
+        !out.status.success(),
+        "expected failure when no work source configured"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected worksource error, got: {stderr}"
+    );
+}

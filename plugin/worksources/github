@@ -226,8 +226,27 @@ case "${1:-}" in
     echo '{"ok":true}'
     ;;
 
+  pr-close)
+    PR_NUMBER="${LEGION_WS_PR_NUMBER:-}"
+    REASON="${LEGION_WS_REASON:-}"
+    DELETE_BRANCH="${LEGION_WS_DELETE_BRANCH:-false}"
+    if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_PR_NUMBER required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    ARGS=(pr close "$PR_NUMBER" --repo "$REPO")
+    [ -n "$REASON" ] && ARGS+=(--comment "$REASON")
+    [ "$DELETE_BRANCH" = "true" ] && ARGS+=(--delete-branch)
+    gh "${ARGS[@]}" >/dev/null || { echo "gh pr close failed" >&2; exit 1; }
+    echo '{"ok":true}'
+    ;;
+
   *)
-    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge>" >&2
+    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close>" >&2
     exit 1
     ;;
 esac

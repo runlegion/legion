@@ -853,6 +853,25 @@ enum PrAction {
         #[arg(long)]
         task: Option<String>,
     },
+
+    /// Close a pull request without merging
+    Close {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR number
+        #[arg(long)]
+        number: u64,
+
+        /// Comment to post before closing
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Delete the remote branch after closing
+        #[arg(long)]
+        delete_branch: bool,
+    },
 }
 
 /// Resolve the legion data directory.
@@ -2282,6 +2301,45 @@ fn run() -> error::Result<()> {
                 });
 
                 println!("PR #{} merged on {}", number, source_repo);
+            }
+            PrAction::Close {
+                repo,
+                number,
+                reason,
+                delete_branch,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                worksource::close_pr(
+                    &plugin_name,
+                    &source_repo,
+                    number,
+                    reason.as_deref(),
+                    delete_branch,
+                )?;
+
+                let details = serde_json::json!({
+                    "reason": reason, "delete_branch": delete_branch,
+                });
+                let details_str = details.to_string();
+                audit(&db::AuditInput {
+                    agent: &repo,
+                    action: "close-pr",
+                    target_type: "pr",
+                    target_ref: &number.to_string(),
+                    task_id: None,
+                    source_type: &plugin_name,
+                    details: Some(&details_str),
+                    outcome: "success",
+                });
+
+                println!("closed PR #{} on {}", number, source_repo);
             }
         },
         Commands::Comment { repo, number, body } => {
