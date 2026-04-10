@@ -18,6 +18,7 @@ mod surface;
 mod task;
 #[cfg(test)]
 mod testutil;
+mod usage;
 mod watch;
 mod worksource;
 
@@ -391,6 +392,33 @@ enum Commands {
         all_hosts: bool,
 
         /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show Claude Code session token usage and cost analysis
+    Usage {
+        /// Show only this specific session UUID
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Show all sessions on or after this date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Show sessions from today only (default when no flags given)
+        #[arg(long)]
+        today: bool,
+
+        /// One row per session, sorted by cost (default for --since)
+        #[arg(long)]
+        by_session: bool,
+
+        /// Group results by repo
+        #[arg(long, conflicts_with = "by_session")]
+        by_repo: bool,
+
+        /// Output as JSON instead of a human-readable table
         #[arg(long)]
         json: bool,
     },
@@ -2401,6 +2429,71 @@ fn run() -> error::Result<()> {
             let base = data_dir()?;
             watch::run(&base)?;
         }
+        Commands::Usage {
+            session,
+            since,
+            today: _today,
+            by_session,
+            by_repo,
+            json,
+        } => {
+            let home: PathBuf = dirs::home_dir().ok_or(error::LegionError::NoHomeDir)?;
+
+            // Determine the since filter.
+            // --since takes an explicit date. --today and no-args both mean today.
+            let since_str: Option<String> = if let Some(ref d) = since {
+                // Validate the date looks like YYYY-MM-DD and convert to an
+                // RFC3339-comparable prefix (timestamps sort lexicographically).
+                if d.len() != 10 || !d.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                    eprintln!("[legion] error: --since expects YYYY-MM-DD, got '{d}'");
+                    std::process::exit(1);
+                }
+                Some(format!("{d}T00:00:00"))
+            } else if session.is_none() {
+                // Default: today only.
+                let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
+                Some(today)
+            } else {
+                // --session bypasses date filtering.
+                None
+            };
+
+            let sessions =
+                usage::discover_sessions(&home, since_str.as_deref(), session.as_deref());
+
+            if session.is_some() && sessions.is_empty() {
+                eprintln!(
+                    "[legion] error: session not found: {}",
+                    session.as_deref().unwrap_or("")
+                );
+                std::process::exit(1);
+            }
+
+            if json {
+                if by_repo {
+                    let groups = usage::group_by_repo(&sessions);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&groups).map_err(error::LegionError::Json)?
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&sessions)
+                            .map_err(error::LegionError::Json)?
+                    );
+                }
+            } else if by_repo {
+                let groups = usage::group_by_repo(&sessions);
+                usage::print_repo_table(&groups);
+            } else if by_session || since.is_some() || session.is_some() {
+                usage::print_session_table(&sessions);
+            } else {
+                // Default (today): show by-session table.
+                usage::print_session_table(&sessions);
+            }
+        }
+
         Commands::Health {
             history,
             all_hosts,
