@@ -107,6 +107,26 @@ pub fn list_issues(
     Ok(issues)
 }
 
+/// View a single issue via a work source plugin.
+pub fn view_issue(plugin_name: &str, github_repo: &str, number: u64) -> Result<ExternalIssue> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let output = call_plugin(
+        &plugin_path,
+        &["view-issue"],
+        &[
+            ("LEGION_WS_REPO", github_repo),
+            ("LEGION_WS_NUMBER", &number.to_string()),
+        ],
+    )?;
+
+    let issue: ExternalIssue =
+        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
+
+    Ok(issue)
+}
+
 /// Close an issue via a work source plugin.
 pub fn close_issue(plugin_name: &str, github_repo: &str, number: u64) -> Result<()> {
     let plugin_path = match find_plugin(plugin_name) {

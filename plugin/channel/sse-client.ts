@@ -70,21 +70,46 @@ function taskToEvent(task: LegacyTask): LegionEvent {
   };
 }
 
+// Check if a feed item is relevant to this agent on startup.
+// Only deliver: signals addressed to this agent, or @all blockers.
+function startsWithMention(text: string, mention: string): boolean {
+  if (!text.startsWith(mention)) return false;
+  // Next char must be whitespace or end-of-string (prevents @legion matching @legion-prime)
+  const next = text[mention.length];
+  return next === undefined || next === " " || next === "\t" || next === "\n";
+}
+
+function isRelevantBacklog(item: LegacyFeedItem, repo: string): boolean {
+  const text = item.text.toLowerCase();
+  const atMe = `@${repo.toLowerCase()}`;
+
+  // Direct signal to this agent
+  if (startsWithMention(text, atMe)) return true;
+
+  // @all blocker
+  if (startsWithMention(text, "@all") && (text.includes("blocker") || text.includes("blocked"))) {
+    return true;
+  }
+
+  return false;
+}
+
 // Fetch initial backlog from REST API before SSE streaming begins.
+// Only delivers direct signals and @all blockers -- everything else is pull-based via bullpen.
 async function fetchBacklog(config: SSEConfig): Promise<void> {
   const base = `http://localhost:${config.port}`;
 
   try {
     const [feedRes, taskRes] = await Promise.all([
-      fetch(`${base}/api/feed?filter=all`),
+      fetch(`${base}/api/feed?filter=signals`),
       fetch(`${base}/api/tasks`),
     ]);
 
     if (feedRes.ok) {
       const items = (await feedRes.json()) as LegacyFeedItem[];
       for (const item of items) {
-        // Skip own posts
         if (item.repo === config.repo) continue;
+        if (!isRelevantBacklog(item, config.repo)) continue;
         config.onEvent(feedItemToEvent(item));
       }
     }
@@ -92,7 +117,6 @@ async function fetchBacklog(config: SSEConfig): Promise<void> {
     if (taskRes.ok) {
       const tasks = (await taskRes.json()) as LegacyTask[];
       for (const task of tasks) {
-        // Only inbound pending tasks for this repo
         if (task.to_repo !== config.repo || task.status !== "pending") continue;
         config.onEvent(taskToEvent(task));
       }
@@ -171,11 +195,12 @@ export async function connectSSE(config: SSEConfig): Promise<void> {
               const parsed = JSON.parse(sse.data);
 
               if (sse.event === "feed") {
-                // Feed events are arrays of items
+                // Feed events are arrays of items -- only deliver @me and @all blockers
                 const items = parsed as LegacyFeedItem[];
                 for (const item of items) {
                   if (item.repo === config.repo) continue;
                   if (seenIds.has(item.id)) continue;
+                  if (!isRelevantBacklog(item, config.repo)) continue;
                   seenIds.add(item.id);
                   config.onEvent(feedItemToEvent(item));
                 }

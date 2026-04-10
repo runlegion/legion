@@ -339,11 +339,6 @@ pub fn format_card_list(cards: &[Card], repo: &str, direction: Direction) -> Str
             .as_deref()
             .map(|n| format!(" -- {}", n))
             .unwrap_or_default();
-        let labels_part = c
-            .labels
-            .as_deref()
-            .map(|l| format!(" {{{}}}", l))
-            .unwrap_or_default();
         let source_part = c
             .source_url
             .as_deref()
@@ -351,9 +346,17 @@ pub fn format_card_list(cards: &[Card], repo: &str, direction: Direction) -> Str
             .unwrap_or_default();
         let date = crate::db::format_date(&c.created_at);
         output.push_str(&format!(
-            "- [{}] {}{}{}{} ({}, {}{}) {}\n",
-            c.status, c.text, prio, labels_part, source_part, peer, date, note_part, c.id
+            "- [{}] {}{}{} ({}, {}{}) {}\n",
+            c.status, c.text, prio, source_part, peer, date, note_part, c.id
         ));
+
+        // Show structured summary if context is parseable
+        if let Some(ref ctx) = c.context {
+            let parsed = crate::card_parse::parse_issue_body(ctx);
+            if let Some(summary) = crate::card_parse::format_summary(&parsed) {
+                output.push_str(&format!("  {}\n", summary));
+            }
+        }
     }
 
     output
@@ -845,7 +848,6 @@ mod tests {
         assert!(output.contains("[Legion] Cards for legion"));
         assert!(output.contains("test card"));
         assert!(output.contains("[high]"));
-        assert!(output.contains("{backend}"));
         assert!(output.contains("from:kelex"));
     }
 

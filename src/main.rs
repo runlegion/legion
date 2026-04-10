@@ -1,4 +1,5 @@
 mod board;
+mod card_parse;
 mod db;
 mod embed;
 mod error;
@@ -684,6 +685,16 @@ enum IssueAction {
         #[arg(long)]
         assignee: Option<String>,
     },
+    /// View an issue (local card data + live GitHub state)
+    View {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// Issue number
+        #[arg(long)]
+        number: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1017,6 +1028,15 @@ fn run() -> error::Result<()> {
             tags,
             follows,
         } => {
+            // Redirect @self posts to reflect -- they're private, not for the team
+            let is_self_post = text.as_deref().is_some_and(|t| {
+                let lower = t.trim_start().to_lowercase();
+                lower.starts_with("@self ") || lower.starts_with("@self\t") || lower == "@self"
+            });
+            if is_self_post {
+                eprintln!("[legion] @self posts are private -- redirecting to reflect");
+            }
+
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
@@ -1026,17 +1046,31 @@ fn run() -> error::Result<()> {
                 parent_id: follows,
             };
 
-            run_compound_command_with_meta(
-                &database,
-                &index,
-                &repo,
-                &text,
-                &transcript,
-                &meta,
-                board::post_from_text_with_meta,
-                board::post_from_transcript_with_meta,
-                "posting",
-            )?;
+            if is_self_post {
+                run_compound_command_with_meta(
+                    &database,
+                    &index,
+                    &repo,
+                    &text,
+                    &transcript,
+                    &meta,
+                    reflect::reflect_from_text_with_meta,
+                    reflect::reflect_from_transcript_with_meta,
+                    "reflecting",
+                )?;
+            } else {
+                run_compound_command_with_meta(
+                    &database,
+                    &index,
+                    &repo,
+                    &text,
+                    &transcript,
+                    &meta,
+                    board::post_from_text_with_meta,
+                    board::post_from_transcript_with_meta,
+                    "posting",
+                )?;
+            }
 
             // Compute embeddings for new posts
             if let Some(model) = try_load_embed_model() {
@@ -1686,6 +1720,44 @@ fn run() -> error::Result<()> {
                     "[legion] created issue #{} on {}",
                     created.number, source_repo
                 );
+            }
+            IssueAction::View { repo, number } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let issue = worksource::view_issue(&plugin_name, &source_repo, number)?;
+                let parsed = card_parse::parse_issue_body(issue.body.as_deref().unwrap_or(""));
+
+                // Structured output
+                println!("# {} #{}\n", issue.title, issue.number);
+
+                if let Some(ref problem) = parsed.problem {
+                    println!("Problem: {}\n", problem);
+                }
+                if let Some(ref solution) = parsed.solution {
+                    println!("Solution: {}\n", solution);
+                }
+                if !parsed.acceptance.is_empty() {
+                    println!("Acceptance criteria:");
+                    for item in &parsed.acceptance {
+                        println!("  - {}", item);
+                    }
+                    println!();
+                }
+                for (heading, content) in &parsed.sections {
+                    println!("{}:\n{}\n", heading, content);
+                }
+                if let Some(ref body) = parsed.body {
+                    println!("{}\n", body);
+                }
+
+                println!("State: {}", issue.state);
+                println!("URL: {}", issue.url);
             }
         },
         Commands::Pr { action } => match action {
