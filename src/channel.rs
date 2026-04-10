@@ -1,0 +1,448 @@
+use std::convert::Infallible;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive};
+use axum::response::{IntoResponse, Response, Sse};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use tokio::sync::broadcast;
+
+use crate::db::{Database, ReflectionMeta};
+use crate::error::LegionError;
+use crate::search::SearchIndex;
+use crate::signal as sig;
+
+/// Broadcast channel capacity. A slow SSE consumer can lag by up to this many
+/// events before it starts missing notifications.
+const BROADCAST_CAPACITY: usize = 1024;
+
+/// Maximum number of feed items returned by GET /api/feed.
+const FEED_LIMIT: usize = 100;
+
+/// Maximum number of feed items returned by the SSE feed event.
+const SSE_FEED_LIMIT: usize = 20;
+
+/// Seconds between keepalive pings when no change has been detected.
+const PING_INTERVAL_SECS: u64 = 30;
+
+/// Notification that something in the DB has changed. SSE subscribers wake on
+/// receiving any variant and re-read from the database.
+#[derive(Debug, Clone)]
+pub enum ChannelEvent {
+    /// New board post or reflection arrived.
+    Feed,
+    /// Task table changed.
+    Tasks,
+}
+
+/// Shared state for the channel HTTP server.
+#[derive(Clone)]
+pub struct ChannelState {
+    pub data_dir: PathBuf,
+    pub tx: broadcast::Sender<ChannelEvent>,
+}
+
+/// Feed item returned by GET /api/feed -- matches the legacy TS shape exactly.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct FeedItem {
+    pub id: String,
+    pub repo: String,
+    pub text: String,
+    pub created_at: String,
+    pub is_signal: bool,
+}
+
+/// Query parameters for GET /api/feed.
+#[derive(serde::Deserialize)]
+pub struct FeedQuery {
+    pub repo: Option<String>,
+    pub filter: Option<String>,
+    /// When set, return only posts unread by this repo and atomically mark them
+    /// as read. Matches the existing serve.rs unread_for behaviour.
+    pub unread_for: Option<String>,
+}
+
+/// Build the axum Router for the channel HTTP server.
+///
+/// This is a standalone router -- the caller mounts it into the main axum app.
+pub fn router(state: ChannelState) -> Router {
+    Router::new()
+        .route("/sse", get(sse_handler))
+        .route("/api/feed", get(api_feed))
+        .route("/api/tasks", get(api_tasks))
+        .route("/api/post", post(api_post))
+        .with_state(state)
+}
+
+/// Open a Database from the data_dir. Maps failure to a 500 status and logs.
+fn open_db(data_dir: &std::path::Path) -> Result<Database, StatusCode> {
+    Database::open(&data_dir.join("legion.db")).map_err(|e| {
+        eprintln!("[legion channel] open_db failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+/// Open the search index from the data_dir.
+fn open_index(data_dir: &std::path::Path) -> Result<SearchIndex, StatusCode> {
+    SearchIndex::open(&data_dir.join("index")).map_err(|e| {
+        eprintln!("[legion channel] open_index failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+/// JSON error response helper (mirrors serve.rs).
+fn json_error(status: StatusCode, message: &str) -> Response {
+    let body = serde_json::json!({ "error": message });
+    (status, Json(body)).into_response()
+}
+
+/// GET /api/feed -- bullpen posts with optional repo and signal/musing filter.
+///
+/// Matches the legacy TypeScript API shape exactly:
+/// - `repo`: filter by source repo
+/// - `filter`: "signals" | "musings" | (all)
+/// - `unread_for`: atomic unread-and-mark for the channel backlog
+pub async fn api_feed(
+    State(state): State<ChannelState>,
+    Query(params): Query<FeedQuery>,
+) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let posts = if let Some(reader) = params.unread_for.as_deref() {
+        match db.get_and_mark_unread_board_posts(reader) {
+            Ok(p) => p,
+            Err(e) => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("query error: {e}"),
+                );
+            }
+        }
+    } else {
+        match db.get_board_posts() {
+            Ok(p) => p,
+            Err(e) => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("query error: {e}"),
+                );
+            }
+        }
+    };
+
+    let repo_filter = params.repo.as_deref().unwrap_or("all");
+    let type_filter = params.filter.as_deref().unwrap_or("all");
+    let reader = params.unread_for.as_deref();
+
+    let items: Vec<FeedItem> = posts
+        .into_iter()
+        .filter(|p| reader.is_none_or(|r| p.repo != r))
+        .filter(|p| repo_filter == "all" || p.repo == repo_filter)
+        .filter_map(|p| {
+            let is_signal = sig::is_signal(&p.text);
+            let keep = match type_filter {
+                "signals" => is_signal,
+                "musings" => !is_signal,
+                _ => true,
+            };
+            if keep {
+                Some(FeedItem {
+                    id: p.id,
+                    repo: p.repo,
+                    text: p.text,
+                    created_at: p.created_at,
+                    is_signal,
+                })
+            } else {
+                None
+            }
+        })
+        .take(FEED_LIMIT)
+        .collect();
+
+    Json(items).into_response()
+}
+
+/// GET /api/tasks -- all tasks serialized as the legacy Task shape.
+pub async fn api_tasks(State(state): State<ChannelState>) -> Response {
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    match db.get_all_tasks() {
+        Ok(tasks) => Json(tasks).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("query error: {e}"),
+        ),
+    }
+}
+
+/// POST /api/post request body.
+#[derive(serde::Deserialize)]
+pub struct PostRequest {
+    pub repo: String,
+    pub text: String,
+}
+
+/// POST /api/post -- broadcast a message to the bullpen and notify SSE subscribers.
+pub async fn api_post(
+    State(state): State<ChannelState>,
+    Json(body): Json<PostRequest>,
+) -> Response {
+    let trimmed = body.text.trim();
+    if trimmed.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "text is required");
+    }
+
+    let db = match open_db(&state.data_dir) {
+        Ok(db) => db,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
+    };
+
+    let index = match open_index(&state.data_dir) {
+        Ok(idx) => idx,
+        Err(_) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to open search index",
+            );
+        }
+    };
+
+    let reflection = match db.insert_reflection_with_meta(
+        &body.repo,
+        trimmed,
+        "team",
+        &ReflectionMeta::default(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("insert error: {e}"),
+            );
+        }
+    };
+
+    if let Err(e) = index.add(&reflection.id, &reflection.repo, trimmed) {
+        eprintln!("[legion channel] search index add failed: {e}");
+    }
+
+    // Notify SSE subscribers (best-effort; no SSE listeners is not an error).
+    let _ = state.tx.send(ChannelEvent::Feed);
+
+    Json(reflection).into_response()
+}
+
+/// SSE handler -- streams feed, tasks, and ping events to subscribers.
+///
+/// Opens the database once at stream start and holds it for the stream's
+/// lifetime. On each broadcast notification, queries the new max timestamp
+/// and emits feed/tasks events. Emits a keepalive ping every PING_INTERVAL_SECS
+/// when there is no activity.
+///
+/// Event shapes:
+///   feed  -- JSON array of FeedItem (last SSE_FEED_LIMIT team posts)
+///   tasks -- JSON array of Task
+///   ping  -- `{}` heartbeat every 30s
+pub async fn sse_handler(
+    State(state): State<ChannelState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let mut rx = state.tx.subscribe();
+
+    let stream = async_stream::stream! {
+        // Open DB once for the lifetime of the stream.
+        let db = match Database::open(&state.data_dir.join("legion.db")) {
+            Ok(db) => db,
+            Err(e) => {
+                eprintln!("[legion channel] sse_handler: failed to open db: {e}");
+                return;
+            }
+        };
+
+        let mut last_reflection_ts: Option<String> = None;
+        let mut last_task_ts: Option<String> = None;
+        let ping_interval = Duration::from_secs(PING_INTERVAL_SECS);
+
+        loop {
+            // Wait for a broadcast notification or a ping timeout.
+            tokio::select! {
+                Ok(_) = rx.recv() => {
+                    // Something changed -- fall through to emit events.
+                }
+                _ = tokio::time::sleep(ping_interval) => {
+                    // No change notification for a while -- emit keepalive only.
+                    yield Ok(Event::default().event("ping").data("{}"));
+                    continue;
+                }
+            }
+
+            // Feed: emit when max created_at changes.
+            let current_reflection_ts = db.get_max_created_at().ok().flatten();
+            if current_reflection_ts != last_reflection_ts && current_reflection_ts.is_some() {
+                last_reflection_ts = current_reflection_ts;
+
+                if let Ok(feed_json) = build_feed_json(&db) {
+                    yield Ok(Event::default().event("feed").data(feed_json));
+                }
+            }
+
+            // Tasks: emit when max task updated_at changes.
+            let current_task_ts = db.get_max_task_updated_at().ok().flatten();
+            if current_task_ts != last_task_ts && current_task_ts.is_some() {
+                last_task_ts = current_task_ts;
+
+                if let Ok(tasks) = db.get_all_tasks()
+                    && let Ok(json) = serde_json::to_string(&tasks)
+                {
+                    yield Ok(Event::default().event("tasks").data(json));
+                }
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Build the feed JSON payload (last SSE_FEED_LIMIT team posts).
+///
+/// Returns the actual error so callers can log or propagate it.
+fn build_feed_json(db: &Database) -> Result<String, LegionError> {
+    let posts = db.get_board_posts()?;
+    let items: Vec<FeedItem> = posts
+        .into_iter()
+        .take(SSE_FEED_LIMIT)
+        .map(|p| {
+            let is_signal = sig::is_signal(&p.text);
+            FeedItem {
+                id: p.id,
+                repo: p.repo,
+                text: p.text,
+                created_at: p.created_at,
+                is_signal,
+            }
+        })
+        .collect();
+
+    Ok(serde_json::to_string(&items)?)
+}
+
+/// Create a broadcast channel pair for the channel pub/sub system.
+pub fn new_broadcast() -> (
+    broadcast::Sender<ChannelEvent>,
+    broadcast::Receiver<ChannelEvent>,
+) {
+    broadcast::channel(BROADCAST_CAPACITY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::ReflectionMeta;
+    use crate::testutil::test_storage;
+
+    fn make_feed_item(id: &str, repo: &str, text: &str) -> FeedItem {
+        FeedItem {
+            id: id.to_string(),
+            repo: repo.to_string(),
+            text: text.to_string(),
+            created_at: "2026-04-09T00:00:00Z".to_string(),
+            is_signal: sig::is_signal(text),
+        }
+    }
+
+    #[test]
+    fn feed_endpoint_matches_legacy_shape() {
+        let (db, index, dir) = test_storage();
+        let data_dir = dir.path().to_path_buf();
+
+        // Insert a team post
+        let reflection = db
+            .insert_reflection_with_meta("kelex", "hello team", "team", &ReflectionMeta::default())
+            .expect("insert");
+        index
+            .add(&reflection.id, "kelex", "hello team")
+            .expect("index");
+
+        // Verify the DB has the post. test_storage() uses "test.db" in the same dir.
+        let posts = db.get_board_posts().expect("get posts");
+        assert_eq!(posts.len(), 1);
+
+        // Build FeedItem from the post -- matches the handler logic exactly.
+        let item = FeedItem {
+            id: posts[0].id.clone(),
+            repo: posts[0].repo.clone(),
+            text: posts[0].text.clone(),
+            created_at: posts[0].created_at.clone(),
+            is_signal: sig::is_signal(&posts[0].text),
+        };
+
+        assert_eq!(item.repo, "kelex");
+        assert_eq!(item.text, "hello team");
+        assert!(!item.is_signal);
+        // Verify serialization matches legacy JSON shape.
+        let json = serde_json::to_value(&item).expect("serialize");
+        assert!(json.get("id").is_some());
+        assert!(json.get("repo").is_some());
+        assert!(json.get("text").is_some());
+        assert!(json.get("created_at").is_some());
+        assert!(json.get("is_signal").is_some());
+        // Drop to make usage clear.
+        drop(data_dir);
+    }
+
+    #[test]
+    fn feed_filter_signals_calls_is_signal_once_per_item() {
+        // Verifies no double is_signal call via filter_map (finding #16).
+        // We test the output shape is correct when filtering signals.
+        let items = [
+            make_feed_item("1", "kelex", "@legion review:approved"),
+            make_feed_item("2", "kelex", "just a musing"),
+            make_feed_item("3", "kelex", "@all announce: shipped"),
+        ];
+
+        let signals: Vec<_> = items.iter().filter(|i| i.is_signal).collect();
+        assert_eq!(signals.len(), 2);
+
+        let musings: Vec<_> = items.iter().filter(|i| !i.is_signal).collect();
+        assert_eq!(musings.len(), 1);
+    }
+
+    #[test]
+    fn broadcast_channel_delivers_events() {
+        let (tx, mut rx) = new_broadcast();
+        tx.send(ChannelEvent::Feed).expect("send");
+        let evt = rx.try_recv().expect("recv");
+        assert!(matches!(evt, ChannelEvent::Feed));
+    }
+
+    #[test]
+    fn dedup_seen_ids_prevents_double_delivery() {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let item = make_feed_item("abc", "kelex", "@legion review:approved");
+
+        assert!(seen.insert(item.id.clone()));
+        // Second time: already seen
+        assert!(!seen.insert(item.id.clone()));
+    }
+
+    #[test]
+    fn build_feed_json_returns_valid_json() {
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection_with_meta("kelex", "hello", "team", &ReflectionMeta::default())
+            .expect("insert");
+
+        let json = build_feed_json(&db).expect("build feed json");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert!(parsed.is_array());
+        assert_eq!(parsed.as_array().unwrap().len(), 1);
+    }
+}

@@ -1,7 +1,10 @@
 #!/bin/bash
-# Legion plugin: ensure binary and channel dependencies are available.
+# Legion plugin: ensure binary is available.
 # Downloads the correct platform binary from GitHub Releases on first run
 # or version mismatch. Uses CLAUDE_PLUGIN_DATA for persistent storage.
+#
+# The channel MCP server is now built into the legion binary itself
+# (legion daemon --mcp). No Bun or Node.js dependency required.
 set -euo pipefail
 
 REPO="runlegion/legion"
@@ -13,17 +16,6 @@ if [ -f "$PLUGIN_JSON" ]; then
   EXPECTED_VERSION=$(grep '"version"' "$PLUGIN_JSON" | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
 fi
 EXPECTED_VERSION="${EXPECTED_VERSION:-0.3.0}"
-
-# -- Channel dependencies ----------------------------------------------------
-
-# Install channel MCP dependencies if missing (bun required for the channel)
-CHANNEL_DIR="${CLAUDE_PLUGIN_ROOT:-}/channel"
-if [ -d "$CHANNEL_DIR" ] && [ -f "$CHANNEL_DIR/package.json" ] && [ ! -d "$CHANNEL_DIR/node_modules" ]; then
-  if command -v bun >/dev/null 2>&1; then
-    echo "[legion] installing channel dependencies..." >&2
-    (cd "$CHANNEL_DIR" && bun install) >&2 || true
-  fi
-fi
 
 # -- Binary setup -------------------------------------------------------------
 

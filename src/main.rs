@@ -1,5 +1,7 @@
 mod board;
 mod card_parse;
+mod channel;
+mod daemon;
 mod db;
 mod embed;
 mod error;
@@ -7,6 +9,7 @@ mod health;
 mod init;
 #[allow(dead_code)] // Items used by tests + pending surface/status/serve migration
 mod kanban;
+mod mcp;
 mod recall;
 mod reflect;
 mod search;
@@ -435,6 +438,17 @@ enum Commands {
 
     /// Watch for signals and auto-wake sleeping agents
     Watch,
+
+    /// Start the legion daemon (channel + watch + optional MCP stdio)
+    Daemon {
+        /// HTTP port for the channel server
+        #[arg(long, default_value = "3131")]
+        port: u16,
+
+        /// Enable MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
+        #[arg(long)]
+        mcp: bool,
+    },
 
     /// Record a quality gate result for a skill run
     QualityGate {
@@ -2692,7 +2706,18 @@ fn run() -> error::Result<()> {
         }
         Commands::Watch => {
             let base = data_dir()?;
+            eprintln!(
+                "[legion] `legion watch` is deprecated -- use `legion daemon` to run channel + watch in one process"
+            );
             watch::run(&base)?;
+        }
+        Commands::Daemon { port, mcp } => {
+            let base = data_dir()?;
+            daemon::run_daemon(daemon::DaemonConfig {
+                data_dir: base,
+                port,
+                enable_mcp: mcp,
+            })?;
         }
         Commands::QualityGate { action } => match action {
             QualityGateAction::Record {

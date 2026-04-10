@@ -76,6 +76,9 @@ pub enum LegionError {
 
     #[error("health error: {0}")]
     Health(String),
+
+    #[error("MCP invalid argument: {0}")]
+    McpInvalidArgument(String),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
