@@ -10,6 +10,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use tokio::sync::broadcast;
 
+use crate::board;
 use crate::db::{Database, ReflectionMeta};
 use crate::error::LegionError;
 use crate::search::SearchIndex;
@@ -45,7 +46,8 @@ pub struct ChannelState {
     pub tx: broadcast::Sender<ChannelEvent>,
 }
 
-/// Feed item returned by GET /api/feed -- matches the legacy TS shape exactly.
+/// Feed item returned by GET /api/feed. Field names (snake_case) and is_signal flag are part of the
+/// public JSON contract -- changing them breaks dashboard and external tooling.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct FeedItem {
     pub id: String,
@@ -101,7 +103,7 @@ fn json_error(status: StatusCode, message: &str) -> Response {
 
 /// GET /api/feed -- bullpen posts with optional repo and signal/musing filter.
 ///
-/// Matches the legacy TypeScript API shape exactly:
+/// Query shape is part of the public JSON contract: repo, filter=signals|musings, unread_for=<repo>.
 /// - `repo`: filter by source repo
 /// - `filter`: "signals" | "musings" | (all)
 /// - `unread_for`: atomic unread-and-mark for the channel backlog
@@ -193,11 +195,15 @@ pub struct PostRequest {
 }
 
 /// POST /api/post -- broadcast a message to the bullpen and notify SSE subscribers.
+///
+/// Index failures are treated as errors (500) rather than silently swallowed -- a post
+/// that cannot be indexed is unsearchable, which is a half-broken state. Callers should
+/// retry if they get a 500.
 pub async fn api_post(
     State(state): State<ChannelState>,
     Json(body): Json<PostRequest>,
 ) -> Response {
-    let trimmed = body.text.trim();
+    let trimmed = body.text.trim().to_string();
     if trimmed.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "text is required");
     }
@@ -217,29 +223,25 @@ pub async fn api_post(
         }
     };
 
-    let reflection = match db.insert_reflection_with_meta(
+    // TODO(019d7991-2eab): compute and store embedding so this post is similarity-searchable
+    let id = match board::post_from_text_with_meta(
+        &db,
+        &index,
         &body.repo,
-        trimmed,
-        "team",
+        &trimmed,
         &ReflectionMeta::default(),
     ) {
-        Ok(r) => r,
+        Ok(id) => id,
         Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("insert error: {e}"),
-            );
+            eprintln!("[legion channel] api_post failed: {e}");
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to store post");
         }
     };
-
-    if let Err(e) = index.add(&reflection.id, &reflection.repo, trimmed) {
-        eprintln!("[legion channel] search index add failed: {e}");
-    }
 
     // Notify SSE subscribers (best-effort; no SSE listeners is not an error).
     let _ = state.tx.send(ChannelEvent::Feed);
 
-    Json(reflection).into_response()
+    Json(serde_json::json!({ "id": id })).into_response()
 }
 
 /// SSE handler -- streams feed, tasks, and ping events to subscribers.
@@ -275,8 +277,22 @@ pub async fn sse_handler(
         loop {
             // Wait for a broadcast notification or a ping timeout.
             tokio::select! {
-                Ok(_) = rx.recv() => {
-                    // Something changed -- fall through to emit events.
+                result = rx.recv() => {
+                    match result {
+                        Ok(_) => {
+                            // Something changed -- fall through to emit events.
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            // Subscriber fell behind the broadcast ring buffer. Events were
+                            // dropped, so force a re-read of the DB to catch up.
+                            eprintln!("[legion channel] sse subscriber lagged {n} events; forcing re-check");
+                            // Fall through to re-query the DB for latest state.
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            eprintln!("[legion channel] sse broadcast closed; ending stream");
+                            return;
+                        }
+                    }
                 }
                 _ = tokio::time::sleep(ping_interval) => {
                     // No change notification for a while -- emit keepalive only.
@@ -361,8 +377,7 @@ mod tests {
 
     #[test]
     fn feed_endpoint_matches_legacy_shape() {
-        let (db, index, dir) = test_storage();
-        let data_dir = dir.path().to_path_buf();
+        let (db, index, _dir) = test_storage();
 
         // Insert a team post
         let reflection = db
@@ -395,8 +410,6 @@ mod tests {
         assert!(json.get("text").is_some());
         assert!(json.get("created_at").is_some());
         assert!(json.get("is_signal").is_some());
-        // Drop to make usage clear.
-        drop(data_dir);
     }
 
     #[test]
@@ -444,5 +457,43 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
         assert!(parsed.is_array());
         assert_eq!(parsed.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn broadcast_lag_produces_recv_error() {
+        // A subscriber that falls behind the ring buffer capacity gets TryRecvError::Lagged,
+        // not a silent drop. This guards the M2 fix -- the SSE handler must handle Lagged
+        // explicitly (force re-read) rather than letting the select! arm silently not fire.
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        // Tiny capacity to force lag.
+        let (tx, mut rx) = broadcast::channel::<ChannelEvent>(1);
+
+        // Fill past capacity without the subscriber reading.
+        tx.send(ChannelEvent::Feed).expect("send 1");
+        tx.send(ChannelEvent::Feed).expect("send 2");
+
+        // The first recv should be Lagged since we overflowed the 1-slot buffer.
+        let result = rx.try_recv();
+        assert!(
+            matches!(result, Err(TryRecvError::Lagged(_))),
+            "expected TryRecvError::Lagged, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn broadcast_closed_produces_recv_error() {
+        // When the sender is dropped the subscriber gets TryRecvError::Closed on next recv.
+        // Guards the M2 fix -- SSE handler must return on Closed, not loop forever.
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        let (tx, mut rx) = broadcast::channel::<ChannelEvent>(8);
+        drop(tx); // close the channel
+
+        let result = rx.try_recv();
+        assert!(
+            matches!(result, Err(TryRecvError::Closed)),
+            "expected TryRecvError::Closed, got: {result:?}"
+        );
     }
 }
