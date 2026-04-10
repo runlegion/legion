@@ -21,7 +21,7 @@ mod testutil;
 mod watch;
 mod worksource;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand};
@@ -805,16 +805,118 @@ enum PrAction {
     },
 }
 
+/// Resolve the legion data directory.
+///
+/// Resolution order:
+/// 1. `LEGION_DATA_DIR` env var (explicit override, used by tests)
+/// 2. `CLAUDE_PLUGIN_DATA` env var set by Claude Code when running under the
+///    plugin (plugin-scoped data dir, stable across plugin updates)
+/// 3. Hardcoded `$HOME/.claude/plugins/data/legion-legion/` (same location
+///    Claude Code uses, discoverable when running outside the plugin context)
+///
+/// If the resolved directory does not yet contain a legion.db but legacy
+/// paths do, migrate the database, Tantivy index, and watch.toml from the
+/// legacy location on first run. Legacy paths checked:
+/// - `ProjectDirs::from("","","legion").data_dir()` (macOS:
+///   ~/Library/Application Support/legion, Linux: ~/.local/share/legion)
 fn data_dir() -> error::Result<PathBuf> {
-    let path = match std::env::var("LEGION_DATA_DIR") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => {
-            let dirs = ProjectDirs::from("", "", "legion").ok_or(error::LegionError::NoDataDir)?;
-            dirs.data_dir().to_path_buf()
+    let path = if let Ok(dir) = std::env::var("LEGION_DATA_DIR") {
+        PathBuf::from(dir)
+    } else if let Ok(dir) = std::env::var("CLAUDE_PLUGIN_DATA")
+        && !dir.is_empty()
+    {
+        PathBuf::from(dir)
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home)
+            .join(".claude")
+            .join("plugins")
+            .join("data")
+            .join("legion-legion")
+    } else {
+        return Err(error::LegionError::NoDataDir);
+    };
+
+    std::fs::create_dir_all(&path)?;
+
+    // First-run migration: if the target has no DB but a legacy path does,
+    // move the state across. One-way, idempotent (guarded by target DB presence).
+    if !path.join("legion.db").exists() {
+        migrate_from_legacy(&path);
+    }
+
+    Ok(path)
+}
+
+/// Migrate legion state from the legacy ProjectDirs path to the plugin data dir.
+///
+/// Only runs when the target has no legion.db. Best-effort: logs to stderr on
+/// failure and continues. Moves legion.db, legion.db-wal, legion.db-shm, the
+/// Tantivy index/ directory, and watch.toml. Does NOT delete the source --
+/// leaves it in place as a safety net until the user confirms the migration.
+fn migrate_from_legacy(target: &Path) {
+    let Some(dirs) = ProjectDirs::from("", "", "legion") else {
+        return;
+    };
+    let legacy = dirs.data_dir();
+    let legacy_db = legacy.join("legion.db");
+    if !legacy_db.exists() {
+        return;
+    }
+
+    eprintln!(
+        "[legion] first-run migration: copying state from {} to {}",
+        legacy.display(),
+        target.display()
+    );
+
+    let copy_file = |name: &str| {
+        let src = legacy.join(name);
+        if src.exists()
+            && let Err(e) = std::fs::copy(&src, target.join(name))
+        {
+            eprintln!("[legion] migration: failed to copy {name}: {e}");
         }
     };
-    std::fs::create_dir_all(&path)?;
-    Ok(path)
+
+    copy_file("legion.db");
+    copy_file("legion.db-wal");
+    copy_file("legion.db-shm");
+    copy_file("watch.toml");
+
+    // Tantivy index is a directory tree -- copy recursively
+    let legacy_index = legacy.join("index");
+    let target_index = target.join("index");
+    if legacy_index.is_dir()
+        && !target_index.exists()
+        && let Err(e) = copy_dir_recursive(&legacy_index, &target_index)
+    {
+        eprintln!("[legion] migration: failed to copy index: {e}");
+    }
+
+    eprintln!(
+        "[legion] migration complete. Legacy path left in place: {}",
+        legacy.display()
+    );
+    eprintln!(
+        "[legion] delete manually once verified: rm -rf {}",
+        legacy.display()
+    );
+}
+
+/// Recursively copy a directory tree. Used for the Tantivy index migration.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Best-effort audit log entry. Failures warn to stderr, never abort.
