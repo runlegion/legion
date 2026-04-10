@@ -21,7 +21,7 @@ mod testutil;
 mod watch;
 mod worksource;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand};
@@ -99,6 +99,11 @@ enum Commands {
         /// Return most recent reflections instead of BM25 search
         #[arg(long)]
         latest: bool,
+
+        /// Truncate each reflection text to this many characters. Used by
+        /// hooks to keep injected context compact.
+        #[arg(long)]
+        preview: Option<usize>,
     },
 
     /// Search reflections across all repos for cross-agent consultation
@@ -269,6 +274,10 @@ enum Commands {
         /// Repository name
         #[arg(long)]
         repo: String,
+
+        /// Output as JSON with counts only (for hooks/scripts)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show what the team needs help with
@@ -796,16 +805,175 @@ enum PrAction {
     },
 }
 
+/// Resolve the legion data directory.
+///
+/// Resolution order:
+/// 1. `LEGION_DATA_DIR` env var (explicit override, used by tests)
+/// 2. `CLAUDE_PLUGIN_DATA` env var set by Claude Code when running under the
+///    plugin (plugin-scoped data dir, stable across plugin updates)
+/// 3. `$HOME/.claude/plugins/data/legion-legion/` (same location Claude
+///    Code uses, discoverable when running outside the plugin context)
+///
+/// Result is cached via OnceLock after first successful resolution: commands
+/// like `audit()` re-enter this dozens of times and the path never changes
+/// inside a single process. Tests that manipulate `LEGION_DATA_DIR` between
+/// calls should use a fresh subprocess.
+///
+/// On the first successful resolution, if the target has no `legion.db` but
+/// the legacy `ProjectDirs` location does (macOS: ~/Library/Application
+/// Support/legion, Linux: ~/.local/share/legion), the database, Tantivy
+/// index, and watch.toml are migrated across. One-way, best-effort, leaves
+/// the legacy path in place as a safety net.
 fn data_dir() -> error::Result<PathBuf> {
-    let path = match std::env::var("LEGION_DATA_DIR") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => {
-            let dirs = ProjectDirs::from("", "", "legion").ok_or(error::LegionError::NoDataDir)?;
-            dirs.data_dir().to_path_buf()
-        }
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<PathBuf> = OnceLock::new();
+
+    if let Some(cached) = CACHED.get() {
+        return Ok(cached.clone());
+    }
+
+    let path = if let Ok(dir) = std::env::var("LEGION_DATA_DIR") {
+        PathBuf::from(dir)
+    } else if let Ok(dir) = std::env::var("CLAUDE_PLUGIN_DATA")
+        && !dir.is_empty()
+    {
+        PathBuf::from(dir)
+    } else {
+        dirs::home_dir()
+            .ok_or(error::LegionError::NoHomeDir)?
+            .join(".claude")
+            .join("plugins")
+            .join("data")
+            .join("legion-legion")
     };
+
     std::fs::create_dir_all(&path)?;
+
+    if !path.join("legion.db").exists() {
+        migrate_from_legacy(&path);
+    }
+
+    let _ = CACHED.set(path.clone());
     Ok(path)
+}
+
+/// Migrate legion state from the legacy ProjectDirs path to the plugin data dir.
+///
+/// Resolves the legacy path via `ProjectDirs` and delegates to
+/// [`migrate_between`], which is the testable inner form.
+fn migrate_from_legacy(target: &Path) {
+    let Some(dirs) = ProjectDirs::from("", "", "legion") else {
+        return;
+    };
+    migrate_between(dirs.data_dir(), target);
+}
+
+/// Copy legion state from `legacy` to `target`.
+///
+/// Runs only when `legacy/legion.db` exists and `target/legion.db` does not.
+/// Best-effort: logs to stderr on each failure and continues. Moves
+/// `legion.db` (after a WAL checkpoint on the source so the copy is
+/// consistent), `watch.toml`, and the Tantivy `index/` directory tree. Does
+/// NOT delete the source -- leaves it in place as a safety net until the
+/// user cleans up manually.
+///
+/// The Tantivy index is copied BEFORE `legion.db` so a mid-migration failure
+/// leaves the target without a DB, which causes the next run to retry the
+/// whole migration from scratch rather than strand a populated DB with an
+/// empty index.
+fn migrate_between(legacy: &Path, target: &Path) {
+    let legacy_db = legacy.join("legion.db");
+    if !legacy_db.exists() {
+        return;
+    }
+    if target.join("legion.db").exists() {
+        return;
+    }
+
+    eprintln!(
+        "[legion] first-run migration: copying state from {} to {}",
+        legacy.display(),
+        target.display()
+    );
+
+    // 1. Tantivy index first: if this fails, the target still has no
+    //    legion.db so the next run retries the full migration.
+    let legacy_index = legacy.join("index");
+    let target_index = target.join("index");
+    if legacy_index.is_dir()
+        && !target_index.exists()
+        && let Err(e) = copy_dir_recursive(&legacy_index, &target_index)
+    {
+        eprintln!(
+            "[legion] migration: failed to copy index tree: {e} -- aborting before DB copy so the next run retries"
+        );
+        return;
+    }
+
+    // 2. WAL checkpoint on the source so the DB copy is internally
+    //    consistent. Opening the legacy DB briefly and issuing
+    //    PRAGMA wal_checkpoint(TRUNCATE) flushes any pending writes into the
+    //    main file and empties the WAL. If the checkpoint fails (e.g. locked
+    //    by a running watch daemon), we log and proceed with the copy anyway;
+    //    the target may need a manual recovery but this is no worse than the
+    //    previous behavior.
+    if let Err(e) = checkpoint_sqlite(&legacy_db) {
+        eprintln!("[legion] migration: WAL checkpoint failed ({e}); copy may be inconsistent");
+    }
+
+    // 3. Copy the main DB last. After this point the target is "owned" and
+    //    the migration guard (`target/legion.db.exists()`) will prevent re-runs.
+    if let Err(e) = std::fs::copy(&legacy_db, target.join("legion.db")) {
+        eprintln!("[legion] migration: failed to copy legion.db: {e}");
+        return;
+    }
+
+    // 4. watch.toml: optional, best-effort.
+    let legacy_watch = legacy.join("watch.toml");
+    if legacy_watch.exists()
+        && let Err(e) = std::fs::copy(&legacy_watch, target.join("watch.toml"))
+    {
+        eprintln!("[legion] migration: failed to copy watch.toml: {e}");
+    }
+
+    eprintln!(
+        "[legion] migration complete. Legacy path left in place: {}",
+        legacy.display()
+    );
+    eprintln!(
+        "[legion] delete manually once verified: rm -rf {}",
+        legacy.display()
+    );
+}
+
+/// Open the given SQLite file briefly and issue a TRUNCATE checkpoint.
+///
+/// Used by [`migrate_between`] to make sure the WAL is drained into the main
+/// file before the copy. Returns the rusqlite error on failure; caller decides
+/// whether to proceed with the copy anyway.
+fn checkpoint_sqlite(path: &Path) -> std::result::Result<(), rusqlite::Error> {
+    let conn = rusqlite::Connection::open(path)?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    Ok(())
+}
+
+/// Recursively copy a directory tree. Used for the Tantivy index migration.
+/// Follows symlinks (the legacy index is expected to be a normal directory
+/// tree with no symlinks); if that ever changes, switch to `symlink_metadata`
+/// and preserve the link type.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Best-effort audit log entry. Failures warn to stderr, never abort.
@@ -983,6 +1151,7 @@ fn run() -> error::Result<()> {
             context,
             limit,
             latest,
+            preview,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
@@ -999,7 +1168,7 @@ fn run() -> error::Result<()> {
                     None => recall::recall_bm25(&database, &index, &repo, &context, limit)?,
                 }
             };
-            let output = recall::format_for_hook(&result);
+            let output = recall::format_for_hook(&result, preview);
             if !output.is_empty() {
                 print!("{output}");
             }
@@ -1327,18 +1496,25 @@ fn run() -> error::Result<()> {
             }
             serve::run_server(port, base)?;
         }
-        Commands::Status { repo } => {
+        Commands::Status { repo, json } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             let output = status::get_status(&database, &repo)?;
-            let formatted = status::format_status(&output);
-            if formatted.is_empty() {
+            if json {
                 println!(
-                    "[Legion] Status for {}: all clear. Check `gh issue list` for GitHub issues.",
-                    repo
+                    "{}",
+                    serde_json::to_string(&status::format_summary(&output))?
                 );
             } else {
-                print!("{formatted}");
+                let formatted = status::format_status(&output);
+                if formatted.is_empty() {
+                    println!(
+                        "[Legion] Status for {}: all clear. Check `gh issue list` for GitHub issues.",
+                        repo
+                    );
+                } else {
+                    print!("{formatted}");
+                }
             }
         }
         Commands::Needs { repo } => {
@@ -2311,5 +2487,160 @@ fn print_health_all_hosts(samples: &[health::HealthSample]) {
             "  {:<20} CPU: {:5.1}%  Mem: {:5.1}%  Pressure: {:5.1}%  Agents: {}  ({})",
             s.hostname, s.cpu_usage_pct, s.mem_usage_pct, s.pressure, s.agents_active, age
         );
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    fn seed_legacy_db(legacy: &Path) {
+        std::fs::create_dir_all(legacy).expect("create legacy dir");
+        let conn = rusqlite::Connection::open(legacy.join("legion.db")).expect("open legacy db");
+        conn.execute_batch(
+            "CREATE TABLE sentinel (value TEXT NOT NULL); \
+             INSERT INTO sentinel VALUES ('migrated');",
+        )
+        .expect("seed legacy db");
+    }
+
+    #[test]
+    fn migrate_between_skips_when_legacy_has_no_db() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let legacy = tmp.path().join("legacy");
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+
+        migrate_between(&legacy, &target);
+        assert!(
+            !target.join("legion.db").exists(),
+            "target should stay empty when legacy has no db"
+        );
+    }
+
+    #[test]
+    fn migrate_between_skips_when_target_already_has_db() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let legacy = tmp.path().join("legacy");
+        let target = tmp.path().join("target");
+        seed_legacy_db(&legacy);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("legion.db"), b"existing").unwrap();
+
+        migrate_between(&legacy, &target);
+        // Target DB should remain the placeholder bytes, not the legacy content.
+        let content = std::fs::read(target.join("legion.db")).unwrap();
+        assert_eq!(content, b"existing", "migration should not overwrite");
+    }
+
+    #[test]
+    fn migrate_between_copies_db_and_index() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let legacy = tmp.path().join("legacy");
+        let target = tmp.path().join("target");
+        seed_legacy_db(&legacy);
+
+        // Seed a fake Tantivy-style index tree with nested files.
+        std::fs::create_dir_all(legacy.join("index/segment_0")).unwrap();
+        std::fs::write(legacy.join("index/meta.json"), b"{\"version\": 1}").unwrap();
+        std::fs::write(
+            legacy.join("index/segment_0/posting.bin"),
+            b"\x00\x01\x02\x03",
+        )
+        .unwrap();
+
+        // Seed watch.toml
+        std::fs::write(legacy.join("watch.toml"), b"[[repos]]\nname = \"legion\"\n").unwrap();
+
+        std::fs::create_dir_all(&target).unwrap();
+        migrate_between(&legacy, &target);
+
+        assert!(target.join("legion.db").exists(), "db not migrated");
+        assert!(
+            target.join("index/meta.json").exists(),
+            "index meta not migrated"
+        );
+        assert!(
+            target.join("index/segment_0/posting.bin").exists(),
+            "nested index file not migrated"
+        );
+        assert!(
+            target.join("watch.toml").exists(),
+            "watch.toml not migrated"
+        );
+
+        // Legacy must remain in place as a safety net.
+        assert!(
+            legacy.join("legion.db").exists(),
+            "legacy db removed (should be kept)"
+        );
+
+        // Migrated DB should be readable and contain the sentinel row.
+        let conn = rusqlite::Connection::open(target.join("legion.db")).unwrap();
+        let value: String = conn
+            .query_row("SELECT value FROM sentinel", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "migrated");
+    }
+
+    #[test]
+    fn migrate_between_is_idempotent_on_rerun() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let legacy = tmp.path().join("legacy");
+        let target = tmp.path().join("target");
+        seed_legacy_db(&legacy);
+        std::fs::create_dir_all(&target).unwrap();
+
+        migrate_between(&legacy, &target);
+        // Second call should be a no-op because target now has legion.db.
+        let first_content = std::fs::read(target.join("legion.db")).unwrap();
+        migrate_between(&legacy, &target);
+        let second_content = std::fs::read(target.join("legion.db")).unwrap();
+        assert_eq!(first_content, second_content);
+    }
+
+    #[test]
+    fn copy_dir_recursive_handles_nested_tree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(src.join("a/b/c")).unwrap();
+        std::fs::write(src.join("top.txt"), b"top").unwrap();
+        std::fs::write(src.join("a/mid.txt"), b"mid").unwrap();
+        std::fs::write(src.join("a/b/leaf.bin"), b"\xde\xad\xbe\xef").unwrap();
+
+        copy_dir_recursive(&src, &dst).expect("copy");
+
+        assert_eq!(std::fs::read(dst.join("top.txt")).unwrap(), b"top");
+        assert_eq!(std::fs::read(dst.join("a/mid.txt")).unwrap(), b"mid");
+        assert_eq!(
+            std::fs::read(dst.join("a/b/leaf.bin")).unwrap(),
+            b"\xde\xad\xbe\xef"
+        );
+        assert!(dst.join("a/b/c").is_dir(), "empty nested dir not created");
+    }
+
+    #[test]
+    fn checkpoint_sqlite_drains_wal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("legion.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode = WAL; \
+                 CREATE TABLE t (x INTEGER); \
+                 INSERT INTO t VALUES (1), (2), (3);",
+            )
+            .unwrap();
+        }
+        // WAL may be non-empty at this point.
+        checkpoint_sqlite(&db_path).expect("checkpoint should succeed");
+        // Data must still be readable after the checkpoint.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 3);
     }
 }

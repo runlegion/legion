@@ -314,8 +314,13 @@ pub fn consult_bm25(
 /// Format recall results for Claude Code hook injection.
 ///
 /// Produces concise, human-readable output. Returns an empty string
-/// when there are no results.
-pub fn format_for_hook(result: &RecallResult) -> String {
+/// when there are no results. When `preview` is `Some(n)`, each reflection
+/// text is truncated to the first `n` characters (UTF-8 safe) via
+/// [`card_parse::truncate_chars`], keeping session-start and PreToolUse
+/// injections small. When preview is None, the reflection text is borrowed
+/// rather than cloned (the per-line `format!` still allocates the output
+/// chunk).
+pub fn format_for_hook(result: &RecallResult, preview: Option<usize>) -> String {
     if result.reflections.is_empty() {
         return String::new();
     }
@@ -323,9 +328,15 @@ pub fn format_for_hook(result: &RecallResult) -> String {
     let mut output = format!("[Legion] Relevant reflections for {}:\n", result.repo);
 
     for r in &result.reflections {
+        let text: std::borrow::Cow<'_, str> = match preview {
+            Some(n) if r.text.chars().count() > n => {
+                std::borrow::Cow::Owned(crate::card_parse::truncate_chars(&r.text, n))
+            }
+            _ => std::borrow::Cow::Borrowed(&r.text),
+        };
         output.push_str(&format!(
             "- {} (id: {}, score: {:.2})\n",
-            r.text, r.id, r.score
+            text, r.id, r.score
         ));
     }
 
@@ -460,7 +471,7 @@ mod tests {
                 created_at: "2026-03-05T00:00:00Z".into(),
             }],
         };
-        let output = format_for_hook(&result);
+        let output = format_for_hook(&result, None);
         assert!(output.contains("mapping rules are fragile"));
         assert!(output.contains("kelex"));
         assert!(output.contains("0.87"));
@@ -489,7 +500,7 @@ mod tests {
                 },
             ],
         };
-        let output = format_for_hook(&result);
+        let output = format_for_hook(&result, None);
         assert!(output.contains("mapping rules are fragile"));
         assert!(output.contains("discriminated unions hide complexity"));
         assert!(output.contains("[Legion]"));
@@ -502,8 +513,45 @@ mod tests {
             repo: "kelex".into(),
             reflections: vec![],
         };
-        let output = format_for_hook(&result);
+        let output = format_for_hook(&result, None);
         assert!(output.is_empty() || output.contains("No relevant reflections"));
+    }
+
+    #[test]
+    fn format_for_hook_truncates_when_preview_set() {
+        let result = RecallResult {
+            query: "q".into(),
+            repo: "legion".into(),
+            reflections: vec![RecalledReflection {
+                id: "abc".into(),
+                repo: "legion".into(),
+                text: "a".repeat(500),
+                score: 0.9,
+                created_at: "2026-04-10".into(),
+            }],
+        };
+        let output = format_for_hook(&result, Some(50));
+        // Delegates to card_parse::truncate_chars which appends "..."
+        assert!(output.contains("..."));
+        assert!(output.len() < 200);
+    }
+
+    #[test]
+    fn format_for_hook_preview_none_does_not_truncate() {
+        let long_text = "a".repeat(500);
+        let result = RecallResult {
+            query: "q".into(),
+            repo: "legion".into(),
+            reflections: vec![RecalledReflection {
+                id: "abc".into(),
+                repo: "legion".into(),
+                text: long_text.clone(),
+                score: 0.9,
+                created_at: "2026-04-10".into(),
+            }],
+        };
+        let output = format_for_hook(&result, None);
+        assert!(output.contains(&long_text));
     }
 
     #[test]

@@ -96,19 +96,21 @@ function isRelevantBacklog(item: LegacyFeedItem, repo: string): boolean {
 
 // Fetch initial backlog from REST API before SSE streaming begins.
 // Only delivers direct signals and @all blockers -- everything else is pull-based via bullpen.
+// Uses `unread_for=<repo>` so the server atomically marks posts as read, preventing
+// the same backlog from being re-delivered on every connection.
 async function fetchBacklog(config: SSEConfig): Promise<void> {
   const base = `http://localhost:${config.port}`;
+  const unreadFor = encodeURIComponent(config.repo);
 
   try {
     const [feedRes, taskRes] = await Promise.all([
-      fetch(`${base}/api/feed?filter=signals`),
+      fetch(`${base}/api/feed?filter=signals&unread_for=${unreadFor}`),
       fetch(`${base}/api/tasks`),
     ]);
 
     if (feedRes.ok) {
       const items = (await feedRes.json()) as LegacyFeedItem[];
       for (const item of items) {
-        if (item.repo === config.repo) continue;
         if (!isRelevantBacklog(item, config.repo)) continue;
         config.onEvent(feedItemToEvent(item));
       }

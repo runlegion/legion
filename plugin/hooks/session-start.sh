@@ -1,5 +1,19 @@
 #!/bin/bash
-# Legion SessionStart hook: last reflection + status + channel server
+# Legion SessionStart hook: inject recall hits + compact status counts.
+#
+# Only injects what requires a DB read: recent reflections and a one-line
+# status summary. Everything else (instructions, command reference) lives
+# in the plugin's own documentation surfaces.
+#
+# Also warms the Tantivy index in the background so the first PreToolUse
+# recall-first.sh hit is fast (cold ~2.2s, warm ~170ms).
+#
+# Error handling: legion invocations append stderr to /tmp/legion-hook-errors.log
+# instead of dropping it so a silently-broken legion (missing binary, bad
+# migration, DB schema mismatch) leaves a breadcrumb. The hook still exits 0
+# and degrades to "no context" so Claude Code does not block on a legion bug.
+LOG=/tmp/legion-hook-errors.log
+
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
@@ -9,58 +23,61 @@ fi
 
 REPO=$(basename "$CWD")
 
-# Clean up markers from previous session so hooks fire fresh
+# Clean up per-session markers from prior session
 CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
 rm -f "/tmp/legion-reflected-${CWD_HASH}" 2>/dev/null
-rm -f "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
-rm -f "/tmp/legion-recall-nudge-${CWD_HASH}" 2>/dev/null
 rm -f "/tmp/legion-channel-${REPO}" 2>/dev/null
 
-# Mark session as having done work (used by stop hook)
+# Mark session as having done work (used by Stop hook to decide if reflect prompt fires)
 touch "/tmp/legion-work-${CWD_HASH}"
 
-# -- Long-lived services -------------------------------------------------------
-# Channel MCP and watch should always be running. They outlive agent sessions
-# so signals can wake sleeping agents even when no session is active.
-LEGION_PORT="${LEGION_PORT:-3131}"
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+# Warm the Tantivy index in the background -- makes PreToolUse recall-first.sh
+# fast on the first tool call instead of paying a 2s cold-start cost
+(legion recall --repo "$REPO" --context warmup --limit 1 >/dev/null 2>&1 &)
 
-# Channel MCP server
-if [ -n "$PLUGIN_ROOT" ] && [ -f "$PLUGIN_ROOT/channel/index.ts" ]; then
-  if ! lsof -iTCP:"$LEGION_PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
-    if command -v bun >/dev/null 2>&1; then
-      nohup bun run "$PLUGIN_ROOT/channel/index.ts" >/dev/null 2>&1 &
-    fi
-  fi
-fi
-
-# Watch (auto-wake agents on signal arrival)
-if command -v legion >/dev/null 2>&1; then
-  if ! pgrep -f "legion watch" >/dev/null 2>&1; then
-    nohup legion watch >/dev/null 2>&1 &
-  fi
-fi
-
-# Append non-empty text to OUTPUT, separated by double newlines
-append() {
-  local text="$1"
-  if [ -n "$text" ]; then
-    if [ -n "$OUTPUT" ]; then
-      OUTPUT="$OUTPUT"$'\n\n'"$text"
-    else
-      OUTPUT="$text"
-    fi
-  fi
-}
-
+# Branch-context recall first, fallback to latest if nothing matched.
+# --preview 240 keeps each hit compact so the session start stays small.
+BRANCH=$(cd "$CWD" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 OUTPUT=""
+if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ]; then
+  OUTPUT=$(legion recall --repo "$REPO" --context "$BRANCH" --limit 2 --preview 240 2>>"$LOG")
+fi
+if [ -z "$OUTPUT" ]; then
+  OUTPUT=$(legion recall --repo "$REPO" --latest --limit 2 --preview 240 2>>"$LOG")
+fi
 
-# 1. Last self-reflection -- where you left off
-LAST=$(legion recall --repo "$REPO" --latest --limit 1 2>/dev/null)
-append "$LAST"
+# Compact status counts from the JSON summary instead of full status text
+STATUS_JSON=$(legion status --repo "$REPO" --json 2>>"$LOG")
+if [ -n "$STATUS_JSON" ]; then
+  TASKS=$(echo "$STATUS_JSON" | jq -r '.tasks // 0')
+  BLOCKED=$(echo "$STATUS_JSON" | jq -r '.blocked // 0')
+  TEAM_NEEDS=$(echo "$STATUS_JSON" | jq -r '.team_needs // 0')
+  CHANGED=$(echo "$STATUS_JSON" | jq -r '.what_changed // 0')
 
-# 2. Status -- task count, direct signals, what changed
-append "$(legion status --repo "$REPO" 2>/dev/null)"
+  PARTS=()
+  if [ "$TASKS" -gt 0 ]; then
+    if [ "$BLOCKED" -gt 0 ]; then
+      PARTS+=("$TASKS tasks ($BLOCKED blocked)")
+    else
+      PARTS+=("$TASKS tasks")
+    fi
+  fi
+  if [ "$TEAM_NEEDS" -gt 0 ]; then
+    PARTS+=("$TEAM_NEEDS unread @$REPO")
+  fi
+  if [ "$CHANGED" -gt 0 ]; then
+    PARTS+=("$CHANGED updates")
+  fi
+
+  if [ ${#PARTS[@]} -gt 0 ]; then
+    STATUS_LINE="[Legion] $(IFS=', '; echo "${PARTS[*]}") -- legion bullpen for details"
+    if [ -n "$OUTPUT" ]; then
+      OUTPUT="${OUTPUT}"$'\n\n'"${STATUS_LINE}"
+    else
+      OUTPUT="$STATUS_LINE"
+    fi
+  fi
+fi
 
 if [ -n "$OUTPUT" ]; then
   jq -n --arg ctx "$OUTPUT" '{

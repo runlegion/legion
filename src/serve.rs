@@ -314,30 +314,55 @@ struct FeedItem {
 struct FeedQuery {
     repo: Option<String>,
     filter: Option<String>,
+    /// When set, return only posts unread by this reader repo AND atomically
+    /// mark them as read. Used by the channel backlog fetch so agents only
+    /// see each post once. The reader's own posts are excluded from the
+    /// response regardless of other filters. Combining with `repo` narrows
+    /// unread posts to that repo (not mutually exclusive).
+    unread_for: Option<String>,
 }
 
 /// GET /api/feed -- bullpen posts with optional repo and signal/musing filter.
+/// When `unread_for=<repo>` is set, returns only posts unread by that repo
+/// and atomically marks them as read so the same post is never delivered twice.
 async fn api_feed(State(state): State<AppState>, Query(params): Query<FeedQuery>) -> Response {
     let db = match open_db(&state.data_dir) {
         Ok(db) => db,
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
     };
 
-    let posts = match db.get_board_posts() {
-        Ok(p) => p,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("query error: {e}"),
-            );
+    // When `unread_for` is set, use the atomic unread-and-mark query so the
+    // channel backlog delivers each post exactly once across connections.
+    let posts = if let Some(reader) = params.unread_for.as_deref() {
+        match db.get_and_mark_unread_board_posts(reader) {
+            Ok(p) => p,
+            Err(e) => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("query error: {e}"),
+                );
+            }
+        }
+    } else {
+        match db.get_board_posts() {
+            Ok(p) => p,
+            Err(e) => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("query error: {e}"),
+                );
+            }
         }
     };
 
     let repo_filter = params.repo.as_deref().unwrap_or("all");
     let type_filter = params.filter.as_deref().unwrap_or("all");
+    let reader = params.unread_for.as_deref();
 
     let items: Vec<FeedItem> = posts
         .into_iter()
+        // Exclude the reader's own posts from unread delivery.
+        .filter(|p| reader.is_none_or(|r| p.repo != r))
         .filter(|p| repo_filter == "all" || p.repo == repo_filter)
         .filter(|p| match type_filter {
             "signals" => sig::is_signal(&p.text),

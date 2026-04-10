@@ -21,9 +21,6 @@ pub enum LegionError {
     #[error("transcript file not found: {0}")]
     TranscriptNotFound(PathBuf),
 
-    #[error("data directory not available")]
-    NoDataDir,
-
     #[error("one or more repos failed during compound reflect")]
     ReflectPartialFailure,
 
@@ -133,12 +130,6 @@ mod tests {
     }
 
     #[test]
-    fn error_display_no_data_dir() {
-        let err = LegionError::NoDataDir;
-        assert_eq!(err.to_string(), "data directory not available");
-    }
-
-    #[test]
     fn error_display_signal_note_too_long() {
         let err = LegionError::SignalNoteTooLong { len: 500, max: 280 };
         let msg = err.to_string();
@@ -152,7 +143,7 @@ mod tests {
         let ok: Result<i32> = Ok(42);
         assert!(ok.is_ok());
 
-        let err: Result<i32> = Err(LegionError::NoDataDir);
+        let err: Result<i32> = Err(LegionError::NoHomeDir);
         assert!(err.is_err());
     }
 }

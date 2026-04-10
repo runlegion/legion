@@ -133,47 +133,5 @@ install_binary() {
 }
 
 if [ "$NEED_BINARY" = true ]; then
-  install_binary || echo "[legion] binary install failed (exit $?) -- continuing with CLAUDE.md setup" >&2
-fi
-
-# Persist resolved binary path so bin/legion can find it outside hook context.
-PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if [ -x "$BINARY_PATH" ]; then
-  echo "$BINARY_PATH" > "${PLUGIN_DIR}/.legion-binary-path"
-fi
-
-# -- CLAUDE.md instructions ----------------------------------------------------
-
-# Append legion instructions to ~/.claude/CLAUDE.md if not present.
-# Idempotent: checks for marker before writing.
-CLAUDE_MD="$HOME/.claude/CLAUDE.md"
-MARKER="<!-- legion-plugin -->"
-
-if [ -f "$CLAUDE_MD" ] && grep -qF "$MARKER" "$CLAUDE_MD" 2>/dev/null; then
-  # Already installed -- nothing to do
-  :
-else
-  mkdir -p "$HOME/.claude"
-  cat >> "$CLAUDE_MD" << 'LEGION_EOF'
-
-<!-- legion-plugin -->
-## Legion
-
-You have institutional memory. Check it before grepping for decisions or patterns.
-
-- `legion recall --repo <name> --context "problem"` -- search your reflections
-- `legion consult --context "problem"` -- search all agents across repos
-- `legion bullpen --repo <name>` -- read team posts
-- `legion kanban list --repo <name>` -- your task board
-
-Work source commands (required -- direct `gh` is blocked):
-- `legion issue create --repo <name> --title '...' --body '...'`
-- `legion pr create --repo <name> --title '...' --body '...'`
-- `legion pr list --repo <name>`
-- `legion pr review --repo <name> --number <n> --approve --body 'LGTM'`
-- `legion pr merge --repo <name> --number <n> --task <card-id>`
-- `legion comment --repo <name> --number <n> --body '...'`
-<!-- /legion-plugin -->
-LEGION_EOF
-  echo "[legion] added instructions to ${CLAUDE_MD}" >&2
+  install_binary || echo "[legion] binary install failed (exit $?)" >&2
 fi

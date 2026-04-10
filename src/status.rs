@@ -21,6 +21,11 @@ pub struct StatusOutput {
     pub your_work: Vec<StatusItem>,
     pub team_needs: Vec<StatusItem>,
     pub what_changed: Vec<StatusItem>,
+    /// Total active task count for the repo. Sourced directly from the DB
+    /// query in `get_your_work`, not parsed from the `your_work` display text.
+    pub active_task_count: usize,
+    /// Subset of `active_task_count` that are currently blocked.
+    pub blocked_task_count: usize,
 }
 
 /// Hours to look back for team posts in status output.
@@ -35,7 +40,10 @@ const MAX_NEEDS_FOCUSED: usize = 20;
 
 /// Gather the full status for a repo.
 pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
-    let your_work = get_your_work(db, repo)?;
+    let tasks: Vec<Task> = db.get_active_tasks_for_repo(repo)?;
+    let active_task_count = tasks.len();
+    let blocked_task_count = tasks.iter().filter(|t| t.status == "blocked").count();
+    let your_work = your_work_items(&tasks, repo);
     let posts: Vec<Reflection> = db.get_recent_board_posts(LOOKBACK_HOURS)?;
     let (team_needs, seen_ids) = get_team_needs(&posts, repo);
     let what_changed = get_what_changed(&posts, repo, &seen_ids);
@@ -45,6 +53,8 @@ pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
         your_work,
         team_needs,
         what_changed,
+        active_task_count,
+        blocked_task_count,
     })
 }
 
@@ -104,6 +114,27 @@ pub fn format_needs(repo: &str, items: &[StatusItem]) -> String {
     out
 }
 
+/// JSON-friendly summary with counts only. Used by hooks to inject minimal context.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StatusSummary {
+    pub repo: String,
+    pub tasks: usize,
+    pub blocked: usize,
+    pub team_needs: usize,
+    pub what_changed: usize,
+}
+
+/// Produce a compact summary with counts only.
+pub fn format_summary(output: &StatusOutput) -> StatusSummary {
+    StatusSummary {
+        repo: output.repo.clone(),
+        tasks: output.active_task_count,
+        blocked: output.blocked_task_count,
+        team_needs: output.team_needs.len(),
+        what_changed: output.what_changed.len(),
+    }
+}
+
 /// Format status output for terminal display.
 pub fn format_status(output: &StatusOutput) -> String {
     if output.your_work.is_empty() && output.team_needs.is_empty() && output.what_changed.is_empty()
@@ -133,8 +164,11 @@ fn format_section(out: &mut String, header: &str, items: &[StatusItem]) {
 
 /// YOUR WORK: summary count of active tasks assigned to this repo.
 /// Shows blocked tasks individually (they need attention), everything else as a count.
-fn get_your_work(db: &Database, repo: &str) -> Result<Vec<StatusItem>> {
-    let tasks: Vec<Task> = db.get_active_tasks_for_repo(repo)?;
+///
+/// Takes pre-fetched tasks so `get_status` can derive both the display items
+/// and the counts from a single DB query, without round-tripping the count
+/// through the display text.
+fn your_work_items(tasks: &[Task], repo: &str) -> Vec<StatusItem> {
     let mut items: Vec<StatusItem> = Vec::new();
 
     if !tasks.is_empty() {
@@ -155,7 +189,7 @@ fn get_your_work(db: &Database, repo: &str) -> Result<Vec<StatusItem>> {
         });
     }
 
-    Ok(items)
+    items
 }
 
 /// TEAM NEEDS YOU: recent posts with actionable requests directed at this repo.
@@ -463,6 +497,8 @@ mod tests {
             your_work: vec![],
             team_needs: vec![],
             what_changed: vec![],
+            active_task_count: 0,
+            blocked_task_count: 0,
         };
         assert!(format_status(&output).is_empty());
     }
@@ -489,6 +525,8 @@ mod tests {
                 from: "eavesdrop".to_string(),
                 age: "4h ago".to_string(),
             }],
+            active_task_count: 1,
+            blocked_task_count: 0,
         };
         let formatted = format_status(&output);
         assert!(formatted.contains("[Legion] Status for kelex:"));
@@ -508,10 +546,12 @@ mod tests {
         crate::task::create_task(&db, "platform", "kelex", "another task", None, "med")
             .expect("create");
 
-        let items = get_your_work(&db, "kelex").expect("your_work");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].category, "TASKS");
-        assert!(items[0].text.contains("2 tasks"));
+        let output = get_status(&db, "kelex").expect("get_status");
+        assert_eq!(output.active_task_count, 2);
+        assert_eq!(output.blocked_task_count, 0);
+        assert_eq!(output.your_work.len(), 1);
+        assert_eq!(output.your_work[0].category, "TASKS");
+        assert!(output.your_work[0].text.contains("2 tasks"));
     }
 
     #[test]
@@ -524,12 +564,14 @@ mod tests {
         crate::task::create_task(&db, "platform", "kelex", "other work", None, "med")
             .expect("create");
 
-        let items = get_your_work(&db, "kelex").expect("your_work");
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].category, "TASKS");
-        assert!(items[0].text.contains("2 tasks"));
-        assert_eq!(items[1].category, "TASK:high");
-        assert!(items[1].text.contains("[BLOCKED]"));
+        let output = get_status(&db, "kelex").expect("get_status");
+        assert_eq!(output.active_task_count, 2);
+        assert_eq!(output.blocked_task_count, 1);
+        assert_eq!(output.your_work.len(), 2);
+        assert_eq!(output.your_work[0].category, "TASKS");
+        assert!(output.your_work[0].text.contains("2 tasks"));
+        assert_eq!(output.your_work[1].category, "TASK:high");
+        assert!(output.your_work[1].text.contains("[BLOCKED]"));
     }
 
     #[test]
@@ -540,11 +582,11 @@ mod tests {
         crate::task::accept_task(&db, &id).expect("accept");
         crate::task::block_task(&db, &id, Some("waiting")).expect("block");
 
-        let items = get_your_work(&db, "kelex").expect("your_work");
-        // Count line + blocked line
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].category, "TASKS");
-        assert!(items[1].text.contains("[BLOCKED]"));
+        let output = get_status(&db, "kelex").expect("get_status");
+        assert_eq!(output.blocked_task_count, 1);
+        assert_eq!(output.your_work.len(), 2);
+        assert_eq!(output.your_work[0].category, "TASKS");
+        assert!(output.your_work[1].text.contains("[BLOCKED]"));
     }
 
     #[test]
@@ -555,8 +597,51 @@ mod tests {
         crate::task::accept_task(&db, &id).expect("accept");
         crate::task::complete_task(&db, &id, None).expect("complete");
 
-        let items = get_your_work(&db, "kelex").expect("your_work");
-        assert!(items.is_empty());
+        let output = get_status(&db, "kelex").expect("get_status");
+        assert_eq!(output.active_task_count, 0);
+        assert!(output.your_work.is_empty());
+    }
+
+    #[test]
+    fn format_summary_maps_all_fields() {
+        let output = StatusOutput {
+            repo: "legion".to_string(),
+            your_work: vec![StatusItem {
+                category: "TASKS".to_string(),
+                text: "3 tasks (...)".to_string(),
+                from: "legion".to_string(),
+                age: String::new(),
+            }],
+            team_needs: vec![
+                StatusItem {
+                    category: "REVIEW".to_string(),
+                    text: "PR #1".to_string(),
+                    from: "platform".to_string(),
+                    age: "1h".to_string(),
+                },
+                StatusItem {
+                    category: "QUESTION".to_string(),
+                    text: "how do we?".to_string(),
+                    from: "mail".to_string(),
+                    age: "2h".to_string(),
+                },
+            ],
+            what_changed: vec![StatusItem {
+                category: "UPDATE".to_string(),
+                text: "shipped X".to_string(),
+                from: "rafters".to_string(),
+                age: "30m".to_string(),
+            }],
+            active_task_count: 3,
+            blocked_task_count: 1,
+        };
+
+        let summary = format_summary(&output);
+        assert_eq!(summary.repo, "legion");
+        assert_eq!(summary.tasks, 3);
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(summary.team_needs, 2);
+        assert_eq!(summary.what_changed, 1);
     }
 
     fn get_posts(db: &Database) -> Vec<Reflection> {
