@@ -23,12 +23,33 @@ pub struct ExternalIssue {
 /// Discover work source plugin paths.
 /// Resolves a work source plugin from CLAUDE_PLUGIN_ROOT/worksources/.
 /// Set by Claude Code in hook context, or exported by bin/legion wrapper.
+///
+/// Fallback: if CLAUDE_PLUGIN_ROOT is not set (e.g. binary invoked directly
+/// from the plugin cache PATH), derive the plugin root from the binary's own
+/// location. When the binary sits at <plugin_root>/bin/legion, the grandparent
+/// directory is the plugin root.
 fn find_plugin(name: &str) -> Option<PathBuf> {
-    let plugin_root = std::env::var("CLAUDE_PLUGIN_ROOT").ok()?;
-    let path = PathBuf::from(&plugin_root).join("worksources").join(name);
-    if path.exists() {
-        return Some(path);
+    // Primary: env var set by wrapper or hook context
+    if let Ok(plugin_root) = std::env::var("CLAUDE_PLUGIN_ROOT") {
+        let path = PathBuf::from(&plugin_root).join("worksources").join(name);
+        if path.exists() {
+            return Some(path);
+        }
     }
+
+    // Fallback: derive from current executable location
+    // Binary at <plugin_root>/bin/legion -> plugin_root = grandparent
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(bin_dir) = exe.parent()
+        && bin_dir.file_name().and_then(|n| n.to_str()) == Some("bin")
+        && let Some(plugin_root) = bin_dir.parent()
+    {
+        let path = plugin_root.join("worksources").join(name);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
     None
 }
 
