@@ -1679,3 +1679,401 @@ fn kanban_with_source_url() {
         "expected source URL in output, got: {stdout}"
     );
 }
+
+// --- kanban view tests ---
+
+#[test]
+fn kanban_view_human_output() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "view me",
+            "--priority",
+            "high",
+            "--labels",
+            "backend",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "view", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "view failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&id), "card id in output");
+    assert!(stdout.contains("view me"), "title in output");
+    assert!(stdout.contains("high"), "priority in output");
+}
+
+#[test]
+fn kanban_view_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "json view",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "view", "--id", &id, "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "view --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("output should be valid JSON");
+    assert_eq!(parsed["id"].as_str().unwrap(), id, "id matches");
+    assert_eq!(parsed["from_repo"].as_str().unwrap(), "sean");
+}
+
+#[test]
+fn kanban_view_not_found_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Initialize DB
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "setup"])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "view",
+            "--id",
+            "00000000-0000-0000-0000-000000000000",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for missing card"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("card not found"),
+        "expected card not found message, got: {stderr}"
+    );
+}
+
+// --- kanban update tests ---
+
+#[test]
+fn kanban_update_text() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "original title",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "update",
+            "--id",
+            &id,
+            "--repo",
+            "sean",
+            "--text",
+            "updated title",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "update failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Should print the card id
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.trim() == id, "expected card id, got: {stdout}");
+
+    // Verify the title changed
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "view", "--id", &id, "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("valid JSON");
+    assert_eq!(parsed["text"].as_str().unwrap(), "updated title");
+}
+
+#[test]
+fn kanban_update_priority() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "prio test",
+            "--priority",
+            "low",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "update",
+            "--id",
+            &id,
+            "--repo",
+            "sean",
+            "--priority",
+            "critical",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "update failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "view", "--id", &id, "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("valid JSON");
+    assert_eq!(parsed["priority"].as_str().unwrap(), "critical");
+}
+
+#[test]
+fn kanban_update_add_labels_deduplicates() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "label test",
+            "--labels",
+            "backend,api",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "update",
+            "--id",
+            &id,
+            "--repo",
+            "sean",
+            "--add-labels",
+            "api,frontend",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "add-labels failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "view", "--id", &id, "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("valid JSON");
+    let labels_raw = parsed["labels"].as_str().unwrap_or("");
+    let label_parts: Vec<&str> = labels_raw.split(',').collect();
+    assert_eq!(
+        label_parts.iter().filter(|&&l| l == "api").count(),
+        1,
+        "api appears exactly once"
+    );
+    assert!(label_parts.contains(&"frontend"), "frontend added");
+    assert!(label_parts.contains(&"backend"), "backend preserved");
+}
+
+#[test]
+fn kanban_update_no_flags_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban", "create", "--from", "sean", "--to", "kelex", "--text", "no flags",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "update", "--id", &id, "--repo", "sean"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit when no fields provided"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no fields to update"),
+        "expected helpful message, got: {stderr}"
+    );
+}
+
+// --- kanban list --json tests ---
+
+#[test]
+fn kanban_list_json_emits_jsonl() {
+    let dir = tempfile::tempdir().unwrap();
+
+    legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "## Card Alpha",
+            "--labels",
+            "backend",
+        ])
+        .output()
+        .unwrap();
+    legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "Card Beta",
+        ])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "list", "--repo", "kelex", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "list --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "two lines for two cards");
+
+    for line in &lines {
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).expect("each line should be valid JSON");
+        assert!(parsed["id"].is_string(), "id present");
+        assert!(parsed["title"].is_string(), "title present");
+        assert!(parsed["status"].is_string(), "status present");
+        assert!(
+            !parsed.as_object().unwrap().contains_key("context"),
+            "no context in summary"
+        );
+    }
+
+    // Card Alpha should have heading stripped
+    let alpha_line = lines.iter().find(|&&l| l.contains("Card Alpha"));
+    assert!(
+        alpha_line.is_some(),
+        "Card Alpha (heading stripped) found in output"
+    );
+}
+
+#[test]
+fn kanban_list_json_labels_are_array() {
+    let dir = tempfile::tempdir().unwrap();
+
+    legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "labeled",
+            "--labels",
+            "backend,api",
+        ])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "list", "--repo", "kelex", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout.lines().next().expect("has output");
+    let parsed: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+    let labels = parsed["labels"].as_array().expect("labels is array");
+    assert!(labels.iter().any(|l| l.as_str() == Some("backend")));
+    assert!(labels.iter().any(|l| l.as_str() == Some("api")));
+}

@@ -1554,6 +1554,78 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Update mutable card fields by ID.
+    ///
+    /// Builds a SET clause only for fields that are Some, so callers can
+    /// update one field at a time without touching the others. Always
+    /// sets `updated_at` to now. Returns `CardNotFound` if the id does not
+    /// exist.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_card_fields(
+        &self,
+        id: &str,
+        text: Option<&str>,
+        context: Option<&str>,
+        problem: Option<&str>,
+        solution: Option<&str>,
+        acceptance: Option<&str>,
+        priority: Option<&str>,
+        labels: Option<&str>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut sets: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(v) = text {
+            sets.push(format!("text = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = context {
+            sets.push(format!("context = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = problem {
+            sets.push(format!("problem = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = solution {
+            sets.push(format!("solution = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = acceptance {
+            sets.push(format!("acceptance = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = priority {
+            sets.push(format!("priority = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = labels {
+            sets.push(format!("labels = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+
+        // updated_at is always set
+        sets.push(format!("updated_at = ?{}", params.len() + 1));
+        params.push(Box::new(now));
+
+        let id_pos = params.len() + 1;
+        params.push(Box::new(id.to_string()));
+
+        let sql = format!(
+            "UPDATE tasks SET {} WHERE id = ?{}",
+            sets.join(", "),
+            id_pos
+        );
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let rows = self.conn.execute(&sql, param_refs.as_slice())?;
+        if rows == 0 {
+            return Err(LegionError::CardNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     // --- Schedule CRUD ---
 
     /// Insert a new schedule. Validates the cron expression and time window, computes next_run.

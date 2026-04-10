@@ -510,6 +510,52 @@ enum KanbanAction {
         source_type: Option<String>,
     },
 
+    /// View a single card by ID
+    View {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+
+        /// Output as a single JSON object instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Update mutable fields on an existing card
+    Update {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+
+        /// Repository name (used as the audit agent)
+        #[arg(long)]
+        repo: String,
+
+        /// New title text
+        #[arg(long)]
+        text: Option<String>,
+
+        /// New body (markdown); re-parsed into problem/solution/acceptance sections
+        #[arg(long)]
+        body: Option<String>,
+
+        /// New priority: low, med, high, critical
+        #[arg(long, value_parser = ["low", "med", "high", "critical"])]
+        priority: Option<String>,
+
+        /// Replace labels with this comma-separated list
+        #[arg(long, conflicts_with_all = ["add_labels", "remove_labels"])]
+        labels: Option<String>,
+
+        /// Append comma-separated labels (deduplicated against existing)
+        #[arg(long, conflicts_with = "labels")]
+        add_labels: Option<String>,
+
+        /// Remove comma-separated labels
+        #[arg(long, conflicts_with = "labels")]
+        remove_labels: Option<String>,
+    },
+
     /// List cards for a repo
     List {
         /// Repository name
@@ -519,6 +565,10 @@ enum KanbanAction {
         /// Show outbound cards (created by this repo) instead of inbound
         #[arg(long)]
         from: bool,
+
+        /// Emit JSONL (one summary object per line) instead of human-readable text
+        #[arg(long)]
+        json: bool,
     },
 
     /// Accept a pending card (move to in-progress)
@@ -1632,18 +1682,77 @@ fn run() -> error::Result<()> {
                     )?;
                     println!("{id}");
                 }
-                KanbanAction::List { repo, from } => {
+                KanbanAction::View { id, json } => {
+                    let card = kanban::view_card(&database, &id).map_err(|e| {
+                        eprintln!("{e}");
+                        e
+                    })?;
+                    if json {
+                        println!("{}", kanban::format_card_json(&card)?);
+                    } else {
+                        print!("{}", kanban::format_card_view(&card));
+                    }
+                }
+                KanbanAction::Update {
+                    id,
+                    repo,
+                    text,
+                    body,
+                    priority,
+                    labels,
+                    add_labels,
+                    remove_labels,
+                } => {
+                    let any_set = text.is_some()
+                        || body.is_some()
+                        || priority.is_some()
+                        || labels.is_some()
+                        || add_labels.is_some()
+                        || remove_labels.is_some();
+                    if !any_set {
+                        eprintln!(
+                            "[legion] no fields to update: pass at least one of --text, --body, --priority, --labels, --add-labels, --remove-labels"
+                        );
+                        std::process::exit(1);
+                    }
+                    let params = kanban::CardUpdateParams {
+                        text,
+                        body,
+                        priority,
+                        labels,
+                        add_labels,
+                        remove_labels,
+                    };
+                    let card_id = kanban::update_card(&database, &id, &repo, &params)?;
+                    println!("{card_id}");
+                    audit(&db::AuditInput {
+                        agent: &repo,
+                        action: "update-card",
+                        target_type: "card",
+                        target_ref: &id,
+                        task_id: Some(&id),
+                        source_type: "legion",
+                        details: None,
+                        outcome: "success",
+                    });
+                }
+                KanbanAction::List { repo, from, json } => {
                     let direction = if from {
                         kanban::Direction::Outbound
                     } else {
                         kanban::Direction::Inbound
                     };
                     let cards = kanban::list_cards(&database, &repo, direction)?;
-                    let output = kanban::format_card_list(&cards, &repo, direction);
-                    if output.is_empty() {
-                        info!("[legion] no cards found");
-                    } else {
+                    if json {
+                        let output = kanban::format_card_list_json(&cards)?;
                         print!("{output}");
+                    } else {
+                        let output = kanban::format_card_list(&cards, &repo, direction);
+                        if output.is_empty() {
+                            info!("[legion] no cards found");
+                        } else {
+                            print!("{output}");
+                        }
                     }
                 }
                 KanbanAction::Accept { id } => {
