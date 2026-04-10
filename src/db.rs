@@ -761,6 +761,49 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Retrieve active bullpen posts unread by the given reader repo and
+    /// atomically mark them as read. Posts created during the read are NOT
+    /// marked, so they remain unread on the next call.
+    ///
+    /// Used by the channel backlog fetch so agents only see each post once.
+    /// Race-safe: uses a single timestamp for both the SELECT filter upper
+    /// bound and the mark_read UPDATE, inside a transaction.
+    pub fn get_and_mark_unread_board_posts(&self, reader_repo: &str) -> Result<Vec<Reflection>> {
+        let now = Utc::now().to_rfc3339();
+
+        let txn = self.conn.unchecked_transaction()?;
+
+        let mut stmt = txn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections \
+             WHERE audience = 'team' AND archived_at IS NULL \
+             AND created_at > COALESCE( \
+                 (SELECT last_read_at FROM board_reads WHERE reader_repo = ?1), \
+                 '' \
+             ) \
+             AND created_at <= ?2 \
+             ORDER BY created_at DESC",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![reader_repo, &now], map_reflection_row)?;
+        let posts: Vec<Reflection> = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)?;
+
+        drop(stmt);
+
+        txn.execute(
+            "INSERT INTO board_reads (reader_repo, last_read_at) VALUES (?1, ?2) \
+             ON CONFLICT(reader_repo) DO UPDATE SET last_read_at = excluded.last_read_at \
+             WHERE excluded.last_read_at > board_reads.last_read_at",
+            rusqlite::params![reader_repo, &now],
+        )?;
+
+        txn.commit()?;
+
+        Ok(posts)
+    }
+
     /// Retrieve archived bullpen posts, ordered newest first.
     pub fn get_archived_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
@@ -2092,6 +2135,57 @@ mod tests {
         db.insert_reflection("rafters", "old post", "team").unwrap();
         db.mark_board_read("kelex").unwrap();
         assert_eq!(db.get_unread_count("kelex").unwrap(), 0);
+    }
+
+    #[test]
+    fn get_and_mark_unread_delivers_once() {
+        let db = test_db();
+        db.insert_reflection("rafters", "post 1", "team").unwrap();
+        db.insert_reflection("kelex", "post 2", "team").unwrap();
+
+        // First call delivers both posts.
+        let first = db.get_and_mark_unread_board_posts("legion").unwrap();
+        assert_eq!(first.len(), 2);
+
+        // Second call delivers nothing -- they were marked read.
+        let second = db.get_and_mark_unread_board_posts("legion").unwrap();
+        assert!(
+            second.is_empty(),
+            "expected empty on second call, got {}",
+            second.len()
+        );
+    }
+
+    #[test]
+    fn get_and_mark_unread_delivers_new_posts_after_mark() {
+        let db = test_db();
+        db.insert_reflection("rafters", "first", "team").unwrap();
+
+        // Read the first post -- marks as read.
+        let first = db.get_and_mark_unread_board_posts("legion").unwrap();
+        assert_eq!(first.len(), 1);
+
+        // New post arrives after the read.
+        db.insert_reflection("kelex", "second", "team").unwrap();
+
+        // Second call delivers only the new post.
+        let second = db.get_and_mark_unread_board_posts("legion").unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].text, "second");
+    }
+
+    #[test]
+    fn get_and_mark_unread_is_per_reader() {
+        let db = test_db();
+        db.insert_reflection("rafters", "post", "team").unwrap();
+
+        // legion reads -- marked for legion only.
+        let legion_posts = db.get_and_mark_unread_board_posts("legion").unwrap();
+        assert_eq!(legion_posts.len(), 1);
+
+        // kelex still sees it as unread.
+        let kelex_posts = db.get_and_mark_unread_board_posts("kelex").unwrap();
+        assert_eq!(kelex_posts.len(), 1);
     }
 
     #[test]
