@@ -39,10 +39,10 @@ pub struct ExternalIssue {
 /// 2. Alongside the current executable, for dev checkouts where the binary
 ///    lives in `plugin/bin/` next to `worksources/`.
 /// 3. Glob `~/.claude/plugins/cache/*/legion/*/worksources/<name>` and pick
-///    the highest version that has the worksource. This is the fallback
-///    that survives Claude Code 2.1.97 setting CLAUDE_PLUGIN_ROOT to empty
-///    string in Bash subprocess context -- the plugin cache is always in a
-///    predictable location regardless of what the env var says.
+///    the highest version that has the worksource. The plugin cache path is
+///    predictable regardless of env-var state, so this fallback survives
+///    upstream versions that pass an empty `CLAUDE_PLUGIN_ROOT` under Bash
+///    subprocess context.
 fn find_plugin(name: &str) -> Option<PathBuf> {
     if let Ok(cache) = plugin_cache().lock()
         && let Some(cached) = cache.get(name)
@@ -92,16 +92,25 @@ fn resolve_plugin(name: &str) -> Option<PathBuf> {
 
 /// Scan the Claude Code plugin cache for the highest version of legion that
 /// ships the requested worksource. Returns None if no cached version has it.
+///
+/// Defaults to `~/.claude/plugins/cache`; override via [`find_in_cache_root`]
+/// for tests.
 fn find_in_plugin_cache(name: &str) -> Option<PathBuf> {
     let cache_root = dirs::home_dir()?
         .join(".claude")
         .join("plugins")
         .join("cache");
+    find_in_cache_root(&cache_root, name)
+}
 
+/// Testable inner: scan a specific cache root directory for the highest
+/// version of legion that ships `name`. Separated from `find_in_plugin_cache`
+/// so tests can point at a tempdir.
+fn find_in_cache_root(cache_root: &Path, name: &str) -> Option<PathBuf> {
     let mut best: Option<(Vec<u32>, PathBuf)> = None;
 
     // Iterate marketplaces under cache_root.
-    for marketplace in std::fs::read_dir(&cache_root).ok()?.flatten() {
+    for marketplace in std::fs::read_dir(cache_root).ok()?.flatten() {
         let legion_dir = marketplace.path().join("legion");
         let Ok(versions) = std::fs::read_dir(&legion_dir) else {
             continue;
@@ -587,5 +596,67 @@ mod tests {
         assert!(parse_semver("1.0.0") > parse_semver("0.99.99"));
         assert_eq!(parse_semver("0.4.7"), vec![0, 4, 7]);
         assert_eq!(parse_semver("garbage"), vec![0]);
+    }
+
+    /// Seed a fake plugin cache layout at `root`: `<marketplace>/legion/<version>/worksources/<name>`.
+    fn seed_cache(root: &Path, marketplace: &str, version: &str, worksources: &[&str]) {
+        let version_dir = root
+            .join(marketplace)
+            .join("legion")
+            .join(version)
+            .join("worksources");
+        std::fs::create_dir_all(&version_dir).expect("create cache dirs");
+        for name in worksources {
+            std::fs::write(version_dir.join(name), "#!/bin/sh\n").expect("write worksource");
+        }
+    }
+
+    #[test]
+    fn find_in_cache_root_returns_none_when_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(find_in_cache_root(tmp.path(), "github").is_none());
+    }
+
+    #[test]
+    fn find_in_cache_root_picks_highest_version() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_cache(tmp.path(), "legion", "0.4.3", &["github"]);
+        seed_cache(tmp.path(), "legion", "0.5.0", &["github"]);
+        seed_cache(tmp.path(), "legion", "0.4.7", &["github"]);
+
+        let found = find_in_cache_root(tmp.path(), "github").expect("should find github");
+        assert!(
+            found.to_string_lossy().contains("0.5.0"),
+            "expected 0.5.0, got {}",
+            found.display()
+        );
+    }
+
+    #[test]
+    fn find_in_cache_root_skips_versions_without_worksource() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // 0.5.0 has no github worksource, 0.4.3 does -- should return 0.4.3
+        seed_cache(tmp.path(), "legion", "0.5.0", &[]);
+        seed_cache(tmp.path(), "legion", "0.4.3", &["github"]);
+
+        let found = find_in_cache_root(tmp.path(), "github").expect("should find github");
+        assert!(found.to_string_lossy().contains("0.4.3"));
+    }
+
+    #[test]
+    fn find_in_cache_root_handles_multiple_marketplaces() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_cache(tmp.path(), "marketplace-a", "0.4.3", &["github"]);
+        seed_cache(tmp.path(), "marketplace-b", "0.5.0", &["github"]);
+
+        let found = find_in_cache_root(tmp.path(), "github").expect("should find github");
+        assert!(found.to_string_lossy().contains("0.5.0"));
+    }
+
+    #[test]
+    fn find_in_cache_root_returns_none_when_worksource_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_cache(tmp.path(), "legion", "0.5.0", &["linear"]);
+        assert!(find_in_cache_root(tmp.path(), "github").is_none());
     }
 }

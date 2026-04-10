@@ -602,6 +602,48 @@ mod tests {
         assert!(output.your_work.is_empty());
     }
 
+    #[test]
+    fn format_summary_maps_all_fields() {
+        let output = StatusOutput {
+            repo: "legion".to_string(),
+            your_work: vec![StatusItem {
+                category: "TASKS".to_string(),
+                text: "3 tasks (...)".to_string(),
+                from: "legion".to_string(),
+                age: String::new(),
+            }],
+            team_needs: vec![
+                StatusItem {
+                    category: "REVIEW".to_string(),
+                    text: "PR #1".to_string(),
+                    from: "platform".to_string(),
+                    age: "1h".to_string(),
+                },
+                StatusItem {
+                    category: "QUESTION".to_string(),
+                    text: "how do we?".to_string(),
+                    from: "mail".to_string(),
+                    age: "2h".to_string(),
+                },
+            ],
+            what_changed: vec![StatusItem {
+                category: "UPDATE".to_string(),
+                text: "shipped X".to_string(),
+                from: "rafters".to_string(),
+                age: "30m".to_string(),
+            }],
+            active_task_count: 3,
+            blocked_task_count: 1,
+        };
+
+        let summary = format_summary(&output);
+        assert_eq!(summary.repo, "legion");
+        assert_eq!(summary.tasks, 3);
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(summary.team_needs, 2);
+        assert_eq!(summary.what_changed, 1);
+    }
+
     fn get_posts(db: &Database) -> Vec<Reflection> {
         db.get_recent_board_posts(24)
             .expect("get_recent_board_posts")

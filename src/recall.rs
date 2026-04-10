@@ -318,7 +318,8 @@ pub fn consult_bm25(
 /// text is truncated to the first `n` characters (UTF-8 safe) via
 /// [`card_parse::truncate_chars`], keeping session-start and PreToolUse
 /// injections small. When preview is None, the reflection text is borrowed
-/// in place -- no per-reflection allocation.
+/// rather than cloned (the per-line `format!` still allocates the output
+/// chunk).
 pub fn format_for_hook(result: &RecallResult, preview: Option<usize>) -> String {
     if result.reflections.is_empty() {
         return String::new();

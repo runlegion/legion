@@ -1,13 +1,18 @@
 #!/bin/bash
 # Legion SessionStart hook: inject recall hits + compact status counts.
 #
-# Philosophy: the session start is for orientation, not documentation. Everything
-# that can live in skills or the CLAUDE.md plugin instruction lives there.
-# This hook only injects what requires a DB read: recent reflections and a
-# one-line status summary.
+# Only injects what requires a DB read: recent reflections and a one-line
+# status summary. Everything else (instructions, command reference) lives
+# in the plugin's own documentation surfaces.
 #
 # Also warms the Tantivy index in the background so the first PreToolUse
-# recall-first.sh hit is fast (cold: 2.2s, warm: ~170ms).
+# recall-first.sh hit is fast (cold ~2.2s, warm ~170ms).
+#
+# Error handling: legion invocations append stderr to /tmp/legion-hook-errors.log
+# instead of dropping it so a silently-broken legion (missing binary, bad
+# migration, DB schema mismatch) leaves a breadcrumb. The hook still exits 0
+# and degrades to "no context" so Claude Code does not block on a legion bug.
+LOG=/tmp/legion-hook-errors.log
 
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
@@ -35,14 +40,14 @@ touch "/tmp/legion-work-${CWD_HASH}"
 BRANCH=$(cd "$CWD" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 OUTPUT=""
 if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ]; then
-  OUTPUT=$(legion recall --repo "$REPO" --context "$BRANCH" --limit 2 --preview 240 2>/dev/null)
+  OUTPUT=$(legion recall --repo "$REPO" --context "$BRANCH" --limit 2 --preview 240 2>>"$LOG")
 fi
 if [ -z "$OUTPUT" ]; then
-  OUTPUT=$(legion recall --repo "$REPO" --latest --limit 2 --preview 240 2>/dev/null)
+  OUTPUT=$(legion recall --repo "$REPO" --latest --limit 2 --preview 240 2>>"$LOG")
 fi
 
 # Compact status counts from the JSON summary instead of full status text
-STATUS_JSON=$(legion status --repo "$REPO" --json 2>/dev/null)
+STATUS_JSON=$(legion status --repo "$REPO" --json 2>>"$LOG")
 if [ -n "$STATUS_JSON" ]; then
   TASKS=$(echo "$STATUS_JSON" | jq -r '.tasks // 0')
   BLOCKED=$(echo "$STATUS_JSON" | jq -r '.blocked // 0')

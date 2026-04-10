@@ -5,10 +5,14 @@
 # Fires on Grep, Glob, WebFetch, WebSearch. The agent may decide not to run
 # the search after seeing the reflections -- that is the point.
 #
-# Phase PT: upgrades the v0.4.0 nudge-only version (which only printed "check
-# legion first") to actually execute legion recall on the tool's query.
-# Latency: ~170ms warm, ~2.2s cold. session-start.sh warms the index so the
-# first tool call in a session pays a reasonable cost.
+# Relies on session-start.sh having warmed the Tantivy index; cold ~2.2s,
+# warm ~170ms per call.
+#
+# Error handling: legion invocations append stderr to /tmp/legion-hook-errors.log
+# instead of dropping it, so a silently-broken legion (missing binary, bad
+# migration, DB schema mismatch) leaves a breadcrumb. The hook still exits 0
+# on legion failure so the tool call proceeds as if nothing was injected.
+LOG=/tmp/legion-hook-errors.log
 
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
@@ -46,7 +50,7 @@ if [ -z "$QUERY" ] || [ ${#QUERY} -lt 4 ]; then
 fi
 
 # Run recall. Short limit + preview truncation keep injected context compact.
-HITS=$(legion recall --repo "$REPO" --context "$QUERY" --limit 3 --preview 200 2>/dev/null)
+HITS=$(legion recall --repo "$REPO" --context "$QUERY" --limit 3 --preview 200 2>>"$LOG")
 
 # No hits -- don't inject anything, let the tool fire as normal
 if [ -z "$HITS" ]; then
