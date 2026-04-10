@@ -2327,3 +2327,262 @@ fn usage_no_sessions_prints_no_sessions_found() {
         "expected 'no sessions found', got: {stdout}"
     );
 }
+
+// --- Card A: legion similar ---
+
+#[test]
+fn similar_nonexistent_id_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["similar", "--id", "00000000-0000-0000-0000-000000000000"])
+        .output()
+        .unwrap();
+
+    // Exits non-zero (either "reflection not found" or "embed model unavailable")
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for nonexistent id"
+    );
+}
+
+#[test]
+fn similar_json_flag_accepted() {
+    // Verify the --json flag parses without panic. Exits non-zero because no model/id,
+    // but argument parsing must succeed.
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "similar",
+            "--id",
+            "00000000-0000-0000-0000-000000000000",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    // Should exit non-zero, not panic
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "should not panic, got: {stderr}"
+    );
+}
+
+// --- Card B: recall --cosine-only and --min-score ---
+
+#[test]
+fn recall_cosine_only_flag_accepted_by_parser() {
+    // When embed model is unavailable, --cosine-only exits non-zero with a clear error.
+    // This verifies the flag is accepted by the parser and the handler runs.
+    let dir = tempfile::tempdir().unwrap();
+
+    // Reflect something first so there's data
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "some reflection"])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "recall",
+            "--repo",
+            "test",
+            "--context",
+            "some",
+            "--cosine-only",
+        ])
+        .output()
+        .unwrap();
+
+    // Either succeeds (model available) or fails with embedding error (not a parse error)
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "flag should parse correctly, got: {stderr}"
+    );
+}
+
+#[test]
+fn recall_min_score_flag_accepted_by_parser() {
+    let dir = tempfile::tempdir().unwrap();
+
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "min score test"])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "recall",
+            "--repo",
+            "test",
+            "--context",
+            "min score",
+            "--min-score",
+            "0.5",
+        ])
+        .output()
+        .unwrap();
+
+    // Should either succeed or fail on embedding, not on arg parsing
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "flag should parse correctly, got: {stderr}"
+    );
+}
+
+// --- Card C: reflect --dedupe-mode and --force ---
+
+#[test]
+fn reflect_force_flag_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "some text",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "reflect --force should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn reflect_dedupe_mode_off_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "some text",
+            "--dedupe-mode",
+            "off",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "reflect --dedupe-mode off should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn reflect_dedupe_mode_warn_stores_and_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Store first; second is a duplicate but with warn mode should still succeed.
+    let text = "near duplicate reflection text for testing";
+
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", text])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            text,
+            "--dedupe-mode",
+            "warn",
+        ])
+        .output()
+        .unwrap();
+
+    // In warn mode: always exits zero (embed model may or may not be available).
+    assert!(
+        out.status.success(),
+        "reflect --dedupe-mode warn should exit zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Requires embed model -- tests that strict mode blocks duplicates.
+#[test]
+#[ignore]
+fn reflect_dedupe_mode_strict_blocks_duplicate() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = "strict dedup test reflection content";
+
+    // First store succeeds
+    let first = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", text])
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+
+    // Second store with strict mode should fail (near-duplicate)
+    let second = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            text,
+            "--dedupe-mode",
+            "strict",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !second.status.success(),
+        "strict mode should refuse identical reflection"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("near-duplicate"),
+        "error message should mention near-duplicate, got: {stderr}"
+    );
+}
+
+/// Requires embed model -- tests that --force bypasses strict dedupe.
+#[test]
+#[ignore]
+fn reflect_force_bypasses_strict_dedupe() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = "force bypass test reflection";
+
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", text])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            text,
+            "--dedupe-mode",
+            "strict",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "--force should bypass strict mode: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

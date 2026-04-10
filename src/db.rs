@@ -17,6 +17,11 @@ pub(crate) fn format_date(iso_timestamp: &str) -> &str {
     }
 }
 
+/// A reflection row returned with its embedding blob for dedupe checks.
+///
+/// Tuple fields: (id, embedding_bytes, text, created_at).
+pub type ReflectionWithEmbedding = (String, Vec<u8>, String, String);
+
 /// Which timestamp column to set during a card status update.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -568,7 +573,6 @@ impl Database {
     }
 
     /// Retrieve the embedding BLOB for a reflection, if it exists.
-    #[allow(dead_code)]
     pub fn get_embedding(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let mut stmt = self
             .conn
@@ -617,6 +621,33 @@ impl Database {
             let id: String = row.get(0)?;
             let text: String = row.get(1)?;
             Ok((id, text))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Retrieve the most recent reflections with embeddings for a repo.
+    ///
+    /// Returns (id, embedding_blob, text, created_at) tuples, ordered newest
+    /// first, for near-duplicate detection on `legion reflect`. Only rows that
+    /// have a non-NULL embedding are returned, so reflections that predate the
+    /// embed backfill are naturally skipped.
+    pub fn get_recent_reflections_with_embeddings(
+        &self,
+        repo: &str,
+        limit: usize,
+    ) -> Result<Vec<ReflectionWithEmbedding>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, embedding, text, created_at FROM reflections \
+             WHERE repo = ?1 AND embedding IS NOT NULL \
+             ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![repo, limit], |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            let text: String = row.get(2)?;
+            let created_at: String = row.get(3)?;
+            Ok((id, blob, text, created_at))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
@@ -2817,5 +2848,67 @@ mod tests {
         }
         let entries = db.query_audit_log(None, None, 3).unwrap();
         assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn get_recent_reflections_with_embeddings_returns_only_embedded() {
+        let db = test_db();
+        // Insert two reflections; only give one an embedding.
+        let r1 = db
+            .insert_reflection("kelex", "has embedding", "self")
+            .unwrap();
+        let _r2 = db
+            .insert_reflection("kelex", "no embedding", "self")
+            .unwrap();
+
+        let blob = vec![0u8; 256 * 4]; // 256 f32 zeros
+        db.store_embedding(&r1.id, &blob).unwrap();
+
+        let results = db
+            .get_recent_reflections_with_embeddings("kelex", 10)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "only the embedded reflection should appear"
+        );
+        assert_eq!(results[0].0, r1.id);
+    }
+
+    #[test]
+    fn get_recent_reflections_with_embeddings_respects_repo_scope() {
+        let db = test_db();
+        let r_kelex = db.insert_reflection("kelex", "kelex text", "self").unwrap();
+        let r_rafters = db
+            .insert_reflection("rafters", "rafters text", "self")
+            .unwrap();
+
+        let blob = vec![0u8; 256 * 4];
+        db.store_embedding(&r_kelex.id, &blob).unwrap();
+        db.store_embedding(&r_rafters.id, &blob).unwrap();
+
+        let kelex_results = db
+            .get_recent_reflections_with_embeddings("kelex", 10)
+            .unwrap();
+        assert_eq!(kelex_results.len(), 1);
+        assert_eq!(kelex_results[0].0, r_kelex.id);
+    }
+
+    #[test]
+    fn get_recent_reflections_with_embeddings_respects_limit() {
+        let db = test_db();
+        let blob = vec![0u8; 256 * 4];
+
+        for i in 0..5 {
+            let r = db
+                .insert_reflection("legion", &format!("reflection {i}"), "self")
+                .unwrap();
+            db.store_embedding(&r.id, &blob).unwrap();
+        }
+
+        let results = db
+            .get_recent_reflections_with_embeddings("legion", 3)
+            .unwrap();
+        assert_eq!(results.len(), 3);
     }
 }

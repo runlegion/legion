@@ -54,6 +54,18 @@ struct Cli {
     command: Commands,
 }
 
+/// Controls near-duplicate detection behavior on `legion reflect`.
+#[derive(clap::ValueEnum, Clone, Debug, Default)]
+enum DedupeMode {
+    /// Warn on stderr when a near-duplicate is found, but still store the reflection.
+    #[default]
+    Warn,
+    /// Refuse to store the reflection and exit non-zero when a near-duplicate is found.
+    Strict,
+    /// Skip the near-duplicate check entirely.
+    Off,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Store a reflection from a completed session
@@ -81,6 +93,14 @@ enum Commands {
         /// Link to a parent reflection ID to form a learning chain
         #[arg(long)]
         follows: Option<String>,
+
+        /// Skip near-duplicate detection regardless of --dedupe-mode
+        #[arg(long)]
+        force: bool,
+
+        /// Near-duplicate detection mode: warn (default), strict (block), or off (skip)
+        #[arg(long, value_enum, default_value_t = DedupeMode::Warn)]
+        dedupe_mode: DedupeMode,
     },
 
     /// Recall relevant reflections for the current context
@@ -105,6 +125,41 @@ enum Commands {
         /// hooks to keep injected context compact.
         #[arg(long)]
         preview: Option<usize>,
+
+        /// Skip BM25; rank purely by cosine similarity (requires embed model)
+        #[arg(long, conflicts_with = "latest")]
+        cosine_only: bool,
+
+        /// Filter out results with a final score below this threshold
+        #[arg(long)]
+        min_score: Option<f32>,
+    },
+
+    /// Find reflections similar to a given reflection by cosine similarity
+    Similar {
+        /// Reflection ID to find neighbors for
+        #[arg(long)]
+        id: String,
+
+        /// Maximum number of neighbors to return
+        #[arg(long, default_value = "5")]
+        limit: usize,
+
+        /// Include reflections from all repos (default: same repo as the source)
+        #[arg(long)]
+        cross_repo: bool,
+
+        /// Filter out results with a score below this threshold
+        #[arg(long)]
+        min_score: Option<f32>,
+
+        /// Truncate reflection text to this many characters in output
+        #[arg(long)]
+        preview: Option<usize>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Search reflections across all repos for cross-agent consultation
@@ -1175,6 +1230,62 @@ fn backfill_embeddings(db: &db::Database, model: &embed::EmbedModel) -> error::R
     Ok(count)
 }
 
+/// Check new reflection text for near-duplicates in the same repo.
+///
+/// Computes the embedding of `text`, then compares it against the 100 most
+/// recent reflections with embeddings for `repo`. When cosine similarity
+/// exceeds 0.95, warns to stderr. In `Strict` mode the function returns an
+/// error so the caller aborts before storing. In `Warn` mode it returns Ok
+/// and the reflection is stored anyway.
+fn run_dedupe_check(
+    db: &db::Database,
+    model: &embed::EmbedModel,
+    repo: &str,
+    text: &str,
+    mode: &DedupeMode,
+) -> error::Result<()> {
+    const DEDUPE_THRESHOLD: f32 = 0.95;
+    const DEDUPE_LOOKBACK: usize = 100;
+
+    let new_emb = match model.encode_one(text) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[legion] warning: dedupe check skipped (embed failed): {e}");
+            return Ok(());
+        }
+    };
+
+    let recent = db.get_recent_reflections_with_embeddings(repo, DEDUPE_LOOKBACK)?;
+
+    for (id, blob, existing_text, created_at) in &recent {
+        let existing_emb = embed::embedding_from_bytes(blob);
+        let sim = embed::cosine_similarity(&new_emb, &existing_emb);
+
+        if sim >= DEDUPE_THRESHOLD {
+            let preview: String = existing_text.chars().take(80).collect();
+            let date = db::format_date(created_at);
+            eprintln!(
+                "[legion] warning: this reflection is {sim:.2} cosine to reflection {id} \
+                 (created {date}): \"{preview}\". \
+                 stored anyway (set --dedupe-mode strict to refuse). \
+                 Consider `legion reflect --follows {id}` to extend."
+            );
+
+            if matches!(mode, DedupeMode::Strict) {
+                return Err(error::LegionError::Embedding(format!(
+                    "near-duplicate detected (cosine {sim:.2} >= {DEDUPE_THRESHOLD}) \
+                     with reflection {id} -- use --force to store anyway"
+                )));
+            }
+
+            // In Warn mode we warn once for the closest match and stop checking.
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 /// Raise the soft file-descriptor limit to the hard limit.
 ///
 /// macOS ships a low soft limit (often 2560) which Tantivy can exhaust
@@ -1213,10 +1324,27 @@ fn run() -> error::Result<()> {
             domain,
             tags,
             follows,
+            force,
+            dedupe_mode,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
+
+            // Near-duplicate detection before storing (Card C).
+            // Skip when --force or --dedupe-mode off.
+            let skip_dedupe = force || matches!(dedupe_mode, DedupeMode::Off);
+            if !skip_dedupe
+                && let Some(ref t) = text
+                && let Some(model) = try_load_embed_model()
+            {
+                // Compound repos (comma-separated) each get their own check.
+                for r in &repo {
+                    run_dedupe_check(&database, &model, r, t, &dedupe_mode)?;
+                }
+                // If model is unavailable, skip dedupe silently (best-effort).
+            }
+
             let meta = db::ReflectionMeta {
                 domain,
                 tags,
@@ -1249,12 +1377,22 @@ fn run() -> error::Result<()> {
             limit,
             latest,
             preview,
+            cosine_only,
+            min_score,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
 
-            let result = if latest {
+            let mut result = if latest {
                 recall::recall_latest(&database, &repo, limit)?
+            } else if cosine_only {
+                // --cosine-only requires the embed model; error if unavailable.
+                let model = embed::EmbedModel::load().map_err(|e| {
+                    error::LegionError::Embedding(format!(
+                        "--cosine-only requires embedding model: {e}"
+                    ))
+                })?;
+                recall::recall_cosine_only(&database, &model, &repo, &context, limit, min_score)?
             } else {
                 let index = search::SearchIndex::open(&base.join("index"))?;
                 // Try hybrid (BM25 + cosine) recall, fall back to BM25-only
@@ -1265,9 +1403,39 @@ fn run() -> error::Result<()> {
                     None => recall::recall_bm25(&database, &index, &repo, &context, limit)?,
                 }
             };
+            // Apply min-score filter on hybrid/latest paths (cosine-only applies it inline).
+            if !cosine_only && let Some(threshold) = min_score {
+                recall::filter_by_min_score(&mut result, threshold);
+            }
             let output = recall::format_for_hook(&result, preview);
             if !output.is_empty() {
                 print!("{output}");
+            }
+        }
+        Commands::Similar {
+            id,
+            limit,
+            cross_repo,
+            min_score,
+            preview,
+            json,
+        } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            // Validate the embed model is available; similar needs embeddings to work.
+            embed::EmbedModel::load().map_err(|e| {
+                error::LegionError::Embedding(format!(
+                    "legion similar requires embedding model: {e}"
+                ))
+            })?;
+            let result = recall::find_similar_by_id(&database, &id, limit, cross_repo, min_score)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                let output = recall::format_for_hook(&result, preview);
+                if !output.is_empty() {
+                    print!("{output}");
+                }
             }
         }
         Commands::Consult { context, limit } => {
