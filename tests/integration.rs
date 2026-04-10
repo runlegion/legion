@@ -2151,12 +2151,18 @@ fn usage_assistant_event(
     )
 }
 
-/// A variant of `legion_cmd` that also overrides HOME so the usage command
-/// reads sessions from the tempdir instead of the real ~/.claude/projects/.
+/// A variant of `legion_cmd` that also overrides the home directory so the
+/// usage command reads sessions from the tempdir instead of the real
+/// `~/.claude/projects/`.
+///
+/// `dirs::home_dir()` on Windows consults `USERPROFILE` (not `HOME`), so the
+/// override must set both env vars. On Unix `HOME` wins; on Windows
+/// `USERPROFILE` wins; setting both lets the same test pass on every platform.
 fn legion_cmd_with_home(data_dir: &std::path::Path, home_dir: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_legion"));
     cmd.env("LEGION_DATA_DIR", data_dir);
     cmd.env("HOME", home_dir);
+    cmd.env("USERPROFILE", home_dir);
     cmd
 }
 
