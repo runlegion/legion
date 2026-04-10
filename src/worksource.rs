@@ -67,7 +67,10 @@ fn find_plugin(name: &str) -> Option<PathBuf> {
 /// ships the requested worksource. Returns None if no cached version has it.
 fn find_in_plugin_cache(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    let cache_root = PathBuf::from(home).join(".claude").join("plugins").join("cache");
+    let cache_root = PathBuf::from(home)
+        .join(".claude")
+        .join("plugins")
+        .join("cache");
 
     let mut best: Option<(Vec<u32>, PathBuf)> = None;
 
