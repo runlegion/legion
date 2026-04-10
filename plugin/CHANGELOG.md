@@ -1,5 +1,39 @@
 # Legion Changelog
 
+## 0.6.1
+
+### Phase D: Channel + Watch + MCP unified daemon
+
+Ports `plugin/channel/*.ts` (TypeScript + Bun) to three tokio tasks in one Rust process under a new `legion daemon` subcommand. Kills the Bun runtime dependency entirely. Closes #200.
+
+### Features
+- **`legion daemon` subcommand**: one process hosts the channel (SSE pub/sub + HTTP endpoints at `/api/feed`, `/api/tasks`, `/api/post`, `/sse`), an optional MCP stdio server (`legion daemon --mcp`), and the watch poll loop that was previously a separate `legion watch` process
+- **`src/channel.rs`** (~532 lines): SSE broadcast channel, HTTP endpoints matching the legacy TS JSON shapes byte-for-byte so existing consumers (dashboard, sse-client, any external tooling) continue to work through the transition. Opens DB once per SSE subscriber lifetime and queries only on broadcast notifications, not on every tick.
+- **`src/mcp.rs`** (~700 lines): hand-rolled JSON-RPC 2.0 stdio server. Implements `initialize`, `tools/list`, `tools/call` per MCP 2024-11-05 spec. Four legion tools: `legion_post`, `legion_reply`, `legion_signal`, `legion_task_respond`. Each handler calls existing Rust primitives (`board::post_from_text_with_meta`, `sig::*`, `task::*`) instead of re-implementing. Bounded stdin buffer (1 MB per line) to prevent resource exhaustion. UTF-8 safe response truncation.
+- **`src/daemon.rs`**: task orchestration with shared `Arc<Database>`. Watch task holds a `watch::PidLockGuard` for RAII cleanup on SIGINT/abort. Graceful shutdown via `select!` on Ctrl+C + SIGTERM (with logged fallback if signal handler install fails instead of panicking).
+- **New error variant**: `LegionError::McpInvalidArgument(String)` replaces the `LegionError::Io` abuse that was previously used for MCP argument validation errors.
+
+### Deleted
+- `plugin/channel/index.ts`, `sse-client.ts`, `event-bridge.ts`, `instructions.ts`, `types.ts`, `tools.ts`, `fakechat.ts`
+- `plugin/channel/package.json`, `bun.lock`, `tsconfig.json`, `node_modules/`
+- `plugin/bin/legion-channel` (Bun dispatcher wrapper)
+- Bun references from `plugin/hooks/session-start.sh` and `plugin/hooks/setup-binary.sh`
+
+### Bug Fixes (from simplify review of the port)
+- **`truncate` UTF-8 safety**: byte-slicing replaced with `char_indices` iteration. Previously panicked on multibyte content, which is common in agent-generated text.
+- **Watch PID lock leak on SIGINT**: `run_watch_task` now holds a `PidLockGuard` whose `Drop` impl releases the lock. Previously `watch_handle.abort()` orphaned the PID file, blocking the next daemon start.
+- **Silent `"unknown"` repo fallback in MCP handlers**: removed. Required fields now return `McpInvalidArgument` errors matching the tool input schema contract.
+- **`build_feed_json` silent failures**: return type changed from `Result<_, ()>` to `Result<_, LegionError>`. DB and serde errors are now propagated and logged instead of swallowed.
+- **`open_db` / `open_index` error logging**: errors are now logged server-side before being converted to a generic 500 response (avoids leaking internals while preserving debuggability).
+- **Dead code removed**: `is_relevant_backlog` + `starts_with_mention` in channel.rs (6 tests + 30 LOC) had `#[allow(dead_code)]` and a comment claiming MCP backlog delivery usage that never existed.
+- **`build_app` passthrough deleted**: was a one-line function with a misleading "merge routers" comment that didn't do any merging.
+- **`shutdown_signal` no longer panics**: `.expect()` on Ctrl+C / SIGTERM handler install replaced with logged fallback.
+
+### Follow-up cards filed from the simplify review
+- `019d7991-2eab` HIGH: daemon does not load the embedding model, so daemon-side posts (via `api_post` or MCP tools) land with NULL embeddings, degrading hybrid recall for them. Fix is non-trivial (threading `Arc<Option<EmbedModel>>` through ChannelState + MCP context).
+- `019d7991-2eb4` MED: `FeedItem` / `build_feed_json` / `json_error` / `open_db` / `open_index` duplicated between `channel.rs` and `serve.rs`. Extract shared helpers.
+- `019d7991-2ebc` MED: `daemon::run_watch_task` duplicates `watch::run` with logic drift already visible. Refactor to one shared implementation.
+
 ## 0.6.0
 
 ### Features
