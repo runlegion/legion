@@ -267,6 +267,35 @@ impl Database {
         Ok(names.iter().any(|n| n == column))
     }
 
+    /// Parse context into structured fields for cards that have context but no parsed data.
+    fn backfill_parsed_fields(conn: &Connection) -> Result<()> {
+        let mut stmt = conn.prepare(
+            "SELECT id, context FROM tasks WHERE context IS NOT NULL AND problem IS NULL",
+        )?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)?;
+
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        for (id, context) in &rows {
+            let parsed = crate::card_parse::parse_issue_body(context);
+            let acceptance = if parsed.acceptance.is_empty() {
+                None
+            } else {
+                Some(parsed.acceptance.join("\n"))
+            };
+            conn.execute(
+                "UPDATE tasks SET problem = ?1, solution = ?2, acceptance = ?3 WHERE id = ?4",
+                rusqlite::params![parsed.problem, parsed.solution, acceptance, id],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Create the reflections table, indexes, and supporting tables.
     ///
     /// Uses `has_column` checks to skip already-applied migrations, so
@@ -428,6 +457,15 @@ impl Database {
         if !Self::has_column(conn, "tasks", "completed_at")? {
             conn.execute_batch("ALTER TABLE tasks ADD COLUMN completed_at TEXT")?;
         }
+
+        // Structured card fields parsed from issue body context.
+        if !Self::has_column(conn, "tasks", "problem")? {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN problem TEXT")?;
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN solution TEXT")?;
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN acceptance TEXT")?;
+            Self::backfill_parsed_fields(conn)?;
+        }
+
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_card_id);
              CREATE INDEX IF NOT EXISTS idx_tasks_status_sort ON tasks(status, sort_order, created_at);",
@@ -1145,7 +1183,8 @@ impl Database {
     /// The full column list for card queries.
     const CARD_COLUMNS: &'static str = "id, from_repo, to_repo, text, context, priority, status, note, \
          labels, parent_card_id, source_url, source_type, sort_order, \
-         created_at, updated_at, assigned_at, started_at, completed_at";
+         created_at, updated_at, assigned_at, started_at, completed_at, \
+         problem, solution, acceptance";
 
     /// SQL fragment for consistent priority ordering across all card queries.
     const PRIORITY_ORDER: &'static str = "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 \
@@ -1169,10 +1208,21 @@ impl Database {
         let id = uuid::Uuid::now_v7().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let created_at = created_at_override.unwrap_or(&now);
+
+        let parsed = context.map(crate::card_parse::parse_issue_body);
+        let problem = parsed.as_ref().and_then(|p| p.problem.as_deref());
+        let solution = parsed.as_ref().and_then(|p| p.solution.as_deref());
+        let acceptance = parsed
+            .as_ref()
+            .map(|p| &p.acceptance)
+            .filter(|a| !a.is_empty())
+            .map(|a| a.join("\n"));
+
         self.conn.execute(
             "INSERT INTO tasks (id, from_repo, to_repo, text, context, priority, status, \
-             labels, parent_card_id, source_url, source_type, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, ?10, ?11, ?12)",
+             labels, parent_card_id, source_url, source_type, created_at, updated_at, \
+             problem, solution, acceptance) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             rusqlite::params![
                 id,
                 from_repo,
@@ -1185,7 +1235,10 @@ impl Database {
                 source_url,
                 source_type,
                 created_at,
-                now
+                now,
+                problem,
+                solution,
+                acceptance,
             ],
         )?;
         Ok(id)

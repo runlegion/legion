@@ -128,7 +128,7 @@ fn extract_checklist(text: &str) -> Vec<String> {
 
 /// Truncate a string to at most `max` characters, appending "..." if truncated.
 /// Safe for multi-byte UTF-8.
-fn truncate_chars(s: &str, max: usize) -> String {
+pub fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -136,23 +136,28 @@ fn truncate_chars(s: &str, max: usize) -> String {
     format!("{end}...")
 }
 
-/// Format a parsed issue for display on kanban list.
-pub fn format_summary(parsed: &ParsedIssue) -> Option<String> {
+/// Format a card summary from stored structured fields.
+/// Accepts the pre-parsed fields directly -- no reconstruction needed.
+pub fn card_summary(
+    problem: Option<&str>,
+    acceptance: Option<&str>,
+    context: Option<&str>,
+) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
-    if let Some(ref problem) = parsed.problem {
-        parts.push(truncate_chars(problem, 120));
+    if let Some(p) = problem {
+        parts.push(truncate_chars(p, 120));
     }
 
-    if !parsed.acceptance.is_empty() {
-        parts.push(format!("[{} criteria]", parsed.acceptance.len()));
+    if let Some(acc) = acceptance {
+        let count = acc.lines().count();
+        if count > 0 {
+            parts.push(format!("[{count} criteria]"));
+        }
     }
 
     if parts.is_empty() {
-        if let Some(ref body) = parsed.body {
-            return Some(truncate_chars(body, 120));
-        }
-        return None;
+        return context.map(|c| truncate_chars(c, 120));
     }
 
     Some(parts.join(" "))
@@ -213,24 +218,15 @@ mod tests {
     }
 
     #[test]
-    fn format_summary_with_problem_and_criteria() {
-        let parsed = ParsedIssue {
-            problem: Some("Things are broken".to_string()),
-            acceptance: vec!["a".to_string(), "b".to_string()],
-            ..Default::default()
-        };
-        let summary = format_summary(&parsed).expect("summary");
+    fn card_summary_with_problem_and_criteria() {
+        let summary = card_summary(Some("Things are broken"), Some("a\nb"), None).expect("summary");
         assert!(summary.contains("Things are broken"));
         assert!(summary.contains("[2 criteria]"));
     }
 
     #[test]
-    fn format_summary_fallback_to_body() {
-        let parsed = ParsedIssue {
-            body: Some("Raw description".to_string()),
-            ..Default::default()
-        };
-        let summary = format_summary(&parsed).expect("summary");
+    fn card_summary_fallback_to_context() {
+        let summary = card_summary(None, None, Some("Raw description")).expect("summary");
         assert_eq!(summary, "Raw description");
     }
 }
