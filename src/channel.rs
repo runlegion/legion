@@ -377,8 +377,7 @@ mod tests {
 
     #[test]
     fn feed_endpoint_matches_legacy_shape() {
-        let (db, index, dir) = test_storage();
-        let _data_dir = dir.path().to_path_buf();
+        let (db, index, _dir) = test_storage();
 
         // Insert a team post
         let reflection = db

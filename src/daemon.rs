@@ -101,44 +101,36 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     // Build the axum server future.
     let serve_future = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
 
-    // Race the HTTP server, watch task, MCP task (if present), and shutdown signal.
-    // Any task exiting (success or failure) triggers the others to be cancelled.
-    // This ensures panics or early returns in background tasks don't go undetected.
-    if let Some(mcp) = mcp_handle {
-        tokio::select! {
-            result = serve_future => {
-                if let Err(e) = result {
-                    eprintln!("[legion daemon] http server error: {e}");
-                }
-                eprintln!("[legion daemon] http server exited; shutting down");
+    // Unify the mcp arm: when mcp is disabled, the future parks forever so the
+    // select! never fires it. This avoids duplicating the whole select! block.
+    let mcp_future = async move {
+        match mcp_handle {
+            Some(h) => h.await,
+            None => std::future::pending().await,
+        }
+    };
+
+    // Race the HTTP server, watch task, and MCP task (if enabled). Any task
+    // exiting -- success, error, or panic -- triggers the others to stop so
+    // background failures surface immediately instead of silently continuing.
+    tokio::select! {
+        result = serve_future => {
+            if let Err(e) = result {
+                eprintln!("[legion daemon] http server error: {e}");
             }
-            result = watch_handle => {
-                match result {
-                    Ok(()) => eprintln!("[legion daemon] watch task exited; shutting down"),
-                    Err(e) => eprintln!("[legion daemon] watch task exited: {e}; shutting down"),
-                }
-            }
-            result = mcp => {
-                match result {
-                    Ok(Ok(())) => eprintln!("[legion daemon] mcp loop exited; shutting down"),
-                    Ok(Err(e)) => eprintln!("[legion daemon] mcp loop error: {e}; shutting down"),
-                    Err(e) => eprintln!("[legion daemon] mcp task panic: {e}; shutting down"),
-                }
+            eprintln!("[legion daemon] http server exited; shutting down");
+        }
+        result = watch_handle => {
+            match result {
+                Ok(()) => eprintln!("[legion daemon] watch task exited; shutting down"),
+                Err(e) => eprintln!("[legion daemon] watch task exited: {e}; shutting down"),
             }
         }
-    } else {
-        tokio::select! {
-            result = serve_future => {
-                if let Err(e) = result {
-                    eprintln!("[legion daemon] http server error: {e}");
-                }
-                eprintln!("[legion daemon] http server exited; shutting down");
-            }
-            result = watch_handle => {
-                match result {
-                    Ok(()) => eprintln!("[legion daemon] watch task exited; shutting down"),
-                    Err(e) => eprintln!("[legion daemon] watch task exited: {e}; shutting down"),
-                }
+        result = mcp_future => {
+            match result {
+                Ok(Ok(())) => eprintln!("[legion daemon] mcp loop exited; shutting down"),
+                Ok(Err(e)) => eprintln!("[legion daemon] mcp loop error: {e}; shutting down"),
+                Err(e) => eprintln!("[legion daemon] mcp task panic: {e}; shutting down"),
             }
         }
     }
