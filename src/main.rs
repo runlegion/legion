@@ -18,6 +18,7 @@ mod surface;
 mod task;
 #[cfg(test)]
 mod testutil;
+mod usage;
 mod watch;
 mod worksource;
 
@@ -53,6 +54,18 @@ struct Cli {
     command: Commands,
 }
 
+/// Controls near-duplicate detection behavior on `legion reflect`.
+#[derive(clap::ValueEnum, Clone, Debug, Default)]
+enum DedupeMode {
+    /// Warn on stderr when a near-duplicate is found, but still store the reflection.
+    #[default]
+    Warn,
+    /// Refuse to store the reflection and exit non-zero when a near-duplicate is found.
+    Strict,
+    /// Skip the near-duplicate check entirely.
+    Off,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Store a reflection from a completed session
@@ -80,6 +93,14 @@ enum Commands {
         /// Link to a parent reflection ID to form a learning chain
         #[arg(long)]
         follows: Option<String>,
+
+        /// Skip near-duplicate detection regardless of --dedupe-mode
+        #[arg(long)]
+        force: bool,
+
+        /// Near-duplicate detection mode: warn (default), strict (block), or off (skip)
+        #[arg(long, value_enum, default_value_t = DedupeMode::Warn)]
+        dedupe_mode: DedupeMode,
     },
 
     /// Recall relevant reflections for the current context
@@ -104,6 +125,41 @@ enum Commands {
         /// hooks to keep injected context compact.
         #[arg(long)]
         preview: Option<usize>,
+
+        /// Skip BM25; rank purely by cosine similarity (requires embed model)
+        #[arg(long, conflicts_with = "latest")]
+        cosine_only: bool,
+
+        /// Filter out results with a final score below this threshold
+        #[arg(long)]
+        min_score: Option<f32>,
+    },
+
+    /// Find reflections similar to a given reflection by cosine similarity
+    Similar {
+        /// Reflection ID to find neighbors for
+        #[arg(long)]
+        id: String,
+
+        /// Maximum number of neighbors to return
+        #[arg(long, default_value = "5")]
+        limit: usize,
+
+        /// Include reflections from all repos (default: same repo as the source)
+        #[arg(long)]
+        cross_repo: bool,
+
+        /// Filter out results with a score below this threshold
+        #[arg(long)]
+        min_score: Option<f32>,
+
+        /// Truncate reflection text to this many characters in output
+        #[arg(long)]
+        preview: Option<usize>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Search reflections across all repos for cross-agent consultation
@@ -380,6 +436,12 @@ enum Commands {
     /// Watch for signals and auto-wake sleeping agents
     Watch,
 
+    /// Record a quality gate result for a skill run
+    QualityGate {
+        #[command(subcommand)]
+        action: QualityGateAction,
+    },
+
     /// Show current system health and recent trend
     Health {
         /// Show history for the last N duration (e.g., "1h", "30m", "24h")
@@ -391,6 +453,33 @@ enum Commands {
         all_hosts: bool,
 
         /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show Claude Code session token usage and cost analysis
+    Usage {
+        /// Show only this specific session UUID
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Show all sessions on or after this date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Show sessions from today only (default when no flags given)
+        #[arg(long)]
+        today: bool,
+
+        /// One row per session, sorted by cost (default for --since)
+        #[arg(long)]
+        by_session: bool,
+
+        /// Group results by repo
+        #[arg(long, conflicts_with = "by_session")]
+        by_repo: bool,
+
+        /// Output as JSON instead of a human-readable table
         #[arg(long)]
         json: bool,
     },
@@ -510,6 +599,52 @@ enum KanbanAction {
         source_type: Option<String>,
     },
 
+    /// View a single card by ID
+    View {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+
+        /// Output as a single JSON object instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Update mutable fields on an existing card
+    Update {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+
+        /// Repository name (used as the audit agent)
+        #[arg(long)]
+        repo: String,
+
+        /// New title text
+        #[arg(long)]
+        text: Option<String>,
+
+        /// New body (markdown); re-parsed into problem/solution/acceptance sections
+        #[arg(long)]
+        body: Option<String>,
+
+        /// New priority: low, med, high, critical
+        #[arg(long, value_parser = ["low", "med", "high", "critical"])]
+        priority: Option<String>,
+
+        /// Replace labels with this comma-separated list
+        #[arg(long, conflicts_with_all = ["add_labels", "remove_labels"])]
+        labels: Option<String>,
+
+        /// Append comma-separated labels (deduplicated against existing)
+        #[arg(long, conflicts_with = "labels")]
+        add_labels: Option<String>,
+
+        /// Remove comma-separated labels
+        #[arg(long, conflicts_with = "labels")]
+        remove_labels: Option<String>,
+    },
+
     /// List cards for a repo
     List {
         /// Repository name
@@ -519,6 +654,10 @@ enum KanbanAction {
         /// Show outbound cards (created by this repo) instead of inbound
         #[arg(long)]
         from: bool,
+
+        /// Emit JSONL (one summary object per line) instead of human-readable text
+        #[arg(long)]
+        json: bool,
     },
 
     /// Accept a pending card (move to in-progress)
@@ -745,6 +884,12 @@ enum PrAction {
         /// Kanban card ID to link (stores PR URL on the card)
         #[arg(long)]
         task: Option<String>,
+
+        /// Skip the legion-simplify quality gate check.
+        /// FOR BOOTSTRAP ONLY -- use when the branch IS the simplify skill itself.
+        /// An audit entry is written so this cannot be done silently.
+        #[arg(long)]
+        skip_gates: bool,
     },
 
     /// List open pull requests with review status
@@ -802,6 +947,51 @@ enum PrAction {
         /// Kanban card ID to transition to done
         #[arg(long)]
         task: Option<String>,
+    },
+
+    /// Close a pull request without merging
+    Close {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR number
+        #[arg(long)]
+        number: u64,
+
+        /// Comment to post before closing
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Delete the remote branch after closing
+        #[arg(long)]
+        delete_branch: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum QualityGateAction {
+    /// Record a quality gate result for the current HEAD commit.
+    ///
+    /// Reads git HEAD and branch automatically. The skill runner calls this
+    /// after inspecting the diff. `legion pr create` checks the gate before
+    /// calling the work source so the result cannot be faked via a file flag.
+    Record {
+        /// Skill name (e.g., "legion-simplify")
+        #[arg(long)]
+        skill: String,
+
+        /// Gate result: "clean" or "issues"
+        #[arg(long, value_parser = ["clean", "issues"])]
+        result: String,
+
+        /// Number of findings (default 0)
+        #[arg(long, default_value = "0")]
+        findings_count: u64,
+
+        /// Raw JSON details from the skill (full findings array)
+        #[arg(long)]
+        details_json: Option<String>,
     },
 }
 
@@ -1078,6 +1268,62 @@ fn backfill_embeddings(db: &db::Database, model: &embed::EmbedModel) -> error::R
     Ok(count)
 }
 
+/// Check new reflection text for near-duplicates in the same repo.
+///
+/// Computes the embedding of `text`, then compares it against the 100 most
+/// recent reflections with embeddings for `repo`. When cosine similarity
+/// exceeds 0.95, warns to stderr. In `Strict` mode the function returns an
+/// error so the caller aborts before storing. In `Warn` mode it returns Ok
+/// and the reflection is stored anyway.
+fn run_dedupe_check(
+    db: &db::Database,
+    model: &embed::EmbedModel,
+    repo: &str,
+    text: &str,
+    mode: &DedupeMode,
+) -> error::Result<()> {
+    const DEDUPE_THRESHOLD: f32 = 0.95;
+    const DEDUPE_LOOKBACK: usize = 100;
+
+    let new_emb = match model.encode_one(text) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[legion] warning: dedupe check skipped (embed failed): {e}");
+            return Ok(());
+        }
+    };
+
+    let recent = db.get_recent_reflections_with_embeddings(repo, DEDUPE_LOOKBACK)?;
+
+    for (id, blob, existing_text, created_at) in &recent {
+        let existing_emb = embed::embedding_from_bytes(blob);
+        let sim = embed::cosine_similarity(&new_emb, &existing_emb);
+
+        if sim >= DEDUPE_THRESHOLD {
+            let preview: String = existing_text.chars().take(80).collect();
+            let date = db::format_date(created_at);
+            eprintln!(
+                "[legion] warning: this reflection is {sim:.2} cosine to reflection {id} \
+                 (created {date}): \"{preview}\". \
+                 stored anyway (set --dedupe-mode strict to refuse). \
+                 Consider `legion reflect --follows {id}` to extend."
+            );
+
+            if matches!(mode, DedupeMode::Strict) {
+                return Err(error::LegionError::Embedding(format!(
+                    "near-duplicate detected (cosine {sim:.2} >= {DEDUPE_THRESHOLD}) \
+                     with reflection {id} -- use --force to store anyway"
+                )));
+            }
+
+            // In Warn mode we warn once for the closest match and stop checking.
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 /// Raise the soft file-descriptor limit to the hard limit.
 ///
 /// macOS ships a low soft limit (often 2560) which Tantivy can exhaust
@@ -1116,10 +1362,27 @@ fn run() -> error::Result<()> {
             domain,
             tags,
             follows,
+            force,
+            dedupe_mode,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
+
+            // Near-duplicate detection before storing (Card C).
+            // Skip when --force or --dedupe-mode off.
+            let skip_dedupe = force || matches!(dedupe_mode, DedupeMode::Off);
+            if !skip_dedupe
+                && let Some(ref t) = text
+                && let Some(model) = try_load_embed_model()
+            {
+                // Compound repos (comma-separated) each get their own check.
+                for r in &repo {
+                    run_dedupe_check(&database, &model, r, t, &dedupe_mode)?;
+                }
+                // If model is unavailable, skip dedupe silently (best-effort).
+            }
+
             let meta = db::ReflectionMeta {
                 domain,
                 tags,
@@ -1152,12 +1415,22 @@ fn run() -> error::Result<()> {
             limit,
             latest,
             preview,
+            cosine_only,
+            min_score,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
 
-            let result = if latest {
+            let mut result = if latest {
                 recall::recall_latest(&database, &repo, limit)?
+            } else if cosine_only {
+                // --cosine-only requires the embed model; error if unavailable.
+                let model = embed::EmbedModel::load().map_err(|e| {
+                    error::LegionError::Embedding(format!(
+                        "--cosine-only requires embedding model: {e}"
+                    ))
+                })?;
+                recall::recall_cosine_only(&database, &model, &repo, &context, limit, min_score)?
             } else {
                 let index = search::SearchIndex::open(&base.join("index"))?;
                 // Try hybrid (BM25 + cosine) recall, fall back to BM25-only
@@ -1168,9 +1441,39 @@ fn run() -> error::Result<()> {
                     None => recall::recall_bm25(&database, &index, &repo, &context, limit)?,
                 }
             };
+            // Apply min-score filter on hybrid/latest paths (cosine-only applies it inline).
+            if !cosine_only && let Some(threshold) = min_score {
+                recall::filter_by_min_score(&mut result, threshold);
+            }
             let output = recall::format_for_hook(&result, preview);
             if !output.is_empty() {
                 print!("{output}");
+            }
+        }
+        Commands::Similar {
+            id,
+            limit,
+            cross_repo,
+            min_score,
+            preview,
+            json,
+        } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            // Validate the embed model is available; similar needs embeddings to work.
+            embed::EmbedModel::load().map_err(|e| {
+                error::LegionError::Embedding(format!(
+                    "legion similar requires embedding model: {e}"
+                ))
+            })?;
+            let result = recall::find_similar_by_id(&database, &id, limit, cross_repo, min_score)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                let output = recall::format_for_hook(&result, preview);
+                if !output.is_empty() {
+                    print!("{output}");
+                }
             }
         }
         Commands::Consult { context, limit } => {
@@ -1632,18 +1935,77 @@ fn run() -> error::Result<()> {
                     )?;
                     println!("{id}");
                 }
-                KanbanAction::List { repo, from } => {
+                KanbanAction::View { id, json } => {
+                    let card = kanban::view_card(&database, &id).map_err(|e| {
+                        eprintln!("{e}");
+                        e
+                    })?;
+                    if json {
+                        println!("{}", kanban::format_card_json(&card)?);
+                    } else {
+                        print!("{}", kanban::format_card_view(&card));
+                    }
+                }
+                KanbanAction::Update {
+                    id,
+                    repo,
+                    text,
+                    body,
+                    priority,
+                    labels,
+                    add_labels,
+                    remove_labels,
+                } => {
+                    let any_set = text.is_some()
+                        || body.is_some()
+                        || priority.is_some()
+                        || labels.is_some()
+                        || add_labels.is_some()
+                        || remove_labels.is_some();
+                    if !any_set {
+                        eprintln!(
+                            "[legion] no fields to update: pass at least one of --text, --body, --priority, --labels, --add-labels, --remove-labels"
+                        );
+                        std::process::exit(1);
+                    }
+                    let params = kanban::CardUpdateParams {
+                        text,
+                        body,
+                        priority,
+                        labels,
+                        add_labels,
+                        remove_labels,
+                    };
+                    let card_id = kanban::update_card(&database, &id, &repo, &params)?;
+                    println!("{card_id}");
+                    audit(&db::AuditInput {
+                        agent: &repo,
+                        action: "update-card",
+                        target_type: "card",
+                        target_ref: &id,
+                        task_id: Some(&id),
+                        source_type: "legion",
+                        details: None,
+                        outcome: "success",
+                    });
+                }
+                KanbanAction::List { repo, from, json } => {
                     let direction = if from {
                         kanban::Direction::Outbound
                     } else {
                         kanban::Direction::Inbound
                     };
                     let cards = kanban::list_cards(&database, &repo, direction)?;
-                    let output = kanban::format_card_list(&cards, &repo, direction);
-                    if output.is_empty() {
-                        info!("[legion] no cards found");
-                    } else {
+                    if json {
+                        let output = kanban::format_card_list_json(&cards)?;
                         print!("{output}");
+                    } else {
+                        let output = kanban::format_card_list(&cards, &repo, direction);
+                        if output.is_empty() {
+                            info!("[legion] no cards found");
+                        } else {
+                            print!("{output}");
+                        }
                     }
                 }
                 KanbanAction::Accept { id } => {
@@ -1947,7 +2309,66 @@ fn run() -> error::Result<()> {
                 labels,
                 reviewer,
                 task,
+                skip_gates,
             } => {
+                // Quality gate: verify legion-simplify ran clean on HEAD before
+                // calling the work source. This runs before worksource::resolve_config
+                // so the gate error is always surfaced, even if the worksource is not
+                // configured. --skip-gates is a bootstrap escape hatch for the branch
+                // that ships the skill itself; it writes an audit entry so it cannot
+                // be done silently.
+                if skip_gates {
+                    audit(&db::AuditInput {
+                        agent: &repo,
+                        action: "skip-gate-bootstrap",
+                        target_type: "pr",
+                        target_ref: "pending",
+                        task_id: task.as_deref(),
+                        source_type: "unknown",
+                        details: Some(r#"{"skill":"legion-simplify","reason":"bootstrap"}"#),
+                        outcome: "skipped",
+                    });
+                    eprintln!("[legion] warning: quality gate skipped (--skip-gates bootstrap)");
+                } else {
+                    let head_hash = std::process::Command::new("git")
+                        .args(["rev-parse", "HEAD"])
+                        .output()
+                        .map_err(|e| {
+                            error::LegionError::WorkSource(format!("failed to read git HEAD: {e}"))
+                        })?;
+                    if !head_hash.status.success() {
+                        return Err(error::LegionError::WorkSource(
+                            "git rev-parse HEAD failed -- is this a git repo?".to_owned(),
+                        ));
+                    }
+                    let commit_hash: String =
+                        String::from_utf8_lossy(&head_hash.stdout).trim().to_owned();
+                    let short_hash: &str = &commit_hash[..commit_hash.len().min(8)];
+
+                    let db_base = data_dir()?;
+                    let gate_db = db::Database::open(&db_base.join("legion.db"))?;
+                    match gate_db.get_quality_gate(&commit_hash, "legion-simplify")? {
+                        None => {
+                            eprintln!(
+                                "[legion] error: no clean legion-simplify gate on HEAD ({short_hash}). \
+                                 Run /legion-simplify before creating the PR."
+                            );
+                            std::process::exit(1);
+                        }
+                        Some(gate) if gate.result != "clean" => {
+                            eprintln!(
+                                "[legion] error: legion-simplify recorded issues on HEAD ({short_hash}), \
+                                 {} findings. Fix them and re-run the skill before creating the PR.",
+                                gate.findings_count
+                            );
+                            std::process::exit(1);
+                        }
+                        Some(_) => {
+                            // Gate is clean -- proceed.
+                        }
+                    }
+                }
+
                 let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
                     .ok_or_else(|| {
                         error::LegionError::WorkSource(format!(
@@ -2174,6 +2595,45 @@ fn run() -> error::Result<()> {
 
                 println!("PR #{} merged on {}", number, source_repo);
             }
+            PrAction::Close {
+                repo,
+                number,
+                reason,
+                delete_branch,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                worksource::close_pr(
+                    &plugin_name,
+                    &source_repo,
+                    number,
+                    reason.as_deref(),
+                    delete_branch,
+                )?;
+
+                let details = serde_json::json!({
+                    "reason": reason, "delete_branch": delete_branch,
+                });
+                let details_str = details.to_string();
+                audit(&db::AuditInput {
+                    agent: &repo,
+                    action: "close-pr",
+                    target_type: "pr",
+                    target_ref: &number.to_string(),
+                    task_id: None,
+                    source_type: &plugin_name,
+                    details: Some(&details_str),
+                    outcome: "success",
+                });
+
+                println!("closed PR #{} on {}", number, source_repo);
+            }
         },
         Commands::Comment { repo, number, body } => {
             let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
@@ -2234,6 +2694,126 @@ fn run() -> error::Result<()> {
             let base = data_dir()?;
             watch::run(&base)?;
         }
+        Commands::QualityGate { action } => match action {
+            QualityGateAction::Record {
+                skill,
+                result,
+                findings_count,
+                details_json,
+            } => {
+                let head_output = std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .map_err(|e| {
+                        error::LegionError::WorkSource(format!("failed to read git HEAD: {e}"))
+                    })?;
+                if !head_output.status.success() {
+                    return Err(error::LegionError::WorkSource(
+                        "git rev-parse HEAD failed -- is this a git repo?".to_owned(),
+                    ));
+                }
+                let commit_hash: String = String::from_utf8_lossy(&head_output.stdout)
+                    .trim()
+                    .to_owned();
+
+                let branch_output = std::process::Command::new("git")
+                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .output()
+                    .map_err(|e| {
+                        error::LegionError::WorkSource(format!("failed to read git branch: {e}"))
+                    })?;
+                let branch: String = if branch_output.status.success() {
+                    String::from_utf8_lossy(&branch_output.stdout)
+                        .trim()
+                        .to_owned()
+                } else {
+                    "unknown".to_owned()
+                };
+
+                let base = data_dir()?;
+                let database = db::Database::open(&base.join("legion.db"))?;
+                let row = database.record_quality_gate(
+                    &branch,
+                    &commit_hash,
+                    &skill,
+                    &result,
+                    findings_count,
+                    details_json.as_deref(),
+                )?;
+                println!("{}", row.id);
+            }
+        },
+        Commands::Usage {
+            session,
+            since,
+            today: _today,
+            by_session,
+            by_repo,
+            json,
+        } => {
+            // LEGION_HOME overrides dirs::home_dir() for test isolation.
+            // dirs 5.x on Windows uses SHGetKnownFolderPath and ignores HOME/USERPROFILE
+            // env vars, so tests need an explicit override to point at a temp dir.
+            let home: PathBuf = std::env::var_os("LEGION_HOME")
+                .map(PathBuf::from)
+                .or_else(dirs::home_dir)
+                .ok_or(error::LegionError::NoHomeDir)?;
+
+            // Determine the since filter.
+            // --since takes an explicit date. --today and no-args both mean today.
+            let since_str: Option<String> = if let Some(ref d) = since {
+                // Validate the date looks like YYYY-MM-DD and convert to an
+                // RFC3339-comparable prefix (timestamps sort lexicographically).
+                if d.len() != 10 || !d.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                    eprintln!("[legion] error: --since expects YYYY-MM-DD, got '{d}'");
+                    std::process::exit(1);
+                }
+                Some(format!("{d}T00:00:00"))
+            } else if session.is_none() {
+                // Default: today only.
+                let today = chrono::Utc::now().format("%Y-%m-%dT00:00:00").to_string();
+                Some(today)
+            } else {
+                // --session bypasses date filtering.
+                None
+            };
+
+            let sessions =
+                usage::discover_sessions(&home, since_str.as_deref(), session.as_deref());
+
+            if session.is_some() && sessions.is_empty() {
+                eprintln!(
+                    "[legion] error: session not found: {}",
+                    session.as_deref().unwrap_or("")
+                );
+                std::process::exit(1);
+            }
+
+            if json {
+                if by_repo {
+                    let groups = usage::group_by_repo(&sessions);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&groups).map_err(error::LegionError::Json)?
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&sessions)
+                            .map_err(error::LegionError::Json)?
+                    );
+                }
+            } else if by_repo {
+                let groups = usage::group_by_repo(&sessions);
+                usage::print_repo_table(&groups);
+            } else if by_session || since.is_some() || session.is_some() {
+                usage::print_session_table(&sessions);
+            } else {
+                // Default (today): show by-session table.
+                usage::print_session_table(&sessions);
+            }
+        }
+
         Commands::Health {
             history,
             all_hosts,

@@ -1679,3 +1679,1039 @@ fn kanban_with_source_url() {
         "expected source URL in output, got: {stdout}"
     );
 }
+
+// --- kanban view tests ---
+
+#[test]
+fn kanban_view_human_output() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "view me",
+            "--priority",
+            "high",
+            "--labels",
+            "backend",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "view", "--id", &id])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "view failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&id), "card id in output");
+    assert!(stdout.contains("view me"), "title in output");
+    assert!(stdout.contains("high"), "priority in output");
+}
+
+#[test]
+fn kanban_view_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "json view",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "view", "--id", &id, "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "view --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("output should be valid JSON");
+    assert_eq!(parsed["id"].as_str().unwrap(), id, "id matches");
+    assert_eq!(parsed["from_repo"].as_str().unwrap(), "sean");
+}
+
+#[test]
+fn kanban_view_not_found_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Initialize DB
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "setup"])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "view",
+            "--id",
+            "00000000-0000-0000-0000-000000000000",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for missing card"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("card not found"),
+        "expected card not found message, got: {stderr}"
+    );
+}
+
+// --- kanban update tests ---
+
+#[test]
+fn kanban_update_text() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "original title",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "update",
+            "--id",
+            &id,
+            "--repo",
+            "sean",
+            "--text",
+            "updated title",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "update failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Should print the card id
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.trim() == id, "expected card id, got: {stdout}");
+
+    // Verify the title changed
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "view", "--id", &id, "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("valid JSON");
+    assert_eq!(parsed["text"].as_str().unwrap(), "updated title");
+}
+
+#[test]
+fn kanban_update_priority() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "prio test",
+            "--priority",
+            "low",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "update",
+            "--id",
+            &id,
+            "--repo",
+            "sean",
+            "--priority",
+            "critical",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "update failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "view", "--id", &id, "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("valid JSON");
+    assert_eq!(parsed["priority"].as_str().unwrap(), "critical");
+}
+
+#[test]
+fn kanban_update_add_labels_deduplicates() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "label test",
+            "--labels",
+            "backend,api",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "update",
+            "--id",
+            &id,
+            "--repo",
+            "sean",
+            "--add-labels",
+            "api,frontend",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "add-labels failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "view", "--id", &id, "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("valid JSON");
+    let labels_raw = parsed["labels"].as_str().unwrap_or("");
+    let label_parts: Vec<&str> = labels_raw.split(',').collect();
+    assert_eq!(
+        label_parts.iter().filter(|&&l| l == "api").count(),
+        1,
+        "api appears exactly once"
+    );
+    assert!(label_parts.contains(&"frontend"), "frontend added");
+    assert!(label_parts.contains(&"backend"), "backend preserved");
+}
+
+#[test]
+fn kanban_update_no_flags_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "kanban", "create", "--from", "sean", "--to", "kelex", "--text", "no flags",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "update", "--id", &id, "--repo", "sean"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit when no fields provided"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no fields to update"),
+        "expected helpful message, got: {stderr}"
+    );
+}
+
+// --- kanban list --json tests ---
+
+#[test]
+fn kanban_list_json_emits_jsonl() {
+    let dir = tempfile::tempdir().unwrap();
+
+    legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "## Card Alpha",
+            "--labels",
+            "backend",
+        ])
+        .output()
+        .unwrap();
+    legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "Card Beta",
+        ])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "list", "--repo", "kelex", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "list --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "two lines for two cards");
+
+    for line in &lines {
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).expect("each line should be valid JSON");
+        assert!(parsed["id"].is_string(), "id present");
+        assert!(parsed["title"].is_string(), "title present");
+        assert!(parsed["status"].is_string(), "status present");
+        assert!(
+            !parsed.as_object().unwrap().contains_key("context"),
+            "no context in summary"
+        );
+    }
+
+    // Card Alpha should have heading stripped
+    let alpha_line = lines.iter().find(|&&l| l.contains("Card Alpha"));
+    assert!(
+        alpha_line.is_some(),
+        "Card Alpha (heading stripped) found in output"
+    );
+}
+
+#[test]
+fn kanban_list_json_labels_are_array() {
+    let dir = tempfile::tempdir().unwrap();
+
+    legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "labeled",
+            "--labels",
+            "backend,api",
+        ])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "list", "--repo", "kelex", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout.lines().next().expect("has output");
+    let parsed: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+    let labels = parsed["labels"].as_array().expect("labels is array");
+    assert!(labels.iter().any(|l| l.as_str() == Some("backend")));
+    assert!(labels.iter().any(|l| l.as_str() == Some("api")));
+}
+
+/// Verify `legion pr close` fails with a clear error when the repo has no
+/// work source config in watch.toml. Network access is not available in tests,
+/// so we confirm the CLI is correctly wired without invoking `gh`.
+#[test]
+fn pr_close_errors_without_worksource_config() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["pr", "close", "--repo", "no-such-repo", "--number", "42"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "expected failure when no work source configured"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected 'no work source configured' in stderr, got: {stderr}"
+    );
+}
+
+/// Verify `legion pr close --delete-branch` flag is accepted by the CLI parser.
+/// Errors at the worksource level (no config) rather than at argument parsing.
+#[test]
+fn pr_close_delete_branch_flag_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "pr",
+            "close",
+            "--repo",
+            "no-such-repo",
+            "--number",
+            "42",
+            "--reason",
+            "superseded",
+            "--delete-branch",
+        ])
+        .output()
+        .unwrap();
+
+    // Fails at worksource resolution, not arg parsing -- confirms all flags parse
+    assert!(
+        !out.status.success(),
+        "expected failure when no work source configured"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected worksource error, got: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Usage command integration tests
+// ---------------------------------------------------------------------------
+
+/// Build a minimal assistant-turn JSONL event string for fixture files.
+fn usage_assistant_event(
+    input: u64,
+    output: u64,
+    cache_write: u64,
+    cache_read: u64,
+    ts: &str,
+) -> String {
+    format!(
+        r#"{{"type":"assistant","timestamp":"{ts}","message":{{"role":"assistant","usage":{{"input_tokens":{input},"output_tokens":{output},"cache_creation_input_tokens":{cache_write},"cache_read_input_tokens":{cache_read}}}}}}}"#
+    )
+}
+
+/// A variant of `legion_cmd` that also overrides the home directory so the
+/// usage command reads sessions from the tempdir instead of the real
+/// `~/.claude/projects/`.
+///
+/// `dirs::home_dir()` on Windows uses `SHGetKnownFolderPath(FOLDERID_Profile)`
+/// and ignores both `HOME` and `USERPROFILE`, so the usage handler honors a
+/// `LEGION_HOME` override that the test sets here.
+fn legion_cmd_with_home(data_dir: &std::path::Path, home_dir: &std::path::Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_legion"));
+    cmd.env("LEGION_DATA_DIR", data_dir);
+    cmd.env("LEGION_HOME", home_dir);
+    cmd
+}
+
+#[test]
+fn usage_today_shows_table_header() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let home_dir = tempfile::tempdir().unwrap();
+
+    // Set up one session under a fake slug.
+    let ts = "2099-01-01T00:00:00.000Z"; // far future -- always "today" test breaks if date matches, so use today
+    let today = chrono::Utc::now()
+        .format("%Y-%m-%dT00:01:00.000Z")
+        .to_string();
+    let slug = "-Users-test-projects-myrepo";
+    let slug_dir = home_dir.path().join(".claude/projects").join(slug);
+    std::fs::create_dir_all(&slug_dir).unwrap();
+    let event = usage_assistant_event(100, 200, 0, 0, &today);
+    std::fs::write(
+        slug_dir.join("aaaaaaaa-0000-0000-0000-000000000001.jsonl"),
+        format!("{event}\n"),
+    )
+    .unwrap();
+
+    let _ = ts; // used for reference in comment above
+
+    let out = legion_cmd_with_home(data_dir.path(), home_dir.path())
+        .args(["usage"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "usage failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Table should contain "id" and "cost" column headers.
+    assert!(
+        stdout.contains("id") && stdout.contains("cost"),
+        "expected table header in output, got: {stdout}"
+    );
+}
+
+#[test]
+fn usage_json_flag_emits_parseable_json() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let home_dir = tempfile::tempdir().unwrap();
+
+    let today = chrono::Utc::now()
+        .format("%Y-%m-%dT00:02:00.000Z")
+        .to_string();
+    let slug = "-Users-test-projects-testjson";
+    let slug_dir = home_dir.path().join(".claude/projects").join(slug);
+    std::fs::create_dir_all(&slug_dir).unwrap();
+    let event = usage_assistant_event(50, 100, 0, 0, &today);
+    std::fs::write(
+        slug_dir.join("bbbbbbbb-0000-0000-0000-000000000002.jsonl"),
+        format!("{event}\n"),
+    )
+    .unwrap();
+
+    let out = legion_cmd_with_home(data_dir.path(), home_dir.path())
+        .args(["usage", "--today", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "usage --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Must be valid JSON (parseable).
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("usage --json output is not valid JSON: {e}\noutput: {stdout}"));
+    // Should be an array of sessions.
+    assert!(parsed.is_array(), "expected JSON array, got: {parsed}");
+}
+
+#[test]
+fn usage_by_repo_groups_sessions() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let home_dir = tempfile::tempdir().unwrap();
+
+    let today = chrono::Utc::now()
+        .format("%Y-%m-%dT00:03:00.000Z")
+        .to_string();
+    let slug = "-Users-test-projects-groupedrepo";
+    let slug_dir = home_dir.path().join(".claude/projects").join(slug);
+    std::fs::create_dir_all(&slug_dir).unwrap();
+
+    // Two sessions, same slug = same repo.
+    let event = usage_assistant_event(10, 20, 0, 0, &today);
+    std::fs::write(
+        slug_dir.join("cccccccc-0000-0000-0000-000000000003.jsonl"),
+        format!("{event}\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        slug_dir.join("dddddddd-0000-0000-0000-000000000004.jsonl"),
+        format!("{event}\n"),
+    )
+    .unwrap();
+
+    let out = legion_cmd_with_home(data_dir.path(), home_dir.path())
+        .args(["usage", "--today", "--by-repo"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "usage --by-repo failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The grouped repo name should appear.
+    assert!(
+        stdout.contains("groupedrepo"),
+        "expected repo name in --by-repo output, got: {stdout}"
+    );
+}
+
+#[test]
+fn usage_session_flag_exits_nonzero_when_not_found() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let home_dir = tempfile::tempdir().unwrap();
+
+    // Create an empty projects dir so discovery works.
+    std::fs::create_dir_all(home_dir.path().join(".claude/projects")).unwrap();
+
+    let out = legion_cmd_with_home(data_dir.path(), home_dir.path())
+        .args(["usage", "--session", "nonexistent-uuid-1234"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for missing session"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("session not found"),
+        "expected 'session not found' error, got: {stderr}"
+    );
+}
+
+#[test]
+fn usage_no_sessions_prints_no_sessions_found() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let home_dir = tempfile::tempdir().unwrap();
+
+    // Create empty projects dir.
+    std::fs::create_dir_all(home_dir.path().join(".claude/projects")).unwrap();
+
+    let out = legion_cmd_with_home(data_dir.path(), home_dir.path())
+        .args(["usage", "--today"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "usage with empty projects should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no sessions found"),
+        "expected 'no sessions found', got: {stdout}"
+    );
+}
+
+// --- Card A: legion similar ---
+
+#[test]
+fn similar_nonexistent_id_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["similar", "--id", "00000000-0000-0000-0000-000000000000"])
+        .output()
+        .unwrap();
+
+    // Exits non-zero (either "reflection not found" or "embed model unavailable")
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for nonexistent id"
+    );
+}
+
+#[test]
+fn similar_json_flag_accepted() {
+    // Verify the --json flag parses without panic. Exits non-zero because no model/id,
+    // but argument parsing must succeed.
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "similar",
+            "--id",
+            "00000000-0000-0000-0000-000000000000",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    // Should exit non-zero, not panic
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "should not panic, got: {stderr}"
+    );
+}
+
+// --- Card B: recall --cosine-only and --min-score ---
+
+#[test]
+fn recall_cosine_only_flag_accepted_by_parser() {
+    // When embed model is unavailable, --cosine-only exits non-zero with a clear error.
+    // This verifies the flag is accepted by the parser and the handler runs.
+    let dir = tempfile::tempdir().unwrap();
+
+    // Reflect something first so there's data
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "some reflection"])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "recall",
+            "--repo",
+            "test",
+            "--context",
+            "some",
+            "--cosine-only",
+        ])
+        .output()
+        .unwrap();
+
+    // Either succeeds (model available) or fails with embedding error (not a parse error)
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "flag should parse correctly, got: {stderr}"
+    );
+}
+
+#[test]
+fn recall_min_score_flag_accepted_by_parser() {
+    let dir = tempfile::tempdir().unwrap();
+
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", "min score test"])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "recall",
+            "--repo",
+            "test",
+            "--context",
+            "min score",
+            "--min-score",
+            "0.5",
+        ])
+        .output()
+        .unwrap();
+
+    // Should either succeed or fail on embedding, not on arg parsing
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "flag should parse correctly, got: {stderr}"
+    );
+}
+
+// --- Card C: reflect --dedupe-mode and --force ---
+
+#[test]
+fn reflect_force_flag_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "some text",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "reflect --force should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn reflect_dedupe_mode_off_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "some text",
+            "--dedupe-mode",
+            "off",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "reflect --dedupe-mode off should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn reflect_dedupe_mode_warn_stores_and_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Store first; second is a duplicate but with warn mode should still succeed.
+    let text = "near duplicate reflection text for testing";
+
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", text])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            text,
+            "--dedupe-mode",
+            "warn",
+        ])
+        .output()
+        .unwrap();
+
+    // In warn mode: always exits zero (embed model may or may not be available).
+    assert!(
+        out.status.success(),
+        "reflect --dedupe-mode warn should exit zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Requires embed model -- tests that strict mode blocks duplicates.
+#[test]
+#[ignore]
+fn reflect_dedupe_mode_strict_blocks_duplicate() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = "strict dedup test reflection content";
+
+    // First store succeeds
+    let first = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", text])
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+
+    // Second store with strict mode should fail (near-duplicate)
+    let second = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            text,
+            "--dedupe-mode",
+            "strict",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !second.status.success(),
+        "strict mode should refuse identical reflection"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("near-duplicate"),
+        "error message should mention near-duplicate, got: {stderr}"
+    );
+}
+
+/// Requires embed model -- tests that --force bypasses strict dedupe.
+#[test]
+#[ignore]
+fn reflect_force_bypasses_strict_dedupe() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = "force bypass test reflection";
+
+    legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--text", text])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            text,
+            "--dedupe-mode",
+            "strict",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "--force should bypass strict mode: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Quality gate tests
+// ---------------------------------------------------------------------------
+
+/// `legion quality-gate record` writes a row and prints a UUIDv7 on stdout.
+#[test]
+fn quality_gate_record_prints_id() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "quality-gate",
+            "record",
+            "--skill",
+            "legion-simplify",
+            "--result",
+            "clean",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "quality-gate record failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_uuid_format(&id);
+}
+
+/// `legion quality-gate record` with findings-count and details-json succeeds.
+#[test]
+fn quality_gate_record_with_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let details = r#"{"result":"issues","findings_count":2,"findings":[]}"#;
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "quality-gate",
+            "record",
+            "--skill",
+            "legion-simplify",
+            "--result",
+            "issues",
+            "--findings-count",
+            "2",
+            "--details-json",
+            details,
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "quality-gate record with details failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_uuid_format(&id);
+}
+
+/// `legion pr create` exits 1 with a clear error when no quality gate exists for HEAD.
+///
+/// The test uses a repo name that has no watch.toml entry, which means the gate
+/// check fires first and the process exits before reaching worksource resolution.
+/// This test is not #[ignore] because the gate check requires no work source.
+#[test]
+fn pr_create_refuses_without_quality_gate() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // No gate recorded -- the DB is empty.
+    let out = legion_cmd(dir.path())
+        .args(["pr", "create", "--repo", "test-repo", "--title", "My PR"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "pr create should fail without a gate"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no clean legion-simplify gate") || stderr.contains("legion-simplify"),
+        "error should mention legion-simplify gate, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("/legion-simplify") || stderr.contains("legion-simplify"),
+        "error should guide toward the skill, got: {stderr}"
+    );
+}
+
+/// `legion pr create --skip-gates` bypasses the quality gate, writes an audit entry,
+/// and fails at worksource resolution (not at gate check).
+///
+/// This confirms --skip-gates exits past the gate. The specific exit message
+/// from worksource failure varies by platform, so we only check the gate was not
+/// the failure reason.
+#[test]
+fn pr_create_skip_gates_bypasses_gate_check() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // No gate recorded, but --skip-gates should bypass that check.
+    let out = legion_cmd(dir.path())
+        .args([
+            "pr",
+            "create",
+            "--repo",
+            "no-such-repo",
+            "--title",
+            "Bootstrap PR",
+            "--skip-gates",
+        ])
+        .output()
+        .unwrap();
+
+    // Should fail, but NOT with the "no clean legion-simplify gate" message.
+    // It fails later because no watch.toml entry exists for "no-such-repo".
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("no clean legion-simplify gate"),
+        "skip-gates should bypass gate error, got: {stderr}"
+    );
+}

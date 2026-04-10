@@ -17,6 +17,11 @@ pub(crate) fn format_date(iso_timestamp: &str) -> &str {
     }
 }
 
+/// A reflection row returned with its embedding blob for dedupe checks.
+///
+/// Tuple fields: (id, embedding_bytes, text, created_at).
+pub type ReflectionWithEmbedding = (String, Vec<u8>, String, String);
+
 /// Which timestamp column to set during a card status update.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -508,6 +513,24 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);",
         )?;
 
+        // Migration 12: Quality gates for PR creation guard (#200).
+        // Records results from skill runners (e.g. legion-simplify) so
+        // `legion pr create` can verify a clean gate before opening a PR.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS quality_gates (
+                id TEXT PRIMARY KEY,
+                branch TEXT NOT NULL,
+                commit_hash TEXT NOT NULL,
+                skill TEXT NOT NULL,
+                result TEXT NOT NULL,
+                findings_count INTEGER NOT NULL DEFAULT 0,
+                details TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_quality_gates_lookup
+                ON quality_gates(commit_hash, skill);",
+        )?;
+
         Ok(())
     }
 
@@ -568,7 +591,6 @@ impl Database {
     }
 
     /// Retrieve the embedding BLOB for a reflection, if it exists.
-    #[allow(dead_code)]
     pub fn get_embedding(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let mut stmt = self
             .conn
@@ -617,6 +639,33 @@ impl Database {
             let id: String = row.get(0)?;
             let text: String = row.get(1)?;
             Ok((id, text))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Retrieve the most recent reflections with embeddings for a repo.
+    ///
+    /// Returns (id, embedding_blob, text, created_at) tuples, ordered newest
+    /// first, for near-duplicate detection on `legion reflect`. Only rows that
+    /// have a non-NULL embedding are returned, so reflections that predate the
+    /// embed backfill are naturally skipped.
+    pub fn get_recent_reflections_with_embeddings(
+        &self,
+        repo: &str,
+        limit: usize,
+    ) -> Result<Vec<ReflectionWithEmbedding>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, embedding, text, created_at FROM reflections \
+             WHERE repo = ?1 AND embedding IS NOT NULL \
+             ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![repo, limit], |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            let text: String = row.get(2)?;
+            let created_at: String = row.get(3)?;
+            Ok((id, blob, text, created_at))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
@@ -1554,6 +1603,78 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Update mutable card fields by ID.
+    ///
+    /// Builds a SET clause only for fields that are Some, so callers can
+    /// update one field at a time without touching the others. Always
+    /// sets `updated_at` to now. Returns `CardNotFound` if the id does not
+    /// exist.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_card_fields(
+        &self,
+        id: &str,
+        text: Option<&str>,
+        context: Option<&str>,
+        problem: Option<&str>,
+        solution: Option<&str>,
+        acceptance: Option<&str>,
+        priority: Option<&str>,
+        labels: Option<&str>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut sets: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(v) = text {
+            sets.push(format!("text = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = context {
+            sets.push(format!("context = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = problem {
+            sets.push(format!("problem = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = solution {
+            sets.push(format!("solution = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = acceptance {
+            sets.push(format!("acceptance = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = priority {
+            sets.push(format!("priority = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = labels {
+            sets.push(format!("labels = ?{}", params.len() + 1));
+            params.push(Box::new(v.to_string()));
+        }
+
+        // updated_at is always set
+        sets.push(format!("updated_at = ?{}", params.len() + 1));
+        params.push(Box::new(now));
+
+        let id_pos = params.len() + 1;
+        params.push(Box::new(id.to_string()));
+
+        let sql = format!(
+            "UPDATE tasks SET {} WHERE id = ?{}",
+            sets.join(", "),
+            id_pos
+        );
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let rows = self.conn.execute(&sql, param_refs.as_slice())?;
+        if rows == 0 {
+            return Err(LegionError::CardNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     // --- Schedule CRUD ---
 
     /// Insert a new schedule. Validates the cron expression and time window, computes next_run.
@@ -1909,6 +2030,104 @@ fn map_health_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::health::He
         agents_active: row.get(14)?,
         pressure: row.get(15)?,
     })
+}
+
+/// A recorded quality gate result tied to a git commit and skill.
+///
+/// Written by skill runners so `legion pr create` can verify clean state
+/// before calling the work source. Using the DB instead of a file flag
+/// prevents agents from self-reporting "clean" without proof.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QualityGateRow {
+    pub id: String,
+    pub branch: String,
+    pub commit_hash: String,
+    pub skill: String,
+    pub result: String,
+    pub findings_count: u64,
+    pub details: Option<String>,
+    pub created_at: String,
+}
+
+impl Database {
+    /// Record a quality gate result for the given commit and skill.
+    ///
+    /// Multiple rows for the same (commit_hash, skill) pair are allowed --
+    /// `get_quality_gate` returns the most recent one. This lets agents
+    /// re-run the skill after fixing issues without losing the history.
+    pub fn record_quality_gate(
+        &self,
+        branch: &str,
+        commit_hash: &str,
+        skill: &str,
+        result: &str,
+        findings_count: u64,
+        details: Option<&str>,
+    ) -> Result<QualityGateRow> {
+        let id = Uuid::now_v7().to_string();
+        let created_at = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO quality_gates \
+             (id, branch, commit_hash, skill, result, findings_count, details, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                &id,
+                branch,
+                commit_hash,
+                skill,
+                result,
+                findings_count as i64,
+                details,
+                &created_at,
+            ],
+        )?;
+        Ok(QualityGateRow {
+            id,
+            branch: branch.to_owned(),
+            commit_hash: commit_hash.to_owned(),
+            skill: skill.to_owned(),
+            result: result.to_owned(),
+            findings_count,
+            details: details.map(str::to_owned),
+            created_at,
+        })
+    }
+
+    /// Return the most recent gate row for the given (commit_hash, skill), if any.
+    ///
+    /// Returns `None` when no gate has been recorded for this commit. The caller
+    /// should treat `None` as "gate not run" and refuse to proceed.
+    pub fn get_quality_gate(
+        &self,
+        commit_hash: &str,
+        skill: &str,
+    ) -> Result<Option<QualityGateRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at \
+             FROM quality_gates \
+             WHERE commit_hash = ?1 AND skill = ?2 \
+             ORDER BY created_at DESC \
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![commit_hash, skill], |row| {
+            let findings_count_i64: i64 = row.get(5)?;
+            Ok(QualityGateRow {
+                id: row.get(0)?,
+                branch: row.get(1)?,
+                commit_hash: row.get(2)?,
+                skill: row.get(3)?,
+                result: row.get(4)?,
+                findings_count: findings_count_i64.unsigned_abs(),
+                details: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(LegionError::Database(e)),
+            None => Ok(None),
+        }
+    }
 }
 
 /// An entry in the audit log tracking work source actions.
@@ -2745,5 +2964,183 @@ mod tests {
         }
         let entries = db.query_audit_log(None, None, 3).unwrap();
         assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn get_recent_reflections_with_embeddings_returns_only_embedded() {
+        let db = test_db();
+        // Insert two reflections; only give one an embedding.
+        let r1 = db
+            .insert_reflection("kelex", "has embedding", "self")
+            .unwrap();
+        let _r2 = db
+            .insert_reflection("kelex", "no embedding", "self")
+            .unwrap();
+
+        let blob = vec![0u8; 256 * 4]; // 256 f32 zeros
+        db.store_embedding(&r1.id, &blob).unwrap();
+
+        let results = db
+            .get_recent_reflections_with_embeddings("kelex", 10)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "only the embedded reflection should appear"
+        );
+        assert_eq!(results[0].0, r1.id);
+    }
+
+    #[test]
+    fn get_recent_reflections_with_embeddings_respects_repo_scope() {
+        let db = test_db();
+        let r_kelex = db.insert_reflection("kelex", "kelex text", "self").unwrap();
+        let r_rafters = db
+            .insert_reflection("rafters", "rafters text", "self")
+            .unwrap();
+
+        let blob = vec![0u8; 256 * 4];
+        db.store_embedding(&r_kelex.id, &blob).unwrap();
+        db.store_embedding(&r_rafters.id, &blob).unwrap();
+
+        let kelex_results = db
+            .get_recent_reflections_with_embeddings("kelex", 10)
+            .unwrap();
+        assert_eq!(kelex_results.len(), 1);
+        assert_eq!(kelex_results[0].0, r_kelex.id);
+    }
+
+    #[test]
+    fn get_recent_reflections_with_embeddings_respects_limit() {
+        let db = test_db();
+        let blob = vec![0u8; 256 * 4];
+
+        for i in 0..5 {
+            let r = db
+                .insert_reflection("legion", &format!("reflection {i}"), "self")
+                .unwrap();
+            db.store_embedding(&r.id, &blob).unwrap();
+        }
+
+        let results = db
+            .get_recent_reflections_with_embeddings("legion", 3)
+            .unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn quality_gate_insert_and_lookup() {
+        let db = test_db();
+        let row = db
+            .record_quality_gate(
+                "feat/test-branch",
+                "abc1234def5678",
+                "legion-simplify",
+                "clean",
+                0,
+                None,
+            )
+            .unwrap();
+        assert!(!row.id.is_empty());
+        assert_eq!(row.branch, "feat/test-branch");
+        assert_eq!(row.commit_hash, "abc1234def5678");
+        assert_eq!(row.skill, "legion-simplify");
+        assert_eq!(row.result, "clean");
+        assert_eq!(row.findings_count, 0);
+        assert!(row.details.is_none());
+
+        let fetched = db
+            .get_quality_gate("abc1234def5678", "legion-simplify")
+            .unwrap();
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.id, row.id);
+        assert_eq!(fetched.result, "clean");
+    }
+
+    #[test]
+    fn quality_gate_missing_commit_returns_none() {
+        let db = test_db();
+        let result = db
+            .get_quality_gate("nonexistent-hash", "legion-simplify")
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn quality_gate_missing_skill_returns_none() {
+        let db = test_db();
+        db.record_quality_gate("main", "abc1234", "legion-simplify", "clean", 0, None)
+            .unwrap();
+        // Different skill on the same commit should not match.
+        let result = db.get_quality_gate("abc1234", "legion-review").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn quality_gate_multiple_skills_on_same_commit() {
+        let db = test_db();
+        let hash = "deadbeef12345";
+        db.record_quality_gate("main", hash, "legion-simplify", "clean", 0, None)
+            .unwrap();
+        db.record_quality_gate("main", hash, "legion-review", "issues", 2, Some("{}"))
+            .unwrap();
+
+        let simplify = db
+            .get_quality_gate(hash, "legion-simplify")
+            .unwrap()
+            .expect("simplify gate should exist");
+        assert_eq!(simplify.result, "clean");
+
+        let review = db
+            .get_quality_gate(hash, "legion-review")
+            .unwrap()
+            .expect("review gate should exist");
+        assert_eq!(review.result, "issues");
+        assert_eq!(review.findings_count, 2);
+    }
+
+    #[test]
+    fn quality_gate_reruns_return_most_recent() {
+        let db = test_db();
+        let hash = "cafecafe99";
+        // First run: issues found.
+        db.record_quality_gate("main", hash, "legion-simplify", "issues", 3, None)
+            .unwrap();
+        // Second run after fixing: clean.
+        db.record_quality_gate("main", hash, "legion-simplify", "clean", 0, None)
+            .unwrap();
+
+        let gate = db
+            .get_quality_gate(hash, "legion-simplify")
+            .unwrap()
+            .expect("gate should exist");
+        assert_eq!(
+            gate.result, "clean",
+            "should return the most recent (clean) result"
+        );
+    }
+
+    #[test]
+    fn quality_gate_stores_details_json() {
+        let db = test_db();
+        let details = r#"{"result":"issues","findings_count":1,"findings":[]}"#;
+        let row = db
+            .record_quality_gate(
+                "feat/x",
+                "hash123",
+                "legion-simplify",
+                "issues",
+                1,
+                Some(details),
+            )
+            .unwrap();
+        assert_eq!(row.details.as_deref(), Some(details));
+
+        let fetched = db
+            .get_quality_gate("hash123", "legion-simplify")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.details.as_deref(), Some(details));
     }
 }

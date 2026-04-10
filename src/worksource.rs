@@ -416,6 +416,36 @@ pub fn merge_pr(
     Ok(())
 }
 
+/// Close a PR via a work source plugin without merging.
+///
+/// Passes the optional closing comment and branch-deletion flag through to the
+/// plugin so agents can clean up stale or superseded PRs without touching `gh`
+/// directly.
+pub fn close_pr(
+    plugin_name: &str,
+    github_repo: &str,
+    pr_number: u64,
+    reason: Option<&str>,
+    delete_branch: bool,
+) -> Result<()> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let pr_num_str = pr_number.to_string();
+    let delete_str = if delete_branch { "true" } else { "false" };
+    let mut env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_PR_NUMBER", &pr_num_str),
+        ("LEGION_WS_DELETE_BRANCH", delete_str),
+    ];
+    if let Some(r) = reason {
+        env.push(("LEGION_WS_REASON", r));
+    }
+
+    call_plugin(&plugin_path, &["pr-close"], &env)?;
+    Ok(())
+}
+
 /// Detect the external repo identifier from a workdir.
 #[allow(dead_code)]
 pub fn detect_repo(plugin_name: &str, workdir: &str) -> Result<Option<String>> {
@@ -587,6 +617,18 @@ mod tests {
     fn find_plugin_returns_none_for_nonexistent() {
         let result = find_plugin("nonexistent-plugin-xyz");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn close_pr_returns_worksource_error_when_plugin_missing() {
+        // When the named plugin does not exist, close_pr must return a WorkSource
+        // error, not panic. This exercises the find_plugin -> ok_or_else path.
+        let result = close_pr("nonexistent-plugin-xyz", "owner/repo", 1, None, false);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
     }
 
     #[test]

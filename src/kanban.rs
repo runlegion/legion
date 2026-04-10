@@ -368,6 +368,263 @@ pub fn format_card_list(cards: &[Card], repo: &str, direction: Direction) -> Str
     output
 }
 
+/// A compact summary of a card for JSON list output.
+///
+/// Contains only header fields -- excludes the full body to keep
+/// `list --json` output machine-readable without copying large bodies.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CardSummary {
+    pub id: String,
+    pub from_repo: String,
+    pub to_repo: String,
+    pub status: CardStatus,
+    pub priority: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub labels: Vec<String>,
+    pub source_url: Option<String>,
+}
+
+/// Get a single card by ID, returning `CardNotFound` if missing.
+pub fn view_card(db: &Database, id: &str) -> Result<Card> {
+    db.get_card_by_id(id)?
+        .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
+}
+
+/// Derive a display title from the card text field.
+///
+/// Takes the first non-blank line, strips a leading `## ` heading marker if
+/// present, then truncates to 80 chars. This is the same derivation used by
+/// `list --json`.
+fn derive_title(text: &str) -> String {
+    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or(text);
+    let stripped = first.strip_prefix("## ").unwrap_or(first).trim();
+    crate::card_parse::truncate_chars(stripped, 80)
+}
+
+/// Convert a comma-separated labels string to a Vec.
+fn labels_to_vec(labels: Option<&str>) -> Vec<String> {
+    labels
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Format a single card for human-readable CLI display.
+pub fn format_card_view(card: &Card) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Card: {}\n", card.id));
+    out.push_str(&format!("Title: {}\n", derive_title(&card.text)));
+    out.push_str(&format!("Status: {}\n", card.status.label()));
+    out.push_str(&format!("Priority: {}\n", card.priority));
+    out.push_str(&format!(
+        "From: {} -> To: {}\n",
+        card.from_repo, card.to_repo
+    ));
+    out.push_str(&format!("Created: {}\n", card.created_at));
+    out.push_str(&format!("Updated: {}\n", card.updated_at));
+
+    if let Some(ref labels) = card.labels
+        && !labels.is_empty()
+    {
+        out.push_str(&format!("Labels: {}\n", labels));
+    }
+    if let Some(ref url) = card.source_url {
+        out.push_str(&format!("Source: {}\n", url));
+    }
+
+    // Structured sections -- prefer parsed columns, fall back to raw context
+    let has_structured =
+        card.problem.is_some() || card.solution.is_some() || card.acceptance.is_some();
+    if has_structured {
+        if let Some(ref p) = card.problem {
+            out.push_str("\n## Problem\n");
+            out.push_str(p);
+            out.push('\n');
+        }
+        if let Some(ref s) = card.solution {
+            out.push_str("\n## Solution\n");
+            out.push_str(s);
+            out.push('\n');
+        }
+        if let Some(ref a) = card.acceptance {
+            out.push_str("\n## Acceptance\n");
+            out.push_str(a);
+            out.push('\n');
+        }
+    } else if let Some(ref ctx) = card.context {
+        out.push_str("\n## Context\n");
+        out.push_str(ctx);
+        out.push('\n');
+    }
+
+    out
+}
+
+/// Serialize a card to a single JSON object for `view --json`.
+pub fn format_card_json(card: &Card) -> crate::error::Result<String> {
+    Ok(serde_json::to_string(card)?)
+}
+
+/// Convert a list of cards to JSONL (one summary object per line) for `list --json`.
+pub fn format_card_list_json(cards: &[Card]) -> crate::error::Result<String> {
+    let mut out = String::new();
+    for card in cards {
+        let summary = CardSummary {
+            id: card.id.clone(),
+            from_repo: card.from_repo.clone(),
+            to_repo: card.to_repo.clone(),
+            status: card.status,
+            priority: card.priority.clone(),
+            title: derive_title(&card.text),
+            created_at: card.created_at.clone(),
+            updated_at: card.updated_at.clone(),
+            labels: labels_to_vec(card.labels.as_deref()),
+            source_url: card.source_url.clone(),
+        };
+        out.push_str(&serde_json::to_string(&summary)?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Parameters for updating a card's mutable fields.
+#[derive(Debug, Default)]
+pub struct CardUpdateParams {
+    /// New title text (replaces `text` column)
+    pub text: Option<String>,
+    /// New body -- re-parsed into problem/solution/acceptance
+    pub body: Option<String>,
+    /// New priority
+    pub priority: Option<String>,
+    /// Replacement label set (comma-separated)
+    pub labels: Option<String>,
+    /// Labels to append, deduplicated against existing
+    pub add_labels: Option<String>,
+    /// Labels to remove
+    pub remove_labels: Option<String>,
+}
+
+/// Update mutable fields on a card.
+///
+/// Applies text, body (re-parsed), priority, and label changes, then
+/// writes an audit entry. Returns the card id.
+pub fn update_card(
+    db: &Database,
+    id: &str,
+    _from_repo: &str,
+    params: &CardUpdateParams,
+) -> Result<String> {
+    let card = db
+        .get_card_by_id(id)?
+        .ok_or_else(|| LegionError::CardNotFound(id.to_string()))?;
+
+    // Resolve new labels from the three label params
+    let new_labels: Option<String> = resolve_labels(
+        card.labels.as_deref(),
+        params.labels.as_deref(),
+        params.add_labels.as_deref(),
+        params.remove_labels.as_deref(),
+    );
+
+    // Parse body into structured fields if provided
+    let (new_context, new_problem, new_solution, new_acceptance) =
+        if let Some(ref body) = params.body {
+            let parsed = crate::card_parse::parse_issue_body(body);
+            let acceptance = parsed
+                .acceptance
+                .iter()
+                .filter(|a| !a.is_empty())
+                .cloned()
+                .collect::<Vec<_>>();
+            let acceptance_str = if acceptance.is_empty() {
+                None
+            } else {
+                Some(acceptance.join("\n"))
+            };
+            (
+                Some(body.as_str()),
+                parsed.problem.as_deref().map(|s| s.to_string()),
+                parsed.solution.as_deref().map(|s| s.to_string()),
+                acceptance_str,
+            )
+        } else {
+            (None, None, None, None)
+        };
+
+    db.update_card_fields(
+        id,
+        params.text.as_deref(),
+        new_context,
+        new_problem.as_deref(),
+        new_solution.as_deref(),
+        new_acceptance.as_deref(),
+        params.priority.as_deref(),
+        new_labels.as_deref(),
+    )?;
+
+    Ok(id.to_string())
+}
+
+/// Compute the final label string after applying add/remove/replace operations.
+///
+/// Priority: if `replace` is Some, use it verbatim. Otherwise start from
+/// `existing`, add any `add_labels`, remove any `remove_labels`, deduplicate,
+/// and return None if the result is empty.
+fn resolve_labels(
+    existing: Option<&str>,
+    replace: Option<&str>,
+    add_labels: Option<&str>,
+    remove_labels: Option<&str>,
+) -> Option<String> {
+    if let Some(r) = replace {
+        let cleaned = r
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
+        return if cleaned.is_empty() {
+            None
+        } else {
+            Some(cleaned)
+        };
+    }
+
+    let mut set: Vec<String> = existing
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if let Some(add) = add_labels {
+        for label in add.split(',').map(|s| s.trim().to_string()) {
+            if !label.is_empty() && !set.contains(&label) {
+                set.push(label);
+            }
+        }
+    }
+
+    if let Some(remove) = remove_labels {
+        let to_remove: Vec<String> = remove
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        set.retain(|l| !to_remove.contains(l));
+    }
+
+    if set.is_empty() {
+        None
+    } else {
+        Some(set.join(","))
+    }
+}
+
 /// Format ready cards for surface output.
 pub fn format_ready_for_surface(cards: &[Card]) -> String {
     let mut output = String::new();
@@ -1187,5 +1444,475 @@ mod tests {
         assert!(!output.contains("Context:"));
         assert!(!output.contains("Labels:"));
         assert!(!output.contains("Source:"));
+    }
+
+    // --- view_card tests ---
+
+    #[test]
+    fn view_card_returns_card() {
+        let (db, _index, _dir) = test_storage();
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "view test",
+            None,
+            "high",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+        let card = view_card(&db, &id).expect("view");
+        assert_eq!(card.id, id);
+        assert_eq!(card.text, "view test");
+        assert_eq!(card.priority, "high");
+    }
+
+    #[test]
+    fn view_card_not_found_returns_error() {
+        let (db, _index, _dir) = test_storage();
+        let err = view_card(&db, "nonexistent-id").unwrap_err();
+        assert!(matches!(err, LegionError::CardNotFound(_)));
+    }
+
+    #[test]
+    fn format_card_view_includes_structured_sections() {
+        let card = Card {
+            id: "test-id".to_string(),
+            from_repo: "sean".to_string(),
+            to_repo: "kelex".to_string(),
+            text: "## Test Card".to_string(),
+            context: None,
+            priority: "high".to_string(),
+            status: CardStatus::Pending,
+            note: None,
+            labels: Some("backend,api".to_string()),
+            parent_card_id: None,
+            source_url: Some("https://github.com/runlegion/legion/issues/1".to_string()),
+            source_type: Some("github".to_string()),
+            sort_order: 0,
+            created_at: "2026-04-09T00:00:00Z".to_string(),
+            updated_at: "2026-04-09T00:00:00Z".to_string(),
+            assigned_at: None,
+            started_at: None,
+            completed_at: None,
+            problem: Some("Things are broken".to_string()),
+            solution: Some("Fix them".to_string()),
+            acceptance: Some("Tests pass\nClipy clean".to_string()),
+        };
+        let output = format_card_view(&card);
+        assert!(output.contains("Test Card"), "title derived correctly");
+        assert!(output.contains("## Problem"), "problem section present");
+        assert!(output.contains("Things are broken"));
+        assert!(output.contains("## Solution"), "solution section present");
+        assert!(
+            output.contains("## Acceptance"),
+            "acceptance section present"
+        );
+        assert!(output.contains("Labels: backend,api"));
+        assert!(output.contains("github.com"));
+    }
+
+    #[test]
+    fn format_card_view_falls_back_to_context() {
+        let card = Card {
+            id: "test-id".to_string(),
+            from_repo: "sean".to_string(),
+            to_repo: "kelex".to_string(),
+            text: "plain card".to_string(),
+            context: Some("raw context text".to_string()),
+            priority: "med".to_string(),
+            status: CardStatus::Pending,
+            note: None,
+            labels: None,
+            parent_card_id: None,
+            source_url: None,
+            source_type: None,
+            sort_order: 0,
+            created_at: "2026-04-09T00:00:00Z".to_string(),
+            updated_at: "2026-04-09T00:00:00Z".to_string(),
+            assigned_at: None,
+            started_at: None,
+            completed_at: None,
+            problem: None,
+            solution: None,
+            acceptance: None,
+        };
+        let output = format_card_view(&card);
+        assert!(output.contains("## Context"), "context section present");
+        assert!(output.contains("raw context text"));
+        assert!(!output.contains("## Problem"), "no problem section");
+    }
+
+    #[test]
+    fn format_card_json_is_parseable() {
+        let card = Card {
+            id: "test-id".to_string(),
+            from_repo: "sean".to_string(),
+            to_repo: "kelex".to_string(),
+            text: "json test".to_string(),
+            context: None,
+            priority: "med".to_string(),
+            status: CardStatus::Pending,
+            note: None,
+            labels: None,
+            parent_card_id: None,
+            source_url: None,
+            source_type: None,
+            sort_order: 0,
+            created_at: "2026-04-09T00:00:00Z".to_string(),
+            updated_at: "2026-04-09T00:00:00Z".to_string(),
+            assigned_at: None,
+            started_at: None,
+            completed_at: None,
+            problem: None,
+            solution: None,
+            acceptance: None,
+        };
+        let json = format_card_json(&card).expect("json");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["id"].as_str().unwrap(), "test-id");
+        assert_eq!(parsed["from_repo"].as_str().unwrap(), "sean");
+    }
+
+    // --- update_card tests ---
+
+    #[test]
+    fn update_card_title() {
+        let (db, _index, _dir) = test_storage();
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "original title",
+            None,
+            "med",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+
+        let params = CardUpdateParams {
+            text: Some("updated title".to_string()),
+            ..Default::default()
+        };
+        update_card(&db, &id, "sean", &params).expect("update");
+
+        let card = view_card(&db, &id).expect("view");
+        assert_eq!(card.text, "updated title");
+    }
+
+    #[test]
+    fn update_card_body_reparses_structured_fields() {
+        let (db, _index, _dir) = test_storage();
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "card with body",
+            None,
+            "med",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+
+        let body = "## Problem\nThings break.\n## Solution\nFix it.\n## Acceptance criteria\n- Tests pass\n- Clippy clean";
+        let params = CardUpdateParams {
+            body: Some(body.to_string()),
+            ..Default::default()
+        };
+        update_card(&db, &id, "sean", &params).expect("update");
+
+        let card = view_card(&db, &id).expect("view");
+        assert_eq!(card.problem.as_deref(), Some("Things break."));
+        assert_eq!(card.solution.as_deref(), Some("Fix it."));
+        assert!(card.acceptance.is_some());
+        let acc = card.acceptance.unwrap();
+        assert!(acc.contains("Tests pass"));
+    }
+
+    #[test]
+    fn update_card_priority() {
+        let (db, _index, _dir) = test_storage();
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "priority test",
+            None,
+            "low",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+
+        let params = CardUpdateParams {
+            priority: Some("critical".to_string()),
+            ..Default::default()
+        };
+        update_card(&db, &id, "sean", &params).expect("update");
+
+        let card = view_card(&db, &id).expect("view");
+        assert_eq!(card.priority, "critical");
+    }
+
+    #[test]
+    fn update_card_add_labels_deduplicates() {
+        let (db, _index, _dir) = test_storage();
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "labels test",
+            None,
+            "med",
+            Some("backend,api"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+
+        let params = CardUpdateParams {
+            add_labels: Some("api,frontend".to_string()),
+            ..Default::default()
+        };
+        update_card(&db, &id, "sean", &params).expect("update");
+
+        let card = view_card(&db, &id).expect("view");
+        let labels = card.labels.expect("labels");
+        let parts: Vec<&str> = labels.split(',').collect();
+        assert_eq!(
+            parts.iter().filter(|&&l| l == "api").count(),
+            1,
+            "api deduplicated"
+        );
+        assert!(parts.contains(&"frontend"), "frontend added");
+        assert!(parts.contains(&"backend"), "backend preserved");
+    }
+
+    #[test]
+    fn update_card_remove_labels() {
+        let (db, _index, _dir) = test_storage();
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "remove labels test",
+            None,
+            "med",
+            Some("backend,api,frontend"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+
+        let params = CardUpdateParams {
+            remove_labels: Some("api".to_string()),
+            ..Default::default()
+        };
+        update_card(&db, &id, "sean", &params).expect("update");
+
+        let card = view_card(&db, &id).expect("view");
+        let labels = card.labels.expect("labels");
+        assert!(!labels.split(',').any(|l| l == "api"), "api removed");
+        assert!(
+            labels.split(',').any(|l| l == "backend"),
+            "backend preserved"
+        );
+    }
+
+    #[test]
+    fn update_card_replace_labels() {
+        let (db, _index, _dir) = test_storage();
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "replace labels test",
+            None,
+            "med",
+            Some("backend,api"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+
+        let params = CardUpdateParams {
+            labels: Some("frontend,ux".to_string()),
+            ..Default::default()
+        };
+        update_card(&db, &id, "sean", &params).expect("update");
+
+        let card = view_card(&db, &id).expect("view");
+        let labels = card.labels.expect("labels");
+        assert_eq!(labels, "frontend,ux", "labels fully replaced");
+    }
+
+    #[test]
+    fn update_card_not_found() {
+        let (db, _index, _dir) = test_storage();
+        let params = CardUpdateParams {
+            text: Some("new title".to_string()),
+            ..Default::default()
+        };
+        let err = update_card(&db, "nonexistent-id", "sean", &params).unwrap_err();
+        assert!(matches!(err, LegionError::CardNotFound(_)));
+    }
+
+    #[test]
+    fn update_card_sets_updated_at() {
+        let (db, _index, _dir) = test_storage();
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "timestamp test",
+            None,
+            "med",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+        let original = view_card(&db, &id).expect("view").updated_at;
+
+        // Sleep a tick so the timestamp changes
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let params = CardUpdateParams {
+            text: Some("changed".to_string()),
+            ..Default::default()
+        };
+        update_card(&db, &id, "sean", &params).expect("update");
+        let updated = view_card(&db, &id).expect("view").updated_at;
+        assert!(updated >= original, "updated_at should advance");
+    }
+
+    // --- format_card_list_json tests ---
+
+    #[test]
+    fn format_card_list_json_emits_jsonl() {
+        let (db, _index, _dir) = test_storage();
+        create_card(
+            &db,
+            "sean",
+            "kelex",
+            "## Card One",
+            None,
+            "high",
+            Some("backend"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create 1");
+        create_card(
+            &db, "sean", "kelex", "card two", None, "med", None, None, None, None, None,
+        )
+        .expect("create 2");
+
+        let cards = list_cards(&db, "kelex", Direction::Inbound).expect("list");
+        let output = format_card_list_json(&cards).expect("json");
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2, "two lines for two cards");
+
+        // Each line should be valid JSON with a title field
+        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("parse line 0");
+        assert!(first["id"].is_string(), "id present");
+        assert!(first["title"].is_string(), "title present");
+        assert!(
+            !first.as_object().unwrap().contains_key("context"),
+            "no full body"
+        );
+        // title strips ## heading
+        let any_card_one = lines.iter().any(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| v["title"].as_str().map(|s| s.to_string()))
+                .map(|t| t == "Card One")
+                .unwrap_or(false)
+        });
+        assert!(any_card_one, "heading stripped from title");
+    }
+
+    #[test]
+    fn format_card_list_json_labels_as_array() {
+        let (db, _index, _dir) = test_storage();
+        create_card(
+            &db,
+            "sean",
+            "kelex",
+            "labeled card",
+            None,
+            "med",
+            Some("backend,api"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+
+        let cards = list_cards(&db, "kelex", Direction::Inbound).expect("list");
+        let output = format_card_list_json(&cards).expect("json");
+        let line = output.lines().next().expect("has output");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("parse");
+        let labels = parsed["labels"].as_array().expect("labels is array");
+        assert_eq!(labels.len(), 2);
+        assert!(labels.iter().any(|l| l.as_str() == Some("backend")));
+        assert!(labels.iter().any(|l| l.as_str() == Some("api")));
+    }
+
+    // --- resolve_labels unit tests ---
+
+    #[test]
+    fn resolve_labels_replace_wins_over_existing() {
+        let result = resolve_labels(Some("a,b"), Some("c,d"), None, None);
+        assert_eq!(result.as_deref(), Some("c,d"));
+    }
+
+    #[test]
+    fn resolve_labels_add_deduplicates() {
+        let result = resolve_labels(Some("a,b"), None, Some("b,c"), None);
+        let labels = result.expect("some");
+        let parts: Vec<&str> = labels.split(',').collect();
+        assert_eq!(parts.iter().filter(|&&l| l == "b").count(), 1);
+        assert!(parts.contains(&"c"));
+    }
+
+    #[test]
+    fn resolve_labels_remove_subsets() {
+        let result = resolve_labels(Some("a,b,c"), None, None, Some("b"));
+        let labels = result.expect("some");
+        assert!(!labels.split(',').any(|l| l == "b"));
+        assert!(labels.split(',').any(|l| l == "a"));
+    }
+
+    #[test]
+    fn resolve_labels_empty_replace_returns_none() {
+        let result = resolve_labels(Some("a,b"), Some(""), None, None);
+        assert!(result.is_none());
     }
 }

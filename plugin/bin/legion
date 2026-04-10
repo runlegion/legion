@@ -1,9 +1,24 @@
 #!/bin/bash
-# Legion plugin bin wrapper: dispatches to the platform binary in CLAUDE_PLUGIN_DATA.
-# Falls back to PATH lookup if the plugin binary is not available.
+# Legion plugin bin wrapper: dispatches to the platform binary.
+#
+# Resolution order:
+# 1. CLAUDE_PLUGIN_DATA env var, if set and valid. Claude Code sets this in
+#    hook context but NOT in subagent shells spawned via the Task tool, which
+#    is why the default fallback below exists.
+# 2. $HOME/.claude/plugins/data/legion-legion/ -- the Claude Code plugin data
+#    dir convention, always the same path regardless of env. This makes
+#    subagents and plain-terminal invocations work without configuration.
+# 3. PATH lookup for a system-installed legion (cargo install), with the
+#    wrapper's own directory excluded to avoid infinite recursion.
 set -euo pipefail
 
 DATA_DIR="${CLAUDE_PLUGIN_DATA:-}"
+
+# Default to the known plugin data dir when CLAUDE_PLUGIN_DATA is not set.
+# Subagent shells and interactive terminals do not inherit the env var.
+if [ -z "$DATA_DIR" ] && [ -n "${HOME:-}" ]; then
+  DATA_DIR="${HOME}/.claude/plugins/data/legion-legion"
+fi
 
 if [ -n "$DATA_DIR" ] && [ -x "${DATA_DIR}/legion" ]; then
   exec "${DATA_DIR}/legion" "$@"
