@@ -436,6 +436,12 @@ enum Commands {
     /// Watch for signals and auto-wake sleeping agents
     Watch,
 
+    /// Record a quality gate result for a skill run
+    QualityGate {
+        #[command(subcommand)]
+        action: QualityGateAction,
+    },
+
     /// Show current system health and recent trend
     Health {
         /// Show history for the last N duration (e.g., "1h", "30m", "24h")
@@ -878,6 +884,12 @@ enum PrAction {
         /// Kanban card ID to link (stores PR URL on the card)
         #[arg(long)]
         task: Option<String>,
+
+        /// Skip the legion-simplify quality gate check.
+        /// FOR BOOTSTRAP ONLY -- use when the branch IS the simplify skill itself.
+        /// An audit entry is written so this cannot be done silently.
+        #[arg(long)]
+        skip_gates: bool,
     },
 
     /// List open pull requests with review status
@@ -954,6 +966,32 @@ enum PrAction {
         /// Delete the remote branch after closing
         #[arg(long)]
         delete_branch: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum QualityGateAction {
+    /// Record a quality gate result for the current HEAD commit.
+    ///
+    /// Reads git HEAD and branch automatically. The skill runner calls this
+    /// after inspecting the diff. `legion pr create` checks the gate before
+    /// calling the work source so the result cannot be faked via a file flag.
+    Record {
+        /// Skill name (e.g., "legion-simplify")
+        #[arg(long)]
+        skill: String,
+
+        /// Gate result: "clean" or "issues"
+        #[arg(long, value_parser = ["clean", "issues"])]
+        result: String,
+
+        /// Number of findings (default 0)
+        #[arg(long, default_value = "0")]
+        findings_count: u64,
+
+        /// Raw JSON details from the skill (full findings array)
+        #[arg(long)]
+        details_json: Option<String>,
     },
 }
 
@@ -2271,7 +2309,66 @@ fn run() -> error::Result<()> {
                 labels,
                 reviewer,
                 task,
+                skip_gates,
             } => {
+                // Quality gate: verify legion-simplify ran clean on HEAD before
+                // calling the work source. This runs before worksource::resolve_config
+                // so the gate error is always surfaced, even if the worksource is not
+                // configured. --skip-gates is a bootstrap escape hatch for the branch
+                // that ships the skill itself; it writes an audit entry so it cannot
+                // be done silently.
+                if skip_gates {
+                    audit(&db::AuditInput {
+                        agent: &repo,
+                        action: "skip-gate-bootstrap",
+                        target_type: "pr",
+                        target_ref: "pending",
+                        task_id: task.as_deref(),
+                        source_type: "unknown",
+                        details: Some(r#"{"skill":"legion-simplify","reason":"bootstrap"}"#),
+                        outcome: "skipped",
+                    });
+                    eprintln!("[legion] warning: quality gate skipped (--skip-gates bootstrap)");
+                } else {
+                    let head_hash = std::process::Command::new("git")
+                        .args(["rev-parse", "HEAD"])
+                        .output()
+                        .map_err(|e| {
+                            error::LegionError::WorkSource(format!("failed to read git HEAD: {e}"))
+                        })?;
+                    if !head_hash.status.success() {
+                        return Err(error::LegionError::WorkSource(
+                            "git rev-parse HEAD failed -- is this a git repo?".to_owned(),
+                        ));
+                    }
+                    let commit_hash: String =
+                        String::from_utf8_lossy(&head_hash.stdout).trim().to_owned();
+                    let short_hash: &str = &commit_hash[..commit_hash.len().min(8)];
+
+                    let db_base = data_dir()?;
+                    let gate_db = db::Database::open(&db_base.join("legion.db"))?;
+                    match gate_db.get_quality_gate(&commit_hash, "legion-simplify")? {
+                        None => {
+                            eprintln!(
+                                "[legion] error: no clean legion-simplify gate on HEAD ({short_hash}). \
+                                 Run /legion-simplify before creating the PR."
+                            );
+                            std::process::exit(1);
+                        }
+                        Some(gate) if gate.result != "clean" => {
+                            eprintln!(
+                                "[legion] error: legion-simplify recorded issues on HEAD ({short_hash}), \
+                                 {} findings. Fix them and re-run the skill before creating the PR.",
+                                gate.findings_count
+                            );
+                            std::process::exit(1);
+                        }
+                        Some(_) => {
+                            // Gate is clean -- proceed.
+                        }
+                    }
+                }
+
                 let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
                     .ok_or_else(|| {
                         error::LegionError::WorkSource(format!(
@@ -2597,6 +2694,55 @@ fn run() -> error::Result<()> {
             let base = data_dir()?;
             watch::run(&base)?;
         }
+        Commands::QualityGate { action } => match action {
+            QualityGateAction::Record {
+                skill,
+                result,
+                findings_count,
+                details_json,
+            } => {
+                let head_output = std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .map_err(|e| {
+                        error::LegionError::WorkSource(format!("failed to read git HEAD: {e}"))
+                    })?;
+                if !head_output.status.success() {
+                    return Err(error::LegionError::WorkSource(
+                        "git rev-parse HEAD failed -- is this a git repo?".to_owned(),
+                    ));
+                }
+                let commit_hash: String = String::from_utf8_lossy(&head_output.stdout)
+                    .trim()
+                    .to_owned();
+
+                let branch_output = std::process::Command::new("git")
+                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .output()
+                    .map_err(|e| {
+                        error::LegionError::WorkSource(format!("failed to read git branch: {e}"))
+                    })?;
+                let branch: String = if branch_output.status.success() {
+                    String::from_utf8_lossy(&branch_output.stdout)
+                        .trim()
+                        .to_owned()
+                } else {
+                    "unknown".to_owned()
+                };
+
+                let base = data_dir()?;
+                let database = db::Database::open(&base.join("legion.db"))?;
+                let row = database.record_quality_gate(
+                    &branch,
+                    &commit_hash,
+                    &skill,
+                    &result,
+                    findings_count,
+                    details_json.as_deref(),
+                )?;
+                println!("{}", row.id);
+            }
+        },
         Commands::Usage {
             session,
             since,

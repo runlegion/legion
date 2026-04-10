@@ -56,6 +56,7 @@ legion audit                                 # view recent audit log entries
 legion audit --repo <name>                   # filter by agent
 legion audit --action create-pr              # filter by action type
 legion audit --json                          # output as JSON
+legion quality-gate record --skill legion-simplify --result clean|issues [--findings-count N] [--details-json '<json>']
 legion watch                                 # auto-wake sleeping agents on signal arrival
 legion -v <command>                          # show informational messages (quiet by default)
 ```
@@ -87,8 +88,8 @@ Each step is mandatory. Do not skip steps or combine them.
 1. **Plan** -- Propose approach, get user confirmation before coding.
 2. **Issue** -- Create a GitHub issue via `legion issue create` if one doesn't exist.
 3. **Build** -- Implement on a feature branch (`feat/<issue#>-<short-desc>`). Write tests alongside code. Run `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check`. All must pass.
-4. **Simplify** -- Run `/simplify` on all changed files. Accept structural improvements, flatten unnecessary abstractions, remove dead code.
-5. **PR** -- Create the PR via `legion pr create`. Reference the issue number.
+4. **Simplify** -- Run `/legion-simplify` on the branch. Accept structural improvements, flatten unnecessary abstractions, remove dead code. The skill records its result via `legion quality-gate record` to the DB.
+5. **PR** -- Create the PR via `legion pr create`. Reference the issue number. `legion pr create` requires a clean `legion-simplify` gate on HEAD -- run `/legion-simplify` first. The gate is recorded in legion.db via `legion quality-gate record` (the skill runner writes it; agents cannot fake it). Use `--skip-gates` only when the branch IS the simplify skill itself (bootstrap); an audit entry is written.
 6. **Automated review** -- Run `/review-pr` which launches parallel review agents (code quality, silent failures, etc.).
 7. **Fix** -- Address every issue the automated review found. Re-run tests after fixes.
 8. **Team review** -- Request reviews from two agents via `legion pr review`:

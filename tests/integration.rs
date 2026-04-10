@@ -2586,3 +2586,127 @@ fn reflect_force_bypasses_strict_dedupe() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Quality gate tests
+// ---------------------------------------------------------------------------
+
+/// `legion quality-gate record` writes a row and prints a UUIDv7 on stdout.
+#[test]
+fn quality_gate_record_prints_id() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "quality-gate",
+            "record",
+            "--skill",
+            "legion-simplify",
+            "--result",
+            "clean",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "quality-gate record failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_uuid_format(&id);
+}
+
+/// `legion quality-gate record` with findings-count and details-json succeeds.
+#[test]
+fn quality_gate_record_with_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let details = r#"{"result":"issues","findings_count":2,"findings":[]}"#;
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "quality-gate",
+            "record",
+            "--skill",
+            "legion-simplify",
+            "--result",
+            "issues",
+            "--findings-count",
+            "2",
+            "--details-json",
+            details,
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "quality-gate record with details failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_uuid_format(&id);
+}
+
+/// `legion pr create` exits 1 with a clear error when no quality gate exists for HEAD.
+///
+/// The test uses a repo name that has no watch.toml entry, which means the gate
+/// check fires first and the process exits before reaching worksource resolution.
+/// This test is not #[ignore] because the gate check requires no work source.
+#[test]
+fn pr_create_refuses_without_quality_gate() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // No gate recorded -- the DB is empty.
+    let out = legion_cmd(dir.path())
+        .args(["pr", "create", "--repo", "test-repo", "--title", "My PR"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "pr create should fail without a gate"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no clean legion-simplify gate") || stderr.contains("legion-simplify"),
+        "error should mention legion-simplify gate, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("/legion-simplify") || stderr.contains("legion-simplify"),
+        "error should guide toward the skill, got: {stderr}"
+    );
+}
+
+/// `legion pr create --skip-gates` bypasses the quality gate, writes an audit entry,
+/// and fails at worksource resolution (not at gate check).
+///
+/// This confirms --skip-gates exits past the gate. The specific exit message
+/// from worksource failure varies by platform, so we only check the gate was not
+/// the failure reason.
+#[test]
+fn pr_create_skip_gates_bypasses_gate_check() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // No gate recorded, but --skip-gates should bypass that check.
+    let out = legion_cmd(dir.path())
+        .args([
+            "pr",
+            "create",
+            "--repo",
+            "no-such-repo",
+            "--title",
+            "Bootstrap PR",
+            "--skip-gates",
+        ])
+        .output()
+        .unwrap();
+
+    // Should fail, but NOT with the "no clean legion-simplify gate" message.
+    // It fails later because no watch.toml entry exists for "no-such-repo".
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("no clean legion-simplify gate"),
+        "skip-gates should bypass gate error, got: {stderr}"
+    );
+}

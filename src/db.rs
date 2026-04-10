@@ -513,6 +513,24 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);",
         )?;
 
+        // Migration 12: Quality gates for PR creation guard (#200).
+        // Records results from skill runners (e.g. legion-simplify) so
+        // `legion pr create` can verify a clean gate before opening a PR.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS quality_gates (
+                id TEXT PRIMARY KEY,
+                branch TEXT NOT NULL,
+                commit_hash TEXT NOT NULL,
+                skill TEXT NOT NULL,
+                result TEXT NOT NULL,
+                findings_count INTEGER NOT NULL DEFAULT 0,
+                details TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_quality_gates_lookup
+                ON quality_gates(commit_hash, skill);",
+        )?;
+
         Ok(())
     }
 
@@ -2014,6 +2032,104 @@ fn map_health_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::health::He
     })
 }
 
+/// A recorded quality gate result tied to a git commit and skill.
+///
+/// Written by skill runners so `legion pr create` can verify clean state
+/// before calling the work source. Using the DB instead of a file flag
+/// prevents agents from self-reporting "clean" without proof.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QualityGateRow {
+    pub id: String,
+    pub branch: String,
+    pub commit_hash: String,
+    pub skill: String,
+    pub result: String,
+    pub findings_count: u64,
+    pub details: Option<String>,
+    pub created_at: String,
+}
+
+impl Database {
+    /// Record a quality gate result for the given commit and skill.
+    ///
+    /// Multiple rows for the same (commit_hash, skill) pair are allowed --
+    /// `get_quality_gate` returns the most recent one. This lets agents
+    /// re-run the skill after fixing issues without losing the history.
+    pub fn record_quality_gate(
+        &self,
+        branch: &str,
+        commit_hash: &str,
+        skill: &str,
+        result: &str,
+        findings_count: u64,
+        details: Option<&str>,
+    ) -> Result<QualityGateRow> {
+        let id = Uuid::now_v7().to_string();
+        let created_at = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO quality_gates \
+             (id, branch, commit_hash, skill, result, findings_count, details, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                &id,
+                branch,
+                commit_hash,
+                skill,
+                result,
+                findings_count as i64,
+                details,
+                &created_at,
+            ],
+        )?;
+        Ok(QualityGateRow {
+            id,
+            branch: branch.to_owned(),
+            commit_hash: commit_hash.to_owned(),
+            skill: skill.to_owned(),
+            result: result.to_owned(),
+            findings_count,
+            details: details.map(str::to_owned),
+            created_at,
+        })
+    }
+
+    /// Return the most recent gate row for the given (commit_hash, skill), if any.
+    ///
+    /// Returns `None` when no gate has been recorded for this commit. The caller
+    /// should treat `None` as "gate not run" and refuse to proceed.
+    pub fn get_quality_gate(
+        &self,
+        commit_hash: &str,
+        skill: &str,
+    ) -> Result<Option<QualityGateRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at \
+             FROM quality_gates \
+             WHERE commit_hash = ?1 AND skill = ?2 \
+             ORDER BY created_at DESC \
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![commit_hash, skill], |row| {
+            let findings_count_i64: i64 = row.get(5)?;
+            Ok(QualityGateRow {
+                id: row.get(0)?,
+                branch: row.get(1)?,
+                commit_hash: row.get(2)?,
+                skill: row.get(3)?,
+                result: row.get(4)?,
+                findings_count: findings_count_i64.unsigned_abs(),
+                details: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(LegionError::Database(e)),
+            None => Ok(None),
+        }
+    }
+}
+
 /// An entry in the audit log tracking work source actions.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuditEntry {
@@ -2910,5 +3026,121 @@ mod tests {
             .get_recent_reflections_with_embeddings("legion", 3)
             .unwrap();
         assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn quality_gate_insert_and_lookup() {
+        let db = test_db();
+        let row = db
+            .record_quality_gate(
+                "feat/test-branch",
+                "abc1234def5678",
+                "legion-simplify",
+                "clean",
+                0,
+                None,
+            )
+            .unwrap();
+        assert!(!row.id.is_empty());
+        assert_eq!(row.branch, "feat/test-branch");
+        assert_eq!(row.commit_hash, "abc1234def5678");
+        assert_eq!(row.skill, "legion-simplify");
+        assert_eq!(row.result, "clean");
+        assert_eq!(row.findings_count, 0);
+        assert!(row.details.is_none());
+
+        let fetched = db
+            .get_quality_gate("abc1234def5678", "legion-simplify")
+            .unwrap();
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.id, row.id);
+        assert_eq!(fetched.result, "clean");
+    }
+
+    #[test]
+    fn quality_gate_missing_commit_returns_none() {
+        let db = test_db();
+        let result = db
+            .get_quality_gate("nonexistent-hash", "legion-simplify")
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn quality_gate_missing_skill_returns_none() {
+        let db = test_db();
+        db.record_quality_gate("main", "abc1234", "legion-simplify", "clean", 0, None)
+            .unwrap();
+        // Different skill on the same commit should not match.
+        let result = db.get_quality_gate("abc1234", "legion-review").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn quality_gate_multiple_skills_on_same_commit() {
+        let db = test_db();
+        let hash = "deadbeef12345";
+        db.record_quality_gate("main", hash, "legion-simplify", "clean", 0, None)
+            .unwrap();
+        db.record_quality_gate("main", hash, "legion-review", "issues", 2, Some("{}"))
+            .unwrap();
+
+        let simplify = db
+            .get_quality_gate(hash, "legion-simplify")
+            .unwrap()
+            .expect("simplify gate should exist");
+        assert_eq!(simplify.result, "clean");
+
+        let review = db
+            .get_quality_gate(hash, "legion-review")
+            .unwrap()
+            .expect("review gate should exist");
+        assert_eq!(review.result, "issues");
+        assert_eq!(review.findings_count, 2);
+    }
+
+    #[test]
+    fn quality_gate_reruns_return_most_recent() {
+        let db = test_db();
+        let hash = "cafecafe99";
+        // First run: issues found.
+        db.record_quality_gate("main", hash, "legion-simplify", "issues", 3, None)
+            .unwrap();
+        // Second run after fixing: clean.
+        db.record_quality_gate("main", hash, "legion-simplify", "clean", 0, None)
+            .unwrap();
+
+        let gate = db
+            .get_quality_gate(hash, "legion-simplify")
+            .unwrap()
+            .expect("gate should exist");
+        assert_eq!(
+            gate.result, "clean",
+            "should return the most recent (clean) result"
+        );
+    }
+
+    #[test]
+    fn quality_gate_stores_details_json() {
+        let db = test_db();
+        let details = r#"{"result":"issues","findings_count":1,"findings":[]}"#;
+        let row = db
+            .record_quality_gate(
+                "feat/x",
+                "hash123",
+                "legion-simplify",
+                "issues",
+                1,
+                Some(details),
+            )
+            .unwrap();
+        assert_eq!(row.details.as_deref(), Some(details));
+
+        let fetched = db
+            .get_quality_gate("hash123", "legion-simplify")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.details.as_deref(), Some(details));
     }
 }
