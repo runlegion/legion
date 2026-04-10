@@ -1,5 +1,24 @@
 # Legion Changelog
 
+## 0.6.2
+
+### Phase D daemon post-merge review fixes
+
+Addresses findings from the pr-review-toolkit run on #201 that were deferred to ship the merge. Closes #202.
+
+### Bug Fixes
+- **Daemon task supervision** (`src/daemon.rs`): `run_daemon_async` now races the HTTP server, watch task, and MCP task via `tokio::select!`. Any task exiting (success, error, or panic) triggers the others to stop. Previously background task failures were silently ignored until SIGINT, so a crashing watch loop or panicking MCP handler would leave the daemon running in a half-broken state.
+- **SIGINT hang on MCP stdin** (`src/daemon.rs`): `run_daemon` now calls `runtime.shutdown_timeout(Duration::from_secs(2))` after `block_on` returns, giving the blocking MCP stdin thread up to 2 seconds to exit cleanly. Without this, a `spawn_blocking` task parked on `read_until()` held the OS thread alive and blocked process exit.
+- **`shutdown_signal` ctrl_c install failure now parks instead of returning** (`src/daemon.rs`): a return in the `ctrl_c` arm would cause the outer `select!` to fire immediately on daemon startup, shutting the daemon down. The failure branch now logs and parks via `std::future::pending()`.
+- **MCP tool errors use `isError: true`** (`src/mcp.rs`): per MCP 2024-11-05 spec, tool execution failures go in the success envelope with `isError: true`, not as JSON-RPC `-32603` responses. JSON-RPC errors are reserved for protocol-level failures (parse errors, method not found, invalid request envelope). Added the `tool_error` helper and three tests asserting the correct envelope shape for unknown tools and `McpInvalidArgument` errors.
+- **MCP error messages are sanitized** (`src/mcp.rs`): non-argument errors show `"internal error: <msg>"` instead of leaking file paths or DB internals. `McpInvalidArgument` still shows the full validation message since it is a contract error for the caller.
+- **`api_post` uses `board::post_from_text_with_meta`** (`src/channel.rs`): matches the MCP handlers and propagates index failures as 500s instead of silently swallowing them with an `eprintln!`. A post that cannot be indexed is unsearchable, which is a half-broken state -- callers should see the failure and retry.
+- **SSE broadcast `Lagged`/`Closed` handled explicitly** (`src/channel.rs`): previously the `Ok(_) = rx.recv()` select arm used a refutable match that silently did not fire on `Lagged(n)` (subscriber fell behind the ring buffer) or `Closed` (sender dropped). `Lagged` now logs the dropped-event count and forces a DB re-read to catch up; `Closed` ends the stream. Added two tests guarding the `TryRecvError::Lagged` and `TryRecvError::Closed` paths.
+
+### Features
+- **Embed model absence warning at daemon startup**: logs `"note: embed model not loaded -- posts via /api/post and MCP will not be similarity-searchable until card 019d7991-2eab lands"` so operators are not surprised when daemon-side posts do not appear in cosine recall results.
+- **TODO comments on each `post_from_text_with_meta` call site** (`src/mcp.rs`, `src/channel.rs`): reference card `019d7991-2eab` for the embed model threading follow-up.
+
 ## 0.6.1
 
 ### Phase D: Channel + Watch + MCP unified daemon
@@ -8,9 +27,9 @@ Ports `plugin/channel/*.ts` (TypeScript + Bun) to three tokio tasks in one Rust 
 
 ### Features
 - **`legion daemon` subcommand**: one process hosts the channel (SSE pub/sub + HTTP endpoints at `/api/feed`, `/api/tasks`, `/api/post`, `/sse`), an optional MCP stdio server (`legion daemon --mcp`), and the watch poll loop that was previously a separate `legion watch` process
-- **`src/channel.rs`** (~532 lines): SSE broadcast channel, HTTP endpoints matching the legacy TS JSON shapes byte-for-byte so existing consumers (dashboard, sse-client, any external tooling) continue to work through the transition. Opens DB once per SSE subscriber lifetime and queries only on broadcast notifications, not on every tick.
-- **`src/mcp.rs`** (~700 lines): hand-rolled JSON-RPC 2.0 stdio server. Implements `initialize`, `tools/list`, `tools/call` per MCP 2024-11-05 spec. Four legion tools: `legion_post`, `legion_reply`, `legion_signal`, `legion_task_respond`. Each handler calls existing Rust primitives (`board::post_from_text_with_meta`, `sig::*`, `task::*`) instead of re-implementing. Bounded stdin buffer (1 MB per line) to prevent resource exhaustion. UTF-8 safe response truncation.
-- **`src/daemon.rs`**: task orchestration with shared `Arc<Database>`. Watch task holds a `watch::PidLockGuard` for RAII cleanup on SIGINT/abort. Graceful shutdown via `select!` on Ctrl+C + SIGTERM (with logged fallback if signal handler install fails instead of panicking).
+- **`src/channel.rs`**: SSE broadcast channel, HTTP endpoints matching the legacy JSON shapes so existing consumers (dashboard, any external tooling that scraped the legacy endpoints) continue to work. Opens DB once per SSE subscriber lifetime and queries only on broadcast notifications, not on every tick.
+- **`src/mcp.rs`**: hand-rolled JSON-RPC 2.0 stdio server. Implements `initialize`, `tools/list`, `tools/call` per MCP 2024-11-05 spec. Four legion tools: `legion_post`, `legion_reply`, `legion_signal`, `legion_task_respond`. Each handler calls existing Rust primitives (`board::post_from_text_with_meta`, `sig::*`, `task::*`) instead of re-implementing. Bounded stdin buffer (1 MB per line) to prevent resource exhaustion. UTF-8 safe response truncation.
+- **`src/daemon.rs`**: task orchestration; each handler opens its own DB connection consistent with the CLI pattern (follow-up card 019d7991-2eb4 tracks deduplication between channel.rs and serve.rs). Watch task holds a `watch::PidLockGuard` for RAII cleanup on SIGINT/abort. Graceful shutdown via `select!` races HTTP server, watch task, and MCP task -- any task exiting triggers the others to stop. Ctrl+C install failure uses `pending()` instead of returning, preventing spurious instant shutdown.
 - **New error variant**: `LegionError::McpInvalidArgument(String)` replaces the `LegionError::Io` abuse that was previously used for MCP argument validation errors.
 
 ### Deleted

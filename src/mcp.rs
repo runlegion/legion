@@ -27,7 +27,7 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// Maximum tool result content length before truncation.
 const MAX_TOOL_RESULT_LEN: usize = 2000;
 
-/// Tool definitions -- match the TypeScript tools.ts shapes exactly.
+/// Tool definitions returned by tools/list. Shape is a public contract -- external MCP clients pin to these field names.
 fn tool_definitions() -> Value {
     json!([
         {
@@ -163,6 +163,27 @@ fn tool_result(text: &str) -> Value {
     })
 }
 
+/// Build a tool error response per MCP spec 2024-11-05.
+///
+/// Tool execution errors are returned in the SUCCESS envelope with `isError: true`,
+/// not as JSON-RPC error responses. JSON-RPC errors are reserved for protocol-level
+/// failures (parse errors, method not found, invalid request envelope).
+fn tool_error(id: &Value, err: &LegionError) -> Value {
+    // Avoid leaking internal details (file paths, DB internals) for non-argument errors.
+    let msg = match err {
+        LegionError::McpInvalidArgument(m) => m.clone(),
+        _ => format!("internal error: {err}"),
+    };
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{"type": "text", "text": msg}],
+            "isError": true
+        }
+    })
+}
+
 /// Truncate content to MAX_TOOL_RESULT_LEN with a trailing hint.
 ///
 /// Cuts at a UTF-8 codepoint boundary to avoid panicking on multi-byte chars.
@@ -209,6 +230,7 @@ fn handle_tool_call(
             let db = Database::open(&data_dir.join("legion.db"))?;
             let index = SearchIndex::open(&data_dir.join("index"))?;
 
+            // TODO(019d7991-2eab): compute and store embedding so this post is similarity-searchable
             let id = board::post_from_text_with_meta(
                 &db,
                 &index,
@@ -230,12 +252,13 @@ fn handle_tool_call(
             let text = get_str("text")
                 .ok_or_else(|| LegionError::McpInvalidArgument("text is required".into()))?;
 
-            // Format: re:<post_id> -- <text>  (matches TS tools.ts::legion_reply)
+            // Reply format "re:<post_id> -- <text>" is part of the bullpen text protocol; other agents parse this prefix.
             let reply_text = format!("re:{} -- {}", post_id, text.trim());
 
             let db = Database::open(&data_dir.join("legion.db"))?;
             let index = SearchIndex::open(&data_dir.join("index"))?;
 
+            // TODO(019d7991-2eab): compute and store embedding so this post is similarity-searchable
             let id = board::post_from_text_with_meta(
                 &db,
                 &index,
@@ -286,6 +309,7 @@ fn handle_tool_call(
             let db = Database::open(&data_dir.join("legion.db"))?;
             let index = SearchIndex::open(&data_dir.join("index"))?;
 
+            // TODO(019d7991-2eab): compute and store embedding so this post is similarity-searchable
             let id = board::post_from_text_with_meta(
                 &db,
                 &index,
@@ -391,7 +415,9 @@ pub fn dispatch(
                     let truncated = truncate(&text);
                     Some(success_response(&id, tool_result(&truncated)))
                 }
-                Err(e) => Some(error_response(&id, -32603, &e.to_string())),
+                // Per MCP spec 2024-11-05: tool execution errors go in the success
+                // envelope with isError:true, not as JSON-RPC error responses.
+                Err(e) => Some(tool_error(&id, &e)),
             }
         }
 
@@ -665,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tool_returns_error() {
+    fn unknown_tool_returns_is_error() {
         let (db, dir) = mcp_test_dir();
         drop(db);
 
@@ -679,7 +705,21 @@ mod tests {
         );
 
         let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
-        assert!(resp.get("error").is_some(), "expected error response");
+        // Per MCP spec: tool errors go in the success envelope with isError:true,
+        // NOT as a JSON-RPC error response.
+        assert!(
+            resp.get("error").is_none(),
+            "tool errors must not be JSON-RPC errors"
+        );
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "expected isError: true in result"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("nonexistent_tool"),
+            "error text should name the tool"
+        );
     }
 
     #[test]
@@ -708,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn legion_post_missing_repo_returns_error() {
+    fn legion_post_missing_repo_returns_is_error() {
         let (db, dir) = mcp_test_dir();
         drop(db);
 
@@ -724,15 +764,54 @@ mod tests {
         );
 
         let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        // Per MCP spec: McpInvalidArgument is a tool error, not a protocol error.
+        // Must be in the success envelope with isError:true.
         assert!(
-            resp.get("error").is_some(),
-            "expected error for missing repo"
+            resp.get("error").is_none(),
+            "tool argument errors must not be JSON-RPC errors; got: {:?}",
+            resp.get("error")
         );
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "expected isError: true in result"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
         assert!(
-            resp["error"]["message"]
-                .as_str()
-                .unwrap_or("")
-                .contains("repo is required")
+            text.contains("repo is required"),
+            "expected 'repo is required' in error text, got: {text}"
+        );
+    }
+
+    #[test]
+    fn mcp_invalid_argument_is_not_json_rpc_error() {
+        // Specifically assert McpInvalidArgument produces isError:true, not -32603.
+        let (db, dir) = mcp_test_dir();
+        drop(db);
+
+        let tx = make_tx();
+        // legion_signal requires "repo", "to", and "verb".
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "legion_signal",
+                "arguments": {
+                    "repo": "kelex"
+                    // missing "to" and "verb"
+                }
+            })),
+        );
+
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        assert!(
+            resp.get("error").is_none(),
+            "McpInvalidArgument must not produce a JSON-RPC error envelope"
+        );
+        assert_eq!(resp["result"]["isError"], true);
+        // The error text should describe what is missing (not internal server error).
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            !text.starts_with("internal error:"),
+            "McpInvalidArgument should show the validation message, not 'internal error'"
         );
     }
 

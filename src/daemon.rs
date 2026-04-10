@@ -6,6 +6,7 @@
 ///
 /// The daemon starts all tasks and shuts down cleanly on SIGINT/SIGTERM.
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::channel;
 use crate::error::{LegionError, Result};
@@ -34,7 +35,14 @@ pub fn run_daemon(config: DaemonConfig) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| LegionError::Server(format!("failed to create runtime: {e}")))?;
 
-    runtime.block_on(run_daemon_async(config))
+    let result = runtime.block_on(run_daemon_async(config));
+
+    // Give blocking threads (e.g. MCP stdin loop) up to 2 seconds to exit before
+    // the runtime forcibly drops them. Without this, a blocking task stuck on
+    // read_until() holds the OS thread alive until the process exits.
+    runtime.shutdown_timeout(Duration::from_secs(2));
+
+    result
 }
 
 async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
@@ -46,10 +54,15 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
         port, config.enable_mcp
     );
 
+    // Embed model is not loaded in daemon mode. Posts via /api/post and MCP tools will have
+    // NULL embedding columns and won't be similarity-searchable until card 019d7991-2eab lands.
+    eprintln!(
+        "[legion daemon] note: embed model not loaded -- posts via /api/post and MCP will not be similarity-searchable until card 019d7991-2eab lands"
+    );
+
     // Build the broadcast channel for SSE notifications.
     let (tx, _rx) = channel::new_broadcast();
 
-    // Build the channel HTTP router directly -- no passthrough wrapper needed.
     let channel_state = channel::ChannelState {
         data_dir: data_dir.clone(),
         tx: tx.clone(),
@@ -71,7 +84,7 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     });
 
     // Spawn the MCP stdio server if requested.
-    let mcp_handle = if config.enable_mcp {
+    let mcp_handle: Option<tokio::task::JoinHandle<Result<()>>> = if config.enable_mcp {
         let mcp_data_dir = data_dir.clone();
         let mcp_tx = tx.clone();
         let version = env!("CARGO_PKG_VERSION").to_string();
@@ -85,20 +98,52 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
         None
     };
 
-    // Run the axum server until SIGINT/SIGTERM.
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| LegionError::Server(format!("server error: {e}")))?;
+    // Build the axum server future.
+    let serve_future = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
 
-    eprintln!("[legion daemon] shutting down");
-
-    // Abort background tasks on shutdown.
-    watch_handle.abort();
-    if let Some(h) = mcp_handle {
-        h.abort();
+    // Race the HTTP server, watch task, MCP task (if present), and shutdown signal.
+    // Any task exiting (success or failure) triggers the others to be cancelled.
+    // This ensures panics or early returns in background tasks don't go undetected.
+    if let Some(mcp) = mcp_handle {
+        tokio::select! {
+            result = serve_future => {
+                if let Err(e) = result {
+                    eprintln!("[legion daemon] http server error: {e}");
+                }
+                eprintln!("[legion daemon] http server exited; shutting down");
+            }
+            result = watch_handle => {
+                match result {
+                    Ok(()) => eprintln!("[legion daemon] watch task exited; shutting down"),
+                    Err(e) => eprintln!("[legion daemon] watch task exited: {e}; shutting down"),
+                }
+            }
+            result = mcp => {
+                match result {
+                    Ok(Ok(())) => eprintln!("[legion daemon] mcp loop exited; shutting down"),
+                    Ok(Err(e)) => eprintln!("[legion daemon] mcp loop error: {e}; shutting down"),
+                    Err(e) => eprintln!("[legion daemon] mcp task panic: {e}; shutting down"),
+                }
+            }
+        }
+    } else {
+        tokio::select! {
+            result = serve_future => {
+                if let Err(e) = result {
+                    eprintln!("[legion daemon] http server error: {e}");
+                }
+                eprintln!("[legion daemon] http server exited; shutting down");
+            }
+            result = watch_handle => {
+                match result {
+                    Ok(()) => eprintln!("[legion daemon] watch task exited; shutting down"),
+                    Err(e) => eprintln!("[legion daemon] watch task exited: {e}; shutting down"),
+                }
+            }
+        }
     }
 
+    eprintln!("[legion daemon] shutdown complete");
     Ok(())
 }
 
@@ -223,8 +268,15 @@ async fn shutdown_signal() {
     use tokio::signal;
 
     let ctrl_c = async {
-        if let Err(e) = signal::ctrl_c().await {
-            eprintln!("[legion daemon] failed to install Ctrl+C handler: {e}");
+        match signal::ctrl_c().await {
+            Ok(()) => {}
+            Err(e) => {
+                // Log the failure but never return -- returning here would cause
+                // the select! to fire the ctrl_c arm on startup, shutting down
+                // the daemon immediately. Instead park until SIGTERM arrives.
+                eprintln!("[legion daemon] failed to install Ctrl+C handler, ignoring: {e}");
+                std::future::pending::<()>().await;
+            }
         }
     };
 
