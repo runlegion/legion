@@ -2751,7 +2751,13 @@ fn run() -> error::Result<()> {
             by_repo,
             json,
         } => {
-            let home: PathBuf = dirs::home_dir().ok_or(error::LegionError::NoHomeDir)?;
+            // LEGION_HOME overrides dirs::home_dir() for test isolation.
+            // dirs 5.x on Windows uses SHGetKnownFolderPath and ignores HOME/USERPROFILE
+            // env vars, so tests need an explicit override to point at a temp dir.
+            let home: PathBuf = std::env::var_os("LEGION_HOME")
+                .map(PathBuf::from)
+                .or_else(dirs::home_dir)
+                .ok_or(error::LegionError::NoHomeDir)?;
 
             // Determine the since filter.
             // --since takes an explicit date. --today and no-args both mean today.
