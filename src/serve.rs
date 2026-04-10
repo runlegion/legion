@@ -207,8 +207,8 @@ async fn sse_handler(
 }
 
 /// Build the agents JSON payload (same logic as api_agents).
-fn build_agents_json(db: &Database) -> Result<String, ()> {
-    let stats = db.get_dashboard_stats().map_err(|_| ())?;
+fn build_agents_json(db: &Database) -> Result<String, error::LegionError> {
+    let stats = db.get_dashboard_stats()?;
     let unread_map: HashMap<String, u64> = db
         .get_unread_counts_all()
         .unwrap_or_default()
@@ -227,12 +227,12 @@ fn build_agents_json(db: &Database) -> Result<String, ()> {
         })
         .collect();
 
-    serde_json::to_string(&agents).map_err(|_| ())
+    Ok(serde_json::to_string(&agents)?)
 }
 
 /// Build the feed JSON payload (last 20 team posts).
-fn build_feed_json(db: &Database) -> Result<String, ()> {
-    let posts = db.get_board_posts().map_err(|_| ())?;
+fn build_feed_json(db: &Database) -> Result<String, error::LegionError> {
+    let posts = db.get_board_posts()?;
     let items: Vec<FeedItem> = posts
         .into_iter()
         .take(20)
@@ -248,7 +248,7 @@ fn build_feed_json(db: &Database) -> Result<String, ()> {
         })
         .collect();
 
-    serde_json::to_string(&items).map_err(|_| ())
+    Ok(serde_json::to_string(&items)?)
 }
 
 /// Agent info returned by GET /api/agents.

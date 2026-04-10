@@ -7,14 +7,15 @@
 ///   - tools/call
 ///
 /// No Content-Length headers. Each message is a single JSON line.
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
+use crate::board;
 use crate::channel::ChannelEvent;
-use crate::db::{Database, ReflectionMeta};
+use crate::db::Database;
 use crate::error::{LegionError, Result};
 use crate::search::SearchIndex;
 use crate::signal as sig;
@@ -23,8 +24,8 @@ use crate::task;
 /// Protocol version string returned by initialize.
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-/// Maximum notification content length before truncation.
-const MAX_NOTIFICATION_LEN: usize = 2000;
+/// Maximum tool result content length before truncation.
+const MAX_TOOL_RESULT_LEN: usize = 2000;
 
 /// Tool definitions -- match the TypeScript tools.ts shapes exactly.
 fn tool_definitions() -> Value {
@@ -162,20 +163,23 @@ fn tool_result(text: &str) -> Value {
     })
 }
 
-/// Truncate content to MAX_NOTIFICATION_LEN with a trailing hint.
-fn truncate(content: &str, id: Option<&str>) -> String {
-    if content.len() <= MAX_NOTIFICATION_LEN {
+/// Truncate content to MAX_TOOL_RESULT_LEN with a trailing hint.
+///
+/// Cuts at a UTF-8 codepoint boundary to avoid panicking on multi-byte chars.
+fn truncate(content: &str) -> String {
+    if content.len() <= MAX_TOOL_RESULT_LEN {
         return content.to_string();
     }
-    let hint = match id {
-        Some(post_id) => format!(
-            "\n\n[truncated -- full content on bullpen, id: {}]",
-            post_id
-        ),
-        None => "\n\n[truncated -- full content on bullpen]".to_string(),
-    };
-    let cut = MAX_NOTIFICATION_LEN.saturating_sub(hint.len());
-    format!("{}{}", &content[..cut], hint)
+    let hint = "\n\n[truncated -- full content on bullpen]";
+    let budget = MAX_TOOL_RESULT_LEN.saturating_sub(hint.len());
+    let mut cut = 0usize;
+    for (i, c) in content.char_indices() {
+        if i + c.len_utf8() > budget {
+            break;
+        }
+        cut = i + c.len_utf8();
+    }
+    format!("{}{hint}", &content[..cut])
 }
 
 /// Handle a single MCP tools/call dispatch.
@@ -197,47 +201,34 @@ fn handle_tool_call(
 
     match name {
         "legion_post" => {
-            let repo = get_str("repo").unwrap_or_else(|| "unknown".to_string());
-            let text = get_str("text").ok_or_else(|| {
-                LegionError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "text is required",
-                ))
-            })?;
+            let repo = get_str("repo")
+                .ok_or_else(|| LegionError::McpInvalidArgument("repo is required".into()))?;
+            let text = get_str("text")
+                .ok_or_else(|| LegionError::McpInvalidArgument("text is required".into()))?;
 
             let db = Database::open(&data_dir.join("legion.db"))?;
             let index = SearchIndex::open(&data_dir.join("index"))?;
 
-            let reflection = db.insert_reflection_with_meta(
+            let id = board::post_from_text_with_meta(
+                &db,
+                &index,
                 &repo,
                 text.trim(),
-                "team",
-                &ReflectionMeta::default(),
+                &crate::db::ReflectionMeta::default(),
             )?;
-
-            if let Err(e) = index.add(&reflection.id, &repo, text.trim()) {
-                eprintln!("[legion mcp] search index add failed: {e}");
-            }
 
             let _ = tx.send(ChannelEvent::Feed);
 
-            Ok(format!("posted (id: {})", reflection.id))
+            Ok(format!("posted (id: {})", id))
         }
 
         "legion_reply" => {
-            let repo = get_str("repo").unwrap_or_else(|| "unknown".to_string());
-            let post_id = get_str("post_id").ok_or_else(|| {
-                LegionError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "post_id is required",
-                ))
-            })?;
-            let text = get_str("text").ok_or_else(|| {
-                LegionError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "text is required",
-                ))
-            })?;
+            let repo = get_str("repo")
+                .ok_or_else(|| LegionError::McpInvalidArgument("repo is required".into()))?;
+            let post_id = get_str("post_id")
+                .ok_or_else(|| LegionError::McpInvalidArgument("post_id is required".into()))?;
+            let text = get_str("text")
+                .ok_or_else(|| LegionError::McpInvalidArgument("text is required".into()))?;
 
             // Format: re:<post_id> -- <text>  (matches TS tools.ts::legion_reply)
             let reply_text = format!("re:{} -- {}", post_id, text.trim());
@@ -245,36 +236,26 @@ fn handle_tool_call(
             let db = Database::open(&data_dir.join("legion.db"))?;
             let index = SearchIndex::open(&data_dir.join("index"))?;
 
-            let reflection = db.insert_reflection_with_meta(
+            let id = board::post_from_text_with_meta(
+                &db,
+                &index,
                 &repo,
                 &reply_text,
-                "team",
-                &ReflectionMeta::default(),
+                &crate::db::ReflectionMeta::default(),
             )?;
-
-            if let Err(e) = index.add(&reflection.id, &repo, &reply_text) {
-                eprintln!("[legion mcp] search index add failed: {e}");
-            }
 
             let _ = tx.send(ChannelEvent::Feed);
 
-            Ok(format!("replied (id: {})", reflection.id))
+            Ok(format!("replied (id: {})", id))
         }
 
         "legion_signal" => {
-            let repo = get_str("repo").unwrap_or_else(|| "unknown".to_string());
-            let to = get_str("to").ok_or_else(|| {
-                LegionError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "to is required",
-                ))
-            })?;
-            let verb = get_str("verb").ok_or_else(|| {
-                LegionError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "verb is required",
-                ))
-            })?;
+            let repo = get_str("repo")
+                .ok_or_else(|| LegionError::McpInvalidArgument("repo is required".into()))?;
+            let to = get_str("to")
+                .ok_or_else(|| LegionError::McpInvalidArgument("to is required".into()))?;
+            let verb = get_str("verb")
+                .ok_or_else(|| LegionError::McpInvalidArgument("verb is required".into()))?;
             let status = get_str("status");
             let note = get_str("note");
             let details_str = get_str("details");
@@ -305,35 +286,24 @@ fn handle_tool_call(
             let db = Database::open(&data_dir.join("legion.db"))?;
             let index = SearchIndex::open(&data_dir.join("index"))?;
 
-            let reflection = db.insert_reflection_with_meta(
+            let id = board::post_from_text_with_meta(
+                &db,
+                &index,
                 &repo,
                 &signal_text,
-                "team",
-                &ReflectionMeta::default(),
+                &crate::db::ReflectionMeta::default(),
             )?;
-
-            if let Err(e) = index.add(&reflection.id, &repo, &signal_text) {
-                eprintln!("[legion mcp] search index add failed: {e}");
-            }
 
             let _ = tx.send(ChannelEvent::Feed);
 
-            Ok(format!("signaled (id: {})", reflection.id))
+            Ok(format!("signaled (id: {})", id))
         }
 
         "legion_task_respond" => {
-            let task_id = get_str("task_id").ok_or_else(|| {
-                LegionError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "task_id is required",
-                ))
-            })?;
-            let action = get_str("action").ok_or_else(|| {
-                LegionError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "action is required",
-                ))
-            })?;
+            let task_id = get_str("task_id")
+                .ok_or_else(|| LegionError::McpInvalidArgument("task_id is required".into()))?;
+            let action = get_str("action")
+                .ok_or_else(|| LegionError::McpInvalidArgument("action is required".into()))?;
             let note = get_str("note");
 
             let db = Database::open(&data_dir.join("legion.db"))?;
@@ -343,9 +313,8 @@ fn handle_tool_call(
                 "done" => task::complete_task(&db, &task_id, note.as_deref())?,
                 "block" => task::block_task(&db, &task_id, note.as_deref())?,
                 other => {
-                    return Err(LegionError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("unknown action: {other}; expected accept, done, or block"),
+                    return Err(LegionError::McpInvalidArgument(format!(
+                        "unknown action: {other}; expected accept, done, or block"
                     )));
                 }
             }
@@ -355,9 +324,8 @@ fn handle_tool_call(
             Ok(format!("task {}: {}", action, task_id))
         }
 
-        other => Err(LegionError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("unknown tool: {other}"),
+        other => Err(LegionError::McpInvalidArgument(format!(
+            "unknown tool: {other}"
         ))),
     }
 }
@@ -420,7 +388,7 @@ pub fn dispatch(
 
             match handle_tool_call(data_dir, tool_name, &tool_args, tx) {
                 Ok(text) => {
-                    let truncated = truncate(&text, None);
+                    let truncated = truncate(&text);
                     Some(success_response(&id, tool_result(&truncated)))
                 }
                 Err(e) => Some(error_response(&id, -32603, &e.to_string())),
@@ -438,10 +406,15 @@ pub fn dispatch(
     }
 }
 
+/// Maximum bytes accepted per input line. Rejects oversized messages to
+/// prevent unbounded memory growth from a malicious or misbehaving client.
+const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB
+
 /// Run the MCP stdio server loop.
 ///
 /// Reads newline-delimited JSON from stdin. Writes responses to stdout.
 /// Blocks the calling thread (meant to run in spawn_blocking or a dedicated thread).
+/// Lines larger than MAX_LINE_BYTES are rejected with a JSON-RPC parse error.
 pub fn run_stdio_loop(
     data_dir: PathBuf,
     version: String,
@@ -450,16 +423,35 @@ pub fn run_stdio_loop(
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
+    let mut reader = BufReader::new(stdin.lock());
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
             Err(e) => {
                 eprintln!("[legion mcp] stdin read error: {e}");
                 break;
             }
-        };
+        }
 
+        if buf.len() > MAX_LINE_BYTES {
+            eprintln!(
+                "[legion mcp] oversized message ({} bytes), rejecting",
+                buf.len()
+            );
+            let id = Value::Null;
+            let resp = error_response(&id, -32700, "message too large");
+            if let Ok(s) = serde_json::to_string(&resp) {
+                let _ = writeln!(out, "{s}");
+                let _ = out.flush();
+            }
+            continue;
+        }
+
+        let line = String::from_utf8_lossy(&buf);
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -472,7 +464,7 @@ pub fn run_stdio_loop(
                 let id = Value::Null;
                 let resp = error_response(&id, -32700, "parse error");
                 if let Ok(s) = serde_json::to_string(&resp) {
-                    let _ = writeln!(out, "{}", s);
+                    let _ = writeln!(out, "{s}");
                     let _ = out.flush();
                 }
                 continue;
@@ -482,7 +474,7 @@ pub fn run_stdio_loop(
         if let Some(response) = dispatch(&request, &data_dir, &version, &tx) {
             match serde_json::to_string(&response) {
                 Ok(s) => {
-                    let _ = writeln!(out, "{}", s);
+                    let _ = writeln!(out, "{s}");
                     let _ = out.flush();
                 }
                 Err(e) => {
@@ -716,17 +708,56 @@ mod tests {
     }
 
     #[test]
+    fn legion_post_missing_repo_returns_error() {
+        let (db, dir) = mcp_test_dir();
+        drop(db);
+
+        let tx = make_tx();
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "legion_post",
+                "arguments": {
+                    "text": "missing repo"
+                }
+            })),
+        );
+
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        assert!(
+            resp.get("error").is_some(),
+            "expected error for missing repo"
+        );
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("repo is required")
+        );
+    }
+
+    #[test]
     fn truncate_short_content_unchanged() {
         let short = "hello world";
-        assert_eq!(truncate(short, None), short);
+        assert_eq!(truncate(short), short);
     }
 
     #[test]
     fn truncate_long_content_with_hint() {
-        let long = "a".repeat(MAX_NOTIFICATION_LEN + 100);
-        let result = truncate(&long, Some("test-id"));
-        assert!(result.len() <= MAX_NOTIFICATION_LEN);
+        let long = "a".repeat(MAX_TOOL_RESULT_LEN + 100);
+        let result = truncate(&long);
+        assert!(result.len() <= MAX_TOOL_RESULT_LEN);
         assert!(result.contains("truncated"));
-        assert!(result.contains("test-id"));
+    }
+
+    #[test]
+    fn truncate_multibyte_safe() {
+        // Build a string with multi-byte chars near the boundary.
+        // Each Chinese character is 3 bytes in UTF-8.
+        let repeated: String = "\u{4e2d}".repeat(MAX_TOOL_RESULT_LEN); // well over limit
+        let result = truncate(&repeated);
+        // Must not panic and must be valid UTF-8
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        assert!(result.len() <= MAX_TOOL_RESULT_LEN);
     }
 }

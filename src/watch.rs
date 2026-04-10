@@ -195,7 +195,10 @@ pub fn release_pid_lock(lock_path: &Path) {
 }
 
 /// RAII guard that releases the PID lock file on drop.
-struct PidLockGuard(PathBuf);
+///
+/// Holds the lock path and removes the file when dropped, ensuring the lock
+/// is always released even on panic or task abort.
+pub struct PidLockGuard(pub PathBuf);
 
 impl Drop for PidLockGuard {
     fn drop(&mut self) {

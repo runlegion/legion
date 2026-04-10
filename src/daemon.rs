@@ -7,8 +7,6 @@
 /// The daemon starts all tasks and shuts down cleanly on SIGINT/SIGTERM.
 use std::path::{Path, PathBuf};
 
-use axum::Router;
-
 use crate::channel;
 use crate::error::{LegionError, Result};
 use crate::mcp;
@@ -51,18 +49,12 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     // Build the broadcast channel for SSE notifications.
     let (tx, _rx) = channel::new_broadcast();
 
-    // Build the channel HTTP router.
+    // Build the channel HTTP router directly -- no passthrough wrapper needed.
     let channel_state = channel::ChannelState {
         data_dir: data_dir.clone(),
         tx: tx.clone(),
     };
-    let channel_router = channel::router(channel_state);
-
-    // Also mount the full serve.rs router so existing endpoints remain reachable.
-    // We use a nested router: /sse, /api/feed, /api/tasks, /api/post from channel,
-    // everything else from the passthrough. Since we can't easily merge two AppState
-    // types here, the channel routes take precedence via routing order.
-    let app = build_app(channel_router);
+    let app = channel::router(channel_state);
 
     // Bind the TCP listener.
     let addr = format!("0.0.0.0:{port}");
@@ -110,19 +102,13 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     Ok(())
 }
 
-/// Build the combined axum application.
-///
-/// Channel routes (/sse, /api/feed, /api/tasks, /api/post) are registered
-/// first. No other routes are needed -- the full dashboard is in serve.rs
-/// and remains accessible via `legion serve`.
-fn build_app(channel_router: Router) -> Router {
-    channel_router
-}
-
 /// Run the watch loop inside a tokio task.
 ///
 /// Loads watch.toml from data_dir. If the config is missing or has no repos,
 /// logs a warning and exits the task (does not crash the daemon).
+///
+/// The PID lock is held via a RAII guard so it is always released when the
+/// task exits -- whether by normal return, abort, or panic.
 async fn run_watch_task(data_dir: &Path) {
     let config_path = data_dir.join("watch.toml");
     let lock_path = data_dir.join("watch.pid");
@@ -142,6 +128,9 @@ async fn run_watch_task(data_dir: &Path) {
         return;
     }
 
+    // RAII guard releases the lock when this task exits (abort, panic, or return).
+    let _pid_guard = watch::PidLockGuard(lock_path);
+
     eprintln!(
         "[legion daemon] watch active: {} repo(s), poll every {}s",
         config.repos.len(),
@@ -152,7 +141,6 @@ async fn run_watch_task(data_dir: &Path) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("[legion daemon] watch: db open error: {e}");
-            watch::release_pid_lock(&lock_path);
             return;
         }
     };
@@ -227,21 +215,30 @@ async fn run_watch_task(data_dir: &Path) {
 }
 
 /// Wait for SIGINT or SIGTERM.
+///
+/// If signal handler installation fails, logs the error and returns immediately
+/// rather than panicking. The daemon continues running but loses graceful
+/// shutdown; it can still be killed via SIGKILL.
 async fn shutdown_signal() {
     use tokio::signal;
 
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(e) = signal::ctrl_c().await {
+            eprintln!("[legion daemon] failed to install Ctrl+C handler: {e}");
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(e) => {
+                eprintln!("[legion daemon] failed to install SIGTERM handler: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]
@@ -272,8 +269,7 @@ mod tests {
             tx,
         };
 
-        let router = channel::router(state);
-        let app = build_app(router);
+        let app = channel::router(state);
 
         // Bind on an ephemeral port.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
