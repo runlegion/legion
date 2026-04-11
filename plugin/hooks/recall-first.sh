@@ -18,6 +18,10 @@
 LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
 LOG=/tmp/legion-hook-errors.log
 
+# Shared warning helper -- surfaces legion degradation instead of letting
+# it silently hide recall context from the agent. See #209.
+source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-warn.sh"
+
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
@@ -55,17 +59,29 @@ fi
 
 # Run recall. Short limit + preview truncation keep injected context compact.
 HITS=$("$LEGION" recall --repo "$REPO" --context "$QUERY" --limit 3 --preview 200 2>>"$LOG")
+legion_check $? "recall"
 
-# No hits -- don't inject anything, let the tool fire as normal
-if [ -z "$HITS" ]; then
+WARN=$(legion_warnings_block)
+
+# No hits and no warning -- don't inject anything, let the tool fire as normal.
+# If there's a warning, surface it even without hits so the agent knows recall
+# is degraded and shouldn't trust the absence of reflections as "nothing relevant".
+if [ -z "$HITS" ] && [ -z "$WARN" ]; then
   exit 0
 fi
 
-CTX="[Legion] Before ${TOOL}, recall hits for: ${QUERY}
+if [ -z "$HITS" ]; then
+  CTX="$WARN"
+else
+  CTX="[Legion] Before ${TOOL}, recall hits for: ${QUERY}
 
 ${HITS}
 
 If these answer your question, skip the ${TOOL}. Otherwise continue -- but consider whether the reflection explains WHY before you search for WHAT."
+  if [ -n "$WARN" ]; then
+    CTX="${WARN}"$'\n\n'"${CTX}"
+  fi
+fi
 
 jq -n --arg ctx "$CTX" '{
   "hookSpecificOutput": {
