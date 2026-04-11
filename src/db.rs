@@ -1651,6 +1651,25 @@ impl Database {
         Ok(())
     }
 
+    /// Permanently remove a kanban card from the database.
+    ///
+    /// Unlike `transition_card` with `Cancel`, which moves the card to a
+    /// terminal `cancelled` state where it still appears in `legion kanban
+    /// list`, this drops the row entirely. Used to hard-remove a card
+    /// filed in error (e.g. a card created from a mistaken
+    /// `legion kanban create`) that should never have existed. Returns
+    /// `CardNotFound` if the id does not match any row so the caller can
+    /// surface a clear error rather than silently no-op.
+    pub fn delete_card(&self, id: &str) -> Result<()> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM tasks WHERE id = ?1", rusqlite::params![id])?;
+        if rows == 0 {
+            return Err(LegionError::CardNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     /// Get per-agent workload summary.
     pub fn get_agent_workloads(&self) -> Result<Vec<crate::kanban::AgentWorkload>> {
         let mut stmt = self.conn.prepare(
@@ -3380,5 +3399,39 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fetched.details.as_deref(), Some(details));
+    }
+
+    #[test]
+    fn delete_card_removes_row_and_reports_not_found() {
+        let db = test_db();
+
+        // Insert a minimal card and confirm it is visible before delete.
+        let id = db
+            .insert_card(
+                "legion",
+                "legion",
+                "test card to delete",
+                None,
+                "med",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(db.get_card_by_id(&id).unwrap().is_some());
+
+        // Delete the card and confirm it is gone.
+        db.delete_card(&id).expect("delete existing card");
+        assert!(db.get_card_by_id(&id).unwrap().is_none());
+
+        // Deleting a non-existent card returns CardNotFound, not a silent
+        // no-op.
+        let result = db.delete_card(&id);
+        assert!(
+            matches!(result, Err(LegionError::CardNotFound(_))),
+            "expected CardNotFound for missing card, got: {result:?}"
+        );
     }
 }

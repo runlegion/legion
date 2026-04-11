@@ -209,17 +209,111 @@ pub fn view_issue(plugin_name: &str, github_repo: &str, number: u64) -> Result<E
 }
 
 /// Close an issue via a work source plugin.
-pub fn close_issue(plugin_name: &str, github_repo: &str, number: u64) -> Result<()> {
-    let plugin_path = match find_plugin(plugin_name) {
-        Some(p) => p,
-        None => return Ok(()),
-    };
+///
+/// When `comment` is provided, the plugin posts it as a closing comment on
+/// the issue before transitioning state. The plugin reads the comment from
+/// the `LEGION_WS_COMMENT` environment variable and is expected to no-op on
+/// the comment step if the variable is empty or absent.
+///
+/// A missing plugin is a hard error. A previous revision silently returned
+/// `Ok(())` when the plugin could not be found, which looked like a
+/// successful close from the caller's perspective and let kanban-done
+/// transitions claim they had closed the GitHub issue when in fact nothing
+/// had happened. That quiet-failure mode was the root cause of #190 sitting
+/// open on GitHub for days after its card was marked done.
+pub fn close_issue(
+    plugin_name: &str,
+    github_repo: &str,
+    number: u64,
+    comment: Option<&str>,
+) -> Result<()> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
 
-    call_plugin(
-        &plugin_path,
-        &["close", &number.to_string()],
-        &[("LEGION_WS_REPO", github_repo)],
-    )?;
+    let number_str = number.to_string();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_NUMBER", &number_str),
+    ];
+    if let Some(c) = comment {
+        env.push(("LEGION_WS_COMMENT", c));
+    }
+
+    call_plugin(&plugin_path, &["close", &number_str], &env)?;
+
+    Ok(())
+}
+
+/// Reopen a previously closed issue via a work source plugin.
+///
+/// Symmetrical with `close_issue`. When `comment` is provided, the plugin
+/// posts it as a reopening comment on the issue after transitioning state
+/// back to open. Used to revert a kanban transition that already propagated
+/// to GitHub (e.g. a card moved from `done` back to `in-progress`).
+///
+/// A missing plugin is a hard error, matching the close path.
+pub fn reopen_issue(
+    plugin_name: &str,
+    github_repo: &str,
+    number: u64,
+    comment: Option<&str>,
+) -> Result<()> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let number_str = number.to_string();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_NUMBER", &number_str),
+    ];
+    if let Some(c) = comment {
+        env.push(("LEGION_WS_COMMENT", c));
+    }
+
+    call_plugin(&plugin_path, &["reopen", &number_str], &env)?;
+
+    Ok(())
+}
+
+/// Edit an existing issue's title and/or body via a work source plugin.
+///
+/// At least one of `title` or `body` must be set; passing both `None` is
+/// rejected as a caller bug rather than silently no-opping. The plugin
+/// reads `LEGION_WS_TITLE` and `LEGION_WS_BODY` env vars and is expected
+/// to no-op on any field whose env var is empty or absent.
+///
+/// Used for scope amendments and stale-content fixes after a sync, so
+/// agents do not have to drop scope addenda into comment threads where
+/// they are buried below fold on the public GitHub view.
+pub fn edit_issue(
+    plugin_name: &str,
+    github_repo: &str,
+    number: u64,
+    title: Option<&str>,
+    body: Option<&str>,
+) -> Result<()> {
+    if title.is_none() && body.is_none() {
+        return Err(LegionError::WorkSource(
+            "edit_issue: at least one of title or body must be provided".to_string(),
+        ));
+    }
+
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let number_str = number.to_string();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_NUMBER", &number_str),
+    ];
+    if let Some(t) = title {
+        env.push(("LEGION_WS_TITLE", t));
+    }
+    if let Some(b) = body {
+        env.push(("LEGION_WS_BODY", b));
+    }
+
+    call_plugin(&plugin_path, &["edit-issue"], &env)?;
 
     Ok(())
 }
@@ -628,6 +722,95 @@ mod tests {
             matches!(result, Err(LegionError::WorkSource(_))),
             "expected WorkSource error, got {:?}",
             result
+        );
+    }
+
+    /// Regression guard for the PR #227 silent-fallthrough fix.
+    ///
+    /// A prior revision of `close_issue` had `None => return Ok(())` on the
+    /// `find_plugin` branch, silently no-opping when the plugin was not
+    /// installed. That made every caller believe the close had succeeded
+    /// when in fact nothing had happened, and was the root cause of
+    /// kanban-done-but-github-open drift observed in practice.
+    ///
+    /// If a future PR restores the silent fallthrough on `close_issue`,
+    /// `reopen_issue`, or `edit_issue`, this test must fail.
+    #[test]
+    fn close_issue_returns_worksource_error_when_plugin_missing() {
+        let result = close_issue("nonexistent-plugin-xyz", "owner/repo", 1, None);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn close_issue_returns_worksource_error_when_plugin_missing_with_comment() {
+        // Same regression guard with a non-None comment, so a future change
+        // that routes the comment through a different path and loses the
+        // plugin check still fails this test.
+        let result = close_issue(
+            "nonexistent-plugin-xyz",
+            "owner/repo",
+            1,
+            Some("closed by legion reconcile"),
+        );
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn reopen_issue_returns_worksource_error_when_plugin_missing() {
+        let result = reopen_issue("nonexistent-plugin-xyz", "owner/repo", 1, None);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn edit_issue_returns_worksource_error_when_plugin_missing() {
+        let result = edit_issue(
+            "nonexistent-plugin-xyz",
+            "owner/repo",
+            1,
+            Some("new title"),
+            None,
+        );
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    /// Regression guard for the `edit_issue` empty-args defense-in-depth.
+    ///
+    /// The function rejects `title.is_none() && body.is_none()` before
+    /// attempting any plugin call. The CLI handler in `main.rs` also
+    /// performs the same check, but this guard is load-bearing for
+    /// programmatic callers (propagation helpers, reconcile paths,
+    /// future auto-propagation sites) that might bypass the CLI layer.
+    /// If someone deletes the worksource check thinking the CLI check is
+    /// sufficient, this test fails.
+    #[test]
+    fn edit_issue_rejects_empty_args_before_plugin_lookup() {
+        // Uses a plugin name that would otherwise cause a plugin-lookup
+        // failure. The assertion on the error message proves the
+        // validation fired BEFORE the lookup rather than the lookup
+        // happening to succeed with None args.
+        let result = edit_issue("any-plugin-name", "owner/repo", 1, None, None);
+        let Err(LegionError::WorkSource(msg)) = result else {
+            panic!("expected WorkSource error, got {:?}", result);
+        };
+        assert!(
+            msg.contains("at least one of title or body"),
+            "expected validation error message, got: {msg}"
         );
     }
 

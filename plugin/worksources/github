@@ -33,13 +33,66 @@ case "${1:-}" in
 
   close)
     NUMBER="${2:-}"
+    COMMENT="${LEGION_WS_COMMENT:-}"
     if [ -z "$REPO" ] || [ -z "$NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and number required"}' >&2
       exit 1
     fi
     if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
       exit 1
     fi
-    gh issue close "$NUMBER" --repo "$REPO" 2>/dev/null
+    if [ -n "$COMMENT" ]; then
+      gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT" >/dev/null \
+        || { echo '{"error":"gh issue comment failed"}' >&2; exit 1; }
+    fi
+    gh issue close "$NUMBER" --repo "$REPO" \
+      || { echo '{"error":"gh issue close failed"}' >&2; exit 1; }
+    echo '{"ok":true}'
+    ;;
+
+  reopen)
+    NUMBER="${2:-}"
+    COMMENT="${LEGION_WS_COMMENT:-}"
+    if [ -z "$REPO" ] || [ -z "$NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and number required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    gh issue reopen "$NUMBER" --repo "$REPO" \
+      || { echo '{"error":"gh issue reopen failed"}' >&2; exit 1; }
+    if [ -n "$COMMENT" ]; then
+      gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT" >/dev/null \
+        || { echo '{"error":"gh issue comment failed"}' >&2; exit 1; }
+    fi
+    echo '{"ok":true}'
+    ;;
+
+  edit-issue)
+    NUMBER="${LEGION_WS_NUMBER:-}"
+    TITLE="${LEGION_WS_TITLE:-}"
+    BODY="${LEGION_WS_BODY:-}"
+    if [ -z "$REPO" ] || [ -z "$NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_NUMBER required"}' >&2
+      exit 1
+    fi
+    if [ -z "$TITLE" ] && [ -z "$BODY" ]; then
+      echo '{"error":"at least one of LEGION_WS_TITLE or LEGION_WS_BODY required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    ARGS=(issue edit "$NUMBER" --repo "$REPO")
+    [ -n "$TITLE" ] && ARGS+=(--title "$TITLE")
+    [ -n "$BODY" ] && ARGS+=(--body "$BODY")
+    gh "${ARGS[@]}" >/dev/null \
+      || { echo '{"error":"gh issue edit failed"}' >&2; exit 1; }
+    echo '{"ok":true}'
     ;;
 
   detect)
