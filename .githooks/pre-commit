@@ -1,7 +1,31 @@
 #!/bin/bash
-# Pre-commit: run /simplify on staged changes via Claude Code.
-# Catches structural issues, dead code, and cleanup before every commit.
+# Pre-commit: enforce version invariants, then run /simplify on staged changes.
+#
+# Step 1 (always runs): scripts/sync-version.sh when any of Cargo.toml,
+#   plugin.json, marketplace.json, or plugin/CHANGELOG.md are staged.
+#   Cargo.toml is the source of truth for the version number. The script
+#   propagates Cargo.toml's version to plugin.json and marketplace.json (and
+#   stages the updates), refuses to downgrade if either is ahead of Cargo.toml,
+#   and requires plugin/CHANGELOG.md's top "## <version>" header to match.
+#   See scripts/sync-version.sh and runlegion/legion#210.
+#
+# Step 2: run Claude Code's /simplify on the staged diff to catch structural
+#   issues, dead code, and cleanup before every commit. Skipped silently if
+#   Claude Code is not available.
 
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Step 1: version sync. Only runs when a version-bearing file is staged;
+# noise-free on every other commit.
+STAGED=$(git diff --cached --name-only)
+if echo "$STAGED" | grep -qE '^(Cargo\.toml|plugin/\.claude-plugin/plugin\.json|\.claude-plugin/marketplace\.json|plugin/CHANGELOG\.md)$'; then
+  if ! "${REPO_ROOT}/scripts/sync-version.sh"; then
+    echo "[pre-commit] scripts/sync-version.sh failed -- fix the version/changelog and re-commit" >&2
+    exit 1
+  fi
+fi
+
+# Step 2: simplify review on the staged diff.
 DIFF=$(git diff --cached --diff-filter=ACMR)
 if [ -z "$DIFF" ]; then
   exit 0
@@ -9,9 +33,7 @@ fi
 
 echo "[pre-commit] Running simplify review on staged changes..."
 
-RESULT=$(echo "$DIFF" | claude -p "You are reviewing a diff for code quality. Check for: dead code, unnecessary abstractions, copy-paste patterns, missing error handling, and style violations. If you find issues that MUST be fixed before commit, start your response with BLOCK: and list them. If the code is acceptable, start with PASS: and optionally note minor suggestions. Be concise." 2>/dev/null)
-
-if [ $? -ne 0 ]; then
+if ! RESULT=$(echo "$DIFF" | claude -p "You are reviewing a diff for code quality. Check for: dead code, unnecessary abstractions, copy-paste patterns, missing error handling, and style violations. If you find issues that MUST be fixed before commit, start your response with BLOCK: and list them. If the code is acceptable, start with PASS: and optionally note minor suggestions. Be concise." 2>/dev/null); then
   echo "[pre-commit] Claude Code unavailable, skipping review"
   exit 0
 fi

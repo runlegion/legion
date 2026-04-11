@@ -51,6 +51,21 @@ in your shell or in the environment where Claude Code runs. This disables the au
 
 Full documentation, architecture, and the multi-node story at [runlegion.dev](https://runlegion.dev).
 
+## Contributing
+
+After cloning the repo, install the tracked git hooks once:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+This points `core.hooksPath` at the tracked `.githooks/` directory. Two hooks run from there:
+
+- **pre-commit** enforces the "Cargo.toml is source of truth" version invariant via `scripts/sync-version.sh` (propagates the Cargo.toml version to `plugin/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`, refuses to downgrade, requires the `plugin/CHANGELOG.md` top header to match), then runs Claude Code's `/simplify` review over the staged diff.
+- **pre-push** runs the full Claude Code PR review over the branch diff before it reaches the remote.
+
+Both hooks silently skip if Claude Code is not on `PATH`. The version sync is pure shell and runs unconditionally when a version-bearing file is staged.
+
 ## License
 
 MIT
