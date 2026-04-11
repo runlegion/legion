@@ -793,6 +793,20 @@ enum KanbanAction {
         #[arg(long)]
         no_propagate: bool,
     },
+
+    /// Permanently delete a card from the kanban board.
+    ///
+    /// Unlike `cancel` (which transitions to a terminal `cancelled`
+    /// state where the card still appears in `legion kanban list`),
+    /// `delete` removes the row entirely. Used to hard-remove a card
+    /// filed in error. Does NOT touch the linked GitHub issue; use
+    /// `legion issue close` or `legion issue reopen` separately if the
+    /// public state needs to change.
+    Delete {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2380,6 +2394,31 @@ fn run() -> error::Result<()> {
                     if !no_propagate {
                         propagate_card_reopen_to_worksource(&database, &id, reason.as_deref());
                     }
+                }
+                KanbanAction::Delete { id } => {
+                    // Capture the card's to_repo before the delete so the
+                    // audit entry records which agent owned it. A card
+                    // that does not exist at delete time is a hard error
+                    // from the DB layer, matching the shape of the other
+                    // id-targeted kanban subcommands.
+                    let agent_repo = database
+                        .get_card_by_id(&id)?
+                        .map(|c| c.to_repo)
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    database.delete_card(&id)?;
+                    println!("{id}");
+
+                    audit(&db::AuditInput {
+                        agent: &agent_repo,
+                        action: "delete-card",
+                        target_type: "card",
+                        target_ref: &id,
+                        task_id: Some(&id),
+                        source_type: "legion",
+                        details: None,
+                        outcome: "success",
+                    });
                 }
             }
         }
