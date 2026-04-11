@@ -599,53 +599,88 @@ fn run_notifier_loop(
         }
     };
 
-    // Seed the cursor to the DB's current max `created_at` watermark so the
+    // Seed the cursor to the DB's current team-board watermark so the
     // notifier only emits for posts that land after the MCP subprocess
-    // started. Replaying historical bullpen content would flood the session
-    // with messages the user has already seen.
+    // started. Replaying historical bullpen content would flood the
+    // session with messages the user has already seen.
     //
     // Using a DB-derived watermark rather than `now()` eliminates a
-    // small-but-real race: if a post is committed in the same nanosecond as
-    // the notifier's wall-clock seed, a `> now()` cursor would drop it. The
-    // DB watermark is always consistent with the rows the DB has observed.
+    // small-but-real race: a post committed in the same nanosecond as
+    // the notifier's wall-clock seed would be dropped by the strict-`>`
+    // comparator on the next poll. The DB watermark is consistent with
+    // the rows the notifier is filtering against.
     //
-    // Falls back to `now()` only when the reflections table is empty (fresh
-    // install, no rows at all), in which case there is no race window.
-    let mut last_seen_at = match db.get_max_created_at() {
-        Ok(Some(ts)) => ts,
-        Ok(None) => chrono::Utc::now().to_rfc3339(),
+    // On seed error (the reflections table exists but the query failed)
+    // the notifier thread exits cleanly rather than falling back to
+    // `now()`, because the fallback would silently reintroduce the very
+    // race the watermark closes, AND the next poll against the same
+    // connection would almost certainly fail the same way. A dead
+    // notifier at least does not give a false "channel is working"
+    // signal to the rest of the process.
+    //
+    // Empty table (`None`) seeds from `now()` because there is no race
+    // window when there are no rows.
+    let (mut last_seen_at, mut last_seen_id): (String, String) = match db
+        .get_board_cursor_watermark()
+    {
+        Ok(Some((ts, id))) => (ts, id),
+        Ok(None) => (chrono::Utc::now().to_rfc3339(), String::new()),
         Err(e) => {
             eprintln!(
-                "[legion mcp notif] failed to read max(created_at) for seed: {e}; using now()"
+                "[legion mcp notif] failed to seed cursor from db watermark: {e}; notifier thread exiting (channel push is now inoperative for this session)"
             );
-            chrono::Utc::now().to_rfc3339()
+            return;
         }
     };
 
     let poll_interval = mcp_poll_interval();
+    let mut consecutive_cap_hits: u32 = 0;
 
     loop {
         std::thread::sleep(poll_interval);
 
-        let new_posts = match db.get_board_posts_since(&last_seen_at, NOTIFIER_BATCH_LIMIT) {
-            Ok(posts) => posts,
-            Err(e) => {
-                eprintln!("[legion mcp notif] db poll failed: {e}; continuing");
-                continue;
-            }
-        };
+        let new_posts =
+            match db.get_board_posts_since(&last_seen_at, &last_seen_id, NOTIFIER_BATCH_LIMIT) {
+                Ok(posts) => posts,
+                Err(e) => {
+                    eprintln!("[legion mcp notif] db poll failed: {e}; continuing");
+                    continue;
+                }
+            };
 
         if new_posts.is_empty() {
+            consecutive_cap_hits = 0;
             continue;
         }
 
+        // Surface a breadcrumb when the notifier hits the batch cap on
+        // back-to-back ticks. Hitting the cap occasionally is expected
+        // under normal activity bursts; hitting it repeatedly means the
+        // notifier is falling behind (a misbehaving spammer, or a batch
+        // import). This is the only diagnostic for "delivery is minutes
+        // behind because we are saturated," which would otherwise be
+        // indistinguishable from "the team is quiet."
+        if new_posts.len() == NOTIFIER_BATCH_LIMIT {
+            consecutive_cap_hits = consecutive_cap_hits.saturating_add(1);
+            if consecutive_cap_hits >= 3 {
+                eprintln!(
+                    "[legion mcp notif] hit NOTIFIER_BATCH_LIMIT ({}) on {} consecutive polls; delivery may be lagging real time",
+                    NOTIFIER_BATCH_LIMIT, consecutive_cap_hits
+                );
+            }
+        } else {
+            consecutive_cap_hits = 0;
+        }
+
         // Advance the cursor to the newest row we saw. Rows are ordered
-        // ascending by `created_at`, so the last element is the newest.
-        // This must happen unconditionally regardless of whether individual
-        // rows are delivered or suppressed, or a suppressed post (own-post,
-        // wrong signal target) would be re-scanned forever.
+        // ascending by `(created_at, id)`, so the last element is the
+        // newest. This must happen unconditionally regardless of whether
+        // individual rows are delivered or suppressed, or a suppressed
+        // post (own-post, wrong signal target) would be re-scanned
+        // forever.
         if let Some(last) = new_posts.last() {
             last_seen_at = last.created_at.clone();
+            last_seen_id = last.id.clone();
         }
 
         let client_repo = client_repo_cell.get().map(|s| s.as_str());
@@ -684,9 +719,23 @@ fn run_notifier_loop(
                 continue;
             };
 
+            // Mutex poisoning here is catastrophic, not recoverable. The
+            // same `Arc<Mutex<BufWriter<Stdout>>>` is shared with the
+            // request loop running on the main thread; a poisoned mutex
+            // means every subsequent `out.lock()` on EITHER side returns
+            // Err, which would leave the MCP subprocess alive (still
+            // accepting requests on stdin) but silently unable to write
+            // any response or notification. That is strictly worse than
+            // a dead subprocess: Claude Code can recover from a dead MCP
+            // server by respawning, but it cannot detect a server that
+            // accepts initialize, accepts tool calls, and quietly drops
+            // every response. Abort the process so the client gets a
+            // clean disconnect and can respawn.
             let Ok(mut locked) = out.lock() else {
-                eprintln!("[legion mcp notif] stdout mutex poisoned; notifier thread exiting");
-                return;
+                eprintln!(
+                    "[legion mcp notif] stdout mutex poisoned; aborting process so claude code can respawn the mcp subprocess"
+                );
+                std::process::abort();
             };
 
             // A write or flush failure on stdout almost always means the

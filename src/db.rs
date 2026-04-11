@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use chrono::{Timelike, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::error::{LegionError, Result};
@@ -810,29 +810,74 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
-    /// Retrieve up to `limit` active bullpen posts created strictly after
-    /// the given ISO 8601 timestamp, ordered oldest first. Used by the MCP
+    /// Retrieve up to `limit` active bullpen posts strictly after the given
+    /// `(created_at, id)` cursor, ordered oldest first. Used by the MCP
     /// notifier thread to discover cross-process writes (from the CLI
     /// `legion post` command or from another MCP subprocess) that would
     /// otherwise be invisible to an in-process broadcast channel.
     ///
-    /// Ordering is ascending so the caller can advance a `last_seen_at`
-    /// cursor to the `created_at` of the most recent row in insertion order.
+    /// The composite `(created_at, id)` cursor is the tiebreaker for two
+    /// posts that share an identical `created_at` timestamp. Strict `>` on
+    /// `created_at` alone is wrong when combined with `limit`: if the batch
+    /// cap splits a tied-timestamp group, the next poll's cursor advances
+    /// past the shared timestamp and subsequent rows at that timestamp are
+    /// lost. Ordering and filtering by `(created_at, id)` eliminates this
+    /// by giving every row a totally-ordered position (UUIDv7 ids embed a
+    /// monotonic timestamp, so ties on `created_at` are almost always
+    /// broken by `id` ordering anyway).
+    ///
     /// `limit` caps the size of a single batch: if more rows exist beyond
     /// the cap, the cursor advances to the last row returned and the next
     /// poll catches the remainder.
-    pub fn get_board_posts_since(&self, since_iso: &str, limit: usize) -> Result<Vec<Reflection>> {
+    pub fn get_board_posts_since(
+        &self,
+        since_created_at: &str,
+        since_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Reflection>> {
+        // strict `>` on the composite key: `(created_at > ?1) OR
+        // (created_at = ?1 AND id > ?2)`. Flipping either comparator to
+        // inclusive re-emits the cursor row on every poll tick and
+        // produces an infinite duplicate-notification loop.
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND created_at > ?1 ORDER BY created_at ASC LIMIT ?2",
+             FROM reflections \
+             WHERE audience = 'team' AND archived_at IS NULL \
+               AND (created_at > ?1 OR (created_at = ?1 AND id > ?2)) \
+             ORDER BY created_at ASC, id ASC \
+             LIMIT ?3",
         )?;
 
         let rows = stmt.query_map(
-            rusqlite::params![since_iso, limit as i64],
+            rusqlite::params![since_created_at, since_id, limit as i64],
             map_reflection_row,
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
+    }
+
+    /// Return the `(created_at, id)` of the most recent active team bullpen
+    /// post, or `None` when the board is empty. Used by the MCP notifier
+    /// thread as its startup cursor: seeding from the actual watermark of
+    /// the rows the notifier is filtering against means a post committed in
+    /// the same nanosecond as the notifier's seed is not dropped by a
+    /// wall-clock race, and a future change that allows backdated inserts
+    /// into non-team audience does not silently shift the notifier's
+    /// starting point.
+    pub fn get_board_cursor_watermark(&self) -> Result<Option<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT created_at, id FROM reflections \
+             WHERE audience = 'team' AND archived_at IS NULL \
+             ORDER BY created_at DESC, id DESC \
+             LIMIT 1",
+        )?;
+        let result = stmt
+            .query_row([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()
+            .map_err(LegionError::Database)?;
+        Ok(result)
     }
 
     /// Retrieve active bullpen posts unread by the given reader repo and
@@ -2392,13 +2437,64 @@ mod tests {
         db.insert_reflection("kelex", "not shared", "self").unwrap();
         let newer = db.insert_reflection("rafters", "new", "team").unwrap();
 
-        // Cursor at `older.created_at` must return only `newer` (strict >).
+        // Cursor at `(older.created_at, older.id)` must return only `newer`
+        // (strict `>` on the composite key).
         let batch = db
-            .get_board_posts_since(&older.created_at, 100)
+            .get_board_posts_since(&older.created_at, &older.id, 100)
             .expect("query");
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].id, newer.id);
         assert_eq!(batch[0].audience, "team");
+    }
+
+    #[test]
+    fn get_board_posts_since_breaks_ties_on_id_component() {
+        // Two posts with an identical `created_at` must still be visited in
+        // deterministic order by id, and splitting a tied group with a tight
+        // LIMIT must not lose rows: the cursor advances to `(created_at, id)`
+        // of the last row returned, and the next query finds the tied-but-
+        // higher-id row via the `created_at = ? AND id > ?` branch.
+        let db = test_db();
+        let shared_ts = "2026-04-11T12:00:00.000000000+00:00";
+
+        // Insert two rows with IDENTICAL created_at (bypassing insert_reflection
+        // so we can force the timestamp collision). UUIDv7 ids naturally sort
+        // in the same order they are generated, so order_a < order_b.
+        let id_a = "01000000-0000-7000-8000-000000000001";
+        let id_b = "01000000-0000-7000-8000-000000000002";
+
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, audience) \
+                 VALUES (?1, 'kelex', 'tied A', ?2, 'team')",
+                rusqlite::params![id_a, shared_ts],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, audience) \
+                 VALUES (?1, 'kelex', 'tied B', ?2, 'team')",
+                rusqlite::params![id_b, shared_ts],
+            )
+            .unwrap();
+
+        // First batch with limit=1 must return id_a and advance the cursor
+        // to `(shared_ts, id_a)`.
+        let batch = db
+            .get_board_posts_since("2026-04-11T00:00:00+00:00", "", 1)
+            .expect("query");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].id, id_a);
+
+        // Second batch using the advanced cursor must find id_b via the
+        // tiebreaker branch -- this is the regression guard against the
+        // "tied timestamp + strict > on created_at alone = silent row drop"
+        // bug surfaced in PR #222 review.
+        let batch2 = db
+            .get_board_posts_since(shared_ts, id_a, 10)
+            .expect("query");
+        assert_eq!(batch2.len(), 1);
+        assert_eq!(batch2[0].id, id_b);
     }
 
     #[test]
@@ -2409,9 +2505,11 @@ mod tests {
         let sentinel = db.insert_reflection("seed", "sentinel", "team").unwrap();
 
         // Insert five team posts after the sentinel. insert_reflection writes
-        // `created_at = Utc::now().to_rfc3339()` with sub-millisecond precision
-        // via chrono, so sequential inserts produce strictly increasing
-        // timestamps under any realistic scheduler.
+        // `created_at = Utc::now().to_rfc3339()` with nanosecond precision
+        // via chrono; if the OS clock resolution ever collapses sequential
+        // inserts into identical stamps, the composite cursor (covered by
+        // `get_board_posts_since_breaks_ties_on_id_component`) still keeps
+        // this test deterministic via UUIDv7 ordering.
         let mut expected_ids = Vec::new();
         for i in 0..5 {
             let r = db
@@ -2423,7 +2521,7 @@ mod tests {
         // Request at most 3 rows after the sentinel -- must return the first
         // three in insertion order.
         let batch = db
-            .get_board_posts_since(&sentinel.created_at, 3)
+            .get_board_posts_since(&sentinel.created_at, &sentinel.id, 3)
             .expect("query");
         assert_eq!(batch.len(), 3);
         assert_eq!(batch[0].id, expected_ids[0]);
@@ -2433,11 +2531,67 @@ mod tests {
         // Advance the cursor to the last row returned; the next call returns
         // the remaining two.
         let next = db
-            .get_board_posts_since(&batch[2].created_at, 3)
+            .get_board_posts_since(&batch[2].created_at, &batch[2].id, 3)
             .expect("query");
         assert_eq!(next.len(), 2);
         assert_eq!(next[0].id, expected_ids[3]);
         assert_eq!(next[1].id, expected_ids[4]);
+
+        // Cursor at the newest row returns an empty batch (idle poll path).
+        let idle = db
+            .get_board_posts_since(&next[1].created_at, &next[1].id, 10)
+            .expect("query");
+        assert!(idle.is_empty());
+    }
+
+    #[test]
+    fn get_board_posts_since_excludes_archived() {
+        // The query must filter out archived_at rows so a bullpen archive
+        // pass does not re-notify every archived post on next startup.
+        let db = test_db();
+        let live = db.insert_reflection("kelex", "live", "team").unwrap();
+        let _archived = db
+            .insert_reflection("kelex", "will archive", "team")
+            .unwrap();
+
+        // Archive the second row directly (no public archive helper for a
+        // single id -- the test exercises the invariant the SQL relies on).
+        db.conn
+            .execute(
+                "UPDATE reflections SET archived_at = '2026-04-11T00:00:00+00:00' WHERE text = 'will archive'",
+                [],
+            )
+            .unwrap();
+
+        // Cursor from the very beginning should still return only the live
+        // row.
+        let batch = db
+            .get_board_posts_since("2026-01-01T00:00:00+00:00", "", 100)
+            .expect("query");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].id, live.id);
+    }
+
+    #[test]
+    fn get_board_cursor_watermark_empty_and_populated() {
+        let db = test_db();
+
+        // Empty table -> None.
+        assert!(db.get_board_cursor_watermark().unwrap().is_none());
+
+        // Single self reflection -> None (watermark is team-only).
+        db.insert_reflection("kelex", "private", "self").unwrap();
+        assert!(db.get_board_cursor_watermark().unwrap().is_none());
+
+        // Add a team post -> watermark is that row.
+        let team = db.insert_reflection("kelex", "shared", "team").unwrap();
+        let watermark = db.get_board_cursor_watermark().unwrap();
+        assert_eq!(watermark, Some((team.created_at.clone(), team.id.clone())));
+
+        // Add a newer team post -> watermark advances.
+        let newer = db.insert_reflection("rafters", "shared 2", "team").unwrap();
+        let watermark = db.get_board_cursor_watermark().unwrap();
+        assert_eq!(watermark, Some((newer.created_at, newer.id)));
     }
 
     #[test]
