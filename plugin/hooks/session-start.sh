@@ -39,6 +39,17 @@ touch "/tmp/legion-work-${CWD_HASH}"
 # fast on the first tool call instead of paying a 2s cold-start cost
 ("$LEGION" recall --repo "$REPO" --context warmup --limit 1 >/dev/null 2>&1 &)
 
+# Sync GitHub issues into kanban before session starts (5-second timeout to avoid blocking).
+# Opt-out via LEGION_NO_SYNC=1 (for environments without network access or to avoid latency).
+if [ "${LEGION_NO_SYNC:-}" != "1" ]; then
+  # Use gtimeout if available (macOS via homebrew), otherwise fall back to perl idiom.
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout 5 "$LEGION" sync --repo "$REPO" >/dev/null 2>>"$LOG"
+  else
+    perl -e 'alarm 5; exec @ARGV' -- "$LEGION" sync --repo "$REPO" >/dev/null 2>>"$LOG"
+  fi
+fi
+
 # Branch-context recall first, fallback to latest if nothing matched.
 # --preview 240 keeps each hit compact so the session start stays small.
 BRANCH=$(cd "$CWD" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")

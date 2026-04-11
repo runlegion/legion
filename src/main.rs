@@ -372,6 +372,13 @@ enum Commands {
         peek: bool,
     },
 
+    /// Sync issues from work source into kanban board
+    Sync {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+    },
+
     /// Manage the kanban board
     Kanban {
         #[command(subcommand)]
@@ -1945,6 +1952,23 @@ fn run() -> error::Result<()> {
             match card {
                 Some(c) => print!("{}", kanban::format_work_card(&c)),
                 None => info!("[legion] no pending work for {repo}"),
+            }
+        }
+        Commands::Sync { repo } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            // Sync from external work sources
+            if let Some((plugin, source_repo, workdir)) = worksource::resolve_config(&repo) {
+                match worksource::sync_issues(&database, &plugin, &source_repo, &workdir, &repo) {
+                    Ok(n) if n > 0 => info!("[legion] synced {n} new issues from {plugin}"),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[legion] work source sync failed: {e}"),
+                }
+            } else {
+                return Err(error::LegionError::WorkSource(format!(
+                    "no work source configured for {repo}"
+                )));
             }
         }
         Commands::Kanban { action } => {

@@ -2821,3 +2821,23 @@ fn data_dir_override_suppresses_migration() {
         "LEGION_DATA_DIR override must suppress migration chatter\nstderr: {stderr}"
     );
 }
+
+/// Test that `legion sync` returns an error when no work source is configured.
+/// This verifies the command parses and executes, even when it fails.
+#[test]
+fn sync_command_errors_without_worksource_config() {
+    let data_dir = tempfile::tempdir().unwrap();
+
+    // Run sync for a repo with no watch.toml entry - should fail gracefully
+    let output = legion_cmd(data_dir.path())
+        .args(["sync", "--repo", "nonexistent-repo"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "sync should fail without config");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected 'no work source configured' error, got: {stderr}"
+    );
+}
