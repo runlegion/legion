@@ -807,6 +807,35 @@ enum KanbanAction {
         #[arg(long)]
         id: String,
     },
+
+    /// Reconcile kanban done/cancelled cards with their linked GitHub
+    /// issue state.
+    ///
+    /// Finds every card whose local state is `done` or `cancelled` but
+    /// whose linked GitHub issue is still `OPEN`, and reports the
+    /// mismatches. Used to backfill the stale-open drift that
+    /// accumulated before the `cancel`/`reopen` auto-propagation
+    /// shipped.
+    ///
+    /// `--dry-run` (default) only prints the mismatches. `--close-stale`
+    /// additionally calls `legion issue close` on every mismatched
+    /// issue with a canned reconciliation comment.
+    Reconcile {
+        /// Optional repo filter -- only reconcile cards owned by this
+        /// agent. Default is all cards across all repos.
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Dry-run (default). Report mismatches without changing any
+        /// GitHub state.
+        #[arg(long, default_value_t = true)]
+        dry_run: bool,
+
+        /// Actually close the stale GitHub issues. Without this flag,
+        /// the command is read-only and safe to run repeatedly.
+        #[arg(long)]
+        close_stale: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2442,6 +2471,154 @@ fn run() -> error::Result<()> {
                         details: None,
                         outcome: "success",
                     });
+                }
+                KanbanAction::Reconcile {
+                    repo,
+                    dry_run: _,
+                    close_stale,
+                } => {
+                    // `dry_run` is true by default from clap; the
+                    // meaningful flag is `close_stale`. When
+                    // `close_stale` is set, we actually close stale
+                    // issues; otherwise we only print mismatches.
+                    let cards = kanban::board_cards(&database)?;
+                    let mut stale: Vec<(kanban::Card, u64, String)> = Vec::new();
+
+                    for card in cards {
+                        // Only done/cancelled cards are candidates for
+                        // reconciliation. Active cards are expected to
+                        // have open issues.
+                        if !matches!(
+                            card.status,
+                            kanban::CardStatus::Done | kanban::CardStatus::Cancelled
+                        ) {
+                            continue;
+                        }
+
+                        if let Some(ref filter) = repo
+                            && card.to_repo != *filter
+                        {
+                            continue;
+                        }
+
+                        let Some(ref source_url) = card.source_url else {
+                            continue;
+                        };
+                        let Some(number) = worksource::extract_issue_number(source_url) else {
+                            continue;
+                        };
+                        let Some(source) = card.source_type.as_deref() else {
+                            continue;
+                        };
+                        let Some((_, source_repo, _)) = worksource::resolve_config(&card.to_repo)
+                        else {
+                            eprintln!(
+                                "[legion] reconcile: skipping card {} -- to_repo '{}' has no work source configured",
+                                card.id, card.to_repo
+                            );
+                            continue;
+                        };
+
+                        // Query the live issue state. view_issue returns
+                        // ExternalIssue with a `state` field that is
+                        // "OPEN" or "CLOSED" for GitHub. Any other
+                        // value is treated as "unknown" and skipped
+                        // with a warning so a plugin that returns a
+                        // non-standard state does not silently get
+                        // reported as stale-open.
+                        let state = match worksource::view_issue(source, &source_repo, number) {
+                            Ok(issue) => issue.state,
+                            Err(e) => {
+                                eprintln!(
+                                    "[legion] reconcile: failed to view {} issue #{}: {}",
+                                    source_repo, number, e
+                                );
+                                continue;
+                            }
+                        };
+
+                        if state == "OPEN" {
+                            stale.push((card.clone(), number, source_repo.clone()));
+                        }
+                    }
+
+                    if stale.is_empty() {
+                        println!("[legion] reconcile: no stale-open issues found");
+                    } else {
+                        println!(
+                            "[legion] reconcile: {} stale-open issue(s) found",
+                            stale.len()
+                        );
+                        for (card, number, source_repo) in &stale {
+                            println!(
+                                "  card={} status={} source={}#{} to_repo={}",
+                                card.id,
+                                card.status.label(),
+                                source_repo,
+                                number,
+                                card.to_repo
+                            );
+                        }
+                    }
+
+                    if close_stale && !stale.is_empty() {
+                        println!("[legion] reconcile: closing {} stale issue(s)", stale.len());
+                        let mut closed = 0_u64;
+                        let mut failed = 0_u64;
+                        for (card, number, source_repo) in &stale {
+                            let Some(source) = card.source_type.as_deref() else {
+                                continue;
+                            };
+                            let reconcile_comment = format!(
+                                "Closed by legion reconcile: local card {} is {} but this issue was left open. Reconciling to match the local state.",
+                                card.id,
+                                card.status.label()
+                            );
+                            match worksource::close_issue(
+                                source,
+                                source_repo,
+                                *number,
+                                Some(&reconcile_comment),
+                            ) {
+                                Ok(()) => {
+                                    closed += 1;
+                                    eprintln!(
+                                        "[legion] reconcile: closed {} issue #{}",
+                                        source_repo, number
+                                    );
+                                    let details = serde_json::json!({
+                                        "card_id": card.id,
+                                        "propagation": "reconcile",
+                                    });
+                                    let details_str = details.to_string();
+                                    audit(&db::AuditInput {
+                                        agent: &card.to_repo,
+                                        action: "close-issue",
+                                        target_type: "issue",
+                                        target_ref: &number.to_string(),
+                                        task_id: Some(&card.id),
+                                        source_type: source,
+                                        details: Some(&details_str),
+                                        outcome: "success",
+                                    });
+                                }
+                                Err(e) => {
+                                    failed += 1;
+                                    eprintln!(
+                                        "[legion] reconcile: failed to close {} issue #{}: {}",
+                                        source_repo, number, e
+                                    );
+                                }
+                            }
+                        }
+                        println!("[legion] reconcile: {} closed, {} failed", closed, failed);
+                    } else if close_stale {
+                        println!("[legion] reconcile: nothing to close");
+                    } else if !stale.is_empty() {
+                        println!(
+                            "[legion] reconcile: dry-run -- pass --close-stale to actually close these issues"
+                        );
+                    }
                 }
             }
         }
