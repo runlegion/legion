@@ -10,6 +10,15 @@
 //! These tests construct two broken legion environments and assert that
 //! every hook surfaces a visible `[Legion WARNING]` block in its stdout
 //! while still exiting 0 (so Claude Code never blocks on legion failures).
+//!
+//! Unix-only: the hook scripts are bash (`plugin/hooks/*.sh`) and the tests
+//! spawn `bash` as a subprocess. On Windows CI `Command::new("bash")`
+//! resolves to the WSL stub shipped with System32, which is not a POSIX
+//! bash and cannot run the hook scripts. Gate the whole module to
+//! unix-likes so the Windows test runner stays green -- the hooks
+//! themselves only run on developer / CI unix hosts in practice.
+
+#![cfg(unix)]
 
 use std::fs;
 use std::io::Write;

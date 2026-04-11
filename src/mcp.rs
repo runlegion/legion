@@ -9,6 +9,7 @@
 /// No Content-Length headers. Each message is a single JSON line.
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -239,7 +240,9 @@ fn handle_tool_call(
                 &crate::db::ReflectionMeta::default(),
             )?;
 
-            let _ = tx.send(ChannelEvent::Feed);
+            let _ = tx.send(ChannelEvent::Feed {
+                post_id: id.clone(),
+            });
 
             Ok(format!("posted (id: {})", id))
         }
@@ -267,7 +270,9 @@ fn handle_tool_call(
                 &crate::db::ReflectionMeta::default(),
             )?;
 
-            let _ = tx.send(ChannelEvent::Feed);
+            let _ = tx.send(ChannelEvent::Feed {
+                post_id: id.clone(),
+            });
 
             Ok(format!("replied (id: {})", id))
         }
@@ -318,7 +323,9 @@ fn handle_tool_call(
                 &crate::db::ReflectionMeta::default(),
             )?;
 
-            let _ = tx.send(ChannelEvent::Feed);
+            let _ = tx.send(ChannelEvent::Feed {
+                post_id: id.clone(),
+            });
 
             Ok(format!("signaled (id: {})", id))
         }
@@ -358,11 +365,15 @@ fn handle_tool_call(
 ///
 /// Returns None for notifications (which have no id) -- not used here but
 /// guards against future notification handling.
+///
+/// `client_repo_cell` is populated on the `initialize` call so the notification
+/// emitter thread can learn the client's repo identity after the handshake.
 pub fn dispatch(
     request: &Value,
     data_dir: &std::path::Path,
     version: &str,
     tx: &broadcast::Sender<ChannelEvent>,
+    client_repo_cell: Option<&Arc<OnceLock<String>>>,
 ) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str());
@@ -376,22 +387,45 @@ pub fn dispatch(
     };
 
     match method {
-        "initialize" => Some(success_response(
-            &id,
-            json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {
-                    "tools": {},
-                    "experimental": {
-                        "claude/channel": {}
-                    }
-                },
-                "serverInfo": {
-                    "name": "legion-channel",
-                    "version": version
-                }
-            }),
-        )),
+        "initialize" => {
+            // Extract clientInfo.name to identify the connecting agent's repo.
+            // This is stored for use by the notification emitter thread via
+            // the shared client_repo cell passed into run_stdio_loop. OnceLock
+            // is deliberate: the MCP subprocess is spawned fresh per Claude
+            // Code session, so there is exactly one initialize handshake per
+            // process lifetime. A second initialize (unexpected under the
+            // current plugin model) would silently no-op -- documented here
+            // so future deployment changes catch it.
+            if let Some(cell) = client_repo_cell
+                && let Some(name) = request
+                    .get("params")
+                    .and_then(|p| p.get("clientInfo"))
+                    .and_then(|ci| ci.get("name"))
+                    .and_then(|n| n.as_str())
+                && cell.set(name.to_string()).is_err()
+            {
+                eprintln!(
+                    "[legion mcp] duplicate initialize ignored; client_repo already set (one process = one session)"
+                );
+            }
+            Some(success_response(
+                &id,
+                json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {
+                        "tools": {},
+                        "experimental": {
+                            "claude/channel": {}
+                        }
+                    },
+                    "serverInfo": {
+                        "name": "legion-channel",
+                        "version": version
+                    },
+                    "instructions": "Incoming bullpen posts and signals arrive as JSON-RPC notifications with method notifications/claude/channel. Each notification params.content is an XML-like <channel> tag: <channel type=\"feed\" post_id=\"<uuid>\" repo=\"<repo>\" is_signal=\"<bool>\"><text><![CDATA[post text]]></text></channel>. Read these notifications and integrate them into your working context. No manual polling needed."
+                }),
+            ))
+        }
 
         "notifications/initialized" => {
             // Client acknowledgment -- no response needed
@@ -439,9 +473,97 @@ pub fn dispatch(
 /// prevent unbounded memory growth from a malicious or misbehaving client.
 const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB
 
+/// Determine whether a notification for a post should be delivered to this client.
+///
+/// Rules (applied in order):
+/// 1. If the text starts with `@all`, deliver unconditionally (broadcast signal).
+/// 2. If the text starts with `@<client_repo>` (direct mention), deliver.
+/// 3. If the text starts with `@` but NOT addressed to this client, suppress.
+/// 4. If `client_repo` is known and the post's `repo` equals `client_repo`, suppress
+///    (the client wrote it; no need to echo a general musing back to its author).
+/// 5. Otherwise (general musing, no `@` prefix, from a different agent), deliver.
+///
+/// Recipient parsing treats anything after a leading `@` up to the first
+/// whitespace as the recipient token, with a trailing `:` trimmed. An empty
+/// recipient (`@` alone) or a recipient that itself begins with `@` (e.g.
+/// `@@all`, which looks like a broadcast but isn't) is NOT treated as `@all`
+/// or any named target -- the post falls through the signal branch and is
+/// suppressed. This is deliberately strict: if an agent fat-fingers a
+/// broadcast as `@@all`, it should silently fail rather than silently succeed
+/// with the wrong-looking prefix.
+pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool {
+    if let Some(rest) = text.strip_prefix('@') {
+        // It's a signal. Extract the recipient token (first whitespace word).
+        let recipient_raw = rest.split_whitespace().next().unwrap_or("");
+        let recipient = recipient_raw.trim_end_matches(':');
+
+        // Reject empty or `@`-prefixed recipients -- `@` alone, `@@all`,
+        // `@@`, etc. These are suppressed rather than passed to the @all /
+        // named-target branches. See docstring above for the reasoning.
+        if recipient.is_empty() || recipient.starts_with('@') {
+            return false;
+        }
+
+        if recipient == "all" {
+            return true;
+        }
+        if let Some(cr) = client_repo {
+            return recipient == cr;
+        }
+        // No client_repo known -- suppress signals (can't verify recipient).
+        return false;
+    }
+
+    // General musing: suppress own posts, deliver everything else.
+    if let Some(cr) = client_repo
+        && repo == cr
+    {
+        return false;
+    }
+
+    true
+}
+
+/// Split a CDATA body around any literal `]]>` occurrences so the terminator
+/// cannot escape the section. The standard XML trick is to replace every
+/// `]]>` with `]]]]><![CDATA[>` -- close the current section after the first
+/// `]]`, then reopen with `<![CDATA[` before the stray `>`. An agent post
+/// containing the literal substring `]]>` (plausible in code snippets) would
+/// otherwise terminate the block early and inject raw content into the XML.
+fn escape_cdata(text: &str) -> String {
+    text.replace("]]>", "]]]]><![CDATA[>")
+}
+
+/// Escape `"`, `<`, `>`, and `&` for use inside an XML attribute value.
+/// The attribute values are short (post_id, repo, is_signal) and controlled,
+/// but post_id comes from the DB and repo from the user; better to escape than
+/// trust.
+fn escape_xml_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Build the XML-like channel notification content string. Text goes inside a
+/// CDATA block with `]]>` sequences neutralised; attribute values are
+/// XML-escaped.
+fn build_channel_content(post_id: &str, repo: &str, text: &str, is_signal: bool) -> String {
+    let post_id_attr = escape_xml_attr(post_id);
+    let repo_attr = escape_xml_attr(repo);
+    let text_body = escape_cdata(text);
+    format!(
+        "<channel type=\"feed\" post_id=\"{post_id_attr}\" repo=\"{repo_attr}\" is_signal=\"{is_signal}\"><text><![CDATA[{text_body}]]></text></channel>"
+    )
+}
+
 /// Run the MCP stdio server loop.
 ///
-/// Reads newline-delimited JSON from stdin. Writes responses to stdout.
+/// Reads newline-delimited JSON from stdin. Writes JSON-RPC responses to stdout.
+/// A concurrent notification emitter thread subscribes to the broadcast channel
+/// and pushes `notifications/claude/channel` messages to stdout when new bullpen
+/// posts arrive that pass the recipient filter.
+///
 /// Blocks the calling thread (meant to run in spawn_blocking or a dedicated thread).
 /// Lines larger than MAX_LINE_BYTES are rejected with a JSON-RPC parse error.
 pub fn run_stdio_loop(
@@ -449,9 +571,122 @@ pub fn run_stdio_loop(
     version: String,
     tx: broadcast::Sender<ChannelEvent>,
 ) -> Result<()> {
-    let stdin = std::io::stdin();
+    // Shared stdout writer -- both the request loop and the notification thread
+    // write to stdout. The Mutex serialises their writes so lines never interleave.
     let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::new(stdout.lock());
+    let out: Arc<Mutex<std::io::BufWriter<std::io::Stdout>>> =
+        Arc::new(Mutex::new(std::io::BufWriter::new(stdout)));
+
+    // Shared cell so the request loop can inform the notification thread which
+    // repo the connected client belongs to (extracted from initialize clientInfo.name).
+    let client_repo_cell: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+
+    // Spawn the notification emitter thread before entering the blocking read loop.
+    let notif_out = Arc::clone(&out);
+    let notif_data_dir = data_dir.clone();
+    let notif_client_repo = Arc::clone(&client_repo_cell);
+    let mut rx = tx.subscribe();
+
+    std::thread::spawn(move || {
+        // Open the db once for the lifetime of this notifier thread. A prior
+        // draft reopened inside the loop on every event; that paid a file-open
+        // cost per bullpen post per connected client. A long-lived handle is
+        // fine here because the notifier thread's only job is read-only lookup
+        // of freshly inserted rows, and SQLite's default journal mode handles
+        // that concurrent read cleanly.
+        let db = match Database::open(&notif_data_dir.join("legion.db")) {
+            Ok(db) => db,
+            Err(e) => {
+                eprintln!("[legion mcp notif] failed to open db: {e}; notifier thread exiting");
+                return;
+            }
+        };
+
+        loop {
+            let event = match rx.blocking_recv() {
+                Ok(e) => e,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // tokio's broadcast receiver recovers internally on the
+                    // next recv; no manual resubscribe needed.
+                    eprintln!("[legion mcp notif] lagged {n} events; dropping and continuing");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    eprintln!("[legion mcp notif] broadcast closed; exiting notifier");
+                    break;
+                }
+            };
+
+            let post_id = match event {
+                ChannelEvent::Feed { post_id } => post_id,
+                ChannelEvent::Tasks => continue, // no task notifications in this issue
+            };
+
+            let post = match db.get_reflection_by_id(&post_id) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    eprintln!("[legion mcp notif] post {post_id} not found");
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("[legion mcp notif] db lookup failed: {e}");
+                    continue;
+                }
+            };
+
+            let client_repo = notif_client_repo.get().map(|s| s.as_str());
+            let is_signal = crate::signal::is_signal(&post.text);
+
+            // Log the "named signal suppressed because client_repo is
+            // unknown" case exactly once per post, so that a stuck
+            // initialize (or a client that omitted clientInfo.name) is
+            // visible in the breadcrumb log instead of manifesting as
+            // silent delivery failures. Other suppression cases (own post,
+            // signal to a different agent) are expected and not logged.
+            if client_repo.is_none() && is_signal && !post.text.starts_with("@all") {
+                eprintln!(
+                    "[legion mcp notif] suppressing signal {post_id} -- client_repo unknown (initialize handshake missing or clientInfo.name absent)"
+                );
+            }
+
+            if !should_notify(&post.text, &post.repo, client_repo) {
+                continue;
+            }
+
+            let content = build_channel_content(&post.id, &post.repo, &post.text, is_signal);
+            let notification = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/claude/channel",
+                "params": {
+                    "content": content
+                }
+            });
+
+            let Ok(s) = serde_json::to_string(&notification) else {
+                eprintln!("[legion mcp notif] failed to serialize notification");
+                continue;
+            };
+
+            let Ok(mut locked) = notif_out.lock() else {
+                eprintln!("[legion mcp notif] stdout mutex poisoned; notifier thread exiting");
+                return;
+            };
+
+            // A write or flush failure on stdout almost always means the
+            // client hung up (EPIPE). Keep looping against a dead pipe would
+            // burn CPU silently forever -- exit the notifier thread instead.
+            if let Err(e) = writeln!(locked, "{s}") {
+                eprintln!("[legion mcp notif] stdout write failed ({e}); notifier thread exiting");
+                return;
+            }
+            if let Err(e) = locked.flush() {
+                eprintln!("[legion mcp notif] stdout flush failed ({e}); notifier thread exiting");
+                return;
+            }
+        }
+    });
+
+    let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
 
@@ -473,9 +708,11 @@ pub fn run_stdio_loop(
             );
             let id = Value::Null;
             let resp = error_response(&id, -32700, "message too large");
-            if let Ok(s) = serde_json::to_string(&resp) {
-                let _ = writeln!(out, "{s}");
-                let _ = out.flush();
+            if let Ok(s) = serde_json::to_string(&resp)
+                && let Ok(mut locked) = out.lock()
+            {
+                let _ = writeln!(locked, "{s}");
+                let _ = locked.flush();
             }
             continue;
         }
@@ -492,19 +729,25 @@ pub fn run_stdio_loop(
                 eprintln!("[legion mcp] parse error: {e}");
                 let id = Value::Null;
                 let resp = error_response(&id, -32700, "parse error");
-                if let Ok(s) = serde_json::to_string(&resp) {
-                    let _ = writeln!(out, "{s}");
-                    let _ = out.flush();
+                if let Ok(s) = serde_json::to_string(&resp)
+                    && let Ok(mut locked) = out.lock()
+                {
+                    let _ = writeln!(locked, "{s}");
+                    let _ = locked.flush();
                 }
                 continue;
             }
         };
 
-        if let Some(response) = dispatch(&request, &data_dir, &version, &tx) {
+        if let Some(response) =
+            dispatch(&request, &data_dir, &version, &tx, Some(&client_repo_cell))
+        {
             match serde_json::to_string(&response) {
                 Ok(s) => {
-                    let _ = writeln!(out, "{s}");
-                    let _ = out.flush();
+                    if let Ok(mut locked) = out.lock() {
+                        let _ = writeln!(locked, "{s}");
+                        let _ = locked.flush();
+                    }
                 }
                 Err(e) => {
                     eprintln!("[legion mcp] serialize error: {e}");
@@ -550,7 +793,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
 
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], 1);
@@ -566,7 +809,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let req = make_request("tools/list", None);
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
 
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), 4);
@@ -609,7 +852,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
 
         // Should succeed
         assert!(
@@ -647,7 +890,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert!(
             resp.get("error").is_none(),
             "unexpected error: {:?}",
@@ -679,7 +922,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert!(
             resp.get("error").is_none(),
             "unexpected error: {:?}",
@@ -707,7 +950,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         // Per MCP spec: tool errors go in the success envelope with isError:true,
         // NOT as a JSON-RPC error response.
         assert!(
@@ -731,7 +974,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let req = make_request("some/unknown/method", None);
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert!(resp.get("error").is_some());
         assert_eq!(resp["error"]["code"], -32601);
     }
@@ -746,7 +989,7 @@ mod tests {
             "method": "notifications/initialized"
         });
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx);
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None);
         assert!(resp.is_none(), "notifications should return None");
     }
 
@@ -766,7 +1009,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         // Per MCP spec: McpInvalidArgument is a tool error, not a protocol error.
         // Must be in the success envelope with isError:true.
         assert!(
@@ -804,7 +1047,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert!(
             resp.get("error").is_none(),
             "McpInvalidArgument must not produce a JSON-RPC error envelope"
@@ -841,5 +1084,158 @@ mod tests {
         // Must not panic and must be valid UTF-8
         assert!(std::str::from_utf8(result.as_bytes()).is_ok());
         assert!(result.len() <= MAX_TOOL_RESULT_LEN);
+    }
+
+    // ---- notification tests ----
+
+    #[test]
+    fn initialize_response_includes_instructions() {
+        let tx = make_tx();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let req = make_request(
+            "initialize",
+            Some(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "kelex", "version": "0.0.1" }
+            })),
+        );
+
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+
+        let instructions = resp["result"]["instructions"].as_str().unwrap_or("");
+        assert!(
+            !instructions.is_empty(),
+            "instructions field must be present and non-empty"
+        );
+        assert!(
+            instructions.contains("notifications/claude/channel"),
+            "instructions must mention notifications/claude/channel; got: {instructions}"
+        );
+    }
+
+    #[test]
+    fn channel_event_feed_carries_post_id() {
+        use crate::channel::ChannelEvent;
+        let event = ChannelEvent::Feed {
+            post_id: "test-id-abc".to_string(),
+        };
+        match event {
+            ChannelEvent::Feed { post_id } => {
+                assert_eq!(post_id, "test-id-abc");
+            }
+            _ => panic!("expected Feed variant"),
+        }
+    }
+
+    #[test]
+    fn notification_filter_passes_at_all() {
+        // @all signals should reach every client regardless of repo.
+        assert!(
+            should_notify("@all hello team", "smugglr", Some("kelex")),
+            "@all must pass filter for kelex"
+        );
+        assert!(
+            should_notify("@all hello team", "smugglr", Some("smugglr")),
+            "@all must pass even for the poster's own client if the post repo differs"
+        );
+    }
+
+    #[test]
+    fn notification_filter_suppresses_wrong_recipient() {
+        // A signal to @vault must not reach @kelex.
+        assert!(
+            !should_notify("@vault review:approved", "smugglr", Some("kelex")),
+            "@vault signal must be suppressed for kelex client"
+        );
+        // A signal to @kelex MUST reach kelex.
+        assert!(
+            should_notify("@kelex review:approved", "smugglr", Some("kelex")),
+            "@kelex signal must reach kelex client"
+        );
+        // Own post must be suppressed.
+        assert!(
+            !should_notify("hello team", "kelex", Some("kelex")),
+            "own posts must be suppressed"
+        );
+        // General musing from another agent must reach the client.
+        assert!(
+            should_notify("just thinking about things", "smugglr", Some("kelex")),
+            "general musings from others must reach kelex"
+        );
+    }
+
+    #[test]
+    fn notification_filter_rejects_malformed_signal_prefixes() {
+        // `@` alone is not a broadcast -- no recipient token at all.
+        assert!(
+            !should_notify("@ hello", "smugglr", Some("kelex")),
+            "lone @ must be suppressed"
+        );
+        // `@@all foo` looks like a broadcast but recipient parses as `@all`,
+        // which starts with `@` -- rejected as malformed rather than silently
+        // routed as if the user meant @all.
+        assert!(
+            !should_notify("@@all urgent", "smugglr", Some("kelex")),
+            "@@all must be suppressed, not routed as @all"
+        );
+        // `@@` alone with no recipient.
+        assert!(
+            !should_notify("@@", "smugglr", Some("kelex")),
+            "@@ alone must be suppressed"
+        );
+        // Trailing colon is stripped, so `@kelex:` still reaches kelex.
+        assert!(
+            should_notify("@kelex: review:approved", "smugglr", Some("kelex")),
+            "trailing colon on recipient must still reach the target"
+        );
+    }
+
+    #[test]
+    fn build_channel_content_escapes_cdata_terminator() {
+        // A post text containing the CDATA terminator `]]>` would otherwise
+        // close the CDATA block early and leak raw content into the XML.
+        // escape_cdata splits the terminator across a close/reopen using the
+        // canonical `]]]]><![CDATA[>` pattern. An XML parser then sees the
+        // original `]]>` in the reassembled CDATA content.
+        let content = build_channel_content(
+            "019d-test-id",
+            "legion",
+            "here is the literal terminator ]]> in a code example",
+            false,
+        );
+        assert!(
+            content.contains("]]]]><![CDATA[>"),
+            "CDATA escape should split ]]> across a close-and-reopen; got: {content}"
+        );
+        // The legitimate final closer is still `]]></text></channel>`. That
+        // is the ONE allowed occurrence of the `]]>` sequence -- and it
+        // must close a balanced pair of CDATA opens.
+        assert!(
+            content.ends_with("]]></text></channel>"),
+            "content must end with the correct closer; got: {content}"
+        );
+        let cdata_opens = content.matches("<![CDATA[").count();
+        let cdata_closes = content.matches("]]>").count();
+        assert_eq!(
+            cdata_opens, cdata_closes,
+            "CDATA opens/closes must balance after escape (opens={cdata_opens}, closes={cdata_closes}); got: {content}"
+        );
+    }
+
+    #[test]
+    fn build_channel_content_escapes_xml_attributes() {
+        // Post id / repo go into attribute positions. A post from a repo
+        // named with a literal quote or ampersand would otherwise break the
+        // attribute quoting. Not expected in practice, but cheap to enforce.
+        let content = build_channel_content("id\"with'quote", "repo&name", "plain text body", true);
+        assert!(
+            content.contains("id&quot;with"),
+            "post_id attribute must be XML-escaped; got: {content}"
+        );
+        assert!(
+            content.contains("repo&amp;name"),
+            "repo attribute must be XML-escaped; got: {content}"
+        );
     }
 }
