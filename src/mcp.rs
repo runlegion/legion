@@ -11,10 +11,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use log::debug;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 use crate::board;
+use crate::mcp_notify;
 use crate::channel::ChannelEvent;
 use crate::db::Database;
 use crate::error::{LegionError, Result};
@@ -27,6 +29,15 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Maximum tool result content length before truncation.
 const MAX_TOOL_RESULT_LEN: usize = 2000;
+
+/// Guard to unregister MCP server on drop.
+struct CleanupGuard;
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        let _ = mcp_notify::unregister_mcp_server();
+    }
+}
 
 /// Tool definitions returned by tools/list. Shape is a public contract -- external MCP clients pin to these field names.
 fn tool_definitions() -> Value {
@@ -571,6 +582,13 @@ pub fn run_stdio_loop(
     version: String,
     tx: broadcast::Sender<ChannelEvent>,
 ) -> Result<()> {
+    // Register this MCP server instance for inter-process notifications.
+    mcp_notify::register_mcp_server()?;
+    debug!("[mcp] server registered for notifications");
+
+    // Ensure cleanup on exit.
+    let _cleanup = CleanupGuard;
+
     // Shared stdout writer -- both the request loop and the notification thread
     // write to stdout. The Mutex serialises their writes so lines never interleave.
     let stdout = std::io::stdout();

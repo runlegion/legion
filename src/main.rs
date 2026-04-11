@@ -10,6 +10,7 @@ mod init;
 #[allow(dead_code)] // Items used by tests + pending surface/status/serve migration
 mod kanban;
 mod mcp;
+mod mcp_notify;
 mod recall;
 mod reflect;
 mod search;
