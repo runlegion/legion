@@ -738,10 +738,27 @@ enum KanbanAction {
     },
 
     /// Cancel a card
+    ///
+    /// When the card has a linked external issue (`source_url`), the
+    /// corresponding GitHub issue is automatically closed as
+    /// "not-planned" via the work source plugin. Pass `--no-propagate`
+    /// to transition only the local card state without touching
+    /// GitHub.
     Cancel {
         /// Card ID
         #[arg(long)]
         id: String,
+
+        /// Optional cancel reason, posted as a comment on the GitHub
+        /// issue before the close
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Transition the card locally without closing the linked
+        /// GitHub issue. Use this when the kanban state needs to
+        /// diverge from the external issue state deliberately.
+        #[arg(long)]
+        no_propagate: bool,
     },
 
     /// Assign a backlog card to an agent
@@ -756,10 +773,25 @@ enum KanbanAction {
     },
 
     /// Reopen a done or cancelled card
+    ///
+    /// When the card has a linked external issue that was previously
+    /// closed by a kanban transition, the corresponding GitHub issue
+    /// is automatically reopened via the work source plugin. Pass
+    /// `--no-propagate` to transition only the local card state.
     Reopen {
         /// Card ID
         #[arg(long)]
         id: String,
+
+        /// Optional reopen reason, posted as a comment on the GitHub
+        /// issue after the reopen
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Transition the card locally without reopening the linked
+        /// GitHub issue
+        #[arg(long)]
+        no_propagate: bool,
     },
 }
 
@@ -1266,6 +1298,164 @@ fn audit(input: &db::AuditInput<'_>) {
         && let Err(e) = database.insert_audit_entry(input)
     {
         eprintln!("[legion] warning: audit log failed: {}", e);
+    }
+}
+
+/// Close the GitHub issue linked to a kanban card via the work source
+/// plugin, and write an audit entry describing the propagation. Called by
+/// `legion kanban cancel` (and in the future `legion kanban done` /
+/// `legion done`) to keep the public GitHub state consistent with the local
+/// kanban state.
+///
+/// A card with no `source_url` is a pure local card and is skipped
+/// silently. A card whose `to_repo` has no work source configured in
+/// `watch.toml` is also skipped, with a warning -- the agent can still
+/// transition the card locally, they just have to reconcile GitHub state
+/// manually. All other failure modes log to stderr and do not abort the
+/// calling handler, because the card transition has already happened and
+/// returning an error here would leave the agent with an inconsistent
+/// understanding of local state.
+///
+/// `comment` is the closing comment posted on the GitHub issue before the
+/// state transition. When `None`, the plugin closes the issue without a
+/// comment.
+fn propagate_card_close_to_worksource(
+    database: &db::Database,
+    card_id: &str,
+    comment: Option<&str>,
+) {
+    let card = match database.get_card_by_id(card_id) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            eprintln!("[legion] propagate: card {card_id} not found; skipping");
+            return;
+        }
+        Err(e) => {
+            eprintln!("[legion] propagate: lookup of card {card_id} failed: {e}; skipping");
+            return;
+        }
+    };
+
+    let Some(ref source_url) = card.source_url else {
+        // Pure local card with no linked issue -- nothing to propagate.
+        return;
+    };
+
+    let Some(number) = worksource::extract_issue_number(source_url) else {
+        eprintln!(
+            "[legion] propagate: card {card_id} has source_url {source_url} but no extractable issue number; skipping"
+        );
+        return;
+    };
+
+    let Some(source) = card.source_type.as_deref() else {
+        eprintln!(
+            "[legion] propagate: card {card_id} has source_url {source_url} but no source_type; skipping"
+        );
+        return;
+    };
+
+    let Some((_, source_repo, _)) = worksource::resolve_config(&card.to_repo) else {
+        eprintln!(
+            "[legion] propagate: to_repo '{}' for card {card_id} has no work source configured in watch.toml; skipping GitHub close",
+            card.to_repo
+        );
+        return;
+    };
+
+    match worksource::close_issue(source, &source_repo, number, comment) {
+        Ok(()) => {
+            eprintln!("[legion] closed {source} issue #{number}");
+            let details = serde_json::json!({
+                "card_id": card_id,
+                "propagation": "kanban-transition",
+                "comment": comment,
+            });
+            let details_str = details.to_string();
+            audit(&db::AuditInput {
+                agent: &card.to_repo,
+                action: "close-issue",
+                target_type: "issue",
+                target_ref: &number.to_string(),
+                task_id: Some(card_id),
+                source_type: source,
+                details: Some(&details_str),
+                outcome: "success",
+            });
+        }
+        Err(e) => {
+            eprintln!("[legion] propagate: failed to close {source} issue #{number}: {e}");
+        }
+    }
+}
+
+/// Reopen the GitHub issue linked to a kanban card via the work source
+/// plugin. Symmetrical with `propagate_card_close_to_worksource`. Called by
+/// `legion kanban reopen` so a card being moved back to in-progress reopens
+/// its public GitHub issue.
+fn propagate_card_reopen_to_worksource(
+    database: &db::Database,
+    card_id: &str,
+    comment: Option<&str>,
+) {
+    let card = match database.get_card_by_id(card_id) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            eprintln!("[legion] propagate: card {card_id} not found; skipping");
+            return;
+        }
+        Err(e) => {
+            eprintln!("[legion] propagate: lookup of card {card_id} failed: {e}; skipping");
+            return;
+        }
+    };
+
+    let Some(ref source_url) = card.source_url else {
+        return;
+    };
+    let Some(number) = worksource::extract_issue_number(source_url) else {
+        eprintln!(
+            "[legion] propagate: card {card_id} has source_url {source_url} but no extractable issue number; skipping"
+        );
+        return;
+    };
+    let Some(source) = card.source_type.as_deref() else {
+        eprintln!(
+            "[legion] propagate: card {card_id} has source_url {source_url} but no source_type; skipping"
+        );
+        return;
+    };
+    let Some((_, source_repo, _)) = worksource::resolve_config(&card.to_repo) else {
+        eprintln!(
+            "[legion] propagate: to_repo '{}' for card {card_id} has no work source configured in watch.toml; skipping GitHub reopen",
+            card.to_repo
+        );
+        return;
+    };
+
+    match worksource::reopen_issue(source, &source_repo, number, comment) {
+        Ok(()) => {
+            eprintln!("[legion] reopened {source} issue #{number}");
+            let details = serde_json::json!({
+                "card_id": card_id,
+                "propagation": "kanban-transition",
+                "comment": comment,
+            });
+            let details_str = details.to_string();
+            audit(&db::AuditInput {
+                agent: &card.to_repo,
+                action: "reopen-issue",
+                target_type: "issue",
+                target_ref: &number.to_string(),
+                task_id: Some(card_id),
+                source_type: source,
+                details: Some(&details_str),
+                outcome: "success",
+            });
+        }
+        Err(e) => {
+            eprintln!("[legion] propagate: failed to reopen {source} issue #{number}: {e}");
+        }
     }
 }
 
@@ -2155,17 +2345,41 @@ fn run() -> error::Result<()> {
                     kanban::transition_card(&database, &id, kanban::Action::Resume, None)?;
                     println!("{id}");
                 }
-                KanbanAction::Cancel { id } => {
-                    kanban::transition_card(&database, &id, kanban::Action::Cancel, None)?;
+                KanbanAction::Cancel {
+                    id,
+                    reason,
+                    no_propagate,
+                } => {
+                    kanban::transition_card(
+                        &database,
+                        &id,
+                        kanban::Action::Cancel,
+                        reason.as_deref(),
+                    )?;
                     println!("{id}");
+                    if !no_propagate {
+                        propagate_card_close_to_worksource(&database, &id, reason.as_deref());
+                    }
                 }
                 KanbanAction::Assign { id, to } => {
                     database.assign_card(&id, &to)?;
                     println!("{id}");
                 }
-                KanbanAction::Reopen { id } => {
-                    kanban::transition_card(&database, &id, kanban::Action::Reopen, None)?;
+                KanbanAction::Reopen {
+                    id,
+                    reason,
+                    no_propagate,
+                } => {
+                    kanban::transition_card(
+                        &database,
+                        &id,
+                        kanban::Action::Reopen,
+                        reason.as_deref(),
+                    )?;
                     println!("{id}");
+                    if !no_propagate {
+                        propagate_card_reopen_to_worksource(&database, &id, reason.as_deref());
+                    }
                 }
             }
         }
