@@ -2955,3 +2955,180 @@ fn daemon_auto_spawn_clears_stale_pid() {
         }
     }
 }
+
+/// End-to-end test: spawn `legion daemon --mcp` as a subprocess, perform the
+/// MCP `initialize` handshake, then simulate a CROSS-PROCESS bullpen write
+/// (as a `legion post` CLI invocation would do) and assert that a
+/// `notifications/claude/channel` JSON-RPC frame arrives on the subprocess
+/// stdout within a deterministic bound.
+///
+/// This test is the primary regression guard for issue #220. Prior to the
+/// fix, the MCP notifier thread subscribed to an in-process
+/// `tokio::sync::broadcast` channel, which cannot cross process boundaries.
+/// Any write made from a separate process -- a `legion post` CLI command, a
+/// second Claude Code session's MCP subprocess, the standalone HTTP daemon
+/// -- was silently invisible to the notifier. This test exercises exactly
+/// that path and must fail if the push bridge regresses.
+///
+/// Mechanics:
+/// 1. Spawn `legion daemon --mcp` with `LEGION_DATA_DIR` pointing at a temp
+///    directory and `LEGION_MCP_POLL_MS=50` so the notifier polls on a
+///    tight loop instead of the 500ms default.
+/// 2. Send the MCP `initialize` frame with `clientInfo.name = "recv-repo"`
+///    so the notifier knows which repo this session belongs to (required
+///    for own-post suppression and targeted signal routing).
+/// 3. Read the initialize response from the subprocess stdout to confirm
+///    the handshake completed.
+/// 4. Open a SEPARATE `legion reflect --audience team` subprocess to create
+///    a bullpen post under a different repo. This is a true cross-process
+///    write: it does not touch the MCP subprocess at all.
+/// 5. Poll the subprocess stdout for up to 10 seconds looking for a line
+///    that parses as a JSON-RPC notification with
+///    `method: "notifications/claude/channel"` containing the test text
+///    inside the `<channel><text><![CDATA[...]]></text></channel>` body.
+/// 6. Kill the MCP subprocess and assert the notification was observed.
+#[test]
+fn mcp_push_bridge_delivers_cross_process_post() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // Warm the database once before spawning the MCP subprocess. Legion's
+    // schema migrations are not concurrency-safe at first-open time: two
+    // processes racing to ALTER TABLE on a fresh DB produce "duplicate
+    // column name" errors. A single synchronous CLI command drives the
+    // full migration path to completion, so subsequent openers see a
+    // ready schema. The post written here lands before the MCP notifier
+    // starts -- the notifier seeds its `last_seen_at` cursor to `now()`
+    // at startup, so this warmup post is not delivered as a notification.
+    let warmup = Command::new(env!("CARGO_BIN_EXE_legion"))
+        .env("LEGION_DATA_DIR", dir.path())
+        .args(["post", "--repo", "warmup-repo", "--text", "schema warmup"])
+        .output()
+        .expect("spawn legion post (warmup)");
+    assert!(
+        warmup.status.success(),
+        "warmup post failed: {}",
+        String::from_utf8_lossy(&warmup.stderr)
+    );
+
+    // Spawn the MCP subprocess with a tight poll interval so the test
+    // finishes in milliseconds instead of seconds under the default.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_legion"))
+        .env("LEGION_DATA_DIR", dir.path())
+        .env("LEGION_MCP_POLL_MS", "50")
+        .args(["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn legion mcp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+
+    // 1. Send initialize.
+    let init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "recv-repo", "version": "0.0.1" }
+        }
+    });
+    writeln!(stdin, "{}", serde_json::to_string(&init).unwrap()).expect("write initialize");
+    stdin.flush().expect("flush");
+
+    // 2. Read the initialize response.
+    let mut init_line = String::new();
+    reader
+        .read_line(&mut init_line)
+        .expect("read initialize response");
+    let init_resp: serde_json::Value =
+        serde_json::from_str(init_line.trim()).expect("parse initialize response");
+    assert_eq!(init_resp["id"], 1, "initialize response id mismatch");
+    assert_eq!(
+        init_resp["result"]["serverInfo"]["name"], "legion-channel",
+        "wrong server name"
+    );
+
+    // 3. Cross-process write: spawn `legion post` as a separate CLI
+    //    invocation. This is the exact path a human or hook would take,
+    //    and it writes to the DB without touching the MCP subprocess's
+    //    in-process broadcast channel. Post comes from a different repo
+    //    so the notifier's own-post suppression does not drop it.
+    let marker = "CROSS_PROCESS_TEST_MARKER_9f2a1b";
+    let post_out = Command::new(env!("CARGO_BIN_EXE_legion"))
+        .env("LEGION_DATA_DIR", dir.path())
+        .args(["post", "--repo", "sender-repo", "--text", marker])
+        .output()
+        .expect("spawn legion post");
+    assert!(
+        post_out.status.success(),
+        "legion post failed: {}",
+        String::from_utf8_lossy(&post_out.stderr)
+    );
+
+    // 4. Poll subprocess stdout for up to 10 seconds looking for the
+    //    notification. Each line is consumed regardless of whether it
+    //    matches, so unrelated output (if any) does not block the search.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut found = false;
+    let mut observed_lines: Vec<String> = Vec::new();
+
+    // Read in a dedicated thread so we can enforce the deadline via
+    // channel recv_timeout instead of blocking forever on a dead pipe.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    while Instant::now() < deadline {
+        let remaining = deadline - Instant::now();
+        match rx.recv_timeout(remaining) {
+            Ok(line) => {
+                observed_lines.push(line.clone());
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim())
+                    && v["method"] == "notifications/claude/channel"
+                    && v["params"]["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains(marker))
+                {
+                    found = true;
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    // Always kill the subprocess before asserting so a failure does not
+    // leave a zombie daemon behind.
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        found,
+        "did not observe notifications/claude/channel frame carrying marker '{}' within deadline. observed lines:\n{}",
+        marker,
+        observed_lines.join("")
+    );
+}

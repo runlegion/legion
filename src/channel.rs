@@ -29,13 +29,17 @@ const SSE_FEED_LIMIT: usize = 20;
 /// Seconds between keepalive pings when no change has been detected.
 const PING_INTERVAL_SECS: u64 = 30;
 
-/// Notification that something in the DB has changed. SSE subscribers wake on
-/// receiving any variant and re-read from the database.
+/// Notification that something in the DB has changed. SSE subscribers and the
+/// MCP notifier wake on receiving any variant and re-read from the database,
+/// so the variants are pure signals -- they carry no payload. A previous
+/// revision attached a `post_id` to `Feed` so the MCP notifier could look the
+/// row up directly, but the MCP notifier now polls the database on a timer
+/// (so it picks up cross-process writes that never hit this broadcast at
+/// all), and the SSE handler was already querying the DB on every tick.
 #[derive(Debug, Clone)]
 pub enum ChannelEvent {
-    /// New board post or reflection arrived. Carries the post ID so MCP
-    /// notification emitters can look up the exact post without a full scan.
-    Feed { post_id: String },
+    /// New board post or reflection arrived.
+    Feed,
     /// Task table changed.
     Tasks,
 }
@@ -240,9 +244,7 @@ pub async fn api_post(
     };
 
     // Notify SSE subscribers (best-effort; no SSE listeners is not an error).
-    let _ = state.tx.send(ChannelEvent::Feed {
-        post_id: id.clone(),
-    });
+    let _ = state.tx.send(ChannelEvent::Feed);
 
     Json(serde_json::json!({ "id": id })).into_response()
 }
@@ -435,12 +437,9 @@ mod tests {
     #[test]
     fn broadcast_channel_delivers_events() {
         let (tx, mut rx) = new_broadcast();
-        tx.send(ChannelEvent::Feed {
-            post_id: "test-id".to_string(),
-        })
-        .expect("send");
+        tx.send(ChannelEvent::Feed).expect("send");
         let evt = rx.try_recv().expect("recv");
-        assert!(matches!(evt, ChannelEvent::Feed { .. }));
+        assert!(matches!(evt, ChannelEvent::Feed));
     }
 
     #[test]
@@ -476,14 +475,8 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<ChannelEvent>(1);
 
         // Fill past capacity without the subscriber reading.
-        tx.send(ChannelEvent::Feed {
-            post_id: "id-1".to_string(),
-        })
-        .expect("send 1");
-        tx.send(ChannelEvent::Feed {
-            post_id: "id-2".to_string(),
-        })
-        .expect("send 2");
+        tx.send(ChannelEvent::Feed).expect("send 1");
+        tx.send(ChannelEvent::Feed).expect("send 2");
 
         // The first recv should be Lagged since we overflowed the 1-slot buffer.
         let result = rx.try_recv();

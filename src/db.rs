@@ -810,6 +810,25 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Retrieve active bullpen posts created strictly after the given ISO 8601
+    /// timestamp, ordered oldest first. Used by the MCP notifier thread to
+    /// discover cross-process writes (from the CLI `legion post` command or
+    /// from another MCP subprocess) that would otherwise be invisible to an
+    /// in-process broadcast channel.
+    ///
+    /// Ordering is ascending so the caller can advance a `last_seen_at` cursor
+    /// to the `created_at` of the most recent row in insertion order.
+    pub fn get_board_posts_since(&self, since_iso: &str) -> Result<Vec<Reflection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND created_at > ?1 ORDER BY created_at ASC",
+        )?;
+
+        let rows = stmt.query_map([since_iso], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     /// Retrieve active bullpen posts unread by the given reader repo and
     /// atomically mark them as read. Posts created during the read are NOT
     /// marked, so they remain unread on the next call.
