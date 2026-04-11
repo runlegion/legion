@@ -275,6 +275,49 @@ pub fn reopen_issue(
     Ok(())
 }
 
+/// Edit an existing issue's title and/or body via a work source plugin.
+///
+/// At least one of `title` or `body` must be set; passing both `None` is
+/// rejected as a caller bug rather than silently no-opping. The plugin
+/// reads `LEGION_WS_TITLE` and `LEGION_WS_BODY` env vars and is expected
+/// to no-op on any field whose env var is empty or absent.
+///
+/// Used for scope amendments and stale-content fixes after a sync, so
+/// agents do not have to drop scope addenda into comment threads where
+/// they are buried below fold on the public GitHub view.
+pub fn edit_issue(
+    plugin_name: &str,
+    github_repo: &str,
+    number: u64,
+    title: Option<&str>,
+    body: Option<&str>,
+) -> Result<()> {
+    if title.is_none() && body.is_none() {
+        return Err(LegionError::WorkSource(
+            "edit_issue: at least one of title or body must be provided".to_string(),
+        ));
+    }
+
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let number_str = number.to_string();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_NUMBER", &number_str),
+    ];
+    if let Some(t) = title {
+        env.push(("LEGION_WS_TITLE", t));
+    }
+    if let Some(b) = body {
+        env.push(("LEGION_WS_BODY", b));
+    }
+
+    call_plugin(&plugin_path, &["edit-issue"], &env)?;
+
+    Ok(())
+}
+
 /// Result of creating an issue via a work source plugin.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CreatedIssue {

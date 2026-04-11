@@ -952,6 +952,29 @@ enum IssueAction {
         #[arg(long)]
         comment: Option<String>,
     },
+    /// Edit the title and/or body of an existing issue
+    ///
+    /// At least one of `--title` or `--body` must be provided. Used for
+    /// scope amendments and stale-content fixes after a sync, so agents
+    /// do not have to drop scope addenda into comment threads where they
+    /// are buried below fold on the public GitHub view.
+    Edit {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// Issue number
+        #[arg(long)]
+        number: u64,
+
+        /// Replace the issue title
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Replace the issue body
+        #[arg(long)]
+        body: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2722,6 +2745,52 @@ fn run() -> error::Result<()> {
                 });
 
                 println!("reopened issue #{} on {}", number, source_repo);
+            }
+            IssueAction::Edit {
+                repo,
+                number,
+                title,
+                body,
+            } => {
+                if title.is_none() && body.is_none() {
+                    return Err(error::LegionError::WorkSource(
+                        "legion issue edit requires at least one of --title or --body".to_string(),
+                    ));
+                }
+
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                worksource::edit_issue(
+                    &plugin_name,
+                    &source_repo,
+                    number,
+                    title.as_deref(),
+                    body.as_deref(),
+                )?;
+
+                let details = serde_json::json!({
+                    "title_set": title.is_some(),
+                    "body_set": body.is_some(),
+                });
+                let details_str = details.to_string();
+                audit(&db::AuditInput {
+                    agent: &repo,
+                    action: "edit-issue",
+                    target_type: "issue",
+                    target_ref: &number.to_string(),
+                    task_id: None,
+                    source_type: &plugin_name,
+                    details: Some(&details_str),
+                    outcome: "success",
+                });
+
+                println!("edited issue #{} on {}", number, source_repo);
             }
         },
         Commands::Pr { action } => match action {
