@@ -430,7 +430,12 @@ enum Commands {
         #[arg(long)]
         repo: Option<String>,
 
-        /// Filter by action type (create-issue, create-pr, review, merge, comment, close)
+        /// Filter by action type. Known verbs:
+        /// create-issue, close-issue, reopen-issue, edit-issue,
+        /// create-pr, close-pr, review, merge, comment,
+        /// delete-card, update-card.
+        /// Filter is an exact string match; additional verbs
+        /// introduced by future subcommands work automatically.
         #[arg(long)]
         action: Option<String>,
 
@@ -817,19 +822,15 @@ enum KanbanAction {
     /// accumulated before the `cancel`/`reopen` auto-propagation
     /// shipped.
     ///
-    /// `--dry-run` (default) only prints the mismatches. `--close-stale`
-    /// additionally calls `legion issue close` on every mismatched
-    /// issue with a canned reconciliation comment.
+    /// Default mode is read-only: the command scans and reports
+    /// without changing any GitHub state. Pass `--close-stale` to
+    /// actually close each mismatched issue via the work source
+    /// plugin with a canned reconciliation comment.
     Reconcile {
         /// Optional repo filter -- only reconcile cards owned by this
         /// agent. Default is all cards across all repos.
         #[arg(long)]
         repo: Option<String>,
-
-        /// Dry-run (default). Report mismatches without changing any
-        /// GitHub state.
-        #[arg(long, default_value_t = true)]
-        dry_run: bool,
 
         /// Actually close the stale GitHub issues. Without this flag,
         /// the command is read-only and safe to run repeatedly.
@@ -2472,15 +2473,9 @@ fn run() -> error::Result<()> {
                         outcome: "success",
                     });
                 }
-                KanbanAction::Reconcile {
-                    repo,
-                    dry_run: _,
-                    close_stale,
-                } => {
-                    // `dry_run` is true by default from clap; the
-                    // meaningful flag is `close_stale`. When
-                    // `close_stale` is set, we actually close stale
-                    // issues; otherwise we only print mismatches.
+                KanbanAction::Reconcile { repo, close_stale } => {
+                    // Default mode is read-only. `--close-stale` is the
+                    // only flag that actually touches GitHub.
                     let cards = kanban::board_cards(&database)?;
                     let mut stale: Vec<(kanban::Card, u64, String)> = Vec::new();
 
