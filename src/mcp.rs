@@ -593,10 +593,28 @@ fn run_notifier_loop(
         }
     };
 
-    // Seed the cursor to "now" so the notifier only emits for posts that land
-    // after the MCP subprocess started. Replaying historical bullpen content
-    // would flood the session with messages the user has already seen.
-    let mut last_seen_at = chrono::Utc::now().to_rfc3339();
+    // Seed the cursor to the DB's current max `created_at` watermark so the
+    // notifier only emits for posts that land after the MCP subprocess
+    // started. Replaying historical bullpen content would flood the session
+    // with messages the user has already seen.
+    //
+    // Using a DB-derived watermark rather than `now()` eliminates a
+    // small-but-real race: if a post is committed in the same nanosecond as
+    // the notifier's wall-clock seed, a `> now()` cursor would drop it. The
+    // DB watermark is always consistent with the rows the DB has observed.
+    //
+    // Falls back to `now()` only when the reflections table is empty (fresh
+    // install, no rows at all), in which case there is no race window.
+    let mut last_seen_at = match db.get_max_created_at() {
+        Ok(Some(ts)) => ts,
+        Ok(None) => chrono::Utc::now().to_rfc3339(),
+        Err(e) => {
+            eprintln!(
+                "[legion mcp notif] failed to read max(created_at) for seed: {e}; using now()"
+            );
+            chrono::Utc::now().to_rfc3339()
+        }
+    };
 
     let poll_interval = mcp_poll_interval();
 
