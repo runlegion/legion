@@ -2853,6 +2853,13 @@ fn sync_command_errors_without_worksource_config() {
 /// from the question of whether a real daemon child would survive startup
 /// in a CI environment (port conflicts, missing watch.toml, etc.), which
 /// is a separate concern and not what this test is guarding.
+///
+/// Unix-only: `is_process_alive` uses `kill -0` on Unix and returns `false`
+/// unconditionally on Windows (there is no portable equivalent), so this
+/// idempotency path cannot be exercised on Windows. The entire daemon
+/// auto-spawn feature is Unix-targeted anyway -- `setup-binary.sh` is bash
+/// and the log paths (`~/Library/Logs`, `$XDG_STATE_HOME`) are Unix-only.
+#[cfg(unix)]
 #[test]
 fn daemon_auto_spawn_is_idempotent() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -2901,6 +2908,12 @@ fn daemon_auto_spawn_is_idempotent() {
 /// about whether the spawned child survives -- that is a separate concern.
 /// We only assert that the stale PID was cleared (file was either removed
 /// or overwritten with a different PID) and the command exited zero.
+///
+/// Unix-only for the same reason as `daemon_auto_spawn_is_idempotent`: the
+/// feature uses Unix-only process semantics and shell plumbing, and this
+/// test shells out via `kill` for cleanup. See the doc comment on that
+/// test for the full rationale.
+#[cfg(unix)]
 #[test]
 fn daemon_auto_spawn_clears_stale_pid() {
     let data_dir = tempfile::tempdir().unwrap();
