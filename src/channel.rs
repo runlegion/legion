@@ -33,8 +33,9 @@ const PING_INTERVAL_SECS: u64 = 30;
 /// receiving any variant and re-read from the database.
 #[derive(Debug, Clone)]
 pub enum ChannelEvent {
-    /// New board post or reflection arrived.
-    Feed,
+    /// New board post or reflection arrived. Carries the post ID so MCP
+    /// notification emitters can look up the exact post without a full scan.
+    Feed { post_id: String },
     /// Task table changed.
     Tasks,
 }
@@ -239,7 +240,9 @@ pub async fn api_post(
     };
 
     // Notify SSE subscribers (best-effort; no SSE listeners is not an error).
-    let _ = state.tx.send(ChannelEvent::Feed);
+    let _ = state.tx.send(ChannelEvent::Feed {
+        post_id: id.clone(),
+    });
 
     Json(serde_json::json!({ "id": id })).into_response()
 }
@@ -432,9 +435,12 @@ mod tests {
     #[test]
     fn broadcast_channel_delivers_events() {
         let (tx, mut rx) = new_broadcast();
-        tx.send(ChannelEvent::Feed).expect("send");
+        tx.send(ChannelEvent::Feed {
+            post_id: "test-id".to_string(),
+        })
+        .expect("send");
         let evt = rx.try_recv().expect("recv");
-        assert!(matches!(evt, ChannelEvent::Feed));
+        assert!(matches!(evt, ChannelEvent::Feed { .. }));
     }
 
     #[test]
@@ -470,8 +476,14 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<ChannelEvent>(1);
 
         // Fill past capacity without the subscriber reading.
-        tx.send(ChannelEvent::Feed).expect("send 1");
-        tx.send(ChannelEvent::Feed).expect("send 2");
+        tx.send(ChannelEvent::Feed {
+            post_id: "id-1".to_string(),
+        })
+        .expect("send 1");
+        tx.send(ChannelEvent::Feed {
+            post_id: "id-2".to_string(),
+        })
+        .expect("send 2");
 
         // The first recv should be Lagged since we overflowed the 1-slot buffer.
         let result = rx.try_recv();
