@@ -2523,12 +2523,16 @@ fn run() -> error::Result<()> {
                     // Capture the card's to_repo before the delete so the
                     // audit entry records which agent owned it. A card
                     // that does not exist at delete time is a hard error
-                    // from the DB layer, matching the shape of the other
-                    // id-targeted kanban subcommands.
+                    // from the DB layer (CardNotFound), matching the
+                    // shape of the other id-targeted kanban subcommands;
+                    // the lookup here therefore either returns a real
+                    // repo or propagates the error before we ever reach
+                    // the audit call, so there is no need for a fallback
+                    // value.
                     let agent_repo = database
                         .get_card_by_id(&id)?
-                        .map(|c| c.to_repo)
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .ok_or_else(|| error::LegionError::CardNotFound(id.clone()))?
+                        .to_repo;
 
                     database.delete_card(&id)?;
                     println!("{id}");
