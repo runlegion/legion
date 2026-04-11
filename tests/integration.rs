@@ -2955,3 +2955,65 @@ fn daemon_auto_spawn_clears_stale_pid() {
         }
     }
 }
+
+#[test]
+fn mcp_notifications_end_to_end() {
+    use std::fs;
+    use std::path::Path;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path();
+
+    // Simulate an MCP server registering by creating a notification queue.
+    let notify_dir = Path::new("/tmp/legion-mcp-notify");
+    let _ = fs::create_dir_all(notify_dir);
+    let mock_pid = 99999;
+    let queue_path = notify_dir.join(format!("{}.queue", mock_pid));
+
+    // Clean up any stale queue from previous test runs.
+    let _ = fs::remove_file(&queue_path);
+    fs::File::create(&queue_path).expect("create notification queue");
+
+    // Post a message via CLI.
+    let output = legion_cmd(data_dir)
+        .args([
+            "post",
+            "--repo",
+            "test-mcp",
+            "--text",
+            "hello from mcp test",
+        ])
+        .output()
+        .expect("post command failed");
+
+    assert!(
+        output.status.success(),
+        "post command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let post_id = String::from_utf8(output.stdout)
+        .expect("invalid utf8")
+        .trim()
+        .to_string();
+    assert_uuid_format(&post_id);
+
+    // Check that the notification queue now contains an entry for this post.
+    let queue_content = fs::read_to_string(&queue_path).expect("read queue");
+
+    // The queue should have a notification JSON line.
+    assert!(
+        queue_content.contains(&post_id),
+        "expected post_id {} in notification queue, got: {}",
+        post_id,
+        queue_content
+    );
+    assert!(
+        queue_content.contains("test-mcp"),
+        "expected repo in notification queue, got: {}",
+        queue_content
+    );
+
+    // Clean up.
+    let _ = fs::remove_file(&queue_path);
+}

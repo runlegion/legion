@@ -54,7 +54,12 @@ pub fn unregister_mcp_server() -> Result<()> {
 /// Write a notification to all running MCP server queues.
 /// Called by the CLI post command and other notification sources.
 #[allow(dead_code)]
-pub fn notify_all_mcp_servers(post_id: &str, repo: &str, is_signal: bool, text: &str) -> Result<()> {
+pub fn notify_all_mcp_servers(
+    post_id: &str,
+    repo: &str,
+    is_signal: bool,
+    text: &str,
+) -> Result<()> {
     let dir = queue_dir();
     if !dir.exists() {
         return Ok(());
@@ -72,7 +77,7 @@ pub fn notify_all_mcp_servers(post_id: &str, repo: &str, is_signal: bool, text: 
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |e| e == "queue") {
+        if path.is_file() && path.extension().is_some_and(|e| e == "queue") {
             // Append notification to this queue file (newline-delimited JSON).
             std::fs::OpenOptions::new()
                 .create(true)
@@ -114,6 +119,18 @@ pub fn read_pending_notifications() -> Result<Vec<serde_json::Value>> {
     fs::write(&path, "")?;
 
     Ok(notifications)
+}
+
+/// Notify all MCP servers about a post, by repo and post ID.
+/// Useful when the caller doesn't have immediate access to text/is_signal.
+#[allow(dead_code)]
+pub fn notify_mcp_from_db(db: &crate::db::Database, post_id: &str) -> Result<()> {
+    let post = db
+        .get_reflection_by_id(post_id)?
+        .ok_or_else(|| crate::error::LegionError::Search(format!("post {} not found", post_id)))?;
+
+    let is_signal = crate::signal::is_signal(&post.text);
+    notify_all_mcp_servers(&post.id, &post.repo, is_signal, &post.text)
 }
 
 #[cfg(test)]

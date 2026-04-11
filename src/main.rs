@@ -1589,17 +1589,36 @@ fn run() -> error::Result<()> {
                     "reflecting",
                 )?;
             } else {
-                run_compound_command_with_meta(
-                    &database,
-                    &index,
-                    &repo,
-                    &text,
-                    &transcript,
-                    &meta,
-                    board::post_from_text_with_meta,
-                    board::post_from_transcript_with_meta,
-                    "posting",
-                )?;
+                // Post messages and notify MCP servers of new posts.
+                let mut posted_ids = vec![];
+                for r in &repo {
+                    match (&text, &transcript) {
+                        (Some(t), None) => {
+                            let id =
+                                board::post_from_text_with_meta(&database, &index, r, t, &meta)?;
+                            info!("[legion] posting for {r} ({id})");
+                            posted_ids.push((id.clone(), r.clone()));
+                            println!("{id}");
+                        }
+                        (None, Some(path)) => {
+                            let id = board::post_from_transcript_with_meta(
+                                &database, &index, r, path, &meta,
+                            )?;
+                            info!("[legion] posting for {r} ({id})");
+                            posted_ids.push((id.clone(), r.clone()));
+                            println!("{id}");
+                        }
+                        (Some(_), Some(_)) => return Err(error::LegionError::NoReflectionInput),
+                        (None, None) => return Err(error::LegionError::NoReflectionInput),
+                    };
+                }
+
+                // Notify MCP servers of all newly posted messages.
+                for (post_id, _repo) in posted_ids {
+                    if let Err(e) = mcp_notify::notify_mcp_from_db(&database, &post_id) {
+                        info!("[legion] mcp notification error for {post_id}: {e}");
+                    }
+                }
             }
 
             // Compute embeddings for new posts

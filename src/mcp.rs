@@ -16,10 +16,10 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 use crate::board;
-use crate::mcp_notify;
 use crate::channel::ChannelEvent;
 use crate::db::Database;
 use crate::error::{LegionError, Result};
+use crate::mcp_notify;
 use crate::search::SearchIndex;
 use crate::signal as sig;
 use crate::task;
