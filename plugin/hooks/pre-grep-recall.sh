@@ -68,7 +68,7 @@ case "$TOOL" in
     # Strip regex metacharacters, lowercase, tokenize on non-word runs.
     # The quoted character class is the regex metacharacters we want gone.
     STRIPPED=$(echo "$PATTERN" \
-      | tr 'A-Z' 'a-z' \
+      | tr '[:upper:]' '[:lower:]' \
       | tr -d '\\\\[]{}()*+?^$|.' \
       | tr -s ' ' ' ')
     # Count tokens -- skip if fewer than 2 survive.
@@ -89,7 +89,7 @@ case "$TOOL" in
     # or end in *, strip file extensions, lowercase, join with space.
     STRIPPED=$(echo "$PATTERN" \
       | tr '/' ' ' \
-      | tr 'A-Z' 'a-z' \
+      | tr '[:upper:]' '[:lower:]' \
       | awk '{
           out = ""
           for (i = 1; i <= NF; i++) {
