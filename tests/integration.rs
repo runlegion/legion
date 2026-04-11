@@ -2789,3 +2789,34 @@ fn daemon_mcp_mode_is_stdio_only() {
     // surface stays hot for the duration of the test.
     drop(blocker);
 }
+
+/// Verify that setting `LEGION_DATA_DIR` suppresses the plugin-data-dir
+/// migration. Without this guard, a test tempdir target would inherit
+/// content from the real user's plugin data dir on whatever machine the
+/// tests run on -- leaking `~/.claude/plugins/data/legion-legion/` state
+/// into fresh-tempdir tests and causing unpredictable failures that
+/// depend on the tester's local setup.
+///
+/// The explicit override signals "I know what I'm doing, stay out of the
+/// filesystem." When set, no migration runs regardless of source state.
+#[test]
+fn data_dir_override_suppresses_migration() {
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let output = legion_cmd(data_dir.path())
+        .args(["stats"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stats failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("first-run migration"),
+        "LEGION_DATA_DIR override must suppress migration chatter\nstderr: {stderr}"
+    );
+}
