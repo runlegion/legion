@@ -435,6 +435,46 @@ mod tests {
     }
 
     #[test]
+    fn delete_removes_document_from_index() {
+        let (idx, _dir) = test_index();
+        idx.add(
+            "id-keep",
+            "kelex",
+            "keep this reflection about mapping rules",
+        )
+        .unwrap();
+        idx.add(
+            "id-gone",
+            "kelex",
+            "doomed reflection about mapping rules that should vanish",
+        )
+        .unwrap();
+
+        // Both documents visible before the delete.
+        let before = idx.search("kelex", "mapping rules", 10).unwrap();
+        assert_eq!(before.len(), 2);
+
+        idx.delete("id-gone").unwrap();
+
+        // After delete, only the kept document surfaces -- no ghost for id-gone.
+        let after = idx.search("kelex", "mapping rules", 10).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, "id-keep");
+    }
+
+    #[test]
+    fn delete_nonexistent_id_is_noop() {
+        let (idx, _dir) = test_index();
+        idx.add("id-1", "kelex", "reflection one").unwrap();
+        // Deleting a term that never existed should not error.
+        idx.delete("id-does-not-exist").unwrap();
+        // Existing document still retrievable.
+        let results = idx.search("kelex", "reflection", 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "id-1");
+    }
+
+    #[test]
     fn rebuild_replaces_index_contents() {
         let (idx, _dir) = test_index();
         idx.add("id-old", "test", "old reflection that should be gone")

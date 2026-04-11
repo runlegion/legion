@@ -84,6 +84,84 @@ fn quiet_by_default() {
 }
 
 #[test]
+fn forget_rejects_wrong_repo_safety_check() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Warm the db with a reflection on repo "kelex".
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "kelex",
+            "--text",
+            "doomed reflection about mapping rules",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_uuid_format(&id);
+
+    // Forget with the WRONG --repo must refuse the delete and exit nonzero.
+    let out = legion_cmd(dir.path())
+        .args(["forget", "--id", &id, "--repo", "rafters"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "forget should have failed the safety check, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("repo safety check failed"),
+        "expected safety check error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("kelex"),
+        "expected actual repo in error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("rafters"),
+        "expected expected repo in error, got: {stderr}"
+    );
+
+    // Reflection must still be recallable -- the rejected delete must not
+    // have touched the db or the index.
+    let out = legion_cmd(dir.path())
+        .args(["recall", "--repo", "kelex", "--context", "mapping rules"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("doomed reflection"),
+        "reflection should still be intact after rejected forget, got: {stdout}"
+    );
+
+    // Forget with the CORRECT --repo must succeed.
+    let out = legion_cmd(dir.path())
+        .args(["forget", "--id", &id, "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "forget with correct repo failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("forgot reflection"),
+        "expected forget confirmation, got: {stdout}"
+    );
+}
+
+#[test]
 fn verbose_shows_confirmation() {
     let dir = tempfile::tempdir().unwrap();
 
