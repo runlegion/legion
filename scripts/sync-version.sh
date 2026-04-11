@@ -73,8 +73,29 @@ check_not_ahead() {
   fi
 }
 
+# --- validation phase: everything that can reject the commit runs first ---
+# Rationale: if we mutated plugin.json before discovering a stale CHANGELOG,
+# the developer would land in a half-synced working tree that blocks the
+# commit without any obvious undo path. Validate all invariants up front,
+# exit 1 loudly, then mutate only once we know every check passes.
+
 check_not_ahead "$PLUGIN_JSON" "plugin.json"
 check_not_ahead "$MARKETPLACE_JSON" "marketplace.json"
+
+# Require CHANGELOG top header to match Cargo.toml. Changelog body is
+# human-authored -- we only enforce the header version tag.
+if [ -f "$CHANGELOG" ]; then
+  TOP_HEADER=$(grep -E '^## [0-9]' "$CHANGELOG" | head -1 | sed -E 's/^## //' | awk '{print $1}')
+  if [ -z "$TOP_HEADER" ]; then
+    echo "[sync-version] WARNING: no '## <version>' header found in ${CHANGELOG#"$REPO_ROOT/"}" >&2
+  elif [ "$TOP_HEADER" != "$CARGO_VERSION" ]; then
+    echo "[sync-version] ERROR: ${CHANGELOG#"$REPO_ROOT/"} top header is '## ${TOP_HEADER}', Cargo.toml is ${CARGO_VERSION}" >&2
+    echo "[sync-version] Add a new '## ${CARGO_VERSION}' section at the top of ${CHANGELOG#"$REPO_ROOT/"} describing what shipped in this release, then commit." >&2
+    exit 1
+  fi
+fi
+
+# --- mutation phase: every invariant above passed, safe to edit files ---
 
 UPDATED=false
 
@@ -91,35 +112,28 @@ fi
 
 # Update marketplace.json via python for precise JSON handling (avoids sed
 # ambiguity when multiple "version" fields are present at different depths).
+# Pass path + version via env vars, NOT shell interpolation into the python
+# string literal -- a path or version containing a single quote would
+# otherwise break the python source. The heredoc is single-quoted so bash
+# does not interpolate inside it; python reads from os.environ.
 if [ -f "$MARKETPLACE_JSON" ]; then
   CURRENT=$(extract_version "$MARKETPLACE_JSON")
   if [ -n "$CURRENT" ] && [ "$CURRENT" != "$CARGO_VERSION" ]; then
-    python3 -c "
-import json
-with open('$MARKETPLACE_JSON', 'r') as f:
+    MARKETPLACE_JSON="$MARKETPLACE_JSON" CARGO_VERSION="$CARGO_VERSION" python3 <<'PY'
+import json, os
+path = os.environ['MARKETPLACE_JSON']
+version = os.environ['CARGO_VERSION']
+with open(path, 'r') as f:
     data = json.load(f)
 for p in data.get('plugins', []):
-    p['version'] = '$CARGO_VERSION'
-with open('$MARKETPLACE_JSON', 'w') as f:
+    p['version'] = version
+with open(path, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
-"
+PY
     git add "$MARKETPLACE_JSON"
     echo "[sync-version] marketplace.json: ${CURRENT} -> ${CARGO_VERSION}" >&2
     UPDATED=true
-  fi
-fi
-
-# Require CHANGELOG top header to match Cargo.toml. Changelog body is
-# human-authored -- we only enforce the header version tag.
-if [ -f "$CHANGELOG" ]; then
-  TOP_HEADER=$(grep -E '^## [0-9]' "$CHANGELOG" | head -1 | sed -E 's/^## //' | awk '{print $1}')
-  if [ -z "$TOP_HEADER" ]; then
-    echo "[sync-version] WARNING: no '## <version>' header found in ${CHANGELOG#"$REPO_ROOT/"}" >&2
-  elif [ "$TOP_HEADER" != "$CARGO_VERSION" ]; then
-    echo "[sync-version] ERROR: ${CHANGELOG#"$REPO_ROOT/"} top header is '## ${TOP_HEADER}', Cargo.toml is ${CARGO_VERSION}" >&2
-    echo "[sync-version] Add a new '## ${CARGO_VERSION}' section at the top of ${CHANGELOG#"$REPO_ROOT/"} describing what shipped in this release, then commit." >&2
-    exit 1
   fi
 fi
 
