@@ -1,7 +1,7 @@
 ---
 name: legion-memory
 description: |
-  Auto-triggered skill that enforces recall-before-grep doctrine. When an agent is about to search the codebase for answers, this skill reminds them to check legion memory first. Use this when the agent is researching a problem, looking for patterns, or trying to understand why something was built a certain way.
+  Auto-triggered skill that reminds agents of the recall-before-grep doctrine. When an agent is about to search the codebase for answers, this skill reminds them to check legion memory first. Use this when the agent is researching a problem, looking for patterns, or trying to understand why something was built a certain way.
 version: 1.0.0
 user-invocable: false
 allowed-tools: Bash, Read
