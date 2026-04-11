@@ -34,7 +34,7 @@ When you emit the body:
 - Preserve every section heading the template has, in the order it has them.
 - Preserve fenced code blocks where the template has them. The Rust block under `### Interface` must contain a real `// src/<module>.rs` path and real type definitions, not a placeholder.
 - Preserve checklists where the template has them. The `## Done When` block becomes concrete unchecked boxes tied to this issue's acceptance, plus the literal `**This issue is complete when:**` line filled in.
-- Preserve the `## Dev Workflow` block verbatim in spirit -- copy its numbered steps and the `### Rust Rules` sublist from the canonical template into the body you emit. When a specific issue does not need Rust code at all (for example a prose-only agent edit), replace the Rust Rules list with a single sentence explaining why the rules do not apply and confirm the cargo gates still run as a regression check. Do not delete the Dev Workflow section.
+- Copy the `## Dev Workflow` block's numbered steps verbatim from the canonical template into the body you emit, including the cargo command references. The cargo gates run as a regression check on every PR even for prose-only changes, so the numbered steps stay as-is regardless of what the issue touches. Copy the `### Rust Rules` sublist verbatim as well, except when the issue does not touch Rust code at all (for example a prose-only agent edit), in which case replace the Rust Rules sublist with a single sentence explaining why the rules do not apply. Do not delete the Dev Workflow section and do not soften the numbered steps.
 - Do not add sections that are not in the canonical template.
 
 ## Rules You Follow
@@ -45,9 +45,11 @@ A short, vague issue is worse than a long, precise one. If you cannot fit a conc
 
 ### 2. Tests are part of the spec
 
-For issues that touch Rust code, the behavior bullets and the `## Done When` checklist must name specific test assertions that an implementer can write. If you cannot name the tests because you do not know what the API should be, the spec is not ready.
+For issues that touch Rust code, the `### Behavior` bullets must name specific test assertions that an implementer can write. If you cannot name the tests because you do not know what the API should be, the spec is not ready.
 
-The canonical template's `### Interface` block is the right place for target type signatures. The canonical template does not have a separate "Acceptance Criteria / Functional Tests Required" section, so test requirements live as bullets in `### Behavior` and as checkboxes in `## Done When`. Do not reintroduce an "Acceptance Criteria" section that the template does not have.
+The canonical template's `### Interface` block is the right place for target type signatures. The canonical template does not have a separate "Acceptance Criteria / Functional Tests Required" section, so per-test assertions live as bullets in `### Behavior`. Do not reintroduce an "Acceptance Criteria" section that the template does not have.
+
+The canonical template's `## Done When` checklist is for workflow-stage checkboxes only (tests pass, simplify pass completed, review pass completed, PR created). Do not add a per-test checkbox to `## Done When`; the per-test assertions belong in `### Behavior`, and the `## Done When` "all tests pass" checkbox covers them collectively.
 
 ### 3. No wishful scope
 
