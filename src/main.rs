@@ -106,6 +106,29 @@ enum Commands {
         dedupe_mode: DedupeMode,
     },
 
+    /// Permanently delete a reflection by id.
+    ///
+    /// Destructive. No soft-delete, no undo. Removes the row from both
+    /// the SQLite reflections table and the tantivy search index. Used
+    /// to retire stale workaround reflections, demonstrably-wrong
+    /// reflections, or personal data that should not persist in the
+    /// corpus.
+    ///
+    /// The optional `--repo` flag is a safety check: when provided,
+    /// the delete is refused unless the reflection's actual repo
+    /// matches. Prevents accidentally nuking the wrong reflection when
+    /// working with a similarly-shaped id.
+    Forget {
+        /// Reflection id to delete.
+        #[arg(long)]
+        id: String,
+
+        /// Optional safety check: refuse the delete unless the
+        /// reflection's repo matches this value.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+
     /// Recall relevant reflections for the current context
     Recall {
         /// Repository name
@@ -1799,6 +1822,57 @@ fn run() -> error::Result<()> {
                     info!("[legion] embedded {} reflections", n);
                 }
             }
+        }
+        Commands::Forget { id, repo } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let index = search::SearchIndex::open(&base.join("index"))?;
+
+            // Peek at the reflection first so we can run the optional
+            // --repo safety check AND print a summary of what is about
+            // to be deleted. The actual delete goes through
+            // `delete_reflection` which re-verifies the id exists.
+            let existing = database
+                .get_reflection_by_id(&id)?
+                .ok_or_else(|| error::LegionError::ReflectionNotFound(id.clone()))?;
+
+            if let Some(ref expected_repo) = repo
+                && existing.repo != *expected_repo
+            {
+                return Err(error::LegionError::WorkSource(format!(
+                    "repo safety check failed: reflection {} belongs to '{}', not '{}' -- re-run without --repo or with the correct value",
+                    id, existing.repo, expected_repo
+                )));
+            }
+
+            // Delete from SQLite first. If this fails, the index is
+            // untouched. If this succeeds but the index delete fails,
+            // the next `legion reindex` run will reconcile -- the
+            // index rebuild drops everything and re-seeds from the db.
+            let deleted = database.delete_reflection(&id)?;
+            index.delete(&id)?;
+
+            audit(&db::AuditInput {
+                agent: &deleted.repo,
+                action: "delete-reflection",
+                target_type: "reflection",
+                target_ref: &id,
+                task_id: None,
+                source_type: "legion",
+                details: None,
+                outcome: "success",
+            });
+
+            let preview: String = deleted.text.chars().take(80).collect();
+            let ellipsis = if deleted.text.chars().count() > 80 {
+                "..."
+            } else {
+                ""
+            };
+            println!(
+                "forgot reflection {} ({}): {}{}",
+                id, deleted.repo, preview, ellipsis
+            );
         }
         Commands::Recall {
             repo,

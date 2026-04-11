@@ -750,6 +750,40 @@ impl Database {
         }
     }
 
+    /// Permanently remove a reflection from the database by id.
+    ///
+    /// Returns the deleted reflection so the caller can confirm what was
+    /// removed (repo, audience, first 80 chars of text, etc). Returns
+    /// `LegionError::ReflectionNotFound` if the id does not match any
+    /// row.
+    ///
+    /// This is a HARD delete from SQLite only. Callers must also call
+    /// `SearchIndex::delete(id)` to remove the matching document from
+    /// the tantivy index, or subsequent BM25 queries will still return
+    /// the deleted reflection as a "ghost" until the next reindex.
+    ///
+    /// Destructive. No soft-delete, no undo. Used by `legion forget` to
+    /// retire stale workaround reflections, bad reflections, or personal
+    /// data that should not persist in the corpus.
+    pub fn delete_reflection(&self, id: &str) -> Result<Reflection> {
+        // Fetch first so we can return it and so a missing id produces a
+        // clear error rather than a silent zero-row delete.
+        let reflection = self
+            .get_reflection_by_id(id)?
+            .ok_or_else(|| LegionError::ReflectionNotFound(id.to_string()))?;
+
+        let rows = self
+            .conn
+            .execute("DELETE FROM reflections WHERE id = ?1", rusqlite::params![id])?;
+        if rows == 0 {
+            // Race: reflection existed at the fetch above but was
+            // deleted before our delete ran. Surface as NotFound rather
+            // than success.
+            return Err(LegionError::ReflectionNotFound(id.to_string()));
+        }
+        Ok(reflection)
+    }
+
     /// Retrieve reflections by a list of IDs. Returns them in the order found
     /// (not necessarily the input order). Missing IDs are silently skipped.
     pub fn get_reflections_by_ids(&self, ids: &[&str]) -> Result<Vec<Reflection>> {
@@ -3399,6 +3433,38 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fetched.details.as_deref(), Some(details));
+    }
+
+    #[test]
+    fn delete_reflection_removes_row_and_returns_deleted() {
+        let db = test_db();
+
+        // Insert a reflection via the real path so the schema columns
+        // are all populated exactly as production would.
+        let inserted = db
+            .insert_reflection("shingle", "stale workaround doctrine", "self")
+            .unwrap();
+
+        // Confirm it is visible before the delete.
+        assert!(db.get_reflection_by_id(&inserted.id).unwrap().is_some());
+
+        // Delete, confirm the returned row matches what was stored.
+        let deleted = db.delete_reflection(&inserted.id).expect("delete");
+        assert_eq!(deleted.id, inserted.id);
+        assert_eq!(deleted.repo, "shingle");
+        assert_eq!(deleted.text, "stale workaround doctrine");
+
+        // Gone from the table.
+        assert!(db.get_reflection_by_id(&inserted.id).unwrap().is_none());
+
+        // Second delete on the same id returns ReflectionNotFound,
+        // not silent success.
+        let result = db.delete_reflection(&inserted.id);
+        assert!(
+            matches!(result, Err(LegionError::ReflectionNotFound(_))),
+            "expected ReflectionNotFound, got {:?}",
+            result
+        );
     }
 
     #[test]
