@@ -190,74 +190,77 @@ fn assert_warned(hook: &str, stdout: &str, exit_code: i32) {
     );
 }
 
-// --- TEST 1: corrupted embedding column (the regression from 2026-04-11) ---
+/// One of the two broken-legion scenarios exercised by the tests.
+enum Corruption {
+    /// legion.db replaced with a directory -- every sqlite open fails.
+    Schema,
+    /// LEGION_DATA_DIR is a file where a directory is expected.
+    MissingDataDir,
+}
+
+/// Stdin JSON shape expected by the hook under test.
+enum InputKind {
+    /// `{"cwd": "..."}` -- session-start, bullpen-check, post-compact.
+    Cwd,
+    /// `{"cwd": "...", "tool_name": "Grep", "tool_input": {"pattern": "..."}}` -- recall-first.
+    Grep,
+}
+
+/// Build the hook test environment inside `temp`, applying the requested
+/// corruption, and return the `(plugin_root, legion_data_dir, cwd)` triple
+/// that `run_hook` needs. `temp` must outlive the returned paths.
+fn build_env(temp: &Path, corruption: Corruption) -> (PathBuf, PathBuf, PathBuf) {
+    let plugin_root = setup_plugin_root(temp);
+    let data_dir = match corruption {
+        Corruption::Schema => {
+            let d = temp.join("data");
+            fs::create_dir_all(&d).unwrap();
+            poison_schema(&d);
+            d
+        }
+        Corruption::MissingDataDir => broken_data_dir_as_file(temp),
+    };
+    let cwd = temp.join("legion");
+    fs::create_dir_all(&cwd).unwrap();
+    (plugin_root, data_dir, cwd)
+}
+
+/// Run the common "hook warns under broken legion" assertion. Drives the
+/// two corruption scenarios through the four surfaceable hooks without
+/// duplicating setup code across eight near-identical test bodies.
+fn assert_hook_warns(hook: &str, corruption: Corruption, input: InputKind) {
+    let temp = tempfile::tempdir().unwrap();
+    let (plugin_root, data_dir, cwd) = build_env(temp.path(), corruption);
+
+    let stdin = match input {
+        InputKind::Cwd => cwd_json(&cwd),
+        InputKind::Grep => grep_tool_json(&cwd),
+    };
+
+    let (stdout, _stderr, exit) = run_hook(hook, &plugin_root, &data_dir, &stdin);
+    assert_warned(hook, &stdout, exit);
+}
+
+// --- TEST 1: corrupted schema (the regression class from 2026-04-11) ---
 
 #[test]
 fn session_start_warns_on_corrupted_schema() {
-    let temp = tempfile::tempdir().unwrap();
-    let plugin_root = setup_plugin_root(temp.path());
-    let data_dir = temp.path().join("data");
-    fs::create_dir_all(&data_dir).unwrap();
-    poison_schema(&data_dir);
-
-    let cwd = temp.path().join("legion");
-    fs::create_dir_all(&cwd).unwrap();
-
-    let (stdout, _stderr, exit) =
-        run_hook("session-start.sh", &plugin_root, &data_dir, &cwd_json(&cwd));
-    assert_warned("session-start.sh", &stdout, exit);
+    assert_hook_warns("session-start.sh", Corruption::Schema, InputKind::Cwd);
 }
 
 #[test]
 fn recall_first_warns_on_corrupted_schema() {
-    let temp = tempfile::tempdir().unwrap();
-    let plugin_root = setup_plugin_root(temp.path());
-    let data_dir = temp.path().join("data");
-    fs::create_dir_all(&data_dir).unwrap();
-    poison_schema(&data_dir);
-
-    let cwd = temp.path().join("legion");
-    fs::create_dir_all(&cwd).unwrap();
-
-    let (stdout, _stderr, exit) = run_hook(
-        "recall-first.sh",
-        &plugin_root,
-        &data_dir,
-        &grep_tool_json(&cwd),
-    );
-    assert_warned("recall-first.sh", &stdout, exit);
+    assert_hook_warns("recall-first.sh", Corruption::Schema, InputKind::Grep);
 }
 
 #[test]
 fn bullpen_check_warns_on_corrupted_schema() {
-    let temp = tempfile::tempdir().unwrap();
-    let plugin_root = setup_plugin_root(temp.path());
-    let data_dir = temp.path().join("data");
-    fs::create_dir_all(&data_dir).unwrap();
-    poison_schema(&data_dir);
-
-    let cwd = temp.path().join("legion");
-    fs::create_dir_all(&cwd).unwrap();
-
-    let (stdout, _stderr, exit) =
-        run_hook("bullpen-check.sh", &plugin_root, &data_dir, &cwd_json(&cwd));
-    assert_warned("bullpen-check.sh", &stdout, exit);
+    assert_hook_warns("bullpen-check.sh", Corruption::Schema, InputKind::Cwd);
 }
 
 #[test]
 fn post_compact_warns_on_corrupted_schema() {
-    let temp = tempfile::tempdir().unwrap();
-    let plugin_root = setup_plugin_root(temp.path());
-    let data_dir = temp.path().join("data");
-    fs::create_dir_all(&data_dir).unwrap();
-    poison_schema(&data_dir);
-
-    let cwd = temp.path().join("legion");
-    fs::create_dir_all(&cwd).unwrap();
-
-    let (stdout, _stderr, exit) =
-        run_hook("post-compact.sh", &plugin_root, &data_dir, &cwd_json(&cwd));
-    assert_warned("post-compact.sh", &stdout, exit);
+    assert_hook_warns("post-compact.sh", Corruption::Schema, InputKind::Cwd);
 }
 
 #[test]
@@ -265,15 +268,11 @@ fn precompact_failure_propagates_to_post_compact_warning() {
     // precompact.sh cannot surface additionalContext itself -- the session
     // is about to compact. When its reflect call fails it touches a marker
     // that post-compact.sh reads on the next invocation and surfaces via
-    // its own warning block. This is the end-to-end path.
+    // its own warning block. This is the only end-to-end hook chain that
+    // needs bespoke setup (transcript_path + two sequential invocations),
+    // so it doesn't go through assert_hook_warns.
     let temp = tempfile::tempdir().unwrap();
-    let plugin_root = setup_plugin_root(temp.path());
-    let data_dir = temp.path().join("data");
-    fs::create_dir_all(&data_dir).unwrap();
-    poison_schema(&data_dir);
-
-    let cwd = temp.path().join("legion");
-    fs::create_dir_all(&cwd).unwrap();
+    let (plugin_root, data_dir, cwd) = build_env(temp.path(), Corruption::Schema);
     let transcript = temp.path().join("transcript.jsonl");
     fs::write(&transcript, b"").unwrap();
 
@@ -287,11 +286,11 @@ fn precompact_failure_propagates_to_post_compact_warning() {
     );
     assert_eq!(pre_exit, 0, "precompact must exit 0");
 
-    // The marker path is /tmp/legion-checkpoint-failed-<md5(cwd)>. We can't
-    // easily recompute the hash cross-platform here, so assert by running
-    // post-compact and inspecting its output -- if the marker was dropped,
-    // post-compact will include "precompact reflect (checkpoint not saved)"
-    // in its warning block.
+    // Marker path is /tmp/legion-checkpoint-failed-<md5(cwd)>. Recomputing
+    // the hash cross-platform would couple the test to the shell md5 tool;
+    // instead, run post-compact and assert its output surfaces the
+    // "precompact reflect (checkpoint not saved)" action string that
+    // post-compact only emits when the marker file is present.
     let (stdout, _stderr, exit) =
         run_hook("post-compact.sh", &plugin_root, &data_dir, &cwd_json(&cwd));
     assert_warned("post-compact.sh", &stdout, exit);
@@ -305,60 +304,36 @@ fn precompact_failure_propagates_to_post_compact_warning() {
 
 #[test]
 fn session_start_warns_on_missing_data_dir() {
-    let temp = tempfile::tempdir().unwrap();
-    let plugin_root = setup_plugin_root(temp.path());
-    let broken = broken_data_dir_as_file(temp.path());
-
-    let cwd = temp.path().join("legion");
-    fs::create_dir_all(&cwd).unwrap();
-
-    let (stdout, _stderr, exit) =
-        run_hook("session-start.sh", &plugin_root, &broken, &cwd_json(&cwd));
-    assert_warned("session-start.sh", &stdout, exit);
+    assert_hook_warns(
+        "session-start.sh",
+        Corruption::MissingDataDir,
+        InputKind::Cwd,
+    );
 }
 
 #[test]
 fn recall_first_warns_on_missing_data_dir() {
-    let temp = tempfile::tempdir().unwrap();
-    let plugin_root = setup_plugin_root(temp.path());
-    let broken = broken_data_dir_as_file(temp.path());
-
-    let cwd = temp.path().join("legion");
-    fs::create_dir_all(&cwd).unwrap();
-
-    let (stdout, _stderr, exit) = run_hook(
+    assert_hook_warns(
         "recall-first.sh",
-        &plugin_root,
-        &broken,
-        &grep_tool_json(&cwd),
+        Corruption::MissingDataDir,
+        InputKind::Grep,
     );
-    assert_warned("recall-first.sh", &stdout, exit);
 }
 
 #[test]
 fn bullpen_check_warns_on_missing_data_dir() {
-    let temp = tempfile::tempdir().unwrap();
-    let plugin_root = setup_plugin_root(temp.path());
-    let broken = broken_data_dir_as_file(temp.path());
-
-    let cwd = temp.path().join("legion");
-    fs::create_dir_all(&cwd).unwrap();
-
-    let (stdout, _stderr, exit) =
-        run_hook("bullpen-check.sh", &plugin_root, &broken, &cwd_json(&cwd));
-    assert_warned("bullpen-check.sh", &stdout, exit);
+    assert_hook_warns(
+        "bullpen-check.sh",
+        Corruption::MissingDataDir,
+        InputKind::Cwd,
+    );
 }
 
 #[test]
 fn post_compact_warns_on_missing_data_dir() {
-    let temp = tempfile::tempdir().unwrap();
-    let plugin_root = setup_plugin_root(temp.path());
-    let broken = broken_data_dir_as_file(temp.path());
-
-    let cwd = temp.path().join("legion");
-    fs::create_dir_all(&cwd).unwrap();
-
-    let (stdout, _stderr, exit) =
-        run_hook("post-compact.sh", &plugin_root, &broken, &cwd_json(&cwd));
-    assert_warned("post-compact.sh", &stdout, exit);
+    assert_hook_warns(
+        "post-compact.sh",
+        Corruption::MissingDataDir,
+        InputKind::Cwd,
+    );
 }
