@@ -1013,21 +1013,32 @@ enum QualityGateAction {
 ///
 /// Resolution order:
 /// 1. `LEGION_DATA_DIR` env var (explicit override, used by tests)
-/// 2. `CLAUDE_PLUGIN_DATA` env var set by Claude Code when running under the
-///    plugin (plugin-scoped data dir, stable across plugin updates)
-/// 3. `$HOME/.claude/plugins/data/legion-legion/` (same location Claude
-///    Code uses, discoverable when running outside the plugin context)
+/// 2. `ProjectDirs` platform-native default:
+///    - macOS:   `~/Library/Application Support/legion/`
+///    - Linux:   `~/.local/share/legion/`
+///    - Windows: `%APPDATA%\legion\`
 ///
-/// Result is cached via OnceLock after first successful resolution: commands
-/// like `audit()` re-enter this dozens of times and the path never changes
-/// inside a single process. Tests that manipulate `LEGION_DATA_DIR` between
-/// calls should use a fresh subprocess.
+/// `CLAUDE_PLUGIN_DATA` is deliberately NOT consulted. A prior version of
+/// this function preferred that env var, which caused a split-brain on
+/// macOS: the Claude Code plugin context wrote to
+/// `~/.claude/plugins/data/legion-legion/` while bare CLI invocations and
+/// long-running `legion watch` processes wrote to the ProjectDirs path.
+/// Two divergent databases, invisible to each other, silently broke the
+/// agent learning loop (reflections in one DB were invisible to sessions
+/// that opened the other). The single-path rule is load-bearing for
+/// legion's memory integrity. Do not reintroduce a second default.
 ///
-/// On the first successful resolution, if the target has no `legion.db` but
-/// the legacy `ProjectDirs` location does (macOS: ~/Library/Application
-/// Support/legion, Linux: ~/.local/share/legion), the database, Tantivy
-/// index, and watch.toml are migrated across. One-way, best-effort, leaves
-/// the legacy path in place as a safety net.
+/// Result is cached via OnceLock after first successful resolution:
+/// commands like `audit()` re-enter this dozens of times and the path
+/// never changes inside a single process. Tests that manipulate
+/// `LEGION_DATA_DIR` between calls should use a fresh subprocess.
+///
+/// On the first successful resolution, if the target has no `legion.db`
+/// but the legacy plugin-data-dir location does, the database, Tantivy
+/// index, and `watch.toml` are migrated across. One-way, best-effort,
+/// leaves the legacy path in place as a safety net. This is the reverse
+/// of the previous migration direction, which moved data INTO the plugin
+/// data dir and caused the split-brain in the first place.
 fn data_dir() -> error::Result<PathBuf> {
     use std::sync::OnceLock;
     static CACHED: OnceLock<PathBuf> = OnceLock::new();
@@ -1036,40 +1047,59 @@ fn data_dir() -> error::Result<PathBuf> {
         return Ok(cached.clone());
     }
 
-    let path = if let Ok(dir) = std::env::var("LEGION_DATA_DIR") {
-        PathBuf::from(dir)
-    } else if let Ok(dir) = std::env::var("CLAUDE_PLUGIN_DATA")
-        && !dir.is_empty()
-    {
-        PathBuf::from(dir)
+    // `via_override` tracks whether the caller explicitly set LEGION_DATA_DIR.
+    // When true (tests, CI, or explicit user override), the plugin-data-dir
+    // migration MUST be skipped -- otherwise a test tempdir target would
+    // inherit content from the real user's plugin data dir on the host
+    // machine and tests that expect a clean starting state would fail
+    // unpredictably depending on whose box they ran on. The override is the
+    // explicit "I know what I'm doing, stay out of the filesystem" signal.
+    let (path, via_override) = if let Ok(dir) = std::env::var("LEGION_DATA_DIR") {
+        (PathBuf::from(dir), true)
     } else {
-        dirs::home_dir()
+        let p = ProjectDirs::from("", "", "legion")
             .ok_or(error::LegionError::NoHomeDir)?
-            .join(".claude")
-            .join("plugins")
-            .join("data")
-            .join("legion-legion")
+            .data_dir()
+            .to_path_buf();
+        (p, false)
     };
 
     std::fs::create_dir_all(&path)?;
 
-    if !path.join("legion.db").exists() {
-        migrate_from_legacy(&path);
+    if !via_override && !path.join("legion.db").exists() {
+        migrate_from_plugin_data_dir(&path);
     }
 
     let _ = CACHED.set(path.clone());
     Ok(path)
 }
 
-/// Migrate legion state from the legacy ProjectDirs path to the plugin data dir.
+/// Migrate legion state from the plugin data dir back to the ProjectDirs target.
 ///
-/// Resolves the legacy path via `ProjectDirs` and delegates to
+/// Reverse of the previous migration direction. The prior version moved
+/// ProjectDirs -> plugin data dir, which created the split-brain this
+/// module now exists to clean up. This function copies the OTHER way,
+/// recovering any user whose plugin data dir has their authoritative
+/// legion state but whose ProjectDirs path was empty.
+///
+/// Resolves the plugin data dir from `CLAUDE_PLUGIN_DATA` if set (when
+/// running under Claude Code), otherwise from the known fallback path
+/// `$HOME/.claude/plugins/data/legion-legion/`. Delegates the copy to
 /// [`migrate_between`], which is the testable inner form.
-fn migrate_from_legacy(target: &Path) {
-    let Some(dirs) = ProjectDirs::from("", "", "legion") else {
+fn migrate_from_plugin_data_dir(target: &Path) {
+    let source = if let Ok(dir) = std::env::var("CLAUDE_PLUGIN_DATA")
+        && !dir.is_empty()
+    {
+        PathBuf::from(dir)
+    } else if let Some(home) = dirs::home_dir() {
+        home.join(".claude")
+            .join("plugins")
+            .join("data")
+            .join("legion-legion")
+    } else {
         return;
     };
-    migrate_between(dirs.data_dir(), target);
+    migrate_between(&source, target);
 }
 
 /// Copy legion state from `legacy` to `target`.
