@@ -725,6 +725,95 @@ mod tests {
         );
     }
 
+    /// Regression guard for the PR #227 silent-fallthrough fix.
+    ///
+    /// A prior revision of `close_issue` had `None => return Ok(())` on the
+    /// `find_plugin` branch, silently no-opping when the plugin was not
+    /// installed. That made every caller believe the close had succeeded
+    /// when in fact nothing had happened, and was the root cause of
+    /// kanban-done-but-github-open drift observed in practice.
+    ///
+    /// If a future PR restores the silent fallthrough on `close_issue`,
+    /// `reopen_issue`, or `edit_issue`, this test must fail.
+    #[test]
+    fn close_issue_returns_worksource_error_when_plugin_missing() {
+        let result = close_issue("nonexistent-plugin-xyz", "owner/repo", 1, None);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn close_issue_returns_worksource_error_when_plugin_missing_with_comment() {
+        // Same regression guard with a non-None comment, so a future change
+        // that routes the comment through a different path and loses the
+        // plugin check still fails this test.
+        let result = close_issue(
+            "nonexistent-plugin-xyz",
+            "owner/repo",
+            1,
+            Some("closed by legion reconcile"),
+        );
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn reopen_issue_returns_worksource_error_when_plugin_missing() {
+        let result = reopen_issue("nonexistent-plugin-xyz", "owner/repo", 1, None);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn edit_issue_returns_worksource_error_when_plugin_missing() {
+        let result = edit_issue(
+            "nonexistent-plugin-xyz",
+            "owner/repo",
+            1,
+            Some("new title"),
+            None,
+        );
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    /// Regression guard for the `edit_issue` empty-args defense-in-depth.
+    ///
+    /// The function rejects `title.is_none() && body.is_none()` before
+    /// attempting any plugin call. The CLI handler in `main.rs` also
+    /// performs the same check, but this guard is load-bearing for
+    /// programmatic callers (propagation helpers, reconcile paths,
+    /// future auto-propagation sites) that might bypass the CLI layer.
+    /// If someone deletes the worksource check thinking the CLI check is
+    /// sufficient, this test fails.
+    #[test]
+    fn edit_issue_rejects_empty_args_before_plugin_lookup() {
+        // Uses a plugin name that would otherwise cause a plugin-lookup
+        // failure. The assertion on the error message proves the
+        // validation fired BEFORE the lookup rather than the lookup
+        // happening to succeed with None args.
+        let result = edit_issue("any-plugin-name", "owner/repo", 1, None, None);
+        let Err(LegionError::WorkSource(msg)) = result else {
+            panic!("expected WorkSource error, got {:?}", result);
+        };
+        assert!(
+            msg.contains("at least one of title or body"),
+            "expected validation error message, got: {msg}"
+        );
+    }
+
     #[test]
     fn parse_semver_orders_versions() {
         assert!(parse_semver("0.4.7") > parse_semver("0.4.3"));

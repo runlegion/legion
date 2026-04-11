@@ -1368,11 +1368,44 @@ fn audit(input: &db::AuditInput<'_>) {
     }
 }
 
+/// Outcome of a kanban-to-worksource propagation attempt.
+///
+/// Returned by `propagate_card_close_to_worksource` and
+/// `propagate_card_reopen_to_worksource` so the caller can make the
+/// success/failure state visible on stdout in addition to the stderr
+/// breadcrumbs emitted by the helpers. Scripts piping legion output can
+/// detect `Failed` and surface partial-success errors; humans reading the
+/// terminal see either the silent success or the explicit warning line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PropagateOutcome {
+    /// Plugin call succeeded and the GitHub issue state changed.
+    Propagated,
+    /// Card had no linked external issue (pure local card), or its
+    /// `to_repo` has no work source configured. Nothing to propagate.
+    /// Safe to no-op without caller intervention.
+    Skipped,
+    /// Plugin call was attempted and failed, OR a card-level precondition
+    /// was not met (e.g. source_url present but no extractable issue
+    /// number, or source_type missing). The local card transition has
+    /// already completed; the caller should surface a visible warning so
+    /// scripted consumers can detect partial success.
+    Failed,
+}
+
 /// Close the GitHub issue linked to a kanban card via the work source
 /// plugin, and write an audit entry describing the propagation. Called by
-/// `legion kanban cancel` (and in the future `legion kanban done` /
-/// `legion done`) to keep the public GitHub state consistent with the local
-/// kanban state.
+/// `legion kanban cancel` to keep the public GitHub state consistent with
+/// the local kanban state.
+///
+/// NOT called by `legion done --id`, which has an equivalent inline
+/// propagation at its own call site in `Commands::Done` (search for the
+/// `// Close the linked external issue if present` block). The two paths
+/// are functionally equivalent today; folding `Commands::Done` through
+/// this helper is tracked as post-#192 cleanup.
+///
+/// Returns a `PropagateOutcome` so the caller can emit a visible warning
+/// to stdout on failure. Stderr breadcrumbs explain the failure; stdout
+/// visibility is what lets scripted pipelines detect partial success.
 ///
 /// A card with no `source_url` is a pure local card and is skipped
 /// silently. A card whose `to_repo` has no work source configured in
@@ -1390,36 +1423,36 @@ fn propagate_card_close_to_worksource(
     database: &db::Database,
     card_id: &str,
     comment: Option<&str>,
-) {
+) -> PropagateOutcome {
     let card = match database.get_card_by_id(card_id) {
         Ok(Some(c)) => c,
         Ok(None) => {
             eprintln!("[legion] propagate: card {card_id} not found; skipping");
-            return;
+            return PropagateOutcome::Failed;
         }
         Err(e) => {
             eprintln!("[legion] propagate: lookup of card {card_id} failed: {e}; skipping");
-            return;
+            return PropagateOutcome::Failed;
         }
     };
 
     let Some(ref source_url) = card.source_url else {
         // Pure local card with no linked issue -- nothing to propagate.
-        return;
+        return PropagateOutcome::Skipped;
     };
 
     let Some(number) = worksource::extract_issue_number(source_url) else {
         eprintln!(
             "[legion] propagate: card {card_id} has source_url {source_url} but no extractable issue number; skipping"
         );
-        return;
+        return PropagateOutcome::Failed;
     };
 
     let Some(source) = card.source_type.as_deref() else {
         eprintln!(
             "[legion] propagate: card {card_id} has source_url {source_url} but no source_type; skipping"
         );
-        return;
+        return PropagateOutcome::Failed;
     };
 
     let Some((_, source_repo, _)) = worksource::resolve_config(&card.to_repo) else {
@@ -1427,7 +1460,11 @@ fn propagate_card_close_to_worksource(
             "[legion] propagate: to_repo '{}' for card {card_id} has no work source configured in watch.toml; skipping GitHub close",
             card.to_repo
         );
-        return;
+        // Missing watch.toml entry is treated as Skipped (not Failed)
+        // because it is a configuration-level "not applicable here"
+        // rather than an attempt-and-fail. Scripted consumers that
+        // care about this case should rely on the stderr warning.
+        return PropagateOutcome::Skipped;
     };
 
     match worksource::close_issue(source, &source_repo, number, comment) {
@@ -1449,9 +1486,11 @@ fn propagate_card_close_to_worksource(
                 details: Some(&details_str),
                 outcome: "success",
             });
+            PropagateOutcome::Propagated
         }
         Err(e) => {
             eprintln!("[legion] propagate: failed to close {source} issue #{number}: {e}");
+            PropagateOutcome::Failed
         }
     }
 }
@@ -1464,40 +1503,40 @@ fn propagate_card_reopen_to_worksource(
     database: &db::Database,
     card_id: &str,
     comment: Option<&str>,
-) {
+) -> PropagateOutcome {
     let card = match database.get_card_by_id(card_id) {
         Ok(Some(c)) => c,
         Ok(None) => {
             eprintln!("[legion] propagate: card {card_id} not found; skipping");
-            return;
+            return PropagateOutcome::Failed;
         }
         Err(e) => {
             eprintln!("[legion] propagate: lookup of card {card_id} failed: {e}; skipping");
-            return;
+            return PropagateOutcome::Failed;
         }
     };
 
     let Some(ref source_url) = card.source_url else {
-        return;
+        return PropagateOutcome::Skipped;
     };
     let Some(number) = worksource::extract_issue_number(source_url) else {
         eprintln!(
             "[legion] propagate: card {card_id} has source_url {source_url} but no extractable issue number; skipping"
         );
-        return;
+        return PropagateOutcome::Failed;
     };
     let Some(source) = card.source_type.as_deref() else {
         eprintln!(
             "[legion] propagate: card {card_id} has source_url {source_url} but no source_type; skipping"
         );
-        return;
+        return PropagateOutcome::Failed;
     };
     let Some((_, source_repo, _)) = worksource::resolve_config(&card.to_repo) else {
         eprintln!(
             "[legion] propagate: to_repo '{}' for card {card_id} has no work source configured in watch.toml; skipping GitHub reopen",
             card.to_repo
         );
-        return;
+        return PropagateOutcome::Skipped;
     };
 
     match worksource::reopen_issue(source, &source_repo, number, comment) {
@@ -1519,9 +1558,11 @@ fn propagate_card_reopen_to_worksource(
                 details: Some(&details_str),
                 outcome: "success",
             });
+            PropagateOutcome::Propagated
         }
         Err(e) => {
             eprintln!("[legion] propagate: failed to reopen {source} issue #{number}: {e}");
+            PropagateOutcome::Failed
         }
     }
 }
@@ -2425,7 +2466,23 @@ fn run() -> error::Result<()> {
                     )?;
                     println!("{id}");
                     if !no_propagate {
-                        propagate_card_close_to_worksource(&database, &id, reason.as_deref());
+                        match propagate_card_close_to_worksource(&database, &id, reason.as_deref())
+                        {
+                            PropagateOutcome::Propagated | PropagateOutcome::Skipped => {}
+                            PropagateOutcome::Failed => {
+                                // Emit a visible warning line on stdout so
+                                // scripted callers (`legion kanban cancel |
+                                // ...`) can detect partial success. The
+                                // card transition has already succeeded --
+                                // the first println of {id} above is still
+                                // the authoritative success marker -- but
+                                // the linked GitHub issue was NOT closed
+                                // and the caller needs to know.
+                                println!(
+                                    "[legion] WARNING: card {id} cancelled locally but linked github issue propagation FAILED -- run `legion kanban reconcile --close-stale` to retry"
+                                );
+                            }
+                        }
                     }
                 }
                 KanbanAction::Assign { id, to } => {
@@ -2445,7 +2502,21 @@ fn run() -> error::Result<()> {
                     )?;
                     println!("{id}");
                     if !no_propagate {
-                        propagate_card_reopen_to_worksource(&database, &id, reason.as_deref());
+                        match propagate_card_reopen_to_worksource(&database, &id, reason.as_deref())
+                        {
+                            PropagateOutcome::Propagated | PropagateOutcome::Skipped => {}
+                            PropagateOutcome::Failed => {
+                                // Same stdout-visibility pattern as
+                                // KanbanAction::Cancel above. The card
+                                // is reopened locally but the linked
+                                // GitHub issue was not reopened, and
+                                // scripted callers need to see this on
+                                // stdout, not buried in stderr.
+                                println!(
+                                    "[legion] WARNING: card {id} reopened locally but linked github issue propagation FAILED -- the public issue may still be closed"
+                                );
+                            }
+                        }
                     }
                 }
                 KanbanAction::Delete { id } => {
@@ -2603,6 +2674,33 @@ fn run() -> error::Result<()> {
                                         "[legion] reconcile: failed to close {} issue #{}: {}",
                                         source_repo, number, e
                                     );
+                                    // Record the failure in the audit log
+                                    // so a human operator running
+                                    // `legion audit --action close-issue`
+                                    // can see exactly which stale issues
+                                    // reconcile could not close. Without
+                                    // this, a reconcile run that fails
+                                    // on 3 of 10 issues leaves no durable
+                                    // record of which 3 -- same class of
+                                    // invisibility the PR is fixing for
+                                    // the direct cancel path.
+                                    let err_msg = e.to_string();
+                                    let details = serde_json::json!({
+                                        "card_id": card.id,
+                                        "propagation": "reconcile",
+                                        "error": err_msg,
+                                    });
+                                    let details_str = details.to_string();
+                                    audit(&db::AuditInput {
+                                        agent: &card.to_repo,
+                                        action: "close-issue",
+                                        target_type: "issue",
+                                        target_ref: &number.to_string(),
+                                        task_id: Some(&card.id),
+                                        source_type: source,
+                                        details: Some(&details_str),
+                                        outcome: "failure",
+                                    });
                                 }
                             }
                         }
