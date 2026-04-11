@@ -555,6 +555,12 @@ fn build_channel_content(post_id: &str, repo: &str, text: &str, is_signal: bool)
 /// `LEGION_MCP_POLL_MS` for integration tests that want a tighter loop.
 const DEFAULT_MCP_POLL_MS: u64 = 500;
 
+/// Maximum rows the notifier reads per poll tick. Bounds memory and stdout
+/// mutex hold time if a burst of writes lands between ticks. Anything beyond
+/// the cap is picked up on the next poll because the cursor advances to the
+/// last delivered row.
+const NOTIFIER_BATCH_LIMIT: usize = 100;
+
 /// Read the notifier poll interval from the environment, falling back to the
 /// default. Invalid values (non-numeric, zero) fall back silently -- the
 /// failure mode is "notifier ticks at the default rate", not crash.
@@ -621,7 +627,7 @@ fn run_notifier_loop(
     loop {
         std::thread::sleep(poll_interval);
 
-        let new_posts = match db.get_board_posts_since(&last_seen_at) {
+        let new_posts = match db.get_board_posts_since(&last_seen_at, NOTIFIER_BATCH_LIMIT) {
             Ok(posts) => posts,
             Err(e) => {
                 eprintln!("[legion mcp notif] db poll failed: {e}; continuing");

@@ -810,21 +810,27 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
-    /// Retrieve active bullpen posts created strictly after the given ISO 8601
-    /// timestamp, ordered oldest first. Used by the MCP notifier thread to
-    /// discover cross-process writes (from the CLI `legion post` command or
-    /// from another MCP subprocess) that would otherwise be invisible to an
-    /// in-process broadcast channel.
+    /// Retrieve up to `limit` active bullpen posts created strictly after
+    /// the given ISO 8601 timestamp, ordered oldest first. Used by the MCP
+    /// notifier thread to discover cross-process writes (from the CLI
+    /// `legion post` command or from another MCP subprocess) that would
+    /// otherwise be invisible to an in-process broadcast channel.
     ///
-    /// Ordering is ascending so the caller can advance a `last_seen_at` cursor
-    /// to the `created_at` of the most recent row in insertion order.
-    pub fn get_board_posts_since(&self, since_iso: &str) -> Result<Vec<Reflection>> {
+    /// Ordering is ascending so the caller can advance a `last_seen_at`
+    /// cursor to the `created_at` of the most recent row in insertion order.
+    /// `limit` caps the size of a single batch: if more rows exist beyond
+    /// the cap, the cursor advances to the last row returned and the next
+    /// poll catches the remainder.
+    pub fn get_board_posts_since(&self, since_iso: &str, limit: usize) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND created_at > ?1 ORDER BY created_at ASC",
+             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND created_at > ?1 ORDER BY created_at ASC LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map([since_iso], map_reflection_row)?;
+        let rows = stmt.query_map(
+            rusqlite::params![since_iso, limit as i64],
+            map_reflection_row,
+        )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }
@@ -2373,6 +2379,65 @@ mod tests {
         let posts = db.get_board_posts().unwrap();
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].audience, "team");
+    }
+
+    #[test]
+    fn get_board_posts_since_excludes_cursor_row_and_self_posts() {
+        let db = test_db();
+
+        // Insert three rows with increasing created_at: older, middle, newer.
+        // Use insert_reflection so created_at is a real ISO 8601 stamp.
+        let older = db.insert_reflection("kelex", "old", "team").unwrap();
+        // Private reflection between team posts -- must NOT appear.
+        db.insert_reflection("kelex", "not shared", "self").unwrap();
+        let newer = db.insert_reflection("rafters", "new", "team").unwrap();
+
+        // Cursor at `older.created_at` must return only `newer` (strict >).
+        let batch = db
+            .get_board_posts_since(&older.created_at, 100)
+            .expect("query");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].id, newer.id);
+        assert_eq!(batch[0].audience, "team");
+    }
+
+    #[test]
+    fn get_board_posts_since_honors_limit_and_ordering() {
+        let db = test_db();
+
+        // Seed a sentinel row so we have a stable pre-cursor.
+        let sentinel = db.insert_reflection("seed", "sentinel", "team").unwrap();
+
+        // Insert five team posts after the sentinel. insert_reflection writes
+        // `created_at = Utc::now().to_rfc3339()` with sub-millisecond precision
+        // via chrono, so sequential inserts produce strictly increasing
+        // timestamps under any realistic scheduler.
+        let mut expected_ids = Vec::new();
+        for i in 0..5 {
+            let r = db
+                .insert_reflection("kelex", &format!("msg {i}"), "team")
+                .unwrap();
+            expected_ids.push(r.id);
+        }
+
+        // Request at most 3 rows after the sentinel -- must return the first
+        // three in insertion order.
+        let batch = db
+            .get_board_posts_since(&sentinel.created_at, 3)
+            .expect("query");
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[0].id, expected_ids[0]);
+        assert_eq!(batch[1].id, expected_ids[1]);
+        assert_eq!(batch[2].id, expected_ids[2]);
+
+        // Advance the cursor to the last row returned; the next call returns
+        // the remaining two.
+        let next = db
+            .get_board_posts_since(&batch[2].created_at, 3)
+            .expect("query");
+        assert_eq!(next.len(), 2);
+        assert_eq!(next[0].id, expected_ids[3]);
+        assert_eq!(next[1].id, expected_ids[4]);
     }
 
     #[test]
