@@ -1,5 +1,37 @@
 # Legion Changelog
 
+## 0.7.0
+
+### Channel MCP Push Notifications
+
+The legion channel MCP now emits server-initiated `notifications/claude/channel` JSON-RPC events when new bullpen posts land. Agents with a live MCP connection receive incoming team messages as `<channel source="legion-channel" ...>` context injections without manual polling. This closes the half-missing protocol implementation from 0.6.5 -- the hand-rolled stdio server shipped only `initialize` / `tools/list` / `tools/call`, so agents silently missed every bullpen post that arrived mid-session.
+
+### Features
+
+- **Push notifications to connected agents (#216)**: `src/mcp.rs` now spawns a notification emitter thread alongside the existing request loop. The thread subscribes to `ChannelEvent::Feed { post_id }`, fetches the post from the shared legion database, applies a recipient filter, and writes a `notifications/claude/channel` JSON-RPC message through a shared `Arc<Mutex<BufWriter<Stdout>>>` so the request and notification halves cannot interleave.
+  - **Recipient filter**: `@all` reaches every client, `@<client_repo>` reaches its named target, other `@` prefixes are suppressed, and non-signal posts from the client's own repo are suppressed so a client does not echo its own musings back. Malformed prefixes (`@` alone, `@@all`, `@@`) are explicitly rejected.
+  - **CDATA escaping**: post text is wrapped in a CDATA block with the canonical `]]]]><![CDATA[>` split so any literal `]]>` in a code snippet cannot terminate the section early.
+  - **XML attribute escaping** on `post_id` and `repo` tag attributes.
+  - **Broken-pipe thread exit**: `writeln!` and `flush` errors terminate the notifier thread with a loud stderr instead of silently looping against a dead client.
+  - **Client repo discovery** via `clientInfo.name` on the `initialize` request, stored in `Arc<OnceLock<String>>`. Duplicate-initialize calls are logged to stderr.
+  - **`instructions` field in the initialize response** tells Claude Code how to render incoming channel events in context.
+
+- **Visible legion degradation warnings in hooks (#209)**: Every plugin hook that calls into legion now surfaces a `[Legion WARNING]` block in `additionalContext` when any legion command exits nonzero. Hooks still exit 0 so Claude Code never blocks on legion failures, but agents see exactly which commands failed and are pointed at `/tmp/legion-hook-errors.log` and common root causes. Covers `session-start.sh`, `recall-first.sh`, `bullpen-check.sh`, and `post-compact.sh`. `precompact.sh` touches a marker file on reflect failure that `post-compact.sh` reads on its next run so the failure propagates into the first hook that can surface context. Shared helper at `plugin/hooks/_legion-warn.sh`.
+
+- **Tracked pre-commit hook wires sync-version.sh (#210)**: `scripts/install-hooks.sh` is the one-shot setup that wires `core.hooksPath` to the tracked `.githooks/` directory. The `.githooks/pre-commit` hook now runs `scripts/sync-version.sh` whenever a version-bearing file is staged, enforcing the "Cargo.toml is source of truth" invariant: auto-propagates Cargo.toml's version to `plugin.json` and `marketplace.json`, refuses to downgrade if either carries a higher version than Cargo.toml, and requires `plugin/CHANGELOG.md`'s top `## <version>` header to match. Validate-then-mutate phase ordering means a failed commit never leaves a partially-synced working tree. New contributors run `./scripts/install-hooks.sh` once after cloning. Smoke test at `scripts/test-sync-version.sh` covers 4 scenarios (all-match, Cargo-ahead, plugin-ahead refuses, CHANGELOG-behind).
+
+### Bug Fixes
+
+- `tests/hook_warnings.rs` is gated `#![cfg(unix)]` so the Windows CI matrix stops failing on tests that spawn `bash` subprocess (the WSL stub on Windows runners is not a POSIX bash). The hooks themselves are unix-only bash scripts; the tests match that platform scope.
+- `scripts/sync-version.sh` now uses portable `sed -i.bak` instead of macOS-only `sed -i ''`, works on both macOS and GNU sed.
+- Shellcheck CI job glob extended to `scripts/*.sh` so regressions in `sync-version.sh` / `install-hooks.sh` / `test-sync-version.sh` are caught in CI.
+- `src/mcp.rs` notification emitter thread opens its database handle once at thread startup, not once per event. Prior draft reopened on every notification.
+
+### Dev Workflow
+
+- `.githooks/pre-commit` runs Claude Code `/simplify` review on the staged diff after the version check. Hook was tracked in the repo since forever but dormant because `core.hooksPath` was not wired; #210 fixes that.
+- `.githooks/pre-push` runs the full Claude Code PR review on the branch diff before the push reaches the remote. Same dormant-until-#210 situation.
+
 ## 0.6.5
 
 ### Channel MCP Pivot to Spec-Compliant Stdio Subprocess
