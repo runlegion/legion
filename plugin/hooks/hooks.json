@@ -61,8 +61,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/recall-first.sh",
-            "timeout": 5
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-grep-recall.sh",
+            "timeout": 6
           }
         ]
       },
@@ -71,8 +71,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/recall-first.sh",
-            "timeout": 5
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-grep-recall.sh",
+            "timeout": 6
           }
         ]
       },
