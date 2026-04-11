@@ -240,9 +240,7 @@ fn handle_tool_call(
                 &crate::db::ReflectionMeta::default(),
             )?;
 
-            let _ = tx.send(ChannelEvent::Feed {
-                post_id: id.clone(),
-            });
+            let _ = tx.send(ChannelEvent::Feed);
 
             Ok(format!("posted (id: {})", id))
         }
@@ -270,9 +268,7 @@ fn handle_tool_call(
                 &crate::db::ReflectionMeta::default(),
             )?;
 
-            let _ = tx.send(ChannelEvent::Feed {
-                post_id: id.clone(),
-            });
+            let _ = tx.send(ChannelEvent::Feed);
 
             Ok(format!("replied (id: {})", id))
         }
@@ -323,9 +319,7 @@ fn handle_tool_call(
                 &crate::db::ReflectionMeta::default(),
             )?;
 
-            let _ = tx.send(ChannelEvent::Feed {
-                post_id: id.clone(),
-            });
+            let _ = tx.send(ChannelEvent::Feed);
 
             Ok(format!("signaled (id: {})", id))
         }
@@ -557,12 +551,225 @@ fn build_channel_content(post_id: &str, repo: &str, text: &str, is_signal: bool)
     )
 }
 
+/// Default poll interval for the MCP notifier thread. Overridable via
+/// `LEGION_MCP_POLL_MS` for integration tests that want a tighter loop.
+const DEFAULT_MCP_POLL_MS: u64 = 500;
+
+/// Maximum rows the notifier reads per poll tick. Bounds memory and stdout
+/// mutex hold time if a burst of writes lands between ticks. Anything beyond
+/// the cap is picked up on the next poll because the cursor advances to the
+/// last delivered row.
+const NOTIFIER_BATCH_LIMIT: usize = 100;
+
+/// Read the notifier poll interval from the environment, falling back to the
+/// default. Invalid values (non-numeric, zero) fall back silently -- the
+/// failure mode is "notifier ticks at the default rate", not crash.
+fn mcp_poll_interval() -> std::time::Duration {
+    let ms = std::env::var("LEGION_MCP_POLL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_MCP_POLL_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+/// Body of the notifier thread spawned by `run_stdio_loop`.
+///
+/// Polls the `reflections` table for new bullpen rows and writes a
+/// `notifications/claude/channel` JSON-RPC frame to the shared stdout writer
+/// for each row that passes the recipient filter. Shared state (stdout,
+/// client_repo cell) is passed in by the caller so the thread can be tested
+/// independently from stdio wiring.
+///
+/// Exits cleanly on a stdout write failure (client hung up, EPIPE) or on a
+/// poisoned stdout mutex. Transient database errors are logged and the loop
+/// continues -- the notifier is a best-effort push channel, not a strict
+/// delivery guarantee. The `last_seen_at` cursor advances only when a poll
+/// succeeds, so a transient failure does not lose events on recovery.
+fn run_notifier_loop(
+    data_dir: PathBuf,
+    out: Arc<Mutex<std::io::BufWriter<std::io::Stdout>>>,
+    client_repo_cell: Arc<OnceLock<String>>,
+) {
+    let db = match Database::open(&data_dir.join("legion.db")) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("[legion mcp notif] failed to open db: {e}; notifier thread exiting");
+            return;
+        }
+    };
+
+    // Seed the cursor to the DB's current team-board watermark so the
+    // notifier only emits for posts that land after the MCP subprocess
+    // started. Replaying historical bullpen content would flood the
+    // session with messages the user has already seen.
+    //
+    // Using a DB-derived watermark rather than `now()` eliminates a
+    // small-but-real race: a post committed in the same nanosecond as
+    // the notifier's wall-clock seed would be dropped by the strict-`>`
+    // comparator on the next poll. The DB watermark is consistent with
+    // the rows the notifier is filtering against.
+    //
+    // On seed error (the reflections table exists but the query failed)
+    // the notifier thread exits cleanly rather than falling back to
+    // `now()`, because the fallback would silently reintroduce the very
+    // race the watermark closes, AND the next poll against the same
+    // connection would almost certainly fail the same way. A dead
+    // notifier at least does not give a false "channel is working"
+    // signal to the rest of the process.
+    //
+    // Empty table (`None`) seeds from `now()` because there is no race
+    // window when there are no rows.
+    let (mut last_seen_at, mut last_seen_id): (String, String) = match db
+        .get_board_cursor_watermark()
+    {
+        Ok(Some((ts, id))) => (ts, id),
+        Ok(None) => (chrono::Utc::now().to_rfc3339(), String::new()),
+        Err(e) => {
+            eprintln!(
+                "[legion mcp notif] failed to seed cursor from db watermark: {e}; notifier thread exiting (channel push is now inoperative for this session)"
+            );
+            return;
+        }
+    };
+
+    let poll_interval = mcp_poll_interval();
+    let mut consecutive_cap_hits: u32 = 0;
+
+    loop {
+        std::thread::sleep(poll_interval);
+
+        let new_posts =
+            match db.get_board_posts_since(&last_seen_at, &last_seen_id, NOTIFIER_BATCH_LIMIT) {
+                Ok(posts) => posts,
+                Err(e) => {
+                    eprintln!("[legion mcp notif] db poll failed: {e}; continuing");
+                    continue;
+                }
+            };
+
+        if new_posts.is_empty() {
+            consecutive_cap_hits = 0;
+            continue;
+        }
+
+        // Surface a breadcrumb when the notifier hits the batch cap on
+        // back-to-back ticks. Hitting the cap occasionally is expected
+        // under normal activity bursts; hitting it repeatedly means the
+        // notifier is falling behind (a misbehaving spammer, or a batch
+        // import). This is the only diagnostic for "delivery is minutes
+        // behind because we are saturated," which would otherwise be
+        // indistinguishable from "the team is quiet."
+        if new_posts.len() == NOTIFIER_BATCH_LIMIT {
+            consecutive_cap_hits = consecutive_cap_hits.saturating_add(1);
+            if consecutive_cap_hits >= 3 {
+                eprintln!(
+                    "[legion mcp notif] hit NOTIFIER_BATCH_LIMIT ({}) on {} consecutive polls; delivery may be lagging real time",
+                    NOTIFIER_BATCH_LIMIT, consecutive_cap_hits
+                );
+            }
+        } else {
+            consecutive_cap_hits = 0;
+        }
+
+        // Advance the cursor to the newest row we saw. Rows are ordered
+        // ascending by `(created_at, id)`, so the last element is the
+        // newest. This must happen unconditionally regardless of whether
+        // individual rows are delivered or suppressed, or a suppressed
+        // post (own-post, wrong signal target) would be re-scanned
+        // forever.
+        if let Some(last) = new_posts.last() {
+            last_seen_at = last.created_at.clone();
+            last_seen_id = last.id.clone();
+        }
+
+        let client_repo = client_repo_cell.get().map(|s| s.as_str());
+
+        for post in new_posts {
+            let is_signal = crate::signal::is_signal(&post.text);
+
+            // Log the "named signal suppressed because client_repo is
+            // unknown" case exactly once per post, so that a stuck
+            // initialize (or a client that omitted clientInfo.name) is
+            // visible in the breadcrumb log instead of manifesting as
+            // silent delivery failures. Other suppression cases (own post,
+            // signal to a different agent) are expected and not logged.
+            if client_repo.is_none() && is_signal && !post.text.starts_with("@all") {
+                eprintln!(
+                    "[legion mcp notif] suppressing signal {} -- client_repo unknown (initialize handshake missing or clientInfo.name absent)",
+                    post.id
+                );
+            }
+
+            if !should_notify(&post.text, &post.repo, client_repo) {
+                continue;
+            }
+
+            let content = build_channel_content(&post.id, &post.repo, &post.text, is_signal);
+            let notification = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/claude/channel",
+                "params": {
+                    "content": content
+                }
+            });
+
+            let Ok(s) = serde_json::to_string(&notification) else {
+                eprintln!("[legion mcp notif] failed to serialize notification");
+                continue;
+            };
+
+            // Mutex poisoning here is catastrophic, not recoverable. The
+            // same `Arc<Mutex<BufWriter<Stdout>>>` is shared with the
+            // request loop running on the main thread; a poisoned mutex
+            // means every subsequent `out.lock()` on EITHER side returns
+            // Err, which would leave the MCP subprocess alive (still
+            // accepting requests on stdin) but silently unable to write
+            // any response or notification. That is strictly worse than
+            // a dead subprocess: Claude Code can recover from a dead MCP
+            // server by respawning, but it cannot detect a server that
+            // accepts initialize, accepts tool calls, and quietly drops
+            // every response. Abort the process so the client gets a
+            // clean disconnect and can respawn.
+            let Ok(mut locked) = out.lock() else {
+                eprintln!(
+                    "[legion mcp notif] stdout mutex poisoned; aborting process so claude code can respawn the mcp subprocess"
+                );
+                std::process::abort();
+            };
+
+            // A write or flush failure on stdout almost always means the
+            // client hung up (EPIPE). Continuing to loop against a dead pipe
+            // would burn CPU silently forever -- exit the notifier thread
+            // instead.
+            if let Err(e) = writeln!(locked, "{s}") {
+                eprintln!("[legion mcp notif] stdout write failed ({e}); notifier thread exiting");
+                return;
+            }
+            if let Err(e) = locked.flush() {
+                eprintln!("[legion mcp notif] stdout flush failed ({e}); notifier thread exiting");
+                return;
+            }
+        }
+    }
+}
+
 /// Run the MCP stdio server loop.
 ///
 /// Reads newline-delimited JSON from stdin. Writes JSON-RPC responses to stdout.
-/// A concurrent notification emitter thread subscribes to the broadcast channel
-/// and pushes `notifications/claude/channel` messages to stdout when new bullpen
-/// posts arrive that pass the recipient filter.
+/// A concurrent notification emitter thread polls the legion database for new
+/// bullpen rows and pushes `notifications/claude/channel` messages to stdout
+/// when the post passes the recipient filter.
+///
+/// The polling design (rather than an in-process broadcast subscription) is
+/// deliberate: MCP subprocesses are spawned one per Claude Code session, so
+/// writes originating in a different session's MCP process, in a `legion post`
+/// CLI invocation, or in the standalone HTTP daemon all need to reach this
+/// notifier. `tokio::sync::broadcast` only fans out inside a single process,
+/// so the previous broadcast-driven implementation silently missed every
+/// cross-process write. SQLite polling is the lowest-friction bridge: no new
+/// dependencies, no IPC primitive, and every write path already lands in the
+/// same `reflections` table.
 ///
 /// Blocks the calling thread (meant to run in spawn_blocking or a dedicated thread).
 /// Lines larger than MAX_LINE_BYTES are rejected with a JSON-RPC parse error.
@@ -585,105 +792,9 @@ pub fn run_stdio_loop(
     let notif_out = Arc::clone(&out);
     let notif_data_dir = data_dir.clone();
     let notif_client_repo = Arc::clone(&client_repo_cell);
-    let mut rx = tx.subscribe();
 
     std::thread::spawn(move || {
-        // Open the db once for the lifetime of this notifier thread. A prior
-        // draft reopened inside the loop on every event; that paid a file-open
-        // cost per bullpen post per connected client. A long-lived handle is
-        // fine here because the notifier thread's only job is read-only lookup
-        // of freshly inserted rows, and SQLite's default journal mode handles
-        // that concurrent read cleanly.
-        let db = match Database::open(&notif_data_dir.join("legion.db")) {
-            Ok(db) => db,
-            Err(e) => {
-                eprintln!("[legion mcp notif] failed to open db: {e}; notifier thread exiting");
-                return;
-            }
-        };
-
-        loop {
-            let event = match rx.blocking_recv() {
-                Ok(e) => e,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    // tokio's broadcast receiver recovers internally on the
-                    // next recv; no manual resubscribe needed.
-                    eprintln!("[legion mcp notif] lagged {n} events; dropping and continuing");
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    eprintln!("[legion mcp notif] broadcast closed; exiting notifier");
-                    break;
-                }
-            };
-
-            let post_id = match event {
-                ChannelEvent::Feed { post_id } => post_id,
-                ChannelEvent::Tasks => continue, // no task notifications in this issue
-            };
-
-            let post = match db.get_reflection_by_id(&post_id) {
-                Ok(Some(p)) => p,
-                Ok(None) => {
-                    eprintln!("[legion mcp notif] post {post_id} not found");
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("[legion mcp notif] db lookup failed: {e}");
-                    continue;
-                }
-            };
-
-            let client_repo = notif_client_repo.get().map(|s| s.as_str());
-            let is_signal = crate::signal::is_signal(&post.text);
-
-            // Log the "named signal suppressed because client_repo is
-            // unknown" case exactly once per post, so that a stuck
-            // initialize (or a client that omitted clientInfo.name) is
-            // visible in the breadcrumb log instead of manifesting as
-            // silent delivery failures. Other suppression cases (own post,
-            // signal to a different agent) are expected and not logged.
-            if client_repo.is_none() && is_signal && !post.text.starts_with("@all") {
-                eprintln!(
-                    "[legion mcp notif] suppressing signal {post_id} -- client_repo unknown (initialize handshake missing or clientInfo.name absent)"
-                );
-            }
-
-            if !should_notify(&post.text, &post.repo, client_repo) {
-                continue;
-            }
-
-            let content = build_channel_content(&post.id, &post.repo, &post.text, is_signal);
-            let notification = json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/claude/channel",
-                "params": {
-                    "content": content
-                }
-            });
-
-            let Ok(s) = serde_json::to_string(&notification) else {
-                eprintln!("[legion mcp notif] failed to serialize notification");
-                continue;
-            };
-
-            let Ok(mut locked) = notif_out.lock() else {
-                eprintln!("[legion mcp notif] stdout mutex poisoned; notifier thread exiting");
-                return;
-            };
-
-            // A write or flush failure on stdout almost always means the
-            // client hung up (EPIPE). Keep looping against a dead pipe would
-            // burn CPU silently forever -- exit the notifier thread instead.
-            if let Err(e) = writeln!(locked, "{s}") {
-                eprintln!("[legion mcp notif] stdout write failed ({e}); notifier thread exiting");
-                return;
-            }
-            if let Err(e) = locked.flush() {
-                eprintln!("[legion mcp notif] stdout flush failed ({e}); notifier thread exiting");
-                return;
-            }
-        }
+        run_notifier_loop(notif_data_dir, notif_out, notif_client_repo);
     });
 
     let stdin = std::io::stdin();
@@ -1112,20 +1223,6 @@ mod tests {
             instructions.contains("notifications/claude/channel"),
             "instructions must mention notifications/claude/channel; got: {instructions}"
         );
-    }
-
-    #[test]
-    fn channel_event_feed_carries_post_id() {
-        use crate::channel::ChannelEvent;
-        let event = ChannelEvent::Feed {
-            post_id: "test-id-abc".to_string(),
-        };
-        match event {
-            ChannelEvent::Feed { post_id } => {
-                assert_eq!(post_id, "test-id-abc");
-            }
-            _ => panic!("expected Feed variant"),
-        }
     }
 
     #[test]

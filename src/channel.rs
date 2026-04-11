@@ -29,13 +29,33 @@ const SSE_FEED_LIMIT: usize = 20;
 /// Seconds between keepalive pings when no change has been detected.
 const PING_INTERVAL_SECS: u64 = 30;
 
-/// Notification that something in the DB has changed. SSE subscribers wake on
-/// receiving any variant and re-read from the database.
+/// Wake-up signal for in-process consumers of the broadcast channel. The
+/// variants carry no payload: every consumer re-reads from the database on
+/// receipt. A previous revision attached a `post_id` to `Feed`, but the two
+/// live consumers now both query the database themselves (the HTTP SSE
+/// handler queries `max(created_at)` on every tick, and the MCP notifier
+/// was moved to a DB polling loop because a `tokio::broadcast` cannot
+/// cross process boundaries and was silently missing writes from other
+/// processes).
+///
+/// **The broadcast channel is still live and still used.** The SSE handler
+/// in `src/channel.rs` subscribes and uses it as the edge-triggered wakeup
+/// that replaces a dumber polling loop. The MCP tool-call handlers in
+/// `src/mcp.rs` still fire `tx.send(ChannelEvent::Feed)` on every post so
+/// an in-process SSE consumer -- for example, a future daemon mode that
+/// runs both HTTP and MCP in one process -- sees them with zero-latency
+/// wakeup. The MCP notifier thread does NOT subscribe (it polls the DB
+/// directly), so the send in `handle_tool_call` is a no-op in the
+/// stdio-only `legion mcp` subprocess. Do NOT delete the broadcast path
+/// or the `tx.send` calls on the assumption that they are dead -- the SSE
+/// consumer depends on them.
+///
+/// The wire-level `<channel post_id="...">` XML attribute is unchanged --
+/// only this internal event enum lost the field.
 #[derive(Debug, Clone)]
 pub enum ChannelEvent {
-    /// New board post or reflection arrived. Carries the post ID so MCP
-    /// notification emitters can look up the exact post without a full scan.
-    Feed { post_id: String },
+    /// New board post or reflection arrived.
+    Feed,
     /// Task table changed.
     Tasks,
 }
@@ -240,9 +260,7 @@ pub async fn api_post(
     };
 
     // Notify SSE subscribers (best-effort; no SSE listeners is not an error).
-    let _ = state.tx.send(ChannelEvent::Feed {
-        post_id: id.clone(),
-    });
+    let _ = state.tx.send(ChannelEvent::Feed);
 
     Json(serde_json::json!({ "id": id })).into_response()
 }
@@ -435,12 +453,9 @@ mod tests {
     #[test]
     fn broadcast_channel_delivers_events() {
         let (tx, mut rx) = new_broadcast();
-        tx.send(ChannelEvent::Feed {
-            post_id: "test-id".to_string(),
-        })
-        .expect("send");
+        tx.send(ChannelEvent::Feed).expect("send");
         let evt = rx.try_recv().expect("recv");
-        assert!(matches!(evt, ChannelEvent::Feed { .. }));
+        assert!(matches!(evt, ChannelEvent::Feed));
     }
 
     #[test]
@@ -476,14 +491,8 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<ChannelEvent>(1);
 
         // Fill past capacity without the subscriber reading.
-        tx.send(ChannelEvent::Feed {
-            post_id: "id-1".to_string(),
-        })
-        .expect("send 1");
-        tx.send(ChannelEvent::Feed {
-            post_id: "id-2".to_string(),
-        })
-        .expect("send 2");
+        tx.send(ChannelEvent::Feed).expect("send 1");
+        tx.send(ChannelEvent::Feed).expect("send 2");
 
         // The first recv should be Lagged since we overflowed the 1-slot buffer.
         let result = rx.try_recv();
