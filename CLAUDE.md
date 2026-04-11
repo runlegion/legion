@@ -30,6 +30,7 @@ legion stats --repo <name>
 legion reindex
 legion work --repo <name>                    # get next card from scheduler (auto-accepts)
 legion work --repo <name> --peek             # peek at next card without accepting
+legion sync --repo <name>                    # sync issues from work source into kanban
 legion done --repo <name> --text "what was completed" --id <card-id>  # complete card + announce
 legion kanban create --from <repo> --to <repo> --text "description" --priority <low|med|high|critical>
 legion kanban create --from <repo> --to <repo> --text "..." --labels "tag1,tag2" --source-url "https://..."
@@ -212,7 +213,7 @@ Stagger prevents I/O storms by sleeping between spawns (default 15s; set to 0 to
 ## Hook Integration
 
 Legion is called by Claude Code hooks:
-- `SessionStart` hook calls `legion recall` + `legion surface` and injects context via additionalContext
+- `SessionStart` hook calls `legion recall` + `legion surface` and injects context via additionalContext. Also runs `legion sync` (with 5-second timeout) to pull new GitHub issues into kanban. Opt-out with `LEGION_NO_SYNC=1`.
 - `Stop` hook prompts the agent to reflect before closing
 - `consult` is agent-initiated (called via Bash mid-session), not hook-driven
 - `post` is agent-initiated (when agent has something worth sharing with the team)
