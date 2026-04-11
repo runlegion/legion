@@ -389,16 +389,24 @@ pub fn dispatch(
     match method {
         "initialize" => {
             // Extract clientInfo.name to identify the connecting agent's repo.
-            // This is stored for use by the notification emitter thread via the
-            // shared client_repo cell passed into run_stdio_loop.
+            // This is stored for use by the notification emitter thread via
+            // the shared client_repo cell passed into run_stdio_loop. OnceLock
+            // is deliberate: the MCP subprocess is spawned fresh per Claude
+            // Code session, so there is exactly one initialize handshake per
+            // process lifetime. A second initialize (unexpected under the
+            // current plugin model) would silently no-op -- documented here
+            // so future deployment changes catch it.
             if let Some(cell) = client_repo_cell
                 && let Some(name) = request
                     .get("params")
                     .and_then(|p| p.get("clientInfo"))
                     .and_then(|ci| ci.get("name"))
                     .and_then(|n| n.as_str())
+                && cell.set(name.to_string()).is_err()
             {
-                let _ = cell.set(name.to_string());
+                eprintln!(
+                    "[legion mcp] duplicate initialize ignored; client_repo already set (one process = one session)"
+                );
             }
             Some(success_response(
                 &id,
@@ -474,14 +482,28 @@ const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB
 /// 4. If `client_repo` is known and the post's `repo` equals `client_repo`, suppress
 ///    (the client wrote it; no need to echo a general musing back to its author).
 /// 5. Otherwise (general musing, no `@` prefix, from a different agent), deliver.
+///
+/// Recipient parsing treats anything after a leading `@` up to the first
+/// whitespace as the recipient token, with a trailing `:` trimmed. An empty
+/// recipient (`@` alone) or a recipient that itself begins with `@` (e.g.
+/// `@@all`, which looks like a broadcast but isn't) is NOT treated as `@all`
+/// or any named target -- the post falls through the signal branch and is
+/// suppressed. This is deliberately strict: if an agent fat-fingers a
+/// broadcast as `@@all`, it should silently fail rather than silently succeed
+/// with the wrong-looking prefix.
 pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool {
     if let Some(rest) = text.strip_prefix('@') {
-        // It's a signal. Check if it's addressed to us or to "all".
-        let recipient = rest
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_end_matches(':');
+        // It's a signal. Extract the recipient token (first whitespace word).
+        let recipient_raw = rest.split_whitespace().next().unwrap_or("");
+        let recipient = recipient_raw.trim_end_matches(':');
+
+        // Reject empty or `@`-prefixed recipients -- `@` alone, `@@all`,
+        // `@@`, etc. These are suppressed rather than passed to the @all /
+        // named-target branches. See docstring above for the reasoning.
+        if recipient.is_empty() || recipient.starts_with('@') {
+            return false;
+        }
+
         if recipient == "all" {
             return true;
         }
@@ -502,10 +524,36 @@ pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool 
     true
 }
 
-/// Build the XML-like channel notification content string.
+/// Split a CDATA body around any literal `]]>` occurrences so the terminator
+/// cannot escape the section. The standard XML trick is to replace every
+/// `]]>` with `]]]]><![CDATA[>` -- close the current section after the first
+/// `]]`, then reopen with `<![CDATA[` before the stray `>`. An agent post
+/// containing the literal substring `]]>` (plausible in code snippets) would
+/// otherwise terminate the block early and inject raw content into the XML.
+fn escape_cdata(text: &str) -> String {
+    text.replace("]]>", "]]]]><![CDATA[>")
+}
+
+/// Escape `"`, `<`, `>`, and `&` for use inside an XML attribute value.
+/// The attribute values are short (post_id, repo, is_signal) and controlled,
+/// but post_id comes from the DB and repo from the user; better to escape than
+/// trust.
+fn escape_xml_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Build the XML-like channel notification content string. Text goes inside a
+/// CDATA block with `]]>` sequences neutralised; attribute values are
+/// XML-escaped.
 fn build_channel_content(post_id: &str, repo: &str, text: &str, is_signal: bool) -> String {
+    let post_id_attr = escape_xml_attr(post_id);
+    let repo_attr = escape_xml_attr(repo);
+    let text_body = escape_cdata(text);
     format!(
-        "<channel type=\"feed\" post_id=\"{post_id}\" repo=\"{repo}\" is_signal=\"{is_signal}\"><text><![CDATA[{text}]]></text></channel>"
+        "<channel type=\"feed\" post_id=\"{post_id_attr}\" repo=\"{repo_attr}\" is_signal=\"{is_signal}\"><text><![CDATA[{text_body}]]></text></channel>"
     )
 }
 
@@ -589,6 +637,18 @@ pub fn run_stdio_loop(
             let client_repo = notif_client_repo.get().map(|s| s.as_str());
             let is_signal = crate::signal::is_signal(&post.text);
 
+            // Log the "named signal suppressed because client_repo is
+            // unknown" case exactly once per post, so that a stuck
+            // initialize (or a client that omitted clientInfo.name) is
+            // visible in the breadcrumb log instead of manifesting as
+            // silent delivery failures. Other suppression cases (own post,
+            // signal to a different agent) are expected and not logged.
+            if client_repo.is_none() && is_signal && !post.text.starts_with("@all") {
+                eprintln!(
+                    "[legion mcp notif] suppressing signal {post_id} -- client_repo unknown (initialize handshake missing or clientInfo.name absent)"
+                );
+            }
+
             if !should_notify(&post.text, &post.repo, client_repo) {
                 continue;
             }
@@ -602,11 +662,26 @@ pub fn run_stdio_loop(
                 }
             });
 
-            if let Ok(s) = serde_json::to_string(&notification)
-                && let Ok(mut locked) = notif_out.lock()
-            {
-                let _ = writeln!(locked, "{s}");
-                let _ = locked.flush();
+            let Ok(s) = serde_json::to_string(&notification) else {
+                eprintln!("[legion mcp notif] failed to serialize notification");
+                continue;
+            };
+
+            let Ok(mut locked) = notif_out.lock() else {
+                eprintln!("[legion mcp notif] stdout mutex poisoned; notifier thread exiting");
+                return;
+            };
+
+            // A write or flush failure on stdout almost always means the
+            // client hung up (EPIPE). Keep looping against a dead pipe would
+            // burn CPU silently forever -- exit the notifier thread instead.
+            if let Err(e) = writeln!(locked, "{s}") {
+                eprintln!("[legion mcp notif] stdout write failed ({e}); notifier thread exiting");
+                return;
+            }
+            if let Err(e) = locked.flush() {
+                eprintln!("[legion mcp notif] stdout flush failed ({e}); notifier thread exiting");
+                return;
             }
         }
     });
@@ -1087,6 +1162,80 @@ mod tests {
         assert!(
             should_notify("just thinking about things", "smugglr", Some("kelex")),
             "general musings from others must reach kelex"
+        );
+    }
+
+    #[test]
+    fn notification_filter_rejects_malformed_signal_prefixes() {
+        // `@` alone is not a broadcast -- no recipient token at all.
+        assert!(
+            !should_notify("@ hello", "smugglr", Some("kelex")),
+            "lone @ must be suppressed"
+        );
+        // `@@all foo` looks like a broadcast but recipient parses as `@all`,
+        // which starts with `@` -- rejected as malformed rather than silently
+        // routed as if the user meant @all.
+        assert!(
+            !should_notify("@@all urgent", "smugglr", Some("kelex")),
+            "@@all must be suppressed, not routed as @all"
+        );
+        // `@@` alone with no recipient.
+        assert!(
+            !should_notify("@@", "smugglr", Some("kelex")),
+            "@@ alone must be suppressed"
+        );
+        // Trailing colon is stripped, so `@kelex:` still reaches kelex.
+        assert!(
+            should_notify("@kelex: review:approved", "smugglr", Some("kelex")),
+            "trailing colon on recipient must still reach the target"
+        );
+    }
+
+    #[test]
+    fn build_channel_content_escapes_cdata_terminator() {
+        // A post text containing the CDATA terminator `]]>` would otherwise
+        // close the CDATA block early and leak raw content into the XML.
+        // escape_cdata splits the terminator across a close/reopen using the
+        // canonical `]]]]><![CDATA[>` pattern. An XML parser then sees the
+        // original `]]>` in the reassembled CDATA content.
+        let content = build_channel_content(
+            "019d-test-id",
+            "legion",
+            "here is the literal terminator ]]> in a code example",
+            false,
+        );
+        assert!(
+            content.contains("]]]]><![CDATA[>"),
+            "CDATA escape should split ]]> across a close-and-reopen; got: {content}"
+        );
+        // The legitimate final closer is still `]]></text></channel>`. That
+        // is the ONE allowed occurrence of the `]]>` sequence -- and it
+        // must close a balanced pair of CDATA opens.
+        assert!(
+            content.ends_with("]]></text></channel>"),
+            "content must end with the correct closer; got: {content}"
+        );
+        let cdata_opens = content.matches("<![CDATA[").count();
+        let cdata_closes = content.matches("]]>").count();
+        assert_eq!(
+            cdata_opens, cdata_closes,
+            "CDATA opens/closes must balance after escape (opens={cdata_opens}, closes={cdata_closes}); got: {content}"
+        );
+    }
+
+    #[test]
+    fn build_channel_content_escapes_xml_attributes() {
+        // Post id / repo go into attribute positions. A post from a repo
+        // named with a literal quote or ampersand would otherwise break the
+        // attribute quoting. Not expected in practice, but cheap to enforce.
+        let content = build_channel_content("id\"with'quote", "repo&name", "plain text body", true);
+        assert!(
+            content.contains("id&quot;with"),
+            "post_id attribute must be XML-escaped; got: {content}"
+        );
+        assert!(
+            content.contains("repo&amp;name"),
+            "repo attribute must be XML-escaped; got: {content}"
         );
     }
 }
