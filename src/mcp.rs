@@ -381,7 +381,10 @@ pub fn dispatch(
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {
-                    "tools": {}
+                    "tools": {},
+                    "experimental": {
+                        "claude/channel": {}
+                    }
                 },
                 "serverInfo": {
                     "name": "legion-channel",
