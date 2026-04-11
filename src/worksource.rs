@@ -209,17 +209,68 @@ pub fn view_issue(plugin_name: &str, github_repo: &str, number: u64) -> Result<E
 }
 
 /// Close an issue via a work source plugin.
-pub fn close_issue(plugin_name: &str, github_repo: &str, number: u64) -> Result<()> {
-    let plugin_path = match find_plugin(plugin_name) {
-        Some(p) => p,
-        None => return Ok(()),
-    };
+///
+/// When `comment` is provided, the plugin posts it as a closing comment on
+/// the issue before transitioning state. The plugin reads the comment from
+/// the `LEGION_WS_COMMENT` environment variable and is expected to no-op on
+/// the comment step if the variable is empty or absent.
+///
+/// A missing plugin is a hard error. A previous revision silently returned
+/// `Ok(())` when the plugin could not be found, which looked like a
+/// successful close from the caller's perspective and let kanban-done
+/// transitions claim they had closed the GitHub issue when in fact nothing
+/// had happened. That quiet-failure mode was the root cause of #190 sitting
+/// open on GitHub for days after its card was marked done.
+pub fn close_issue(
+    plugin_name: &str,
+    github_repo: &str,
+    number: u64,
+    comment: Option<&str>,
+) -> Result<()> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
 
-    call_plugin(
-        &plugin_path,
-        &["close", &number.to_string()],
-        &[("LEGION_WS_REPO", github_repo)],
-    )?;
+    let number_str = number.to_string();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_NUMBER", &number_str),
+    ];
+    if let Some(c) = comment {
+        env.push(("LEGION_WS_COMMENT", c));
+    }
+
+    call_plugin(&plugin_path, &["close", &number_str], &env)?;
+
+    Ok(())
+}
+
+/// Reopen a previously closed issue via a work source plugin.
+///
+/// Symmetrical with `close_issue`. When `comment` is provided, the plugin
+/// posts it as a reopening comment on the issue after transitioning state
+/// back to open. Used to revert a kanban transition that already propagated
+/// to GitHub (e.g. a card moved from `done` back to `in-progress`).
+///
+/// A missing plugin is a hard error, matching the close path.
+pub fn reopen_issue(
+    plugin_name: &str,
+    github_repo: &str,
+    number: u64,
+    comment: Option<&str>,
+) -> Result<()> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let number_str = number.to_string();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_NUMBER", &number_str),
+    ];
+    if let Some(c) = comment {
+        env.push(("LEGION_WS_COMMENT", c));
+    }
+
+    call_plugin(&plugin_path, &["reopen", &number_str], &env)?;
 
     Ok(())
 }

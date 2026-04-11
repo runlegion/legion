@@ -870,6 +870,42 @@ enum IssueAction {
         #[arg(long)]
         number: u64,
     },
+    /// Close an issue via the configured work source
+    ///
+    /// Used to reconcile a shipped kanban card with its public GitHub state
+    /// when the card was closed through a path other than `pr merge --task`
+    /// (which already auto-closes the linked issue). The optional `--comment`
+    /// is posted on the issue before it transitions to closed.
+    Close {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// Issue number
+        #[arg(long)]
+        number: u64,
+
+        /// Optional closing comment posted before the close
+        #[arg(long)]
+        comment: Option<String>,
+    },
+    /// Reopen a previously closed issue via the configured work source
+    ///
+    /// Symmetrical with `close` for reverting a kanban transition that
+    /// already propagated to GitHub.
+    Reopen {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// Issue number
+        #[arg(long)]
+        number: u64,
+
+        /// Optional reopening comment posted after the reopen
+        #[arg(long)]
+        comment: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1894,11 +1930,14 @@ fn run() -> error::Result<()> {
                     kanban::transition_card(&database, card_id, kanban::Action::Done, Some(&text))?;
                 println!("{card_id}");
 
-                // Close linked external issue if present
+                // Close the linked external issue if present, using the
+                // done-text as the closing comment so the GitHub issue thread
+                // records why it was closed.
                 if let (Some(url), Some(source)) = (&card.source_url, &card.source_type)
                     && let Some(number) = worksource::extract_issue_number(url)
                     && let Some((_, source_repo, _)) = worksource::resolve_config(&repo)
-                    && let Err(e) = worksource::close_issue(source, &source_repo, number)
+                    && let Err(e) =
+                        worksource::close_issue(source, &source_repo, number, Some(&text))
                 {
                     eprintln!("[legion] failed to close {source} issue #{number}: {e}");
                 }
@@ -2371,6 +2410,66 @@ fn run() -> error::Result<()> {
                 println!("State: {}", issue.state);
                 println!("URL: {}", issue.url);
             }
+            IssueAction::Close {
+                repo,
+                number,
+                comment,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                worksource::close_issue(&plugin_name, &source_repo, number, comment.as_deref())?;
+
+                let details = serde_json::json!({ "comment": comment });
+                let details_str = details.to_string();
+                audit(&db::AuditInput {
+                    agent: &repo,
+                    action: "close-issue",
+                    target_type: "issue",
+                    target_ref: &number.to_string(),
+                    task_id: None,
+                    source_type: &plugin_name,
+                    details: Some(&details_str),
+                    outcome: "success",
+                });
+
+                println!("closed issue #{} on {}", number, source_repo);
+            }
+            IssueAction::Reopen {
+                repo,
+                number,
+                comment,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                worksource::reopen_issue(&plugin_name, &source_repo, number, comment.as_deref())?;
+
+                let details = serde_json::json!({ "comment": comment });
+                let details_str = details.to_string();
+                audit(&db::AuditInput {
+                    agent: &repo,
+                    action: "reopen-issue",
+                    target_type: "issue",
+                    target_ref: &number.to_string(),
+                    task_id: None,
+                    source_type: &plugin_name,
+                    details: Some(&details_str),
+                    outcome: "success",
+                });
+
+                println!("reopened issue #{} on {}", number, source_repo);
+            }
         },
         Commands::Pr { action } => match action {
             PrAction::Create {
@@ -2635,13 +2734,22 @@ fn run() -> error::Result<()> {
                         ),
                     }
 
-                    // Close linked issue if the card has a source URL
+                    // Close the linked issue if the card has a source URL,
+                    // using a generated merge comment so the GitHub issue
+                    // records which PR merge closed it.
                     if let Some(card) = database.get_card_by_id(task_id)?
                         && let Some(ref url) = card.source_url
                         && let Some(issue_num) = worksource::extract_issue_number(url)
                         && let Some(ref source) = card.source_type
                     {
-                        if let Err(e) = worksource::close_issue(source, &source_repo, issue_num) {
+                        let merge_comment =
+                            format!("Closed by PR #{number} merge via legion kanban propagation.");
+                        if let Err(e) = worksource::close_issue(
+                            source,
+                            &source_repo,
+                            issue_num,
+                            Some(&merge_comment),
+                        ) {
                             eprintln!(
                                 "[legion] warning: could not close issue #{}: {}",
                                 issue_num, e
