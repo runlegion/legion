@@ -79,21 +79,14 @@ pub fn notify_all_mcp_servers(
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|e| e == "queue") {
             // Append notification to this queue file (newline-delimited JSON).
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)?;
-
-            // Use std::fs::write with append to safely write in a race-safe manner.
-            // For each queue, append the notification as a line.
-            if let Ok(mut content) = fs::read_to_string(&path) {
-                content.push('\n');
-                content.push_str(&notif_json);
-                fs::write(&path, content)?;
+            // Read current content, append notification, and write back.
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            let new_content = if content.is_empty() {
+                format!("{}\n", notif_json)
             } else {
-                // If file doesn't exist or is unreadable, just write the notification.
-                fs::write(&path, format!("{}\n", notif_json))?;
-            }
+                format!("{}\n{}\n", content.trim_end(), notif_json)
+            };
+            fs::write(&path, new_content)?;
         }
     }
 

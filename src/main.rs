@@ -1592,25 +1592,19 @@ fn run() -> error::Result<()> {
                 // Post messages and notify MCP servers of new posts.
                 let mut posted_ids = vec![];
                 for r in &repo {
-                    match (&text, &transcript) {
+                    let id = match (&text, &transcript) {
                         (Some(t), None) => {
-                            let id =
-                                board::post_from_text_with_meta(&database, &index, r, t, &meta)?;
-                            info!("[legion] posting for {r} ({id})");
-                            posted_ids.push((id.clone(), r.clone()));
-                            println!("{id}");
+                            board::post_from_text_with_meta(&database, &index, r, t, &meta)?
                         }
-                        (None, Some(path)) => {
-                            let id = board::post_from_transcript_with_meta(
-                                &database, &index, r, path, &meta,
-                            )?;
-                            info!("[legion] posting for {r} ({id})");
-                            posted_ids.push((id.clone(), r.clone()));
-                            println!("{id}");
-                        }
+                        (None, Some(path)) => board::post_from_transcript_with_meta(
+                            &database, &index, r, path, &meta,
+                        )?,
                         (Some(_), Some(_)) => return Err(error::LegionError::NoReflectionInput),
                         (None, None) => return Err(error::LegionError::NoReflectionInput),
                     };
+                    info!("[legion] posting for {r} ({id})");
+                    posted_ids.push((id.clone(), r.clone()));
+                    println!("{id}");
                 }
 
                 // Notify MCP servers of all newly posted messages.
