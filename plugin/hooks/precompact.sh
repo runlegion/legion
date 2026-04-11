@@ -2,6 +2,11 @@
 # Legion PreCompact hook: auto-reflect a checkpoint before context compaction
 # Extracts recent assistant output from the transcript and saves it as a
 # reflection so that the post-compact SessionStart hook can recall it.
+
+# Hook subshells do not inherit the plugin bin dir on PATH -- only the Bash
+# tool does. Invoke via full CLAUDE_PLUGIN_ROOT path (fixes #204).
+LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
+
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
@@ -33,6 +38,6 @@ if [ -z "$CONTEXT" ]; then
 fi
 
 # Save checkpoint reflection
-legion reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>/dev/null
+"$LEGION" reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>/dev/null
 
 exit 0

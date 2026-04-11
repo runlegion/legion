@@ -47,17 +47,21 @@ pub fn run_daemon(config: DaemonConfig) -> Result<()> {
 
 async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     let data_dir = config.data_dir.clone();
+
+    // --mcp mode: stdio-only per-session subprocess spawned by Claude Code via
+    // plugin.json mcpServers. Skip HTTP server bind and watch loop -- those are
+    // singleton concerns that run via `legion daemon` without --mcp, independently.
+    // Running them per-session causes :3131 bind conflicts across concurrent
+    // sessions and duplicate watch loops that can trigger recursive agent spawns.
+    if config.enable_mcp {
+        return run_mcp_stdio_only(data_dir).await;
+    }
+
     let port = config.port;
 
+    eprintln!("[legion daemon] starting on port {port}");
     eprintln!(
-        "[legion daemon] starting on port {} (mcp: {})",
-        port, config.enable_mcp
-    );
-
-    // Embed model is not loaded in daemon mode. Posts via /api/post and MCP tools will have
-    // NULL embedding columns and won't be similarity-searchable until card 019d7991-2eab lands.
-    eprintln!(
-        "[legion daemon] note: embed model not loaded -- posts via /api/post and MCP will not be similarity-searchable until card 019d7991-2eab lands"
+        "[legion daemon] note: embed model not loaded -- posts via /api/post will not be similarity-searchable until card 019d7991-2eab lands"
     );
 
     // Build the broadcast channel for SSE notifications.
@@ -65,7 +69,7 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
 
     let channel_state = channel::ChannelState {
         data_dir: data_dir.clone(),
-        tx: tx.clone(),
+        tx,
     };
     let app = channel::router(channel_state);
 
@@ -78,41 +82,16 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     eprintln!("[legion daemon] channel server at http://localhost:{port}");
 
     // Spawn the watch loop as a background task.
-    let watch_data_dir = data_dir.clone();
     let watch_handle = tokio::spawn(async move {
-        run_watch_task(&watch_data_dir).await;
+        run_watch_task(&data_dir).await;
     });
-
-    // Spawn the MCP stdio server if requested.
-    let mcp_handle: Option<tokio::task::JoinHandle<Result<()>>> = if config.enable_mcp {
-        let mcp_data_dir = data_dir.clone();
-        let mcp_tx = tx.clone();
-        let version = env!("CARGO_PKG_VERSION").to_string();
-
-        eprintln!("[legion daemon] MCP stdio server active");
-
-        let handle =
-            tokio::task::spawn_blocking(move || mcp::run_stdio_loop(mcp_data_dir, version, mcp_tx));
-        Some(handle)
-    } else {
-        None
-    };
 
     // Build the axum server future.
     let serve_future = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
 
-    // Unify the mcp arm: when mcp is disabled, the future parks forever so the
-    // select! never fires it. This avoids duplicating the whole select! block.
-    let mcp_future = async move {
-        match mcp_handle {
-            Some(h) => h.await,
-            None => std::future::pending().await,
-        }
-    };
-
-    // Race the HTTP server, watch task, and MCP task (if enabled). Any task
-    // exiting -- success, error, or panic -- triggers the others to stop so
-    // background failures surface immediately instead of silently continuing.
+    // Race the HTTP server and watch task. Any task exiting -- success, error,
+    // or panic -- triggers the other to stop so background failures surface
+    // immediately instead of silently continuing.
     tokio::select! {
         result = serve_future => {
             if let Err(e) = result {
@@ -126,17 +105,48 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
                 Err(e) => eprintln!("[legion daemon] watch task exited: {e}; shutting down"),
             }
         }
-        result = mcp_future => {
-            match result {
-                Ok(Ok(())) => eprintln!("[legion daemon] mcp loop exited; shutting down"),
-                Ok(Err(e)) => eprintln!("[legion daemon] mcp loop error: {e}; shutting down"),
-                Err(e) => eprintln!("[legion daemon] mcp task panic: {e}; shutting down"),
-            }
-        }
     }
 
     eprintln!("[legion daemon] shutdown complete");
     Ok(())
+}
+
+/// Run the MCP stdio server without HTTP bind or watch loop.
+///
+/// Each Claude Code session spawns its own `legion daemon --mcp` subprocess via
+/// plugin.json mcpServers, so this path must be cheap and isolated: no network
+/// port, no cross-session coordination, no watch-loop side effects. When stdin
+/// closes (CC session ends), `run_stdio_loop` returns and this process exits.
+///
+/// The broadcast channel is constructed locally even though no HTTP subscribers
+/// exist in this mode, because the MCP tool handlers in `mcp.rs` call
+/// `tx.send()` unconditionally to notify would-be channel listeners. The sender
+/// must be live for those calls to be no-op sends instead of panics.
+async fn run_mcp_stdio_only(data_dir: PathBuf) -> Result<()> {
+    eprintln!("[legion daemon] MCP stdio-only mode (no HTTP, no watch)");
+    eprintln!(
+        "[legion daemon] note: embed model not loaded -- posts via MCP will not be similarity-searchable until card 019d7991-2eab lands"
+    );
+
+    let (tx, _rx) = channel::new_broadcast();
+    let version = env!("CARGO_PKG_VERSION").to_string();
+
+    let handle = tokio::task::spawn_blocking(move || mcp::run_stdio_loop(data_dir, version, tx));
+
+    match handle.await {
+        Ok(Ok(())) => {
+            eprintln!("[legion daemon] mcp loop exited; shutting down");
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            eprintln!("[legion daemon] mcp loop error: {e}; shutting down");
+            Err(e)
+        }
+        Err(e) => {
+            eprintln!("[legion daemon] mcp task panic: {e}; shutting down");
+            Err(LegionError::Server(format!("mcp task panic: {e}")))
+        }
+    }
 }
 
 /// Run the watch loop inside a tokio task.

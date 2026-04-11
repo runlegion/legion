@@ -12,6 +12,11 @@
 # instead of dropping it so a silently-broken legion (missing binary, bad
 # migration, DB schema mismatch) leaves a breadcrumb. The hook still exits 0
 # and degrades to "no context" so Claude Code does not block on a legion bug.
+
+# Hook subshells do not inherit the plugin bin dir on PATH -- only the Bash
+# tool does. Invoke the plugin binary by full path via CLAUDE_PLUGIN_ROOT
+# (exported to hook processes per plugins-reference). Fixes #204.
+LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
 LOG=/tmp/legion-hook-errors.log
 
 INPUT=$(cat)
@@ -32,21 +37,21 @@ touch "/tmp/legion-work-${CWD_HASH}"
 
 # Warm the Tantivy index in the background -- makes PreToolUse recall-first.sh
 # fast on the first tool call instead of paying a 2s cold-start cost
-(legion recall --repo "$REPO" --context warmup --limit 1 >/dev/null 2>&1 &)
+("$LEGION" recall --repo "$REPO" --context warmup --limit 1 >/dev/null 2>&1 &)
 
 # Branch-context recall first, fallback to latest if nothing matched.
 # --preview 240 keeps each hit compact so the session start stays small.
 BRANCH=$(cd "$CWD" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 OUTPUT=""
 if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ]; then
-  OUTPUT=$(legion recall --repo "$REPO" --context "$BRANCH" --limit 2 --preview 240 2>>"$LOG")
+  OUTPUT=$("$LEGION" recall --repo "$REPO" --context "$BRANCH" --limit 2 --preview 240 2>>"$LOG")
 fi
 if [ -z "$OUTPUT" ]; then
-  OUTPUT=$(legion recall --repo "$REPO" --latest --limit 2 --preview 240 2>>"$LOG")
+  OUTPUT=$("$LEGION" recall --repo "$REPO" --latest --limit 2 --preview 240 2>>"$LOG")
 fi
 
 # Compact status counts from the JSON summary instead of full status text
-STATUS_JSON=$(legion status --repo "$REPO" --json 2>>"$LOG")
+STATUS_JSON=$("$LEGION" status --repo "$REPO" --json 2>>"$LOG")
 if [ -n "$STATUS_JSON" ]; then
   TASKS=$(echo "$STATUS_JSON" | jq -r '.tasks // 0')
   BLOCKED=$(echo "$STATUS_JSON" | jq -r '.blocked // 0')
