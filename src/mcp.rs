@@ -540,13 +540,27 @@ pub fn run_stdio_loop(
     let mut rx = tx.subscribe();
 
     std::thread::spawn(move || {
+        // Open the db once for the lifetime of this notifier thread. A prior
+        // draft reopened inside the loop on every event; that paid a file-open
+        // cost per bullpen post per connected client. A long-lived handle is
+        // fine here because the notifier thread's only job is read-only lookup
+        // of freshly inserted rows, and SQLite's default journal mode handles
+        // that concurrent read cleanly.
+        let db = match Database::open(&notif_data_dir.join("legion.db")) {
+            Ok(db) => db,
+            Err(e) => {
+                eprintln!("[legion mcp notif] failed to open db: {e}; notifier thread exiting");
+                return;
+            }
+        };
+
         loop {
             let event = match rx.blocking_recv() {
                 Ok(e) => e,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!(
-                        "[legion mcp notif] lagged {n} events; re-subscribing next iteration"
-                    );
+                    // tokio's broadcast receiver recovers internally on the
+                    // next recv; no manual resubscribe needed.
+                    eprintln!("[legion mcp notif] lagged {n} events; dropping and continuing");
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -556,17 +570,8 @@ pub fn run_stdio_loop(
             };
 
             let post_id = match event {
-                ChannelEvent::Feed { ref post_id } => post_id.clone(),
+                ChannelEvent::Feed { post_id } => post_id,
                 ChannelEvent::Tasks => continue, // no task notifications in this issue
-            };
-
-            // Look up the post from the database.
-            let db = match Database::open(&notif_data_dir.join("legion.db")) {
-                Ok(db) => db,
-                Err(e) => {
-                    eprintln!("[legion mcp notif] failed to open db: {e}");
-                    continue;
-                }
             };
 
             let post = match db.get_reflection_by_id(&post_id) {
