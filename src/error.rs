@@ -45,6 +45,15 @@ pub enum LegionError {
     #[error("reflection not found: {0}")]
     ReflectionNotFound(String),
 
+    #[error(
+        "repo safety check failed: reflection {id} belongs to '{actual}', not '{expected}' -- re-run without --repo or with the correct value"
+    )]
+    ReflectionRepoMismatch {
+        id: String,
+        actual: String,
+        expected: String,
+    },
+
     #[error("invalid card transition: cannot {action} a card in status '{current}'")]
     InvalidCardTransition { action: String, current: String },
 

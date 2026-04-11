@@ -119,8 +119,8 @@ fn forget_rejects_wrong_repo_safety_check() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("repo safety check failed"),
-        "expected safety check error, got: {stderr}"
+        stderr.contains("ReflectionRepoMismatch"),
+        "expected safety check error variant, got: {stderr}"
     );
     assert!(
         stderr.contains("kelex"),
@@ -144,6 +144,27 @@ fn forget_rejects_wrong_repo_safety_check() {
         "reflection should still be intact after rejected forget, got: {stdout}"
     );
 
+    // Rejected forget attempts must be traceable in the audit log.
+    // Destructive-command rejections are forensically relevant.
+    let out = legion_cmd(dir.path())
+        .args(["audit", "--action", "delete-reflection", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let audit_stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        audit_stdout.contains("\"outcome\": \"rejected\""),
+        "rejected forget should be audited, got: {audit_stdout}"
+    );
+    assert!(
+        audit_stdout.contains("expected=rafters"),
+        "audit details should name the mismatched expected repo, got: {audit_stdout}"
+    );
+    assert!(
+        audit_stdout.contains("actual=kelex"),
+        "audit details should name the actual repo, got: {audit_stdout}"
+    );
+
     // Forget with the CORRECT --repo must succeed.
     let out = legion_cmd(dir.path())
         .args(["forget", "--id", &id, "--repo", "kelex"])
@@ -158,6 +179,18 @@ fn forget_rejects_wrong_repo_safety_check() {
     assert!(
         stdout.contains("forgot reflection"),
         "expected forget confirmation, got: {stdout}"
+    );
+
+    // The successful delete also produces an audit entry with outcome=success.
+    let out = legion_cmd(dir.path())
+        .args(["audit", "--action", "delete-reflection", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let audit_stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        audit_stdout.contains("\"outcome\": \"success\""),
+        "successful forget should be audited, got: {audit_stdout}"
     );
 }
 

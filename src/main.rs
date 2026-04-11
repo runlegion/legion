@@ -1836,32 +1836,64 @@ fn run() -> error::Result<()> {
                 .get_reflection_by_id(&id)?
                 .ok_or_else(|| error::LegionError::ReflectionNotFound(id.clone()))?;
 
+            // Every audit row for this command shares action/target_type/
+            // target_ref/task_id/source_type. Build them through one closure
+            // so the three call sites (rejected / success / partial) only
+            // name the three things that actually differ.
+            let write_audit = |agent: &str, outcome: &str, details: Option<&str>| {
+                audit(&db::AuditInput {
+                    agent,
+                    action: "delete-reflection",
+                    target_type: "reflection",
+                    target_ref: &id,
+                    task_id: None,
+                    source_type: "legion",
+                    details,
+                    outcome,
+                });
+            };
+
             if let Some(ref expected_repo) = repo
                 && existing.repo != *expected_repo
             {
-                return Err(error::LegionError::WorkSource(format!(
-                    "repo safety check failed: reflection {} belongs to '{}', not '{}' -- re-run without --repo or with the correct value",
-                    id, existing.repo, expected_repo
-                )));
+                // Audit the rejection BEFORE returning. Destructive-command
+                // rejections are forensically relevant -- we want a trace
+                // of every attempted forget, not just successful ones.
+                let details = format!("expected={} actual={}", expected_repo, existing.repo);
+                write_audit(&existing.repo, "rejected", Some(&details));
+                return Err(error::LegionError::ReflectionRepoMismatch {
+                    id: id.clone(),
+                    actual: existing.repo.clone(),
+                    expected: expected_repo.clone(),
+                });
             }
 
-            // Delete from SQLite first. If this fails, the index is
-            // untouched. If this succeeds but the index delete fails,
-            // the next `legion reindex` run will reconcile -- the
-            // index rebuild drops everything and re-seeds from the db.
+            // Delete from SQLite first. The audit entry is written AFTER
+            // the SQLite delete succeeds but BEFORE the index delete,
+            // so even if the tantivy side fails we still have a record
+            // that the db-side delete happened. The two-store write is
+            // not transactional -- if index.delete fails, the next
+            // `legion reindex` run will reconcile.
             let deleted = database.delete_reflection(&id)?;
-            index.delete(&id)?;
+            write_audit(&deleted.repo, "success", None);
 
-            audit(&db::AuditInput {
-                agent: &deleted.repo,
-                action: "delete-reflection",
-                target_type: "reflection",
-                target_ref: &id,
-                task_id: None,
-                source_type: "legion",
-                details: None,
-                outcome: "success",
-            });
+            if let Err(e) = index.delete(&id) {
+                // SQLite row is gone; tantivy still has the document.
+                // Tell the operator exactly what state the system is in
+                // and how to recover. Do not silently succeed.
+                eprintln!(
+                    "[legion forget] WARNING: SQLite delete succeeded but tantivy index delete failed for {id}.\n\
+                     The reflection is gone from the database but may still appear in BM25 recall results\n\
+                     as a ghost document until the index is rebuilt. Run `legion reindex` to reconcile.\n\
+                     Underlying error: {e}"
+                );
+                write_audit(
+                    &deleted.repo,
+                    "partial",
+                    Some("index-orphan: SQLite row deleted, tantivy index delete failed"),
+                );
+                return Err(e);
+            }
 
             let preview: String = deleted.text.chars().take(80).collect();
             let ellipsis = if deleted.text.chars().count() > 80 {
