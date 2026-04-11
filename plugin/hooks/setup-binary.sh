@@ -127,3 +127,22 @@ install_binary() {
 if [ "$NEED_BINARY" = true ]; then
   install_binary || echo "[legion] binary install failed (exit $?)" >&2
 fi
+
+# -- Daemon auto-start --------------------------------------------------------
+# Spawn the background daemon (channel server + watch loop) if not already
+# running. This runs here, not in session-start.sh, because session-start
+# runs as additionalContext: its stdout is captured for the JSON envelope
+# and background forks corrupt the output. setup-binary runs as a regular
+# command hook where stdout is not captured.
+#
+# Set LEGION_NO_DAEMON=1 to suppress auto-start (useful in CI or minimal
+# environments that do not need the dashboard or auto-wake).
+if [ "${LEGION_NO_DAEMON:-}" != "1" ]; then
+  LEGION_BIN="${BINARY_PATH}"
+  if [ ! -x "$LEGION_BIN" ]; then
+    LEGION_BIN=$(command -v legion 2>/dev/null || true)
+  fi
+  if [ -n "$LEGION_BIN" ] && [ -x "$LEGION_BIN" ]; then
+    "$LEGION_BIN" daemon-spawn 2>>/tmp/legion-hook-errors.log || true
+  fi
+fi

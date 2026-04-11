@@ -2820,3 +2820,78 @@ fn data_dir_override_suppresses_migration() {
         "LEGION_DATA_DIR override must suppress migration chatter\nstderr: {stderr}"
     );
 }
+
+/// Verify that `legion daemon-spawn` is idempotent: calling it twice does not
+/// start a second daemon process. The second invocation must exit 0 and print
+/// the "already running" message to stderr.
+///
+/// The spawned daemon is killed at the end of the test to avoid leaving
+/// orphaned processes on the CI runner.
+#[test]
+fn daemon_auto_spawn_is_idempotent() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let pid_file = data_dir.path().join("daemon.pid");
+
+    // First spawn: should start the daemon and return immediately.
+    let out1 = legion_cmd(data_dir.path())
+        .args(["daemon-spawn"])
+        .output()
+        .expect("failed to run daemon-spawn (first)");
+
+    assert!(
+        out1.status.success(),
+        "first daemon-spawn failed\nstderr: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+
+    // Give the daemon a moment to write the PID file and start listening.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    assert!(
+        pid_file.exists(),
+        "daemon.pid was not created after first daemon-spawn"
+    );
+
+    let pid_str = std::fs::read_to_string(&pid_file).expect("read daemon.pid");
+    let daemon_pid: u32 = pid_str
+        .trim()
+        .parse()
+        .expect("daemon.pid did not contain a valid PID");
+
+    // Second spawn: daemon is already running, must exit 0 with "already running" message.
+    let out2 = legion_cmd(data_dir.path())
+        .args(["daemon-spawn"])
+        .output()
+        .expect("failed to run daemon-spawn (second)");
+
+    assert!(
+        out2.status.success(),
+        "second daemon-spawn must exit 0\nstderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        stderr2.contains("already running"),
+        "expected 'already running' message on second spawn\nstderr: {stderr2}"
+    );
+
+    // Verify only one daemon process was started: PID file must still hold the
+    // original PID from the first spawn.
+    let pid_after = std::fs::read_to_string(&pid_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    assert_eq!(
+        pid_after,
+        Some(daemon_pid),
+        "daemon.pid changed after second spawn -- a second daemon was started"
+    );
+
+    // Tear down: kill the daemon so it does not outlive the test process.
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &daemon_pid.to_string()])
+        .status();
+
+    // Wait briefly for the daemon to exit.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}

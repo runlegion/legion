@@ -372,6 +372,13 @@ enum Commands {
         peek: bool,
     },
 
+    /// Sync issues from the configured work source into the kanban board
+    Sync {
+        /// Repository name (must match a repo entry in watch.toml with a github field)
+        #[arg(long)]
+        repo: String,
+    },
+
     /// Manage the kanban board
     Kanban {
         #[command(subcommand)]
@@ -448,6 +455,18 @@ enum Commands {
         /// Enable MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
         #[arg(long)]
         mcp: bool,
+    },
+
+    /// Spawn the daemon in the background and exit immediately
+    ///
+    /// Checks whether a daemon is already running via PID lock. If running,
+    /// prints a message and exits 0. Otherwise forks the daemon process,
+    /// redirects its output to the platform log file, writes the PID, and
+    /// exits. Safe to call multiple times (idempotent).
+    DaemonSpawn {
+        /// HTTP port for the daemon channel server
+        #[arg(long, default_value = "3131")]
+        port: u16,
     },
 
     /// Record a quality gate result for a skill run
@@ -1948,6 +1967,27 @@ fn run() -> error::Result<()> {
                 None => info!("[legion] no pending work for {repo}"),
             }
         }
+        Commands::Sync { repo } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            match worksource::resolve_config(&repo) {
+                Some((plugin, source_repo, workdir)) => {
+                    match worksource::sync_issues(&database, &plugin, &source_repo, &workdir, &repo)
+                    {
+                        Ok(n) if n > 0 => println!("synced {n} new issues from {plugin}"),
+                        Ok(_) => info!("[legion] sync: 0 new issues from {plugin}"),
+                        Err(e) => {
+                            eprintln!("[legion] sync failed: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                None => {
+                    info!("[legion] no work source configured for {repo}");
+                }
+            }
+        }
         Commands::Kanban { action } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
@@ -2748,6 +2788,10 @@ fn run() -> error::Result<()> {
                 port,
                 enable_mcp: mcp,
             })?;
+        }
+        Commands::DaemonSpawn { port } => {
+            let base = data_dir()?;
+            daemon::spawn_detached(&base, port)?;
         }
         Commands::QualityGate { action } => match action {
             QualityGateAction::Record {
