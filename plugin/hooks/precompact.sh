@@ -6,6 +6,7 @@
 # Hook subshells do not inherit the plugin bin dir on PATH -- only the Bash
 # tool does. Invoke via full CLAUDE_PLUGIN_ROOT path (fixes #204).
 LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
+LOG=/tmp/legion-hook-errors.log
 
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
@@ -16,6 +17,8 @@ if [ -z "$CWD" ]; then
 fi
 
 REPO=$(basename "$CWD")
+CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
+CHECKPOINT_MARKER="/tmp/legion-checkpoint-failed-${CWD_HASH}"
 
 # Extract recent assistant text from transcript JSONL
 CONTEXT=""
@@ -37,7 +40,16 @@ if [ -z "$CONTEXT" ]; then
   CONTEXT="(no transcript context extracted)"
 fi
 
-# Save checkpoint reflection
-"$LEGION" reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>/dev/null
+# Save checkpoint reflection. PreCompact cannot emit additionalContext (the
+# session is about to be compacted, not resumed), so on failure we touch a
+# marker that post-compact.sh reads and surfaces via its own warning block.
+# This propagates the failure to the first hook that CAN surface context.
+# See #209 -- losing a checkpoint silently is what caused the original incident.
+if ! "$LEGION" reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>>"$LOG"; then
+  touch "$CHECKPOINT_MARKER" 2>/dev/null
+else
+  # Previous run may have left a stale marker; clear it on successful reflect.
+  rm -f "$CHECKPOINT_MARKER" 2>/dev/null
+fi
 
 exit 0

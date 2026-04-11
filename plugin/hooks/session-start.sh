@@ -19,6 +19,11 @@
 LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
 LOG=/tmp/legion-hook-errors.log
 
+# Shared warning helper -- tracks degraded legion calls and renders a
+# visible block when any legion invocation exits nonzero. See #209.
+# shellcheck source=_legion-warn.sh
+source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-warn.sh"
+
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
@@ -41,12 +46,18 @@ touch "/tmp/legion-work-${CWD_HASH}"
 
 # Sync GitHub issues into kanban before session starts (5-second timeout to avoid blocking).
 # Opt-out via LEGION_NO_SYNC=1 (for environments without network access or to avoid latency).
+# A timeout exit is treated as "no sync this session" not a legion breakage -- don't surface it.
 if [ "${LEGION_NO_SYNC:-}" != "1" ]; then
   # Use gtimeout if available (macOS via homebrew), otherwise fall back to perl idiom.
   if command -v gtimeout >/dev/null 2>&1; then
     gtimeout 5 "$LEGION" sync --repo "$REPO" >/dev/null 2>>"$LOG"
   else
     perl -e 'alarm 5; exec @ARGV' -- "$LEGION" sync --repo "$REPO" >/dev/null 2>>"$LOG"
+  fi
+  SYNC_RC=$?
+  # 124 = gtimeout/perl SIGALRM; treat as informational, not a failure.
+  if [ "$SYNC_RC" -ne 0 ] && [ "$SYNC_RC" -ne 124 ] && [ "$SYNC_RC" -ne 142 ]; then
+    legion_check "$SYNC_RC" "sync"
   fi
 fi
 
@@ -56,13 +67,16 @@ BRANCH=$(cd "$CWD" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 OUTPUT=""
 if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ]; then
   OUTPUT=$("$LEGION" recall --repo "$REPO" --context "$BRANCH" --limit 2 --preview 240 2>>"$LOG")
+  legion_check $? "recall (branch)"
 fi
 if [ -z "$OUTPUT" ]; then
   OUTPUT=$("$LEGION" recall --repo "$REPO" --latest --limit 2 --preview 240 2>>"$LOG")
+  legion_check $? "recall (latest)"
 fi
 
 # Compact status counts from the JSON summary instead of full status text
 STATUS_JSON=$("$LEGION" status --repo "$REPO" --json 2>>"$LOG")
+legion_check $? "status --json"
 if [ -n "$STATUS_JSON" ]; then
   TASKS=$(echo "$STATUS_JSON" | jq -r '.tasks // 0')
   BLOCKED=$(echo "$STATUS_JSON" | jq -r '.blocked // 0')
@@ -91,6 +105,17 @@ if [ -n "$STATUS_JSON" ]; then
     else
       OUTPUT="$STATUS_LINE"
     fi
+  fi
+fi
+
+# Prepend a visible warning block if any legion call above failed.
+# The block is load-bearing for agent awareness of legion degradation -- see #209.
+WARN=$(legion_warnings_block)
+if [ -n "$WARN" ]; then
+  if [ -n "$OUTPUT" ]; then
+    OUTPUT="${WARN}"$'\n\n'"${OUTPUT}"
+  else
+    OUTPUT="$WARN"
   fi
 fi
 
