@@ -1,5 +1,11 @@
 # Legion Changelog
 
+## 0.6.3
+
+### Bug Fixes
+- **Hook PATH self-heal** (`plugin/hooks/*.sh`): Claude Code plugin hooks run in subshells that do not inherit the plugin `bin/` directory on PATH -- only the Bash tool does. Phase D hooks called bare `legion` which failed silently with "command not found", causing SessionStart recall context to vanish with no visible error. Each hook now invokes `"${CLAUDE_PLUGIN_ROOT}/bin/legion"` via a `LEGION` variable set at the top of the script. `CLAUDE_PLUGIN_ROOT` is already exported to hook processes per the plugins-reference spec, so this is the documented way to reach plugin-bundled binaries from hooks. Closes #204.
+- **plugin.json MCP server registration** (`plugin/.claude-plugin/plugin.json`): Phase D declared the MCP server under a non-standard top-level `channel` field that the Claude Code plugin loader does not read. Result: zero `mcp__legion__*` tools in any CC session even though `src/mcp.rs`'s `run_stdio_loop` is fully wired. Replaced with a proper `mcpServers` key per the [plugins-reference spec](https://code.claude.com/docs/en/plugins-reference). Uses `${CLAUDE_PLUGIN_ROOT}/bin/legion` as the command so MCP server spawning resolves regardless of PATH. Does not add a `channels` array or declare the `experimental.claude/channel` capability -- the full channel push pipeline is tracked in #205 as separate feature work. This fix only restores the tool surface Phase D built and shipped dark.
+
 ## 0.6.2
 
 ### Phase D daemon post-merge review fixes

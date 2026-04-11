@@ -1,6 +1,11 @@
 #!/bin/bash
 # Legion post-compact hook: aggressive re-orientation after context compaction
 # The compaction summary is STALE. This hook provides ground truth.
+
+# Hook subshells do not inherit the plugin bin dir on PATH -- only the Bash
+# tool does. Invoke via full CLAUDE_PLUGIN_ROOT path (fixes #204).
+LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
+
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
@@ -42,7 +47,7 @@ fi
 # Recall: checkpoint reflection from PreCompact hook + branch context
 OUTPUT="$OUTPUT"$'\n\n'"--- LEGION CHECKPOINT (stored before compaction) ---"
 
-CHECKPOINT=$(legion recall --repo "$REPO" --context "compact checkpoint" --limit 1 2>/dev/null)
+CHECKPOINT=$("$LEGION" recall --repo "$REPO" --context "compact checkpoint" --limit 1 2>/dev/null)
 if [ -n "$CHECKPOINT" ]; then
   OUTPUT="$OUTPUT"$'\n'"$CHECKPOINT"
 else
@@ -51,20 +56,20 @@ fi
 
 # Branch-specific recall if on a feature branch
 if [ -n "$GIT_BRANCH" ] && [ "$GIT_BRANCH" != "main" ] && [ "$GIT_BRANCH" != "master" ]; then
-  BRANCH_RECALL=$(legion recall --repo "$REPO" --context "$GIT_BRANCH" 2>/dev/null)
+  BRANCH_RECALL=$("$LEGION" recall --repo "$REPO" --context "$GIT_BRANCH" 2>/dev/null)
   if [ -n "$BRANCH_RECALL" ]; then
     OUTPUT="$OUTPUT"$'\n\n'"--- BRANCH CONTEXT ($GIT_BRANCH) ---"$'\n'"$BRANCH_RECALL"
   fi
 fi
 
 # Surface: cross-repo highlights, board posts, pending tasks
-SURFACE=$(legion surface --repo "$REPO" 2>/dev/null)
+SURFACE=$("$LEGION" surface --repo "$REPO" 2>/dev/null)
 if [ -n "$SURFACE" ]; then
   OUTPUT="$OUTPUT"$'\n\n'"$SURFACE"
 fi
 
 # Unread bullpen
-BOARD_COUNT=$(legion bullpen --count --repo "$REPO" 2>/dev/null)
+BOARD_COUNT=$("$LEGION" bullpen --count --repo "$REPO" 2>/dev/null)
 if [ -n "$BOARD_COUNT" ]; then
   OUTPUT="$OUTPUT"$'\n\n'"[Legion] ${BOARD_COUNT}. Run: legion bullpen --repo ${REPO}"
 fi

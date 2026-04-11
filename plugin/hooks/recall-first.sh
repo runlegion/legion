@@ -12,6 +12,10 @@
 # instead of dropping it, so a silently-broken legion (missing binary, bad
 # migration, DB schema mismatch) leaves a breadcrumb. The hook still exits 0
 # on legion failure so the tool call proceeds as if nothing was injected.
+
+# Hook subshells do not inherit the plugin bin dir on PATH -- only the Bash
+# tool does. Invoke via full CLAUDE_PLUGIN_ROOT path (fixes #204).
+LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
 LOG=/tmp/legion-hook-errors.log
 
 INPUT=$(cat)
@@ -50,7 +54,7 @@ if [ -z "$QUERY" ] || [ ${#QUERY} -lt 4 ]; then
 fi
 
 # Run recall. Short limit + preview truncation keep injected context compact.
-HITS=$(legion recall --repo "$REPO" --context "$QUERY" --limit 3 --preview 200 2>>"$LOG")
+HITS=$("$LEGION" recall --repo "$REPO" --context "$QUERY" --limit 3 --preview 200 2>>"$LOG")
 
 # No hits -- don't inject anything, let the tool fire as normal
 if [ -z "$HITS" ]; then
