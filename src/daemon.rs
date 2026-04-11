@@ -13,6 +13,130 @@ use crate::error::{LegionError, Result};
 use crate::mcp;
 use crate::watch;
 
+/// PID lock file name for the daemon process (separate from watch.pid).
+const DAEMON_PID_FILE: &str = "daemon.pid";
+
+/// Return the platform-appropriate log file path for the daemon.
+///
+/// - macOS: `~/Library/Logs/legion/daemon.log`
+/// - Linux/other: `${XDG_STATE_HOME:-$HOME/.local/state}/legion/daemon.log`
+pub fn daemon_log_path() -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| LegionError::NoHomeDir)?;
+        Ok(home.join("Library/Logs/legion/daemon.log"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let state_home = if let Ok(d) = std::env::var("XDG_STATE_HOME") {
+            PathBuf::from(d)
+        } else {
+            let home = std::env::var("HOME")
+                .map(PathBuf::from)
+                .map_err(|_| LegionError::NoHomeDir)?;
+            home.join(".local/state")
+        };
+        Ok(state_home.join("legion/daemon.log"))
+    }
+}
+
+/// Spawn the daemon in the background and exit immediately.
+///
+/// If a daemon is already running (valid PID in `data_dir/daemon.pid`), prints
+/// `"legion daemon already running (pid N)"` to stderr and returns `Ok(())`.
+/// Does not attempt a duplicate start.
+///
+/// When clean, forks the current binary with `daemon` subcommand arguments,
+/// redirects stdout and stderr to the platform log file, writes the new PID
+/// to `data_dir/daemon.pid`, and returns. The caller should exit 0 after this
+/// returns -- this function does NOT call `std::process::exit` so the caller
+/// retains control.
+pub fn spawn_detached(data_dir: &Path, port: u16) -> Result<()> {
+    let pid_path = data_dir.join(DAEMON_PID_FILE);
+
+    // Check whether a daemon is already running.
+    if pid_path.exists() {
+        let contents = std::fs::read_to_string(&pid_path).unwrap_or_default();
+        if let Ok(pid) = contents.trim().parse::<u32>() {
+            if is_process_alive(pid) {
+                eprintln!("legion daemon already running (pid {pid})");
+                return Ok(());
+            }
+            // Stale PID file -- process is gone, continue to start a new one.
+            let _ = std::fs::remove_file(&pid_path);
+        }
+    }
+
+    // Resolve the current binary path so the child runs the same binary.
+    let binary = std::env::current_exe().map_err(LegionError::Io)?;
+
+    // Ensure the log directory exists.
+    let log_path = daemon_log_path()?;
+    if let Some(log_dir) = log_path.parent() {
+        std::fs::create_dir_all(log_dir)?;
+    }
+
+    // Open (or create+append) the log file for stdout+stderr redirection.
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+
+    // Clone the file handle for stderr.
+    let log_file_stderr = log_file.try_clone()?;
+
+    let child = std::process::Command::new(&binary)
+        .env("LEGION_DATA_DIR", data_dir)
+        .args(["daemon", "--port", &port.to_string()])
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_file_stderr))
+        .stdin(std::process::Stdio::null())
+        .spawn()?;
+
+    let child_pid = child.id();
+
+    // Write the PID so future calls detect the running daemon.
+    std::fs::write(&pid_path, child_pid.to_string())?;
+
+    // Detach: forget the child so it is not waited on by this process.
+    // On Unix, the child becomes an orphan adopted by init/launchd, which is
+    // the intended behavior for a background daemon.
+    // We deliberately call forget here rather than drop so the Child struct
+    // is not dropped -- dropping a Child on some platforms sends a signal.
+    std::mem::forget(child);
+
+    eprintln!(
+        "[legion] daemon started (pid {child_pid}), logging to {}",
+        log_path.display()
+    );
+
+    Ok(())
+}
+
+/// Check whether a process with the given PID is alive on this platform.
+///
+/// Uses `kill -0` on Unix (no signal sent, just existence check). Always
+/// returns `false` on non-Unix platforms where we cannot probe process state.
+fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 /// Configuration for the daemon.
 pub struct DaemonConfig {
     /// Directory that holds legion.db, watch.toml, etc.

@@ -456,6 +456,13 @@ enum Commands {
         port: u16,
     },
 
+    /// Spawn the daemon in the background (idempotent, for plugin auto-start)
+    DaemonSpawn {
+        /// HTTP port for the channel server
+        #[arg(long, default_value = "3131")]
+        port: u16,
+    },
+
     /// Record a quality gate result for a skill run
     QualityGate {
         #[command(subcommand)]
@@ -2777,6 +2784,10 @@ fn run() -> error::Result<()> {
                 port,
                 enable_mcp: false,
             })?;
+        }
+        Commands::DaemonSpawn { port } => {
+            let base = data_dir()?;
+            daemon::spawn_detached(&base, port)?;
         }
         Commands::QualityGate { action } => match action {
             QualityGateAction::Record {

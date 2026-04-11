@@ -2841,3 +2841,78 @@ fn sync_command_errors_without_worksource_config() {
         "expected 'no work source configured' error, got: {stderr}"
     );
 }
+
+/// Test that `legion daemon-spawn` is idempotent and exits 0 on duplicate.
+/// Spawn twice in the same LEGION_DATA_DIR and verify only one daemon runs.
+#[test]
+fn daemon_auto_spawn_is_idempotent() {
+    let data_dir = tempfile::tempdir().unwrap();
+
+    // First spawn should succeed
+    let output1 = legion_cmd(data_dir.path())
+        .args(["daemon-spawn"])
+        .output()
+        .unwrap();
+    assert!(
+        output1.status.success(),
+        "first daemon-spawn failed: {}",
+        String::from_utf8_lossy(&output1.stderr)
+    );
+
+    // Check that daemon started message was printed
+    let stderr1 = String::from_utf8_lossy(&output1.stderr);
+    assert!(
+        stderr1.contains("daemon started"),
+        "expected 'daemon started' message, got: {stderr1}"
+    );
+
+    // Second spawn should detect the running daemon and exit 0
+    let output2 = legion_cmd(data_dir.path())
+        .args(["daemon-spawn"])
+        .output()
+        .unwrap();
+    assert!(
+        output2.status.success(),
+        "second daemon-spawn failed: {}",
+        String::from_utf8_lossy(&output2.stderr)
+    );
+
+    // Check that "already running" message was printed to stderr
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    assert!(
+        stderr2.contains("already running"),
+        "expected 'already running' message, got: {stderr2}"
+    );
+
+    // Verify the log file exists and contains daemon output
+    let log_path = if cfg!(target_os = "macos") {
+        let home = std::env::var("HOME").unwrap();
+        std::path::PathBuf::from(home).join("Library/Logs/legion/daemon.log")
+    } else {
+        let state_home = std::env::var("XDG_STATE_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap();
+                std::path::PathBuf::from(home).join(".local/state")
+            });
+        state_home.join("legion/daemon.log")
+    };
+
+    assert!(
+        log_path.exists(),
+        "log file should exist at {}",
+        log_path.display()
+    );
+
+    // Clean up: kill the daemon
+    let pid_file = data_dir.path().join("daemon.pid");
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_file)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .output();
+        // Give it a moment to die
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
