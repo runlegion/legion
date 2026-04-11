@@ -11,6 +11,7 @@ LOG=/tmp/legion-hook-errors.log
 # post-compact silently failed because the checkpoint DB was corrupted. Never
 # again. Every legion call now feeds legion_check, and the warning block is
 # rendered at the top of the re-orientation output. See #209.
+# shellcheck source=_legion-warn.sh
 source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-warn.sh"
 
 INPUT=$(cat)

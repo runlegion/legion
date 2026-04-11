@@ -45,8 +45,7 @@ fi
 # marker that post-compact.sh reads and surfaces via its own warning block.
 # This propagates the failure to the first hook that CAN surface context.
 # See #209 -- losing a checkpoint silently is what caused the original incident.
-"$LEGION" reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>>"$LOG"
-if [ $? -ne 0 ]; then
+if ! "$LEGION" reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>>"$LOG"; then
   touch "$CHECKPOINT_MARKER" 2>/dev/null
 else
   # Previous run may have left a stale marker; clear it on successful reflect.

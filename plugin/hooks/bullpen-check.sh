@@ -10,6 +10,7 @@ LOG=/tmp/legion-hook-errors.log
 
 # Shared warning helper -- surfaces legion degradation via additionalContext
 # instead of silently dropping bullpen notifications. See #209.
+# shellcheck source=_legion-warn.sh
 source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-warn.sh"
 
 INPUT=$(cat)
