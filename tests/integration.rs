@@ -2716,32 +2716,33 @@ fn pr_create_skip_gates_bypasses_gate_check() {
     );
 }
 
-/// Verify that `legion daemon --mcp` runs in stdio-only mode: no HTTP port
-/// bind, no watch loop. Each Claude Code session spawns its own --mcp
-/// subprocess via plugin.json mcpServers, so a port bind would conflict across
-/// concurrent sessions and a watch loop would spawn recursive agent sessions.
+/// Verify that `legion mcp` runs as a spec-compliant stdio-only MCP server:
+/// no HTTP port bind, no watch loop. Each Claude Code session spawns its own
+/// `legion mcp` subprocess via plugin.json mcpServers, so a port bind would
+/// conflict across concurrent sessions and a watch loop would spawn recursive
+/// agent sessions. The long-lived HTTP + watch process is `legion daemon`,
+/// kept as a separate singleton and unrelated to this stdio subprocess.
 ///
-/// This test binds a port first to guarantee that --mcp must skip the HTTP
-/// bind (it would fail to bind an already-taken port and exit nonzero).
+/// This test binds a port first to guarantee that `legion mcp` must skip the
+/// HTTP bind entirely (attempting to bind an already-taken port would surface
+/// as a startup error).
 #[test]
-fn daemon_mcp_mode_is_stdio_only() {
+fn legion_mcp_subcommand_is_stdio_only() {
     use std::io::Write;
 
     let data_dir = tempfile::tempdir().unwrap();
 
-    // Bind a port to force a conflict if --mcp tries to bind the HTTP server.
-    // We pass this port to the daemon -- if the daemon skips the bind, the
-    // conflict never materializes; if it tries, the spawn exits with an error.
+    // Hold a port so that if `legion mcp` ever tries to start an HTTP server,
+    // the bind would fail and the subprocess would surface as an error.
     let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = blocker.local_addr().unwrap().port();
 
     let mut child = legion_cmd(data_dir.path())
-        .args(["daemon", "--mcp", "--port", &port.to_string()])
+        .args(["mcp"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("failed to spawn legion daemon --mcp");
+        .expect("failed to spawn legion mcp");
 
     // Send a valid MCP initialize request, then close stdin so the stdio loop
     // returns and the process exits cleanly.
@@ -2755,14 +2756,14 @@ fn daemon_mcp_mode_is_stdio_only() {
 
     let output = child
         .wait_with_output()
-        .expect("failed to wait for legion daemon --mcp");
+        .expect("failed to wait for legion mcp");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "daemon --mcp exited nonzero\nstatus: {:?}\nstderr: {}",
+        "legion mcp exited nonzero\nstatus: {:?}\nstderr: {}",
         output.status,
         stderr
     );
@@ -2771,18 +2772,18 @@ fn daemon_mcp_mode_is_stdio_only() {
     // protocol version, proving the stdio loop actually ran.
     assert!(
         stdout.contains("\"protocolVersion\":\"2024-11-05\""),
-        "daemon --mcp stdout missing initialize response\nstdout: {stdout}"
+        "legion mcp stdout missing initialize response\nstdout: {stdout}"
     );
 
     // Stderr must NOT mention HTTP server startup or watch loop activity,
-    // proving the --mcp branch skipped both.
+    // proving legion mcp is stdio-only and does not start either.
     assert!(
         !stderr.contains("channel server at http://"),
-        "daemon --mcp must not start HTTP server\nstderr: {stderr}"
+        "legion mcp must not start HTTP server\nstderr: {stderr}"
     );
     assert!(
         !stderr.contains("watch active"),
-        "daemon --mcp must not start watch loop\nstderr: {stderr}"
+        "legion mcp must not start watch loop\nstderr: {stderr}"
     );
 
     // Keep the blocker alive until the assertions complete so the conflict
