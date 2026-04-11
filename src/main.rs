@@ -439,15 +439,14 @@ enum Commands {
     /// Watch for signals and auto-wake sleeping agents
     Watch,
 
-    /// Start the legion daemon (channel + watch + optional MCP stdio)
+    /// MCP stdio server for Claude Code channel integration
+    Mcp,
+
+    /// Start the legion daemon (channel + watch)
     Daemon {
         /// HTTP port for the channel server
         #[arg(long, default_value = "3131")]
         port: u16,
-
-        /// Enable MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
-        #[arg(long)]
-        mcp: bool,
     },
 
     /// Record a quality gate result for a skill run
@@ -2741,12 +2740,18 @@ fn run() -> error::Result<()> {
             );
             watch::run(&base)?;
         }
-        Commands::Daemon { port, mcp } => {
+        Commands::Mcp => {
+            let base = data_dir()?;
+            let version = env!("CARGO_PKG_VERSION").to_string();
+            let (tx, _rx) = tokio::sync::broadcast::channel(16);
+            mcp::run_stdio_loop(base, version, tx)?;
+        }
+        Commands::Daemon { port } => {
             let base = data_dir()?;
             daemon::run_daemon(daemon::DaemonConfig {
                 data_dir: base,
                 port,
-                enable_mcp: mcp,
+                enable_mcp: false,
             })?;
         }
         Commands::QualityGate { action } => match action {

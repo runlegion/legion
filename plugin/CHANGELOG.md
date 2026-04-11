@@ -1,5 +1,20 @@
 # Legion Changelog
 
+## 0.6.5
+
+### Channel MCP Pivot to Spec-Compliant Stdio Subprocess
+
+Completes the pivot to spec-compliant MCP channel architecture. Phase D (#201) ported the channel MCP from TypeScript/Bun to Rust but used a pre-spec HTTP/SSE design that Phase D was operating under at the time. This release aligns with the current MCP spec by moving the MCP server into a separate stdio subprocess spawned per Claude Code session, instead of running it as an optional task within the singleton daemon.
+
+### Features
+- **New `legion mcp` subcommand**: stdio-only MCP server compliant with MCP 2024-11-05 spec. Runs as a subprocess per Claude Code session, not part of the daemon singleton.
+- **MCP initialize declares experimental.claude/channel capability**: per the channels spec, the MCP server now declares `capabilities.experimental["claude/channel"]` to indicate support for channel notifications.
+- **plugin.json channels integration**: mcpServers entry now uses `args: ["mcp"]` instead of `args: ["daemon", "--mcp"]`. Added top-level `channels` array declaring the legion MCP server as the channel provider.
+- **Daemon focuses on HTTP + watch**: `legion daemon` no longer accepts `--mcp` flag. The daemon stays as the singleton HTTP channel server and watch loop. MCP is purely a per-session stdio subprocess.
+
+### Breaking Changes
+- **`legion daemon --mcp` flag removed**: MCP is now a separate `legion mcp` subcommand. Callers using `daemon --mcp` should switch to the standalone `mcp` command or rely on plugin auto-spawning via mcpServers.
+
 ## 0.6.4
 
 ### Bug Fixes

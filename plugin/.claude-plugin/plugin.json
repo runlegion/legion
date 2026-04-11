@@ -1,6 +1,6 @@
 {
   "name": "legion",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Institutional memory for Claude Code agents with real-time team channel.",
   "author": {
     "name": "Sean Silvius",
@@ -11,7 +11,12 @@
   "mcpServers": {
     "legion": {
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/legion",
-      "args": ["daemon", "--mcp"]
+      "args": ["mcp"]
     }
-  }
+  },
+  "channels": [
+    {
+      "server": "legion"
+    }
+  ]
 }
