@@ -152,6 +152,29 @@ impl SearchIndex {
         ))
     }
 
+    /// Delete a document from the search index by reflection id.
+    ///
+    /// Constructs a term matching the exact `id` field value and removes
+    /// every document with that term (there should be at most one, since
+    /// `id` is the primary key in the reflections table). Commits
+    /// immediately so a subsequent recall does not return the deleted
+    /// document.
+    ///
+    /// No error if the id is not present in the index -- tantivy's
+    /// `delete_term` is a no-op when nothing matches. The caller's
+    /// database-layer check is the authoritative "does this reflection
+    /// exist" source; this method's job is to remove any trace from the
+    /// index regardless.
+    pub fn delete(&self, id: &str) -> Result<()> {
+        let mut writer: IndexWriter = self.acquire_writer()?;
+        let term = Term::from_field_text(self.id_field, id);
+        writer.delete_term(term);
+        writer
+            .commit()
+            .map_err(|e| LegionError::Search(e.to_string()))?;
+        Ok(())
+    }
+
     /// Rebuild the index from a set of reflections in a single commit.
     ///
     /// Clears the existing index contents first, then bulk-inserts all

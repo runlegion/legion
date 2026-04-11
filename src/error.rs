@@ -42,6 +42,9 @@ pub enum LegionError {
     #[error("card not found: {0}")]
     CardNotFound(String),
 
+    #[error("reflection not found: {0}")]
+    ReflectionNotFound(String),
+
     #[error("invalid card transition: cannot {action} a card in status '{current}'")]
     InvalidCardTransition { action: String, current: String },
 
