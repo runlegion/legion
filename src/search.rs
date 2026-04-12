@@ -152,6 +152,29 @@ impl SearchIndex {
         ))
     }
 
+    /// Delete a document from the search index by reflection id.
+    ///
+    /// Constructs a term matching the exact `id` field value and removes
+    /// every document with that term (there should be at most one, since
+    /// `id` is the primary key in the reflections table). Commits
+    /// immediately so a subsequent recall does not return the deleted
+    /// document.
+    ///
+    /// No error if the id is not present in the index -- tantivy's
+    /// `delete_term` is a no-op when nothing matches. The caller's
+    /// database-layer check is the authoritative "does this reflection
+    /// exist" source; this method's job is to remove any trace from the
+    /// index regardless.
+    pub fn delete(&self, id: &str) -> Result<()> {
+        let mut writer: IndexWriter = self.acquire_writer()?;
+        let term = Term::from_field_text(self.id_field, id);
+        writer.delete_term(term);
+        writer
+            .commit()
+            .map_err(|e| LegionError::Search(e.to_string()))?;
+        Ok(())
+    }
+
     /// Rebuild the index from a set of reflections in a single commit.
     ///
     /// Clears the existing index contents first, then bulk-inserts all
@@ -409,6 +432,46 @@ mod tests {
             last_recalled_at: None,
             parent_id: None,
         }
+    }
+
+    #[test]
+    fn delete_removes_document_from_index() {
+        let (idx, _dir) = test_index();
+        idx.add(
+            "id-keep",
+            "kelex",
+            "keep this reflection about mapping rules",
+        )
+        .unwrap();
+        idx.add(
+            "id-gone",
+            "kelex",
+            "doomed reflection about mapping rules that should vanish",
+        )
+        .unwrap();
+
+        // Both documents visible before the delete.
+        let before = idx.search("kelex", "mapping rules", 10).unwrap();
+        assert_eq!(before.len(), 2);
+
+        idx.delete("id-gone").unwrap();
+
+        // After delete, only the kept document surfaces -- no ghost for id-gone.
+        let after = idx.search("kelex", "mapping rules", 10).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, "id-keep");
+    }
+
+    #[test]
+    fn delete_nonexistent_id_is_noop() {
+        let (idx, _dir) = test_index();
+        idx.add("id-1", "kelex", "reflection one").unwrap();
+        // Deleting a term that never existed should not error.
+        idx.delete("id-does-not-exist").unwrap();
+        // Existing document still retrievable.
+        let results = idx.search("kelex", "reflection", 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "id-1");
     }
 
     #[test]
