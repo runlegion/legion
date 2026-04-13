@@ -1,5 +1,25 @@
 # Legion Changelog
 
+## 0.8.0
+
+### Focused Session Bootstrap (#236)
+
+SessionStart hook rewritten to inject only identity (domain-tagged reflections), snooze context, and kanban cards. Bulk recall, surface highlights, and sync operations removed from startup -- agents boot faster and with less token overhead. The reflections that matter arrive via domain tags, not a flood of search results.
+
+### CLI Completeness (#192)
+
+Major CLI gap rework: `legion issue close`, `legion issue reopen`, `legion issue edit`, `legion kanban delete`, `legion kanban reconcile`, and auto-propagation of card state when issues close or PRs merge. Closes the last operational gaps that forced agents to drop to raw `gh` commands.
+
+### New Commands
+
+- **`legion forget <id>`** (#235): Permanently delete a reflection. Previously reflections could only decay -- now agents can explicitly remove outdated or incorrect knowledge.
+
+### Bug Fixes
+
+- **Pre-grep recall hook query cleanup and score filter** (#230, #234): Recall-first hook now strips Claude's internal reasoning from queries before searching, and applies a minimum score threshold to avoid injecting low-relevance results into context.
+- **Issue-writer reads canonical template from disk** (#223, #224): The issue-writer agent now reads `.github/ISSUE_TEMPLATE/implementation-task.md` at invocation time instead of using a stale embedded copy.
+- **Correct legion-memory skill description** (#231, #233): Skill description changed from "enforces" to "reminds" -- the skill nudges agents toward recall-first behavior, it does not block them.
+
 ## 0.7.1
 
 ### Channel MCP Cross-Process Delivery Fix
