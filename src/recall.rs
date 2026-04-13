@@ -290,6 +290,36 @@ pub fn recall_latest(db: &Database, repo: &str, limit: usize) -> Result<RecallRe
     })
 }
 
+/// Return reflections matching a specific domain for a repo, bypassing search.
+///
+/// Used for reserved domains like `identity` and `snooze` that are injected
+/// on every session start. Pure SQL lookup, no BM25 or cosine involved.
+pub fn recall_by_domain(
+    db: &Database,
+    repo: &str,
+    domain: &str,
+    limit: usize,
+) -> Result<RecallResult> {
+    let matched = db.get_reflections_by_domain(repo, domain, limit)?;
+
+    let reflections: Vec<RecalledReflection> = matched
+        .into_iter()
+        .map(|r| RecalledReflection {
+            id: r.id,
+            repo: r.repo,
+            text: r.text,
+            score: 0.0,
+            created_at: r.created_at,
+        })
+        .collect();
+
+    Ok(RecallResult {
+        reflections,
+        query: format!("(domain:{domain})"),
+        repo: repo.to_owned(),
+    })
+}
+
 /// Search reflections across all repositories for cross-agent consultation.
 ///
 /// Uses `index.search_all()` (no repo filter) and joins with the database

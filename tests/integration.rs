@@ -42,6 +42,119 @@ fn reflect_and_recall_roundtrip() {
     );
 }
 
+#[test]
+fn recall_by_domain_filters_correctly() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create two reflections: one with domain "identity", one with domain "checkpoint"
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "I am the test agent",
+            "--domain",
+            "identity",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "checkpoint before compact",
+            "--domain",
+            "checkpoint",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Also create one without a domain
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "generic reflection no domain",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Recall with --domain identity should return only the identity reflection
+    let out = legion_cmd(dir.path())
+        .args([
+            "recall", "--repo", "test", "--domain", "identity", "--limit", "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("I am the test agent"),
+        "expected identity reflection, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("checkpoint before compact"),
+        "should not contain checkpoint reflection: {stdout}"
+    );
+    assert!(
+        !stdout.contains("generic reflection"),
+        "should not contain domainless reflection: {stdout}"
+    );
+
+    // Recall with --domain checkpoint should return only the checkpoint reflection
+    let out = legion_cmd(dir.path())
+        .args([
+            "recall",
+            "--repo",
+            "test",
+            "--domain",
+            "checkpoint",
+            "--limit",
+            "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("checkpoint before compact"),
+        "expected checkpoint reflection, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("I am the test agent"),
+        "should not contain identity reflection: {stdout}"
+    );
+
+    // Recall with --domain nonexistent should return nothing
+    let out = legion_cmd(dir.path())
+        .args([
+            "recall",
+            "--repo",
+            "test",
+            "--domain",
+            "nonexistent",
+            "--limit",
+            "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.trim().is_empty(),
+        "expected empty output for nonexistent domain, got: {stdout}"
+    );
+}
+
 /// Validate that a string looks like a UUIDv7 (36 chars, 4 hyphens).
 fn assert_uuid_format(s: &str) {
     let trimmed = s.trim();

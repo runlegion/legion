@@ -159,6 +159,10 @@ enum Commands {
         /// Filter out results with a final score below this threshold
         #[arg(long)]
         min_score: Option<f32>,
+
+        /// Return latest reflections matching this domain (bypasses search)
+        #[arg(long, conflicts_with_all = ["latest", "cosine_only", "context"])]
+        domain: Option<String>,
     },
 
     /// Find reflections similar to a given reflection by cosine similarity
@@ -1914,11 +1918,14 @@ fn run() -> error::Result<()> {
             preview,
             cosine_only,
             min_score,
+            domain,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
 
-            let mut result = if latest {
+            let mut result = if let Some(ref dom) = domain {
+                recall::recall_by_domain(&database, &repo, dom, limit)?
+            } else if latest {
                 recall::recall_latest(&database, &repo, limit)?
             } else if cosine_only {
                 // --cosine-only requires the embed model; error if unavailable.
