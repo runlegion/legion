@@ -2,8 +2,12 @@
 # Legion PreToolUse hook: run recall on the search query and inject matching
 # reflections as additionalContext before the search tool fires.
 #
-# Fires on Grep, Glob, WebFetch, WebSearch. The agent may decide not to run
-# the search after seeing the reflections -- that is the point.
+# Fires on WebFetch, WebSearch, and Agent (Explore only). Grep and Glob are
+# handled by pre-grep-recall.sh which has better query sanitization for those.
+#
+# For Explore agent spawns: if recall has strong hits (score >= threshold),
+# the hook DENIES the spawn and returns recall results instead. This prevents
+# agents from burning tokens on Explore when legion already has the answer.
 #
 # Relies on session-start.sh having warmed the Tantivy index; cold ~2.2s,
 # warm ~170ms per call.
@@ -33,20 +37,34 @@ fi
 
 REPO=$(basename "$CWD")
 
+# Check the clamp list -- skip recall for tools that burn tokens without value
+CLAMP_FILE="${CLAUDE_PLUGIN_ROOT}/hooks/recall-clamp.conf"
+if [ -f "$CLAMP_FILE" ] && grep -qx "$TOOL" "$CLAMP_FILE"; then
+  exit 0
+fi
+
 # Extract the search query based on the tool
 QUERY=""
+IS_EXPLORE=false
 case "$TOOL" in
-  Grep|Glob)
-    QUERY=$(echo "$INPUT" | jq -r '.tool_input.pattern // empty')
-    ;;
   WebFetch)
-    # Use the URL path components as the query -- the domain + path usually
-    # carries the topic better than the full URL
-    QUERY=$(echo "$INPUT" | jq -r '.tool_input.url // empty' \
-      | sed -E 's|https?://||; s|[/?#&=]| |g')
+    # Use the prompt (user intent), not the URL -- URL path components
+    # produce garbage BM25 matches. The prompt carries actual topic signal.
+    QUERY=$(echo "$INPUT" | jq -r '.tool_input.prompt // empty')
     ;;
   WebSearch)
     QUERY=$(echo "$INPUT" | jq -r '.tool_input.query // empty')
+    ;;
+  Agent)
+    # For Explore agents, try recall first and deny the spawn if we have
+    # strong hits. Other agent types pass through.
+    AGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // empty')
+    if [ "$AGENT_TYPE" = "Explore" ]; then
+      IS_EXPLORE=true
+      QUERY=$(echo "$INPUT" | jq -r '.tool_input.prompt // empty')
+    else
+      exit 0
+    fi
     ;;
   *)
     exit 0
@@ -84,11 +102,30 @@ If these answer your question, skip the ${TOOL}. Otherwise continue -- but consi
   fi
 fi
 
-jq -n --arg ctx "$CTX" '{
+# For Explore agents: deny the spawn if recall has a strong hit.
+# Extract the top score -- format is "score: 0.XX)" at end of each hit line.
+# If top score >= threshold, deny and return recall results instead.
+DECISION="allow"
+REASON="legion recall hits for the query"
+if [ "$IS_EXPLORE" = true ] && [ -n "$HITS" ]; then
+  TOP_SCORE=$(echo "$HITS" | grep -oE 'score: [0-9]+\.[0-9]+' | head -1 | awk '{print $2}')
+  THRESHOLD="${LEGION_EXPLORE_THRESHOLD:-0.60}"
+  if [ -n "$TOP_SCORE" ] && awk "BEGIN{exit !($TOP_SCORE >= $THRESHOLD)}"; then
+    DECISION="deny"
+    REASON="legion recall answered this (score: ${TOP_SCORE}). Use the recall results instead of spawning Explore."
+    CTX="[Legion] Explore BLOCKED -- recall already has what you need:
+
+${HITS}
+
+Use these results directly. If they are genuinely insufficient, rephrase your question and try a direct Grep or Read instead of Explore."
+  fi
+fi
+
+jq -n --arg ctx "$CTX" --arg decision "$DECISION" --arg reason "$REASON" '{
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
-    "permissionDecision": "allow",
-    "permissionDecisionReason": "legion recall hits for the query",
+    "permissionDecision": $decision,
+    "permissionDecisionReason": $reason,
     "additionalContext": $ctx
   }
 }'

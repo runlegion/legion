@@ -170,9 +170,12 @@ fn cwd_json(cwd: &Path) -> String {
 }
 
 /// Build stdin JSON for recall-first.sh: cwd + tool metadata.
-fn grep_tool_json(cwd: &Path) -> String {
+/// Uses WebFetch (not Grep) because recall-first.sh no longer handles Grep --
+/// pre-grep-recall.sh does. The prompt field must be >= 4 chars to pass the
+/// trivial-query skip.
+fn webfetch_tool_json(cwd: &Path) -> String {
     format!(
-        r#"{{"cwd": "{}", "tool_name": "Grep", "tool_input": {{"pattern": "some-query-longer-than-four"}}}}"#,
+        r#"{{"cwd": "{}", "tool_name": "WebFetch", "tool_input": {{"url": "https://example.com", "prompt": "some query longer than four chars"}}}}"#,
         cwd.display()
     )
 }
@@ -211,8 +214,8 @@ enum Corruption {
 enum InputKind {
     /// `{"cwd": "..."}` -- session-start, bullpen-check, post-compact.
     Cwd,
-    /// `{"cwd": "...", "tool_name": "Grep", "tool_input": {"pattern": "..."}}` -- recall-first.
-    Grep,
+    /// `{"cwd": "...", "tool_name": "WebFetch", "tool_input": {...}}` -- recall-first.
+    WebFetch,
 }
 
 /// Build the hook test environment inside `temp`, applying the requested
@@ -243,7 +246,7 @@ fn assert_hook_warns(hook: &str, corruption: Corruption, input: InputKind) {
 
     let stdin = match input {
         InputKind::Cwd => cwd_json(&cwd),
-        InputKind::Grep => grep_tool_json(&cwd),
+        InputKind::WebFetch => webfetch_tool_json(&cwd),
     };
 
     let (stdout, _stderr, exit) = run_hook(hook, &plugin_root, &data_dir, &stdin);
@@ -259,7 +262,7 @@ fn session_start_warns_on_corrupted_schema() {
 
 #[test]
 fn recall_first_warns_on_corrupted_schema() {
-    assert_hook_warns("recall-first.sh", Corruption::Schema, InputKind::Grep);
+    assert_hook_warns("recall-first.sh", Corruption::Schema, InputKind::WebFetch);
 }
 
 #[test]
@@ -325,7 +328,7 @@ fn recall_first_warns_on_missing_data_dir() {
     assert_hook_warns(
         "recall-first.sh",
         Corruption::MissingDataDir,
-        InputKind::Grep,
+        InputKind::WebFetch,
     );
 }
 

@@ -833,6 +833,27 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Retrieve latest reflections matching a specific domain for a repository.
+    ///
+    /// Bypasses search entirely -- pure SQL lookup by domain. Used for
+    /// reserved domains like `identity` and `snooze` that get injected
+    /// on every session start without needing a search query.
+    pub fn get_reflections_by_domain(
+        &self,
+        repo: &str,
+        domain: &str,
+        limit: usize,
+    ) -> Result<Vec<Reflection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE repo = ?1 AND domain = ?2 ORDER BY created_at DESC LIMIT ?3",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![repo, domain, limit], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     /// Retrieve active (non-archived) bullpen posts, ordered newest first.
     pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
