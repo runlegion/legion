@@ -1191,12 +1191,13 @@ enum QualityGateAction {
 enum WatchAction {
     /// Add a working directory to watch.toml (idempotent by canonicalized path)
     Add {
-        /// Display name for this repo (used for cooldown tracking)
-        #[arg(long)]
-        name: String,
-
         /// Absolute or relative path to the working directory
         path: std::path::PathBuf,
+
+        /// Display name for this repo (used for cooldown tracking).
+        /// Defaults to the basename of the resolved path.
+        #[arg(long)]
+        name: Option<String>,
 
         /// Signal recipient name. Signals addressed to this value (e.g., @my-agent)
         /// will wake this repo. Defaults to --name when absent.
@@ -3620,18 +3621,49 @@ fn run() -> error::Result<()> {
                     );
                     watch::run(&base)?;
                 }
-                Some(WatchAction::Add { name, path, agent }) => {
+                Some(WatchAction::Add { path, name, agent }) => {
                     let config_path = base.join("watch.toml");
-                    let added =
-                        watch::add_repo_to_config(&config_path, &name, &path, agent.as_deref())?;
+                    let effective_name = match name {
+                        Some(n) => n,
+                        None => {
+                            let canonical = path.canonicalize().map_err(|e| {
+                                error::LegionError::WatchConfig(format!(
+                                    "path {} cannot be resolved: {}",
+                                    path.display(),
+                                    e
+                                ))
+                            })?;
+                            canonical
+                                .file_name()
+                                .and_then(std::ffi::OsStr::to_str)
+                                .map(str::to_string)
+                                .ok_or_else(|| {
+                                    error::LegionError::WatchConfig(format!(
+                                        "cannot derive repo name from path {}",
+                                        path.display()
+                                    ))
+                                })?
+                        }
+                    };
+                    let added = watch::add_repo_to_config(
+                        &config_path,
+                        &effective_name,
+                        &path,
+                        agent.as_deref(),
+                    )?;
                     if added {
                         let agent_note = agent
                             .as_deref()
                             .map(|a| format!(" (agent: {})", a))
                             .unwrap_or_default();
-                        println!("added: {} -> {}{}", name, path.display(), agent_note);
+                        println!(
+                            "added: {} -> {}{}",
+                            effective_name,
+                            path.display(),
+                            agent_note
+                        );
                     } else {
-                        println!("already present: {}", name);
+                        println!("already present: {}", effective_name);
                     }
                 }
                 Some(WatchAction::Remove { name }) => {

@@ -3518,6 +3518,39 @@ fn watch_add_creates_entry() {
 }
 
 #[test]
+fn watch_add_derives_name_from_path_basename() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir_parent = tempfile::tempdir().unwrap();
+    let workdir = workdir_parent.path().join("my-project");
+    std::fs::create_dir(&workdir).unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["watch", "add", workdir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "watch add (no --name) failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("my-project"),
+        "expected derived name 'my-project' in output: {stdout}"
+    );
+
+    let listed = legion_cmd(dir.path())
+        .args(["watch", "list"])
+        .output()
+        .unwrap();
+    let listed_stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed_stdout.contains("my-project"),
+        "expected 'my-project' in list output: {listed_stdout}"
+    );
+}
+
+#[test]
 fn watch_add_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let workdir = tempfile::tempdir().unwrap();
