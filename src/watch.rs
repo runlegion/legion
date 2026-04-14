@@ -25,6 +25,14 @@ pub struct WatchRepoConfig {
     pub agent: Option<String>,
 }
 
+impl WatchRepoConfig {
+    /// Recipient name used for signal matching. Prefers `agent` when set, falls
+    /// back to `name`. Centralizes the fallback rule so callers never recompute it.
+    pub fn recipient(&self) -> &str {
+        self.agent.as_deref().unwrap_or(&self.name)
+    }
+}
+
 /// Top-level watch configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WatchConfig {
@@ -185,13 +193,18 @@ pub fn add_repo_to_config(
 
     let mut config = read_or_default(path)?;
 
-    // Idempotent check: already present if the canonicalized workdir matches.
-    let already_present = config
-        .repos
-        .iter()
-        .any(|r| r.workdir == canonical_str || r.name == name);
-    if already_present {
+    // Idempotent by canonicalized path. A repeated add for the same path is a no-op.
+    if config.repos.iter().any(|r| r.workdir == canonical_str) {
         return Ok(false);
+    }
+
+    // Name collision with a different path is an error, not a silent no-op,
+    // so the caller sees the conflict instead of a misleading "already present".
+    if let Some(existing) = config.repos.iter().find(|r| r.name == name) {
+        return Err(LegionError::WatchConfig(format!(
+            "name '{}' already in use by {}",
+            name, existing.workdir
+        )));
     }
 
     config.repos.push(WatchRepoConfig {
@@ -227,12 +240,7 @@ pub fn remove_repo_from_config(path: &Path, name: &str) -> Result<bool> {
 ///
 /// Returns an empty vec if the file does not exist.
 pub fn list_repos_in_config(path: &Path) -> Result<Vec<WatchRepoConfig>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let contents = std::fs::read_to_string(path)?;
-    let config: WatchConfig = toml::from_str(&contents)?;
-    Ok(config.repos)
+    Ok(read_or_default(path)?.repos)
 }
 
 /// Load watch config from the given path. Returns a default config if the
@@ -577,9 +585,7 @@ pub fn poll_cycle(
 
     // Check for auto-unblock opportunities from recent signals
     for repo in &config.repos {
-        // Prefer the agent name for signal lookup when configured.
-        let recipient = repo.agent.as_deref().unwrap_or(&repo.name);
-        if let Ok(signals) = find_pending_signals(db, recipient, since) {
+        if let Ok(signals) = find_pending_signals(db, repo.recipient(), since) {
             check_auto_unblock(db, &signals);
         }
     }
@@ -589,8 +595,7 @@ pub fn poll_cycle(
             continue;
         }
 
-        // Prefer the agent name for signal lookup when configured.
-        let recipient = repo.agent.as_deref().unwrap_or(&repo.name);
+        let recipient = repo.recipient();
         let signals = find_pending_signals(db, recipient, since)?;
         if signals.is_empty() {
             continue;
@@ -1093,7 +1098,7 @@ workdir = "/nonexistent/path/that/does/not/exist"
     }
 
     #[test]
-    fn add_repo_is_idempotent_by_name() {
+    fn add_repo_is_idempotent_by_canonical_path() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("watch.toml");
         let workdir = dir.path().to_path_buf();
@@ -1102,10 +1107,45 @@ workdir = "/nonexistent/path/that/does/not/exist"
         assert!(first);
 
         let second = add_repo_to_config(&config_path, "rafters", &workdir, None).expect("second");
-        assert!(!second, "duplicate by name should return false");
+        assert!(!second, "duplicate by canonical path should return false");
 
         let repos = list_repos_in_config(&config_path).expect("list");
         assert_eq!(repos.len(), 1, "should still have only one entry");
+    }
+
+    #[test]
+    fn add_repo_errors_on_name_collision_with_different_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir_a = dir.path().join("a");
+        let workdir_b = dir.path().join("b");
+        std::fs::create_dir_all(&workdir_a).expect("create a");
+        std::fs::create_dir_all(&workdir_b).expect("create b");
+
+        add_repo_to_config(&config_path, "foo", &workdir_a, None).expect("add a");
+        let err = add_repo_to_config(&config_path, "foo", &workdir_b, None).unwrap_err();
+        assert!(
+            err.to_string().contains("already in use"),
+            "expected 'already in use' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn watch_repo_config_recipient_prefers_agent_over_name() {
+        let repo_with_agent = WatchRepoConfig {
+            name: "ledger".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: Some("platform".to_string()),
+        };
+        assert_eq!(repo_with_agent.recipient(), "platform");
+
+        let repo_without_agent = WatchRepoConfig {
+            name: "legion".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: None,
+        };
+        assert_eq!(repo_without_agent.recipient(), "legion");
     }
 
     #[test]
