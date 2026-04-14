@@ -228,7 +228,18 @@ pub fn add_repo_to_config(
             e
         ))
     })?;
-    let canonical_str = canonical.to_string_lossy().into_owned();
+    // TOML is UTF-8. A lossy conversion would replace non-UTF-8 bytes with U+FFFD,
+    // silently corrupting the stored path and breaking idempotency (two distinct
+    // paths could collide on the same lossy string).
+    let canonical_str = canonical
+        .to_str()
+        .ok_or_else(|| {
+            LegionError::WatchConfig(format!(
+                "workdir path is not valid UTF-8 and cannot be stored in watch.toml: {}",
+                canonical.display()
+            ))
+        })?
+        .to_string();
 
     let mut config = read_or_default(path)?;
 
@@ -643,7 +654,16 @@ pub fn poll_cycle(
         }
 
         let recipient = repo.recipient();
-        let signals = find_pending_signals(db, &repo.name, recipient, since)?;
+        let signals = match find_pending_signals(db, &repo.name, recipient, since) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "[legion watch] signal lookup failed for {}: {}",
+                    repo.name, e
+                );
+                continue;
+            }
+        };
         if signals.is_empty() {
             continue;
         }
@@ -1309,6 +1329,83 @@ github = "rafters-studio/rafters"
         assert!(
             contents.contains(r#"worksource = "github""#),
             "legion's worksource field was stripped: {contents}"
+        );
+    }
+
+    #[test]
+    fn add_repo_preserves_nested_table_extras_on_existing_entries() {
+        // Regression guard: `#[serde(flatten)]` + `toml::Table` must round-trip
+        // NESTED tables, not just scalars. If the serializer ever emits a
+        // trailing scalar after `[repos.review]`, TOML would re-parse the scalar
+        // as a child of `repos.review`, silently reshaping the config.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+
+        let seed = r#"
+[[repos]]
+name = "legion"
+workdir = "/tmp"
+agent = "platform"
+
+[repos.review]
+reviewer = "vault"
+auto = true
+
+[repos.worksource]
+kind = "github"
+repo = "runlegion/legion"
+"#;
+        std::fs::write(&config_path, seed).expect("seed config");
+
+        // Force read-modify-write by adding an unrelated new repo.
+        let new_workdir = dir.path().join("newrepo");
+        std::fs::create_dir_all(&new_workdir).expect("mkdir");
+        add_repo_to_config(&config_path, "newrepo", &new_workdir, None).expect("add");
+
+        let repos = list_repos_in_config(&config_path).expect("list");
+        let legion = repos
+            .iter()
+            .find(|r| r.name == "legion")
+            .expect("legion entry survives");
+
+        // agent MUST still be "platform" (not swallowed into a nested table).
+        assert_eq!(
+            legion.agent.as_deref(),
+            Some("platform"),
+            "agent was reshaped by nested-table round-trip"
+        );
+
+        // Both nested tables must still be present with their original fields.
+        let review = legion
+            .extra
+            .get("review")
+            .and_then(|v| v.as_table())
+            .expect("review table survives");
+        assert_eq!(
+            review.get("reviewer").and_then(|v| v.as_str()),
+            Some("vault"),
+            "review.reviewer was stripped"
+        );
+        assert_eq!(
+            review.get("auto").and_then(|v| v.as_bool()),
+            Some(true),
+            "review.auto was stripped"
+        );
+
+        let worksource = legion
+            .extra
+            .get("worksource")
+            .and_then(|v| v.as_table())
+            .expect("worksource table survives");
+        assert_eq!(
+            worksource.get("kind").and_then(|v| v.as_str()),
+            Some("github"),
+            "worksource.kind was stripped"
+        );
+        assert_eq!(
+            worksource.get("repo").and_then(|v| v.as_str()),
+            Some("runlegion/legion"),
+            "worksource.repo was stripped"
         );
     }
 

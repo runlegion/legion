@@ -3652,8 +3652,13 @@ fn run() -> error::Result<()> {
                         agent.as_deref(),
                     )?;
                     if added {
+                        // Apply the same trim-empty rule `add_repo_to_config` uses so the
+                        // confirmation output matches what was actually persisted -- a raw
+                        // `--agent "  "` must not display as `(agent:   )` while None is stored.
                         let agent_note = agent
                             .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
                             .map(|a| format!(" (agent: {})", a))
                             .unwrap_or_default();
                         println!(
