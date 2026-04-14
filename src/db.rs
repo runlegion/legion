@@ -1071,10 +1071,15 @@ impl Database {
     pub fn get_unhandled_signals_for_repo(
         &self,
         repo_name: &str,
+        recipient: &str,
         since: Option<&str>,
     ) -> Result<Vec<Reflection>> {
-        let pattern_start = format!("@{} %", repo_name);
-        let pattern_mid = format!("%@{} %", repo_name);
+        // `recipient` drives the @mention pattern matching (this is the agent name
+        // when configured, otherwise the repo name). `repo_name` is the stable key
+        // for the watch_handled table and for self-signal exclusion -- signals are
+        // stored by their source repo, not by any agent override.
+        let pattern_start = format!("@{} %", recipient);
+        let pattern_mid = format!("%@{} %", recipient);
         let pattern_all_start = "@all %";
         let pattern_all_mid = "%@all %";
         let since_clause = if since.is_some() {

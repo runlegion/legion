@@ -4,7 +4,7 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 use chrono::Timelike;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db::Database;
 use crate::error::{LegionError, Result};
@@ -14,14 +14,39 @@ use crate::signal;
 // -- Config ------------------------------------------------------------------
 
 /// A watched repository entry from watch.toml.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WatchRepoConfig {
     pub name: String,
     pub workdir: String,
+    /// The recipient name used for signal matching. When set, signals addressed
+    /// to this value (e.g., `@my-agent`) wake this repo. Falls back to `name`
+    /// when absent, preserving backward compatibility with existing watch.toml files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+
+    /// Any additional per-repo fields the struct does not model explicitly
+    /// (e.g., `github`, `worksource`, `review`). These survive a read-modify-write
+    /// cycle so CRUD on one entry never strips integration config on another.
+    #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
+    pub extra: toml::Table,
+}
+
+impl WatchRepoConfig {
+    /// Recipient name used for signal matching. Prefers `agent` when set to a
+    /// non-empty value, falls back to `name`. Empty or whitespace-only `agent`
+    /// values are treated as absent so a hand-edited `agent = ""` cannot silently
+    /// route to nothing. Centralizes the fallback rule so callers never recompute it.
+    pub fn recipient(&self) -> &str {
+        self.agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.name)
+    }
 }
 
 /// Top-level watch configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WatchConfig {
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
@@ -35,11 +60,11 @@ pub struct WatchConfig {
     pub stagger_secs: u64,
 
     /// Work hours start (0-23, local time). No cooldown during work hours.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_hours_start: Option<u8>,
 
     /// Work hours end (0-23, local time). No cooldown during work hours.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_hours_end: Option<u8>,
 
     /// Pressure threshold (0-100). Spawning is skipped when exceeded.
@@ -131,6 +156,131 @@ pub fn rename_in_config(path: &Path, from: &str, to: &str) -> Result<bool> {
     let updated = contents.replace(&needle, &replacement);
     std::fs::write(path, updated)?;
     Ok(true)
+}
+
+/// Read the current config from disk, or return a fresh default if the file
+/// does not exist. Used by add/remove to do a read-modify-write.
+fn read_or_default(path: &Path) -> Result<WatchConfig> {
+    if !path.exists() {
+        return Ok(WatchConfig::default());
+    }
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| LegionError::WatchConfig(format!("cannot read {}: {}", path.display(), e)))?;
+    let config: WatchConfig = toml::from_str(&contents)
+        .map_err(|e| LegionError::WatchConfig(format!("malformed {}: {}", path.display(), e)))?;
+    Ok(config)
+}
+
+/// Write a `WatchConfig` to disk as TOML.
+///
+/// Creates parent directories if they do not exist.
+fn write_config(path: &Path, config: &WatchConfig) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            LegionError::WatchConfig(format!(
+                "cannot create parent dir for {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+    }
+    let toml_str = toml::to_string_pretty(config).map_err(|e| {
+        LegionError::WatchConfig(format!(
+            "cannot serialize watch config for {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+    std::fs::write(path, toml_str)
+        .map_err(|e| LegionError::WatchConfig(format!("cannot write {}: {}", path.display(), e)))?;
+    Ok(())
+}
+
+/// Add a repo entry to watch.toml. Idempotent by canonicalized path.
+///
+/// Returns `true` if a new entry was written, `false` if the path was already
+/// present (matched by canonicalized workdir). Errors if `workdir` is not an
+/// existing directory.
+pub fn add_repo_to_config(
+    path: &Path,
+    name: &str,
+    workdir: &Path,
+    agent: Option<&str>,
+) -> Result<bool> {
+    if !workdir.is_dir() {
+        return Err(LegionError::WatchConfig(format!(
+            "workdir is not a directory: {}",
+            workdir.display()
+        )));
+    }
+
+    // Trim empty/whitespace-only agent values to None so they never round-trip
+    // to disk or bypass the recipient() fallback.
+    let normalized_agent = agent
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let canonical = std::fs::canonicalize(workdir).map_err(|e| {
+        LegionError::WatchConfig(format!(
+            "cannot resolve workdir {}: {}",
+            workdir.display(),
+            e
+        ))
+    })?;
+    let canonical_str = canonical.to_string_lossy().into_owned();
+
+    let mut config = read_or_default(path)?;
+
+    // Idempotent by canonicalized path. A repeated add for the same path is a no-op.
+    if config.repos.iter().any(|r| r.workdir == canonical_str) {
+        return Ok(false);
+    }
+
+    // Name collision with a different path is an error, not a silent no-op,
+    // so the caller sees the conflict instead of a misleading "already present".
+    if let Some(existing) = config.repos.iter().find(|r| r.name == name) {
+        return Err(LegionError::WatchConfig(format!(
+            "name '{}' already in use by {}",
+            name, existing.workdir
+        )));
+    }
+
+    config.repos.push(WatchRepoConfig {
+        name: name.to_string(),
+        workdir: canonical_str,
+        agent: normalized_agent,
+        extra: toml::Table::new(),
+    });
+
+    write_config(path, &config)?;
+    Ok(true)
+}
+
+/// Remove a repo entry from watch.toml by name.
+///
+/// Returns `true` if an entry was removed, `false` if no entry matched.
+pub fn remove_repo_from_config(path: &Path, name: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let mut config = read_or_default(path)?;
+    let before = config.repos.len();
+    config.repos.retain(|r| r.name != name);
+    let removed = config.repos.len() < before;
+
+    if removed {
+        write_config(path, &config)?;
+    }
+    Ok(removed)
+}
+
+/// List all repo entries currently in watch.toml.
+///
+/// Returns an empty vec if the file does not exist.
+pub fn list_repos_in_config(path: &Path) -> Result<Vec<WatchRepoConfig>> {
+    Ok(read_or_default(path)?.repos)
 }
 
 /// Load watch config from the given path. Returns a default config if the
@@ -293,9 +443,10 @@ impl CooldownTracker {
 pub fn find_pending_signals(
     db: &Database,
     repo_name: &str,
+    recipient: &str,
     since: Option<&str>,
 ) -> Result<Vec<(String, String, String)>> {
-    let reflections = db.get_unhandled_signals_for_repo(repo_name, since)?;
+    let reflections = db.get_unhandled_signals_for_repo(repo_name, recipient, since)?;
 
     let mut signals: Vec<(String, String, String)> = Vec::new();
     for r in reflections {
@@ -475,8 +626,14 @@ pub fn poll_cycle(
 
     // Check for auto-unblock opportunities from recent signals
     for repo in &config.repos {
-        if let Ok(signals) = find_pending_signals(db, &repo.name, since) {
-            check_auto_unblock(db, &signals);
+        match find_pending_signals(db, &repo.name, repo.recipient(), since) {
+            Ok(signals) => {
+                check_auto_unblock(db, &signals);
+            }
+            Err(e) => eprintln!(
+                "[legion watch] auto-unblock signal lookup failed for {}: {}",
+                repo.name, e
+            ),
         }
     }
 
@@ -485,7 +642,8 @@ pub fn poll_cycle(
             continue;
         }
 
-        let signals = find_pending_signals(db, &repo.name, since)?;
+        let recipient = repo.recipient();
+        let signals = find_pending_signals(db, &repo.name, recipient, since)?;
         if signals.is_empty() {
             continue;
         }
@@ -496,7 +654,7 @@ pub fn poll_cycle(
             repo.name
         );
 
-        let prompt = build_wake_prompt(&repo.name, &signals);
+        let prompt = build_wake_prompt(recipient, &signals);
 
         if spawned > 0 && config.stagger_secs > 0 {
             std::thread::sleep(Duration::from_secs(config.stagger_secs));
@@ -507,11 +665,12 @@ pub fn poll_cycle(
                 // Mark ALL signals as handled for THIS repo (per-repo tracking).
                 // This includes @all broadcasts -- each repo marks its own copy,
                 // so other repos still see the signal on their next poll.
+                // Keyed by `repo.name` (stable) so future `agent=` edits do not replay.
                 for (id, _, _) in &signals {
-                    if db.mark_signal_handled_for_repo(id, &repo.name).is_err() {
+                    if let Err(e) = db.mark_signal_handled_for_repo(id, &repo.name) {
                         eprintln!(
-                            "[legion watch] failed to mark signal {} as handled for {}",
-                            id, repo.name
+                            "[legion watch] failed to mark signal {} as handled for {}: {}",
+                            id, repo.name, e
                         );
                     }
                 }
@@ -712,7 +871,7 @@ workdir = "/tmp"
         db.insert_reflection("rafters", "@all announce: shipped", "team")
             .expect("insert broadcast");
 
-        let signals = find_pending_signals(&db, "legion", None).expect("find signals");
+        let signals = find_pending_signals(&db, "legion", "legion", None).expect("find signals");
         assert_eq!(signals.len(), 2);
 
         // Verify the targeted signal is found
@@ -742,8 +901,9 @@ workdir = "/tmp"
         .expect("insert multi-recipient");
 
         // Both shingle and huttspawn should see it
-        let shingle = find_pending_signals(&db, "shingle", None).expect("shingle");
-        let huttspawn = find_pending_signals(&db, "huttspawn", None).expect("huttspawn");
+        let shingle = find_pending_signals(&db, "shingle", "shingle", None).expect("shingle");
+        let huttspawn =
+            find_pending_signals(&db, "huttspawn", "huttspawn", None).expect("huttspawn");
         assert_eq!(
             shingle.len(),
             1,
@@ -756,11 +916,11 @@ workdir = "/tmp"
         );
 
         // legion (sender) should NOT see it
-        let legion = find_pending_signals(&db, "legion", None).expect("legion");
+        let legion = find_pending_signals(&db, "legion", "legion", None).expect("legion");
         assert!(legion.is_empty(), "sender should not see own signal");
 
         // unrelated repo should NOT see it
-        let kelex = find_pending_signals(&db, "kelex", None).expect("kelex");
+        let kelex = find_pending_signals(&db, "kelex", "kelex", None).expect("kelex");
         assert!(kelex.is_empty(), "unmentioned repo should not see signal");
     }
 
@@ -772,8 +932,37 @@ workdir = "/tmp"
         db.insert_reflection("legion", "@legion review:approved", "team")
             .expect("insert self-signal");
 
-        let signals = find_pending_signals(&db, "legion", None).expect("find signals");
+        let signals = find_pending_signals(&db, "legion", "legion", None).expect("find signals");
         assert!(signals.is_empty(), "self-signals should be excluded");
+    }
+
+    #[test]
+    fn find_pending_signals_with_agent_excludes_self_signals_via_repo_name() {
+        // Regression guard: when agent != name (e.g., platform agent watches ledger repo),
+        // a signal posted FROM the ledger repo targeting @platform must still be excluded
+        // by the repo_name key, not by the recipient. Previously only recipient was passed,
+        // so `r.repo != 'platform'` vs. `r.repo = 'ledger'` produced a self-wake.
+        let (db, _index, _dir) = test_storage();
+
+        db.insert_reflection("ledger", "@platform review:approved", "team")
+            .expect("insert self-signal");
+
+        let signals = find_pending_signals(&db, "ledger", "platform", None).expect("find signals");
+        assert!(
+            signals.is_empty(),
+            "self-signals must be excluded by repo_name, not by recipient"
+        );
+    }
+
+    #[test]
+    fn find_pending_signals_with_agent_accepts_signals_from_other_repos() {
+        let (db, _index, _dir) = test_storage();
+
+        db.insert_reflection("kelex", "@platform review:approved", "team")
+            .expect("insert external signal");
+
+        let signals = find_pending_signals(&db, "ledger", "platform", None).expect("find signals");
+        assert_eq!(signals.len(), 1, "external signal to agent should be found");
     }
 
     #[test]
@@ -783,7 +972,7 @@ workdir = "/tmp"
         db.insert_reflection("kelex", "@legion review:approved", "team")
             .expect("insert signal");
 
-        let signals = find_pending_signals(&db, "legion", None).expect("first poll");
+        let signals = find_pending_signals(&db, "legion", "legion", None).expect("first poll");
         assert_eq!(signals.len(), 1);
 
         // Mark as handled for legion
@@ -792,7 +981,7 @@ workdir = "/tmp"
             .expect("mark handled");
 
         // Should not appear again for legion
-        let signals = find_pending_signals(&db, "legion", None).expect("second poll");
+        let signals = find_pending_signals(&db, "legion", "legion", None).expect("second poll");
         assert!(signals.is_empty());
     }
 
@@ -827,6 +1016,8 @@ workdir = "/tmp"
             repos: vec![WatchRepoConfig {
                 name: "legion".to_string(),
                 workdir: "/tmp".to_string(),
+                agent: None,
+                extra: toml::Table::new(),
             }],
             ..WatchConfig::default()
         };
@@ -853,8 +1044,9 @@ workdir = "/tmp"
             .expect("insert broadcast");
 
         // Both legion and rafters should see it
-        let legion_signals = find_pending_signals(&db, "legion", None).expect("legion");
-        let rafters_signals = find_pending_signals(&db, "rafters", None).expect("rafters");
+        let legion_signals = find_pending_signals(&db, "legion", "legion", None).expect("legion");
+        let rafters_signals =
+            find_pending_signals(&db, "rafters", "rafters", None).expect("rafters");
         assert_eq!(legion_signals.len(), 1);
         assert_eq!(rafters_signals.len(), 1);
 
@@ -865,14 +1057,16 @@ workdir = "/tmp"
         }
 
         // legion should NOT see it anymore
-        let legion_after = find_pending_signals(&db, "legion", None).expect("legion after");
+        let legion_after =
+            find_pending_signals(&db, "legion", "legion", None).expect("legion after");
         assert!(
             legion_after.is_empty(),
             "legion should not see broadcast after handling"
         );
 
         // rafters should STILL see the broadcast
-        let rafters_after = find_pending_signals(&db, "rafters", None).expect("rafters after");
+        let rafters_after =
+            find_pending_signals(&db, "rafters", "rafters", None).expect("rafters after");
         assert_eq!(
             rafters_after.len(),
             1,
@@ -886,7 +1080,8 @@ workdir = "/tmp"
         }
 
         // Now rafters should not see it either
-        let rafters_final = find_pending_signals(&db, "rafters", None).expect("rafters final");
+        let rafters_final =
+            find_pending_signals(&db, "rafters", "rafters", None).expect("rafters final");
         assert!(
             rafters_final.is_empty(),
             "rafters should not see broadcast after handling"
@@ -952,5 +1147,281 @@ workdir = "/nonexistent/path/that/does/not/exist"
 
         // Should succeed because the process is not running
         acquire_pid_lock(&lock_path).expect("acquire lock over stale");
+    }
+
+    // -- Config management tests -----------------------------------------------
+
+    #[test]
+    fn add_repo_creates_file_when_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir = dir.path().to_path_buf();
+
+        let added = add_repo_to_config(&config_path, "rafters", &workdir, None).expect("add");
+        assert!(added, "should report added=true for new entry");
+        assert!(config_path.exists(), "config file should be created");
+
+        let repos = list_repos_in_config(&config_path).expect("list");
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "rafters");
+        assert!(repos[0].agent.is_none());
+    }
+
+    #[test]
+    fn add_repo_with_agent_stores_agent_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir = dir.path().to_path_buf();
+
+        add_repo_to_config(&config_path, "legion", &workdir, Some("my-agent")).expect("add");
+
+        let repos = list_repos_in_config(&config_path).expect("list");
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].agent.as_deref(), Some("my-agent"));
+    }
+
+    #[test]
+    fn add_repo_is_idempotent_by_canonical_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir = dir.path().to_path_buf();
+
+        let first = add_repo_to_config(&config_path, "rafters", &workdir, None).expect("first");
+        assert!(first);
+
+        let second = add_repo_to_config(&config_path, "rafters", &workdir, None).expect("second");
+        assert!(!second, "duplicate by canonical path should return false");
+
+        let repos = list_repos_in_config(&config_path).expect("list");
+        assert_eq!(repos.len(), 1, "should still have only one entry");
+    }
+
+    #[test]
+    fn add_repo_errors_on_name_collision_with_different_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir_a = dir.path().join("a");
+        let workdir_b = dir.path().join("b");
+        std::fs::create_dir_all(&workdir_a).expect("create a");
+        std::fs::create_dir_all(&workdir_b).expect("create b");
+
+        add_repo_to_config(&config_path, "foo", &workdir_a, None).expect("add a");
+        let err = add_repo_to_config(&config_path, "foo", &workdir_b, None).unwrap_err();
+        assert!(
+            err.to_string().contains("already in use"),
+            "expected 'already in use' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn watch_repo_config_recipient_prefers_agent_over_name() {
+        let repo_with_agent = WatchRepoConfig {
+            name: "ledger".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: Some("platform".to_string()),
+            extra: toml::Table::new(),
+        };
+        assert_eq!(repo_with_agent.recipient(), "platform");
+
+        let repo_without_agent = WatchRepoConfig {
+            name: "legion".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: None,
+            extra: toml::Table::new(),
+        };
+        assert_eq!(repo_without_agent.recipient(), "legion");
+    }
+
+    #[test]
+    fn watch_repo_config_recipient_treats_empty_agent_as_absent() {
+        // Hand-edited watch.toml may set agent = "" or all-whitespace.
+        // recipient() must not return empty -- that would route no signals.
+        let empty = WatchRepoConfig {
+            name: "fallback".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: Some("".to_string()),
+            extra: toml::Table::new(),
+        };
+        assert_eq!(empty.recipient(), "fallback");
+
+        let whitespace = WatchRepoConfig {
+            name: "fallback".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: Some("   ".to_string()),
+            extra: toml::Table::new(),
+        };
+        assert_eq!(whitespace.recipient(), "fallback");
+    }
+
+    #[test]
+    fn add_repo_normalizes_empty_agent_to_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir = dir.path().to_path_buf();
+
+        add_repo_to_config(&config_path, "legion", &workdir, Some("")).expect("add");
+        let repos = list_repos_in_config(&config_path).expect("list");
+        assert_eq!(repos.len(), 1);
+        assert!(
+            repos[0].agent.is_none(),
+            "empty --agent should be normalized to None, not stored as Some(\"\")"
+        );
+    }
+
+    #[test]
+    fn add_repo_preserves_unknown_fields_on_existing_entries() {
+        // Regression guard: add/remove must NOT strip fields the struct does not
+        // model explicitly (github, worksource, review, etc). A silent round-trip
+        // that drops these breaks `legion pr create` for every repo.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+
+        let seed = r#"
+[[repos]]
+name = "legion"
+workdir = "/tmp"
+github = "runlegion/legion"
+worksource = "github"
+
+[[repos]]
+name = "rafters"
+workdir = "/tmp"
+github = "rafters-studio/rafters"
+"#;
+        std::fs::write(&config_path, seed).expect("seed config");
+
+        // Add a new repo -- triggers full read-modify-write.
+        let new_workdir = dir.path().join("newrepo");
+        std::fs::create_dir_all(&new_workdir).expect("mkdir");
+        add_repo_to_config(&config_path, "newrepo", &new_workdir, None).expect("add");
+
+        // Both original repos must still carry their github field.
+        let contents = std::fs::read_to_string(&config_path).expect("reread");
+        assert!(
+            contents.contains(r#"github = "runlegion/legion""#),
+            "legion's github field was stripped: {contents}"
+        );
+        assert!(
+            contents.contains(r#"github = "rafters-studio/rafters""#),
+            "rafters's github field was stripped: {contents}"
+        );
+        assert!(
+            contents.contains(r#"worksource = "github""#),
+            "legion's worksource field was stripped: {contents}"
+        );
+    }
+
+    #[test]
+    fn add_repo_rejects_nonexistent_workdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let bad_path = std::path::Path::new("/nonexistent/path/that/does/not/exist");
+
+        let err = add_repo_to_config(&config_path, "test", bad_path, None).unwrap_err();
+        assert!(
+            err.to_string().contains("not a directory"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn remove_repo_removes_existing_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+
+        // Use two distinct sub-directories so the idempotency check passes.
+        let workdir_a = dir.path().join("a");
+        let workdir_b = dir.path().join("b");
+        std::fs::create_dir_all(&workdir_a).expect("create a");
+        std::fs::create_dir_all(&workdir_b).expect("create b");
+
+        add_repo_to_config(&config_path, "rafters", &workdir_a, None).expect("add rafters");
+        add_repo_to_config(&config_path, "legion", &workdir_b, None).expect("add legion");
+
+        let removed = remove_repo_from_config(&config_path, "rafters").expect("remove");
+        assert!(removed);
+
+        let repos = list_repos_in_config(&config_path).expect("list");
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "legion");
+    }
+
+    #[test]
+    fn remove_repo_returns_false_when_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir = dir.path().to_path_buf();
+
+        add_repo_to_config(&config_path, "rafters", &workdir, None).expect("add");
+
+        let removed = remove_repo_from_config(&config_path, "nonexistent").expect("remove");
+        assert!(!removed, "unknown name should return false");
+    }
+
+    #[test]
+    fn remove_repo_returns_false_when_file_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+
+        let removed = remove_repo_from_config(&config_path, "anything").expect("remove");
+        assert!(!removed);
+    }
+
+    #[test]
+    fn list_repos_returns_empty_when_file_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+
+        let repos = list_repos_in_config(&config_path).expect("list");
+        assert!(repos.is_empty());
+    }
+
+    #[test]
+    fn add_repo_stores_canonicalized_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir = dir.path().to_path_buf();
+        let canonical = std::fs::canonicalize(&workdir).expect("canonicalize");
+
+        add_repo_to_config(&config_path, "test", &workdir, None).expect("add");
+
+        let repos = list_repos_in_config(&config_path).expect("list");
+        // The stored path must be the canonicalized form.
+        assert_eq!(
+            repos[0].workdir,
+            canonical.to_string_lossy().as_ref(),
+            "workdir should be canonical"
+        );
+    }
+
+    #[test]
+    fn existing_config_without_agent_field_deserializes_cleanly() {
+        // Ensures backward compatibility: old watch.toml files without agent= still parse.
+        let toml_str = r#"
+[[repos]]
+name = "rafters"
+workdir = "/tmp"
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(config.repos[0].agent, None);
+    }
+
+    #[test]
+    fn config_with_agent_field_round_trips() {
+        let toml_str = r#"
+[[repos]]
+name = "legion"
+workdir = "/tmp"
+agent = "my-agent"
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(config.repos[0].agent.as_deref(), Some("my-agent"));
+
+        // Serialize and re-parse to confirm round-trip.
+        let serialized = toml::to_string_pretty(&config).expect("serialize");
+        let reparsed: WatchConfig = toml::from_str(&serialized).expect("reparse");
+        assert_eq!(reparsed.repos[0].agent.as_deref(), Some("my-agent"));
     }
 }
