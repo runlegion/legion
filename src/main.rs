@@ -475,8 +475,11 @@ enum Commands {
         json: bool,
     },
 
-    /// Watch for signals and auto-wake sleeping agents
-    Watch,
+    /// Watch for signals and auto-wake sleeping agents (daemon mode when run without a subcommand)
+    Watch {
+        #[command(subcommand)]
+        action: Option<WatchAction>,
+    },
 
     /// MCP stdio server for Claude Code channel integration
     Mcp,
@@ -1182,6 +1185,33 @@ enum QualityGateAction {
         #[arg(long)]
         details_json: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum WatchAction {
+    /// Add a working directory to watch.toml (idempotent by canonicalized path)
+    Add {
+        /// Display name for this repo (used for cooldown tracking)
+        #[arg(long)]
+        name: String,
+
+        /// Absolute or relative path to the working directory
+        path: std::path::PathBuf,
+
+        /// Signal recipient name. Signals addressed to this value (e.g., @my-agent)
+        /// will wake this repo. Defaults to --name when absent.
+        #[arg(long)]
+        agent: Option<String>,
+    },
+
+    /// Remove a repo entry from watch.toml by name
+    Remove {
+        /// Repo name to remove
+        name: String,
+    },
+
+    /// List all repos currently in watch.toml
+    List,
 }
 
 /// Resolve the legion data directory.
@@ -3581,12 +3611,55 @@ fn run() -> error::Result<()> {
                 }
             }
         }
-        Commands::Watch => {
+        Commands::Watch { action } => {
             let base = data_dir()?;
-            eprintln!(
-                "[legion] `legion watch` is deprecated -- use `legion daemon` to run channel + watch in one process"
-            );
-            watch::run(&base)?;
+            match action {
+                None => {
+                    eprintln!(
+                        "[legion] `legion watch` is deprecated -- use `legion daemon` to run channel + watch in one process"
+                    );
+                    watch::run(&base)?;
+                }
+                Some(WatchAction::Add { name, path, agent }) => {
+                    let config_path = base.join("watch.toml");
+                    let added =
+                        watch::add_repo_to_config(&config_path, &name, &path, agent.as_deref())?;
+                    if added {
+                        let agent_note = agent
+                            .as_deref()
+                            .map(|a| format!(" (agent: {})", a))
+                            .unwrap_or_default();
+                        println!("added: {} -> {}{}", name, path.display(), agent_note);
+                    } else {
+                        println!("already present: {}", name);
+                    }
+                }
+                Some(WatchAction::Remove { name }) => {
+                    let config_path = base.join("watch.toml");
+                    let removed = watch::remove_repo_from_config(&config_path, &name)?;
+                    if removed {
+                        println!("removed: {}", name);
+                    } else {
+                        println!("not found: {}", name);
+                    }
+                }
+                Some(WatchAction::List) => {
+                    let config_path = base.join("watch.toml");
+                    let repos = watch::list_repos_in_config(&config_path)?;
+                    if repos.is_empty() {
+                        println!("no repos in watch.toml");
+                    } else {
+                        for repo in &repos {
+                            let agent_note = repo
+                                .agent
+                                .as_deref()
+                                .map(|a| format!(" (agent: {})", a))
+                                .unwrap_or_default();
+                            println!("{}\t{}{}", repo.name, repo.workdir, agent_note);
+                        }
+                    }
+                }
+            }
         }
         Commands::Mcp => {
             let base = data_dir()?;

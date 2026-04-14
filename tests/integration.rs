@@ -3483,3 +3483,220 @@ fn mcp_push_bridge_delivers_cross_process_post() {
         );
     }
 }
+
+// -- legion watch add / remove / list -----------------------------------------
+
+#[test]
+fn watch_add_creates_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "watch",
+            "add",
+            "--name",
+            "rafters",
+            workdir.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "watch add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("added:"),
+        "expected 'added:' in output: {stdout}"
+    );
+    assert!(
+        stdout.contains("rafters"),
+        "expected name in output: {stdout}"
+    );
+}
+
+#[test]
+fn watch_add_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = tempfile::tempdir().unwrap();
+
+    let first = legion_cmd(dir.path())
+        .args([
+            "watch",
+            "add",
+            "--name",
+            "rafters",
+            workdir.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+
+    let second = legion_cmd(dir.path())
+        .args([
+            "watch",
+            "add",
+            "--name",
+            "rafters",
+            workdir.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        stdout.contains("already present"),
+        "expected 'already present' for duplicate: {stdout}"
+    );
+}
+
+#[test]
+fn watch_add_with_agent_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "watch",
+            "add",
+            "--name",
+            "legion",
+            "--agent",
+            "my-agent",
+            workdir.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "watch add --agent failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("my-agent"),
+        "expected agent name in output: {stdout}"
+    );
+}
+
+#[test]
+fn watch_list_shows_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = tempfile::tempdir().unwrap();
+
+    // Empty list first.
+    let empty = legion_cmd(dir.path())
+        .args(["watch", "list"])
+        .output()
+        .unwrap();
+    assert!(empty.status.success());
+    let stdout = String::from_utf8_lossy(&empty.stdout);
+    assert!(
+        stdout.contains("no repos"),
+        "empty list should say 'no repos': {stdout}"
+    );
+
+    // Add one entry.
+    legion_cmd(dir.path())
+        .args([
+            "watch",
+            "add",
+            "--name",
+            "rafters",
+            workdir.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    let list = legion_cmd(dir.path())
+        .args(["watch", "list"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        stdout.contains("rafters"),
+        "list should show 'rafters': {stdout}"
+    );
+}
+
+#[test]
+fn watch_remove_removes_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = tempfile::tempdir().unwrap();
+
+    legion_cmd(dir.path())
+        .args([
+            "watch",
+            "add",
+            "--name",
+            "rafters",
+            workdir.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["watch", "remove", "rafters"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "watch remove failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("removed:"),
+        "expected 'removed:' in output: {stdout}"
+    );
+
+    // Verify it is gone from list.
+    let list = legion_cmd(dir.path())
+        .args(["watch", "list"])
+        .output()
+        .unwrap();
+    let list_out = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        !list_out.contains("rafters"),
+        "entry should be gone after remove: {list_out}"
+    );
+}
+
+#[test]
+fn watch_remove_missing_entry_reports_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["watch", "remove", "nonexistent"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("not found"),
+        "expected 'not found' for unknown name: {stdout}"
+    );
+}
+
+#[test]
+fn watch_add_rejects_nonexistent_workdir() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "watch",
+            "add",
+            "--name",
+            "test",
+            "/nonexistent/path/that/does/not/exist",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "watch add should fail for non-directory path"
+    );
+}
