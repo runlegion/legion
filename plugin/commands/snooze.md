@@ -31,8 +31,10 @@ Every boost makes the system smarter. Do not skip this.
 Store a session reflection that captures what matters for future sessions. Focus on WHY, not WHAT:
 
 ```bash
-legion reflect --repo <your-repo> --text "<consolidated session summary>"
+legion reflect --repo <your-repo> --text "<consolidated session summary>" --domain snooze --tags session
 ```
+
+The `--domain snooze` tag is mandatory -- SessionStart pulls the most recent `--domain snooze` reflection on boot. Without the tag, your session summary is invisible to the next session.
 
 Good reflections answer: "What would I tell another agent who hits this same situation tomorrow?"
 
