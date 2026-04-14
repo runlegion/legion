@@ -3639,7 +3639,7 @@ fn run() -> error::Result<()> {
                                 .map(str::to_string)
                                 .ok_or_else(|| {
                                     error::LegionError::WatchConfig(format!(
-                                        "cannot derive repo name from path {}",
+                                        "cannot derive a repo name from path {} -- pass --name <name> explicitly",
                                         path.display()
                                     ))
                                 })?

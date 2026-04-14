@@ -26,10 +26,16 @@ pub struct WatchRepoConfig {
 }
 
 impl WatchRepoConfig {
-    /// Recipient name used for signal matching. Prefers `agent` when set, falls
-    /// back to `name`. Centralizes the fallback rule so callers never recompute it.
+    /// Recipient name used for signal matching. Prefers `agent` when set to a
+    /// non-empty value, falls back to `name`. Empty or whitespace-only `agent`
+    /// values are treated as absent so a hand-edited `agent = ""` cannot silently
+    /// route to nothing. Centralizes the fallback rule so callers never recompute it.
     pub fn recipient(&self) -> &str {
-        self.agent.as_deref().unwrap_or(&self.name)
+        self.agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.name)
     }
 }
 
@@ -152,8 +158,10 @@ fn read_or_default(path: &Path) -> Result<WatchConfig> {
     if !path.exists() {
         return Ok(WatchConfig::default());
     }
-    let contents = std::fs::read_to_string(path)?;
-    let config: WatchConfig = toml::from_str(&contents)?;
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| LegionError::WatchConfig(format!("cannot read {}: {}", path.display(), e)))?;
+    let config: WatchConfig = toml::from_str(&contents)
+        .map_err(|e| LegionError::WatchConfig(format!("malformed {}: {}", path.display(), e)))?;
     Ok(config)
 }
 
@@ -162,11 +170,23 @@ fn read_or_default(path: &Path) -> Result<WatchConfig> {
 /// Creates parent directories if they do not exist.
 fn write_config(path: &Path, config: &WatchConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            LegionError::WatchConfig(format!(
+                "cannot create parent dir for {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
     }
-    let toml_str =
-        toml::to_string_pretty(config).map_err(|e| LegionError::WatchConfig(e.to_string()))?;
-    std::fs::write(path, toml_str)?;
+    let toml_str = toml::to_string_pretty(config).map_err(|e| {
+        LegionError::WatchConfig(format!(
+            "cannot serialize watch config for {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+    std::fs::write(path, toml_str)
+        .map_err(|e| LegionError::WatchConfig(format!("cannot write {}: {}", path.display(), e)))?;
     Ok(())
 }
 
@@ -188,7 +208,20 @@ pub fn add_repo_to_config(
         )));
     }
 
-    let canonical = std::fs::canonicalize(workdir)?;
+    // Trim empty/whitespace-only agent values to None so they never round-trip
+    // to disk or bypass the recipient() fallback.
+    let normalized_agent = agent
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let canonical = std::fs::canonicalize(workdir).map_err(|e| {
+        LegionError::WatchConfig(format!(
+            "cannot resolve workdir {}: {}",
+            workdir.display(),
+            e
+        ))
+    })?;
     let canonical_str = canonical.to_string_lossy().into_owned();
 
     let mut config = read_or_default(path)?;
@@ -210,7 +243,7 @@ pub fn add_repo_to_config(
     config.repos.push(WatchRepoConfig {
         name: name.to_string(),
         workdir: canonical_str,
-        agent: agent.map(|s| s.to_string()),
+        agent: normalized_agent,
     });
 
     write_config(path, &config)?;
@@ -403,9 +436,10 @@ impl CooldownTracker {
 pub fn find_pending_signals(
     db: &Database,
     repo_name: &str,
+    recipient: &str,
     since: Option<&str>,
 ) -> Result<Vec<(String, String, String)>> {
-    let reflections = db.get_unhandled_signals_for_repo(repo_name, since)?;
+    let reflections = db.get_unhandled_signals_for_repo(repo_name, recipient, since)?;
 
     let mut signals: Vec<(String, String, String)> = Vec::new();
     for r in reflections {
@@ -585,8 +619,14 @@ pub fn poll_cycle(
 
     // Check for auto-unblock opportunities from recent signals
     for repo in &config.repos {
-        if let Ok(signals) = find_pending_signals(db, repo.recipient(), since) {
-            check_auto_unblock(db, &signals);
+        match find_pending_signals(db, &repo.name, repo.recipient(), since) {
+            Ok(signals) => {
+                check_auto_unblock(db, &signals);
+            }
+            Err(e) => eprintln!(
+                "[legion watch] auto-unblock signal lookup failed for {}: {}",
+                repo.name, e
+            ),
         }
     }
 
@@ -596,7 +636,7 @@ pub fn poll_cycle(
         }
 
         let recipient = repo.recipient();
-        let signals = find_pending_signals(db, recipient, since)?;
+        let signals = find_pending_signals(db, &repo.name, recipient, since)?;
         if signals.is_empty() {
             continue;
         }
@@ -618,11 +658,12 @@ pub fn poll_cycle(
                 // Mark ALL signals as handled for THIS repo (per-repo tracking).
                 // This includes @all broadcasts -- each repo marks its own copy,
                 // so other repos still see the signal on their next poll.
+                // Keyed by `repo.name` (stable) so future `agent=` edits do not replay.
                 for (id, _, _) in &signals {
-                    if db.mark_signal_handled_for_repo(id, recipient).is_err() {
+                    if let Err(e) = db.mark_signal_handled_for_repo(id, &repo.name) {
                         eprintln!(
-                            "[legion watch] failed to mark signal {} as handled for {}",
-                            id, repo.name
+                            "[legion watch] failed to mark signal {} as handled for {}: {}",
+                            id, repo.name, e
                         );
                     }
                 }
@@ -823,7 +864,7 @@ workdir = "/tmp"
         db.insert_reflection("rafters", "@all announce: shipped", "team")
             .expect("insert broadcast");
 
-        let signals = find_pending_signals(&db, "legion", None).expect("find signals");
+        let signals = find_pending_signals(&db, "legion", "legion", None).expect("find signals");
         assert_eq!(signals.len(), 2);
 
         // Verify the targeted signal is found
@@ -853,8 +894,9 @@ workdir = "/tmp"
         .expect("insert multi-recipient");
 
         // Both shingle and huttspawn should see it
-        let shingle = find_pending_signals(&db, "shingle", None).expect("shingle");
-        let huttspawn = find_pending_signals(&db, "huttspawn", None).expect("huttspawn");
+        let shingle = find_pending_signals(&db, "shingle", "shingle", None).expect("shingle");
+        let huttspawn =
+            find_pending_signals(&db, "huttspawn", "huttspawn", None).expect("huttspawn");
         assert_eq!(
             shingle.len(),
             1,
@@ -867,11 +909,11 @@ workdir = "/tmp"
         );
 
         // legion (sender) should NOT see it
-        let legion = find_pending_signals(&db, "legion", None).expect("legion");
+        let legion = find_pending_signals(&db, "legion", "legion", None).expect("legion");
         assert!(legion.is_empty(), "sender should not see own signal");
 
         // unrelated repo should NOT see it
-        let kelex = find_pending_signals(&db, "kelex", None).expect("kelex");
+        let kelex = find_pending_signals(&db, "kelex", "kelex", None).expect("kelex");
         assert!(kelex.is_empty(), "unmentioned repo should not see signal");
     }
 
@@ -883,8 +925,37 @@ workdir = "/tmp"
         db.insert_reflection("legion", "@legion review:approved", "team")
             .expect("insert self-signal");
 
-        let signals = find_pending_signals(&db, "legion", None).expect("find signals");
+        let signals = find_pending_signals(&db, "legion", "legion", None).expect("find signals");
         assert!(signals.is_empty(), "self-signals should be excluded");
+    }
+
+    #[test]
+    fn find_pending_signals_with_agent_excludes_self_signals_via_repo_name() {
+        // Regression guard: when agent != name (e.g., platform agent watches ledger repo),
+        // a signal posted FROM the ledger repo targeting @platform must still be excluded
+        // by the repo_name key, not by the recipient. Previously only recipient was passed,
+        // so `r.repo != 'platform'` vs. `r.repo = 'ledger'` produced a self-wake.
+        let (db, _index, _dir) = test_storage();
+
+        db.insert_reflection("ledger", "@platform review:approved", "team")
+            .expect("insert self-signal");
+
+        let signals = find_pending_signals(&db, "ledger", "platform", None).expect("find signals");
+        assert!(
+            signals.is_empty(),
+            "self-signals must be excluded by repo_name, not by recipient"
+        );
+    }
+
+    #[test]
+    fn find_pending_signals_with_agent_accepts_signals_from_other_repos() {
+        let (db, _index, _dir) = test_storage();
+
+        db.insert_reflection("kelex", "@platform review:approved", "team")
+            .expect("insert external signal");
+
+        let signals = find_pending_signals(&db, "ledger", "platform", None).expect("find signals");
+        assert_eq!(signals.len(), 1, "external signal to agent should be found");
     }
 
     #[test]
@@ -894,7 +965,7 @@ workdir = "/tmp"
         db.insert_reflection("kelex", "@legion review:approved", "team")
             .expect("insert signal");
 
-        let signals = find_pending_signals(&db, "legion", None).expect("first poll");
+        let signals = find_pending_signals(&db, "legion", "legion", None).expect("first poll");
         assert_eq!(signals.len(), 1);
 
         // Mark as handled for legion
@@ -903,7 +974,7 @@ workdir = "/tmp"
             .expect("mark handled");
 
         // Should not appear again for legion
-        let signals = find_pending_signals(&db, "legion", None).expect("second poll");
+        let signals = find_pending_signals(&db, "legion", "legion", None).expect("second poll");
         assert!(signals.is_empty());
     }
 
@@ -965,8 +1036,9 @@ workdir = "/tmp"
             .expect("insert broadcast");
 
         // Both legion and rafters should see it
-        let legion_signals = find_pending_signals(&db, "legion", None).expect("legion");
-        let rafters_signals = find_pending_signals(&db, "rafters", None).expect("rafters");
+        let legion_signals = find_pending_signals(&db, "legion", "legion", None).expect("legion");
+        let rafters_signals =
+            find_pending_signals(&db, "rafters", "rafters", None).expect("rafters");
         assert_eq!(legion_signals.len(), 1);
         assert_eq!(rafters_signals.len(), 1);
 
@@ -977,14 +1049,16 @@ workdir = "/tmp"
         }
 
         // legion should NOT see it anymore
-        let legion_after = find_pending_signals(&db, "legion", None).expect("legion after");
+        let legion_after =
+            find_pending_signals(&db, "legion", "legion", None).expect("legion after");
         assert!(
             legion_after.is_empty(),
             "legion should not see broadcast after handling"
         );
 
         // rafters should STILL see the broadcast
-        let rafters_after = find_pending_signals(&db, "rafters", None).expect("rafters after");
+        let rafters_after =
+            find_pending_signals(&db, "rafters", "rafters", None).expect("rafters after");
         assert_eq!(
             rafters_after.len(),
             1,
@@ -998,7 +1072,8 @@ workdir = "/tmp"
         }
 
         // Now rafters should not see it either
-        let rafters_final = find_pending_signals(&db, "rafters", None).expect("rafters final");
+        let rafters_final =
+            find_pending_signals(&db, "rafters", "rafters", None).expect("rafters final");
         assert!(
             rafters_final.is_empty(),
             "rafters should not see broadcast after handling"
@@ -1146,6 +1221,40 @@ workdir = "/nonexistent/path/that/does/not/exist"
             agent: None,
         };
         assert_eq!(repo_without_agent.recipient(), "legion");
+    }
+
+    #[test]
+    fn watch_repo_config_recipient_treats_empty_agent_as_absent() {
+        // Hand-edited watch.toml may set agent = "" or all-whitespace.
+        // recipient() must not return empty -- that would route no signals.
+        let empty = WatchRepoConfig {
+            name: "fallback".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: Some("".to_string()),
+        };
+        assert_eq!(empty.recipient(), "fallback");
+
+        let whitespace = WatchRepoConfig {
+            name: "fallback".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: Some("   ".to_string()),
+        };
+        assert_eq!(whitespace.recipient(), "fallback");
+    }
+
+    #[test]
+    fn add_repo_normalizes_empty_agent_to_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir = dir.path().to_path_buf();
+
+        add_repo_to_config(&config_path, "legion", &workdir, Some("")).expect("add");
+        let repos = list_repos_in_config(&config_path).expect("list");
+        assert_eq!(repos.len(), 1);
+        assert!(
+            repos[0].agent.is_none(),
+            "empty --agent should be normalized to None, not stored as Some(\"\")"
+        );
     }
 
     #[test]
