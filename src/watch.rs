@@ -23,6 +23,12 @@ pub struct WatchRepoConfig {
     /// when absent, preserving backward compatibility with existing watch.toml files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+
+    /// Any additional per-repo fields the struct does not model explicitly
+    /// (e.g., `github`, `worksource`, `review`). These survive a read-modify-write
+    /// cycle so CRUD on one entry never strips integration config on another.
+    #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
+    pub extra: toml::Table,
 }
 
 impl WatchRepoConfig {
@@ -244,6 +250,7 @@ pub fn add_repo_to_config(
         name: name.to_string(),
         workdir: canonical_str,
         agent: normalized_agent,
+        extra: toml::Table::new(),
     });
 
     write_config(path, &config)?;
@@ -1010,6 +1017,7 @@ workdir = "/tmp"
                 name: "legion".to_string(),
                 workdir: "/tmp".to_string(),
                 agent: None,
+                extra: toml::Table::new(),
             }],
             ..WatchConfig::default()
         };
@@ -1212,6 +1220,7 @@ workdir = "/nonexistent/path/that/does/not/exist"
             name: "ledger".to_string(),
             workdir: "/tmp".to_string(),
             agent: Some("platform".to_string()),
+            extra: toml::Table::new(),
         };
         assert_eq!(repo_with_agent.recipient(), "platform");
 
@@ -1219,6 +1228,7 @@ workdir = "/nonexistent/path/that/does/not/exist"
             name: "legion".to_string(),
             workdir: "/tmp".to_string(),
             agent: None,
+            extra: toml::Table::new(),
         };
         assert_eq!(repo_without_agent.recipient(), "legion");
     }
@@ -1231,6 +1241,7 @@ workdir = "/nonexistent/path/that/does/not/exist"
             name: "fallback".to_string(),
             workdir: "/tmp".to_string(),
             agent: Some("".to_string()),
+            extra: toml::Table::new(),
         };
         assert_eq!(empty.recipient(), "fallback");
 
@@ -1238,6 +1249,7 @@ workdir = "/nonexistent/path/that/does/not/exist"
             name: "fallback".to_string(),
             workdir: "/tmp".to_string(),
             agent: Some("   ".to_string()),
+            extra: toml::Table::new(),
         };
         assert_eq!(whitespace.recipient(), "fallback");
     }
@@ -1254,6 +1266,49 @@ workdir = "/nonexistent/path/that/does/not/exist"
         assert!(
             repos[0].agent.is_none(),
             "empty --agent should be normalized to None, not stored as Some(\"\")"
+        );
+    }
+
+    #[test]
+    fn add_repo_preserves_unknown_fields_on_existing_entries() {
+        // Regression guard: add/remove must NOT strip fields the struct does not
+        // model explicitly (github, worksource, review, etc). A silent round-trip
+        // that drops these breaks `legion pr create` for every repo.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+
+        let seed = r#"
+[[repos]]
+name = "legion"
+workdir = "/tmp"
+github = "runlegion/legion"
+worksource = "github"
+
+[[repos]]
+name = "rafters"
+workdir = "/tmp"
+github = "rafters-studio/rafters"
+"#;
+        std::fs::write(&config_path, seed).expect("seed config");
+
+        // Add a new repo -- triggers full read-modify-write.
+        let new_workdir = dir.path().join("newrepo");
+        std::fs::create_dir_all(&new_workdir).expect("mkdir");
+        add_repo_to_config(&config_path, "newrepo", &new_workdir, None).expect("add");
+
+        // Both original repos must still carry their github field.
+        let contents = std::fs::read_to_string(&config_path).expect("reread");
+        assert!(
+            contents.contains(r#"github = "runlegion/legion""#),
+            "legion's github field was stripped: {contents}"
+        );
+        assert!(
+            contents.contains(r#"github = "rafters-studio/rafters""#),
+            "rafters's github field was stripped: {contents}"
+        );
+        assert!(
+            contents.contains(r#"worksource = "github""#),
+            "legion's worksource field was stripped: {contents}"
         );
     }
 
