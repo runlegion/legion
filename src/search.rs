@@ -425,6 +425,7 @@ mod tests {
             repo: repo.into(),
             text: text.into(),
             created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: None,
             audience: "self".into(),
             domain: None,
             tags: None,
