@@ -565,6 +565,22 @@ impl Database {
             )?;
         }
 
+        // Migration 15: Partial indexes for soft-deleted rows (#256).
+        // Most queries filter by deleted_at IS NULL. Partial indexes exclude
+        // tombstones, reducing index size and improving query performance.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_reflections_repo_live \
+                 ON reflections(repo) WHERE deleted_at IS NULL;
+             CREATE INDEX IF NOT EXISTS idx_reflections_audience_live \
+                 ON reflections(audience, created_at) WHERE deleted_at IS NULL;
+             CREATE INDEX IF NOT EXISTS idx_tasks_to_live \
+                 ON tasks(to_repo, status) WHERE deleted_at IS NULL;
+             CREATE INDEX IF NOT EXISTS idx_tasks_from_live \
+                 ON tasks(from_repo) WHERE deleted_at IS NULL;
+             CREATE INDEX IF NOT EXISTS idx_schedules_repo_live \
+                 ON schedules(repo) WHERE deleted_at IS NULL;",
+        )?;
+
         Ok(())
     }
 
@@ -4065,5 +4081,43 @@ mod tests {
             .unwrap();
         assert_eq!(deltas.len(), 1);
         assert!(deltas[0].deleted_at.is_some());
+    }
+
+    #[test]
+    fn partial_indexes_created_for_soft_delete() {
+        let db = test_db();
+
+        // Query sqlite_master for our partial indexes.
+        let mut stmt = db
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%_live'")
+            .unwrap();
+        let indexes: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        // Verify all expected partial indexes exist.
+        assert!(
+            indexes.contains(&"idx_reflections_repo_live".to_string()),
+            "idx_reflections_repo_live should exist"
+        );
+        assert!(
+            indexes.contains(&"idx_reflections_audience_live".to_string()),
+            "idx_reflections_audience_live should exist"
+        );
+        assert!(
+            indexes.contains(&"idx_tasks_to_live".to_string()),
+            "idx_tasks_to_live should exist"
+        );
+        assert!(
+            indexes.contains(&"idx_tasks_from_live".to_string()),
+            "idx_tasks_from_live should exist"
+        );
+        assert!(
+            indexes.contains(&"idx_schedules_repo_live".to_string()),
+            "idx_schedules_repo_live should exist"
+        );
     }
 }
