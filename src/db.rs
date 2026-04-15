@@ -874,7 +874,7 @@ impl Database {
     ) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE repo = ?1 AND domain = ?2 ORDER BY created_at DESC LIMIT ?3",
+             FROM reflections WHERE repo = ?1 AND domain = ?2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3",
         )?;
 
         let rows = stmt.query_map(rusqlite::params![repo, domain, limit], map_reflection_row)?;
@@ -886,7 +886,7 @@ impl Database {
     pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND archived_at IS NULL ORDER BY created_at DESC",
+             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL ORDER BY created_at DESC",
         )?;
 
         let rows = stmt.query_map([], map_reflection_row)?;
@@ -926,7 +926,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections \
-             WHERE audience = 'team' AND archived_at IS NULL \
+             WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
                AND (created_at > ?1 OR (created_at = ?1 AND id > ?2)) \
              ORDER BY created_at ASC, id ASC \
              LIMIT ?3",
@@ -1120,7 +1120,7 @@ impl Database {
              r.recall_count, r.last_recalled_at, r.parent_id \
              FROM reflections r \
              LEFT JOIN watch_handled wh ON wh.signal_id = r.id AND wh.repo_name = ?5 \
-             WHERE r.audience = 'team' \
+             WHERE r.audience = 'team' AND r.deleted_at IS NULL \
                AND wh.signal_id IS NULL \
                AND (r.text LIKE ?1 OR r.text LIKE ?2 OR r.text LIKE ?3 OR r.text LIKE ?4) \
                AND r.repo != ?5{} \
@@ -1287,7 +1287,7 @@ impl Database {
              COALESCE(SUM(recall_count), 0) as boost, \
              SUM(CASE WHEN audience = 'team' THEN 1 ELSE 0 END) as team_cnt, \
              MAX(created_at) as last_act \
-             FROM reflections GROUP BY repo ORDER BY repo",
+             FROM reflections WHERE deleted_at IS NULL GROUP BY repo ORDER BY repo",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -1308,7 +1308,7 @@ impl Database {
     pub fn get_all_tasks(&self) -> Result<Vec<crate::task::Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-             FROM tasks ORDER BY created_at DESC",
+             FROM tasks WHERE deleted_at IS NULL ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], crate::task::map_task_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1342,7 +1342,7 @@ impl Database {
     pub fn get_task_by_id(&self, id: &str) -> Result<Option<crate::task::Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-             FROM tasks WHERE id = ?1",
+             FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
         )?;
         let mut rows = stmt.query_map([id], crate::task::map_task_row)?;
         match rows.next() {
@@ -1360,11 +1360,11 @@ impl Database {
         let sql = match direction {
             crate::task::Direction::Inbound => {
                 "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-                 FROM tasks WHERE to_repo = ?1 ORDER BY created_at DESC"
+                 FROM tasks WHERE to_repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC"
             }
             crate::task::Direction::Outbound => {
                 "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-                 FROM tasks WHERE from_repo = ?1 ORDER BY created_at DESC"
+                 FROM tasks WHERE from_repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC"
             }
         };
 
@@ -2054,7 +2054,7 @@ impl Database {
         let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE parent_id IS NOT NULL AND created_at > ?1 ORDER BY created_at DESC",
+             FROM reflections WHERE parent_id IS NOT NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([&cutoff], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
