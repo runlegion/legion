@@ -798,6 +798,21 @@ impl Database {
         Ok(reflection)
     }
 
+    /// Soft-delete a reflection by setting its deleted_at timestamp.
+    ///
+    /// Unlike `delete_reflection` (hard delete), this preserves the row for
+    /// multi-node sync tombstone propagation. The row becomes invisible to
+    /// normal queries but can still be synced to other nodes.
+    #[allow(dead_code)] // Used by sync module in #248
+    pub fn soft_delete_reflection(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE reflections SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Retrieve reflections by a list of IDs. Returns them in the order found
     /// (not necessarily the input order). Missing IDs are silently skipped.
     pub fn get_reflections_by_ids(&self, ids: &[&str]) -> Result<Vec<Reflection>> {
@@ -1749,6 +1764,21 @@ impl Database {
         Ok(())
     }
 
+    /// Soft-delete a card by setting its deleted_at timestamp.
+    ///
+    /// Unlike `delete_card` (hard delete), this preserves the row for
+    /// multi-node sync tombstone propagation. The row becomes invisible to
+    /// normal queries but can still be synced to other nodes.
+    #[allow(dead_code)] // Used by sync module in #248
+    pub fn soft_delete_card(&self, id: &str) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE tasks SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Get per-agent workload summary.
     pub fn get_agent_workloads(&self) -> Result<Vec<crate::kanban::AgentWorkload>> {
         let mut stmt = self.conn.prepare(
@@ -1756,7 +1786,7 @@ impl Database {
              SUM(CASE WHEN status IN ('accepted', 'in-review', 'needs-input') THEN 1 ELSE 0 END) as active, \
              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending, \
              SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked \
-             FROM tasks WHERE status NOT IN ('done', 'cancelled') \
+             FROM tasks WHERE status NOT IN ('done', 'cancelled') AND deleted_at IS NULL \
              GROUP BY to_repo ORDER BY to_repo",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1955,6 +1985,21 @@ impl Database {
         let rows = self
             .conn
             .execute("DELETE FROM schedules WHERE id = ?1", [id])?;
+        Ok(rows > 0)
+    }
+
+    /// Soft-delete a schedule by setting its deleted_at timestamp.
+    ///
+    /// Unlike `delete_schedule` (hard delete), this preserves the row for
+    /// multi-node sync tombstone propagation. The row becomes invisible to
+    /// normal queries but can still be synced to other nodes.
+    #[allow(dead_code)] // Used by sync module in #248
+    pub fn soft_delete_schedule(&self, id: &str) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE schedules SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now, id],
+        )?;
         Ok(rows > 0)
     }
 
@@ -3545,6 +3590,109 @@ mod tests {
         assert!(
             matches!(result, Err(LegionError::CardNotFound(_))),
             "expected CardNotFound for missing card, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn soft_delete_reflection_hides_from_queries() {
+        let db = test_db();
+
+        // Insert a reflection.
+        let r = db
+            .insert_reflection("test-repo", "soft delete test reflection", "self")
+            .unwrap();
+        let id = r.id;
+        assert!(db.get_reflection_by_id(&id).unwrap().is_some());
+
+        // Soft delete it.
+        let deleted = db.soft_delete_reflection(&id).unwrap();
+        assert!(deleted, "soft_delete_reflection should return true");
+
+        // The reflection should now be invisible to normal queries.
+        assert!(
+            db.get_reflection_by_id(&id).unwrap().is_none(),
+            "soft-deleted reflection should not be visible"
+        );
+
+        // Soft deleting again returns false (already deleted).
+        let deleted_again = db.soft_delete_reflection(&id).unwrap();
+        assert!(
+            !deleted_again,
+            "soft_delete_reflection on already-deleted should return false"
+        );
+    }
+
+    #[test]
+    fn soft_delete_card_hides_from_queries() {
+        let db = test_db();
+
+        // Insert a card.
+        let id = db
+            .insert_card(
+                "legion",
+                "legion",
+                "soft delete test card",
+                None,
+                "med",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(db.get_card_by_id(&id).unwrap().is_some());
+
+        // Soft delete it.
+        let deleted = db.soft_delete_card(&id).unwrap();
+        assert!(deleted, "soft_delete_card should return true");
+
+        // The card should now be invisible to normal queries.
+        assert!(
+            db.get_card_by_id(&id).unwrap().is_none(),
+            "soft-deleted card should not be visible"
+        );
+
+        // Soft deleting again returns false (already deleted).
+        let deleted_again = db.soft_delete_card(&id).unwrap();
+        assert!(
+            !deleted_again,
+            "soft_delete_card on already-deleted should return false"
+        );
+    }
+
+    #[test]
+    fn soft_delete_schedule_hides_from_queries() {
+        let db = test_db();
+
+        // Insert a schedule (using */Nm interval format).
+        let id = db
+            .insert_schedule("test-schedule", "*/30m", "echo test", "legion", None, None)
+            .unwrap();
+
+        // Verify it appears in list.
+        let schedules = db.list_schedules().unwrap();
+        assert!(
+            schedules.iter().any(|s| s.id == id),
+            "schedule should appear in list"
+        );
+
+        // Soft delete it.
+        let deleted = db.soft_delete_schedule(&id).unwrap();
+        assert!(deleted, "soft_delete_schedule should return true");
+
+        // The schedule should now be invisible.
+        let schedules_after = db.list_schedules().unwrap();
+        assert!(
+            !schedules_after.iter().any(|s| s.id == id),
+            "soft-deleted schedule should not appear in list"
+        );
+
+        // Soft deleting again returns false.
+        let deleted_again = db.soft_delete_schedule(&id).unwrap();
+        assert!(
+            !deleted_again,
+            "soft_delete_schedule on already-deleted should return false"
         );
     }
 }
