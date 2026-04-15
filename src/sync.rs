@@ -8,6 +8,11 @@
 //! - Embedding BLOBs are excluded (each node computes its own)
 //! - Soft-deleted rows are included (tombstone propagation)
 //! - updated_at drives Last-Write-Wins conflict resolution
+//!
+//! Delta types mirror their source structs but:
+//! - Add `deleted_at` for tombstone propagation
+//! - Exclude computed/local-only fields (embeddings)
+//! - Use String for status enums (serde across nodes)
 
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +59,56 @@ impl ReflectionDelta {
             parent_id: r.parent_id.clone(),
         }
     }
+}
+
+/// A kanban card row serialized for sync transmission.
+///
+/// Cards (tasks table) track work items delegated between agents.
+/// Status is serialized as String for cross-node compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardDelta {
+    pub id: String,
+    pub from_repo: String,
+    pub to_repo: String,
+    pub text: String,
+    pub context: Option<String>,
+    pub priority: String,
+    pub status: String, // String, not CardStatus, for serde compatibility
+    pub note: Option<String>,
+    pub labels: Option<String>,
+    pub parent_card_id: Option<String>,
+    pub source_url: Option<String>,
+    pub source_type: Option<String>,
+    pub sort_order: i32,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+    pub assigned_at: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub problem: Option<String>,
+    pub solution: Option<String>,
+    pub acceptance: Option<String>,
+}
+
+/// A schedule row serialized for sync transmission.
+///
+/// Schedules define cron-like commands that fire periodically.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleDelta {
+    pub id: String,
+    pub name: String,
+    pub cron: String,
+    pub command: String,
+    pub repo: String,
+    pub enabled: bool,
+    pub last_run: Option<String>,
+    pub next_run: String,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+    pub deleted_at: Option<String>,
+    pub active_start: Option<String>,
+    pub active_end: Option<String>,
 }
 
 #[cfg(test)]

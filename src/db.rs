@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::error::{LegionError, Result};
-use crate::sync::ReflectionDelta;
+use crate::sync::{CardDelta, ReflectionDelta, ScheduleDelta};
 
 /// Format an ISO 8601 timestamp to a date-only string (YYYY-MM-DD).
 ///
@@ -870,6 +870,90 @@ impl Database {
                 recall_count: row.get(9)?,
                 last_recalled_at: row.get(10)?,
                 parent_id: row.get(11)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get card deltas for multi-node sync.
+    ///
+    /// Returns all cards (tasks table) that have been modified or soft-deleted
+    /// since the given timestamp. Used for delta synchronization between nodes.
+    #[allow(dead_code)] // Used by sync broadcast in #249
+    pub fn get_card_deltas_since(&self, since: &str) -> Result<Vec<CardDelta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_repo, to_repo, text, context, priority, status, note, \
+             labels, parent_card_id, source_url, source_type, sort_order, \
+             created_at, updated_at, deleted_at, assigned_at, started_at, completed_at, \
+             problem, solution, acceptance \
+             FROM tasks \
+             WHERE updated_at > ?1 OR deleted_at > ?1 \
+             ORDER BY COALESCE(updated_at, deleted_at) ASC",
+        )?;
+
+        let rows = stmt.query_map([since], |row| {
+            Ok(CardDelta {
+                id: row.get(0)?,
+                from_repo: row.get(1)?,
+                to_repo: row.get(2)?,
+                text: row.get(3)?,
+                context: row.get(4)?,
+                priority: row.get(5)?,
+                status: row.get(6)?,
+                note: row.get(7)?,
+                labels: row.get(8)?,
+                parent_card_id: row.get(9)?,
+                source_url: row.get(10)?,
+                source_type: row.get(11)?,
+                sort_order: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+                deleted_at: row.get(15)?,
+                assigned_at: row.get(16)?,
+                started_at: row.get(17)?,
+                completed_at: row.get(18)?,
+                problem: row.get(19)?,
+                solution: row.get(20)?,
+                acceptance: row.get(21)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get schedule deltas for multi-node sync.
+    ///
+    /// Returns all schedules that have been modified or soft-deleted since
+    /// the given timestamp. Used for delta synchronization between nodes.
+    #[allow(dead_code)] // Used by sync broadcast in #249
+    pub fn get_schedule_deltas_since(&self, since: &str) -> Result<Vec<ScheduleDelta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, \
+             created_at, updated_at, deleted_at, active_start, active_end \
+             FROM schedules \
+             WHERE updated_at > ?1 OR deleted_at > ?1 \
+             ORDER BY COALESCE(updated_at, deleted_at) ASC",
+        )?;
+
+        let rows = stmt.query_map([since], |row| {
+            let enabled_int: i32 = row.get(5)?;
+            Ok(ScheduleDelta {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                cron: row.get(2)?,
+                command: row.get(3)?,
+                repo: row.get(4)?,
+                enabled: enabled_int != 0,
+                last_run: row.get(6)?,
+                next_run: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+                deleted_at: row.get(10)?,
+                active_start: row.get(11)?,
+                active_end: row.get(12)?,
             })
         })?;
 
@@ -1964,9 +2048,9 @@ impl Database {
         let next_run_str = next_run.to_rfc3339();
 
         self.conn.execute(
-            "INSERT INTO schedules (id, name, cron, command, repo, enabled, next_run, created_at, active_start, active_end) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9)",
-            rusqlite::params![&id, name, cron, command, repo, &next_run_str, &created_at, active_start, active_end],
+            "INSERT INTO schedules (id, name, cron, command, repo, enabled, next_run, created_at, updated_at, active_start, active_end) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![&id, name, cron, command, repo, &next_run_str, &created_at, &created_at, active_start, active_end],
         )?;
 
         Ok(id)
@@ -3878,5 +3962,108 @@ mod tests {
 
         // Verify the reflection still exists but wasn't returned.
         assert!(db.get_reflection_by_id(&r.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn get_card_deltas_since_returns_modified_cards() {
+        let db = test_db();
+
+        // Insert two cards.
+        let id1 = db
+            .insert_card(
+                "kelex", "legion", "task 1", None, "med", None, None, None, None, None,
+            )
+            .unwrap();
+        let _id2 = db
+            .insert_card(
+                "kelex", "legion", "task 2", None, "high", None, None, None, None, None,
+            )
+            .unwrap();
+
+        // Use an old cutoff -- both should appear.
+        let old_cutoff = "2020-01-01T00:00:00Z";
+        let deltas = db.get_card_deltas_since(old_cutoff).unwrap();
+        assert_eq!(deltas.len(), 2);
+
+        // Verify fields are populated.
+        let delta1 = deltas.iter().find(|d| d.id == id1).unwrap();
+        assert_eq!(delta1.from_repo, "kelex");
+        assert_eq!(delta1.to_repo, "legion");
+        assert_eq!(delta1.text, "task 1");
+        assert_eq!(delta1.priority, "med");
+        assert_eq!(delta1.status, "pending");
+        assert!(delta1.deleted_at.is_none());
+    }
+
+    #[test]
+    fn get_card_deltas_since_includes_soft_deleted() {
+        let db = test_db();
+
+        let id = db
+            .insert_card(
+                "kelex",
+                "legion",
+                "will delete",
+                None,
+                "low",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Soft delete the card.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        db.soft_delete_card(&id).unwrap();
+
+        // Should still appear in deltas with deleted_at set.
+        let deltas = db.get_card_deltas_since("2020-01-01T00:00:00Z").unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].id, id);
+        assert!(deltas[0].deleted_at.is_some());
+    }
+
+    #[test]
+    fn get_schedule_deltas_since_returns_modified_schedules() {
+        let db = test_db();
+
+        // Insert a schedule.
+        let id = db
+            .insert_schedule("test-sched", "*/30m", "echo hello", "legion", None, None)
+            .unwrap();
+
+        // Use an old cutoff -- should appear.
+        let deltas = db
+            .get_schedule_deltas_since("2020-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].id, id);
+        assert_eq!(deltas[0].name, "test-sched");
+        assert_eq!(deltas[0].cron, "*/30m");
+        assert_eq!(deltas[0].command, "echo hello");
+        assert!(deltas[0].enabled);
+        assert!(deltas[0].deleted_at.is_none());
+    }
+
+    #[test]
+    fn get_schedule_deltas_since_includes_soft_deleted() {
+        let db = test_db();
+
+        let id = db
+            .insert_schedule("to-delete", "*/5m", "echo bye", "legion", None, None)
+            .unwrap();
+
+        // Soft delete.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        db.soft_delete_schedule(&id).unwrap();
+
+        // Should appear with deleted_at set.
+        let deltas = db
+            .get_schedule_deltas_since("2020-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert!(deltas[0].deleted_at.is_some());
     }
 }
