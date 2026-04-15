@@ -18,6 +18,7 @@ mod signal;
 mod stats;
 mod status;
 mod surface;
+mod sync;
 mod task;
 #[cfg(test)]
 mod testutil;

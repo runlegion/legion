@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::error::{LegionError, Result};
+use crate::sync::ReflectionDelta;
 
 /// Format an ISO 8601 timestamp to a date-only string (YYYY-MM-DD).
 ///
@@ -833,6 +834,47 @@ impl Database {
             rusqlite::params![now, id],
         )?;
         Ok(rows > 0)
+    }
+
+    /// Get reflection deltas for multi-node sync.
+    ///
+    /// Returns all reflections that have been modified or soft-deleted since
+    /// the given timestamp. Used for delta synchronization between legion nodes.
+    ///
+    /// The query includes:
+    /// - Live rows where updated_at > since (modifications)
+    /// - Soft-deleted rows where deleted_at > since (tombstones)
+    ///
+    /// Excludes embedding column since each node computes its own embeddings.
+    #[allow(dead_code)] // Used by sync broadcast in #248
+    pub fn get_reflection_deltas_since(&self, since: &str) -> Result<Vec<ReflectionDelta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, updated_at, deleted_at, audience, domain, tags, \
+             recall_count, last_recalled_at, parent_id \
+             FROM reflections \
+             WHERE updated_at > ?1 OR deleted_at > ?1 \
+             ORDER BY COALESCE(updated_at, deleted_at) ASC",
+        )?;
+
+        let rows = stmt.query_map([since], |row| {
+            Ok(ReflectionDelta {
+                id: row.get(0)?,
+                repo: row.get(1)?,
+                text: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                deleted_at: row.get(5)?,
+                audience: row.get(6)?,
+                domain: row.get(7)?,
+                tags: row.get(8)?,
+                recall_count: row.get(9)?,
+                last_recalled_at: row.get(10)?,
+                parent_id: row.get(11)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
     }
 
     /// Retrieve reflections by a list of IDs. Returns them in the order found
@@ -3758,5 +3800,83 @@ mod tests {
             !deleted_again,
             "soft_delete_schedule on already-deleted should return false"
         );
+    }
+
+    #[test]
+    fn get_reflection_deltas_since_returns_modified_rows() {
+        let db = test_db();
+
+        // Insert two reflections.
+        let r1 = db.insert_reflection("kelex", "first", "self").unwrap();
+        let r2 = db.insert_reflection("kelex", "second", "self").unwrap();
+
+        // Use a cutoff before both were created -- both should appear.
+        let old_cutoff = "2020-01-01T00:00:00Z";
+        let deltas = db.get_reflection_deltas_since(old_cutoff).unwrap();
+        assert_eq!(deltas.len(), 2);
+
+        // Use a cutoff after r1 but before r2 -- only r2 should appear.
+        // (updated_at == created_at on insert, so r1.updated_at < r2.updated_at)
+        let deltas_after_r1 = db
+            .get_reflection_deltas_since(&r1.updated_at.unwrap())
+            .unwrap();
+        assert_eq!(deltas_after_r1.len(), 1);
+        assert_eq!(deltas_after_r1[0].id, r2.id);
+
+        // Boost r1 to bump its updated_at.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        db.boost_reflection(&r1.id).unwrap();
+        let boosted = db.get_reflection_by_id(&r1.id).unwrap().unwrap();
+
+        // Use r2's updated_at as cutoff -- now r1 should appear (it was boosted after).
+        let deltas_after_r2 = db
+            .get_reflection_deltas_since(&r2.updated_at.unwrap())
+            .unwrap();
+        assert_eq!(deltas_after_r2.len(), 1);
+        assert_eq!(deltas_after_r2[0].id, r1.id);
+        assert_eq!(deltas_after_r2[0].updated_at, boosted.updated_at);
+    }
+
+    #[test]
+    fn get_reflection_deltas_since_includes_soft_deleted() {
+        let db = test_db();
+
+        let r = db
+            .insert_reflection("kelex", "will delete", "self")
+            .unwrap();
+        let created_at = r.created_at.clone();
+
+        // Soft delete the reflection.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        db.soft_delete_reflection(&r.id).unwrap();
+
+        // Query with cutoff before creation -- should include the soft-deleted row.
+        let deltas = db
+            .get_reflection_deltas_since("2020-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].id, r.id);
+        assert!(deltas[0].deleted_at.is_some(), "deleted_at should be set");
+
+        // Query with cutoff after creation but before deletion -- should still include.
+        let deltas_after_create = db.get_reflection_deltas_since(&created_at).unwrap();
+        assert_eq!(deltas_after_create.len(), 1);
+        assert!(deltas_after_create[0].deleted_at.is_some());
+    }
+
+    #[test]
+    fn get_reflection_deltas_since_excludes_unchanged() {
+        let db = test_db();
+
+        let r = db.insert_reflection("kelex", "old", "self").unwrap();
+
+        // Use a cutoff after the reflection was created -- should return empty.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let future_cutoff = chrono::Utc::now().to_rfc3339();
+        let deltas = db.get_reflection_deltas_since(&future_cutoff).unwrap();
+        assert!(deltas.is_empty());
+
+        // Verify the reflection still exists but wasn't returned.
+        assert!(db.get_reflection_by_id(&r.id).unwrap().is_some());
     }
 }
