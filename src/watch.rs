@@ -1,3 +1,5 @@
+#![allow(clippy::manual_is_multiple_of)] // Use modulo for MSRV compatibility
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -45,6 +47,108 @@ impl WatchRepoConfig {
     }
 }
 
+/// Multi-node cluster configuration for LAN broadcast sync.
+/// When present, enables smugglr-core UDP broadcast discovery.
+/// When absent, legion runs in single-node mode (no sync).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ClusterConfig {
+    /// UDP port for broadcast (default: 31337)
+    #[serde(default = "default_cluster_port")]
+    pub port: u16,
+
+    /// Broadcast interval in seconds (default: 30)
+    #[serde(default = "default_cluster_interval")]
+    pub interval_secs: u64,
+
+    /// Instance identity (defaults to hostname at runtime)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+
+    /// 256-bit pre-shared key, hex-encoded (64 hex chars).
+    /// When set, all broadcast traffic is encrypted with XChaCha20-Poly1305.
+    /// Validated at parse time: must be exactly 64 valid hex characters.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_secret"
+    )]
+    pub secret: Option<String>,
+}
+
+fn default_cluster_port() -> u16 {
+    31337
+}
+
+fn default_cluster_interval() -> u64 {
+    30
+}
+
+/// Validate the secret field at deserialization time.
+/// Rejects invalid hex or wrong length with a clear error message.
+fn deserialize_secret<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    if let Some(ref s) = opt {
+        if s.len() != 64 {
+            return Err(serde::de::Error::custom(format!(
+                "cluster.secret must be exactly 64 hex characters (256-bit key), got {} characters",
+                s.len()
+            )));
+        }
+        if !s.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(serde::de::Error::custom(
+                "cluster.secret contains invalid hex characters (must be 0-9, a-f, A-F)",
+            ));
+        }
+    }
+    Ok(opt)
+}
+
+impl ClusterConfig {
+    /// Decode the hex-encoded secret into a 256-bit (32-byte) encryption key.
+    /// Returns None if secret is absent. Invalid secrets are rejected at parse
+    /// time by the serde deserializer, so configs loaded from TOML are guaranteed
+    /// to have valid secrets. Returns None defensively if called with invalid data
+    /// (e.g., from direct struct construction in tests).
+    #[allow(dead_code)] // Used when broadcast sync is wired up
+    pub fn encryption_key(&self) -> Option<[u8; 32]> {
+        let secret = self.secret.as_ref()?;
+        let bytes = hex_decode(secret)?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        Some(key)
+    }
+
+    /// Convert to smugglr-core's BroadcastConfig for use with the broadcast system.
+    #[allow(dead_code)] // Used when broadcast sync is wired up
+    pub fn to_broadcast_config(&self) -> smugglr_core::broadcast::BroadcastConfig {
+        smugglr_core::broadcast::BroadcastConfig {
+            port: self.port,
+            interval_secs: self.interval_secs,
+            instance_id: self.instance_id.clone(),
+            secret: self.secret.clone(),
+        }
+    }
+}
+
+/// Decode hex string to bytes. Returns None on invalid hex.
+#[allow(dead_code)] // Used by ClusterConfig::encryption_key
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
 /// Top-level watch configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WatchConfig {
@@ -87,6 +191,11 @@ pub struct WatchConfig {
     /// Only one node per network should have this set to true.
     #[serde(default)]
     pub serve: bool,
+
+    /// Multi-node cluster configuration. When present, enables LAN broadcast
+    /// discovery via smugglr-core. When absent, runs in single-node mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<ClusterConfig>,
 
     #[serde(default)]
     pub repos: Vec<WatchRepoConfig>,
@@ -133,6 +242,7 @@ impl Default for WatchConfig {
             health_window_size: default_health_window_size(),
             retention_days: default_retention_days(),
             serve: false,
+            cluster: None,
             repos: Vec::new(),
         }
     }
@@ -1423,5 +1533,161 @@ agent = "my-agent"
         let serialized = toml::to_string_pretty(&config).expect("serialize");
         let reparsed: WatchConfig = toml::from_str(&serialized).expect("reparse");
         assert_eq!(reparsed.repos[0].agent.as_deref(), Some("my-agent"));
+    }
+
+    #[test]
+    fn cluster_config_parses_from_toml() {
+        let toml_str = r#"
+poll_interval_secs = 30
+
+[cluster]
+port = 31337
+interval_secs = 15
+instance_id = "macbook-pro"
+secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[[repos]]
+name = "legion"
+workdir = "/tmp"
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("parse with cluster");
+        let cluster = config.cluster.expect("cluster should be present");
+        assert_eq!(cluster.port, 31337);
+        assert_eq!(cluster.interval_secs, 15);
+        assert_eq!(cluster.instance_id.as_deref(), Some("macbook-pro"));
+        assert!(cluster.secret.is_some());
+    }
+
+    #[test]
+    fn cluster_config_absent_means_single_node() {
+        let toml_str = r#"
+[[repos]]
+name = "legion"
+workdir = "/tmp"
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("parse without cluster");
+        assert!(
+            config.cluster.is_none(),
+            "missing [cluster] = single-node mode"
+        );
+    }
+
+    #[test]
+    fn cluster_encryption_key_decodes_hex() {
+        let cluster = ClusterConfig {
+            port: 31337,
+            interval_secs: 30,
+            instance_id: None,
+            secret: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            ),
+        };
+        let key = cluster.encryption_key().expect("valid hex secret");
+        assert_eq!(key.len(), 32);
+        assert_eq!(key[0], 0x01);
+        assert_eq!(key[1], 0x23);
+        assert_eq!(key[31], 0xef);
+    }
+
+    #[test]
+    fn cluster_encryption_key_none_when_no_secret() {
+        let cluster = ClusterConfig {
+            port: 31337,
+            interval_secs: 30,
+            instance_id: None,
+            secret: None,
+        };
+        assert!(cluster.encryption_key().is_none(), "no secret = no key");
+    }
+
+    #[test]
+    fn cluster_encryption_key_none_for_invalid_hex() {
+        let cluster = ClusterConfig {
+            port: 31337,
+            interval_secs: 30,
+            instance_id: None,
+            secret: Some("not-valid-hex".to_string()),
+        };
+        assert!(cluster.encryption_key().is_none(), "invalid hex = no key");
+    }
+
+    #[test]
+    fn cluster_encryption_key_none_for_wrong_length() {
+        let cluster = ClusterConfig {
+            port: 31337,
+            interval_secs: 30,
+            instance_id: None,
+            secret: Some("0123456789abcdef".to_string()), // only 16 chars = 8 bytes
+        };
+        assert!(cluster.encryption_key().is_none(), "wrong length = no key");
+    }
+
+    #[test]
+    fn cluster_secret_validation_rejects_invalid_hex() {
+        // 64 characters but 'g' is not valid hex
+        let toml_str = r#"
+[cluster]
+secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"
+"#;
+        let err = toml::from_str::<WatchConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid hex"),
+            "error should mention invalid hex: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn cluster_secret_validation_rejects_wrong_length() {
+        let toml_str = r#"
+[cluster]
+secret = "0123456789abcdef"
+"#;
+        let err = toml::from_str::<WatchConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("64 hex characters"),
+            "error should mention required length: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn cluster_secret_validation_accepts_valid_hex() {
+        let toml_str = r#"
+[cluster]
+secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("valid secret should parse");
+        assert!(config.cluster.unwrap().secret.is_some());
+    }
+
+    #[test]
+    fn cluster_secret_validation_accepts_uppercase_hex() {
+        let toml_str = r#"
+[cluster]
+secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("uppercase hex should parse");
+        let key = config
+            .cluster
+            .unwrap()
+            .encryption_key()
+            .expect("uppercase should decode");
+        assert_eq!(key[15], 0xEF);
+    }
+
+    #[test]
+    fn cluster_config_uses_serde_defaults() {
+        let toml_str = r#"
+[cluster]
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("parse with defaults");
+        let cluster = config.cluster.expect("cluster should be present");
+        assert_eq!(cluster.port, 31337, "default port");
+        assert_eq!(cluster.interval_secs, 30, "default interval");
+        assert!(cluster.instance_id.is_none());
+        assert!(cluster.secret.is_none());
     }
 }

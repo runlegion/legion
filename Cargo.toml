@@ -6,7 +6,7 @@ description = "Agent specialization through deliberate practice"
 
 [dependencies]
 tantivy = "0.22"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -26,6 +26,9 @@ async-stream = "0.3"
 toml = "0.8"
 sysinfo = { version = "0.34", default-features = false, features = ["system", "component"] }
 rlimit = "0.11"
+
+# Multi-node sync via LAN broadcast
+smugglr-core = { git = "https://github.com/rafters-studio/smugglr", default-features = false, features = ["native"] }
 
 [dev-dependencies]
 tempfile = "3"
