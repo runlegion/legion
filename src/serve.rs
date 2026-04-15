@@ -1,3 +1,5 @@
+#![allow(clippy::manual_is_multiple_of)] // Use modulo for MSRV compatibility
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
@@ -136,7 +138,7 @@ async fn sse_handler(
             let db = match open_db(&state.data_dir) {
                 Ok(db) => db,
                 Err(_) => {
-                    if tick.is_multiple_of(ping_every) {
+                    if tick % ping_every == 0 {
                         yield Ok(Event::default().event("ping").data("{}"));
                     }
                     continue;
@@ -197,7 +199,7 @@ async fn sse_handler(
             }
 
             // Periodic ping keepalive
-            if tick.is_multiple_of(ping_every) {
+            if tick % ping_every == 0 {
                 yield Ok(Event::default().event("ping").data("{}"));
             }
         }
