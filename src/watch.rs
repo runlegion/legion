@@ -64,7 +64,12 @@ pub struct ClusterConfig {
 
     /// 256-bit pre-shared key, hex-encoded (64 hex chars).
     /// When set, all broadcast traffic is encrypted with XChaCha20-Poly1305.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Validated at parse time: must be exactly 64 valid hex characters.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_secret"
+    )]
     pub secret: Option<String>,
 }
 
@@ -76,9 +81,36 @@ fn default_cluster_interval() -> u64 {
     30
 }
 
+/// Validate the secret field at deserialization time.
+/// Rejects invalid hex or wrong length with a clear error message.
+fn deserialize_secret<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    if let Some(ref s) = opt {
+        if s.len() != 64 {
+            return Err(serde::de::Error::custom(format!(
+                "cluster.secret must be exactly 64 hex characters (256-bit key), got {} characters",
+                s.len()
+            )));
+        }
+        if !s.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(serde::de::Error::custom(
+                "cluster.secret contains invalid hex characters (must be 0-9, a-f, A-F)",
+            ));
+        }
+    }
+    Ok(opt)
+}
+
 impl ClusterConfig {
     /// Decode the hex-encoded secret into a 256-bit (32-byte) encryption key.
-    /// Returns None if secret is absent or invalid hex.
+    /// Returns None if secret is absent. Invalid secrets are rejected at parse
+    /// time by the serde deserializer, so configs loaded from TOML are guaranteed
+    /// to have valid secrets. Returns None defensively if called with invalid data
+    /// (e.g., from direct struct construction in tests).
     #[allow(dead_code)] // Used when broadcast sync is wired up
     pub fn encryption_key(&self) -> Option<[u8; 32]> {
         let secret = self.secret.as_ref()?;
@@ -1586,5 +1618,74 @@ workdir = "/tmp"
             secret: Some("0123456789abcdef".to_string()), // only 16 chars = 8 bytes
         };
         assert!(cluster.encryption_key().is_none(), "wrong length = no key");
+    }
+
+    #[test]
+    fn cluster_secret_validation_rejects_invalid_hex() {
+        // 64 characters but 'g' is not valid hex
+        let toml_str = r#"
+[cluster]
+secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"
+"#;
+        let err = toml::from_str::<WatchConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid hex"),
+            "error should mention invalid hex: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn cluster_secret_validation_rejects_wrong_length() {
+        let toml_str = r#"
+[cluster]
+secret = "0123456789abcdef"
+"#;
+        let err = toml::from_str::<WatchConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("64 hex characters"),
+            "error should mention required length: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn cluster_secret_validation_accepts_valid_hex() {
+        let toml_str = r#"
+[cluster]
+secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("valid secret should parse");
+        assert!(config.cluster.unwrap().secret.is_some());
+    }
+
+    #[test]
+    fn cluster_secret_validation_accepts_uppercase_hex() {
+        let toml_str = r#"
+[cluster]
+secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("uppercase hex should parse");
+        let key = config
+            .cluster
+            .unwrap()
+            .encryption_key()
+            .expect("uppercase should decode");
+        assert_eq!(key[15], 0xEF);
+    }
+
+    #[test]
+    fn cluster_config_uses_serde_defaults() {
+        let toml_str = r#"
+[cluster]
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("parse with defaults");
+        let cluster = config.cluster.expect("cluster should be present");
+        assert_eq!(cluster.port, 31337, "default port");
+        assert_eq!(cluster.interval_secs, 30, "default interval");
+        assert!(cluster.instance_id.is_none());
+        assert!(cluster.secret.is_none());
     }
 }
