@@ -597,7 +597,7 @@ impl Database {
     /// Store an embedding BLOB for an existing reflection.
     pub fn store_embedding(&self, id: &str, embedding_bytes: &[u8]) -> Result<bool> {
         let rows = self.conn.execute(
-            "UPDATE reflections SET embedding = ?1 WHERE id = ?2",
+            "UPDATE reflections SET embedding = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             rusqlite::params![embedding_bytes, id],
         )?;
         Ok(rows > 0)
@@ -692,7 +692,7 @@ impl Database {
     pub fn boost_reflection(&self, id: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
         let rows = self.conn.execute(
-            "UPDATE reflections SET recall_count = recall_count + 1, last_recalled_at = ?1 WHERE id = ?2",
+            "UPDATE reflections SET recall_count = recall_count + 1, last_recalled_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             (&now, id),
         )?;
         Ok(rows > 0)
@@ -1046,7 +1046,7 @@ impl Database {
 
         let count = self.conn.execute(
             "UPDATE reflections SET archived_at = ?1 \
-             WHERE audience = 'team' AND archived_at IS NULL \
+             WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              AND created_at < (SELECT MIN(last_read_at) FROM board_reads)",
             rusqlite::params![now],
         )?;
@@ -1380,7 +1380,7 @@ impl Database {
     pub fn update_task_status(&self, id: &str, status: &str, note: Option<&str>) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let rows = self.conn.execute(
-            "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), updated_at = ?3 WHERE id = ?4",
+            "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), updated_at = ?3 WHERE id = ?4 AND deleted_at IS NULL",
             rusqlite::params![status, &note, &now, id],
         )?;
         if rows == 0 {
@@ -1630,7 +1630,7 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         let rows_affected = self.conn.execute(
             "UPDATE tasks SET status = 'accepted', started_at = ?1, updated_at = ?2 \
-             WHERE id = ?3 AND status = 'pending'",
+             WHERE id = ?3 AND status = 'pending' AND deleted_at IS NULL",
             rusqlite::params![now, now, card.id],
         )?;
         if rows_affected == 0 {
@@ -1669,22 +1669,22 @@ impl Database {
         let rows = match timestamp {
             CardTimestamp::Assigned => self.conn.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
-                 assigned_at = ?3, updated_at = ?4 WHERE id = ?5",
+                 assigned_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
             CardTimestamp::Started => self.conn.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
-                 started_at = ?3, updated_at = ?4 WHERE id = ?5",
+                 started_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
             CardTimestamp::Completed => self.conn.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
-                 completed_at = ?3, updated_at = ?4 WHERE id = ?5",
+                 completed_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
             CardTimestamp::None => self.conn.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
-                 updated_at = ?3 WHERE id = ?4",
+                 updated_at = ?3 WHERE id = ?4 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, id],
             )?,
         };
@@ -1706,7 +1706,7 @@ impl Database {
             _ => "",
         };
         let sql = format!(
-            "UPDATE tasks SET status = ?1, sort_order = ?2, updated_at = ?3{ts_sql} WHERE id = ?4"
+            "UPDATE tasks SET status = ?1, sort_order = ?2, updated_at = ?3{ts_sql} WHERE id = ?4 AND deleted_at IS NULL"
         );
         let rows = if ts_sql.is_empty() {
             self.conn
@@ -1729,7 +1729,7 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         let rows = self.conn.execute(
             "UPDATE tasks SET to_repo = ?1, status = 'pending', \
-             assigned_at = ?2, updated_at = ?3 WHERE id = ?4 AND status = 'backlog'",
+             assigned_at = ?2, updated_at = ?3 WHERE id = ?4 AND status = 'backlog' AND deleted_at IS NULL",
             rusqlite::params![to_repo, now, now, id],
         )?;
         if rows == 0 {
@@ -1860,7 +1860,7 @@ impl Database {
         params.push(Box::new(id.to_string()));
 
         let sql = format!(
-            "UPDATE tasks SET {} WHERE id = ?{}",
+            "UPDATE tasks SET {} WHERE id = ?{} AND deleted_at IS NULL",
             sets.join(", "),
             id_pos
         );
@@ -1952,7 +1952,7 @@ impl Database {
         let next_run_str = next_run.to_rfc3339();
 
         self.conn.execute(
-            "UPDATE schedules SET last_run = ?1, next_run = ?2 WHERE id = ?3",
+            "UPDATE schedules SET last_run = ?1, next_run = ?2 WHERE id = ?3 AND deleted_at IS NULL",
             rusqlite::params![&now_str, &next_run_str, id],
         )?;
 
@@ -1974,7 +1974,7 @@ impl Database {
     pub fn toggle_schedule(&self, id: &str, enabled: bool) -> Result<bool> {
         let enabled_int: i32 = if enabled { 1 } else { 0 };
         let rows = self.conn.execute(
-            "UPDATE schedules SET enabled = ?1 WHERE id = ?2",
+            "UPDATE schedules SET enabled = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             rusqlite::params![enabled_int, id],
         )?;
         Ok(rows > 0)
@@ -2032,7 +2032,7 @@ impl Database {
         }
 
         let query = format!(
-            "UPDATE schedules SET {} WHERE id = ?{}",
+            "UPDATE schedules SET {} WHERE id = ?{} AND deleted_at IS NULL",
             updates.join(", "),
             params.len() + 1
         );
