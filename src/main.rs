@@ -329,6 +329,13 @@ enum Commands {
     /// Rebuild the search index from the database
     Reindex,
 
+    /// Remove old tombstones (soft-deleted rows) from the database
+    Cleanup {
+        /// Retention period in days (default: 30)
+        #[arg(long, default_value = "30")]
+        retention_days: i64,
+    },
+
     /// Rename a repo across all tables and watch config
     Rename {
         /// Current repo name
@@ -2257,6 +2264,24 @@ fn run() -> error::Result<()> {
             let count = reflections.len();
             index.rebuild(&reflections)?;
             info!("[legion] reindexed {} reflections", count);
+        }
+        Commands::Cleanup { retention_days } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            let result = database.cleanup_tombstones(retention_days)?;
+            if result.is_empty() {
+                eprintln!("[legion] no tombstones older than {} days", retention_days);
+            } else {
+                eprintln!(
+                    "[legion] cleaned up tombstones older than {} days: {} reflections, {} tasks, {} schedules ({} total)",
+                    retention_days,
+                    result.reflections,
+                    result.tasks,
+                    result.schedules,
+                    result.total()
+                );
+            }
         }
         Commands::Rename { from, to } => {
             if from == to {
