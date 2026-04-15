@@ -531,6 +531,19 @@ impl Database {
                 ON quality_gates(commit_hash, skill);",
         )?;
 
+        // Migration 13: Soft delete support for multi-node sync (#245).
+        // Adds deleted_at column to syncable tables. Rows with deleted_at set
+        // are excluded from normal queries but included in sync deltas.
+        if !Self::has_column(conn, "reflections", "deleted_at")? {
+            conn.execute_batch("ALTER TABLE reflections ADD COLUMN deleted_at TEXT;")?;
+        }
+        if !Self::has_column(conn, "tasks", "deleted_at")? {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN deleted_at TEXT;")?;
+        }
+        if !Self::has_column(conn, "schedules", "deleted_at")? {
+            conn.execute_batch("ALTER TABLE schedules ADD COLUMN deleted_at TEXT;")?;
+        }
+
         Ok(())
     }
 
@@ -584,7 +597,7 @@ impl Database {
     /// Store an embedding BLOB for an existing reflection.
     pub fn store_embedding(&self, id: &str, embedding_bytes: &[u8]) -> Result<bool> {
         let rows = self.conn.execute(
-            "UPDATE reflections SET embedding = ?1 WHERE id = ?2",
+            "UPDATE reflections SET embedding = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             rusqlite::params![embedding_bytes, id],
         )?;
         Ok(rows > 0)
@@ -594,7 +607,7 @@ impl Database {
     pub fn get_embedding(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT embedding FROM reflections WHERE id = ?1")?;
+            .prepare("SELECT embedding FROM reflections WHERE id = ?1 AND deleted_at IS NULL")?;
         let mut rows = stmt.query_map([id], |row| {
             let blob: Option<Vec<u8>> = row.get(0)?;
             Ok(blob)
@@ -615,7 +628,7 @@ impl Database {
             Ok((row.get(0)?, row.get(1)?))
         };
 
-        let base = "SELECT id, embedding FROM reflections WHERE embedding IS NOT NULL";
+        let base = "SELECT id, embedding FROM reflections WHERE embedding IS NOT NULL AND deleted_at IS NULL";
         let sql = match repo {
             Some(_) => format!("{base} AND repo = ?1"),
             None => base.to_owned(),
@@ -633,7 +646,7 @@ impl Database {
     /// Get all reflection IDs that are missing embeddings.
     pub fn get_ids_without_embeddings(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, text FROM reflections WHERE embedding IS NULL ORDER BY created_at DESC",
+            "SELECT id, text FROM reflections WHERE embedding IS NULL AND deleted_at IS NULL ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -657,7 +670,7 @@ impl Database {
     ) -> Result<Vec<ReflectionWithEmbedding>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, embedding, text, created_at FROM reflections \
-             WHERE repo = ?1 AND embedding IS NOT NULL \
+             WHERE repo = ?1 AND embedding IS NOT NULL AND deleted_at IS NULL \
              ORDER BY created_at DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![repo, limit], |row| {
@@ -679,7 +692,7 @@ impl Database {
     pub fn boost_reflection(&self, id: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
         let rows = self.conn.execute(
-            "UPDATE reflections SET recall_count = recall_count + 1, last_recalled_at = ?1 WHERE id = ?2",
+            "UPDATE reflections SET recall_count = recall_count + 1, last_recalled_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             (&now, id),
         )?;
         Ok(rows > 0)
@@ -724,9 +737,9 @@ impl Database {
 
     /// Find the child reflection that follows the given parent ID.
     fn find_child(&self, parent_id: &str) -> Result<Option<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM reflections WHERE parent_id = ?1 LIMIT 1")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM reflections WHERE parent_id = ?1 AND deleted_at IS NULL LIMIT 1",
+        )?;
         let mut rows = stmt.query_map([parent_id], |row| row.get::<_, String>(0))?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
@@ -736,10 +749,10 @@ impl Database {
 
     /// Retrieve a single reflection by its ID.
     ///
-    /// Returns `None` if no reflection exists with the given ID.
+    /// Returns `None` if no reflection exists with the given ID or if soft-deleted.
     pub fn get_reflection_by_id(&self, id: &str) -> Result<Option<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE id = ?1",
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE id = ?1 AND deleted_at IS NULL",
         )?;
 
         let mut rows = stmt.query_map([id], map_reflection_row)?;
@@ -785,6 +798,21 @@ impl Database {
         Ok(reflection)
     }
 
+    /// Soft-delete a reflection by setting its deleted_at timestamp.
+    ///
+    /// Unlike `delete_reflection` (hard delete), this preserves the row for
+    /// multi-node sync tombstone propagation. The row becomes invisible to
+    /// normal queries but can still be synced to other nodes.
+    #[allow(dead_code)] // Used by sync module in #248
+    pub fn soft_delete_reflection(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE reflections SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Retrieve reflections by a list of IDs. Returns them in the order found
     /// (not necessarily the input order). Missing IDs are silently skipped.
     pub fn get_reflections_by_ids(&self, ids: &[&str]) -> Result<Vec<Reflection>> {
@@ -794,7 +822,7 @@ impl Database {
         let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
         let sql = format!(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, \
-             last_recalled_at, parent_id FROM reflections WHERE id IN ({})",
+             last_recalled_at, parent_id FROM reflections WHERE id IN ({}) AND deleted_at IS NULL",
             placeholders.join(", ")
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -811,7 +839,7 @@ impl Database {
     #[cfg(test)]
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 ORDER BY created_at DESC",
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
         )?;
 
         let rows = stmt.query_map([repo], map_reflection_row)?;
@@ -825,7 +853,7 @@ impl Database {
     /// number of results are needed, since the database handles the LIMIT.
     pub fn get_latest_self_reflections(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 AND audience = 'self' ORDER BY created_at DESC LIMIT ?2",
+            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 AND audience = 'self' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?2",
         )?;
 
         let rows = stmt.query_map(rusqlite::params![repo, limit], map_reflection_row)?;
@@ -846,7 +874,7 @@ impl Database {
     ) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE repo = ?1 AND domain = ?2 ORDER BY created_at DESC LIMIT ?3",
+             FROM reflections WHERE repo = ?1 AND domain = ?2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3",
         )?;
 
         let rows = stmt.query_map(rusqlite::params![repo, domain, limit], map_reflection_row)?;
@@ -858,7 +886,7 @@ impl Database {
     pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND archived_at IS NULL ORDER BY created_at DESC",
+             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL ORDER BY created_at DESC",
         )?;
 
         let rows = stmt.query_map([], map_reflection_row)?;
@@ -898,7 +926,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections \
-             WHERE audience = 'team' AND archived_at IS NULL \
+             WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
                AND (created_at > ?1 OR (created_at = ?1 AND id > ?2)) \
              ORDER BY created_at ASC, id ASC \
              LIMIT ?3",
@@ -923,7 +951,7 @@ impl Database {
     pub fn get_board_cursor_watermark(&self) -> Result<Option<(String, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT created_at, id FROM reflections \
-             WHERE audience = 'team' AND archived_at IS NULL \
+             WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              ORDER BY created_at DESC, id DESC \
              LIMIT 1",
         )?;
@@ -955,7 +983,7 @@ impl Database {
         let mut stmt = txn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections \
-             WHERE audience = 'team' AND archived_at IS NULL \
+             WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              AND created_at > COALESCE( \
                  (SELECT last_read_at FROM board_reads WHERE reader_repo = ?1), \
                  '' \
@@ -999,7 +1027,7 @@ impl Database {
     pub fn get_archived_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND archived_at IS NOT NULL ORDER BY created_at DESC",
+             FROM reflections WHERE audience = 'team' AND archived_at IS NOT NULL AND deleted_at IS NULL ORDER BY created_at DESC",
         )?;
 
         let rows = stmt.query_map([], map_reflection_row)?;
@@ -1018,7 +1046,7 @@ impl Database {
 
         let count = self.conn.execute(
             "UPDATE reflections SET archived_at = ?1 \
-             WHERE audience = 'team' AND archived_at IS NULL \
+             WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              AND created_at < (SELECT MIN(last_read_at) FROM board_reads)",
             rusqlite::params![now],
         )?;
@@ -1033,7 +1061,7 @@ impl Database {
     pub fn get_unread_count(&self, reader_repo: &str) -> Result<u64> {
         let mut stmt = self.conn.prepare(
             "SELECT COUNT(*) FROM reflections WHERE audience = 'team' \
-             AND archived_at IS NULL \
+             AND archived_at IS NULL AND deleted_at IS NULL \
              AND created_at > COALESCE( \
                  (SELECT last_read_at FROM board_reads WHERE reader_repo = ?1), \
                  '' \
@@ -1092,7 +1120,7 @@ impl Database {
              r.recall_count, r.last_recalled_at, r.parent_id \
              FROM reflections r \
              LEFT JOIN watch_handled wh ON wh.signal_id = r.id AND wh.repo_name = ?5 \
-             WHERE r.audience = 'team' \
+             WHERE r.audience = 'team' AND r.deleted_at IS NULL \
                AND wh.signal_id IS NULL \
                AND (r.text LIKE ?1 OR r.text LIKE ?2 OR r.text LIKE ?3 OR r.text LIKE ?4) \
                AND r.repo != ?5{} \
@@ -1159,7 +1187,7 @@ impl Database {
     pub fn get_all_for_reindex(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections")?;
+            .prepare("SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE deleted_at IS NULL")?;
         let rows = stmt.query_map([], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
@@ -1177,10 +1205,10 @@ impl Database {
         };
 
         let base = "SELECT repo, COUNT(*) as count, MIN(created_at) as oldest, \
-                     MAX(created_at) as newest FROM reflections";
+                     MAX(created_at) as newest FROM reflections WHERE deleted_at IS NULL";
 
         let sql = match repo {
-            Some(_) => format!("{base} WHERE repo = ?1 GROUP BY repo"),
+            Some(_) => format!("{base} AND repo = ?1 GROUP BY repo"),
             None => format!("{base} GROUP BY repo ORDER BY repo"),
         };
 
@@ -1200,7 +1228,7 @@ impl Database {
         let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND created_at > ?1 ORDER BY created_at DESC",
+             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([&cutoff], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1218,7 +1246,7 @@ impl Database {
     ) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE repo != ?1 AND recall_count > 0 ORDER BY recall_count DESC LIMIT ?2",
+             FROM reflections WHERE repo != ?1 AND recall_count > 0 AND deleted_at IS NULL ORDER BY recall_count DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![exclude_repo, limit], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1227,9 +1255,9 @@ impl Database {
 
     /// Get all distinct repo names from reflections.
     pub fn get_distinct_repos(&self) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT repo FROM reflections ORDER BY repo")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT repo FROM reflections WHERE deleted_at IS NULL ORDER BY repo",
+        )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
@@ -1259,7 +1287,7 @@ impl Database {
              COALESCE(SUM(recall_count), 0) as boost, \
              SUM(CASE WHEN audience = 'team' THEN 1 ELSE 0 END) as team_cnt, \
              MAX(created_at) as last_act \
-             FROM reflections GROUP BY repo ORDER BY repo",
+             FROM reflections WHERE deleted_at IS NULL GROUP BY repo ORDER BY repo",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -1280,7 +1308,7 @@ impl Database {
     pub fn get_all_tasks(&self) -> Result<Vec<crate::task::Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-             FROM tasks ORDER BY created_at DESC",
+             FROM tasks WHERE deleted_at IS NULL ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], crate::task::map_task_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1314,7 +1342,7 @@ impl Database {
     pub fn get_task_by_id(&self, id: &str) -> Result<Option<crate::task::Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-             FROM tasks WHERE id = ?1",
+             FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
         )?;
         let mut rows = stmt.query_map([id], crate::task::map_task_row)?;
         match rows.next() {
@@ -1332,11 +1360,11 @@ impl Database {
         let sql = match direction {
             crate::task::Direction::Inbound => {
                 "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-                 FROM tasks WHERE to_repo = ?1 ORDER BY created_at DESC"
+                 FROM tasks WHERE to_repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC"
             }
             crate::task::Direction::Outbound => {
                 "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-                 FROM tasks WHERE from_repo = ?1 ORDER BY created_at DESC"
+                 FROM tasks WHERE from_repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC"
             }
         };
 
@@ -1352,7 +1380,7 @@ impl Database {
     pub fn update_task_status(&self, id: &str, status: &str, note: Option<&str>) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let rows = self.conn.execute(
-            "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), updated_at = ?3 WHERE id = ?4",
+            "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), updated_at = ?3 WHERE id = ?4 AND deleted_at IS NULL",
             rusqlite::params![status, &note, &now, id],
         )?;
         if rows == 0 {
@@ -1365,7 +1393,7 @@ impl Database {
     pub fn count_pending_tasks_for_repo(&self, repo: &str) -> Result<u64> {
         let mut stmt = self
             .conn
-            .prepare("SELECT COUNT(*) FROM tasks WHERE to_repo = ?1 AND status = 'pending'")?;
+            .prepare("SELECT COUNT(*) FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL")?;
         let count: u64 = stmt
             .query_row([repo], |row| row.get(0))
             .map_err(LegionError::Database)?;
@@ -1376,7 +1404,7 @@ impl Database {
     pub fn get_pending_tasks_for_repo(&self, repo: &str) -> Result<Vec<crate::task::Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-             FROM tasks WHERE to_repo = ?1 AND status = 'pending' ORDER BY created_at DESC",
+             FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([repo], crate::task::map_task_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1389,7 +1417,7 @@ impl Database {
     pub fn get_active_tasks_for_repo(&self, repo: &str) -> Result<Vec<crate::task::Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-             FROM tasks WHERE to_repo = ?1 AND status IN ('pending', 'accepted', 'blocked') \
+             FROM tasks WHERE to_repo = ?1 AND status IN ('pending', 'accepted', 'blocked') AND deleted_at IS NULL \
              ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'med' THEN 1 WHEN 'low' THEN 2 END, created_at DESC",
         )?;
         let rows = stmt.query_map([repo], crate::task::map_task_row)?;
@@ -1401,7 +1429,7 @@ impl Database {
     pub fn get_max_created_at(&self) -> Result<Option<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT MAX(created_at) FROM reflections")?;
+            .prepare("SELECT MAX(created_at) FROM reflections WHERE deleted_at IS NULL")?;
         let result: Option<String> = stmt
             .query_row([], |row| row.get(0))
             .map_err(LegionError::Database)?;
@@ -1410,7 +1438,9 @@ impl Database {
 
     /// Get the most recent updated_at timestamp from tasks.
     pub fn get_max_task_updated_at(&self) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare("SELECT MAX(updated_at) FROM tasks")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT MAX(updated_at) FROM tasks WHERE deleted_at IS NULL")?;
         let result: Option<String> = stmt
             .query_row([], |row| row.get(0))
             .map_err(LegionError::Database)?;
@@ -1485,7 +1515,10 @@ impl Database {
 
     /// Retrieve a single card by ID.
     pub fn get_card_by_id(&self, id: &str) -> Result<Option<crate::kanban::Card>> {
-        let sql = format!("SELECT {} FROM tasks WHERE id = ?1", Self::CARD_COLUMNS);
+        let sql = format!(
+            "SELECT {} FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
+            Self::CARD_COLUMNS
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query_map([id], crate::kanban::map_card_row)?;
         match rows.next() {
@@ -1503,14 +1536,14 @@ impl Database {
         let sql = match direction {
             crate::kanban::Direction::Inbound => {
                 format!(
-                    "SELECT {} FROM tasks WHERE to_repo = ?1 ORDER BY {}, sort_order ASC, created_at DESC",
+                    "SELECT {} FROM tasks WHERE to_repo = ?1 AND deleted_at IS NULL ORDER BY {}, sort_order ASC, created_at DESC",
                     Self::CARD_COLUMNS,
                     Self::PRIORITY_ORDER
                 )
             }
             crate::kanban::Direction::Outbound => {
                 format!(
-                    "SELECT {} FROM tasks WHERE from_repo = ?1 ORDER BY created_at DESC",
+                    "SELECT {} FROM tasks WHERE from_repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
                     Self::CARD_COLUMNS
                 )
             }
@@ -1524,7 +1557,7 @@ impl Database {
     /// Get all cards for the kanban board view.
     pub fn get_all_cards(&self) -> Result<Vec<crate::kanban::Card>> {
         let sql = format!(
-            "SELECT {} FROM tasks ORDER BY {}, sort_order ASC, created_at DESC",
+            "SELECT {} FROM tasks WHERE deleted_at IS NULL ORDER BY {}, sort_order ASC, created_at DESC",
             Self::CARD_COLUMNS,
             Self::PRIORITY_ORDER
         );
@@ -1538,7 +1571,7 @@ impl Database {
     pub fn count_pending_cards_for_repo(&self, repo: &str) -> Result<u64> {
         let mut stmt = self
             .conn
-            .prepare("SELECT COUNT(*) FROM tasks WHERE to_repo = ?1 AND status = 'pending'")?;
+            .prepare("SELECT COUNT(*) FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL")?;
         let count: u64 = stmt
             .query_row([repo], |row| row.get(0))
             .map_err(LegionError::Database)?;
@@ -1548,7 +1581,7 @@ impl Database {
     /// Get pending cards assigned to a repo.
     pub fn get_pending_cards_for_repo(&self, repo: &str) -> Result<Vec<crate::kanban::Card>> {
         let sql = format!(
-            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' \
+            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL \
              ORDER BY {}, sort_order ASC, created_at ASC",
             Self::CARD_COLUMNS,
             Self::PRIORITY_ORDER
@@ -1563,7 +1596,7 @@ impl Database {
     #[allow(dead_code)]
     pub fn get_active_cards_for_repo(&self, repo: &str) -> Result<Vec<crate::kanban::Card>> {
         let sql = format!(
-            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status NOT IN ('done', 'cancelled') \
+            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status NOT IN ('done', 'cancelled') AND deleted_at IS NULL \
              ORDER BY {}, sort_order ASC, created_at DESC",
             Self::CARD_COLUMNS,
             Self::PRIORITY_ORDER
@@ -1580,7 +1613,7 @@ impl Database {
     /// Transitions to accepted and sets started_at. Returns None if empty.
     pub fn pick_next_card(&self, repo: &str) -> Result<Option<crate::kanban::Card>> {
         let sql = format!(
-            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' \
+            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL \
              ORDER BY {}, sort_order ASC, created_at ASC LIMIT 1",
             Self::CARD_COLUMNS,
             Self::PRIORITY_ORDER
@@ -1597,7 +1630,7 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         let rows_affected = self.conn.execute(
             "UPDATE tasks SET status = 'accepted', started_at = ?1, updated_at = ?2 \
-             WHERE id = ?3 AND status = 'pending'",
+             WHERE id = ?3 AND status = 'pending' AND deleted_at IS NULL",
             rusqlite::params![now, now, card.id],
         )?;
         if rows_affected == 0 {
@@ -1610,7 +1643,7 @@ impl Database {
     /// Peek at the next pending card without accepting it.
     pub fn peek_next_card(&self, repo: &str) -> Result<Option<crate::kanban::Card>> {
         let sql = format!(
-            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' \
+            "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL \
              ORDER BY {}, sort_order ASC, created_at ASC LIMIT 1",
             Self::CARD_COLUMNS,
             Self::PRIORITY_ORDER
@@ -1636,22 +1669,22 @@ impl Database {
         let rows = match timestamp {
             CardTimestamp::Assigned => self.conn.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
-                 assigned_at = ?3, updated_at = ?4 WHERE id = ?5",
+                 assigned_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
             CardTimestamp::Started => self.conn.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
-                 started_at = ?3, updated_at = ?4 WHERE id = ?5",
+                 started_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
             CardTimestamp::Completed => self.conn.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
-                 completed_at = ?3, updated_at = ?4 WHERE id = ?5",
+                 completed_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
             CardTimestamp::None => self.conn.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
-                 updated_at = ?3 WHERE id = ?4",
+                 updated_at = ?3 WHERE id = ?4 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, id],
             )?,
         };
@@ -1673,7 +1706,7 @@ impl Database {
             _ => "",
         };
         let sql = format!(
-            "UPDATE tasks SET status = ?1, sort_order = ?2, updated_at = ?3{ts_sql} WHERE id = ?4"
+            "UPDATE tasks SET status = ?1, sort_order = ?2, updated_at = ?3{ts_sql} WHERE id = ?4 AND deleted_at IS NULL"
         );
         let rows = if ts_sql.is_empty() {
             self.conn
@@ -1696,7 +1729,7 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         let rows = self.conn.execute(
             "UPDATE tasks SET to_repo = ?1, status = 'pending', \
-             assigned_at = ?2, updated_at = ?3 WHERE id = ?4 AND status = 'backlog'",
+             assigned_at = ?2, updated_at = ?3 WHERE id = ?4 AND status = 'backlog' AND deleted_at IS NULL",
             rusqlite::params![to_repo, now, now, id],
         )?;
         if rows == 0 {
@@ -1731,6 +1764,21 @@ impl Database {
         Ok(())
     }
 
+    /// Soft-delete a card by setting its deleted_at timestamp.
+    ///
+    /// Unlike `delete_card` (hard delete), this preserves the row for
+    /// multi-node sync tombstone propagation. The row becomes invisible to
+    /// normal queries but can still be synced to other nodes.
+    #[allow(dead_code)] // Used by sync module in #248
+    pub fn soft_delete_card(&self, id: &str) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE tasks SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Get per-agent workload summary.
     pub fn get_agent_workloads(&self) -> Result<Vec<crate::kanban::AgentWorkload>> {
         let mut stmt = self.conn.prepare(
@@ -1738,7 +1786,7 @@ impl Database {
              SUM(CASE WHEN status IN ('accepted', 'in-review', 'needs-input') THEN 1 ELSE 0 END) as active, \
              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending, \
              SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked \
-             FROM tasks WHERE status NOT IN ('done', 'cancelled') \
+             FROM tasks WHERE status NOT IN ('done', 'cancelled') AND deleted_at IS NULL \
              GROUP BY to_repo ORDER BY to_repo",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1812,7 +1860,7 @@ impl Database {
         params.push(Box::new(id.to_string()));
 
         let sql = format!(
-            "UPDATE tasks SET {} WHERE id = ?{}",
+            "UPDATE tasks SET {} WHERE id = ?{} AND deleted_at IS NULL",
             sets.join(", "),
             id_pos
         );
@@ -1867,7 +1915,7 @@ impl Database {
         let now_str = now.to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at, active_start, active_end \
-             FROM schedules WHERE enabled = 1 AND next_run <= ?1",
+             FROM schedules WHERE enabled = 1 AND next_run <= ?1 AND deleted_at IS NULL",
         )?;
         let rows = stmt.query_map([&now_str], map_schedule_row)?;
         let all: Vec<Schedule> = rows
@@ -1886,9 +1934,11 @@ impl Database {
         // Fetch the cron expression to compute the next run
         let cron: String = self
             .conn
-            .query_row("SELECT cron FROM schedules WHERE id = ?1", [id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT cron FROM schedules WHERE id = ?1 AND deleted_at IS NULL",
+                [id],
+                |row| row.get(0),
+            )
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => {
                     LegionError::ScheduleNotFound(id.to_string())
@@ -1902,7 +1952,7 @@ impl Database {
         let next_run_str = next_run.to_rfc3339();
 
         self.conn.execute(
-            "UPDATE schedules SET last_run = ?1, next_run = ?2 WHERE id = ?3",
+            "UPDATE schedules SET last_run = ?1, next_run = ?2 WHERE id = ?3 AND deleted_at IS NULL",
             rusqlite::params![&now_str, &next_run_str, id],
         )?;
 
@@ -1913,7 +1963,7 @@ impl Database {
     pub fn list_schedules(&self) -> Result<Vec<Schedule>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at, active_start, active_end \
-             FROM schedules ORDER BY created_at",
+             FROM schedules WHERE deleted_at IS NULL ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], map_schedule_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1924,7 +1974,7 @@ impl Database {
     pub fn toggle_schedule(&self, id: &str, enabled: bool) -> Result<bool> {
         let enabled_int: i32 = if enabled { 1 } else { 0 };
         let rows = self.conn.execute(
-            "UPDATE schedules SET enabled = ?1 WHERE id = ?2",
+            "UPDATE schedules SET enabled = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             rusqlite::params![enabled_int, id],
         )?;
         Ok(rows > 0)
@@ -1935,6 +1985,21 @@ impl Database {
         let rows = self
             .conn
             .execute("DELETE FROM schedules WHERE id = ?1", [id])?;
+        Ok(rows > 0)
+    }
+
+    /// Soft-delete a schedule by setting its deleted_at timestamp.
+    ///
+    /// Unlike `delete_schedule` (hard delete), this preserves the row for
+    /// multi-node sync tombstone propagation. The row becomes invisible to
+    /// normal queries but can still be synced to other nodes.
+    #[allow(dead_code)] // Used by sync module in #248
+    pub fn soft_delete_schedule(&self, id: &str) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE schedules SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now, id],
+        )?;
         Ok(rows > 0)
     }
 
@@ -1967,7 +2032,7 @@ impl Database {
         }
 
         let query = format!(
-            "UPDATE schedules SET {} WHERE id = ?{}",
+            "UPDATE schedules SET {} WHERE id = ?{} AND deleted_at IS NULL",
             updates.join(", "),
             params.len() + 1
         );
@@ -1989,7 +2054,7 @@ impl Database {
         let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE parent_id IS NOT NULL AND created_at > ?1 ORDER BY created_at DESC",
+             FROM reflections WHERE parent_id IS NOT NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([&cutoff], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -3525,6 +3590,109 @@ mod tests {
         assert!(
             matches!(result, Err(LegionError::CardNotFound(_))),
             "expected CardNotFound for missing card, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn soft_delete_reflection_hides_from_queries() {
+        let db = test_db();
+
+        // Insert a reflection.
+        let r = db
+            .insert_reflection("test-repo", "soft delete test reflection", "self")
+            .unwrap();
+        let id = r.id;
+        assert!(db.get_reflection_by_id(&id).unwrap().is_some());
+
+        // Soft delete it.
+        let deleted = db.soft_delete_reflection(&id).unwrap();
+        assert!(deleted, "soft_delete_reflection should return true");
+
+        // The reflection should now be invisible to normal queries.
+        assert!(
+            db.get_reflection_by_id(&id).unwrap().is_none(),
+            "soft-deleted reflection should not be visible"
+        );
+
+        // Soft deleting again returns false (already deleted).
+        let deleted_again = db.soft_delete_reflection(&id).unwrap();
+        assert!(
+            !deleted_again,
+            "soft_delete_reflection on already-deleted should return false"
+        );
+    }
+
+    #[test]
+    fn soft_delete_card_hides_from_queries() {
+        let db = test_db();
+
+        // Insert a card.
+        let id = db
+            .insert_card(
+                "legion",
+                "legion",
+                "soft delete test card",
+                None,
+                "med",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(db.get_card_by_id(&id).unwrap().is_some());
+
+        // Soft delete it.
+        let deleted = db.soft_delete_card(&id).unwrap();
+        assert!(deleted, "soft_delete_card should return true");
+
+        // The card should now be invisible to normal queries.
+        assert!(
+            db.get_card_by_id(&id).unwrap().is_none(),
+            "soft-deleted card should not be visible"
+        );
+
+        // Soft deleting again returns false (already deleted).
+        let deleted_again = db.soft_delete_card(&id).unwrap();
+        assert!(
+            !deleted_again,
+            "soft_delete_card on already-deleted should return false"
+        );
+    }
+
+    #[test]
+    fn soft_delete_schedule_hides_from_queries() {
+        let db = test_db();
+
+        // Insert a schedule (using */Nm interval format).
+        let id = db
+            .insert_schedule("test-schedule", "*/30m", "echo test", "legion", None, None)
+            .unwrap();
+
+        // Verify it appears in list.
+        let schedules = db.list_schedules().unwrap();
+        assert!(
+            schedules.iter().any(|s| s.id == id),
+            "schedule should appear in list"
+        );
+
+        // Soft delete it.
+        let deleted = db.soft_delete_schedule(&id).unwrap();
+        assert!(deleted, "soft_delete_schedule should return true");
+
+        // The schedule should now be invisible.
+        let schedules_after = db.list_schedules().unwrap();
+        assert!(
+            !schedules_after.iter().any(|s| s.id == id),
+            "soft-deleted schedule should not appear in list"
+        );
+
+        // Soft deleting again returns false.
+        let deleted_again = db.soft_delete_schedule(&id).unwrap();
+        assert!(
+            !deleted_again,
+            "soft_delete_schedule on already-deleted should return false"
         );
     }
 }
