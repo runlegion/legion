@@ -44,6 +44,7 @@ pub struct Reflection {
     pub repo: String,
     pub text: String,
     pub created_at: String,
+    pub updated_at: Option<String>,
     pub audience: String,
     // Phase 2.0: Synapse metadata
     pub domain: Option<String>,
@@ -75,7 +76,7 @@ pub struct RepoStats {
 /// Map a database row to a Reflection struct.
 ///
 /// Shared by all queries that select
-/// (id, repo, text, created_at, audience, domain, tags, recall_count,
+/// (id, repo, text, created_at, updated_at, audience, domain, tags, recall_count,
 ///  last_recalled_at, parent_id).
 fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
     Ok(Reflection {
@@ -83,12 +84,13 @@ fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
         repo: row.get(1)?,
         text: row.get(2)?,
         created_at: row.get(3)?,
-        audience: row.get(4)?,
-        domain: row.get(5)?,
-        tags: row.get(6)?,
-        recall_count: row.get(7)?,
-        last_recalled_at: row.get(8)?,
-        parent_id: row.get(9)?,
+        updated_at: row.get(4)?,
+        audience: row.get(5)?,
+        domain: row.get(6)?,
+        tags: row.get(7)?,
+        recall_count: row.get(8)?,
+        last_recalled_at: row.get(9)?,
+        parent_id: row.get(10)?,
     })
 }
 
@@ -105,8 +107,9 @@ fn map_schedule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
         last_run: row.get(6)?,
         next_run: row.get(7)?,
         created_at: row.get(8)?,
-        active_start: row.get(9)?,
-        active_end: row.get(10)?,
+        updated_at: row.get(9)?,
+        active_start: row.get(10)?,
+        active_end: row.get(11)?,
     })
 }
 
@@ -130,6 +133,7 @@ pub struct Schedule {
     pub last_run: Option<String>,
     pub next_run: String,
     pub created_at: String,
+    pub updated_at: Option<String>,
     pub active_start: Option<String>,
     pub active_end: Option<String>,
 }
@@ -544,6 +548,22 @@ impl Database {
             conn.execute_batch("ALTER TABLE schedules ADD COLUMN deleted_at TEXT;")?;
         }
 
+        // Migration 14: Add updated_at for LWW conflict resolution (#255).
+        // Required for multi-node sync to determine which version wins when
+        // the same row is modified on different nodes.
+        if !Self::has_column(conn, "reflections", "updated_at")? {
+            conn.execute_batch(
+                "ALTER TABLE reflections ADD COLUMN updated_at TEXT;
+                 UPDATE reflections SET updated_at = created_at WHERE updated_at IS NULL;",
+            )?;
+        }
+        if !Self::has_column(conn, "schedules", "updated_at")? {
+            conn.execute_batch(
+                "ALTER TABLE schedules ADD COLUMN updated_at TEXT;
+                 UPDATE schedules SET updated_at = created_at WHERE updated_at IS NULL;",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -572,10 +592,10 @@ impl Database {
         let created_at = Utc::now().to_rfc3339();
 
         self.conn.execute(
-            "INSERT INTO reflections (id, repo, text, created_at, audience, domain, tags, parent_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO reflections (id, repo, text, created_at, updated_at, audience, domain, tags, parent_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
-                &id, repo, text, &created_at, audience,
+                &id, repo, text, &created_at, &created_at, audience,
                 &meta.domain, &meta.tags, &meta.parent_id,
             ],
         )?;
@@ -584,7 +604,8 @@ impl Database {
             id,
             repo: repo.to_owned(),
             text: text.to_owned(),
-            created_at,
+            created_at: created_at.clone(),
+            updated_at: Some(created_at),
             audience: audience.to_owned(),
             domain: meta.domain.clone(),
             tags: meta.tags.clone(),
@@ -596,9 +617,10 @@ impl Database {
 
     /// Store an embedding BLOB for an existing reflection.
     pub fn store_embedding(&self, id: &str, embedding_bytes: &[u8]) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
         let rows = self.conn.execute(
-            "UPDATE reflections SET embedding = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-            rusqlite::params![embedding_bytes, id],
+            "UPDATE reflections SET embedding = ?1, updated_at = ?3 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![embedding_bytes, id, &now],
         )?;
         Ok(rows > 0)
     }
@@ -692,7 +714,7 @@ impl Database {
     pub fn boost_reflection(&self, id: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
         let rows = self.conn.execute(
-            "UPDATE reflections SET recall_count = recall_count + 1, last_recalled_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            "UPDATE reflections SET recall_count = recall_count + 1, last_recalled_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             (&now, id),
         )?;
         Ok(rows > 0)
@@ -752,7 +774,7 @@ impl Database {
     /// Returns `None` if no reflection exists with the given ID or if soft-deleted.
     pub fn get_reflection_by_id(&self, id: &str) -> Result<Option<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE id = ?1 AND deleted_at IS NULL",
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE id = ?1 AND deleted_at IS NULL",
         )?;
 
         let mut rows = stmt.query_map([id], map_reflection_row)?;
@@ -807,7 +829,7 @@ impl Database {
     pub fn soft_delete_reflection(&self, id: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
         let rows = self.conn.execute(
-            "UPDATE reflections SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            "UPDATE reflections SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             rusqlite::params![now, id],
         )?;
         Ok(rows > 0)
@@ -839,7 +861,7 @@ impl Database {
     #[cfg(test)]
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
         )?;
 
         let rows = stmt.query_map([repo], map_reflection_row)?;
@@ -853,7 +875,7 @@ impl Database {
     /// number of results are needed, since the database handles the LIMIT.
     pub fn get_latest_self_reflections(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 AND audience = 'self' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?2",
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 AND audience = 'self' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?2",
         )?;
 
         let rows = stmt.query_map(rusqlite::params![repo, limit], map_reflection_row)?;
@@ -873,7 +895,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections WHERE repo = ?1 AND domain = ?2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3",
         )?;
 
@@ -885,7 +907,7 @@ impl Database {
     /// Retrieve active (non-archived) bullpen posts, ordered newest first.
     pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL ORDER BY created_at DESC",
         )?;
 
@@ -924,7 +946,7 @@ impl Database {
         // inclusive re-emits the cursor row on every poll tick and
         // produces an infinite duplicate-notification loop.
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
                AND (created_at > ?1 OR (created_at = ?1 AND id > ?2)) \
@@ -981,7 +1003,7 @@ impl Database {
         let txn = self.conn.unchecked_transaction()?;
 
         let mut stmt = txn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              AND created_at > COALESCE( \
@@ -1026,7 +1048,7 @@ impl Database {
     /// Retrieve archived bullpen posts, ordered newest first.
     pub fn get_archived_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections WHERE audience = 'team' AND archived_at IS NOT NULL AND deleted_at IS NULL ORDER BY created_at DESC",
         )?;
 
@@ -1045,7 +1067,7 @@ impl Database {
         let now = Utc::now().to_rfc3339();
 
         let count = self.conn.execute(
-            "UPDATE reflections SET archived_at = ?1 \
+            "UPDATE reflections SET archived_at = ?1, updated_at = ?1 \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              AND created_at < (SELECT MIN(last_read_at) FROM board_reads)",
             rusqlite::params![now],
@@ -1116,7 +1138,7 @@ impl Database {
             ""
         };
         let query = format!(
-            "SELECT r.id, r.repo, r.text, r.created_at, r.audience, r.domain, r.tags, \
+            "SELECT r.id, r.repo, r.text, r.created_at, r.updated_at, r.audience, r.domain, r.tags, \
              r.recall_count, r.last_recalled_at, r.parent_id \
              FROM reflections r \
              LEFT JOIN watch_handled wh ON wh.signal_id = r.id AND wh.repo_name = ?5 \
@@ -1187,7 +1209,7 @@ impl Database {
     pub fn get_all_for_reindex(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE deleted_at IS NULL")?;
+            .prepare("SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE deleted_at IS NULL")?;
         let rows = stmt.query_map([], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
@@ -1227,7 +1249,7 @@ impl Database {
     pub fn get_recent_board_posts(&self, hours: i64) -> Result<Vec<Reflection>> {
         let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([&cutoff], map_reflection_row)?;
@@ -1245,7 +1267,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections WHERE repo != ?1 AND recall_count > 0 AND deleted_at IS NULL ORDER BY recall_count DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![exclude_repo, limit], map_reflection_row)?;
@@ -1914,7 +1936,7 @@ impl Database {
         let now = Utc::now();
         let now_str = now.to_rfc3339();
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at, active_start, active_end \
+            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at, updated_at, active_start, active_end \
              FROM schedules WHERE enabled = 1 AND next_run <= ?1 AND deleted_at IS NULL",
         )?;
         let rows = stmt.query_map([&now_str], map_schedule_row)?;
@@ -1952,7 +1974,7 @@ impl Database {
         let next_run_str = next_run.to_rfc3339();
 
         self.conn.execute(
-            "UPDATE schedules SET last_run = ?1, next_run = ?2 WHERE id = ?3 AND deleted_at IS NULL",
+            "UPDATE schedules SET last_run = ?1, next_run = ?2, updated_at = ?1 WHERE id = ?3 AND deleted_at IS NULL",
             rusqlite::params![&now_str, &next_run_str, id],
         )?;
 
@@ -1962,7 +1984,7 @@ impl Database {
     /// List all schedules.
     pub fn list_schedules(&self) -> Result<Vec<Schedule>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at, active_start, active_end \
+            "SELECT id, name, cron, command, repo, enabled, last_run, next_run, created_at, updated_at, active_start, active_end \
              FROM schedules WHERE deleted_at IS NULL ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], map_schedule_row)?;
@@ -1973,9 +1995,10 @@ impl Database {
     /// Toggle a schedule's enabled state. Returns false if schedule not found.
     pub fn toggle_schedule(&self, id: &str, enabled: bool) -> Result<bool> {
         let enabled_int: i32 = if enabled { 1 } else { 0 };
+        let now = Utc::now().to_rfc3339();
         let rows = self.conn.execute(
-            "UPDATE schedules SET enabled = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-            rusqlite::params![enabled_int, id],
+            "UPDATE schedules SET enabled = ?1, updated_at = ?3 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![enabled_int, id, &now],
         )?;
         Ok(rows > 0)
     }
@@ -1997,7 +2020,7 @@ impl Database {
     pub fn soft_delete_schedule(&self, id: &str) -> Result<bool> {
         let now = chrono::Utc::now().to_rfc3339();
         let rows = self.conn.execute(
-            "UPDATE schedules SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            "UPDATE schedules SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             rusqlite::params![now, id],
         )?;
         Ok(rows > 0)
@@ -2031,6 +2054,11 @@ impl Database {
             return Ok(false);
         }
 
+        // Always update updated_at for LWW conflict resolution
+        let now = Utc::now().to_rfc3339();
+        updates.push(format!("updated_at = ?{}", params.len() + 1));
+        params.push(now);
+
         let query = format!(
             "UPDATE schedules SET {} WHERE id = ?{} AND deleted_at IS NULL",
             updates.join(", "),
@@ -2053,7 +2081,7 @@ impl Database {
     pub fn get_recent_chain_extensions(&self, hours: i64) -> Result<Vec<Reflection>> {
         let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections WHERE parent_id IS NOT NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([&cutoff], map_reflection_row)?;
@@ -2155,10 +2183,11 @@ impl Database {
         // but rusqlite::Connection::transaction() requires &mut self.
         // Safe here: no concurrent access within this function.
         let tx = self.conn.unchecked_transaction()?;
+        let now = Utc::now().to_rfc3339();
 
         let reflections = tx.execute(
-            "UPDATE reflections SET repo = ?1 WHERE repo = ?2",
-            [to, from],
+            "UPDATE reflections SET repo = ?1, updated_at = ?3 WHERE repo = ?2",
+            rusqlite::params![to, from, &now],
         )? as u64;
 
         let tasks_from = tx.execute(
@@ -2187,8 +2216,10 @@ impl Database {
             [to, from],
         )? as u64;
 
-        let schedules =
-            tx.execute("UPDATE schedules SET repo = ?1 WHERE repo = ?2", [to, from])? as u64;
+        let schedules = tx.execute(
+            "UPDATE schedules SET repo = ?1, updated_at = ?3 WHERE repo = ?2",
+            rusqlite::params![to, from, &now],
+        )? as u64;
 
         tx.commit()?;
 
@@ -2474,6 +2505,36 @@ mod tests {
         let all = db.get_reflections_by_repo("kelex").unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, r.id);
+    }
+
+    #[test]
+    fn updated_at_set_on_insert() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("test", "test reflection", "self")
+            .unwrap();
+        // updated_at should be set to created_at on insert
+        assert!(r.updated_at.is_some());
+        assert_eq!(r.updated_at.as_ref().unwrap(), &r.created_at);
+    }
+
+    #[test]
+    fn updated_at_refreshed_on_boost() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("test", "test reflection", "self")
+            .unwrap();
+        let original_updated_at = r.updated_at.clone();
+
+        // Small delay to ensure timestamp differs
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        db.boost_reflection(&r.id).unwrap();
+
+        let boosted = db.get_reflection_by_id(&r.id).unwrap().unwrap();
+        assert!(boosted.updated_at.is_some());
+        // updated_at should be later than the original
+        assert!(boosted.updated_at.unwrap() > original_updated_at.unwrap());
     }
 
     #[test]
@@ -3041,6 +3102,7 @@ mod tests {
             last_run: None,
             next_run: String::new(),
             created_at: String::new(),
+            updated_at: None,
             active_start: None,
             active_end: None,
         };
@@ -3060,6 +3122,7 @@ mod tests {
             last_run: None,
             next_run: String::new(),
             created_at: String::new(),
+            updated_at: None,
             active_start: Some("09:00".to_string()),
             active_end: Some("17:00".to_string()),
         };
@@ -3105,6 +3168,7 @@ mod tests {
             last_run: None,
             next_run: String::new(),
             created_at: String::new(),
+            updated_at: None,
             active_start: Some("23:00".to_string()),
             active_end: Some("07:00".to_string()),
         };
