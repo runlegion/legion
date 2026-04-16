@@ -859,6 +859,20 @@ pub fn run(data_dir: &Path) -> Result<()> {
             .join(", ")
     );
 
+    // Check cluster sync config
+    let cluster_config = crate::cluster::ClusterConfig::load(data_dir).ok();
+    if let Some(ref cc) = cluster_config {
+        if cc.enabled && cc.secret.is_some() {
+            eprintln!(
+                "[legion watch] cluster sync enabled on port {} (instance: {})",
+                cc.port,
+                cc.resolve_instance_id()
+            );
+            // TODO: Start broadcast actor in background thread
+            // For now, delta sync happens on the next poll cycle
+        }
+    }
+
     loop {
         // Health sample on its own interval
         if health_timer.elapsed() >= health_interval {
