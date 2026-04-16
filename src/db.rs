@@ -977,6 +977,39 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Hard-delete tombstones older than the given number of days.
+    ///
+    /// Removes soft-deleted rows (where deleted_at IS NOT NULL) that are older
+    /// than `retention_days`. Returns a struct with counts of deleted rows per table.
+    ///
+    /// This is the housekeeper cleanup for multi-node sync. Once tombstones have
+    /// propagated to all nodes (typically within hours), they can be permanently
+    /// removed to reclaim space. A 30-day retention is recommended.
+    pub fn cleanup_tombstones(&self, retention_days: i64) -> Result<TombstoneCleanupResult> {
+        let cutoff = (Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
+
+        let reflections = self.conn.execute(
+            "DELETE FROM reflections WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            [&cutoff],
+        )? as u64;
+
+        let tasks = self.conn.execute(
+            "DELETE FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            [&cutoff],
+        )? as u64;
+
+        let schedules = self.conn.execute(
+            "DELETE FROM schedules WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            [&cutoff],
+        )? as u64;
+
+        Ok(TombstoneCleanupResult {
+            reflections,
+            tasks,
+            schedules,
+        })
+    }
+
     /// Retrieve reflections by a list of IDs. Returns them in the order found
     /// (not necessarily the input order). Missing IDs are silently skipped.
     pub fn get_reflections_by_ids(&self, ids: &[&str]) -> Result<Vec<Reflection>> {
@@ -2543,6 +2576,24 @@ pub struct AuditInput<'a> {
     pub source_type: &'a str,
     pub details: Option<&'a str>,
     pub outcome: &'a str,
+}
+
+/// Result of tombstone cleanup operation.
+#[derive(Debug, Default)]
+pub struct TombstoneCleanupResult {
+    pub reflections: u64,
+    pub tasks: u64,
+    pub schedules: u64,
+}
+
+impl TombstoneCleanupResult {
+    pub fn total(&self) -> u64 {
+        self.reflections + self.tasks + self.schedules
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
 }
 
 impl Database {
@@ -4118,6 +4169,67 @@ mod tests {
         assert!(
             indexes.contains(&"idx_schedules_repo_live".to_string()),
             "idx_schedules_repo_live should exist"
+        );
+    }
+
+    #[test]
+    fn cleanup_tombstones_removes_old_soft_deleted_rows() {
+        let db = test_db();
+
+        // Insert and soft delete a reflection.
+        let r = db.insert_reflection("kelex", "to delete", "self").unwrap();
+        db.soft_delete_reflection(&r.id).unwrap();
+
+        // Insert and soft delete a card.
+        let card_id = db
+            .insert_card(
+                "kelex",
+                "legion",
+                "to delete",
+                None,
+                "med",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.soft_delete_card(&card_id).unwrap();
+
+        // Insert and soft delete a schedule.
+        let sched_id = db
+            .insert_schedule("to-delete", "*/5m", "echo bye", "legion", None, None)
+            .unwrap();
+        db.soft_delete_schedule(&sched_id).unwrap();
+
+        // Cleanup with 0-day retention should remove all tombstones.
+        let result = db.cleanup_tombstones(0).unwrap();
+        assert_eq!(result.reflections, 1);
+        assert_eq!(result.tasks, 1);
+        assert_eq!(result.schedules, 1);
+        assert_eq!(result.total(), 3);
+
+        // Running again should return zeros.
+        let result2 = db.cleanup_tombstones(0).unwrap();
+        assert!(result2.is_empty());
+    }
+
+    #[test]
+    fn cleanup_tombstones_respects_retention_period() {
+        let db = test_db();
+
+        // Insert and soft delete a reflection.
+        let r = db
+            .insert_reflection("kelex", "recent delete", "self")
+            .unwrap();
+        db.soft_delete_reflection(&r.id).unwrap();
+
+        // Cleanup with 30-day retention should NOT remove the freshly deleted row.
+        let result = db.cleanup_tombstones(30).unwrap();
+        assert!(
+            result.is_empty(),
+            "fresh tombstone should not be cleaned up"
         );
     }
 }
