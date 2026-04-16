@@ -81,7 +81,16 @@ impl ClusterConfig {
         let content = toml::to_string_pretty(self).map_err(|e| {
             LegionError::Config(format!("failed to serialize cluster config: {e}"))
         })?;
-        fs::write(&path, content)?;
+        fs::write(&path, &content)?;
+
+        // Set restrictive permissions on Unix (contains secret key)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&path, perms)?;
+        }
+
         Ok(())
     }
 
@@ -152,9 +161,9 @@ pub fn handle_cluster_command(
             match config.secret {
                 Some(key) => println!("{key}"),
                 None => {
-                    eprintln!("[legion] no cluster key configured");
-                    eprintln!("[legion] run `legion cluster init` to generate one");
-                    std::process::exit(1);
+                    return Err(LegionError::Config(
+                        "no cluster key configured. Run `legion cluster init` first.".to_string(),
+                    ));
                 }
             }
         }
