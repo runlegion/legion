@@ -1048,6 +1048,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link",
+]
+
+[[package]]
 name = "htmlescape"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1441,8 +1452,11 @@ dependencies = [
  "clap",
  "directories",
  "dirs 5.0.1",
+ "hex",
+ "hostname",
  "mime_guess",
  "model2vec-rs",
+ "rand 0.9.2",
  "rlimit",
  "rusqlite",
  "rust-embed",

@@ -1,6 +1,7 @@
 mod board;
 mod card_parse;
 mod channel;
+mod cluster;
 mod daemon;
 mod db;
 mod embed;
@@ -19,6 +20,7 @@ mod stats;
 mod status;
 mod surface;
 mod sync;
+mod sync_actor;
 mod task;
 #[cfg(test)]
 mod testutil;
@@ -414,6 +416,12 @@ enum Commands {
         repo: String,
     },
 
+    /// Multi-node cluster sync (LAN broadcast with encryption)
+    Cluster {
+        #[command(subcommand)]
+        action: ClusterAction,
+    },
+
     /// Manage the kanban board
     Kanban {
         #[command(subcommand)]
@@ -626,6 +634,32 @@ enum TaskAction {
         #[arg(long)]
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ClusterAction {
+    /// Initialize cluster sync with a shared encryption key
+    Init {
+        /// 256-bit hex-encoded key (64 chars). Generated if omitted.
+        #[arg(long)]
+        key: Option<String>,
+
+        /// UDP port for broadcast (default: 31337)
+        #[arg(long, default_value = "31337")]
+        port: u16,
+    },
+
+    /// Show the current cluster key (for sharing with other nodes)
+    Key,
+
+    /// Enable cluster sync (start broadcasting)
+    Enable,
+
+    /// Disable cluster sync (stop broadcasting)
+    Disable,
+
+    /// Show cluster status: peers, sync state, last sync time
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -2484,6 +2518,10 @@ fn run() -> error::Result<()> {
                     "no work source configured for {repo}"
                 )));
             }
+        }
+        Commands::Cluster { action } => {
+            let base = data_dir()?;
+            cluster::handle_cluster_command(&base, action)?;
         }
         Commands::Kanban { action } => {
             let base = data_dir()?;
