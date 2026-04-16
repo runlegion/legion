@@ -29,6 +29,9 @@ rlimit = "0.11"
 
 # Multi-node sync via LAN broadcast
 smugglr-core = { git = "https://github.com/rafters-studio/smugglr", default-features = false, features = ["native"] }
+rand = "0.9"
+hex = "0.4"
+hostname = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
