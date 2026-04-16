@@ -238,15 +238,17 @@ mod tests {
     #[test]
     fn config_round_trip() {
         let dir = TempDir::new().unwrap();
-        let mut config = ClusterConfig::default();
-        config.secret = Some(generate_key());
-        config.enabled = true;
-        config.port = 12345;
+        let config = ClusterConfig {
+            secret: Some(generate_key()),
+            enabled: true,
+            port: 12345,
+            ..Default::default()
+        };
 
         config.save(dir.path()).unwrap();
         let loaded = ClusterConfig::load(dir.path()).unwrap();
 
-        assert_eq!(loaded.enabled, true);
+        assert!(loaded.enabled);
         assert_eq!(loaded.port, 12345);
         assert!(loaded.secret.is_some());
     }
