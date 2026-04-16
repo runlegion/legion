@@ -14,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
-use smugglr_core::broadcast::{hash_db_path, BroadcastConfig, PeerDiscovery};
+use smugglr_core::broadcast::{BroadcastConfig, PeerDiscovery, hash_db_path};
 use tokio::runtime::Runtime;
 
 use crate::cluster::ClusterConfig;
@@ -51,7 +51,8 @@ impl SyncHandle {
         let thread = thread::spawn(move || {
             let rt = Runtime::new().expect("failed to create tokio runtime");
             rt.block_on(async {
-                if let Err(e) = run_sync_loop(&data_dir, broadcast_config, db_path_hash, stop_rx).await
+                if let Err(e) =
+                    run_sync_loop(&data_dir, broadcast_config, db_path_hash, stop_rx).await
                 {
                     eprintln!("[legion sync] actor error: {}", e);
                 }
@@ -124,18 +125,22 @@ async fn run_sync_loop(
             // Open DB and check for local changes
             if let Ok(db) = Database::open(&db_path) {
                 // Get deltas since last sync
-                let reflection_deltas = db.get_reflection_deltas_since(&last_sync).unwrap_or_else(|e| {
-                    eprintln!("[legion sync] reflection delta query failed: {}", e);
-                    Vec::new()
-                });
+                let reflection_deltas =
+                    db.get_reflection_deltas_since(&last_sync)
+                        .unwrap_or_else(|e| {
+                            eprintln!("[legion sync] reflection delta query failed: {}", e);
+                            Vec::new()
+                        });
                 let card_deltas = db.get_card_deltas_since(&last_sync).unwrap_or_else(|e| {
                     eprintln!("[legion sync] card delta query failed: {}", e);
                     Vec::new()
                 });
-                let schedule_deltas = db.get_schedule_deltas_since(&last_sync).unwrap_or_else(|e| {
-                    eprintln!("[legion sync] schedule delta query failed: {}", e);
-                    Vec::new()
-                });
+                let schedule_deltas =
+                    db.get_schedule_deltas_since(&last_sync)
+                        .unwrap_or_else(|e| {
+                            eprintln!("[legion sync] schedule delta query failed: {}", e);
+                            Vec::new()
+                        });
 
                 let total = reflection_deltas.len() + card_deltas.len() + schedule_deltas.len();
                 if total > 0 {

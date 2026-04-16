@@ -67,9 +67,8 @@ impl ClusterConfig {
         let path = data_dir.join("cluster.toml");
         if path.exists() {
             let content = fs::read_to_string(&path)?;
-            toml::from_str(&content).map_err(|e| {
-                LegionError::Config(format!("failed to parse cluster.toml: {e}"))
-            })
+            toml::from_str(&content)
+                .map_err(|e| LegionError::Config(format!("failed to parse cluster.toml: {e}")))
         } else {
             Ok(Self::default())
         }
@@ -78,9 +77,8 @@ impl ClusterConfig {
     /// Save config to cluster.toml.
     pub fn save(&self, data_dir: &Path) -> Result<()> {
         let path = data_dir.join("cluster.toml");
-        let content = toml::to_string_pretty(self).map_err(|e| {
-            LegionError::Config(format!("failed to serialize cluster config: {e}"))
-        })?;
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| LegionError::Config(format!("failed to serialize cluster config: {e}")))?;
         fs::write(&path, &content)?;
 
         // Set restrictive permissions on Unix (contains secret key)
@@ -114,9 +112,8 @@ pub fn generate_key() -> String {
 
 /// Validate a hex-encoded 256-bit key.
 pub fn validate_key(key: &str) -> Result<()> {
-    let bytes = hex::decode(key).map_err(|_| {
-        LegionError::Config("key must be valid hex".to_string())
-    })?;
+    let bytes =
+        hex::decode(key).map_err(|_| LegionError::Config("key must be valid hex".to_string()))?;
     if bytes.len() != 32 {
         return Err(LegionError::Config(
             "key must be 64 hex characters (256-bit)".to_string(),
@@ -126,10 +123,7 @@ pub fn validate_key(key: &str) -> Result<()> {
 }
 
 /// Handle cluster subcommands.
-pub fn handle_cluster_command(
-    data_dir: &Path,
-    action: crate::ClusterAction,
-) -> Result<()> {
+pub fn handle_cluster_command(data_dir: &Path, action: crate::ClusterAction) -> Result<()> {
     use crate::ClusterAction;
 
     match action {
@@ -193,10 +187,7 @@ pub fn handle_cluster_command(
 
             println!("Cluster Status");
             println!("--------------");
-            println!(
-                "enabled:     {}",
-                if config.enabled { "yes" } else { "no" }
-            );
+            println!("enabled:     {}", if config.enabled { "yes" } else { "no" });
             println!(
                 "key:         {}",
                 if config.secret.is_some() {
@@ -239,7 +230,8 @@ mod tests {
 
     #[test]
     fn validate_key_rejects_invalid_hex() {
-        let result = validate_key("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+        let result =
+            validate_key("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
         assert!(result.is_err());
     }
 
