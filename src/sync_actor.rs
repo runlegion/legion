@@ -75,8 +75,10 @@ async fn run_sync_loop(
     let discovery = match PeerDiscovery::new(config.clone(), db_path_hash.clone()).await {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("[legion sync] failed to initialize: {}", e);
-            return Ok(());
+            return Err(crate::error::LegionError::Config(format!(
+                "sync actor failed to initialize: {}",
+                e
+            )));
         }
     };
 
@@ -148,10 +150,12 @@ async fn run_sync_loop(
                     // TODO: Actually broadcast the deltas to peers
                     // For now, just log that we would send them
                     // The wire protocol uses DeltaPacket with upserts/deletes
+                    //
+                    // IMPORTANT: Only advance last_sync AFTER successful transmission.
+                    // Moving it here now so we don't forget when implementing the wire protocol.
+                    last_sync = chrono::Utc::now().to_rfc3339();
                 }
             }
-
-            last_sync = chrono::Utc::now().to_rfc3339();
         }
 
         // Sleep until next cycle
