@@ -92,9 +92,19 @@ async fn run_sync_loop(
 
     loop {
         // Check for stop signal (non-blocking)
-        if stop_rx.try_recv().is_ok() {
-            eprintln!("[legion sync] stopping");
-            break;
+        // Break on Ok (explicit stop) or Disconnected (sender dropped)
+        match stop_rx.try_recv() {
+            Ok(()) => {
+                eprintln!("[legion sync] stopping (signal received)");
+                break;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                eprintln!("[legion sync] stopping (handle dropped)");
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                // No signal yet, continue loop
+            }
         }
 
         // Discover peers
