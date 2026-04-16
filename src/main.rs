@@ -20,6 +20,7 @@ mod stats;
 mod status;
 mod surface;
 mod sync;
+mod sync_actor;
 mod task;
 #[cfg(test)]
 mod testutil;
