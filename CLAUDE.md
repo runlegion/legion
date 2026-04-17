@@ -59,6 +59,14 @@ legion audit --action create-pr              # filter by action type
 legion audit --json                          # output as JSON
 legion quality-gate record --skill legion-simplify --result clean|issues [--findings-count N] [--details-json '<json>']
 legion watch                                 # auto-wake sleeping agents on signal arrival
+legion watch add <path> [--name <n>] [--agent <a>]  # add repo to watch.toml (idempotent by path)
+legion watch remove <name>                   # remove repo entry from watch.toml
+legion watch list                            # list watch.toml entries
+legion cluster init [--key <hex>] [--port <n>]  # initialize LAN cluster sync (generates key if omitted)
+legion cluster key                           # print current cluster key (share with other nodes)
+legion cluster enable                        # start broadcasting deltas
+legion cluster disable                       # stop broadcasting (key preserved)
+legion cluster status                        # peers, sync state, last sync time
 legion -v <command>                          # show informational messages (quiet by default)
 ```
 
@@ -124,12 +132,17 @@ CREATE TABLE reflections (
     recall_count INTEGER NOT NULL DEFAULT 0,  -- boost counter
     last_recalled_at TEXT,         -- for decay calculation
     parent_id TEXT,                -- learning chain link
-    embedding BLOB                 -- nullable, Phase 2.5
+    embedding BLOB,                -- nullable, Phase 2.5
+    archived_at TEXT,              -- bullpen archive timestamp (nullable)
+    deleted_at TEXT,               -- tombstone for multi-node sync (nullable)
+    updated_at TEXT                -- ISO 8601, LWW conflict resolution
 );
 
 CREATE INDEX idx_reflections_repo ON reflections(repo);
 CREATE INDEX idx_reflections_created ON reflections(created_at);
 ```
+
+`tasks` and `schedules` also carry `deleted_at` + `updated_at` for sync. Partial indexes skip soft-deleted rows. See `docs/site/architecture.md` for the full schema and migration list.
 
 ### Tasks (Agent Delegation)
 
@@ -199,6 +212,23 @@ Opt-IN per repo. Only repos listed in `watch.toml` get auto-woken. PID lock prev
 Cooldown prevents wake storms (default 5 minutes between wakes per repo).
 Stagger prevents I/O storms by sleeping between spawns (default 15s; set to 0 to disable).
 
+`legion watch add|remove|list` manage `watch.toml` entries without hand-editing.
+
+### Multi-Node Cluster Sync
+
+Legion nodes on the same LAN can sync reflections, cards, and schedules via UDP broadcast with XChaCha20-Poly1305 encryption. Opt-in via `cluster.toml` (0o600, contains a pre-shared 256-bit secret).
+
+```bash
+legion cluster init                # generate key, write cluster.toml
+legion cluster init --key <hex>    # second node: use key from first node
+legion cluster enable              # start broadcasting
+legion cluster key                 # print key (to share with another node)
+legion cluster status              # peers, sync state, last sync time
+legion cluster disable             # stop broadcasting (key preserved)
+```
+
+Soft delete + LWW: syncable tables carry `deleted_at` and `updated_at`. Conflicts resolve via higher `updated_at`. Tombstones replicate to peers and are hard-deleted after 7 days by the weekly housekeeper. The delta types (`ReflectionDelta`, `CardDelta`, `ScheduleDelta`) ship; broadcast transport is still landing.
+
 ## Phase Plan
 
 1. **Phase 1** (complete): SQLite + Tantivy BM25. Store reflections, recall by text similarity.
@@ -207,8 +237,9 @@ Stagger prevents I/O storms by sleeping between spawns (default 15s; set to 0 to
 4. **Phase 2.0** (complete): Synapse metadata. Domain/tags, learning chains, boost/decay ranking, `legion surface`.
 5. **Phase 2.1** (complete): Signals. Structured coordination via `@recipient verb:status {details}`. Bullpen filtering (`--signals`, `--musings`).
 6. **Phase 2.2** (complete): Watch. Auto-wake sleeping agents when signals arrive. `legion watch` with opt-in config.
-7. **Phase 2.5** (next): Add model2vec-rs embeddings, hybrid BM25 + cosine scoring, transfer detection.
+7. **Phase 2.5** (complete): model2vec-rs embeddings, hybrid BM25 + cosine scoring.
 8. **Phase 3.0** (planned): LLM classification via Synapse agent for quality gating.
+9. **Phase 4.0** (in progress, v0.9.0): Multi-node cluster sync. Soft delete, LWW, delta types, sync actor, tombstone housekeeper shipped. Broadcast transport landing.
 
 ## Hook Integration
 
