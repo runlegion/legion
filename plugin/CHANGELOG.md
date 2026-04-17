@@ -1,5 +1,21 @@
 # Legion Changelog
 
+## 0.9.1
+
+Ergonomic + cleanup release. No schema changes, no breaking changes.
+
+### New
+
+- **`legion reflect --whoami`** (#266, #269): Shortcut flag for `--domain identity`. Mutually exclusive with `--domain`. Stores the reflection under the reserved `identity` domain that SessionStart injects on every boot. Writing agent identity no longer requires remembering the domain string.
+
+### Cleanup
+
+- **Remove hyperspecific environment assumptions** (#268, #270): Clap help text examples, `.claude/agents/*.md` file references, and docs example TOML all carried Sean-team-specific repo names and `/Volumes/store` absolute paths. Replaced with generic placeholders (`myrepo`, `frontend,backend`, `./CLAUDE.md`, `/path/to/your/repo`). Test-fixture strings (`kelex`, `rafters` as arbitrary repo names in `#[cfg(test)]` blocks) intentionally left alone -- they are semantic noise to rename and not user-visible.
+
+### Deferred
+
+- Empty-identity SessionStart nudge: an earlier PR (#267) bundled this with `--whoami` but hardcoded team-specific vocabulary and vault paths into legion's hook code. Closed. The nudge returns in v0.10.0 driven by a user-supplied prompt template at `<data-dir>/prompts/empty-identity.md` -- legion triggers, user owns the content.
+
 ## 0.9.0
 
 ### Multi-Node Sync Infrastructure (#245-#256)
