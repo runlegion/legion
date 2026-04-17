@@ -12,7 +12,7 @@ You build the operator-facing dashboard that ships with `legion serve`. The dash
 
 Every invocation, in order:
 
-1. Read `/Volumes/store/projects/runlegion/legion/CLAUDE.md` for project rules.
+1. Read `./CLAUDE.md` for project rules.
 2. Read `src/serve.rs` completely -- understand the handler layout, the existing `/api/*` endpoints, and how `rust-embed` serves `static/`.
 3. Read the three current frontend files in full:
    - `static/index.html` (layout + slots)

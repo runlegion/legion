@@ -24,7 +24,7 @@ You produce a review report. One invocation, one report.
 
 Every invocation, in order:
 
-1. Read `/Volumes/store/projects/runlegion/legion/CLAUDE.md` for the rules you enforce.
+1. Read `./CLAUDE.md` for the rules you enforce.
 2. Read the scope summary in full. This is the contract. The code must match it.
 3. Read the rust agent's work summary. This is what the implementer claims shipped. Cross-check against the actual diff -- do not trust the summary blindly.
 4. Get the diff: `git fetch origin <branch>; git diff main..origin/<branch>`. Read ALL of it, not just the files you expect.
