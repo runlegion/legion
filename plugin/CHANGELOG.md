@@ -1,5 +1,29 @@
 # Legion Changelog
 
+## 0.9.0
+
+### Multi-Node Sync Infrastructure (#245-#256)
+
+Foundation for LAN cluster sync via smugglr-core. Nodes discover each other via UDP broadcast and will synchronize reflections, cards, and schedules using encrypted delta packets.
+
+- **Soft delete schema** (#245): All syncable tables now have `deleted_at` columns. Rows are tombstoned rather than hard-deleted, enabling delta-based replication.
+- **LWW conflict resolution** (#255): `updated_at` columns added to all syncable tables for last-write-wins merge semantics.
+- **Delta serialization** (#247, #248): `ReflectionDelta`, `CardDelta`, `ScheduleDelta` types for wire-format serialization.
+- **Sync actor** (#249): Background thread in `legion watch` that discovers peers and queries local deltas. Wire protocol transmission is scaffolded (TODO).
+- **Cluster CLI** (#249): `legion cluster init|key|enable|disable|status` commands for managing cluster.toml configuration.
+- **Weekly housekeeper** (#253): Automatic cleanup of tombstones older than 7 days.
+- **Partial indexes** (#256): Performance indexes that skip soft-deleted rows.
+
+### Watch Config Management (#240)
+
+- **`legion watch add`**: Add a repo to watch.toml without hand-editing.
+- **`legion watch remove`**: Remove a repo from watch.toml.
+- **`legion watch list`**: List configured repos with their workdirs.
+
+### Agent Updates
+
+- **Legion-prime on Opus**: Team lead agent now runs on Opus for deeper reasoning during coordination tasks.
+
 ## 0.8.0
 
 ### Focused Session Bootstrap (#236)
