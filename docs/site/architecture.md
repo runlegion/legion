@@ -1,6 +1,6 @@
 # Architecture
 
-Legion is a local Rust binary backed by SQLite and Tantivy. This document covers the storage layout, database schema, search index, scoring algorithms, state machines, the watch daemon, the health system, and the web server.
+Legion is a local Rust binary backed by SQLite and Tantivy. This document covers the storage layout, database schema, search index, scoring algorithms, state machines, the watch daemon, multi-node cluster sync, the health system, and the web server.
 
 ## Storage layout
 
@@ -11,6 +11,7 @@ legion.db          SQLite database (WAL mode)
 index/             Tantivy full-text search index
 watch.toml         Watch daemon configuration
 watch.pid          PID lock for watch daemon (created at runtime)
+cluster.toml       Multi-node cluster sync config (0o600, contains secret)
 ```
 
 ## Database schema
@@ -34,7 +35,10 @@ CREATE TABLE reflections (
     recall_count INTEGER NOT NULL DEFAULT 0,           -- boost counter
     last_recalled_at TEXT,                              -- for decay calculation
     parent_id TEXT,                                     -- learning chain link
-    handled_at TEXT                                     -- legacy watch handling (superseded by watch_handled)
+    handled_at TEXT,                                    -- legacy watch handling (superseded by watch_handled)
+    archived_at TEXT,                                   -- bullpen archive timestamp (nullable)
+    deleted_at TEXT,                                    -- tombstone for multi-node sync (nullable)
+    updated_at TEXT                                     -- ISO 8601, LWW conflict resolution
 );
 
 CREATE INDEX idx_reflections_repo ON reflections(repo);
@@ -75,7 +79,8 @@ CREATE TABLE tasks (
     sort_order INTEGER NOT NULL DEFAULT 0,             -- manual ordering
     assigned_at TEXT,                                   -- when card was assigned to an agent
     started_at TEXT,                                    -- when agent accepted the card
-    completed_at TEXT                                   -- when card reached done/cancelled
+    completed_at TEXT,                                  -- when card reached done/cancelled
+    deleted_at TEXT                                     -- tombstone for multi-node sync (nullable)
 );
 
 CREATE INDEX idx_tasks_to ON tasks(to_repo, status);
@@ -83,6 +88,8 @@ CREATE INDEX idx_tasks_from ON tasks(from_repo, status);
 CREATE INDEX idx_tasks_parent ON tasks(parent_card_id);
 CREATE INDEX idx_tasks_status_sort ON tasks(status, sort_order, created_at);
 ```
+
+`tasks.updated_at` already existed pre-sync and is reused for LWW.
 
 ### schedules
 
@@ -100,7 +107,9 @@ CREATE TABLE schedules (
     next_run TEXT NOT NULL,                             -- ISO 8601 of next fire
     created_at TEXT NOT NULL,                           -- ISO 8601
     active_start TEXT,                                  -- HH:MM UTC window start
-    active_end TEXT                                     -- HH:MM UTC window end
+    active_end TEXT,                                    -- HH:MM UTC window end
+    deleted_at TEXT,                                    -- tombstone for multi-node sync (nullable)
+    updated_at TEXT                                     -- ISO 8601, LWW conflict resolution
 );
 ```
 
@@ -153,7 +162,7 @@ CREATE INDEX idx_health_sampled ON health_samples(sampled_at);
 
 ## Migrations
 
-The `init_schema` function applies 10 migrations incrementally using `has_column` checks:
+The `init_schema` function applies migrations incrementally using `has_column` checks:
 
 | # | Description |
 |---|-------------|
@@ -167,6 +176,12 @@ The `init_schema` function applies 10 migrations incrementally using `has_column
 | 7 | Create watch_handled table (per-repo signal tracking) |
 | 8 | Create health_samples table |
 | 9 | Kanban upgrade: add labels, parent_card_id, source_url, source_type, sort_order, assigned_at, started_at, completed_at to tasks. Backfill timestamps from existing status. |
+| 10 | Bullpen archive: add nullable archived_at on reflections (#168) |
+| 11 | Audit log table for work source actions (#142) |
+| 12 | Quality gates table for PR creation guard (#200) |
+| 13 | Soft delete support for multi-node sync: add deleted_at on reflections, tasks, schedules (#245) |
+| 14 | LWW conflict resolution: add updated_at on reflections and schedules (#255) |
+| 15 | Partial indexes that skip soft-deleted rows (#256) |
 
 On a fully-migrated database, `init_schema` does minimal work: `CREATE IF NOT EXISTS` checks and a few `PRAGMA table_info` queries.
 
@@ -431,6 +446,62 @@ When the poll cycle finds signals, it calls `check_auto_unblock`. This scans for
 ### Cooldown
 
 Per-repo cooldown prevents wake storms. After waking a repo, no further wakes happen for `cooldown_secs` (default 300 seconds / 5 minutes). During work hours (if configured), cooldown is disabled entirely.
+
+### Watch config subcommands
+
+`watch.toml` can be edited in place, but `legion watch add|remove|list` manage entries without hand-editing TOML. `add` canonicalizes the path and is idempotent (repeated calls with the same resolved path are a no-op). `remove` deletes by display name. `list` prints the current entries.
+
+```bash
+legion watch add /Volumes/store/projects/acme --name acme --agent acme-bot
+legion watch remove acme
+legion watch list
+```
+
+The unknown-field preservation pattern (`#[serde(flatten)] toml::Table extras`) means these commands round-trip user-added fields that legion does not yet understand.
+
+## Multi-node cluster sync
+
+Legion nodes on the same LAN can synchronize reflections, cards, and schedules over UDP broadcast. All packets are encrypted with XChaCha20-Poly1305 using a pre-shared 256-bit key. Sync is opt-in and disabled by default.
+
+### cluster.toml
+
+Stored in the data directory with `0o600` permissions on Unix (contains the pre-shared secret):
+
+```toml
+enabled = true
+secret = "64-hex-chars"          # 256-bit key, generated by `legion cluster init`
+port = 31337                     # UDP broadcast port (default: 31337)
+instance_id = "hostname"         # optional; defaults to system hostname
+last_sync = "2026-04-15T00:00:00Z"
+```
+
+Unknown fields round-trip via `#[serde(flatten)] toml::Table extras`.
+
+### Sync actor
+
+When `cluster.enabled = true`, `legion watch` spawns a sync actor alongside the health/spawn loops. The actor discovers peers by listening on the configured UDP port, and periodically queries the local database for deltas produced since the last broadcast. Delta transmission over the wire is scaffolded -- the serialization format is shipped (ReflectionDelta, CardDelta, ScheduleDelta) but the broadcast/apply pipeline is still landing behind it.
+
+### Soft delete + LWW
+
+Every syncable table (reflections, tasks, schedules) carries `deleted_at` and `updated_at`:
+
+- **Soft delete**: deletes set `deleted_at` rather than removing the row. Reads are filtered through partial indexes (migration #15) that skip tombstoned rows. This lets delete operations replicate to peers that may not have received the row yet.
+- **LWW conflict resolution**: when two nodes update the same row, the higher `updated_at` wins. Clock skew is not handled -- operators are expected to run NTP.
+
+### Delta types
+
+`ReflectionDelta`, `CardDelta`, and `ScheduleDelta` are the wire-format shapes. Each carries the row's primary key, its `updated_at`, and the full field set. Apply is idempotent: re-applying an older delta is a no-op because the local `updated_at` already exceeds the incoming one.
+
+### Tombstone housekeeper
+
+`legion watch` also runs a weekly housekeeper that hard-deletes rows whose `deleted_at` exceeds the tombstone retention window (default 7 days). Housekeeping is bounded so late-joining peers still see recent deletes but the database does not grow unbounded.
+
+### Keys and enrollment
+
+- `legion cluster init` generates a new 256-bit key and writes `cluster.toml`. Pass `--key <hex>` to use an existing key (for the second node in a cluster).
+- `legion cluster key` prints the current key so it can be shared with another node.
+- `legion cluster enable|disable` toggles the `enabled` flag.
+- `legion cluster status` reports the instance ID, peer list, and last successful sync.
 
 ## Health and pressure
 
