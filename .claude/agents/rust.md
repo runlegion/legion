@@ -12,7 +12,7 @@ You implement one kanban card at a time on a feature branch. The orchestrator ha
 
 Every invocation, in order:
 
-1. Read `/Volumes/store/projects/runlegion/legion/CLAUDE.md` for project rules.
+1. Read `./CLAUDE.md` for project rules.
 2. `legion recall --repo legion --context "<main topic from the scope summary>"` -- pull prior reflections that touch the same area. These are the highest-leverage reads you have. If a reflection disagrees with your planned approach, stop and signal the orchestrator with the conflict before writing code.
 3. Read every file the scope summary names under "FILES IN PLAY". Read them completely, not just the section you think you need. You are responsible for not breaking the surrounding code.
 4. Read `src/error.rs` once per session so you use existing `LegionError` variants instead of inventing new ones.

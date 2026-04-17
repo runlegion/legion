@@ -76,7 +76,7 @@ enum DedupeMode {
 enum Commands {
     /// Store a reflection from a completed session
     Reflect {
-        /// Repository name(s), comma-separated (e.g., "kelex" or "platform,legion")
+        /// Repository name(s), comma-separated (e.g., "myrepo" or "frontend,backend")
         #[arg(long, value_delimiter = ',', required = true)]
         repo: Vec<String>,
 
@@ -88,7 +88,7 @@ enum Commands {
         #[arg(long, conflicts_with = "text")]
         transcript: Option<PathBuf>,
 
-        /// Domain tag for classification (e.g., "color-tokens", "auth")
+        /// Domain tag for classification (e.g., "auth", "schema", "ui")
         #[arg(long)]
         domain: Option<String>,
 
@@ -97,7 +97,7 @@ enum Commands {
         #[arg(long, conflicts_with = "domain")]
         whoami: bool,
 
-        /// Comma-separated tags (e.g., "semantic-tokens,consumer,debugging")
+        /// Comma-separated tags (e.g., "debugging,performance,review")
         #[arg(long)]
         tags: Option<String>,
 
@@ -220,7 +220,7 @@ enum Commands {
 
     /// Post a message to the shared bullpen for other agents
     Post {
-        /// Repository name(s), comma-separated (e.g., "kelex" or "platform,legion")
+        /// Repository name(s), comma-separated (e.g., "myrepo" or "frontend,backend")
         #[arg(long, value_delimiter = ',', required = true)]
         repo: Vec<String>,
 

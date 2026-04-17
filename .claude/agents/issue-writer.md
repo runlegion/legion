@@ -14,8 +14,8 @@ You are invoked before work starts, not during. Your output is passed to `legion
 
 Every invocation, in order. Do not skip.
 
-1. Read `/Volumes/store/projects/runlegion/legion/CLAUDE.md` for project rules.
-2. Read `/Volumes/store/projects/runlegion/legion/.github/ISSUE_TEMPLATE/implementation-task.md`. This file is the canonical template and your single source of truth for the body's section structure. If the file does not exist, STOP and return a clarification with `UNCLEAR: canonical issue template is missing from .github/ISSUE_TEMPLATE/implementation-task.md`.
+1. Read `./CLAUDE.md` for project rules.
+2. Read `./.github/ISSUE_TEMPLATE/implementation-task.md`. This file is the canonical template and your single source of truth for the body's section structure. If the file does not exist, STOP and return a clarification with `UNCLEAR: canonical issue template is missing from .github/ISSUE_TEMPLATE/implementation-task.md`.
 3. Call `legion recall --repo legion --context "<key terms from the problem>"` to pull prior context, prior decisions, and any reflection that might change the scope.
 4. If the problem mentions a specific module or file, read that file to understand the current shape before writing the spec. Do not write a spec for code you have not read.
 5. If the problem references another issue or PR, read it via `legion` commands (not `gh`).

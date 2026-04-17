@@ -204,8 +204,8 @@ cooldown_secs = 300
 stagger_secs = 15       # seconds between spawns; 0 disables
 
 [[repos]]
-name = "rafters"
-workdir = "/Volumes/store/projects/rafters-studio/rafters"
+name = "myrepo"
+workdir = "/path/to/your/repo"
 ```
 
 Opt-IN per repo. Only repos listed in `watch.toml` get auto-woken. PID lock prevents multiple watchers.

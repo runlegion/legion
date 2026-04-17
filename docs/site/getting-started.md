@@ -401,12 +401,12 @@ retention_days = 7             # days to keep health samples (default: 7)
 serve = false                  # enable web dashboard on this node (default: false)
 
 [[repos]]
-name = "rafters"
-workdir = "/Volumes/store/projects/rafters-studio/rafters"
+name = "frontend"
+workdir = "/path/to/your/frontend"
 
 [[repos]]
-name = "legion"
-workdir = "/Volumes/store/projects/runlegion/legion"
+name = "backend"
+workdir = "/path/to/your/backend"
 ```
 
 Repos are opt-in. Only repos listed in `watch.toml` get auto-woken. The `/watch-sync` slash command can populate this from your Claude Code project settings.

@@ -12,7 +12,7 @@ You take a TypeScript module and produce an idiomatic Rust equivalent that match
 
 Every invocation, in order:
 
-1. Read `/Volumes/store/projects/runlegion/legion/CLAUDE.md` for project rules.
+1. Read `./CLAUDE.md` for project rules.
 2. Read every file in the source TS module. Completely. If the scope says "port plugin/channel/sse-client.ts", you read ALL of `plugin/channel/*.ts`, not just the one file -- you need the types, the event shapes, the shared constants, and the import graph.
 3. Read `src/signal.rs`, `src/board.rs`, and any other Rust modules that already implement related legion concepts. The TS module probably duplicates logic that already exists in Rust -- reuse it instead of reimplementing.
 4. Read `src/serve.rs` to see how axum is used in legion (router layout, State pattern, error handling, Json responses, SSE streams if present).
