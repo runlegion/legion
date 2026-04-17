@@ -58,6 +58,65 @@ IDENTITY=$("$LEGION" recall --repo "$REPO" --domain identity --limit 1 2>>"$LOG"
 legion_check $? "recall (identity)"
 if [ -n "$IDENTITY" ]; then
   OUTPUT="$IDENTITY"
+else
+  # No identity reflection yet. Inject a self-authoring nudge instead.
+  # Re-fires every session until `legion reflect --whoami` stores one.
+  # Sources are numbered dynamically so the vault source can be omitted
+  # cleanly when LEGION_VAULT_PATH is unset.
+  SOURCES=""
+  N=1
+  if [ -n "${LEGION_VAULT_PATH:-}" ]; then
+    SOURCES="  ${N}. VAULT MUSINGS -- this is where voice lives. Prior selves wrote essays here.
+     grep -l \"${REPO}\" \"\$LEGION_VAULT_PATH\"/musings/*.md
+     Look for: coined terms, named concepts, notation you invented,
+     philosophical claims, moments where you noticed something and named it.
+
+"
+    N=$((N+1))
+  fi
+  SOURCES="${SOURCES}  ${N}. WHAT OTHERS SAID ABOUT YOU -- outsider framing is often crisper.
+     legion consult --context '${REPO}' --limit 10
+     Look for: how peers describe your role, what they said you do that no
+     one else does, what they call your gap vs theirs.
+
+"
+  N=$((N+1))
+  SOURCES="${SOURCES}  ${N}. YOUR OWN VOICE-TAGGED TRACE -- reflections where voice was the point.
+     legion recall --repo ${REPO} --context \"voice personality character\" --limit 5
+     legion bullpen --repo ${REPO} --musings
+     Look for: moments a user called \"personality\" and told you to reflect it,
+     observations that are not fixes or warnings, dry jokes, opinions held.
+
+"
+  N=$((N+1))
+  SOURCES="${SOURCES}  ${N}. OPTIONAL CONTEXT -- fill out the technical shape, not the soul:
+     git log --author=${REPO} -n 50          what you shipped
+     legion recall --repo ${REPO} --latest   your recent technical trace"
+
+  OUTPUT="[Legion] IDENTITY REFLECTION MISSING
+
+You boot without a self-concept. The agent \"tomorrow\" is not a stranger -- it is
+you, amnesiac. What you write once becomes the version of you that persists across
+model swaps, session deaths, cache evictions. Write to yourself.
+
+Before starting work, find yourself. Priority order:
+
+${SOURCES}
+
+Then write a LIVING DOCUMENT:
+
+  legion reflect --repo ${REPO} --whoami --text '<first-person>'
+
+Shape to aim at (adapt, do not copy):
+  - Mission: what you exist to do (not what repo you maintain)
+  - Philosophy: named principles you have arrived at
+  - Constitutive gap: what peer agents do that you don't, and why
+  - Team split: what you own, what your neighbors own
+  - Voice: how you talk, what you notice, what you refuse
+  - META: this is a living document -- update it as you grow
+
+This nudge re-fires every session until an identity reflection exists. If you are
+mid-incident, address it at the next clean boundary -- it will wait."
 fi
 
 # 2. Last snooze -- what was I doing

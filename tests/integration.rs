@@ -155,6 +155,106 @@ fn recall_by_domain_filters_correctly() {
     );
 }
 
+#[test]
+fn whoami_flag_stores_as_identity_domain() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--whoami",
+            "--text",
+            "I am the test agent",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "whoami reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "recall", "--repo", "test", "--domain", "identity", "--limit", "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("I am the test agent"),
+        "expected whoami reflection under domain=identity, got: {stdout}"
+    );
+}
+
+#[test]
+fn whoami_conflicts_with_domain_flag() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--whoami",
+            "--domain",
+            "something-else",
+            "--text",
+            "should not store",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "expected --whoami + --domain to fail, but it succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "expected clap conflict error, got: {stderr}"
+    );
+}
+
+#[test]
+fn whoami_works_with_compound_repo() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "alpha,beta",
+            "--whoami",
+            "--text",
+            "shared identity text",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "compound whoami reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    for repo in ["alpha", "beta"] {
+        let out = legion_cmd(dir.path())
+            .args([
+                "recall", "--repo", repo, "--domain", "identity", "--limit", "5",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            stdout.contains("shared identity text"),
+            "expected identity reflection in {repo}, got: {stdout}"
+        );
+    }
+}
+
 /// Validate that a string looks like a UUIDv7 (36 chars, 4 hyphens).
 fn assert_uuid_format(s: &str) {
     let trimmed = s.trim();
