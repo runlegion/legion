@@ -92,6 +92,11 @@ enum Commands {
         #[arg(long)]
         domain: Option<String>,
 
+        /// Shortcut for --domain identity. Stores as an identity reflection,
+        /// which the SessionStart hook injects on every boot.
+        #[arg(long, conflicts_with = "domain")]
+        whoami: bool,
+
         /// Comma-separated tags (e.g., "semantic-tokens,consumer,debugging")
         #[arg(long)]
         tags: Option<String>,
@@ -1851,11 +1856,17 @@ fn run() -> error::Result<()> {
             text,
             transcript,
             domain,
+            whoami,
             tags,
             follows,
             force,
             dedupe_mode,
         } => {
+            let domain = if whoami {
+                Some("identity".to_owned())
+            } else {
+                domain
+            };
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             let index = search::SearchIndex::open(&base.join("index"))?;
