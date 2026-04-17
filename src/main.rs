@@ -1863,7 +1863,7 @@ fn run() -> error::Result<()> {
             dedupe_mode,
         } => {
             let domain = if whoami {
-                Some("identity".to_owned())
+                Some("identity".to_string())
             } else {
                 domain
             };
