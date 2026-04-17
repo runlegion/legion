@@ -1,9 +1,57 @@
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn legion_cmd(data_dir: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_legion"));
     cmd.env("LEGION_DATA_DIR", data_dir);
     cmd
+}
+
+/// Run the SessionStart hook as a subprocess, piping `input_json` to stdin.
+///
+/// Wires the plugin wrapper to the test's compiled legion binary via a
+/// temporary plugin data dir containing a symlink to CARGO_BIN_EXE_legion.
+/// Returns the hook's stdout as a String.
+#[cfg(unix)]
+fn run_session_start_hook(
+    data_dir: &std::path::Path,
+    input_json: &str,
+    vault_path: Option<&std::path::Path>,
+) -> String {
+    let plugin_data = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_legion"),
+        plugin_data.path().join("legion"),
+    )
+    .unwrap();
+
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let hook = format!("{manifest_dir}/plugin/hooks/session-start.sh");
+    let plugin_root = format!("{manifest_dir}/plugin");
+
+    let mut cmd = Command::new("bash");
+    cmd.arg(&hook)
+        .env("CLAUDE_PLUGIN_ROOT", &plugin_root)
+        .env("CLAUDE_PLUGIN_DATA", plugin_data.path())
+        .env("LEGION_DATA_DIR", data_dir)
+        .env("LEGION_NO_SYNC", "1")
+        .env_remove("LEGION_VAULT_PATH");
+    if let Some(v) = vault_path {
+        cmd.env("LEGION_VAULT_PATH", v);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input_json.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    String::from_utf8(output.stdout).unwrap()
 }
 
 #[test]
@@ -219,6 +267,42 @@ fn whoami_conflicts_with_domain_flag() {
 }
 
 #[test]
+fn whoami_flag_works_with_transcript_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("transcript.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"assistant","content":"I am the test agent from transcript"}
+"#,
+    )
+    .unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "test", "--whoami", "--transcript"])
+        .arg(&transcript)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "whoami + transcript reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "recall", "--repo", "test", "--domain", "identity", "--limit", "5",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("I am the test agent from transcript"),
+        "expected whoami reflection from transcript under domain=identity, got: {stdout}"
+    );
+}
+
+#[test]
 fn whoami_works_with_compound_repo() {
     let dir = tempfile::tempdir().unwrap();
 
@@ -253,6 +337,80 @@ fn whoami_works_with_compound_repo() {
             "expected identity reflection in {repo}, got: {stdout}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn session_start_hook_injects_nudge_when_identity_empty() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let input = format!(r#"{{"cwd":"{}"}}"#, cwd.path().display());
+
+    let stdout = run_session_start_hook(data_dir.path(), &input, None);
+    assert!(
+        stdout.contains("IDENTITY REFLECTION MISSING"),
+        "expected nudge header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("legion reflect --repo"),
+        "expected write command hint, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("VAULT MUSINGS"),
+        "vault source should be omitted when LEGION_VAULT_PATH is unset, got: {stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn session_start_hook_includes_vault_source_when_path_set() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let vault = tempfile::tempdir().unwrap();
+    let input = format!(r#"{{"cwd":"{}"}}"#, cwd.path().display());
+
+    let stdout = run_session_start_hook(data_dir.path(), &input, Some(vault.path()));
+    assert!(
+        stdout.contains("VAULT MUSINGS"),
+        "expected vault source in prompt, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("$LEGION_VAULT_PATH"),
+        "expected literal env var reference in prompt, got: {stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn session_start_hook_skips_nudge_when_identity_exists() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let repo = cwd.path().file_name().unwrap().to_str().unwrap();
+
+    // Store an identity reflection for this repo.
+    let out = legion_cmd(data_dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            repo,
+            "--whoami",
+            "--text",
+            "I am the test agent with established identity",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "seed reflect failed");
+
+    let input = format!(r#"{{"cwd":"{}"}}"#, cwd.path().display());
+    let stdout = run_session_start_hook(data_dir.path(), &input, None);
+    assert!(
+        !stdout.contains("IDENTITY REFLECTION MISSING"),
+        "nudge should not fire when identity exists, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("established identity"),
+        "expected stored identity in injected context, got: {stdout}"
+    );
 }
 
 /// Validate that a string looks like a UUIDv7 (36 chars, 4 hyphens).

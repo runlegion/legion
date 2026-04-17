@@ -90,7 +90,7 @@ else
 "
   N=$((N+1))
   SOURCES="${SOURCES}  ${N}. OPTIONAL CONTEXT -- fill out the technical shape, not the soul:
-     git log --author=${REPO} -n 50          what you shipped
+     git log -n 50 --oneline                 what you shipped
      legion recall --repo ${REPO} --latest   your recent technical trace"
 
   OUTPUT="[Legion] IDENTITY REFLECTION MISSING
