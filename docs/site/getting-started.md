@@ -78,6 +78,7 @@ Contents:
 | `index/` | Tantivy full-text search index |
 | `watch.toml` | Watch daemon configuration |
 | `watch.pid` | PID lock for the watch daemon |
+| `cluster.toml` | Multi-node cluster sync config (0o600, contains secret) |
 
 ## What the hooks do
 
@@ -410,6 +411,18 @@ workdir = "/Volumes/store/projects/runlegion/legion"
 
 Repos are opt-in. Only repos listed in `watch.toml` get auto-woken. The `/watch-sync` slash command can populate this from your Claude Code project settings.
 
+### Manage watch.toml from the CLI
+
+```bash
+legion watch add /Volumes/store/projects/acme                    # add a repo (name = basename)
+legion watch add /Volumes/store/projects/acme --name acme \
+  --agent acme-bot                                               # custom display name and signal recipient
+legion watch remove acme                                          # remove by name
+legion watch list                                                 # show current entries
+```
+
+`add` canonicalizes the path and is idempotent -- repeated calls with the same resolved path are a no-op. Unknown TOML fields are preserved across edits.
+
 ### How it works
 
 The daemon runs a dual-interval loop:
@@ -431,6 +444,56 @@ When a `@all announce` signal contains "completed:", the watch daemon checks for
 ### Work hours
 
 Set `work_hours_start` and `work_hours_end` to disable cooldown during active hours. During work hours, agents can be woken as often as needed. Supports overnight ranges (e.g., 22-06).
+
+## Multi-node cluster sync
+
+Legion nodes on the same LAN can share reflections, cards, and schedules over UDP broadcast. Traffic is encrypted with XChaCha20-Poly1305 using a pre-shared 256-bit key. Sync is opt-in and disabled by default.
+
+### First node
+
+Initialize the cluster. Legion generates a fresh key and writes `cluster.toml`:
+
+```bash
+legion cluster init
+legion cluster enable
+```
+
+The key is printed once on `init`. Save it -- it is the only way to enroll another node.
+
+### Second node (enrolling)
+
+Use the key from the first node:
+
+```bash
+legion cluster init --key <64-hex-chars>
+legion cluster enable
+```
+
+Or print the key from the first node and copy it over:
+
+```bash
+legion cluster key              # on node A
+legion cluster init --key ...   # on node B
+legion cluster enable           # on node B
+```
+
+### Status and control
+
+```bash
+legion cluster status           # peers, sync state, last sync time
+legion cluster disable          # stop broadcasting without deleting the key
+legion cluster enable           # resume
+```
+
+### What syncs
+
+`legion watch` spawns the sync actor when `cluster.enabled = true`. Reflections, kanban cards, and schedules flow between nodes. Conflicts are resolved last-write-wins on `updated_at`, so operators should run NTP. Deletes are tombstones that replicate to peers and are hard-deleted after 7 days by the weekly housekeeper.
+
+The delta format is shipped (ReflectionDelta, CardDelta, ScheduleDelta). Broadcast transport is scaffolded and still landing behind it.
+
+### Security notes
+
+`cluster.toml` contains the pre-shared secret and is written with `0o600` on Unix. Do not commit it. A leaked key lets an attacker on the same subnet read and write to your database.
 
 ## Boost and learning chains
 
