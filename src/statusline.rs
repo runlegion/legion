@@ -150,7 +150,13 @@ pub fn run(json: bool) -> Result<()> {
                 "max_error_bytes": tail.max_error_bytes,
             },
         });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        // Serialisation failures on a well-typed JSON value are effectively
+        // impossible, but swallow them anyway to preserve the "never break
+        // the Claude Code UI" invariant.
+        match serde_json::to_string_pretty(&payload) {
+            Ok(s) => println!("{s}"),
+            Err(e) => log_error(format!("serialise json output: {e}")),
+        }
         return Ok(());
     }
 
@@ -418,9 +424,13 @@ fn cap_segment(pct: Option<f64>, resets_at: Option<i64>, cfg: &CapConfig) -> Opt
         .filter(|s| !s.is_empty())
         .map(|s| format!("\u{2192}{s}"))
         .unwrap_or_default();
+    // Round rather than truncate so the displayed integer matches what
+    // the user expects from the float we are showing (e.g. 89.9 displays
+    // as "90%", not "89%"). The marker is still driven by the raw float
+    // so band semantics do not change.
     Some(format!(
         "{marker} {pct}%\u{00B7}{label}{suffix}",
-        pct = pct as i64,
+        pct = pct.round() as i64,
         label = cfg.label,
     ))
 }
@@ -455,6 +465,10 @@ fn format_reset_day_time(epoch_secs: i64) -> String {
 
 fn cache_path_for(session_id: &str) -> PathBuf {
     // session_id is untrusted; keep only safe chars to avoid path escapes.
+    // Claude Code session IDs in practice are UUIDv7 strings (hyphens and
+    // hex digits only) so the sanitiser is a no-op on real input. It still
+    // defends against malformed input that could collide through character
+    // stripping if Anthropic ever changes the ID shape.
     let safe: String = session_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
