@@ -305,12 +305,19 @@ case "${1:-}" in
       exit 1
     fi
     if ! command -v gh &>/dev/null; then
-      echo "[]"
-      exit 0
+      echo "gh CLI not found" >&2
+      exit 1
     fi
-    gh pr checks "$PR_NUMBER" --repo "$REPO" \
-      --json name,state,workflow,link,description \
-      2>/dev/null || echo "[]"
+    # gh pr checks exits non-zero when any check is failing -- that is data,
+    # not an error from our perspective. Capture stdout, only fail if gh
+    # produced no JSON at all (network error, auth failure, missing PR).
+    OUTPUT=$(gh pr checks "$PR_NUMBER" --repo "$REPO" \
+      --json name,state,workflow,link,description 2>&1)
+    if [ -z "$OUTPUT" ] || ! printf '%s' "$OUTPUT" | jq -e . >/dev/null 2>&1; then
+      echo "gh pr checks failed: $OUTPUT" >&2
+      exit 1
+    fi
+    printf '%s\n' "$OUTPUT"
     ;;
 
   *)

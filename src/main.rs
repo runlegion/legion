@@ -3517,7 +3517,12 @@ fn run() -> error::Result<()> {
 
                 let failed: Vec<&str> = checks
                     .iter()
-                    .filter(|c| matches!(c.state.as_str(), "FAILURE" | "CANCELLED" | "TIMED_OUT"))
+                    .filter(|c| {
+                        matches!(
+                            c.state.as_str(),
+                            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STALE"
+                        )
+                    })
                     .map(|c| c.name.as_str())
                     .collect();
                 if !failed.is_empty() {
