@@ -552,6 +552,189 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Tail parsing for the statusline subcommand
+// ---------------------------------------------------------------------------
+
+/// Per-turn summary of the most recent state of a transcript.
+///
+/// Unlike [`SessionUsage::from_file`], which aggregates every assistant turn,
+/// this function returns only the information the statusline needs:
+/// the last assistant message's raw token counts (the "next-turn replay"
+/// cost driver), the count of real user turns (filtering synthetic content
+/// that Claude Code injects on every render), and the maximum size of any
+/// cached `tool_result` error in the tail of the transcript.
+///
+/// The parser walks the whole file; sessions with hundreds of turns still
+/// complete in well under the statusline's 300ms budget because each line
+/// is JSON-decoded once and the work per line is negligible.
+#[derive(Debug, Default, Clone)]
+pub struct TranscriptTail {
+    /// Raw tokens on the most recent assistant message that carried a
+    /// `usage` object. Zero if the transcript has no such message.
+    pub last_assistant: RawTokens,
+    /// Number of genuine user turns seen in the transcript.
+    /// Excludes synthetic content (system reminders, command echoes,
+    /// tool-result relays) that Claude Code injects per render.
+    pub real_turns: u64,
+    /// Maximum byte size of any cached `tool_result` content flagged
+    /// as an error in the tail of the transcript. Zero when none
+    /// exceed the 2KB threshold.
+    pub max_error_bytes: u64,
+}
+
+/// Prefixes indicating a `user` event whose content is not a genuine
+/// user turn but some synthetic injection from Claude Code or its hooks.
+/// Matches the set used by the mtberlin2023 reference statusline (MIT).
+const SYNTHETIC_PREFIXES: &[&str] = &[
+    "<command-message>",
+    "<command-name>",
+    "<command-args>",
+    "<task-notification>",
+    "<local-command-caveat>",
+    "<system-reminder>",
+    "<user-prompt-submit-hook>",
+    "Unknown command:",
+    "Caveat:",
+];
+
+/// Size above which an error `tool_result` is considered large enough
+/// to surface as a statusline warning. Matches the mtberlin2023 reference.
+const ERROR_SURFACE_THRESHOLD_BYTES: u64 = 2048;
+
+/// Parse the transcript file at `path` and return a [`TranscriptTail`].
+///
+/// Malformed lines are skipped silently. A missing file returns the
+/// default tail (all zeros); the caller decides how to surface that.
+pub fn parse_transcript_tail(path: &Path) -> TranscriptTail {
+    let mut tail = TranscriptTail::default();
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return tail,
+    };
+    let reader = io::BufReader::new(file);
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let obj: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        match obj.get("type").and_then(|v| v.as_str()) {
+            Some("assistant") => {
+                if let Some(usage) = obj.get("message").and_then(|m| m.get("usage")) {
+                    tail.last_assistant = extract_tokens(usage);
+                }
+            }
+            Some("user") => {
+                if is_real_user_turn(&obj, &mut tail.max_error_bytes) {
+                    tail.real_turns += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    tail
+}
+
+/// Determine whether a `user`-type event represents a genuine user turn
+/// and update `max_error_bytes` if any error-flagged tool_result content
+/// exceeds the surfacing threshold.
+fn is_real_user_turn(obj: &Value, max_error_bytes: &mut u64) -> bool {
+    let msg = match obj.get("message") {
+        Some(m) => m,
+        None => return false,
+    };
+    let content = match msg.get("content") {
+        Some(c) => c,
+        None => return false,
+    };
+
+    if let Some(text) = content.as_str() {
+        return !is_synthetic_text(text);
+    }
+
+    let Some(items) = content.as_array() else {
+        return false;
+    };
+
+    let mut real = false;
+    for item in items {
+        let Some(obj_item) = item.as_object() else {
+            continue;
+        };
+        let itype = obj_item.get("type").and_then(|v| v.as_str());
+        match itype {
+            Some("tool_result") => {
+                let body_len = tool_result_body_len(obj_item);
+                let is_error = obj_item
+                    .get("is_error")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if is_error
+                    && body_len > ERROR_SURFACE_THRESHOLD_BYTES
+                    && body_len > *max_error_bytes
+                {
+                    *max_error_bytes = body_len;
+                }
+            }
+            Some("text") => {
+                let text = obj_item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                if !is_synthetic_text(text) {
+                    real = true;
+                }
+            }
+            _ => {
+                real = true;
+            }
+        }
+    }
+    real
+}
+
+/// Check whether a piece of user text is synthetic content that should
+/// not be counted as a real user turn.
+fn is_synthetic_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        return true;
+    }
+    SYNTHETIC_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
+/// Compute the byte length of a `tool_result.content` field, handling
+/// both the string form and the list-of-content-parts form.
+fn tool_result_body_len(item: &serde_json::Map<String, Value>) -> u64 {
+    let Some(body) = item.get("content") else {
+        return 0;
+    };
+    if let Some(text) = body.as_str() {
+        return text.len() as u64;
+    }
+    let Some(parts) = body.as_array() else {
+        return 0;
+    };
+    let mut total: u64 = 0;
+    for part in parts {
+        if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+            total += text.len() as u64;
+        }
+    }
+    total
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

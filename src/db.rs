@@ -581,6 +581,56 @@ impl Database {
                  ON schedules(repo) WHERE deleted_at IS NULL;",
         )?;
 
+        // Migration 16: Rate limit and usage samples for pillar-2 scheduler (#287).
+        // Populated by `legion statusline` on every Claude Code render. Both
+        // tables carry deleted_at + updated_at for smugglr content-hash sync.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS rate_limit_samples (
+                id TEXT PRIMARY KEY,
+                hostname TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                sampled_at TEXT NOT NULL,
+                five_hour_pct REAL,
+                five_hour_resets_at INTEGER,
+                seven_day_pct REAL,
+                seven_day_resets_at INTEGER,
+                model TEXT,
+                deleted_at TEXT,
+                updated_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_samples_sampled \
+                ON rate_limit_samples(sampled_at);
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_samples_host \
+                ON rate_limit_samples(hostname);
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_samples_live \
+                ON rate_limit_samples(hostname, sampled_at) WHERE deleted_at IS NULL;
+
+            CREATE TABLE IF NOT EXISTS usage_samples (
+                id TEXT PRIMARY KEY,
+                hostname TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                turn_index INTEGER,
+                model TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                effective_tokens INTEGER NOT NULL,
+                error_bytes INTEGER NOT NULL DEFAULT 0,
+                sampled_at TEXT NOT NULL,
+                deleted_at TEXT,
+                updated_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_samples_sampled \
+                ON usage_samples(sampled_at);
+            CREATE INDEX IF NOT EXISTS idx_usage_samples_host \
+                ON usage_samples(hostname);
+            CREATE INDEX IF NOT EXISTS idx_usage_samples_session \
+                ON usage_samples(session_id);
+            CREATE INDEX IF NOT EXISTS idx_usage_samples_live \
+                ON usage_samples(hostname, sampled_at) WHERE deleted_at IS NULL;",
+        )?;
+
         Ok(())
     }
 
@@ -2350,6 +2400,86 @@ impl Database {
             [older_than],
         )?;
         Ok(rows as u64)
+    }
+
+    // -- Statusline Samples ------------------------------------------------------
+
+    /// Insert a rate-limit sample captured from a Claude Code statusline render.
+    pub fn insert_rate_limit_sample(
+        &self,
+        sample: &crate::statusline::RateLimitSample,
+    ) -> Result<String> {
+        self.conn.execute(
+            "INSERT INTO rate_limit_samples (id, hostname, session_id, sampled_at, \
+             five_hour_pct, five_hour_resets_at, seven_day_pct, seven_day_resets_at, \
+             model, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4)",
+            rusqlite::params![
+                sample.id,
+                sample.hostname,
+                sample.session_id,
+                sample.sampled_at,
+                sample.five_hour_pct,
+                sample.five_hour_resets_at,
+                sample.seven_day_pct,
+                sample.seven_day_resets_at,
+                sample.model,
+            ],
+        )?;
+        Ok(sample.id.clone())
+    }
+
+    /// Insert a usage sample captured from a Claude Code statusline render.
+    pub fn insert_usage_sample(&self, sample: &crate::statusline::UsageSample) -> Result<String> {
+        self.conn.execute(
+            "INSERT INTO usage_samples (id, hostname, session_id, turn_index, model, \
+             input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, \
+             effective_tokens, error_bytes, sampled_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+            rusqlite::params![
+                sample.id,
+                sample.hostname,
+                sample.session_id,
+                sample.turn_index,
+                sample.model,
+                sample.input_tokens,
+                sample.output_tokens,
+                sample.cache_write_tokens,
+                sample.cache_read_tokens,
+                sample.effective_tokens,
+                sample.error_bytes,
+                sample.sampled_at,
+            ],
+        )?;
+        Ok(sample.id.clone())
+    }
+
+    /// Most recent rate-limit sample across all hosts in the cluster.
+    /// Returns `None` when no sample has been written yet. Used by the
+    /// budget gate to read cluster-wide headroom.
+    #[allow(dead_code)] // Consumed by the upcoming `legion budget` subcommand.
+    pub fn latest_rate_limit_sample(&self) -> Result<Option<crate::statusline::RateLimitSample>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, hostname, session_id, sampled_at, five_hour_pct, \
+             five_hour_resets_at, seven_day_pct, seven_day_resets_at, model \
+             FROM rate_limit_samples WHERE deleted_at IS NULL \
+             ORDER BY sampled_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query([])?;
+        match rows.next().map_err(LegionError::Database)? {
+            Some(row) => Ok(Some(crate::statusline::RateLimitSample {
+                id: row.get(0)?,
+                hostname: row.get(1)?,
+                session_id: row.get(2)?,
+                sampled_at: row.get(3)?,
+                five_hour_pct: row.get(4)?,
+                five_hour_resets_at: row.get(5)?,
+                seven_day_pct: row.get(6)?,
+                seven_day_resets_at: row.get(7)?,
+                model: row.get(8)?,
+            })),
+            None => Ok(None),
+        }
     }
 
     /// Rename a repo across all tables. Returns total rows updated.
