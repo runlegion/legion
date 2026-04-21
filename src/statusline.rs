@@ -105,22 +105,31 @@ const ALERT: &str = "\u{1F6A8}";
 /// logged to `/tmp/legion-hook-errors.log`.
 pub fn run(json: bool) -> Result<()> {
     let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() {
+    if let Err(e) = std::io::stdin().read_to_string(&mut raw) {
+        log_error(format!("read stdin: {e}"));
         return Ok(());
     }
     let parsed = match parse_input(&raw) {
         Some(p) => p,
-        None => return Ok(()),
+        None => {
+            log_error("parse stdin JSON failed or payload empty".to_string());
+            return Ok(());
+        }
     };
 
     let session_id = match parsed.session_id.as_deref() {
         Some(sid) if !sid.is_empty() => sid.to_string(),
-        _ => return Ok(()),
+        _ => {
+            log_error("stdin JSON missing session_id".to_string());
+            return Ok(());
+        }
     };
 
     let cache_path = cache_path_for(&session_id);
 
-    // Fast path: cache hit, re-emit and exit without DB writes.
+    // Fast path: cache hit, re-emit and exit without DB writes. The cached
+    // content already carries its trailing newline from write_cache, so emit
+    // it verbatim with print! rather than println!.
     if !json && let Some(cached) = read_cache_if_fresh(&cache_path, CACHE_TTL_SECS) {
         print!("{cached}");
         return Ok(());
@@ -161,8 +170,11 @@ pub fn run(json: bool) -> Result<()> {
     }
 
     let chip = render_chip(&tail, &parsed);
-    write_cache(&cache_path, &chip);
-    println!("{chip}");
+    // Include the trailing newline in both the stdout emission and the
+    // cached bytes so a subsequent cache-hit emits byte-identical output.
+    let chip_line = format!("{chip}\n");
+    write_cache(&cache_path, &chip_line);
+    print!("{chip_line}");
     Ok(())
 }
 
@@ -724,5 +736,126 @@ mod tests {
     fn next_turn_replay_excludes_output() {
         let r = raw(100, 999_999, 200, 300);
         assert_eq!(next_turn_replay(&r), 600);
+    }
+
+    // --- build_usage_sample contract ---------------------------------
+
+    #[test]
+    fn build_usage_sample_returns_none_when_transcript_absent() {
+        let parsed = ParsedInput::default();
+        let tail = tail(raw(100, 200, 0, 0), 1, 0);
+        assert!(build_usage_sample("host", "sid", "now", &parsed, &tail).is_none());
+    }
+
+    #[test]
+    fn build_usage_sample_returns_none_when_all_tokens_zero() {
+        let parsed = ParsedInput {
+            transcript_path: Some(PathBuf::from("/nonexistent")),
+            ..Default::default()
+        };
+        let tail = tail(raw(0, 0, 0, 0), 0, 0);
+        assert!(build_usage_sample("host", "sid", "now", &parsed, &tail).is_none());
+    }
+
+    #[test]
+    fn build_usage_sample_populated_when_tokens_and_transcript_present() {
+        let parsed = ParsedInput {
+            transcript_path: Some(PathBuf::from("/nonexistent")),
+            model: Some("claude-opus-4-7".into()),
+            ..Default::default()
+        };
+        let tail = tail(raw(10, 20, 30, 40), 3, 5120);
+        let sample = build_usage_sample("host", "sid", "2026-04-21T00:00:00Z", &parsed, &tail)
+            .expect("populated sample");
+        assert_eq!(sample.input_tokens, 10);
+        assert_eq!(sample.output_tokens, 20);
+        assert_eq!(sample.cache_write_tokens, 30);
+        assert_eq!(sample.cache_read_tokens, 40);
+        // 10 + 20*1.0 + 30*1.25 + 40*0.1 = 10 + 20 + 37.5 + 4 = 71.5 -> 72
+        assert_eq!(sample.effective_tokens, 72);
+        assert_eq!(sample.error_bytes, 5120);
+        assert_eq!(sample.turn_index, Some(3));
+        assert_eq!(sample.model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    // --- DB round-trip ------------------------------------------------
+
+    #[test]
+    fn db_rate_limit_sample_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("legion.db")).unwrap();
+        let sample = RateLimitSample {
+            id: Uuid::now_v7().to_string(),
+            hostname: "puck".into(),
+            session_id: "sess-1".into(),
+            sampled_at: "2026-04-21T00:00:00Z".into(),
+            five_hour_pct: Some(42.5),
+            five_hour_resets_at: Some(1714500000),
+            seven_day_pct: Some(68.0),
+            seven_day_resets_at: Some(1714900000),
+            model: Some("claude-opus-4-7".into()),
+        };
+        db.insert_rate_limit_sample(&sample).unwrap();
+
+        let got = db
+            .latest_rate_limit_sample()
+            .unwrap()
+            .expect("sample present");
+        assert_eq!(got.id, sample.id);
+        assert_eq!(got.hostname, "puck");
+        assert_eq!(got.five_hour_pct, Some(42.5));
+        assert_eq!(got.seven_day_resets_at, Some(1714900000));
+        assert_eq!(got.model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn db_usage_sample_insert_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("legion.db")).unwrap();
+        let sample = UsageSample {
+            id: Uuid::now_v7().to_string(),
+            hostname: "puck".into(),
+            session_id: "sess-1".into(),
+            turn_index: Some(5),
+            model: Some("claude-sonnet-4-6".into()),
+            input_tokens: 100,
+            output_tokens: 200,
+            cache_write_tokens: 300,
+            cache_read_tokens: 400,
+            effective_tokens: 715,
+            error_bytes: 0,
+            sampled_at: "2026-04-21T00:00:00Z".into(),
+        };
+        // Schema drift would panic here; presence of an id in the return
+        // proves the insert hit every NOT NULL column correctly.
+        let id = db.insert_usage_sample(&sample).unwrap();
+        assert_eq!(id, sample.id);
+    }
+
+    #[test]
+    fn db_latest_returns_most_recent_rate_limit_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("legion.db")).unwrap();
+        let mk = |id: &str, sampled: &str, pct: f64| RateLimitSample {
+            id: id.to_string(),
+            hostname: "puck".into(),
+            session_id: "sess".into(),
+            sampled_at: sampled.to_string(),
+            five_hour_pct: Some(pct),
+            five_hour_resets_at: None,
+            seven_day_pct: None,
+            seven_day_resets_at: None,
+            model: None,
+        };
+        db.insert_rate_limit_sample(&mk("a", "2026-04-21T00:00:00Z", 30.0))
+            .unwrap();
+        db.insert_rate_limit_sample(&mk("b", "2026-04-21T01:00:00Z", 80.0))
+            .unwrap();
+        db.insert_rate_limit_sample(&mk("c", "2026-04-21T00:30:00Z", 55.0))
+            .unwrap();
+
+        let got = db.latest_rate_limit_sample().unwrap().expect("has sample");
+        assert_eq!(got.id, "b", "most recent by sampled_at should win");
+        assert_eq!(got.five_hour_pct, Some(80.0));
     }
 }

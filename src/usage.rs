@@ -966,4 +966,134 @@ mod tests {
         assert_eq!(result.len(), 5);
         assert!(result.ends_with('~'));
     }
+
+    // -----------------------------------------------------------------
+    // parse_transcript_tail coverage
+    // -----------------------------------------------------------------
+
+    fn user_text_event(ts: &str, text: &str) -> String {
+        let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+        format!(
+            r#"{{"type":"user","timestamp":"{ts}","message":{{"role":"user","content":"{escaped}"}}}}"#
+        )
+    }
+
+    fn tool_result_event(ts: &str, body: &str, is_error: bool) -> String {
+        let escaped = body.replace('\\', "\\\\").replace('"', "\\\"");
+        let flag = if is_error { "true" } else { "false" };
+        format!(
+            r#"{{"type":"user","timestamp":"{ts}","message":{{"role":"user","content":[{{"type":"tool_result","is_error":{flag},"content":"{escaped}"}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn tail_defaults_for_missing_file() {
+        let tail = parse_transcript_tail(&PathBuf::from("/nonexistent/path.jsonl"));
+        assert_eq!(tail.real_turns, 0);
+        assert_eq!(tail.last_assistant.input, 0);
+        assert_eq!(tail.max_error_bytes, 0);
+    }
+
+    #[test]
+    fn tail_captures_last_assistant_tokens() {
+        let ts = "2026-04-21T00:00:00Z";
+        let (_dir, path) = write_fixture(&[
+            assistant_event(1, 2, 3, 4, ts),
+            assistant_event(10, 20, 30, 40, ts),
+            assistant_event(100, 200, 300, 400, ts),
+        ]);
+        let tail = parse_transcript_tail(&path);
+        // Last assistant wins, not sum.
+        assert_eq!(tail.last_assistant.input, 100);
+        assert_eq!(tail.last_assistant.output, 200);
+        assert_eq!(tail.last_assistant.cache_write, 300);
+        assert_eq!(tail.last_assistant.cache_read, 400);
+    }
+
+    #[test]
+    fn tail_counts_real_user_turns() {
+        let ts = "2026-04-21T00:00:00Z";
+        let (_dir, path) = write_fixture(&[
+            user_text_event(ts, "first question"),
+            assistant_event(1, 2, 0, 0, ts),
+            user_text_event(ts, "second question"),
+            assistant_event(3, 4, 0, 0, ts),
+        ]);
+        let tail = parse_transcript_tail(&path);
+        assert_eq!(tail.real_turns, 2);
+    }
+
+    #[test]
+    fn tail_filters_every_synthetic_prefix() {
+        let ts = "2026-04-21T00:00:00Z";
+        let mut lines: Vec<String> = SYNTHETIC_PREFIXES
+            .iter()
+            .map(|p| user_text_event(ts, &format!("{p} payload")))
+            .collect();
+        lines.push(user_text_event(ts, "this one is real"));
+        let (_dir, path) = write_fixture(&lines);
+        let tail = parse_transcript_tail(&path);
+        assert_eq!(
+            tail.real_turns, 1,
+            "only the non-synthetic user turn should count"
+        );
+    }
+
+    #[test]
+    fn tail_reports_large_error_tool_result_size() {
+        let ts = "2026-04-21T00:00:00Z";
+        let big = "x".repeat(3000);
+        let (_dir, path) = write_fixture(&[tool_result_event(ts, &big, true)]);
+        let tail = parse_transcript_tail(&path);
+        assert_eq!(tail.max_error_bytes, 3000);
+    }
+
+    #[test]
+    fn tail_suppresses_error_below_2kb_threshold() {
+        let ts = "2026-04-21T00:00:00Z";
+        // Exactly 2048 is NOT surfaced (strict > 2048). 2049 would be.
+        let at_threshold = "x".repeat(2048);
+        let (_dir, path) = write_fixture(&[tool_result_event(ts, &at_threshold, true)]);
+        let tail = parse_transcript_tail(&path);
+        assert_eq!(tail.max_error_bytes, 0);
+    }
+
+    #[test]
+    fn tail_ignores_non_error_tool_result_even_when_large() {
+        let ts = "2026-04-21T00:00:00Z";
+        let big = "x".repeat(5000);
+        // is_error: false -> must not surface.
+        let (_dir, path) = write_fixture(&[tool_result_event(ts, &big, false)]);
+        let tail = parse_transcript_tail(&path);
+        assert_eq!(tail.max_error_bytes, 0);
+    }
+
+    #[test]
+    fn tail_survives_malformed_lines_mixed_with_good_ones() {
+        let ts = "2026-04-21T00:00:00Z";
+        let lines = vec![
+            assistant_event(1, 2, 3, 4, ts),
+            "not json at all".to_string(),
+            "{\"broken\": ".to_string(),
+            assistant_event(100, 200, 300, 400, ts),
+        ];
+        let (_dir, path) = write_fixture(&lines);
+        let tail = parse_transcript_tail(&path);
+        // Malformed lines are skipped; the valid final assistant wins.
+        assert_eq!(tail.last_assistant.input, 100);
+        assert_eq!(tail.last_assistant.cache_read, 400);
+    }
+
+    #[test]
+    fn tail_parses_array_form_tool_result_content() {
+        let ts = "2026-04-21T00:00:00Z";
+        let big_text = "y".repeat(2500);
+        let escaped = big_text.replace('\\', "\\\\").replace('"', "\\\"");
+        let event = format!(
+            r#"{{"type":"user","timestamp":"{ts}","message":{{"role":"user","content":[{{"type":"tool_result","is_error":true,"content":[{{"type":"text","text":"{escaped}"}}]}}]}}}}"#
+        );
+        let (_dir, path) = write_fixture(&[event]);
+        let tail = parse_transcript_tail(&path);
+        assert_eq!(tail.max_error_bytes, 2500);
+    }
 }
