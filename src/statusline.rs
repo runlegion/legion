@@ -10,7 +10,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use chrono::{Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::Database;
-use crate::error::{LegionError, Result};
+use crate::error::Result;
 use crate::usage::{RawTokens, TranscriptTail, format_tokens, parse_transcript_tail};
 
 // ---------------------------------------------------------------------------
@@ -490,24 +490,6 @@ fn log_error(msg: String) {
     {
         let _ = f.write_all(line.as_bytes());
     }
-}
-
-// Keep the LegionError import live so the error wiring compiles even if
-// callers decide to propagate in the future.
-#[allow(dead_code)]
-fn _typecheck_error(e: LegionError) -> LegionError {
-    e
-}
-
-// Keep SystemTime + UNIX_EPOCH imports live for potential timestamp math
-// in follow-up work on forecast/runway chips. The current implementation
-// uses chrono for time formatting so these live in scope only.
-#[allow(dead_code)]
-fn _system_epoch() -> Option<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs())
 }
 
 // ---------------------------------------------------------------------------
