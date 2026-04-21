@@ -76,8 +76,17 @@ const SEVEN_DAY_ALERT_PCT: f64 = 85.0;
 
 /// Cache window: how long a rendered chip stays fresh before re-render.
 const CACHE_TTL_SECS: u64 = 10;
-const CACHE_PREFIX: &str = "/tmp/legion-statusline-";
-const ERROR_LOG: &str = "/tmp/legion-hook-errors.log";
+
+/// Subdirectory (under legion's data dir) that holds per-session chip caches.
+/// User-scoped by construction: the parent `data_dir()` lives under the
+/// current user's XDG data / macOS Application Support tree, so a different
+/// user on the same host cannot poison or collide with these files.
+const CACHE_SUBDIR: &str = "cache/statusline";
+
+/// Error log path relative to legion's data dir. Same user-scoping rationale
+/// as the cache dir -- a `/tmp` log is symlink-attackable on shared hosts
+/// because `OpenOptions::append` follows symlinks.
+const ERROR_LOG_SUBPATH: &str = "logs/hook-errors.log";
 
 /// Default action slash command surfaced at yellow+ replay thresholds.
 /// Overridable via the `LEGION_STATUSLINE_ACTION` environment variable.
@@ -102,7 +111,7 @@ const ALERT: &str = "\u{1F6A8}";
 ///
 /// Always returns `Ok(())` in production: a broken statusline must not
 /// surface as an error to the Claude Code UI. Internal failures are
-/// logged to `/tmp/legion-hook-errors.log`.
+/// logged to `<legion-data-dir>/logs/hook-errors.log`.
 pub fn run(json: bool) -> Result<()> {
     let mut raw = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut raw) {
@@ -129,8 +138,12 @@ pub fn run(json: bool) -> Result<()> {
 
     // Fast path: cache hit, re-emit and exit without DB writes. The cached
     // content already carries its trailing newline from write_cache, so emit
-    // it verbatim with print! rather than println!.
-    if !json && let Some(cached) = read_cache_if_fresh(&cache_path, CACHE_TTL_SECS) {
+    // it verbatim with print! rather than println!. A missing or unresolvable
+    // cache path just skips the fast path; the render below still runs.
+    if !json
+        && let Some(ref p) = cache_path
+        && let Some(cached) = read_cache_if_fresh(p, CACHE_TTL_SECS)
+    {
         print!("{cached}");
         return Ok(());
     }
@@ -173,7 +186,9 @@ pub fn run(json: bool) -> Result<()> {
     // Include the trailing newline in both the stdout emission and the
     // cached bytes so a subsequent cache-hit emits byte-identical output.
     let chip_line = format!("{chip}\n");
-    write_cache(&cache_path, &chip_line);
+    if let Some(ref p) = cache_path {
+        write_cache(p, &chip_line);
+    }
     print!("{chip_line}");
     Ok(())
 }
@@ -316,8 +331,14 @@ fn persist_samples(rate: &RateLimitSample, usage: Option<&UsageSample>) {
 }
 
 fn database_path() -> Option<PathBuf> {
-    let dirs = directories::ProjectDirs::from("dev", "runlegion", "legion")?;
-    Some(dirs.data_dir().join("legion.db"))
+    // Resolve through the same `data_dir()` the rest of the binary uses so
+    // statusline samples land in the one canonical legion.db. A previous
+    // revision constructed its own ProjectDirs tuple here, which pointed at
+    // a different path on macOS and silently split the sample stream off
+    // from the rest of legion's state -- the exact split-brain the
+    // `data_dir()` doc warns against. Swallow errors: the statusline must
+    // never crash the Claude Code UI just because the home dir is weird.
+    crate::data_dir().ok().map(|d| d.join("legion.db"))
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +496,16 @@ fn format_reset_day_time(epoch_secs: i64) -> String {
 // Cache helpers
 // ---------------------------------------------------------------------------
 
-fn cache_path_for(session_id: &str) -> PathBuf {
+fn cache_path_for(session_id: &str) -> Option<PathBuf> {
+    cache_path_in(&crate::data_dir().ok()?, session_id)
+}
+
+/// Compute the statusline cache path for `session_id` under an explicit
+/// data dir. Split out from [`cache_path_for`] so unit tests can exercise
+/// the sanitiser and path layout without relying on the process-wide
+/// `data_dir()` cache, which resolves once per process and can leak state
+/// between tests run in the same binary.
+fn cache_path_in(data_dir: &Path, session_id: &str) -> Option<PathBuf> {
     // session_id is untrusted; keep only safe chars to avoid path escapes.
     // Claude Code session IDs in practice are UUIDv7 strings (hyphens and
     // hex digits only) so the sanitiser is a no-op on real input. It still
@@ -485,7 +515,13 @@ fn cache_path_for(session_id: &str) -> PathBuf {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    PathBuf::from(format!("{CACHE_PREFIX}{safe}"))
+    if safe.is_empty() {
+        return None;
+    }
+    let dir = data_dir.join(CACHE_SUBDIR);
+    // Best-effort: if mkdir fails the write path will fail-soft too.
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join(safe))
 }
 
 fn read_cache_if_fresh(path: &Path, ttl_secs: u64) -> Option<String> {
@@ -500,10 +536,33 @@ fn read_cache_if_fresh(path: &Path, ttl_secs: u64) -> Option<String> {
 }
 
 fn write_cache(path: &Path, content: &str) {
-    // Best-effort: a failed cache write is not fatal; next render just
-    // recomputes. Writing via create+write avoids truncation races.
-    if let Ok(mut f) = std::fs::File::create(path) {
-        let _ = f.write_all(content.as_bytes());
+    // Atomic write via tmp file + rename: a concurrent reader either sees
+    // the previous complete file or the new complete file, never a partial
+    // write. The previous revision used `File::create(path)` which truncates
+    // in place -- a reader racing the writer could observe zero bytes or a
+    // half-written chip. All steps are best-effort: a failure just means
+    // the next render recomputes instead of hitting the cache.
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let file_name = match path.file_name().and_then(|s| s.to_str()) {
+        Some(s) => s,
+        None => return,
+    };
+    let tmp = parent.join(format!(".{file_name}.tmp.{pid}", pid = std::process::id()));
+    let Ok(mut f) = std::fs::File::create(&tmp) else {
+        return;
+    };
+    if f.write_all(content.as_bytes()).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    // Flush before rename so a crash between rename and fsync still leaves
+    // a file whose bytes are on disk (rename is atomic on the same fs).
+    let _ = f.sync_data();
+    drop(f);
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -521,13 +580,28 @@ fn log_error(msg: String) {
         ts = Utc::now().to_rfc3339(),
         msg = msg,
     );
+    // Resolve the error log path through legion's data dir so shared hosts
+    // cannot poison the file or race symlink attacks through `/tmp`.
+    // If the data dir can't be resolved (unusual -- no HOME, filesystem
+    // unwritable) swallow the error: the statusline must never surface a
+    // failure to the Claude Code UI.
+    let Some(path) = error_log_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(ERROR_LOG)
+        .open(&path)
     {
         let _ = f.write_all(line.as_bytes());
     }
+}
+
+fn error_log_path() -> Option<PathBuf> {
+    crate::data_dir().ok().map(|d| d.join(ERROR_LOG_SUBPATH))
 }
 
 // ---------------------------------------------------------------------------
@@ -700,10 +774,53 @@ mod tests {
 
     #[test]
     fn cache_path_sanitises_session_id() {
-        let p = cache_path_for("../../../etc/passwd");
+        // Run the sanitiser through `cache_path_in` with an explicit tmp data
+        // dir so the test stays hermetic: `cache_path_for` resolves through
+        // the process-wide `data_dir()` cache which is not safely swappable
+        // from within a unit test.
+        let dir = tempfile::tempdir().unwrap();
+        let p = cache_path_in(dir.path(), "../../../etc/passwd").expect("path resolves");
         let s = p.to_string_lossy();
         assert!(s.ends_with("etcpasswd"), "path should be sanitised: {s}");
-        assert!(s.starts_with(CACHE_PREFIX));
+        assert!(
+            s.contains(CACHE_SUBDIR),
+            "path should live under cache subdir: {s}"
+        );
+        // And it must stay under the data dir we passed in -- no `/tmp` leakage.
+        assert!(
+            p.starts_with(dir.path()),
+            "path must live under the passed-in data dir: {s}"
+        );
+    }
+
+    #[test]
+    fn cache_path_returns_none_for_empty_sanitised_id() {
+        // After sanitising, "/////" collapses to the empty string. The path
+        // must resolve to None rather than a dir-only path that would point
+        // the cache write at the cache directory itself.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cache_path_in(dir.path(), "/////").is_none());
+    }
+
+    #[test]
+    fn write_cache_is_atomic_against_concurrent_readers() {
+        // The previous revision used `File::create(path)` which truncates
+        // in place -- a reader racing the writer could observe zero bytes.
+        // The atomic rename flow guarantees the target file either has the
+        // old content or the new content, never a partial write.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chip");
+        std::fs::write(&path, "OLD\n").unwrap();
+        write_cache(&path, "NEW-CONTENT\n");
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(got, "NEW-CONTENT\n");
+        // No stray tmp file left behind on the success path.
+        let stray: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".chip.tmp."))
+            .collect();
+        assert!(stray.is_empty(), "tmp files left behind: {stray:?}");
     }
 
     #[test]

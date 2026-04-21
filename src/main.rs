@@ -1305,7 +1305,7 @@ enum WatchAction {
 /// leaves the legacy path in place as a safety net. This is the reverse
 /// of the previous migration direction, which moved data INTO the plugin
 /// data dir and caused the split-brain in the first place.
-fn data_dir() -> error::Result<PathBuf> {
+pub(crate) fn data_dir() -> error::Result<PathBuf> {
     use std::sync::OnceLock;
     static CACHED: OnceLock<PathBuf> = OnceLock::new();
 
