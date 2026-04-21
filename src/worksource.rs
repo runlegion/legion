@@ -457,8 +457,9 @@ pub fn list_prs(plugin_name: &str, github_repo: &str) -> Result<Vec<ExternalPR>>
     Ok(prs)
 }
 
-/// A single CI check on a PR. State values mirror gh's: SUCCESS, FAILURE,
-/// PENDING, IN_PROGRESS, NEUTRAL, SKIPPED, CANCELLED, TIMED_OUT.
+/// A single CI check on a PR. `state` mirrors gh's check-state vocabulary;
+/// see `gh pr checks --json state`. Stringly-typed so unknown states from a
+/// future gh release deserialize cleanly instead of failing the whole call.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExternalPRCheck {
     pub name: String,
@@ -467,6 +468,18 @@ pub struct ExternalPRCheck {
     pub link: String,
     #[serde(default)]
     pub description: String,
+}
+
+impl ExternalPRCheck {
+    /// True if `state` is a terminal failure that should make `legion pr checks`
+    /// exit non-zero. Excludes in-flight (`PENDING`, `IN_PROGRESS`) and
+    /// non-required-passing (`NEUTRAL`, `SKIPPED`, `SUCCESS`) states.
+    pub fn is_failing(&self) -> bool {
+        matches!(
+            self.state.as_str(),
+            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STALE"
+        )
+    }
 }
 
 /// Fetch CI check status for a PR via a work source plugin.
@@ -735,6 +748,49 @@ pub fn resolve_review_config() -> Option<ReviewConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check_with_state(state: &str) -> ExternalPRCheck {
+        ExternalPRCheck {
+            name: "Test".into(),
+            state: state.into(),
+            workflow: "CI".into(),
+            link: String::new(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn is_failing_terminal_failure_states() {
+        for state in [
+            "FAILURE",
+            "CANCELLED",
+            "TIMED_OUT",
+            "ACTION_REQUIRED",
+            "STALE",
+        ] {
+            assert!(
+                check_with_state(state).is_failing(),
+                "expected {state} to be failing"
+            );
+        }
+    }
+
+    #[test]
+    fn is_failing_passing_and_in_flight_states() {
+        for state in ["SUCCESS", "PENDING", "IN_PROGRESS", "NEUTRAL", "SKIPPED"] {
+            assert!(
+                !check_with_state(state).is_failing(),
+                "expected {state} to NOT be failing"
+            );
+        }
+    }
+
+    #[test]
+    fn is_failing_unknown_state_treated_as_passing() {
+        // Forward-compat: a future gh state we have not heard of must not poison
+        // the exit code. Worse to break the build than miss a new failure.
+        assert!(!check_with_state("FUTURE_GH_STATE").is_failing());
+    }
 
     #[test]
     fn extract_issue_number_from_url() {

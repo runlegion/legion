@@ -1139,7 +1139,8 @@ enum PrAction {
     },
 
     /// Show CI check status for a pull request.
-    /// Exits non-zero if any check is failed, cancelled, or timed out.
+    /// Exits non-zero if any check is in a terminal-failure state
+    /// (see `ExternalPRCheck::is_failing` for the exact set).
     Checks {
         /// Repository name (resolves work source config from watch.toml)
         #[arg(long)]
@@ -3517,12 +3518,7 @@ fn run() -> error::Result<()> {
 
                 let failed: Vec<&str> = checks
                     .iter()
-                    .filter(|c| {
-                        matches!(
-                            c.state.as_str(),
-                            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STALE"
-                        )
-                    })
+                    .filter(|c| c.is_failing())
                     .map(|c| c.name.as_str())
                     .collect();
                 if !failed.is_empty() {
