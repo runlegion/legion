@@ -1139,8 +1139,10 @@ enum PrAction {
     },
 
     /// Show CI check status for a pull request.
-    /// Exits non-zero if any check is in a terminal-failure state
-    /// (see `ExternalPRCheck::is_failing` for the exact set).
+    /// Exits non-zero if any check is not in a known passing or in-flight
+    /// state (see `ExternalPRCheck::is_failing` -- fail-closed on unknown
+    /// states so a future gh release with a new failure variant cannot
+    /// silently render as green to the merge gate).
     Checks {
         /// Repository name (resolves work source config from watch.toml)
         #[arg(long)]

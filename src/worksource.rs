@@ -471,27 +471,40 @@ pub struct ExternalPRCheck {
 }
 
 impl ExternalPRCheck {
-    /// True if `state` is a terminal failure that should make `legion pr checks`
-    /// exit non-zero. Excludes in-flight (`PENDING`, `IN_PROGRESS`) and
-    /// non-required-passing (`NEUTRAL`, `SKIPPED`, `SUCCESS`) states.
+    /// True unless `state` is a known passing or in-flight value.
+    ///
+    /// `legion pr checks` is a merge gate. Fail-closed on unknown states: a
+    /// future gh release that adds a new failure variant must surface as a
+    /// loud non-zero exit, not a silent green that lets a bad merge through.
+    /// Adding a new passing state will trip this and require an explicit
+    /// allow-list edit, which is the correct review burden for the gate.
     pub fn is_failing(&self) -> bool {
-        matches!(
+        !matches!(
             self.state.as_str(),
-            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STALE"
+            "SUCCESS"
+                | "NEUTRAL"
+                | "SKIPPED"
+                | "PENDING"
+                | "IN_PROGRESS"
+                | "QUEUED"
+                | "WAITING"
+                | "REQUESTED"
         )
     }
 }
 
 /// Fetch CI check status for a PR via a work source plugin.
+///
+/// Returns `Err` when the named plugin is not installed. Callers gate merges
+/// on this; an empty `Ok(Vec)` would render as a clean green and let a
+/// misconfigured `watch.toml` auto-approve a PR with no checks ever run.
 pub fn pr_checks(
     plugin_name: &str,
     github_repo: &str,
     pr_number: u64,
 ) -> Result<Vec<ExternalPRCheck>> {
-    let plugin_path = match find_plugin(plugin_name) {
-        Some(p) => p,
-        None => return Ok(Vec::new()),
-    };
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
 
     let pr_num_str = pr_number.to_string();
     let output = call_plugin(
@@ -777,7 +790,16 @@ mod tests {
 
     #[test]
     fn is_failing_passing_and_in_flight_states() {
-        for state in ["SUCCESS", "PENDING", "IN_PROGRESS", "NEUTRAL", "SKIPPED"] {
+        for state in [
+            "SUCCESS",
+            "NEUTRAL",
+            "SKIPPED",
+            "PENDING",
+            "IN_PROGRESS",
+            "QUEUED",
+            "WAITING",
+            "REQUESTED",
+        ] {
             assert!(
                 !check_with_state(state).is_failing(),
                 "expected {state} to NOT be failing"
@@ -786,10 +808,29 @@ mod tests {
     }
 
     #[test]
-    fn is_failing_unknown_state_treated_as_passing() {
-        // Forward-compat: a future gh state we have not heard of must not poison
-        // the exit code. Worse to break the build than miss a new failure.
-        assert!(!check_with_state("FUTURE_GH_STATE").is_failing());
+    fn is_failing_unknown_state_treated_as_failing() {
+        // Fail-closed: a future gh state we have not heard of must surface as
+        // a loud non-zero exit, not a silent green. Adding a new passing
+        // state requires an explicit allow-list edit -- the correct review
+        // burden for a merge gate.
+        assert!(check_with_state("FUTURE_GH_STATE").is_failing());
+    }
+
+    /// Regression guard for the silent-Ok hazard smugglr flagged on PR #291.
+    ///
+    /// `pr_checks` previously returned `Ok(Vec::new())` when the plugin
+    /// binary could not be resolved. `legion pr checks` reads that empty
+    /// vector, finds nothing failing, and exits 0 -- a false-green merge
+    /// gate. Mirrors the close_issue / reopen_issue regression guards
+    /// inherited from PR #227.
+    #[test]
+    fn pr_checks_returns_worksource_error_when_plugin_missing() {
+        let result = pr_checks("nonexistent-plugin-xyz", "owner/repo", 1);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
     }
 
     #[test]
