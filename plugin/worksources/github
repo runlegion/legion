@@ -298,8 +298,23 @@ case "${1:-}" in
     echo '{"ok":true}'
     ;;
 
+  pr-checks)
+    PR_NUMBER="${LEGION_WS_PR_NUMBER:-}"
+    if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_PR_NUMBER required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo "[]"
+      exit 0
+    fi
+    gh pr checks "$PR_NUMBER" --repo "$REPO" \
+      --json name,state,workflow,link,description \
+      2>/dev/null || echo "[]"
+    ;;
+
   *)
-    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close>" >&2
+    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close|pr-checks>" >&2
     exit 1
     ;;
 esac

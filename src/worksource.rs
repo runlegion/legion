@@ -457,6 +457,45 @@ pub fn list_prs(plugin_name: &str, github_repo: &str) -> Result<Vec<ExternalPR>>
     Ok(prs)
 }
 
+/// A single CI check on a PR. State values mirror gh's: SUCCESS, FAILURE,
+/// PENDING, IN_PROGRESS, NEUTRAL, SKIPPED, CANCELLED, TIMED_OUT.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExternalPRCheck {
+    pub name: String,
+    pub state: String,
+    pub workflow: String,
+    pub link: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Fetch CI check status for a PR via a work source plugin.
+pub fn pr_checks(
+    plugin_name: &str,
+    github_repo: &str,
+    pr_number: u64,
+) -> Result<Vec<ExternalPRCheck>> {
+    let plugin_path = match find_plugin(plugin_name) {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+
+    let pr_num_str = pr_number.to_string();
+    let output = call_plugin(
+        &plugin_path,
+        &["pr-checks"],
+        &[
+            ("LEGION_WS_REPO", github_repo),
+            ("LEGION_WS_PR_NUMBER", &pr_num_str),
+        ],
+    )?;
+
+    let checks: Vec<ExternalPRCheck> =
+        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
+
+    Ok(checks)
+}
+
 /// Post a review on a PR via a work source plugin.
 pub fn review_pr(
     plugin_name: &str,

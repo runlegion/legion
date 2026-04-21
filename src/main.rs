@@ -1138,6 +1138,22 @@ enum PrAction {
         repo: String,
     },
 
+    /// Show CI check status for a pull request.
+    /// Exits non-zero if any check is failed, cancelled, or timed out.
+    Checks {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR number
+        #[arg(long)]
+        number: u64,
+
+        /// Emit raw JSON instead of human-formatted output
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Post a review on a pull request
     Review {
         /// Repository name (resolves work source config from watch.toml)
@@ -3456,6 +3472,61 @@ fn run() -> error::Result<()> {
                             pr.number, pr.title, pr.head_ref_name, review, draft
                         );
                     }
+                }
+            }
+            PrAction::Checks { repo, number, json } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let checks = worksource::pr_checks(&plugin_name, &source_repo, number)?;
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&checks).unwrap_or_else(|_| "[]".into())
+                    );
+                } else if checks.is_empty() {
+                    eprintln!(
+                        "[legion] no checks reported for PR #{} on {}",
+                        number, source_repo
+                    );
+                } else {
+                    let mut name_w = 0usize;
+                    let mut wf_w = 0usize;
+                    for c in &checks {
+                        name_w = name_w.max(c.name.len());
+                        wf_w = wf_w.max(c.workflow.len());
+                    }
+                    for c in &checks {
+                        println!(
+                            "{:<8} {:<name_w$}  {:<wf_w$}  {}",
+                            c.state,
+                            c.name,
+                            c.workflow,
+                            c.link,
+                            name_w = name_w,
+                            wf_w = wf_w,
+                        );
+                    }
+                }
+
+                let failed: Vec<&str> = checks
+                    .iter()
+                    .filter(|c| matches!(c.state.as_str(), "FAILURE" | "CANCELLED" | "TIMED_OUT"))
+                    .map(|c| c.name.as_str())
+                    .collect();
+                if !failed.is_empty() {
+                    return Err(error::LegionError::WorkSource(format!(
+                        "{} check(s) failed on PR #{}: {}",
+                        failed.len(),
+                        number,
+                        failed.join(", ")
+                    )));
                 }
             }
             PrAction::Review {

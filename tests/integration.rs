@@ -2494,6 +2494,55 @@ fn pr_close_delete_branch_flag_accepted() {
     );
 }
 
+#[test]
+fn pr_checks_errors_without_worksource_config() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["pr", "checks", "--repo", "no-such-repo", "--number", "42"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "expected failure when no work source configured"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected 'no work source configured' in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn pr_checks_json_flag_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "pr",
+            "checks",
+            "--repo",
+            "no-such-repo",
+            "--number",
+            "42",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    // Fails at worksource resolution, not arg parsing -- confirms --json parses
+    assert!(
+        !out.status.success(),
+        "expected failure when no work source configured"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected worksource error, got: {stderr}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Usage command integration tests
 // ---------------------------------------------------------------------------
