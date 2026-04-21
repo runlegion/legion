@@ -362,54 +362,66 @@ fn error_suffix(bytes: u64) -> String {
 /// Concatenated cap segments (5h, weekly) in order.
 fn cap_segments(parsed: &ParsedInput) -> String {
     let mut out = String::new();
-    if let Some(s) = five_hour_segment(parsed.five_hour_pct, parsed.five_hour_resets_at) {
+    if let Some(s) = cap_segment(
+        parsed.five_hour_pct,
+        parsed.five_hour_resets_at,
+        &FIVE_HOUR_CONFIG,
+    ) {
         out.push_str(&format!(" \u{00B7} {s}"));
     }
-    if let Some(s) = seven_day_segment(parsed.seven_day_pct, parsed.seven_day_resets_at) {
+    if let Some(s) = cap_segment(
+        parsed.seven_day_pct,
+        parsed.seven_day_resets_at,
+        &SEVEN_DAY_CONFIG,
+    ) {
         out.push_str(&format!(" \u{00B7} {s}"));
     }
     out
 }
 
-fn five_hour_segment(pct: Option<f64>, resets_at: Option<i64>) -> Option<String> {
-    let pct = pct?;
-    let marker = if pct >= FIVE_HOUR_ALERT_PCT {
-        ALERT
-    } else if pct >= FIVE_HOUR_WARN_PCT {
-        WARN
-    } else {
-        return None;
-    };
-    let suffix = resets_at
-        .filter(|&t| t > 0)
-        .map(format_reset_same_day)
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("\u{2192}{s}"))
-        .unwrap_or_default();
-    Some(format!(
-        "{marker} {pct}%\u{00B7}5h{suffix}",
-        pct = pct as i64
-    ))
+/// Per-window calibration used by [`cap_segment`].
+struct CapConfig {
+    warn_pct: f64,
+    alert_pct: f64,
+    label: &'static str,
+    format_reset: fn(i64) -> String,
 }
 
-fn seven_day_segment(pct: Option<f64>, resets_at: Option<i64>) -> Option<String> {
+const FIVE_HOUR_CONFIG: CapConfig = CapConfig {
+    warn_pct: FIVE_HOUR_WARN_PCT,
+    alert_pct: FIVE_HOUR_ALERT_PCT,
+    label: "5h",
+    format_reset: format_reset_same_day,
+};
+
+const SEVEN_DAY_CONFIG: CapConfig = CapConfig {
+    warn_pct: SEVEN_DAY_WARN_PCT,
+    alert_pct: SEVEN_DAY_ALERT_PCT,
+    label: "wk",
+    format_reset: format_reset_day_time,
+};
+
+/// Produce one cap segment (e.g. "WARN 78%·5h→14:32") or `None` when the
+/// percentage sits below the warn threshold for this window.
+fn cap_segment(pct: Option<f64>, resets_at: Option<i64>, cfg: &CapConfig) -> Option<String> {
     let pct = pct?;
-    let marker = if pct >= SEVEN_DAY_ALERT_PCT {
+    let marker = if pct >= cfg.alert_pct {
         ALERT
-    } else if pct >= SEVEN_DAY_WARN_PCT {
+    } else if pct >= cfg.warn_pct {
         WARN
     } else {
         return None;
     };
     let suffix = resets_at
         .filter(|&t| t > 0)
-        .map(format_reset_day_time)
+        .map(cfg.format_reset)
         .filter(|s| !s.is_empty())
         .map(|s| format!("\u{2192}{s}"))
         .unwrap_or_default();
     Some(format!(
-        "{marker} {pct}%\u{00B7}wk{suffix}",
-        pct = pct as i64
+        "{marker} {pct}%\u{00B7}{label}{suffix}",
+        pct = pct as i64,
+        label = cfg.label,
     ))
 }
 
@@ -549,12 +561,12 @@ mod tests {
 
     #[test]
     fn five_hour_segment_hidden_below_warn() {
-        assert!(five_hour_segment(Some(60.0), Some(1_800_000_000)).is_none());
+        assert!(cap_segment(Some(60.0), Some(1_800_000_000), &FIVE_HOUR_CONFIG).is_none());
     }
 
     #[test]
     fn five_hour_segment_warn_at_75() {
-        let s = five_hour_segment(Some(78.0), None).expect("warn segment present");
+        let s = cap_segment(Some(78.0), None, &FIVE_HOUR_CONFIG).expect("warn segment present");
         assert!(s.contains(WARN));
         assert!(s.contains("78%"));
         assert!(s.contains("5h"));
@@ -562,14 +574,14 @@ mod tests {
 
     #[test]
     fn five_hour_segment_alert_at_90() {
-        let s = five_hour_segment(Some(92.0), None).expect("alert segment present");
+        let s = cap_segment(Some(92.0), None, &FIVE_HOUR_CONFIG).expect("alert segment present");
         assert!(s.contains(ALERT));
         assert!(s.contains("92%"));
     }
 
     #[test]
     fn seven_day_segment_warn_at_60() {
-        let s = seven_day_segment(Some(62.0), None).expect("warn segment present");
+        let s = cap_segment(Some(62.0), None, &SEVEN_DAY_CONFIG).expect("warn segment present");
         assert!(s.contains(WARN));
         assert!(s.contains("62%"));
         assert!(s.contains("wk"));
@@ -577,7 +589,7 @@ mod tests {
 
     #[test]
     fn seven_day_segment_alert_at_85() {
-        let s = seven_day_segment(Some(88.0), None).expect("alert segment present");
+        let s = cap_segment(Some(88.0), None, &SEVEN_DAY_CONFIG).expect("alert segment present");
         assert!(s.contains(ALERT));
         assert!(s.contains("88%"));
     }
