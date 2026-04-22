@@ -634,10 +634,8 @@ pub fn parse_transcript_tail(path: &Path) -> TranscriptTail {
                     tail.last_assistant = extract_tokens(usage);
                 }
             }
-            Some("user") => {
-                if is_real_user_turn(&obj, &mut tail.max_error_bytes) {
-                    tail.real_turns += 1;
-                }
+            Some("user") if is_real_user_turn(&obj, &mut tail.max_error_bytes) => {
+                tail.real_turns += 1;
             }
             _ => {}
         }
