@@ -2405,6 +2405,12 @@ impl Database {
     // -- Statusline Samples ------------------------------------------------------
 
     /// Insert a rate-limit sample captured from a Claude Code statusline render.
+    ///
+    /// Note the VALUES clause reuses bind index `?4` for both `sampled_at`
+    /// and `updated_at`. This is intentional on INSERT -- a fresh row's
+    /// updated_at equals its sampled_at -- but a future UPDATE path must
+    /// re-bind updated_at to a fresh timestamp. Don't copy the pattern
+    /// blindly into an UPDATE statement.
     pub fn insert_rate_limit_sample(
         &self,
         sample: &crate::statusline::RateLimitSample,
@@ -2430,6 +2436,11 @@ impl Database {
     }
 
     /// Insert a usage sample captured from a Claude Code statusline render.
+    ///
+    /// VALUES reuses bind index `?12` for both `sampled_at` and
+    /// `updated_at`. Intentional on INSERT; a future UPDATE path must
+    /// re-bind updated_at separately. See `insert_rate_limit_sample`
+    /// for the same pattern.
     pub fn insert_usage_sample(&self, sample: &crate::statusline::UsageSample) -> Result<String> {
         self.conn.execute(
             "INSERT INTO usage_samples (id, hostname, session_id, turn_index, model, \
