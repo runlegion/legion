@@ -206,7 +206,23 @@ fn newest_sampled_at(
 ) -> Option<String> {
     match (rate, usage) {
         (Some(r), Some(u)) => {
-            if r.sampled_at >= u.sampled_at {
+            // Parse + compare chronologically. Lex-comparing RFC3339 strings
+            // works today because every writer goes through
+            // `Utc::now().to_rfc3339()` (see src/statusline.rs), but cluster
+            // sync is the path where peer-written rows with a different
+            // serialization (`Z` vs `+00:00`, fractional seconds, whitespace)
+            // could land here. Lex ordering would silently diverge from
+            // chronological ordering at that point. Fall back to string
+            // compare only if parsing fails for both sides.
+            let rp = DateTime::parse_from_rfc3339(&r.sampled_at).ok();
+            let up = DateTime::parse_from_rfc3339(&u.sampled_at).ok();
+            let pick_rate = match (rp, up) {
+                (Some(a), Some(b)) => a >= b,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => r.sampled_at >= u.sampled_at,
+            };
+            if pick_rate {
                 Some(r.sampled_at.clone())
             } else {
                 Some(u.sampled_at.clone())
@@ -445,6 +461,30 @@ mod tests {
             "2h-future sample must be flagged stale, not rank-winning"
         );
         assert!(ranked[0].age.is_none());
+    }
+
+    #[test]
+    fn newest_sampled_at_compares_chronologically_across_rfc3339_dialects() {
+        // Cluster-sync path: peer writes `Z` suffix, local writes `+00:00`.
+        // Lex-comparing the strings would pick `+00:00` as newer because
+        // `+` (0x2B) < `Z` (0x5A), so the older local sample would win
+        // even when the peer sample is actually newer. Parse + compare
+        // chronologically to prevent the silent divergence.
+        let older_plus = rate("host", "2026-04-22T11:58:00+00:00", 30.0, 50.0);
+        let newer_z = usage("host", "2026-04-22T11:59:00Z", 100);
+        assert_eq!(
+            newest_sampled_at(Some(&older_plus), Some(&newer_z)),
+            Some("2026-04-22T11:59:00Z".to_string()),
+            "newer `Z`-suffixed sample must win even against lex-greater `+00:00` string"
+        );
+
+        // And the symmetric case: local newer (+00:00), peer older (Z).
+        let newer_plus = rate("host", "2026-04-22T12:00:00+00:00", 30.0, 50.0);
+        let older_z = usage("host", "2026-04-22T11:59:00Z", 100);
+        assert_eq!(
+            newest_sampled_at(Some(&newer_plus), Some(&older_z)),
+            Some("2026-04-22T12:00:00+00:00".to_string()),
+        );
     }
 
     #[test]

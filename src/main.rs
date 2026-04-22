@@ -1964,8 +1964,8 @@ fn resolve_stale_cutoff() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-fn round_f64(v: f64, digits: u32) -> f64 {
-    let factor = 10f64.powi(digits as i32);
+fn round_f64(v: f64, digits: i32) -> f64 {
+    let factor = 10f64.powi(digits);
     (v * factor).round() / factor
 }
 
