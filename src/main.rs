@@ -4075,8 +4075,9 @@ fn run() -> error::Result<()> {
         },
         Commands::Statusline { json } => {
             // Never surface an error to the Claude Code UI: statusline::run
-            // already swallows internal failures and logs them.
-            statusline::run(json)?;
+            // already swallows internal failures and logs them, and its
+            // signature reflects that contract (cannot return an error).
+            statusline::run(json);
         }
 
         Commands::Usage {

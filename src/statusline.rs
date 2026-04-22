@@ -18,7 +18,6 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::Database;
-use crate::error::Result;
 use crate::usage::{RawTokens, TranscriptTail, format_tokens, parse_transcript_tail};
 
 // ---------------------------------------------------------------------------
@@ -109,20 +108,23 @@ const ALERT: &str = "\u{1F6A8}";
 /// to the database, and prints either the rendered chip (default) or
 /// a JSON summary (when `json` is true).
 ///
-/// Always returns `Ok(())` in production: a broken statusline must not
-/// surface as an error to the Claude Code UI. Internal failures are
-/// logged to `<legion-data-dir>/logs/hook-errors.log`.
-pub fn run(json: bool) -> Result<()> {
+/// Cannot fail: a broken statusline must not surface as an error to the
+/// Claude Code UI (which would display a distracting red banner on every
+/// assistant turn). Every internal failure path is swallowed, logged to
+/// `<legion-data-dir>/logs/hook-errors.log`, and returns cleanly. The
+/// signature reflects that contract -- no `Result<()>` lying about
+/// failure modes that never surface.
+pub fn run(json: bool) {
     let mut raw = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut raw) {
         log_error(format!("read stdin: {e}"));
-        return Ok(());
+        return;
     }
     let parsed = match parse_input(&raw) {
         Some(p) => p,
         None => {
             log_error("parse stdin JSON failed or payload empty".to_string());
-            return Ok(());
+            return;
         }
     };
 
@@ -130,7 +132,7 @@ pub fn run(json: bool) -> Result<()> {
         Some(sid) if !sid.is_empty() => sid.to_string(),
         _ => {
             log_error("stdin JSON missing session_id".to_string());
-            return Ok(());
+            return;
         }
     };
 
@@ -145,7 +147,7 @@ pub fn run(json: bool) -> Result<()> {
         && let Some(cached) = read_cache_if_fresh(p, CACHE_TTL_SECS)
     {
         print!("{cached}");
-        return Ok(());
+        return;
     }
 
     let hostname = resolve_hostname();
@@ -179,7 +181,7 @@ pub fn run(json: bool) -> Result<()> {
             Ok(s) => println!("{s}"),
             Err(e) => log_error(format!("serialise json output: {e}")),
         }
-        return Ok(());
+        return;
     }
 
     let chip = render_chip(&tail, &parsed);
@@ -190,7 +192,6 @@ pub fn run(json: bool) -> Result<()> {
         write_cache(p, &chip_line);
     }
     print!("{chip_line}");
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -288,22 +289,28 @@ fn build_usage_sample(
     if raw.input == 0 && raw.output == 0 && raw.cache_write == 0 && raw.cache_read == 0 {
         return None;
     }
+    // Token counts and real_turns are u64 from the parser; SQLite stores i64.
+    // `as i64` would silently truncate above 2^63 (impossible in practice for
+    // tokens, but the idiom is wrong and removes the upper-bound guarantee);
+    // `try_from().unwrap_or(i64::MAX)` makes the clamp explicit so an
+    // unexpectedly huge value pins at i64::MAX rather than wrapping to a
+    // negative-looking gigantic number in the DB.
     Some(UsageSample {
         id: Uuid::now_v7().to_string(),
         hostname: hostname.to_owned(),
         session_id: session_id.to_owned(),
         turn_index: if tail.real_turns > 0 {
-            Some(tail.real_turns as i64)
+            Some(i64::try_from(tail.real_turns).unwrap_or(i64::MAX))
         } else {
             None
         },
         model: parsed.model.clone(),
-        input_tokens: raw.input as i64,
-        output_tokens: raw.output as i64,
-        cache_write_tokens: raw.cache_write as i64,
-        cache_read_tokens: raw.cache_read as i64,
-        effective_tokens: raw.effective() as i64,
-        error_bytes: tail.max_error_bytes as i64,
+        input_tokens: i64::try_from(raw.input).unwrap_or(i64::MAX),
+        output_tokens: i64::try_from(raw.output).unwrap_or(i64::MAX),
+        cache_write_tokens: i64::try_from(raw.cache_write).unwrap_or(i64::MAX),
+        cache_read_tokens: i64::try_from(raw.cache_read).unwrap_or(i64::MAX),
+        effective_tokens: i64::try_from(raw.effective()).unwrap_or(i64::MAX),
+        error_bytes: i64::try_from(tail.max_error_bytes).unwrap_or(i64::MAX),
         sampled_at: sampled_at.to_owned(),
     })
 }

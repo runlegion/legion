@@ -4,8 +4,13 @@
 /// Each slug encodes the filesystem path of the project (hyphens substitute
 /// for slashes). Only `type == "assistant"` events with a populated
 /// `message.usage` object contribute token counts. Lines that do not parse
-/// as JSON or that lack usage data are skipped silently (one stderr warning
-/// per session, not per line).
+/// as JSON or that lack usage data are skipped silently.
+///
+/// `SessionUsage::from_file` additionally emits a single stderr warning per
+/// session (not per malformed line) summarising skip counts. The lighter
+/// [`parse_transcript_tail`] entry point -- used by the statusline where
+/// any stderr output would taint the chip -- skips silently with no
+/// aggregation.
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
@@ -692,6 +697,11 @@ fn is_real_user_turn(obj: &Value, max_error_bytes: &mut u64) -> bool {
                 }
             }
             _ => {
+                // Unknown content-item type counts as a real turn. Deliberate
+                // bias toward over-counting: a missed real turn (under-count)
+                // corrupts turn-based cluster aggregates silently, while an
+                // extra counted turn is visible in metrics and self-heals
+                // once the unknown type gets its own explicit arm.
                 real = true;
             }
         }
