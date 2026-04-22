@@ -2493,6 +2493,91 @@ impl Database {
         }
     }
 
+    /// Most recent rate-limit sample per hostname.
+    ///
+    /// Returns one row per host, picking the newest `sampled_at` for each.
+    /// Soft-deleted rows are skipped. Cluster-sync pushes samples from
+    /// peers into the same table, so a single node running this query
+    /// sees the whole mesh once sync has settled.
+    ///
+    /// Used by `legion mesh headroom / pick` to rank hosts by available
+    /// capacity. Paired with [`latest_usage_samples_per_host`].
+    pub fn latest_rate_limit_samples_per_host(
+        &self,
+    ) -> Result<Vec<crate::statusline::RateLimitSample>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, hostname, session_id, sampled_at, five_hour_pct, \
+             five_hour_resets_at, seven_day_pct, seven_day_resets_at, model \
+             FROM rate_limit_samples \
+             WHERE deleted_at IS NULL \
+             AND (hostname, sampled_at) IN ( \
+                 SELECT hostname, MAX(sampled_at) \
+                 FROM rate_limit_samples \
+                 WHERE deleted_at IS NULL \
+                 GROUP BY hostname \
+             ) \
+             ORDER BY hostname",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(crate::statusline::RateLimitSample {
+                id: row.get(0)?,
+                hostname: row.get(1)?,
+                session_id: row.get(2)?,
+                sampled_at: row.get(3)?,
+                five_hour_pct: row.get(4)?,
+                five_hour_resets_at: row.get(5)?,
+                seven_day_pct: row.get(6)?,
+                seven_day_resets_at: row.get(7)?,
+                model: row.get(8)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Most recent usage sample per hostname. Pair of
+    /// [`latest_rate_limit_samples_per_host`].
+    pub fn latest_usage_samples_per_host(&self) -> Result<Vec<crate::statusline::UsageSample>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, hostname, session_id, turn_index, model, \
+             input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, \
+             effective_tokens, error_bytes, sampled_at \
+             FROM usage_samples \
+             WHERE deleted_at IS NULL \
+             AND (hostname, sampled_at) IN ( \
+                 SELECT hostname, MAX(sampled_at) \
+                 FROM usage_samples \
+                 WHERE deleted_at IS NULL \
+                 GROUP BY hostname \
+             ) \
+             ORDER BY hostname",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(crate::statusline::UsageSample {
+                id: row.get(0)?,
+                hostname: row.get(1)?,
+                session_id: row.get(2)?,
+                turn_index: row.get(3)?,
+                model: row.get(4)?,
+                input_tokens: row.get(5)?,
+                output_tokens: row.get(6)?,
+                cache_write_tokens: row.get(7)?,
+                cache_read_tokens: row.get(8)?,
+                effective_tokens: row.get(9)?,
+                error_bytes: row.get(10)?,
+                sampled_at: row.get(11)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Rename a repo across all tables. Returns total rows updated.
     pub fn rename_repo(&self, from: &str, to: &str) -> Result<RenameCounts> {
         // unchecked_transaction because Database uses &self (shared ref),
@@ -4372,5 +4457,150 @@ mod tests {
             result.is_empty(),
             "fresh tombstone should not be cleaned up"
         );
+    }
+
+    fn rate_sample(
+        id: &str,
+        host: &str,
+        sampled_at: &str,
+        five_hour_pct: Option<f64>,
+        seven_day_pct: Option<f64>,
+    ) -> crate::statusline::RateLimitSample {
+        crate::statusline::RateLimitSample {
+            id: id.to_string(),
+            hostname: host.to_string(),
+            session_id: "sess".to_string(),
+            sampled_at: sampled_at.to_string(),
+            five_hour_pct,
+            five_hour_resets_at: None,
+            seven_day_pct,
+            seven_day_resets_at: None,
+            model: None,
+        }
+    }
+
+    fn usage_sample(
+        id: &str,
+        host: &str,
+        sampled_at: &str,
+        effective: i64,
+    ) -> crate::statusline::UsageSample {
+        crate::statusline::UsageSample {
+            id: id.to_string(),
+            hostname: host.to_string(),
+            session_id: "sess".to_string(),
+            turn_index: None,
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+            effective_tokens: effective,
+            error_bytes: 0,
+            sampled_at: sampled_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn latest_rate_limit_samples_per_host_returns_newest_per_host() {
+        let db = test_db();
+        // Two hosts, two samples each; expect the newest per host.
+        db.insert_rate_limit_sample(&rate_sample(
+            "1",
+            "Puck",
+            "2026-04-22T10:00:00Z",
+            Some(30.0),
+            Some(50.0),
+        ))
+        .unwrap();
+        db.insert_rate_limit_sample(&rate_sample(
+            "2",
+            "Puck",
+            "2026-04-22T11:00:00Z",
+            Some(40.0),
+            Some(55.0),
+        ))
+        .unwrap();
+        db.insert_rate_limit_sample(&rate_sample(
+            "3",
+            "laptop",
+            "2026-04-22T09:00:00Z",
+            Some(60.0),
+            Some(70.0),
+        ))
+        .unwrap();
+        db.insert_rate_limit_sample(&rate_sample(
+            "4",
+            "laptop",
+            "2026-04-22T12:00:00Z",
+            Some(70.0),
+            Some(75.0),
+        ))
+        .unwrap();
+
+        let got = db.latest_rate_limit_samples_per_host().unwrap();
+        assert_eq!(got.len(), 2);
+        let by_host: std::collections::HashMap<_, _> =
+            got.into_iter().map(|s| (s.hostname.clone(), s)).collect();
+        assert_eq!(by_host["Puck"].id, "2");
+        assert_eq!(by_host["laptop"].id, "4");
+    }
+
+    #[test]
+    fn latest_rate_limit_samples_per_host_skips_soft_deleted() {
+        let db = test_db();
+        db.insert_rate_limit_sample(&rate_sample(
+            "1",
+            "Puck",
+            "2026-04-22T10:00:00Z",
+            Some(30.0),
+            Some(50.0),
+        ))
+        .unwrap();
+        db.insert_rate_limit_sample(&rate_sample(
+            "2",
+            "Puck",
+            "2026-04-22T11:00:00Z",
+            Some(40.0),
+            Some(55.0),
+        ))
+        .unwrap();
+        // Tombstone the newer row. The query should fall back to the older
+        // row, NOT return Puck with sampled_at=null or skip the host entirely.
+        db.conn
+            .execute(
+                "UPDATE rate_limit_samples SET deleted_at = ?1 WHERE id = '2'",
+                rusqlite::params!["2026-04-22T12:00:00Z"],
+            )
+            .unwrap();
+
+        let got = db.latest_rate_limit_samples_per_host().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "1");
+    }
+
+    #[test]
+    fn latest_rate_limit_samples_per_host_empty_table() {
+        let db = test_db();
+        let got = db.latest_rate_limit_samples_per_host().unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn latest_usage_samples_per_host_returns_newest_per_host() {
+        let db = test_db();
+        db.insert_usage_sample(&usage_sample("1", "Puck", "2026-04-22T10:00:00Z", 100))
+            .unwrap();
+        db.insert_usage_sample(&usage_sample("2", "Puck", "2026-04-22T11:00:00Z", 200))
+            .unwrap();
+        db.insert_usage_sample(&usage_sample("3", "laptop", "2026-04-22T11:30:00Z", 300))
+            .unwrap();
+
+        let got = db.latest_usage_samples_per_host().unwrap();
+        assert_eq!(got.len(), 2);
+        let by_host: std::collections::HashMap<_, _> =
+            got.into_iter().map(|s| (s.hostname.clone(), s)).collect();
+        assert_eq!(by_host["Puck"].effective_tokens, 200);
+        assert_eq!(by_host["laptop"].effective_tokens, 300);
     }
 }

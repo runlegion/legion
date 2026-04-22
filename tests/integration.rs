@@ -4358,3 +4358,50 @@ fn watch_add_rejects_nonexistent_workdir() {
         "watch add should fail for non-directory path"
     );
 }
+
+#[test]
+fn mesh_headroom_on_empty_store_notices_no_samples() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = legion_cmd(dir.path())
+        .args(["mesh", "headroom"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "headroom on empty store exits 0");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no samples yet"),
+        "empty-store notice expected, got stderr: {stderr}"
+    );
+}
+
+#[test]
+fn mesh_headroom_json_on_empty_store_returns_array() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = legion_cmd(dir.path())
+        .args(["mesh", "headroom", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(parsed.is_array(), "expected JSON array, got {parsed}");
+    assert_eq!(parsed.as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn mesh_pick_on_empty_store_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = legion_cmd(dir.path())
+        .args(["mesh", "pick"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "pick must fail when no fresh host exists"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no fresh host"),
+        "error message must name the condition, got: {stderr}"
+    );
+}

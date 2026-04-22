@@ -11,6 +11,7 @@ mod init;
 #[allow(dead_code)] // Items used by tests + pending surface/status/serve migration
 mod kanban;
 mod mcp;
+mod mesh;
 mod pr_view;
 mod recall;
 mod reflect;
@@ -554,6 +555,12 @@ enum Commands {
         json: bool,
     },
 
+    /// Mesh-aware task placement -- rank hosts by statusline-sample headroom
+    Mesh {
+        #[command(subcommand)]
+        action: MeshAction,
+    },
+
     /// Show Claude Code session token usage and cost analysis
     Usage {
         /// Show only this specific session UUID
@@ -679,6 +686,32 @@ enum ClusterAction {
 
     /// Show cluster status: peers, sync state, last sync time
     Status,
+}
+
+#[derive(Subcommand)]
+enum MeshAction {
+    /// Print per-host ranked table with headroom, burn, and staleness
+    Headroom {
+        /// Emit raw JSON instead of the human-formatted table
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print the best hostname to run a task on. Exit 1 if no host is fresh.
+    Pick {
+        /// Comma-separated hostnames to omit from the ranking
+        #[arg(long)]
+        exclude: Option<String>,
+
+        /// Emit raw JSON instead of the plain hostname
+        #[arg(long)]
+        json: bool,
+
+        /// Kanban card ID this pick is for (reserved for future
+        /// task-specific weighting; today a plain tag in the JSON output).
+        #[arg(long)]
+        for_task: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1916,6 +1949,51 @@ fn raise_fd_limit() {
     match rlimit::increase_nofile_limit(u64::MAX) {
         Ok(_) => {}
         Err(e) => eprintln!("[legion] warning: could not raise fd limit: {e}"),
+    }
+}
+
+/// Mesh stale-threshold. Statusline writes on every assistant turn, so
+/// minutes of silence usually means "no session live on that host". Let
+/// operators override via env -- useful when running a flaky network
+/// where 5min is too tight, or when diagnosing a specific host.
+fn resolve_stale_cutoff() -> std::time::Duration {
+    let secs = std::env::var("LEGION_MESH_STALE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(mesh::DEFAULT_STALE_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+fn round_f64(v: f64, digits: u32) -> f64 {
+    let factor = 10f64.powi(digits as i32);
+    (v * factor).round() / factor
+}
+
+fn fmt_pct(v: Option<f64>) -> String {
+    match v {
+        Some(p) => format!("{:.0}", p),
+        None => "-".into(),
+    }
+}
+
+fn fmt_i64(v: Option<i64>) -> String {
+    match v {
+        Some(n) if n >= 1000 => format!("{:.0}K", n as f64 / 1000.0),
+        Some(n) => n.to_string(),
+        None => "-".into(),
+    }
+}
+
+fn format_age(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
     }
 }
 
@@ -4078,6 +4156,98 @@ fn run() -> error::Result<()> {
             // already swallows internal failures and logs them, and its
             // signature reflects that contract (cannot return an error).
             statusline::run(json);
+        }
+
+        Commands::Mesh { action } => {
+            let db_path = data_dir()?.join("legion.db");
+            let database = db::Database::open(&db_path)?;
+            let stale_cutoff = resolve_stale_cutoff();
+            let now = chrono::Utc::now();
+            let ranked = mesh::ranked_hosts_from_db(&database, now, stale_cutoff)?;
+
+            match action {
+                MeshAction::Headroom { json } => {
+                    if json {
+                        let rows: Vec<_> = ranked
+                            .iter()
+                            .map(|h| {
+                                serde_json::json!({
+                                    "hostname": h.hostname,
+                                    "score": round_f64(h.score, 1),
+                                    "fiveHourPct": h.five_hour_pct,
+                                    "sevenDayPct": h.seven_day_pct,
+                                    "lastEffectiveTokens": h.last_effective_tokens,
+                                    "sampledAt": h.sampled_at,
+                                    "ageSecs": h.age.map(|a| a.as_secs()),
+                                    "stale": h.stale,
+                                })
+                            })
+                            .collect();
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&rows)
+                                .expect("ranked rows serialize infallibly")
+                        );
+                    } else if ranked.is_empty() {
+                        eprintln!(
+                            "[legion] no samples yet -- run `legion statusline` on at least one node first"
+                        );
+                    } else {
+                        println!(
+                            "host                 score    5h%    7d%   last_turn       age  status"
+                        );
+                        for h in &ranked {
+                            let age = h.age.map(format_age).unwrap_or_else(|| "-".into());
+                            let status = if h.stale { "stale" } else { "fresh" };
+                            println!(
+                                "{:<20} {:>6.1}  {:>5}  {:>5}  {:>10}  {:>8}  {}",
+                                h.hostname,
+                                h.score,
+                                fmt_pct(h.five_hour_pct),
+                                fmt_pct(h.seven_day_pct),
+                                fmt_i64(h.last_effective_tokens),
+                                age,
+                                status,
+                            );
+                        }
+                    }
+                }
+                MeshAction::Pick {
+                    exclude,
+                    json,
+                    for_task,
+                } => {
+                    let excluded: std::collections::HashSet<String> = exclude
+                        .as_deref()
+                        .map(|s| s.split(',').map(|v| v.trim().to_string()).collect())
+                        .unwrap_or_default();
+                    let winner = ranked
+                        .iter()
+                        .find(|h| !h.stale && !excluded.contains(&h.hostname));
+                    match winner {
+                        Some(h) => {
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&serde_json::json!({
+                                        "hostname": h.hostname,
+                                        "score": round_f64(h.score, 1),
+                                        "forTask": for_task,
+                                    }))
+                                    .expect("pick payload serializes infallibly")
+                                );
+                            } else {
+                                println!("{}", h.hostname);
+                            }
+                        }
+                        None => {
+                            return Err(error::LegionError::WorkSource(
+                                "no fresh host available to pick".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         Commands::Usage {
