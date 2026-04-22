@@ -1,5 +1,18 @@
 # Legion Changelog
 
+## 0.9.2
+
+Patch release. New CLI surface closes a self-inflicted gap; safety hardening on the new gate.
+
+### New
+
+- **`legion pr checks --repo <r> --number <n> [--json]`** (#290, #291): Lists CI check status for a PR via the existing worksource plugin protocol. Exits non-zero when any check is in a terminal-failure state. Closes the gap where `gh` was blocked by `no-gh.sh` but no replacement existed -- agents previously had to ask the user to `! gh pr checks N` in their prompt to see what broke a build.
+
+### Safety
+
+- **`is_failing` is fail-closed**: The failed-state predicate now lists known passing/in-flight states (`SUCCESS`, `PENDING`, `IN_PROGRESS`, `NEUTRAL`, `SKIPPED`) and treats everything else as failing. A new gh state -- e.g. an unknown failure-class variant -- surfaces as a loud non-zero exit instead of silent green. Adding a new passing state requires an explicit allow-list edit, the correct review burden for a merge gate.
+- **`pr_checks` returns `Err` on plugin-not-found** instead of `Ok(Vec::new())`, matching the established pattern from `view_issue` / `review_pr` / `merge_pr` and the PR #227 fix to `close_issue`. A misconfigured `watch.toml` now fails loudly rather than yielding "nothing failing" and letting a bad merge through.
+
 ## 0.9.1
 
 Ergonomic + cleanup release. No schema changes, no breaking changes.
