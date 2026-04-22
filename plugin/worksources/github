@@ -298,8 +298,35 @@ case "${1:-}" in
     echo '{"ok":true}'
     ;;
 
+  pr-checks)
+    PR_NUMBER="${LEGION_WS_PR_NUMBER:-}"
+    if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_PR_NUMBER required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo "gh CLI not found" >&2
+      exit 1
+    fi
+    # gh pr checks exits non-zero when any check is failing -- that is data,
+    # not an error from our perspective. Capture stdout and stderr separately
+    # so a gh warning printed to stderr cannot slip into the JSON blob jq
+    # then accepts. Only fail if stdout is empty or not valid JSON
+    # (network error, auth failure, missing PR).
+    STDERR_FILE=$(mktemp)
+    OUTPUT=$(gh pr checks "$PR_NUMBER" --repo "$REPO" \
+      --json name,state,workflow,link,description 2>"$STDERR_FILE")
+    if [ -z "$OUTPUT" ] || ! printf '%s' "$OUTPUT" | jq -e . >/dev/null 2>&1; then
+      echo "gh pr checks failed: $(cat "$STDERR_FILE")" >&2
+      rm -f "$STDERR_FILE"
+      exit 1
+    fi
+    rm -f "$STDERR_FILE"
+    printf '%s\n' "$OUTPUT"
+    ;;
+
   *)
-    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close>" >&2
+    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close|pr-checks>" >&2
     exit 1
     ;;
 esac
