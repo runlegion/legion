@@ -1,5 +1,26 @@
 # Legion Changelog
 
+## 0.9.3
+
+Daily-loop release. New read-side `legion pr` surface closes the write-only monologue so agents can actually read reviews, comments, and failing-check logs through legion instead of the blocked `gh` CLI. Plugin timeout and statusline polish ride along.
+
+### New
+
+- **`legion pr view` / `pr comments` / `pr reviews` / `pr checks --log-failed`** (#295, #297): Full read-side surface for GitHub PRs via the existing worksource plugin. `pr view` shows metadata + body; `pr comments` renders issue + inline review comments chronologically; `pr reviews` groups inline comments under their parent review; `pr checks --log-failed` streams the raw CI log for every failing job, each preceded by a `===== <name> (<job-id>) =====` header. Every command also accepts `--json`. Closes the "step 7 of the workflow -- fix every issue the review found -- was impossible through legion" gap. Dogfooded on PR #288 the same session it was built.
+- **`legion statusline`** (#287, #288): Claude Code statusLine consumer. Ingests rate-limit + usage samples on every assistant turn, persists to legion's store (cluster-sync-aware via smugglr deltas), renders a single-line chip. Replay-band thresholds + 5h/weekly cap segments + cached-turn error surfacing. Foundation for the upcoming `legion budget` gate.
+
+### Safety
+
+- **`call_plugin` wall-clock timeout** (#292, #298): Every worksource plugin invocation now runs under a bounded budget (default 30s, `LEGION_WS_TIMEOUT_SECS` to override, `0` to disable). On expiry the entire process subtree is SIGKILLed via `killpg` so an orphaned `gh` grandchild cannot keep pipe fds open and defeat the timeout. `legion watch`, CI runners, and the merge gate no longer wedge on a hung auth prompt / DNS stall / stuck TLS handshake.
+- **`is_failing` state partition** (#292, #298): Extracted `PR_CHECK_PASSING_STATES` and `PR_CHECK_FAILING_STATES` as module-level constants. New partition test asserts the two sets are disjoint so a future PR can't list a state in both (or neither) and silently break the merge gate. Unknown states still fail-closed.
+- **Read-side surface is fail-closed**: `view_pr` / `list_pr_comments` / `list_pr_reviews` / `fetch_check_log` return `Err(WorkSource)` on plugin-not-found, matching the established pattern. Empty results would be indistinguishable from "PR has no body" / "thread has no comments" and would mask a misconfigured `watch.toml`.
+
+### Polish
+
+- **`i64::try_from` casts on token counts** (#289, #299): `statusline::build_usage_sample` swaps `u64 as i64` for `i64::try_from(n).unwrap_or(i64::MAX)` on all token/turn/byte counts. Unreachable in practice, but `as` silently wraps past the boundary -- try_from clamps explicitly.
+- **`statusline::run` signature no longer lies** (#289, #299): The function's docstring said "always returns `Ok(())`" but the type was `Result<()>`. Dropped the `Result` so the signature reflects the contract.
+- **Load-bearing comments added** (#289, #299) for the INSERT bind-index reuse in `insert_rate_limit_sample` / `insert_usage_sample`, the doc drift between `parse_transcript_tail` and `SessionUsage::from_file`, and the deliberate over-count bias in `is_real_user_turn`'s unknown-content arm.
+
 ## 0.9.2
 
 Patch release. New CLI surface closes a self-inflicted gap; safety hardening on the new gate.
