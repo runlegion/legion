@@ -793,6 +793,17 @@ pub struct ExternalPRComment {
     pub in_reply_to_id: Option<String>,
 }
 
+impl ExternalPRComment {
+    /// True when this comment is an inline review comment on a diff hunk
+    /// (as opposed to a top-level issue-thread comment). Use this rather
+    /// than `path.is_some()` at render sites -- the path-presence check
+    /// couples the renderer to the current plugin shape and silently
+    /// misroutes if a future plugin emits a review comment with no path.
+    pub fn is_review(&self) -> bool {
+        self.kind == "review"
+    }
+}
+
 /// A submitted review with its body and any inline comments grouped under it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

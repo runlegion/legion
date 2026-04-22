@@ -2837,6 +2837,133 @@ fn pr_checks_log_failed_streams_failing_job_logs() {
     assert!(stdout.contains("non-Actions check link"));
 }
 
+/// A stub where pr-check-log always exits non-zero. Exercises the Err branch
+/// of fetch_check_log inside the --log-failed loop -- partial failures must
+/// render a marker and the outer run must still exit non-zero on the failing
+/// check, independently of whether the log fetch succeeded.
+fn pr_read_stub_plugin_failing_log() -> String {
+    r#"#!/bin/bash
+set -e
+case "${1:-}" in
+  pr-checks)
+    cat <<'BODY'
+[{"name":"Clippy","state":"FAILURE","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/42","description":""}]
+BODY
+    ;;
+  pr-check-log)
+    echo "gh api actions logs failed: HTTP 502" >&2
+    exit 1
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"#
+    .to_string()
+}
+
+#[test]
+fn pr_checks_log_failed_marks_partial_log_fetch_failure() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_read_stub_plugin_failing_log();
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let out = pr_read_cmd(data_dir.path(), plugin_root.path())
+        .args([
+            "pr",
+            "checks",
+            "--repo",
+            "stub",
+            "--number",
+            "1",
+            "--log-failed",
+        ])
+        .output()
+        .unwrap();
+    // Outer check failure still drives the exit code even when the log
+    // fetch itself fails for the failing job.
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit even when log fetch fails"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("===== Clippy (42) ====="),
+        "header still emitted: {stdout}"
+    );
+    assert!(
+        stdout.contains("(log unavailable:"),
+        "Err branch marker: {stdout}"
+    );
+}
+
+#[test]
+fn pr_checks_log_failed_suppressed_under_json() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_read_stub_plugin("{}", "[]", "[]", "error[E0308]: mismatched types");
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let out = pr_read_cmd(data_dir.path(), plugin_root.path())
+        .args([
+            "pr",
+            "checks",
+            "--repo",
+            "stub",
+            "--number",
+            "1",
+            "--json",
+            "--log-failed",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // JSON mode must emit a single valid JSON array with no log stream
+    // leaking in and no "===== <job> =====" headers corrupting stdout.
+    assert!(
+        !stdout.contains("====="),
+        "log headers leaked into JSON output: {stdout}"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be a single valid JSON array");
+    assert!(parsed.is_array(), "expected JSON array, got {parsed}");
+}
+
+#[test]
+fn pr_view_surfaces_malformed_plugin_json_as_worksource_error() {
+    // A plugin bug or a gh breaking-change that emits a shape-mismatched
+    // blob must produce a loud WorkSource error, not an empty struct. The
+    // rendered error does not need to be pretty, but the exit must be
+    // non-zero and stderr must mention the PR so the failure site is
+    // identifiable.
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_read_stub_plugin(
+        "[this is not a valid ExternalPRDetails object]",
+        "[]",
+        "[]",
+        "",
+    );
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let out = pr_read_cmd(data_dir.path(), plugin_root.path())
+        .args(["pr", "view", "--repo", "stub", "--number", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit on malformed JSON"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.is_empty(),
+        "expected a non-empty error message on malformed plugin output"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Usage command integration tests
 // ---------------------------------------------------------------------------

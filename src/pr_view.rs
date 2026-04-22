@@ -56,10 +56,17 @@ pub fn render_reviews(reviews: &[ExternalPRReview]) {
 
 fn render_comment(c: &ExternalPRComment, indent: usize) {
     let pad = " ".repeat(indent);
-    let loc = match (&c.path, c.line) {
-        (Some(path), Some(line)) => format!(" {}:{}", path, line),
-        (Some(path), None) => format!(" {}", path),
-        _ => String::new(),
+    // Only review-kind comments carry path/line metadata. Key off `kind`,
+    // not `path.is_some()`, so a future plugin emitting a review comment
+    // without a path still renders under the right header.
+    let loc = if c.is_review() {
+        match (&c.path, c.line) {
+            (Some(path), Some(line)) => format!(" {}:{}", path, line),
+            (Some(path), None) => format!(" {}", path),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
     };
     println!("{}[{}]{} {} @ {}", pad, c.kind, loc, c.author, c.updated_at);
     if c.body.trim().is_empty() {

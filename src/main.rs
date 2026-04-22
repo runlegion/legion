@@ -3564,7 +3564,8 @@ fn run() -> error::Result<()> {
                 if json {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&checks).unwrap_or_else(|_| "[]".into())
+                        serde_json::to_string_pretty(&checks)
+                            .expect("ExternalPRCheck serializes infallibly")
                     );
                 } else if checks.is_empty() {
                     eprintln!(
@@ -3644,7 +3645,8 @@ fn run() -> error::Result<()> {
                 if json {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&pr).unwrap_or_else(|_| "{}".into())
+                        serde_json::to_string_pretty(&pr)
+                            .expect("ExternalPRDetails serializes infallibly")
                     );
                 } else {
                     pr_view::render_pr(&pr);
@@ -3663,7 +3665,8 @@ fn run() -> error::Result<()> {
                 if json {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&comments).unwrap_or_else(|_| "[]".into())
+                        serde_json::to_string_pretty(&comments)
+                            .expect("ExternalPRComment serializes infallibly")
                     );
                 } else if comments.is_empty() {
                     eprintln!("[legion] no comments on PR #{} on {}", number, source_repo);
@@ -3684,7 +3687,8 @@ fn run() -> error::Result<()> {
                 if json {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&reviews).unwrap_or_else(|_| "[]".into())
+                        serde_json::to_string_pretty(&reviews)
+                            .expect("ExternalPRReview serializes infallibly")
                     );
                 } else if reviews.is_empty() {
                     eprintln!("[legion] no reviews on PR #{} on {}", number, source_repo);
