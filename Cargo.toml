@@ -26,12 +26,20 @@ async-stream = "0.3"
 toml = "0.8"
 sysinfo = { version = "0.34", default-features = false, features = ["system", "component"] }
 rlimit = "0.11"
+wait-timeout = "0.2"
 
 # Multi-node sync via LAN broadcast
 smugglr-core = { git = "https://github.com/rafters-studio/smugglr", default-features = false, features = ["native"] }
 rand = "0.9"
 hex = "0.4"
 hostname = "0.4"
+
+# libc pulls in only on unix for killpg in call_plugin_inner's timeout arm.
+# Must stay AFTER all platform-independent deps -- TOML tables consume
+# every key until the next header, so listing it mid-file would leak the
+# cfg(unix) gate onto later deps and they would vanish on Windows.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
