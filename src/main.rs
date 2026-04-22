@@ -18,6 +18,7 @@ mod serve;
 mod signal;
 mod stats;
 mod status;
+mod statusline;
 mod surface;
 mod sync;
 mod sync_actor;
@@ -536,6 +537,18 @@ enum Commands {
         all_hosts: bool,
 
         /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Claude Code statusLine subcommand: ingest rate-limit + usage, render chip
+    ///
+    /// Reads the Claude Code statusLine JSON on stdin, persists a
+    /// `rate_limit_samples` row (and a `usage_samples` row when the
+    /// transcript is readable), then prints a single-line chip on stdout.
+    /// Wire via `statusLine.command` in settings.json.
+    Statusline {
+        /// Print the parsed sample state as JSON instead of the chip
         #[arg(long)]
         json: bool,
     },
@@ -1311,7 +1324,7 @@ enum WatchAction {
 /// leaves the legacy path in place as a safety net. This is the reverse
 /// of the previous migration direction, which moved data INTO the plugin
 /// data dir and caused the split-brain in the first place.
-fn data_dir() -> error::Result<PathBuf> {
+pub(crate) fn data_dir() -> error::Result<PathBuf> {
     use std::sync::OnceLock;
     static CACHED: OnceLock<PathBuf> = OnceLock::new();
 
@@ -3909,6 +3922,12 @@ fn run() -> error::Result<()> {
                 println!("{}", row.id);
             }
         },
+        Commands::Statusline { json } => {
+            // Never surface an error to the Claude Code UI: statusline::run
+            // already swallows internal failures and logs them.
+            statusline::run(json)?;
+        }
+
         Commands::Usage {
             session,
             since,

@@ -91,6 +91,94 @@ pub struct CardDelta {
     pub acceptance: Option<String>,
 }
 
+/// A rate-limit sample serialized for sync transmission.
+///
+/// Written by `legion statusline` on every Claude Code render. Synced
+/// cluster-wide so any node can read the latest account-level headroom
+/// when the budget gate decides whether to pick up a card.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitDelta {
+    pub id: String,
+    pub hostname: String,
+    pub session_id: String,
+    pub sampled_at: String,
+    pub five_hour_pct: Option<f64>,
+    pub five_hour_resets_at: Option<i64>,
+    pub seven_day_pct: Option<f64>,
+    pub seven_day_resets_at: Option<i64>,
+    pub model: Option<String>,
+    pub updated_at: Option<String>,
+    pub deleted_at: Option<String>,
+}
+
+impl RateLimitDelta {
+    /// Convert a RateLimitSample into its sync delta. Callers that need
+    /// a tombstone pass the deletion timestamp through `deleted_at`.
+    #[allow(dead_code)] // Consumed by the sync actor once #276 wires transport.
+    pub fn from_sample(s: &crate::statusline::RateLimitSample, deleted_at: Option<String>) -> Self {
+        Self {
+            id: s.id.clone(),
+            hostname: s.hostname.clone(),
+            session_id: s.session_id.clone(),
+            sampled_at: s.sampled_at.clone(),
+            five_hour_pct: s.five_hour_pct,
+            five_hour_resets_at: s.five_hour_resets_at,
+            seven_day_pct: s.seven_day_pct,
+            seven_day_resets_at: s.seven_day_resets_at,
+            model: s.model.clone(),
+            updated_at: Some(s.sampled_at.clone()),
+            deleted_at,
+        }
+    }
+}
+
+/// A per-turn usage sample serialized for sync transmission.
+///
+/// Feeds the empirical cost estimator: historical `usage_samples` rows
+/// grouped by card shape give the p50/p90/p99 distribution used at
+/// gate time to predict cost against remaining rate-limit headroom.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageDelta {
+    pub id: String,
+    pub hostname: String,
+    pub session_id: String,
+    pub turn_index: Option<i64>,
+    pub model: Option<String>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub effective_tokens: i64,
+    pub error_bytes: i64,
+    pub sampled_at: String,
+    pub updated_at: Option<String>,
+    pub deleted_at: Option<String>,
+}
+
+impl UsageDelta {
+    /// Convert a UsageSample into its sync delta. Tombstones flow via
+    /// `deleted_at`; live rows carry `updated_at = sampled_at`.
+    #[allow(dead_code)] // Consumed by the sync actor once #276 wires transport.
+    pub fn from_sample(s: &crate::statusline::UsageSample, deleted_at: Option<String>) -> Self {
+        Self {
+            id: s.id.clone(),
+            hostname: s.hostname.clone(),
+            session_id: s.session_id.clone(),
+            turn_index: s.turn_index,
+            model: s.model.clone(),
+            input_tokens: s.input_tokens,
+            output_tokens: s.output_tokens,
+            cache_write_tokens: s.cache_write_tokens,
+            cache_read_tokens: s.cache_read_tokens,
+            effective_tokens: s.effective_tokens,
+            error_bytes: s.error_bytes,
+            sampled_at: s.sampled_at.clone(),
+            updated_at: Some(s.sampled_at.clone()),
+            deleted_at,
+        }
+    }
+}
+
 /// A schedule row serialized for sync transmission.
 ///
 /// Schedules define cron-like commands that fire periodically.
@@ -161,5 +249,66 @@ mod tests {
 
         assert!(delta.deleted_at.is_some());
         assert_eq!(delta.deleted_at.unwrap(), "2026-04-15T01:00:00Z");
+    }
+
+    #[test]
+    fn rate_limit_delta_from_sample_roundtrips_fields() {
+        let sample = crate::statusline::RateLimitSample {
+            id: "rl-1".into(),
+            hostname: "puck".into(),
+            session_id: "sess-a".into(),
+            sampled_at: "2026-04-20T01:00:00Z".into(),
+            five_hour_pct: Some(42.5),
+            five_hour_resets_at: Some(1714500000),
+            seven_day_pct: Some(68.0),
+            seven_day_resets_at: Some(1714900000),
+            model: Some("claude-opus-4-7".into()),
+        };
+        let delta = RateLimitDelta::from_sample(&sample, None);
+        assert_eq!(delta.id, "rl-1");
+        assert_eq!(delta.five_hour_pct, Some(42.5));
+        assert_eq!(delta.updated_at.as_deref(), Some("2026-04-20T01:00:00Z"));
+        assert!(delta.deleted_at.is_none());
+    }
+
+    #[test]
+    fn rate_limit_delta_tombstone_carries_deleted_at() {
+        let sample = crate::statusline::RateLimitSample {
+            id: "rl-2".into(),
+            hostname: "puck".into(),
+            session_id: "sess-b".into(),
+            sampled_at: "2026-04-20T02:00:00Z".into(),
+            five_hour_pct: None,
+            five_hour_resets_at: None,
+            seven_day_pct: None,
+            seven_day_resets_at: None,
+            model: None,
+        };
+        let delta = RateLimitDelta::from_sample(&sample, Some("2026-04-20T03:00:00Z".into()));
+        assert_eq!(delta.deleted_at.as_deref(), Some("2026-04-20T03:00:00Z"));
+    }
+
+    #[test]
+    fn usage_delta_from_sample_preserves_token_fields() {
+        let sample = crate::statusline::UsageSample {
+            id: "us-1".into(),
+            hostname: "puck".into(),
+            session_id: "sess-a".into(),
+            turn_index: Some(12),
+            model: Some("claude-sonnet-4-6".into()),
+            input_tokens: 100,
+            output_tokens: 200,
+            cache_write_tokens: 300,
+            cache_read_tokens: 400,
+            effective_tokens: 640,
+            error_bytes: 0,
+            sampled_at: "2026-04-20T04:00:00Z".into(),
+        };
+        let delta = UsageDelta::from_sample(&sample, None);
+        assert_eq!(delta.input_tokens, 100);
+        assert_eq!(delta.cache_read_tokens, 400);
+        assert_eq!(delta.effective_tokens, 640);
+        assert_eq!(delta.turn_index, Some(12));
+        assert!(delta.deleted_at.is_none());
     }
 }
