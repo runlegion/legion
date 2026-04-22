@@ -1,7 +1,12 @@
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
+
+use wait_timeout::ChildExt;
 
 use crate::db::Database;
 use crate::error::{LegionError, Result};
@@ -142,24 +147,148 @@ fn parse_semver(v: &str) -> Vec<u32> {
     v.split('.').map(|s| s.parse().unwrap_or(0)).collect()
 }
 
-/// Call a work source plugin with the given subcommand.
+/// Default wall-clock budget for a plugin invocation. GitHub API calls
+/// normally complete in under a second; a 30s budget tolerates slow
+/// networks while bounding the damage when `gh` hangs on an auth prompt,
+/// a DNS stall, or a stuck TLS handshake. `legion watch` and CI runners
+/// depend on this not wedging indefinitely.
+///
+/// Override by setting `LEGION_WS_TIMEOUT_SECS` in the environment. A value
+/// of 0 disables the timeout (falls back to the pre-timeout behaviour,
+/// primarily for debugging a known-hung plugin under strace).
+const DEFAULT_PLUGIN_TIMEOUT_SECS: u64 = 30;
+
+fn resolve_plugin_timeout() -> Option<Duration> {
+    let secs = std::env::var("LEGION_WS_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PLUGIN_TIMEOUT_SECS);
+    if secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(secs))
+    }
+}
+
+/// Call a work source plugin with the given subcommand, bounded by a
+/// wall-clock timeout so a hung gh call cannot wedge the caller
+/// indefinitely. On timeout the child is SIGKILLed and a
+/// `LegionError::WorkSource("plugin timeout after Ns")` is returned.
 fn call_plugin(plugin_path: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+    call_plugin_inner(plugin_path, args, env, resolve_plugin_timeout())
+}
+
+fn call_plugin_inner(
+    plugin_path: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    timeout: Option<Duration>,
+) -> Result<String> {
     let mut cmd = Command::new(plugin_path);
     cmd.args(args);
     for (key, val) in env {
         cmd.env(key, val);
     }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Child becomes its own process group leader on unix. Required so that
+    // on timeout we can kill the entire subtree (`killpg`), not just the
+    // bash interpreter. Without this, a bash plugin that spawns `gh` would
+    // leave `gh` orphaned and still holding pipe fds open -- reader threads
+    // would block on EOF until gh itself exited, defeating the timeout.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| LegionError::WorkSource(format!("failed to run plugin: {e}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    // Reader threads must be spawned BEFORE we wait. If the plugin emits
+    // more than a pipe buffer of output and nothing is draining, the
+    // plugin blocks on write() and wait() never returns -- classic
+    // producer/consumer deadlock that `Command::output` avoids by doing
+    // exactly this dance internally.
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| LegionError::WorkSource("plugin stdout missing".into()))?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| LegionError::WorkSource("plugin stderr missing".into()))?;
+    let stdout_thread = thread::spawn(move || drain_pipe(stdout_pipe));
+    let stderr_thread = thread::spawn(move || drain_pipe(stderr_pipe));
+
+    let status = match timeout {
+        Some(budget) => match child
+            .wait_timeout(budget)
+            .map_err(|e| LegionError::WorkSource(format!("plugin wait: {e}")))?
+        {
+            Some(status) => status,
+            None => {
+                kill_child_tree(&mut child);
+                let _ = child.wait();
+                // Reader threads will hit EOF now that the whole subtree
+                // is dead. Join to reclaim them cleanly.
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(LegionError::WorkSource(format!(
+                    "plugin timeout after {}s",
+                    budget.as_secs()
+                )));
+            }
+        },
+        None => child
+            .wait()
+            .map_err(|e| LegionError::WorkSource(format!("plugin wait: {e}")))?,
+    };
+
+    let stdout = stdout_thread
+        .join()
+        .map_err(|_| LegionError::WorkSource("plugin stdout reader panicked".into()))?
+        .map_err(|e| LegionError::WorkSource(format!("plugin stdout: {e}")))?;
+    let stderr = stderr_thread
+        .join()
+        .map_err(|_| LegionError::WorkSource("plugin stderr reader panicked".into()))?
+        .unwrap_or_default();
+
+    if !status.success() {
         return Err(LegionError::WorkSource(format!("plugin failed: {stderr}")));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(stdout)
+}
+
+/// SIGKILL the entire process group rooted at the plugin child, so orphan
+/// grandchildren (e.g., a `gh` subprocess under a bash interpreter) die
+/// with their parent. Falls back to killing only the child on non-unix.
+fn kill_child_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // child.id() returns the pid; because we spawned with process_group(0)
+        // the pgid equals the pid. killpg sends SIGKILL to every member of
+        // that group. Negative kill() with the pgid has the same effect and
+        // avoids bringing libc's constant namespace in scope elsewhere, but
+        // killpg is the clearer call.
+        let pid = child.id() as libc::pid_t;
+        unsafe {
+            libc::killpg(pid, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+}
+
+fn drain_pipe<R: Read>(mut pipe: R) -> std::io::Result<String> {
+    let mut buf = String::new();
+    pipe.read_to_string(&mut buf)?;
+    Ok(buf)
 }
 
 /// List issues from a work source plugin.
@@ -470,26 +599,51 @@ pub struct ExternalPRCheck {
     pub description: String,
 }
 
+/// States that `gh pr checks --json state` emits for a check that is
+/// passing or still in flight. Anything NOT in this list is treated as
+/// failing by `ExternalPRCheck::is_failing`. Single source of truth:
+/// `is_failing` and its tests both reference this constant so "what is
+/// passing?" and "what is failing?" cannot drift apart in review.
+///
+/// Adding a new passing state from a future gh release requires editing
+/// exactly this list -- the correct review burden for a merge gate.
+pub const PR_CHECK_PASSING_STATES: &[&str] = &[
+    "SUCCESS",
+    "NEUTRAL",
+    "SKIPPED",
+    "PENDING",
+    "IN_PROGRESS",
+    "QUEUED",
+    "WAITING",
+    "REQUESTED",
+];
+
+/// Concrete terminal failure states gh emits today. Kept as a separate
+/// list (not the negation of `PR_CHECK_PASSING_STATES`) so the partition
+/// test can assert that the two lists disjoint-cover the observed
+/// state-space. Unknown states fall into neither and still count as
+/// failing via `is_failing`'s fail-closed default.
+///
+/// Referenced only from the test that guards the partition; `#[allow(dead_code)]`
+/// keeps it as a documented reference rather than hiding it in test code.
+#[allow(dead_code)]
+pub const PR_CHECK_FAILING_STATES: &[&str] = &[
+    "FAILURE",
+    "CANCELLED",
+    "TIMED_OUT",
+    "ACTION_REQUIRED",
+    "STALE",
+];
+
 impl ExternalPRCheck {
-    /// True unless `state` is a known passing or in-flight value.
+    /// True unless `state` is a known passing or in-flight value
+    /// (see `PR_CHECK_PASSING_STATES`).
     ///
     /// `legion pr checks` is a merge gate. Fail-closed on unknown states: a
     /// future gh release that adds a new failure variant must surface as a
     /// loud non-zero exit, not a silent green that lets a bad merge through.
-    /// Adding a new passing state will trip this and require an explicit
-    /// allow-list edit, which is the correct review burden for the gate.
     pub fn is_failing(&self) -> bool {
-        !matches!(
-            self.state.as_str(),
-            "SUCCESS"
-                | "NEUTRAL"
-                | "SKIPPED"
-                | "PENDING"
-                | "IN_PROGRESS"
-                | "QUEUED"
-                | "WAITING"
-                | "REQUESTED"
-        )
+        !PR_CHECK_PASSING_STATES.contains(&self.state.as_str())
     }
 }
 
@@ -930,13 +1084,7 @@ mod tests {
 
     #[test]
     fn is_failing_terminal_failure_states() {
-        for state in [
-            "FAILURE",
-            "CANCELLED",
-            "TIMED_OUT",
-            "ACTION_REQUIRED",
-            "STALE",
-        ] {
+        for state in PR_CHECK_FAILING_STATES {
             assert!(
                 check_with_state(state).is_failing(),
                 "expected {state} to be failing"
@@ -946,20 +1094,38 @@ mod tests {
 
     #[test]
     fn is_failing_passing_and_in_flight_states() {
-        for state in [
-            "SUCCESS",
-            "NEUTRAL",
-            "SKIPPED",
-            "PENDING",
-            "IN_PROGRESS",
-            "QUEUED",
-            "WAITING",
-            "REQUESTED",
-        ] {
+        for state in PR_CHECK_PASSING_STATES {
             assert!(
                 !check_with_state(state).is_failing(),
                 "expected {state} to NOT be failing"
             );
+        }
+    }
+
+    /// The two declared state lists must disjoint-cover the observed
+    /// state-space. If someone adds a state to both (or neither of) the
+    /// lists, this test catches it before is_failing starts lying.
+    /// Unknown states are fail-closed elsewhere
+    /// (`is_failing_unknown_state_treated_as_failing`); this test guards
+    /// only the states we have chosen to classify.
+    #[test]
+    fn pr_check_state_lists_partition() {
+        let passing: std::collections::HashSet<&str> =
+            PR_CHECK_PASSING_STATES.iter().copied().collect();
+        let failing: std::collections::HashSet<&str> =
+            PR_CHECK_FAILING_STATES.iter().copied().collect();
+
+        let overlap: Vec<&&str> = passing.intersection(&failing).collect();
+        assert!(
+            overlap.is_empty(),
+            "a state cannot be both passing and failing: {overlap:?}"
+        );
+
+        for state in &passing {
+            assert!(!check_with_state(state).is_failing(), "{state}");
+        }
+        for state in &failing {
+            assert!(check_with_state(state).is_failing(), "{state}");
         }
     }
 
@@ -1241,5 +1407,88 @@ mod tests {
             "expected WorkSource error, got {:?}",
             result
         );
+    }
+
+    #[cfg(unix)]
+    mod call_plugin_timeout {
+        use super::*;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        /// Write a throwaway bash script and chmod it executable. Returns
+        /// (tempdir holding the script, path to the script).
+        fn write_stub(body: &str) -> (tempfile::TempDir, PathBuf) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("stub");
+            fs::write(&path, body).expect("write stub");
+            let mut perm = fs::metadata(&path).expect("stat").permissions();
+            perm.set_mode(0o755);
+            fs::set_permissions(&path, perm).expect("chmod");
+            (dir, path)
+        }
+
+        #[test]
+        fn returns_stdout_on_success() {
+            let (_tmp, path) = write_stub("#!/bin/bash\necho hello\n");
+            let out = call_plugin_inner(&path, &[], &[], Some(Duration::from_secs(2)))
+                .expect("stub should succeed");
+            assert_eq!(out, "hello\n");
+        }
+
+        #[test]
+        fn surfaces_stderr_on_nonzero_exit() {
+            let (_tmp, path) = write_stub("#!/bin/bash\necho bad >&2\nexit 1\n");
+            let err = call_plugin_inner(&path, &[], &[], Some(Duration::from_secs(2)))
+                .expect_err("nonzero exit must error");
+            let LegionError::WorkSource(msg) = err else {
+                panic!("expected WorkSource error, got {err:?}")
+            };
+            assert!(msg.contains("bad"), "expected stderr in error: {msg}");
+        }
+
+        #[test]
+        fn times_out_and_kills_hung_plugin() {
+            // `sleep 60` is well beyond our 1s budget; the timeout arm must
+            // fire and SIGKILL the child. Verified via wall-clock -- the call
+            // must not take anywhere near 60s.
+            let (_tmp, path) = write_stub("#!/bin/bash\nsleep 60\n");
+            let start = std::time::Instant::now();
+            let err = call_plugin_inner(&path, &[], &[], Some(Duration::from_secs(1)))
+                .expect_err("hung plugin must error");
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(5),
+                "timeout fired too late: {elapsed:?}"
+            );
+            let LegionError::WorkSource(msg) = err else {
+                panic!("expected WorkSource error, got {err:?}")
+            };
+            assert!(
+                msg.contains("timeout"),
+                "expected timeout error message, got: {msg}"
+            );
+        }
+
+        #[test]
+        fn no_timeout_lets_plugin_run_to_completion() {
+            // None budget disables the timeout. Short-running plugin must
+            // still return its stdout.
+            let (_tmp, path) = write_stub("#!/bin/bash\nsleep 0.1\necho done\n");
+            let out = call_plugin_inner(&path, &[], &[], None).expect("no-timeout must succeed");
+            assert_eq!(out, "done\n");
+        }
+
+        #[test]
+        fn survives_stdout_larger_than_pipe_buffer() {
+            // Reader threads are spawned BEFORE wait; without them a plugin
+            // that writes more than one pipe buffer's worth (~64K on Linux,
+            // ~16K on macOS) would deadlock because wait() blocks waiting
+            // for exit and the plugin blocks on write(). Emit ~256K and
+            // assert we read all of it.
+            let (_tmp, path) = write_stub("#!/bin/bash\nyes A | head -c 262144\n");
+            let out = call_plugin_inner(&path, &[], &[], Some(Duration::from_secs(5)))
+                .expect("large stdout must not deadlock");
+            assert_eq!(out.len(), 262144);
+        }
     }
 }

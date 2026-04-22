@@ -26,6 +26,10 @@ async-stream = "0.3"
 toml = "0.8"
 sysinfo = { version = "0.34", default-features = false, features = ["system", "component"] }
 rlimit = "0.11"
+wait-timeout = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Multi-node sync via LAN broadcast
 smugglr-core = { git = "https://github.com/rafters-studio/smugglr", default-features = false, features = ["native"] }
