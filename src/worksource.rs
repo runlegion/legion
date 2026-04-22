@@ -758,6 +758,162 @@ pub fn resolve_review_config() -> Option<ReviewConfig> {
     Some(ReviewConfig { agent, auto_signal })
 }
 
+/// Full details of a PR, including body, head SHA, and mergeability.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalPRDetails {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub author: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub body: String,
+    pub head_ref_name: String,
+    pub head_sha: String,
+    pub base_ref_name: String,
+    pub is_draft: bool,
+    pub review_decision: Option<String>,
+    pub mergeable: Option<String>,
+}
+
+/// A single comment on a PR -- either a top-level conversation comment
+/// or an inline review comment on a diff hunk. `kind` discriminates.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalPRComment {
+    pub id: String,
+    pub author: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub body: String,
+    pub kind: String,
+    pub path: Option<String>,
+    pub line: Option<u32>,
+    pub in_reply_to_id: Option<String>,
+}
+
+impl ExternalPRComment {
+    /// True when this comment is an inline review comment on a diff hunk
+    /// (as opposed to a top-level issue-thread comment). Use this rather
+    /// than `path.is_some()` at render sites -- the path-presence check
+    /// couples the renderer to the current plugin shape and silently
+    /// misroutes if a future plugin emits a review comment with no path.
+    pub fn is_review(&self) -> bool {
+        self.kind == "review"
+    }
+}
+
+/// A submitted review with its body and any inline comments grouped under it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalPRReview {
+    pub id: String,
+    pub author: String,
+    pub state: String,
+    pub submitted_at: Option<String>,
+    pub body: String,
+    pub comments: Vec<ExternalPRComment>,
+}
+
+/// Fetch a PR's body + metadata via a work source plugin.
+///
+/// Fail-closed: a missing plugin returns Err rather than an empty result.
+/// Callers use this for human review of a PR thread; empty output would
+/// be indistinguishable from an uncommented PR.
+pub fn view_pr(plugin_name: &str, github_repo: &str, pr_number: u64) -> Result<ExternalPRDetails> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let pr_num_str = pr_number.to_string();
+    let output = call_plugin(
+        &plugin_path,
+        &["view-pr"],
+        &[
+            ("LEGION_WS_REPO", github_repo),
+            ("LEGION_WS_NUMBER", &pr_num_str),
+        ],
+    )?;
+
+    serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))
+}
+
+/// List all comments on a PR (top-level + inline review comments) in
+/// chronological order.
+pub fn list_pr_comments(
+    plugin_name: &str,
+    github_repo: &str,
+    pr_number: u64,
+) -> Result<Vec<ExternalPRComment>> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let pr_num_str = pr_number.to_string();
+    let output = call_plugin(
+        &plugin_path,
+        &["pr-comments"],
+        &[
+            ("LEGION_WS_REPO", github_repo),
+            ("LEGION_WS_NUMBER", &pr_num_str),
+        ],
+    )?;
+
+    serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))
+}
+
+/// List all submitted reviews with their bodies and inline comments.
+pub fn list_pr_reviews(
+    plugin_name: &str,
+    github_repo: &str,
+    pr_number: u64,
+) -> Result<Vec<ExternalPRReview>> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let pr_num_str = pr_number.to_string();
+    let output = call_plugin(
+        &plugin_path,
+        &["pr-reviews"],
+        &[
+            ("LEGION_WS_REPO", github_repo),
+            ("LEGION_WS_NUMBER", &pr_num_str),
+        ],
+    )?;
+
+    serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))
+}
+
+/// Fetch the raw CI log for a single job. Job IDs come from the numeric
+/// suffix of `ExternalPRCheck::link` (`.../actions/runs/<run>/job/<job>`).
+///
+/// Returns the raw log bytes as a UTF-8 string. Callers are responsible
+/// for rendering (ANSI codes, timestamp prefixes, etc. are preserved).
+pub fn fetch_check_log(plugin_name: &str, github_repo: &str, job_id: u64) -> Result<String> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+
+    let job_id_str = job_id.to_string();
+    call_plugin(
+        &plugin_path,
+        &["pr-check-log"],
+        &[
+            ("LEGION_WS_REPO", github_repo),
+            ("LEGION_WS_JOB_ID", &job_id_str),
+        ],
+    )
+}
+
+/// Extract the numeric job id from a check's link. GitHub's check links
+/// match `https://github.com/<owner>/<repo>/actions/runs/<run>/job/<job>`.
+/// Returns None if the link does not match the expected pattern (custom
+/// check runners, third-party integrations, etc.).
+pub fn job_id_from_link(link: &str) -> Option<u64> {
+    let suffix = link.rsplit_once("/job/")?.1;
+    // Trim any query string or fragment.
+    let numeric_part = suffix.split(|c: char| !c.is_ascii_digit()).next()?;
+    numeric_part.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1019,5 +1175,71 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         seed_cache(tmp.path(), "legion", "0.5.0", &["linear"]);
         assert!(find_in_cache_root(tmp.path(), "github").is_none());
+    }
+
+    #[test]
+    fn job_id_from_link_parses_github_actions_url() {
+        let link = "https://github.com/runlegion/legion/actions/runs/24756870394/job/72431832342";
+        assert_eq!(job_id_from_link(link), Some(72431832342));
+    }
+
+    #[test]
+    fn job_id_from_link_tolerates_query_string() {
+        let link = "https://github.com/foo/bar/actions/runs/1/job/99?pr=42";
+        assert_eq!(job_id_from_link(link), Some(99));
+    }
+
+    #[test]
+    fn job_id_from_link_returns_none_for_non_job_url() {
+        // Third-party check integrations often link to a dashboard, not an
+        // actions job. We must distinguish those from GitHub Actions jobs so
+        // log fetch can be skipped with a clear marker rather than attempted
+        // against the wrong endpoint.
+        assert_eq!(job_id_from_link("https://example.com/checks/abc"), None);
+        assert_eq!(job_id_from_link(""), None);
+    }
+
+    #[test]
+    fn view_pr_returns_worksource_error_when_plugin_missing() {
+        // Fail-closed mirror of pr_checks_returns_worksource_error_when_plugin_missing:
+        // a missing plugin must not surface as "empty PR body" because a caller
+        // (human reading via `legion pr view`) would read that as "the PR has
+        // no description" rather than "we could not reach the API".
+        let result = view_pr("nonexistent-plugin-xyz", "owner/repo", 1);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn list_pr_comments_returns_worksource_error_when_plugin_missing() {
+        let result = list_pr_comments("nonexistent-plugin-xyz", "owner/repo", 1);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn list_pr_reviews_returns_worksource_error_when_plugin_missing() {
+        let result = list_pr_reviews("nonexistent-plugin-xyz", "owner/repo", 1);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn fetch_check_log_returns_worksource_error_when_plugin_missing() {
+        let result = fetch_check_log("nonexistent-plugin-xyz", "owner/repo", 42);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
     }
 }

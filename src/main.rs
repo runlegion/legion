@@ -11,6 +11,7 @@ mod init;
 #[allow(dead_code)] // Items used by tests + pending surface/status/serve migration
 mod kanban;
 mod mcp;
+mod pr_view;
 mod recall;
 mod reflect;
 mod search;
@@ -1157,6 +1158,60 @@ enum PrAction {
     /// states so a future gh release with a new failure variant cannot
     /// silently render as green to the merge gate).
     Checks {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR number
+        #[arg(long)]
+        number: u64,
+
+        /// Emit raw JSON instead of human-formatted output
+        #[arg(long)]
+        json: bool,
+
+        /// Additionally stream the raw CI log for every failing check.
+        /// Each log is preceded by a `===== <name> (<job-id>) =====` header.
+        /// Per-job log fetch failures print a marker and do not abort the
+        /// run -- the exit code still reflects the overall check status.
+        #[arg(long)]
+        log_failed: bool,
+    },
+
+    /// Show a pull request's body and metadata.
+    View {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR number
+        #[arg(long)]
+        number: u64,
+
+        /// Emit raw JSON instead of human-formatted output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List comments on a pull request (top-level + inline review comments)
+    /// in chronological order.
+    Comments {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR number
+        #[arg(long)]
+        number: u64,
+
+        /// Emit raw JSON instead of human-formatted output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List submitted reviews on a pull request with their bodies and
+    /// inline comments.
+    Reviews {
         /// Repository name (resolves work source config from watch.toml)
         #[arg(long)]
         repo: String,
@@ -3490,7 +3545,12 @@ fn run() -> error::Result<()> {
                     }
                 }
             }
-            PrAction::Checks { repo, number, json } => {
+            PrAction::Checks {
+                repo,
+                number,
+                json,
+                log_failed,
+            } => {
                 let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
                     .ok_or_else(|| {
                         error::LegionError::WorkSource(format!(
@@ -3504,7 +3564,8 @@ fn run() -> error::Result<()> {
                 if json {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&checks).unwrap_or_else(|_| "[]".into())
+                        serde_json::to_string_pretty(&checks)
+                            .expect("ExternalPRCheck serializes infallibly")
                     );
                 } else if checks.is_empty() {
                     eprintln!(
@@ -3531,6 +3592,32 @@ fn run() -> error::Result<()> {
                     }
                 }
 
+                if log_failed && !json {
+                    for c in checks.iter().filter(|c| c.is_failing()) {
+                        match worksource::job_id_from_link(&c.link) {
+                            Some(job_id) => {
+                                println!("\n===== {} ({}) =====", c.name, job_id);
+                                match worksource::fetch_check_log(
+                                    &plugin_name,
+                                    &source_repo,
+                                    job_id,
+                                ) {
+                                    Ok(log) => print!("{log}"),
+                                    Err(e) => {
+                                        println!("(log unavailable: {e})");
+                                    }
+                                }
+                            }
+                            None => {
+                                println!(
+                                    "\n===== {} =====\n(log unavailable: non-Actions check link: {})",
+                                    c.name, c.link
+                                );
+                            }
+                        }
+                    }
+                }
+
                 let failed: Vec<&str> = checks
                     .iter()
                     .filter(|c| c.is_failing())
@@ -3543,6 +3630,70 @@ fn run() -> error::Result<()> {
                         number,
                         failed.join(", ")
                     )));
+                }
+            }
+            PrAction::View { repo, number, json } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let pr = worksource::view_pr(&plugin_name, &source_repo, number)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&pr)
+                            .expect("ExternalPRDetails serializes infallibly")
+                    );
+                } else {
+                    pr_view::render_pr(&pr);
+                }
+            }
+            PrAction::Comments { repo, number, json } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let comments = worksource::list_pr_comments(&plugin_name, &source_repo, number)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&comments)
+                            .expect("ExternalPRComment serializes infallibly")
+                    );
+                } else if comments.is_empty() {
+                    eprintln!("[legion] no comments on PR #{} on {}", number, source_repo);
+                } else {
+                    pr_view::render_comments(&comments);
+                }
+            }
+            PrAction::Reviews { repo, number, json } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                let reviews = worksource::list_pr_reviews(&plugin_name, &source_repo, number)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&reviews)
+                            .expect("ExternalPRReview serializes infallibly")
+                    );
+                } else if reviews.is_empty() {
+                    eprintln!("[legion] no reviews on PR #{} on {}", number, source_repo);
+                } else {
+                    pr_view::render_reviews(&reviews);
                 }
             }
             PrAction::Review {
