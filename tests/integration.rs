@@ -4404,4 +4404,163 @@ fn mesh_pick_on_empty_store_exits_nonzero() {
         stderr.contains("no fresh host"),
         "error message must name the condition, got: {stderr}"
     );
+    assert!(
+        !stderr.contains("WorkSource"),
+        "error must not surface as a WorkSource variant -- operators grep that token for real plugin failures, got: {stderr}"
+    );
+}
+
+/// Seed a single rate-limit sample by invoking `legion statusline` with a
+/// minimal synthetic Claude Code JSON payload. Returns the path to a
+/// transcript file we do NOT create -- statusline tolerates a missing
+/// transcript (skips usage sample) and still writes the rate-limit row.
+fn seed_rate_limit_sample(data_dir: &std::path::Path, five_hour_pct: f64, seven_day_pct: f64) {
+    let session_id = format!("seed-{}", uuid::Uuid::now_v7());
+    let payload = serde_json::json!({
+        "session_id": session_id,
+        "rate_limits": {
+            "five_hour": { "used_percentage": five_hour_pct, "resets_at": 0 },
+            "seven_day": { "used_percentage": seven_day_pct, "resets_at": 0 },
+        },
+    });
+    let mut child = legion_cmd(data_dir)
+        .args(["statusline"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "statusline seed failed");
+}
+
+#[test]
+fn mesh_headroom_json_shape_pins_field_names() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_rate_limit_sample(dir.path(), 40.0, 55.0);
+
+    let out = legion_cmd(dir.path())
+        .args(["mesh", "headroom", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "headroom failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let rows = parsed.as_array().expect("expected array");
+    assert!(
+        !rows.is_empty(),
+        "seed should produce at least one host row"
+    );
+    let row = &rows[0];
+    // Contract: downstream schedulers / hooks will key on these names.
+    // A typo or camelCase flip is a silent breakage otherwise.
+    for field in [
+        "hostname",
+        "score",
+        "fiveHourPct",
+        "sevenDayPct",
+        "lastEffectiveTokens",
+        "sampledAt",
+        "ageSecs",
+        "stale",
+    ] {
+        assert!(
+            row.get(field).is_some(),
+            "missing field '{field}' in headroom JSON: {row}"
+        );
+    }
+}
+
+#[test]
+fn mesh_pick_json_shape_pins_field_names() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_rate_limit_sample(dir.path(), 40.0, 55.0);
+
+    let out = legion_cmd(dir.path())
+        .args(["mesh", "pick", "--json", "--for-task", "card-xyz"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "pick --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    for field in ["hostname", "score", "forTask"] {
+        assert!(
+            parsed.get(field).is_some(),
+            "missing field '{field}' in pick JSON: {parsed}"
+        );
+    }
+    assert_eq!(
+        parsed["forTask"].as_str(),
+        Some("card-xyz"),
+        "--for-task must round-trip into the JSON payload"
+    );
+}
+
+#[test]
+fn mesh_pick_exclude_removes_named_host() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_rate_limit_sample(dir.path(), 10.0, 10.0);
+    // Figure out the host's name from headroom output.
+    let head = legion_cmd(dir.path())
+        .args(["mesh", "headroom", "--json"])
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&head.stdout)).unwrap();
+    let host = parsed[0]["hostname"].as_str().unwrap().to_string();
+
+    // Excluding the only fresh host must exit 1 with "no fresh host".
+    let out = legion_cmd(dir.path())
+        .args(["mesh", "pick", "--exclude", &host])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "pick must fail when every fresh host is excluded"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no fresh host"),
+        "error must name condition, got: {stderr}"
+    );
+}
+
+#[test]
+fn mesh_stale_cutoff_env_override_is_respected() {
+    // Default cutoff is 600s. Seed a sample, sleep so the sample is
+    // definitely older than 3 seconds, then run pick with a 3-second
+    // cutoff. Sample must register as stale; pick must fail.
+    let dir = tempfile::tempdir().unwrap();
+    seed_rate_limit_sample(dir.path(), 40.0, 55.0);
+    std::thread::sleep(std::time::Duration::from_secs(4));
+
+    let out = legion_cmd(dir.path())
+        .env("LEGION_MESH_STALE_SECS", "3")
+        .args(["mesh", "pick"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "with cutoff=3s the >=4s-old sample is stale; pick must fail. stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no fresh host"),
+        "stale env-override path must surface the same no-fresh-host error, got: {stderr}"
+    );
 }

@@ -4241,7 +4241,7 @@ fn run() -> error::Result<()> {
                             }
                         }
                         None => {
-                            return Err(error::LegionError::WorkSource(
+                            return Err(error::LegionError::Mesh(
                                 "no fresh host available to pick".to_string(),
                             ));
                         }

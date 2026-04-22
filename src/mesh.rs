@@ -74,21 +74,39 @@ pub fn score_host(
         - seven_day_pct
             .unwrap_or(UNKNOWN_PCT_NEUTRAL)
             .clamp(0.0, 100.0);
-    WEIGHT_FIVE_HOUR * h5 + WEIGHT_SEVEN_DAY * h7 + WEIGHT_BURN * burn_component
+    // Clamp burn defensively. compute_burn_components emits 0..100 today,
+    // but a future tweak to its formula that returns out-of-range values
+    // would silently push `score` outside [0, 100] and break the
+    // partial_cmp-based sort assumption.
+    let burn = burn_component.clamp(0.0, 100.0);
+    WEIGHT_FIVE_HOUR * h5 + WEIGHT_SEVEN_DAY * h7 + WEIGHT_BURN * burn
 }
 
 /// Map hostname -> burn_component in 0..100, where higher means less
 /// burning. Derived from the median effective-token count across the
-/// cluster: any host <= median gets 100; any host >= 2x median gets 0;
-/// linear interpolation in between. Hosts with no usage sample default
-/// to 100 (we don't know they're burning, so don't penalise them).
+/// cluster (average of the two middle values on even-sized inputs):
+/// any host <= median gets 100; any host >= 2x median gets 0; linear
+/// interpolation in between. Hosts with no usage sample default to 100
+/// (we don't know they're burning, so don't penalise them).
 fn compute_burn_components(usage_by_host: &BTreeMap<String, UsageSample>) -> BTreeMap<String, f64> {
     let mut burns: Vec<i64> = usage_by_host.values().map(|s| s.effective_tokens).collect();
     if burns.is_empty() {
         return BTreeMap::new();
     }
     burns.sort_unstable();
-    let median = burns[burns.len() / 2].max(1) as f64;
+    // True median: for even n, average the two middle values. burns[n/2]
+    // alone (upper-middle) collapsed the differentiator on 2-host clusters
+    // -- both hosts satisfy ratio <= 1 and both score 100 on burn. Common
+    // LAN setups (Puck + laptop) are exactly 2 hosts, so this mattered.
+    let median = {
+        let n = burns.len();
+        let raw = if n.is_multiple_of(2) {
+            (burns[n / 2 - 1] as f64 + burns[n / 2] as f64) / 2.0
+        } else {
+            burns[n / 2] as f64
+        };
+        raw.max(1.0)
+    };
 
     let mut out = BTreeMap::new();
     for (host, sample) in usage_by_host {
@@ -200,21 +218,50 @@ fn newest_sampled_at(
     }
 }
 
+/// Maximum permitted clock skew before a peer's sample is treated as
+/// unusable. A statusline sample stamped more than this far in the
+/// future means the peer's clock is too far off to score against the
+/// cluster; treat it as stale rather than preferring it forever.
+const MAX_FUTURE_SKEW_SECS: i64 = 60;
+
 fn newest_age(
     rate: Option<&RateLimitSample>,
     usage: Option<&UsageSample>,
     now: DateTime<Utc>,
 ) -> Option<Duration> {
     let ts = newest_sampled_at(rate, usage)?;
-    let parsed = DateTime::parse_from_rfc3339(&ts).ok()?;
+    let parsed = match DateTime::parse_from_rfc3339(&ts) {
+        Ok(p) => p,
+        Err(e) => {
+            // Do not silently swallow: a corrupted sampled_at field (from
+            // schema drift or a broken peer) would otherwise return None
+            // here and silently mark the host stale with zero diagnostic.
+            eprintln!(
+                "[legion] warning: unparseable sampled_at '{}': {} -- host will be marked stale",
+                ts, e
+            );
+            return None;
+        }
+    };
     let parsed_utc = parsed.with_timezone(&Utc);
     let delta = now.signed_duration_since(parsed_utc);
-    // Negative deltas (sample timestamped in the future) clamp to zero so
-    // a clock-skew on a peer cannot silently push that host into stale.
-    if delta.num_seconds() < 0 {
+    let secs = delta.num_seconds();
+    if secs < -MAX_FUTURE_SKEW_SECS {
+        // Peer clock off by more than the grace window -- their samples
+        // cannot be ranked honestly against the cluster. Return None so
+        // the host is flagged stale rather than silently winning forever.
+        eprintln!(
+            "[legion] warning: sample timestamped {}s in the future -- peer clock skew beyond grace, marking stale",
+            -secs
+        );
+        None
+    } else if secs < 0 {
+        // Small forward skew (peer a few seconds ahead of us) is normal
+        // and harmless -- clamp age to zero so the host still counts
+        // as fresh.
         Some(Duration::from_secs(0))
     } else {
-        Some(Duration::from_secs(delta.num_seconds() as u64))
+        Some(Duration::from_secs(secs as u64))
     }
 }
 
@@ -276,6 +323,38 @@ mod tests {
         let puck = score_host(Some(30.0), Some(50.0), 100.0);
         let laptop = score_host(Some(70.0), Some(60.0), 100.0);
         assert!(puck > laptop, "lower used-% must score higher");
+    }
+
+    #[test]
+    fn score_host_neutral_default_is_exactly_50_pct_used() {
+        // Pin the magnitude, not just the ordering -- a "helpful" PR that
+        // moves UNKNOWN_PCT_NEUTRAL from 50 to 10 would still pass the
+        // ordering test (full > missing > exhausted). This one fails.
+        // score(None, None, 0) = 0.5*50 + 0.4*50 + 0.1*0 = 45.0
+        let s = score_host(None, None, 0.0);
+        assert!(
+            (s - 45.0).abs() < 1e-9,
+            "neutral default must score 45.0 given burn=0, got {s}"
+        );
+    }
+
+    #[test]
+    fn score_host_clamps_burn_out_of_range() {
+        // If compute_burn_components ever emits a value outside [0,100]
+        // (regression), score_host must clamp so the resulting score
+        // stays in [0,100] and partial_cmp ordering remains meaningful.
+        let low = score_host(Some(0.0), Some(0.0), -50.0);
+        let zero_burn = score_host(Some(0.0), Some(0.0), 0.0);
+        let high = score_host(Some(0.0), Some(0.0), 200.0);
+        let cap_burn = score_host(Some(0.0), Some(0.0), 100.0);
+        assert!(
+            (low - zero_burn).abs() < 1e-9,
+            "burn below 0 must clamp to 0"
+        );
+        assert!(
+            (high - cap_burn).abs() < 1e-9,
+            "burn above 100 must clamp to 100"
+        );
     }
 
     #[test]
@@ -353,6 +432,34 @@ mod tests {
     }
 
     #[test]
+    fn rank_hosts_huge_future_skew_marks_host_stale() {
+        // Sample stamped 2 hours in the future -- peer clock is broken
+        // beyond the grace window. Without the upper bound the host
+        // would show age=0 and win every pick forever; with it, treat
+        // as stale so an operator can see the problem.
+        let rates = vec![rate("broken-clock", "2026-04-22T14:00:00Z", 5.0, 5.0)];
+        let ranked = rank_hosts(&rates, &[], now(), Duration::from_secs(600));
+        assert_eq!(ranked.len(), 1);
+        assert!(
+            ranked[0].stale,
+            "2h-future sample must be flagged stale, not rank-winning"
+        );
+        assert!(ranked[0].age.is_none());
+    }
+
+    #[test]
+    fn rank_hosts_malformed_sampled_at_marks_host_stale() {
+        // Corrupted sampled_at field (schema drift, tampering). Stale
+        // path triggers with a warning on stderr; host does not
+        // mysteriously win pick or vanish from the table.
+        let rates = vec![rate("garbled", "not-a-timestamp", 5.0, 5.0)];
+        let ranked = rank_hosts(&rates, &[], now(), Duration::from_secs(600));
+        assert_eq!(ranked.len(), 1);
+        assert!(ranked[0].stale);
+        assert!(ranked[0].age.is_none());
+    }
+
+    #[test]
     fn ranked_hosts_from_db_roundtrips_multi_host_samples() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("mesh.db")).unwrap();
@@ -397,6 +504,47 @@ mod tests {
         assert_eq!(ranked.len(), 1);
         assert!(ranked[0].stale);
         assert!(ranked[0].age.is_some());
+    }
+
+    #[test]
+    fn burn_component_n1_has_sole_host_at_midpoint() {
+        // Single-host cluster: the only sample IS the midpoint, ratio=1.0,
+        // burn=100. Locks in the benign behaviour and guards against a
+        // future "divide-by-len" regression that would underflow.
+        let rates = vec![rate("solo", "2026-04-22T11:59:00Z", 30.0, 30.0)];
+        let usages = vec![usage("solo", "2026-04-22T11:59:00Z", 12345)];
+        let ranked = rank_hosts(&rates, &usages, now(), Duration::from_secs(600));
+        assert_eq!(ranked.len(), 1);
+        // score = 0.5*70 + 0.4*70 + 0.1*100 = 73
+        assert!((ranked[0].score - 73.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn burn_component_n2_lower_burner_beats_higher_on_burn() {
+        // Two-host cluster. With true-median (avg of two middles =
+        // (100+500)/2 = 300), cheap has ratio 0.33 (burn=100), spendy
+        // ratio 1.67 (burn=33). Headroom terms are equal, so burn
+        // differentiates -- the common LAN case (Puck + laptop) now
+        // gets a real picker signal.
+        let rates = vec![
+            rate("cheap", "2026-04-22T11:59:00Z", 30.0, 30.0),
+            rate("spendy", "2026-04-22T11:59:00Z", 30.0, 30.0),
+        ];
+        let usages = vec![
+            usage("cheap", "2026-04-22T11:59:00Z", 100),
+            usage("spendy", "2026-04-22T11:59:00Z", 500),
+        ];
+        let ranked = rank_hosts(&rates, &usages, now(), Duration::from_secs(600));
+        let by_host: std::collections::HashMap<_, _> = ranked
+            .into_iter()
+            .map(|h| (h.hostname.clone(), h))
+            .collect();
+        assert!(
+            by_host["cheap"].score > by_host["spendy"].score,
+            "true-median burn must differentiate the 2-host case: cheap={} spendy={}",
+            by_host["cheap"].score,
+            by_host["spendy"].score
+        );
     }
 
     #[test]

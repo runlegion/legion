@@ -2505,17 +2505,26 @@ impl Database {
     pub fn latest_rate_limit_samples_per_host(
         &self,
     ) -> Result<Vec<crate::statusline::RateLimitSample>> {
+        // ROW_NUMBER partitioned by hostname gives a deterministic tie-break
+        // when two rows share the same MAX(sampled_at). Without it, the
+        // IN-subquery variant returned both rows and the caller's BTreeMap
+        // collapsed them in insertion order, so a pair of statusline writes
+        // within one RFC3339-second could produce non-deterministic scores.
+        // Tie-break: newer sampled_at, then higher id (UUIDv7 embeds time).
         let mut stmt = self.conn.prepare(
             "SELECT id, hostname, session_id, sampled_at, five_hour_pct, \
              five_hour_resets_at, seven_day_pct, seven_day_resets_at, model \
-             FROM rate_limit_samples \
-             WHERE deleted_at IS NULL \
-             AND (hostname, sampled_at) IN ( \
-                 SELECT hostname, MAX(sampled_at) \
+             FROM ( \
+                 SELECT id, hostname, session_id, sampled_at, five_hour_pct, \
+                     five_hour_resets_at, seven_day_pct, seven_day_resets_at, model, \
+                     ROW_NUMBER() OVER ( \
+                         PARTITION BY hostname \
+                         ORDER BY sampled_at DESC, id DESC \
+                     ) AS rn \
                  FROM rate_limit_samples \
                  WHERE deleted_at IS NULL \
-                 GROUP BY hostname \
              ) \
+             WHERE rn = 1 \
              ORDER BY hostname",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -2545,14 +2554,18 @@ impl Database {
             "SELECT id, hostname, session_id, turn_index, model, \
              input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, \
              effective_tokens, error_bytes, sampled_at \
-             FROM usage_samples \
-             WHERE deleted_at IS NULL \
-             AND (hostname, sampled_at) IN ( \
-                 SELECT hostname, MAX(sampled_at) \
+             FROM ( \
+                 SELECT id, hostname, session_id, turn_index, model, \
+                     input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, \
+                     effective_tokens, error_bytes, sampled_at, \
+                     ROW_NUMBER() OVER ( \
+                         PARTITION BY hostname \
+                         ORDER BY sampled_at DESC, id DESC \
+                     ) AS rn \
                  FROM usage_samples \
                  WHERE deleted_at IS NULL \
-                 GROUP BY hostname \
              ) \
+             WHERE rn = 1 \
              ORDER BY hostname",
         )?;
         let rows = stmt.query_map([], |row| {
