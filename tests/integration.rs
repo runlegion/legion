@@ -2547,8 +2547,15 @@ fn pr_checks_json_flag_accepted() {
 // PR read-side (view / comments / reviews / checks --log-failed) with a
 // stubbed worksource plugin. The plugin is a bash script that dispatches on
 // the subcommand, ignores the env vars, and echoes the fixture contents.
+//
+// Gated on #[cfg(unix)] because the stub relies on a bash interpreter, an
+// exec bit (chmod 0o755 via PermissionsExt), and the plugin-resolution path
+// that legion uses via `Command::new(plugin_path)`. Windows CI builds and
+// tests everything else; the worksource plugin itself is bash-based and the
+// read surface is exercised end-to-end on ubuntu/macos runners.
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 fn pr_read_stub_plugin(view_pr: &str, comments: &str, reviews: &str, check_log: &str) -> String {
     // Encode each fixture as a single-quoted heredoc body so shell escaping
     // inside the fixture content (backticks, dollars, braces) cannot break
@@ -2599,6 +2606,7 @@ esac
     )
 }
 
+#[cfg(unix)]
 fn setup_pr_read_stub(
     data_dir: &std::path::Path,
     plugin_root: &std::path::Path,
@@ -2633,12 +2641,14 @@ worksource = "github"
     plugin_path
 }
 
+#[cfg(unix)]
 fn pr_read_cmd(data_dir: &std::path::Path, plugin_root: &std::path::Path) -> Command {
     let mut cmd = legion_cmd(data_dir);
     cmd.env("CLAUDE_PLUGIN_ROOT", plugin_root);
     cmd
 }
 
+#[cfg(unix)]
 #[test]
 fn pr_view_renders_body_and_metadata() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -2683,6 +2693,7 @@ fn pr_view_renders_body_and_metadata() {
     assert!(stdout.contains("multi-line"));
 }
 
+#[cfg(unix)]
 #[test]
 fn pr_view_json_roundtrips() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -2720,6 +2731,7 @@ fn pr_view_json_roundtrips() {
     assert_eq!(parsed["state"], "MERGED");
 }
 
+#[cfg(unix)]
 #[test]
 fn pr_comments_handles_empty_thread() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -2739,6 +2751,7 @@ fn pr_comments_handles_empty_thread() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn pr_comments_renders_issue_and_review_mix() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -2766,6 +2779,7 @@ fn pr_comments_renders_issue_and_review_mix() {
     assert!(stdout.contains("fix this line"));
 }
 
+#[cfg(unix)]
 #[test]
 fn pr_reviews_renders_inline_comments_grouped() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -2801,6 +2815,7 @@ fn pr_reviews_renders_inline_comments_grouped() {
     assert!(stdout.contains("inline nit"));
 }
 
+#[cfg(unix)]
 #[test]
 fn pr_checks_log_failed_streams_failing_job_logs() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -2841,6 +2856,7 @@ fn pr_checks_log_failed_streams_failing_job_logs() {
 /// of fetch_check_log inside the --log-failed loop -- partial failures must
 /// render a marker and the outer run must still exit non-zero on the failing
 /// check, independently of whether the log fetch succeeded.
+#[cfg(unix)]
 fn pr_read_stub_plugin_failing_log() -> String {
     r#"#!/bin/bash
 set -e
@@ -2863,6 +2879,7 @@ esac
     .to_string()
 }
 
+#[cfg(unix)]
 #[test]
 fn pr_checks_log_failed_marks_partial_log_fetch_failure() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -2899,6 +2916,7 @@ fn pr_checks_log_failed_marks_partial_log_fetch_failure() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn pr_checks_log_failed_suppressed_under_json() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -2932,6 +2950,7 @@ fn pr_checks_log_failed_suppressed_under_json() {
     assert!(parsed.is_array(), "expected JSON array, got {parsed}");
 }
 
+#[cfg(unix)]
 #[test]
 fn pr_view_surfaces_malformed_plugin_json_as_worksource_error() {
     // A plugin bug or a gh breaking-change that emits a shape-mismatched
