@@ -325,8 +325,162 @@ case "${1:-}" in
     printf '%s\n' "$OUTPUT"
     ;;
 
+  view-pr)
+    PR_NUMBER="${LEGION_WS_NUMBER:-}"
+    if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_NUMBER required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    OUTPUT=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json \
+      number,title,state,author,createdAt,updatedAt,body,headRefName,headRefOid,baseRefName,isDraft,reviewDecision,mergeable \
+      2>/dev/null) || { echo '{"error":"gh pr view failed"}' >&2; exit 1; }
+    if [ -z "$OUTPUT" ] || ! printf '%s' "$OUTPUT" | jq -e . >/dev/null 2>&1; then
+      echo '{"error":"gh pr view returned empty or malformed JSON"}' >&2
+      exit 1
+    fi
+    # Project gh's shape into our ExternalPRDetails shape. gh returns
+    # author as {login: "..."} and headRefOid as the SHA; flatten both
+    # and rename so the Rust struct deserializes cleanly.
+    printf '%s' "$OUTPUT" | jq '{
+      number,
+      title,
+      state,
+      author: (.author.login // ""),
+      createdAt,
+      updatedAt,
+      body,
+      headRefName,
+      headSha: .headRefOid,
+      baseRefName,
+      isDraft,
+      reviewDecision,
+      mergeable
+    }'
+    ;;
+
+  pr-comments)
+    PR_NUMBER="${LEGION_WS_NUMBER:-}"
+    if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_NUMBER required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    OWNER="${REPO%%/*}"
+    REPO_NAME="${REPO##*/}"
+    # Issue comments (the top-level PR conversation).
+    ISSUE_COMMENTS=$(gh api "repos/${OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments" --paginate 2>/dev/null) \
+      || { echo '{"error":"gh api issue comments failed"}' >&2; exit 1; }
+    # Review comments (inline comments on diff hunks).
+    REVIEW_COMMENTS=$(gh api "repos/${OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/comments" --paginate 2>/dev/null) \
+      || { echo '{"error":"gh api review comments failed"}' >&2; exit 1; }
+    # Project both shapes into ExternalPRComment and merge chronologically.
+    jq -n \
+      --argjson issue "$ISSUE_COMMENTS" \
+      --argjson review "$REVIEW_COMMENTS" \
+      '
+      ( $issue | map({
+          id: (.id | tostring),
+          author: (.user.login // ""),
+          createdAt: .created_at,
+          updatedAt: .updated_at,
+          body: (.body // ""),
+          kind: "issue",
+          path: null,
+          line: null,
+          inReplyToId: null
+        }) )
+      +
+      ( $review | map({
+          id: (.id | tostring),
+          author: (.user.login // ""),
+          createdAt: .created_at,
+          updatedAt: .updated_at,
+          body: (.body // ""),
+          kind: "review",
+          path: (.path // null),
+          line: (.line // .original_line // null),
+          inReplyToId: (if .in_reply_to_id then (.in_reply_to_id | tostring) else null end)
+        }) )
+      | sort_by(.createdAt)
+      '
+    ;;
+
+  pr-reviews)
+    PR_NUMBER="${LEGION_WS_NUMBER:-}"
+    if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_NUMBER required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    OWNER="${REPO%%/*}"
+    REPO_NAME="${REPO##*/}"
+    REVIEWS=$(gh api "repos/${OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/reviews" --paginate 2>/dev/null) \
+      || { echo '{"error":"gh api reviews failed"}' >&2; exit 1; }
+    REVIEW_COMMENTS=$(gh api "repos/${OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/comments" --paginate 2>/dev/null) \
+      || { echo '{"error":"gh api review comments failed"}' >&2; exit 1; }
+    # Group comments by pull_request_review_id so each review carries its
+    # inline comments in one object. Omit pending reviews with no submitted_at
+    # unless they have a body or comments (gh shows them; so do we).
+    jq -n \
+      --argjson reviews "$REVIEWS" \
+      --argjson comments "$REVIEW_COMMENTS" \
+      '
+      ( $comments | group_by(.pull_request_review_id) | map({
+          key: (.[0].pull_request_review_id | tostring),
+          value: map({
+            id: (.id | tostring),
+            author: (.user.login // ""),
+            createdAt: .created_at,
+            updatedAt: .updated_at,
+            body: (.body // ""),
+            kind: "review",
+            path: (.path // null),
+            line: (.line // .original_line // null),
+            inReplyToId: (if .in_reply_to_id then (.in_reply_to_id | tostring) else null end)
+          })
+        }) | from_entries ) as $by_review
+      |
+      $reviews | map({
+        id: (.id | tostring),
+        author: (.user.login // ""),
+        state: (.state // "COMMENTED"),
+        submittedAt: (.submitted_at // null),
+        body: (.body // ""),
+        comments: ($by_review[(.id | tostring)] // [])
+      })
+      | sort_by(.submittedAt // "")
+      '
+    ;;
+
+  pr-check-log)
+    JOB_ID="${LEGION_WS_JOB_ID:-}"
+    if [ -z "$REPO" ] || [ -z "$JOB_ID" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_JOB_ID required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    OWNER="${REPO%%/*}"
+    REPO_NAME="${REPO##*/}"
+    # Raw log text, not JSON. gh api follows the 302 to the signed blob URL.
+    gh api "repos/${OWNER}/${REPO_NAME}/actions/jobs/${JOB_ID}/logs" 2>/dev/null \
+      || { echo '{"error":"gh api actions logs failed"}' >&2; exit 1; }
+    ;;
+
   *)
-    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close|pr-checks>" >&2
+    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close|pr-checks|view-pr|pr-comments|pr-reviews|pr-check-log>" >&2
     exit 1
     ;;
 esac

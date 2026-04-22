@@ -2544,6 +2544,300 @@ fn pr_checks_json_flag_accepted() {
 }
 
 // ---------------------------------------------------------------------------
+// PR read-side (view / comments / reviews / checks --log-failed) with a
+// stubbed worksource plugin. The plugin is a bash script that dispatches on
+// the subcommand, ignores the env vars, and echoes the fixture contents.
+// ---------------------------------------------------------------------------
+
+fn pr_read_stub_plugin(view_pr: &str, comments: &str, reviews: &str, check_log: &str) -> String {
+    // Encode each fixture as a single-quoted heredoc body so shell escaping
+    // inside the fixture content (backticks, dollars, braces) cannot break
+    // the dispatch script. Uses `cat <<'BODY'` which is literal.
+    format!(
+        r#"#!/bin/bash
+set -e
+case "${{1:-}}" in
+  view-pr)
+    cat <<'BODY'
+{view_pr}
+BODY
+    ;;
+  pr-comments)
+    cat <<'BODY'
+{comments}
+BODY
+    ;;
+  pr-reviews)
+    cat <<'BODY'
+{reviews}
+BODY
+    ;;
+  pr-checks)
+    # Minimal fixture matching ExternalPRCheck shape so `pr checks --log-failed`
+    # has something to iterate. One failing check, one success, plus one
+    # failure whose link does not match the Actions pattern so the
+    # non-Actions-link branch runs.
+    cat <<'BODY'
+[
+  {{"name":"Clippy","state":"FAILURE","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/42","description":""}},
+  {{"name":"Tests","state":"SUCCESS","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/99","description":""}},
+  {{"name":"External","state":"FAILURE","workflow":"CI","link":"https://dashboard.example.com/checks/abc","description":""}}
+]
+BODY
+    ;;
+  pr-check-log)
+    cat <<'BODY'
+{check_log}
+BODY
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"#
+    )
+}
+
+fn setup_pr_read_stub(
+    data_dir: &std::path::Path,
+    plugin_root: &std::path::Path,
+    body: &str,
+) -> std::path::PathBuf {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let worksources = plugin_root.join("worksources");
+    fs::create_dir_all(&worksources).unwrap();
+    let plugin_path = worksources.join("github");
+    fs::write(&plugin_path, body).unwrap();
+    let mut perm = fs::metadata(&plugin_path).unwrap().permissions();
+    perm.set_mode(0o755);
+    fs::set_permissions(&plugin_path, perm).unwrap();
+
+    // watch.toml pointing a fake repo at the stub plugin.
+    let watch = format!(
+        r#"poll_interval_secs = 30
+cooldown_secs = 300
+
+[[repos]]
+name = "stub"
+github = "owner/stub"
+workdir = "{}"
+worksource = "github"
+"#,
+        data_dir.display()
+    );
+    fs::write(data_dir.join("watch.toml"), watch).unwrap();
+
+    plugin_path
+}
+
+fn pr_read_cmd(data_dir: &std::path::Path, plugin_root: &std::path::Path) -> Command {
+    let mut cmd = legion_cmd(data_dir);
+    cmd.env("CLAUDE_PLUGIN_ROOT", plugin_root);
+    cmd
+}
+
+#[test]
+fn pr_view_renders_body_and_metadata() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_read_stub_plugin(
+        r#"{
+  "number": 42,
+  "title": "stub PR",
+  "state": "OPEN",
+  "author": "alice",
+  "createdAt": "2026-04-21T10:00:00Z",
+  "updatedAt": "2026-04-21T11:00:00Z",
+  "body": "multi-line\nbody",
+  "headRefName": "feat/x",
+  "headSha": "deadbeef",
+  "baseRefName": "main",
+  "isDraft": false,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "mergeable": "MERGEABLE"
+}"#,
+        "[]",
+        "[]",
+        "",
+    );
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let out = pr_read_cmd(data_dir.path(), plugin_root.path())
+        .args(["pr", "view", "--repo", "stub", "--number", "42"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "pr view failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("PR #42"));
+    assert!(stdout.contains("stub PR"));
+    assert!(stdout.contains("OPEN"));
+    assert!(stdout.contains("feat/x -> main"));
+    assert!(stdout.contains("REVIEW_REQUIRED"));
+    assert!(stdout.contains("multi-line"));
+}
+
+#[test]
+fn pr_view_json_roundtrips() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_read_stub_plugin(
+        r#"{
+  "number": 1,
+  "title": "t",
+  "state": "MERGED",
+  "author": "a",
+  "createdAt": "2026-04-21T00:00:00Z",
+  "updatedAt": "2026-04-21T00:00:00Z",
+  "body": "x",
+  "headRefName": "f",
+  "headSha": "0",
+  "baseRefName": "main",
+  "isDraft": false,
+  "reviewDecision": null,
+  "mergeable": null
+}"#,
+        "[]",
+        "[]",
+        "",
+    );
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let out = pr_read_cmd(data_dir.path(), plugin_root.path())
+        .args(["pr", "view", "--repo", "stub", "--number", "1", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(parsed["number"], 1);
+    assert_eq!(parsed["state"], "MERGED");
+}
+
+#[test]
+fn pr_comments_handles_empty_thread() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_read_stub_plugin("{}", "[]", "[]", "");
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let out = pr_read_cmd(data_dir.path(), plugin_root.path())
+        .args(["pr", "comments", "--repo", "stub", "--number", "1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no comments"),
+        "expected empty-thread notice, got stderr: {stderr}"
+    );
+}
+
+#[test]
+fn pr_comments_renders_issue_and_review_mix() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_read_stub_plugin(
+        "{}",
+        r#"[
+  {"id":"1","author":"alice","createdAt":"2026-04-21T09:00:00Z","updatedAt":"2026-04-21T09:00:00Z","body":"top-level thoughts","kind":"issue","path":null,"line":null,"inReplyToId":null},
+  {"id":"2","author":"bob","createdAt":"2026-04-21T09:30:00Z","updatedAt":"2026-04-21T09:30:00Z","body":"fix this line","kind":"review","path":"src/foo.rs","line":42,"inReplyToId":null}
+]"#,
+        "[]",
+        "",
+    );
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let out = pr_read_cmd(data_dir.path(), plugin_root.path())
+        .args(["pr", "comments", "--repo", "stub", "--number", "1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[issue]"));
+    assert!(stdout.contains("top-level thoughts"));
+    assert!(stdout.contains("[review] src/foo.rs:42"));
+    assert!(stdout.contains("fix this line"));
+}
+
+#[test]
+fn pr_reviews_renders_inline_comments_grouped() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_read_stub_plugin(
+        "{}",
+        "[]",
+        r#"[
+  {
+    "id":"10",
+    "author":"vault",
+    "state":"CHANGES_REQUESTED",
+    "submittedAt":"2026-04-21T10:00:00Z",
+    "body":"needs work",
+    "comments":[
+      {"id":"20","author":"vault","createdAt":"2026-04-21T10:00:00Z","updatedAt":"2026-04-21T10:00:00Z","body":"inline nit","kind":"review","path":"src/x.rs","line":12,"inReplyToId":null}
+    ]
+  }
+]"#,
+        "",
+    );
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let out = pr_read_cmd(data_dir.path(), plugin_root.path())
+        .args(["pr", "reviews", "--repo", "stub", "--number", "1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[CHANGES_REQUESTED] vault"));
+    assert!(stdout.contains("needs work"));
+    assert!(stdout.contains("[review] src/x.rs:12"));
+    assert!(stdout.contains("inline nit"));
+}
+
+#[test]
+fn pr_checks_log_failed_streams_failing_job_logs() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_read_stub_plugin(
+        "{}",
+        "[]",
+        "[]",
+        "error[E0308]: mismatched types\n  --> src/lib.rs:3:5",
+    );
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let out = pr_read_cmd(data_dir.path(), plugin_root.path())
+        .args([
+            "pr",
+            "checks",
+            "--repo",
+            "stub",
+            "--number",
+            "1",
+            "--log-failed",
+        ])
+        .output()
+        .unwrap();
+    // Exits non-zero because the stub returns a FAILURE check.
+    assert!(!out.status.success(), "expected non-zero exit on failure");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Actions-linked failure: job id extracted from link, header + log emitted.
+    assert!(stdout.contains("===== Clippy (42) ====="));
+    assert!(stdout.contains("error[E0308]"));
+    // Non-Actions link: skipped with a marker rather than crashing or
+    // silently swallowing the failure.
+    assert!(stdout.contains("===== External ====="));
+    assert!(stdout.contains("non-Actions check link"));
+}
+
+// ---------------------------------------------------------------------------
 // Usage command integration tests
 // ---------------------------------------------------------------------------
 
