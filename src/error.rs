@@ -94,6 +94,9 @@ pub enum LegionError {
 
     #[error("cluster config error: {0}")]
     Config(String),
+
+    #[error("mesh error: {0}")]
+    Mesh(String),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
