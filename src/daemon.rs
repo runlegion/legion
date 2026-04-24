@@ -323,6 +323,8 @@ async fn run_watch_task(data_dir: &Path) {
     );
     let mut tracker = watch::AgentTracker::new();
     let session_locks = watch::SessionLockTracker::new(data_dir, config.session_lock_ttl_secs);
+    let host = watch::resolve_host_id();
+    let lease_ttl = std::time::Duration::from_secs(config.persona_lease_ttl_secs);
     let mut sampler = crate::health::HealthSampler::new(config.health_window_size);
 
     let poll_interval = std::time::Duration::from_secs(config.poll_interval_secs);
@@ -343,7 +345,10 @@ async fn run_watch_task(data_dir: &Path) {
 
         if health_timer.elapsed() >= health_interval {
             sampler.sample();
-            tracker.reap_finished();
+            tracker.reap_finished(Some(&db));
+            if let Err(e) = db.heartbeat_persona_leases(&host, lease_ttl) {
+                eprintln!("[legion daemon] lease heartbeat error: {e}");
+            }
 
             match sampler.to_health_sample(tracker.active_count()) {
                 Ok(sample) => {
@@ -361,12 +366,18 @@ async fn run_watch_task(data_dir: &Path) {
 
         if poll_timer.elapsed() >= poll_interval {
             if sampler.can_spawn(config.health_threshold_pct) {
+                let lease_gate = watch::PersonaLeaseGate {
+                    db: &db,
+                    host: &host,
+                    ttl: lease_ttl,
+                };
                 match watch::poll_cycle(
                     &db,
                     &config,
                     &mut cooldown,
                     &mut tracker,
                     Some(&session_locks),
+                    Some(&lease_gate),
                     Some(&lookback),
                 ) {
                     Ok(n) if n > 0 => {

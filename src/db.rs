@@ -631,6 +631,34 @@ impl Database {
                 ON usage_samples(hostname, sampled_at) WHERE deleted_at IS NULL;",
         )?;
 
+        // Migration 17: Persona wake leases for cluster-wide wake coordination (#308).
+        //
+        // When a signal arrives addressed to a persona (either `--to P` or `--to all`),
+        // watch acquires a lease keyed by (persona_id, signal_id) before spawning. Other
+        // nodes (or later poll cycles on the same node) see the lease is held and skip
+        // the wake. Heartbeats keep the lease fresh; crashes release via TTL.
+        //
+        // `deleted_at` + `updated_at` carry the usual LWW semantics for smugglr sync.
+        // `expires_at` is a denormalized scalar for cheap "is this lease still live"
+        // filters without constructing a duration against `heartbeat_at` at query time.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS persona_wake_leases (
+                persona_id TEXT NOT NULL,
+                signal_id TEXT NOT NULL,
+                acquired_by_host TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                deleted_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (persona_id, signal_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_persona_wake_leases_persona \
+                ON persona_wake_leases(persona_id) WHERE deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_persona_wake_leases_expires \
+                ON persona_wake_leases(expires_at) WHERE deleted_at IS NULL;",
+        )?;
+
         Ok(())
     }
 
@@ -2670,6 +2698,302 @@ impl RenameCounts {
     }
 }
 
+/// A persona wake lease -- "host H is handling signal S for persona P until T".
+///
+/// Acquired by watch before spawning an agent in response to a wake signal.
+/// Other watchers (on this node or peers) see the live lease and skip their
+/// own spawn. Heartbeats keep `expires_at` rolling forward; a crashed session
+/// whose heartbeats stop lets the lease age out via TTL.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct PersonaWakeLease {
+    pub persona_id: String,
+    pub signal_id: String,
+    pub acquired_by_host: String,
+    pub acquired_at: String,
+    pub heartbeat_at: String,
+    pub expires_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+}
+
+fn map_persona_lease_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonaWakeLease> {
+    Ok(PersonaWakeLease {
+        persona_id: row.get(0)?,
+        signal_id: row.get(1)?,
+        acquired_by_host: row.get(2)?,
+        acquired_at: row.get(3)?,
+        heartbeat_at: row.get(4)?,
+        expires_at: row.get(5)?,
+        deleted_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+impl Database {
+    /// Try to acquire a persona wake lease. Returns `Ok(true)` on success,
+    /// `Ok(false)` when a live lease for `(persona_id, signal_id)` is already
+    /// held by someone else. Expired or soft-deleted leases are treated as
+    /// free -- the new acquire overwrites them.
+    ///
+    /// Atomicity: the check-then-insert runs inside a transaction, and SQLite
+    /// serializes writers per connection. Cross-host races are resolved by
+    /// `apply_persona_wake_lease_delta` using earlier `acquired_at` wins.
+    pub fn try_acquire_persona_lease(
+        &self,
+        persona_id: &str,
+        signal_id: &str,
+        host: &str,
+        lease_ttl: std::time::Duration,
+    ) -> Result<bool> {
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let expires = (now
+            + chrono::Duration::from_std(lease_ttl)
+                .unwrap_or_else(|_| chrono::Duration::minutes(10)))
+        .to_rfc3339();
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT acquired_by_host FROM persona_wake_leases \
+                 WHERE persona_id = ?1 AND signal_id = ?2 \
+                   AND deleted_at IS NULL AND expires_at > ?3",
+                rusqlite::params![persona_id, signal_id, &now_str],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if existing.is_some() {
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        tx.execute(
+            "INSERT OR REPLACE INTO persona_wake_leases \
+             (persona_id, signal_id, acquired_by_host, acquired_at, heartbeat_at, \
+              expires_at, updated_at, deleted_at) \
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?4, NULL)",
+            rusqlite::params![persona_id, signal_id, host, &now_str, &expires],
+        )?;
+
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Refresh every live lease held by `host`, extending `expires_at` to
+    /// `now + ttl`. Returns the number of leases touched.
+    pub fn heartbeat_persona_leases(&self, host: &str, ttl: std::time::Duration) -> Result<u64> {
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let expires = (now
+            + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::minutes(10)))
+        .to_rfc3339();
+
+        let updated = self.conn.execute(
+            "UPDATE persona_wake_leases \
+             SET heartbeat_at = ?1, expires_at = ?2, updated_at = ?1 \
+             WHERE acquired_by_host = ?3 AND deleted_at IS NULL",
+            rusqlite::params![&now_str, &expires, host],
+        )?;
+        Ok(updated as u64)
+    }
+
+    /// Soft-delete one lease by (persona_id, signal_id). Returns true if a
+    /// matching live lease existed. Idempotent on an already-released lease.
+    pub fn release_persona_lease(&self, persona_id: &str, signal_id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE persona_wake_leases \
+             SET deleted_at = ?1, updated_at = ?1 \
+             WHERE persona_id = ?2 AND signal_id = ?3 AND deleted_at IS NULL",
+            rusqlite::params![&now, persona_id, signal_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Soft-delete every live lease held by `host`. Called on daemon shutdown
+    /// so a graceful exit does not leave ghost leases that must age out via TTL.
+    #[allow(dead_code)] // wired by a future SIGTERM handler; kept in the API surface now
+    pub fn release_persona_leases_by_host(&self, host: &str) -> Result<u64> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE persona_wake_leases \
+             SET deleted_at = ?1, updated_at = ?1 \
+             WHERE acquired_by_host = ?2 AND deleted_at IS NULL",
+            rusqlite::params![&now, host],
+        )?;
+        Ok(updated as u64)
+    }
+
+    /// Return every live (non-expired, non-deleted) lease, optionally filtered
+    /// to a single persona. Ordered oldest-first by `acquired_at` so the CLI
+    /// lists leases in the order they were taken.
+    pub fn list_persona_leases(&self, persona: Option<&str>) -> Result<Vec<PersonaWakeLease>> {
+        let now = Utc::now().to_rfc3339();
+        match persona {
+            Some(p) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT persona_id, signal_id, acquired_by_host, acquired_at, \
+                            heartbeat_at, expires_at, deleted_at, updated_at \
+                     FROM persona_wake_leases \
+                     WHERE deleted_at IS NULL AND expires_at > ?1 AND persona_id = ?2 \
+                     ORDER BY acquired_at ASC",
+                )?;
+                Ok(stmt
+                    .query_map(rusqlite::params![&now, p], map_persona_lease_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            }
+            None => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT persona_id, signal_id, acquired_by_host, acquired_at, \
+                            heartbeat_at, expires_at, deleted_at, updated_at \
+                     FROM persona_wake_leases \
+                     WHERE deleted_at IS NULL AND expires_at > ?1 \
+                     ORDER BY acquired_at ASC",
+                )?;
+                Ok(stmt
+                    .query_map(rusqlite::params![&now], map_persona_lease_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            }
+        }
+    }
+
+    /// Delta query for cluster sync. Returns every lease row (including
+    /// tombstones) whose `updated_at > since`. Wire transport is not yet live;
+    /// `sync_actor` reads this today so the count shows up in broadcast logs,
+    /// and late-loser resolution is ready to engage when transport lands.
+    #[allow(dead_code)] // wired when broadcast transport ships
+    pub fn get_persona_wake_lease_deltas_since(
+        &self,
+        since: &str,
+    ) -> Result<Vec<crate::sync::PersonaWakeLeaseDelta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT persona_id, signal_id, acquired_by_host, acquired_at, \
+                    heartbeat_at, expires_at, deleted_at, updated_at \
+             FROM persona_wake_leases \
+             WHERE updated_at > ?1 \
+             ORDER BY updated_at ASC",
+        )?;
+        let deltas = stmt
+            .query_map(rusqlite::params![since], |row| {
+                Ok(crate::sync::PersonaWakeLeaseDelta {
+                    persona_id: row.get(0)?,
+                    signal_id: row.get(1)?,
+                    acquired_by_host: row.get(2)?,
+                    acquired_at: row.get(3)?,
+                    heartbeat_at: row.get(4)?,
+                    expires_at: row.get(5)?,
+                    deleted_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(deltas)
+    }
+
+    /// Apply an incoming lease delta from a peer. Resolution rules:
+    ///
+    /// - Tombstone (`deleted_at` set): LWW on `updated_at`. Newer wins.
+    /// - Live lease vs. live lease for the same (persona, signal):
+    ///   earlier `acquired_at` wins. The late-loser releases its local lease
+    ///   so the spawned child is the only handler.
+    /// - Live lease vs. no local row: insert the peer's lease as-is.
+    ///
+    /// Returns `Some(released)` with the locally-held `acquired_by_host` when
+    /// this node was the late loser and its lease was downgraded to a
+    /// tombstone. Callers can use this to stop the losing spawn.
+    #[allow(dead_code)] // wired when broadcast transport ships
+    pub fn apply_persona_wake_lease_delta(
+        &self,
+        delta: &crate::sync::PersonaWakeLeaseDelta,
+    ) -> Result<Option<String>> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        let local: Option<(String, String, Option<String>, String)> = tx
+            .query_row(
+                "SELECT acquired_by_host, acquired_at, deleted_at, updated_at \
+                 FROM persona_wake_leases \
+                 WHERE persona_id = ?1 AND signal_id = ?2",
+                rusqlite::params![&delta.persona_id, &delta.signal_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+
+        let mut late_loser: Option<String> = None;
+
+        match local {
+            None => {
+                tx.execute(
+                    "INSERT INTO persona_wake_leases \
+                     (persona_id, signal_id, acquired_by_host, acquired_at, heartbeat_at, \
+                      expires_at, updated_at, deleted_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        &delta.persona_id,
+                        &delta.signal_id,
+                        &delta.acquired_by_host,
+                        &delta.acquired_at,
+                        &delta.heartbeat_at,
+                        &delta.expires_at,
+                        &delta.updated_at,
+                        &delta.deleted_at,
+                    ],
+                )?;
+            }
+            Some((local_host, local_acquired, local_deleted, local_updated)) => {
+                let delta_deleted = delta.deleted_at.is_some();
+                let local_is_deleted = local_deleted.is_some();
+
+                if delta_deleted || local_is_deleted {
+                    // Tombstone involved: plain LWW on updated_at.
+                    if delta.updated_at > local_updated {
+                        tx.execute(
+                            "UPDATE persona_wake_leases \
+                             SET acquired_by_host = ?1, acquired_at = ?2, heartbeat_at = ?3, \
+                                 expires_at = ?4, updated_at = ?5, deleted_at = ?6 \
+                             WHERE persona_id = ?7 AND signal_id = ?8",
+                            rusqlite::params![
+                                &delta.acquired_by_host,
+                                &delta.acquired_at,
+                                &delta.heartbeat_at,
+                                &delta.expires_at,
+                                &delta.updated_at,
+                                &delta.deleted_at,
+                                &delta.persona_id,
+                                &delta.signal_id,
+                            ],
+                        )?;
+                    }
+                } else if delta.acquired_at < local_acquired {
+                    // Two live leases -- earlier acquired_at wins, regardless
+                    // of updated_at ordering. Local is the late loser.
+                    let now = Utc::now().to_rfc3339();
+                    tx.execute(
+                        "UPDATE persona_wake_leases \
+                         SET acquired_by_host = ?1, acquired_at = ?2, heartbeat_at = ?3, \
+                             expires_at = ?4, updated_at = ?5, deleted_at = NULL \
+                         WHERE persona_id = ?6 AND signal_id = ?7",
+                        rusqlite::params![
+                            &delta.acquired_by_host,
+                            &delta.acquired_at,
+                            &delta.heartbeat_at,
+                            &delta.expires_at,
+                            &now,
+                            &delta.persona_id,
+                            &delta.signal_id,
+                        ],
+                    )?;
+                    late_loser = Some(local_host);
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(late_loser)
+    }
+}
+
 /// Map a database row to a HealthSample struct.
 fn map_health_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::health::HealthSample> {
     Ok(crate::health::HealthSample {
@@ -4597,6 +4921,266 @@ mod tests {
         let db = test_db();
         let got = db.latest_rate_limit_samples_per_host().unwrap();
         assert!(got.is_empty());
+    }
+
+    // -- Persona wake lease tests -------------------------------------------
+
+    use std::time::Duration;
+
+    #[test]
+    fn persona_lease_acquire_succeeds_when_free() {
+        let db = test_db();
+        let got = db
+            .try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(60))
+            .unwrap();
+        assert!(
+            got,
+            "first acquire on a free (persona, signal) must succeed"
+        );
+    }
+
+    #[test]
+    fn persona_lease_acquire_fails_when_held_by_another_host() {
+        let db = test_db();
+        assert!(
+            db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(60))
+                .unwrap()
+        );
+        let got = db
+            .try_acquire_persona_lease("legion", "sig-1", "hostB", Duration::from_secs(60))
+            .unwrap();
+        assert!(
+            !got,
+            "second acquire on a live lease must report 'held' (false)"
+        );
+
+        let listed = db.list_persona_leases(Some("legion")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].acquired_by_host, "hostA",
+            "hostA's lease must remain untouched by hostB's failed acquire"
+        );
+    }
+
+    #[test]
+    fn persona_lease_acquire_succeeds_after_release() {
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(60))
+            .unwrap();
+        let released = db.release_persona_lease("legion", "sig-1").unwrap();
+        assert!(released, "release of a live lease must report true");
+
+        let got = db
+            .try_acquire_persona_lease("legion", "sig-1", "hostB", Duration::from_secs(60))
+            .unwrap();
+        assert!(got, "acquire after release must succeed");
+    }
+
+    #[test]
+    fn persona_lease_release_is_idempotent() {
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(60))
+            .unwrap();
+        assert!(db.release_persona_lease("legion", "sig-1").unwrap());
+        assert!(
+            !db.release_persona_lease("legion", "sig-1").unwrap(),
+            "second release of the same lease must report false (already released)"
+        );
+    }
+
+    #[test]
+    fn persona_lease_acquire_succeeds_after_expiry() {
+        let db = test_db();
+        // TTL of 0 seconds -> lease expires immediately.
+        assert!(
+            db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(0))
+                .unwrap()
+        );
+        // Sleep long enough that the clock advances past `expires_at`.
+        std::thread::sleep(Duration::from_millis(10));
+        let got = db
+            .try_acquire_persona_lease("legion", "sig-1", "hostB", Duration::from_secs(60))
+            .unwrap();
+        assert!(
+            got,
+            "acquire against an expired lease must succeed (hostB takes over)"
+        );
+
+        let listed = db.list_persona_leases(Some("legion")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].acquired_by_host, "hostB",
+            "the fresh lease must be owned by the reacquirer"
+        );
+    }
+
+    #[test]
+    fn persona_lease_heartbeat_extends_expiry() {
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(60))
+            .unwrap();
+        let before = db.list_persona_leases(Some("legion")).unwrap().remove(0);
+
+        std::thread::sleep(Duration::from_millis(20));
+        let n = db
+            .heartbeat_persona_leases("hostA", Duration::from_secs(3600))
+            .unwrap();
+        assert_eq!(n, 1, "heartbeat should touch exactly hostA's live lease");
+
+        let after = db.list_persona_leases(Some("legion")).unwrap().remove(0);
+        assert!(
+            after.expires_at > before.expires_at,
+            "heartbeat must push expires_at forward (before: {}, after: {})",
+            before.expires_at,
+            after.expires_at
+        );
+        assert!(
+            after.heartbeat_at > before.heartbeat_at,
+            "heartbeat must advance heartbeat_at"
+        );
+    }
+
+    #[test]
+    fn persona_lease_heartbeat_skips_foreign_hosts() {
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(60))
+            .unwrap();
+        let n = db
+            .heartbeat_persona_leases("hostB", Duration::from_secs(3600))
+            .unwrap();
+        assert_eq!(n, 0, "heartbeat must only touch the caller's leases");
+    }
+
+    #[test]
+    fn persona_lease_list_filters_by_persona() {
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(60))
+            .unwrap();
+        db.try_acquire_persona_lease("huttspawn", "sig-2", "hostA", Duration::from_secs(60))
+            .unwrap();
+
+        let all = db.list_persona_leases(None).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let legion_only = db.list_persona_leases(Some("legion")).unwrap();
+        assert_eq!(legion_only.len(), 1);
+        assert_eq!(legion_only[0].persona_id, "legion");
+    }
+
+    #[test]
+    fn persona_lease_list_omits_expired() {
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(0))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        let listed = db.list_persona_leases(None).unwrap();
+        assert!(listed.is_empty(), "expired leases must not appear in list");
+    }
+
+    #[test]
+    fn persona_lease_list_omits_tombstones() {
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(60))
+            .unwrap();
+        db.release_persona_lease("legion", "sig-1").unwrap();
+        let listed = db.list_persona_leases(None).unwrap();
+        assert!(listed.is_empty(), "released leases must not appear in list");
+    }
+
+    #[test]
+    fn persona_lease_release_by_host_clears_all_host_leases() {
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(60))
+            .unwrap();
+        db.try_acquire_persona_lease("huttspawn", "sig-2", "hostA", Duration::from_secs(60))
+            .unwrap();
+        db.try_acquire_persona_lease("kessel", "sig-3", "hostB", Duration::from_secs(60))
+            .unwrap();
+
+        let cleared = db.release_persona_leases_by_host("hostA").unwrap();
+        assert_eq!(cleared, 2, "must release exactly hostA's two leases");
+
+        let remaining = db.list_persona_leases(None).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].acquired_by_host, "hostB");
+    }
+
+    #[test]
+    fn persona_lease_apply_delta_inserts_new() {
+        let db = test_db();
+        let delta = crate::sync::PersonaWakeLeaseDelta {
+            persona_id: "legion".into(),
+            signal_id: "sig-1".into(),
+            acquired_by_host: "peer".into(),
+            acquired_at: "2026-04-24T00:00:00Z".into(),
+            heartbeat_at: "2026-04-24T00:00:00Z".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            updated_at: "2026-04-24T00:00:00Z".into(),
+            deleted_at: None,
+        };
+        let late = db.apply_persona_wake_lease_delta(&delta).unwrap();
+        assert!(late.is_none(), "no local row means no late loser");
+        let listed = db.list_persona_leases(None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].acquired_by_host, "peer");
+    }
+
+    #[test]
+    fn persona_lease_apply_delta_earlier_acquired_at_wins() {
+        let db = test_db();
+        // Local lease acquired now (later than the incoming delta).
+        db.try_acquire_persona_lease("legion", "sig-1", "local", Duration::from_secs(60))
+            .unwrap();
+
+        let delta = crate::sync::PersonaWakeLeaseDelta {
+            persona_id: "legion".into(),
+            signal_id: "sig-1".into(),
+            acquired_by_host: "peer".into(),
+            acquired_at: "2000-01-01T00:00:00Z".into(), // ancient -- earlier wins
+            heartbeat_at: "2000-01-01T00:00:00Z".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            updated_at: "2000-01-01T00:00:00Z".into(),
+            deleted_at: None,
+        };
+        let late = db.apply_persona_wake_lease_delta(&delta).unwrap();
+        assert_eq!(
+            late.as_deref(),
+            Some("local"),
+            "local node is the late loser; its host identity must surface"
+        );
+
+        let listed = db.list_persona_leases(None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].acquired_by_host, "peer",
+            "peer's earlier lease must win"
+        );
+    }
+
+    #[test]
+    fn persona_lease_apply_delta_tombstone_wins_by_lww() {
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "local", Duration::from_secs(60))
+            .unwrap();
+
+        // Incoming tombstone with a later updated_at.
+        let delta = crate::sync::PersonaWakeLeaseDelta {
+            persona_id: "legion".into(),
+            signal_id: "sig-1".into(),
+            acquired_by_host: "local".into(),
+            acquired_at: "2026-04-24T00:00:00Z".into(),
+            heartbeat_at: "2026-04-24T00:00:00Z".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            updated_at: "2099-01-01T00:00:00Z".into(),
+            deleted_at: Some("2099-01-01T00:00:00Z".into()),
+        };
+        db.apply_persona_wake_lease_delta(&delta).unwrap();
+
+        let listed = db.list_persona_leases(None).unwrap();
+        assert!(
+            listed.is_empty(),
+            "incoming tombstone with newer updated_at must eclipse local live lease"
+        );
     }
 
     #[test]

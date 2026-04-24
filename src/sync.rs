@@ -199,6 +199,23 @@ pub struct ScheduleDelta {
     pub active_end: Option<String>,
 }
 
+/// A persona wake lease row serialized for sync transmission.
+///
+/// Leases prevent two nodes from waking the same persona for the same signal.
+/// See `db::PersonaWakeLease` for acquire / release / heartbeat semantics and
+/// `db::apply_persona_wake_lease_delta` for the late-loser conflict rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonaWakeLeaseDelta {
+    pub persona_id: String,
+    pub signal_id: String,
+    pub acquired_by_host: String,
+    pub acquired_at: String,
+    pub heartbeat_at: String,
+    pub expires_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
