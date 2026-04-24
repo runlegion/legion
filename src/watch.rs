@@ -187,6 +187,12 @@ pub struct WatchConfig {
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
 
+    /// TTL for per-repo session lockfiles, in seconds. A lock is considered
+    /// abandoned when its mtime is older than this. Default 60 minutes.
+    /// Set to `0` to disable the session lock gate entirely (not recommended).
+    #[serde(default = "default_session_lock_ttl_secs")]
+    pub session_lock_ttl_secs: u64,
+
     /// Whether this node serves the web dashboard.
     /// Only one node per network should have this set to true.
     #[serde(default)]
@@ -229,6 +235,10 @@ fn default_retention_days() -> u64 {
     7
 }
 
+fn default_session_lock_ttl_secs() -> u64 {
+    3600
+}
+
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
@@ -241,6 +251,7 @@ impl Default for WatchConfig {
             health_poll_secs: default_health_poll_secs(),
             health_window_size: default_health_window_size(),
             retention_days: default_retention_days(),
+            session_lock_ttl_secs: default_session_lock_ttl_secs(),
             serve: false,
             cluster: None,
             repos: Vec::new(),
@@ -485,6 +496,72 @@ fn process_alive(pid: u32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+// -- Session Lock ------------------------------------------------------------
+
+/// Per-repo session lock. Prevents `watch` from spawning a second agent session
+/// for a repo while a prior session is still running.
+///
+/// The lockfile lives at `<data-dir>/sessions/<repo>.lock` and contains the
+/// child process PID. Two signals count a lock as held:
+/// - The PID in the file is alive (signal-0 check via `process_alive`).
+/// - The file's mtime is within `ttl` of now.
+///
+/// Either condition failing (dead PID, or mtime older than TTL) causes the
+/// lock to be treated as abandoned; the next spawn overwrites it. No explicit
+/// release happens on clean exit -- the dead-PID branch of the check handles
+/// that on the next poll. An explicit release hook is out of scope for this
+/// issue (tracked separately).
+pub struct SessionLockTracker {
+    lock_dir: PathBuf,
+    ttl: Duration,
+}
+
+impl SessionLockTracker {
+    pub fn new(data_dir: &Path, ttl_secs: u64) -> Self {
+        Self {
+            lock_dir: data_dir.join("sessions"),
+            ttl: Duration::from_secs(ttl_secs),
+        }
+    }
+
+    fn lock_path(&self, repo: &str) -> PathBuf {
+        self.lock_dir.join(format!("{}.lock", repo))
+    }
+
+    /// True if a prior spawn's lockfile is still considered live (fresh mtime
+    /// AND a running PID). Returns false on any parse error, missing file, or
+    /// staleness -- callers can safely proceed to spawn in all false cases.
+    pub fn is_active(&self, repo: &str) -> bool {
+        let path = self.lock_path(repo);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return false;
+        };
+        let Ok(mtime) = meta.modified() else {
+            return false;
+        };
+        let age = mtime.elapsed().unwrap_or(Duration::ZERO);
+        if age > self.ttl {
+            return false;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let Ok(pid) = contents.trim().parse::<u32>() else {
+            return false;
+        };
+        process_alive(pid)
+    }
+
+    /// Write or overwrite the lockfile for `repo` with `pid`. Creates the
+    /// parent directory if needed. Caller is responsible for having checked
+    /// `is_active` first if they want to respect an existing lock.
+    pub fn record_spawn(&self, repo: &str, pid: u32) -> Result<()> {
+        std::fs::create_dir_all(&self.lock_dir)?;
+        std::fs::write(self.lock_path(repo), pid.to_string())?;
+        Ok(())
     }
 }
 
@@ -771,6 +848,7 @@ pub fn poll_cycle(
     config: &WatchConfig,
     cooldown: &mut CooldownTracker,
     tracker: &mut AgentTracker,
+    session_locks: Option<&SessionLockTracker>,
     since: Option<&str>,
 ) -> Result<u32> {
     let mut spawned: u32 = 0;
@@ -790,6 +868,16 @@ pub fn poll_cycle(
 
     for repo in &config.repos {
         if cooldown.is_cooling_down(&repo.name) {
+            continue;
+        }
+
+        if let Some(locks) = session_locks
+            && locks.is_active(&repo.name)
+        {
+            eprintln!(
+                "[legion watch] session already active for {} -- skipping wake",
+                repo.name
+            );
             continue;
         }
 
@@ -813,6 +901,7 @@ pub fn poll_cycle(
 
         match spawn_agent(&repo.workdir, &prompt) {
             Ok(child) => {
+                let child_pid = child.id();
                 // Mark ALL signals as handled for THIS repo (per-repo tracking).
                 // This includes @all broadcasts -- each repo marks its own copy,
                 // so other repos still see the signal on their next poll.
@@ -824,6 +913,14 @@ pub fn poll_cycle(
                             id, repo.name, e
                         );
                     }
+                }
+                if let Some(locks) = session_locks
+                    && let Err(e) = locks.record_spawn(&repo.name, child_pid)
+                {
+                    eprintln!(
+                        "[legion watch] failed to write session lock for {}: {}",
+                        repo.name, e
+                    );
                 }
                 tracker.track(repo.name.clone(), child);
                 cooldown.record_wake(&repo.name);
@@ -875,6 +972,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
         config.work_hours_end,
     );
     let mut tracker = AgentTracker::new();
+    let session_locks = SessionLockTracker::new(data_dir, config.session_lock_ttl_secs);
     let mut sampler = HealthSampler::new(config.health_window_size);
 
     let poll_interval = Duration::from_secs(config.poll_interval_secs);
@@ -943,7 +1041,14 @@ pub fn run(data_dir: &Path) -> Result<()> {
         // Spawn check on the poll interval
         if poll_timer.elapsed() >= poll_interval {
             if sampler.can_spawn(config.health_threshold_pct) {
-                match poll_cycle(&db, &config, &mut cooldown, &mut tracker, Some(&lookback)) {
+                match poll_cycle(
+                    &db,
+                    &config,
+                    &mut cooldown,
+                    &mut tracker,
+                    Some(&session_locks),
+                    Some(&lookback),
+                ) {
                     Ok(n) if n > 0 => {
                         eprintln!("[legion watch] cycle complete: {} agent(s) spawned", n);
                     }
@@ -1252,6 +1357,110 @@ workdir = "/tmp"
         assert!(!prompt.contains("INFORMATIONAL"));
     }
 
+    /// Run a short-lived child to completion and return its (now-dead) PID.
+    /// Used to test the dead-PID branch of `SessionLockTracker::is_active`
+    /// without racing against PID reuse on the test host.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id();
+        let _ = child.wait();
+        pid
+    }
+
+    #[test]
+    fn session_lock_active_for_fresh_live_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        locks
+            .record_spawn("legion", std::process::id())
+            .expect("record");
+        assert!(
+            locks.is_active("legion"),
+            "own PID + fresh mtime should read as active"
+        );
+    }
+
+    #[test]
+    fn session_lock_inactive_for_dead_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        locks.record_spawn("legion", dead_pid()).expect("record");
+        assert!(
+            !locks.is_active("legion"),
+            "dead PID should be treated as abandoned"
+        );
+    }
+
+    #[test]
+    fn session_lock_inactive_when_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // TTL of 0 means "any non-zero age is stale"; the sleep below guarantees
+        // elapsed > 0 even under fast clocks.
+        let locks = SessionLockTracker::new(dir.path(), 0);
+        locks
+            .record_spawn("legion", std::process::id())
+            .expect("record");
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            !locks.is_active("legion"),
+            "stale mtime should be treated as abandoned even with live PID"
+        );
+    }
+
+    #[test]
+    fn session_lock_inactive_when_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        assert!(
+            !locks.is_active("legion"),
+            "missing lockfile should read as inactive"
+        );
+    }
+
+    #[test]
+    fn poll_cycle_skips_when_session_lock_is_active() {
+        // Integration-style gate test: with a live session lock in place for a
+        // repo, poll_cycle must not spawn a second agent even when the repo
+        // has fresh signals waiting and cooldown is idle.
+        let (db, _index, data_dir) = test_storage();
+
+        let config = WatchConfig {
+            repos: vec![WatchRepoConfig {
+                name: "legion".to_string(),
+                workdir: "/tmp".to_string(),
+                agent: None,
+                extra: toml::Table::new(),
+            }],
+            ..WatchConfig::default()
+        };
+
+        db.insert_reflection("kelex", "@legion question:help", "team")
+            .expect("insert signal");
+
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+        locks
+            .record_spawn("legion", std::process::id())
+            .expect("record lock");
+
+        let mut cooldown = CooldownTracker::new(0, None, None);
+        let mut tracker = AgentTracker::new();
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            Some(&locks),
+            None,
+        )
+        .expect("poll");
+        assert_eq!(
+            spawned, 0,
+            "active session lock must block a second wake for the same repo"
+        );
+    }
+
     #[test]
     fn poll_cycle_skips_cooling_repos() {
         let (db, _index, _dir) = test_storage();
@@ -1275,7 +1484,8 @@ workdir = "/tmp"
         cooldown.record_wake("legion");
 
         let mut tracker = AgentTracker::new();
-        let spawned = poll_cycle(&db, &config, &mut cooldown, &mut tracker, None).expect("poll");
+        let spawned =
+            poll_cycle(&db, &config, &mut cooldown, &mut tracker, None, None).expect("poll");
         assert_eq!(spawned, 0, "cooling repo should be skipped");
     }
 

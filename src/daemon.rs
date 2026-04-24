@@ -322,6 +322,7 @@ async fn run_watch_task(data_dir: &Path) {
         config.work_hours_end,
     );
     let mut tracker = watch::AgentTracker::new();
+    let session_locks = watch::SessionLockTracker::new(data_dir, config.session_lock_ttl_secs);
     let mut sampler = crate::health::HealthSampler::new(config.health_window_size);
 
     let poll_interval = std::time::Duration::from_secs(config.poll_interval_secs);
@@ -360,8 +361,14 @@ async fn run_watch_task(data_dir: &Path) {
 
         if poll_timer.elapsed() >= poll_interval {
             if sampler.can_spawn(config.health_threshold_pct) {
-                match watch::poll_cycle(&db, &config, &mut cooldown, &mut tracker, Some(&lookback))
-                {
+                match watch::poll_cycle(
+                    &db,
+                    &config,
+                    &mut cooldown,
+                    &mut tracker,
+                    Some(&session_locks),
+                    Some(&lookback),
+                ) {
                     Ok(n) if n > 0 => {
                         eprintln!("[legion daemon] watch: {} agent(s) spawned", n);
                     }
