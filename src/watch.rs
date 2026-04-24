@@ -193,6 +193,13 @@ pub struct WatchConfig {
     #[serde(default = "default_session_lock_ttl_secs")]
     pub session_lock_ttl_secs: u64,
 
+    /// TTL for persona wake leases, in seconds. A lease expires this many
+    /// seconds after its last heartbeat. Default 10 minutes. The daemon
+    /// heartbeats every poll cycle, so healthy sessions keep their lease
+    /// rolling forward; a crashed session's lease ages out within one TTL.
+    #[serde(default = "default_persona_lease_ttl_secs")]
+    pub persona_lease_ttl_secs: u64,
+
     /// Whether this node serves the web dashboard.
     /// Only one node per network should have this set to true.
     #[serde(default)]
@@ -239,6 +246,10 @@ fn default_session_lock_ttl_secs() -> u64 {
     3600
 }
 
+fn default_persona_lease_ttl_secs() -> u64 {
+    600
+}
+
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
@@ -252,6 +263,7 @@ impl Default for WatchConfig {
             health_window_size: default_health_window_size(),
             retention_days: default_retention_days(),
             session_lock_ttl_secs: default_session_lock_ttl_secs(),
+            persona_lease_ttl_secs: default_persona_lease_ttl_secs(),
             serve: false,
             cluster: None,
             repos: Vec::new(),
@@ -730,9 +742,23 @@ pub fn spawn_agent(workdir: &str, prompt: &str) -> Result<Child> {
 
 // -- Agent Tracker -----------------------------------------------------------
 
-/// Tracks spawned child processes for active agent counting.
+/// Tracks spawned child processes for active agent counting and persona
+/// wake lease cleanup. Each tracked entry carries the (persona, signal_id)
+/// pairs it acquired leases for so that `reap_finished` can release them
+/// when the child exits.
+pub struct TrackedChild {
+    pub repo: String,
+    pub child: Child,
+    /// `(persona_id, signal_id)` pairs this child acquired at spawn.
+    pub held_leases: Vec<(String, String)>,
+    /// Host identity the leases were acquired under. Required for the
+    /// host-scoped release so a sync-resolved late-loser cannot drop the
+    /// peer winner's row.
+    pub host: String,
+}
+
 pub struct AgentTracker {
-    children: Vec<(String, Child)>,
+    children: Vec<TrackedChild>,
 }
 
 impl AgentTracker {
@@ -742,30 +768,60 @@ impl AgentTracker {
         }
     }
 
-    /// Record a spawned child process.
-    pub fn track(&mut self, repo: String, child: Child) {
-        self.children.push((repo, child));
+    /// Record a spawned child process together with the leases it holds and
+    /// the host identity under which they were acquired.
+    pub fn track(
+        &mut self,
+        repo: String,
+        child: Child,
+        held_leases: Vec<(String, String)>,
+        host: String,
+    ) {
+        self.children.push(TrackedChild {
+            repo,
+            child,
+            held_leases,
+            host,
+        });
     }
 
-    /// Reap finished child processes, removing them from tracking.
-    pub fn reap_finished(&mut self) {
-        self.children.retain_mut(|(repo, child)| {
-            match child.try_wait() {
+    /// Reap finished child processes, removing them from tracking and
+    /// releasing their held persona wake leases. Uses host-scoped release so
+    /// a late-loser whose lease was overwritten by sync conflict resolution
+    /// cannot accidentally drop the peer winner's row. Release errors are
+    /// logged but not propagated -- a missed release ages out via TTL.
+    pub fn reap_finished(&mut self, db: Option<&Database>) {
+        self.children
+            .retain_mut(|tracked| match tracked.child.try_wait() {
                 Ok(Some(status)) => {
                     eprintln!(
                         "[legion watch] agent for {} exited ({})",
-                        repo,
+                        tracked.repo,
                         if status.success() { "ok" } else { "error" }
                     );
+                    if let Some(db) = db {
+                        for (persona, signal_id) in &tracked.held_leases {
+                            if let Err(e) =
+                                db.release_persona_lease_if_owner(persona, signal_id, &tracked.host)
+                            {
+                                eprintln!(
+                                    "[legion watch] failed to release lease {}/{}: {}",
+                                    persona, signal_id, e
+                                );
+                            }
+                        }
+                    }
                     false // remove from list
                 }
                 Ok(None) => true, // still running
                 Err(e) => {
-                    eprintln!("[legion watch] error checking agent for {}: {}", repo, e);
+                    eprintln!(
+                        "[legion watch] error checking agent for {}: {}",
+                        tracked.repo, e
+                    );
                     true // keep tracking -- process may still be running
                 }
-            }
-        });
+            });
     }
 
     /// Number of currently active agents.
@@ -837,12 +893,28 @@ pub fn check_auto_unblock(db: &Database, signals: &[(String, String, String)]) -
     unblocked
 }
 
+/// Cluster-wide persona wake lease gate. When present, watch will try to
+/// acquire a lease for each signal before spawning; if every lease is already
+/// held, the spawn is skipped (another node or session is handling it).
+pub struct PersonaLeaseGate<'a> {
+    pub db: &'a Database,
+    pub host: &'a str,
+    pub ttl: Duration,
+}
+
+/// Resolve this host's identity for persona wake lease ownership. Falls back
+/// to `"unknown"` when the system hostname is not available.
+pub fn resolve_host_id() -> String {
+    sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_owned())
+}
+
 pub fn poll_cycle(
     db: &Database,
     config: &WatchConfig,
     cooldown: &mut CooldownTracker,
     tracker: &mut AgentTracker,
     session_locks: Option<&SessionLockTracker>,
+    lease_gate: Option<&PersonaLeaseGate<'_>>,
     since: Option<&str>,
 ) -> Result<u32> {
     let mut spawned: u32 = 0;
@@ -881,6 +953,48 @@ pub fn poll_cycle(
             continue;
         }
 
+        // Try to acquire a persona wake lease for each signal. Policy:
+        // - All acquires fail  -> another node/session is already handling
+        //   every one of these signals; skip this spawn entirely.
+        // - Any acquire succeeds -> proceed with the spawn. The held leases
+        //   travel with the child and are released on reap.
+        let held_leases = match lease_gate {
+            Some(gate) => {
+                let mut acquired: Vec<(String, String)> = Vec::new();
+                let mut skipped: Vec<String> = Vec::new();
+                for (id, _, _) in &signals {
+                    match gate
+                        .db
+                        .try_acquire_persona_lease(recipient, id, gate.host, gate.ttl)
+                    {
+                        Ok(true) => acquired.push((recipient.to_string(), id.clone())),
+                        Ok(false) => skipped.push(id.clone()),
+                        Err(e) => eprintln!(
+                            "[legion watch] lease acquire error for {}/{}: {}",
+                            recipient, id, e
+                        ),
+                    }
+                }
+                if acquired.is_empty() {
+                    eprintln!(
+                        "[legion watch] skipping {}: persona {} lease held elsewhere ({} signal(s))",
+                        repo.name,
+                        recipient,
+                        skipped.len()
+                    );
+                    // Do NOT mark signals handled here. The lease TTL is the
+                    // authoritative signal for "is the holder still alive."
+                    // If the holder crashes before spawning, its lease ages
+                    // out and the next poll on this host can try again. Local
+                    // handled-marking would turn a crashed peer into a
+                    // permanently-lost signal from our perspective.
+                    continue;
+                }
+                acquired
+            }
+            None => Vec::new(),
+        };
+
         eprintln!(
             "[legion watch] {} signal(s) for {} -- waking agent",
             signals.len(),
@@ -916,12 +1030,26 @@ pub fn poll_cycle(
                         repo.name, e
                     );
                 }
-                tracker.track(repo.name.clone(), child);
+                let track_host = lease_gate.map(|g| g.host.to_string()).unwrap_or_default();
+                tracker.track(repo.name.clone(), child, held_leases, track_host);
                 cooldown.record_wake(&repo.name);
                 spawned += 1;
                 eprintln!("[legion watch] spawned agent for {}", repo.name);
             }
             Err(e) => {
+                // Spawn failed -- release any leases we acquired so another
+                // node/poll cycle can retry. Missing release would block
+                // re-wakes for a full TTL.
+                if let Some(gate) = lease_gate {
+                    for (persona, sig_id) in &held_leases {
+                        if let Err(re) = gate.db.release_persona_lease(persona, sig_id) {
+                            eprintln!(
+                                "[legion watch] failed to release lease {}/{} after spawn failure: {}",
+                                persona, sig_id, re
+                            );
+                        }
+                    }
+                }
                 eprintln!("[legion watch] spawn failed for {}: {}", repo.name, e);
             }
         }
@@ -972,6 +1100,13 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let poll_interval = Duration::from_secs(config.poll_interval_secs);
     let health_interval = Duration::from_secs(config.health_poll_secs);
     let retention_cutoff = chrono::Duration::days(config.retention_days as i64);
+    let host = resolve_host_id();
+    let lease_ttl = Duration::from_secs(config.persona_lease_ttl_secs);
+    let lease_gate = PersonaLeaseGate {
+        db: &db,
+        host: &host,
+        ttl: lease_ttl,
+    };
     // On startup, only look back 24 hours for unhandled signals.
     // Prevents historical flood when watch restarts after downtime.
     // The watch_handled table prevents re-processing, but without a
@@ -1015,7 +1150,10 @@ pub fn run(data_dir: &Path) -> Result<()> {
         // Health sample on its own interval
         if health_timer.elapsed() >= health_interval {
             sampler.sample();
-            tracker.reap_finished();
+            tracker.reap_finished(Some(&db));
+            if let Err(e) = db.heartbeat_persona_leases(&host, lease_ttl) {
+                eprintln!("[legion watch] lease heartbeat error: {}", e);
+            }
 
             // Persist health sample (failure is non-fatal)
             match sampler.to_health_sample(tracker.active_count()) {
@@ -1041,6 +1179,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
                     &mut cooldown,
                     &mut tracker,
                     Some(&session_locks),
+                    Some(&lease_gate),
                     Some(&lookback),
                 ) {
                     Ok(n) if n > 0 => {
@@ -1483,12 +1622,69 @@ workdir = "/tmp"
             &mut tracker,
             Some(&locks),
             None,
+            None,
         )
         .expect("poll");
         assert_eq!(
             spawned, 0,
             "active session lock must block a second wake for the same repo"
         );
+    }
+
+    #[test]
+    fn poll_cycle_skips_when_persona_lease_is_held() {
+        // Cluster-gate test: a peer node has already acquired the lease for
+        // the inbound signal. This host's poll_cycle must skip the wake
+        // entirely and mark the signal handled so it does not retry.
+        let (db, _index, _dir) = test_storage();
+
+        let config = WatchConfig {
+            repos: vec![WatchRepoConfig {
+                name: "legion".to_string(),
+                workdir: "/tmp".to_string(),
+                agent: None,
+                extra: toml::Table::new(),
+            }],
+            ..WatchConfig::default()
+        };
+
+        let signal = db
+            .insert_reflection("kelex", "@legion question:help", "team")
+            .expect("insert signal");
+
+        // Simulate a peer holding the lease for this (persona, signal).
+        let held = db
+            .try_acquire_persona_lease("legion", &signal.id, "peer-host", Duration::from_secs(3600))
+            .expect("peer acquire");
+        assert!(held, "peer must be able to acquire a free lease");
+
+        let gate = PersonaLeaseGate {
+            db: &db,
+            host: "this-host",
+            ttl: Duration::from_secs(3600),
+        };
+        let mut cooldown = CooldownTracker::new(0, None, None);
+        let mut tracker = AgentTracker::new();
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            Some(&gate),
+            None,
+        )
+        .expect("poll");
+        assert_eq!(
+            spawned, 0,
+            "persona lease held by peer must block this host from spawning"
+        );
+
+        // The lease holder (peer) must still own the lease after the skip --
+        // the failed local acquire must not have disturbed peer's row.
+        let listed = db.list_persona_leases(Some("legion")).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].acquired_by_host, "peer-host");
     }
 
     #[test]
@@ -1515,7 +1711,7 @@ workdir = "/tmp"
 
         let mut tracker = AgentTracker::new();
         let spawned =
-            poll_cycle(&db, &config, &mut cooldown, &mut tracker, None, None).expect("poll");
+            poll_cycle(&db, &config, &mut cooldown, &mut tracker, None, None, None).expect("poll");
         assert_eq!(spawned, 0, "cooling repo should be skipped");
     }
 

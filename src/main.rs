@@ -1380,6 +1380,33 @@ enum WatchAction {
 
     /// List all repos currently in watch.toml
     List,
+
+    /// Inspect or manage persona wake leases (cluster-wide wake coordination)
+    Leases {
+        #[command(subcommand)]
+        action: LeaseAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum LeaseAction {
+    /// List currently held persona wake leases
+    List {
+        /// Show only leases for this persona (e.g. `legion`, `huttspawn`)
+        #[arg(long)]
+        persona: Option<String>,
+    },
+
+    /// Release a single lease by (persona, signal_id). Idempotent.
+    Release {
+        /// Persona whose lease should be released
+        #[arg(long)]
+        persona: String,
+
+        /// Signal id whose lease should be released
+        #[arg(long)]
+        signal: String,
+    },
 }
 
 /// Resolve the legion data directory.
@@ -4079,6 +4106,42 @@ fn run() -> error::Result<()> {
                                 .map(|a| format!(" (agent: {})", a))
                                 .unwrap_or_default();
                             println!("{}\t{}{}", repo.name, repo.workdir, agent_note);
+                        }
+                    }
+                }
+                Some(WatchAction::Leases { action }) => {
+                    let base = data_dir()?;
+                    let db_path = base.join("legion.db");
+                    let db = db::Database::open(&db_path)?;
+                    match action {
+                        LeaseAction::List { persona } => {
+                            let leases = db.list_persona_leases(persona.as_deref())?;
+                            if leases.is_empty() {
+                                println!("no active persona wake leases");
+                            } else {
+                                println!("PERSONA\tSIGNAL\tHOST\tACQUIRED\tEXPIRES");
+                                for l in &leases {
+                                    println!(
+                                        "{}\t{}\t{}\t{}\t{}",
+                                        l.persona_id,
+                                        l.signal_id,
+                                        l.acquired_by_host,
+                                        l.acquired_at,
+                                        l.expires_at,
+                                    );
+                                }
+                            }
+                        }
+                        LeaseAction::Release { persona, signal } => {
+                            let released = db.release_persona_lease(&persona, &signal)?;
+                            if released {
+                                println!("released lease {}/{}", persona, signal);
+                            } else {
+                                println!(
+                                    "no live lease found for {}/{} (may already be released)",
+                                    persona, signal
+                                );
+                            }
                         }
                     }
                 }

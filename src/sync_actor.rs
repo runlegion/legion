@@ -141,15 +141,25 @@ async fn run_sync_loop(
                             eprintln!("[legion sync] schedule delta query failed: {}", e);
                             Vec::new()
                         });
+                let lease_deltas = db
+                    .get_persona_wake_lease_deltas_since(&last_sync)
+                    .unwrap_or_else(|e| {
+                        eprintln!("[legion sync] lease delta query failed: {}", e);
+                        Vec::new()
+                    });
 
-                let total = reflection_deltas.len() + card_deltas.len() + schedule_deltas.len();
+                let total = reflection_deltas.len()
+                    + card_deltas.len()
+                    + schedule_deltas.len()
+                    + lease_deltas.len();
                 if total > 0 {
                     eprintln!(
-                        "[legion sync] broadcasting {} delta(s) ({} reflections, {} cards, {} schedules)",
+                        "[legion sync] broadcasting {} delta(s) ({} reflections, {} cards, {} schedules, {} leases)",
                         total,
                         reflection_deltas.len(),
                         card_deltas.len(),
-                        schedule_deltas.len()
+                        schedule_deltas.len(),
+                        lease_deltas.len()
                     );
 
                     // TODO: Actually broadcast the deltas to peers
