@@ -531,33 +531,27 @@ impl SessionLockTracker {
         self.lock_dir.join(format!("{}.lock", repo))
     }
 
-    /// True if a prior spawn's lockfile is still considered live (fresh mtime
-    /// AND a running PID). Returns false on any parse error, missing file, or
-    /// staleness -- callers can safely proceed to spawn in all false cases.
-    pub fn is_active(&self, repo: &str) -> bool {
+    /// Returns the holding PID when a prior spawn's lockfile is still considered
+    /// live (fresh mtime AND a running PID). Returns `None` on any parse error,
+    /// missing file, or staleness -- callers can safely proceed to spawn in all
+    /// `None` cases. The PID is surfaced so skip-log messages can identify the
+    /// session holding the gate.
+    pub fn active_pid(&self, repo: &str) -> Option<u32> {
         let path = self.lock_path(repo);
-        let Ok(meta) = std::fs::metadata(&path) else {
-            return false;
-        };
-        let Ok(mtime) = meta.modified() else {
-            return false;
-        };
+        let meta = std::fs::metadata(&path).ok()?;
+        let mtime = meta.modified().ok()?;
         let age = mtime.elapsed().unwrap_or(Duration::ZERO);
         if age > self.ttl {
-            return false;
+            return None;
         }
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            return false;
-        };
-        let Ok(pid) = contents.trim().parse::<u32>() else {
-            return false;
-        };
-        process_alive(pid)
+        let contents = std::fs::read_to_string(&path).ok()?;
+        let pid = contents.trim().parse::<u32>().ok()?;
+        if process_alive(pid) { Some(pid) } else { None }
     }
 
     /// Write or overwrite the lockfile for `repo` with `pid`. Creates the
     /// parent directory if needed. Caller is responsible for having checked
-    /// `is_active` first if they want to respect an existing lock.
+    /// `active_pid` first if they want to respect an existing lock.
     pub fn record_spawn(&self, repo: &str, pid: u32) -> Result<()> {
         std::fs::create_dir_all(&self.lock_dir)?;
         std::fs::write(self.lock_path(repo), pid.to_string())?;
@@ -872,11 +866,11 @@ pub fn poll_cycle(
         }
 
         if let Some(locks) = session_locks
-            && locks.is_active(&repo.name)
+            && let Some(pid) = locks.active_pid(&repo.name)
         {
             eprintln!(
-                "[legion watch] session already active for {} -- skipping wake",
-                repo.name
+                "[legion watch] skipping {}: active session (pid {})",
+                repo.name, pid
             );
             continue;
         }
@@ -1358,7 +1352,7 @@ workdir = "/tmp"
     }
 
     /// Run a short-lived child to completion and return its (now-dead) PID.
-    /// Used to test the dead-PID branch of `SessionLockTracker::is_active`
+    /// Used to test the dead-PID branch of `SessionLockTracker::active_pid`
     /// without racing against PID reuse on the test host.
     fn dead_pid() -> u32 {
         let mut child = std::process::Command::new("true")
@@ -1377,7 +1371,7 @@ workdir = "/tmp"
             .record_spawn("legion", std::process::id())
             .expect("record");
         assert!(
-            locks.is_active("legion"),
+            locks.active_pid("legion").is_some(),
             "own PID + fresh mtime should read as active"
         );
     }
@@ -1388,7 +1382,7 @@ workdir = "/tmp"
         let locks = SessionLockTracker::new(dir.path(), 3600);
         locks.record_spawn("legion", dead_pid()).expect("record");
         assert!(
-            !locks.is_active("legion"),
+            locks.active_pid("legion").is_none(),
             "dead PID should be treated as abandoned"
         );
     }
@@ -1396,16 +1390,42 @@ workdir = "/tmp"
     #[test]
     fn session_lock_inactive_when_stale() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // TTL of 0 means "any non-zero age is stale"; the sleep below guarantees
-        // elapsed > 0 even under fast clocks.
-        let locks = SessionLockTracker::new(dir.path(), 0);
+        // TTL=1s + sleep > TTL proves the stale-mtime branch fires for a
+        // non-zero TTL -- distinguishing it from the TTL=0 disable sentinel.
+        let locks = SessionLockTracker::new(dir.path(), 1);
         locks
             .record_spawn("legion", std::process::id())
             .expect("record");
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(1_100));
         assert!(
-            !locks.is_active("legion"),
+            locks.active_pid("legion").is_none(),
             "stale mtime should be treated as abandoned even with live PID"
+        );
+    }
+
+    #[test]
+    fn session_lock_record_spawn_overwrites_abandoned_lock() {
+        // Acceptance criterion 5 from issue #274: a dead-PID / stale-mtime
+        // lock must be overwritten on the next spawn and the fresh lock then
+        // read as active. Proves the abandon-and-replace path end-to-end.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+
+        // Seed with an abandoned (dead-PID) lock.
+        locks.record_spawn("legion", dead_pid()).expect("seed");
+        assert!(
+            locks.active_pid("legion").is_none(),
+            "precondition: seeded lock must read as abandoned"
+        );
+
+        // Re-record with our own (live) PID, simulating a successful respawn.
+        locks
+            .record_spawn("legion", std::process::id())
+            .expect("overwrite");
+        assert_eq!(
+            locks.active_pid("legion"),
+            Some(std::process::id()),
+            "overwrite must leave a live lock holding the new PID"
         );
     }
 
@@ -1414,7 +1434,7 @@ workdir = "/tmp"
         let dir = tempfile::tempdir().expect("tempdir");
         let locks = SessionLockTracker::new(dir.path(), 3600);
         assert!(
-            !locks.is_active("legion"),
+            locks.active_pid("legion").is_none(),
             "missing lockfile should read as inactive"
         );
     }
