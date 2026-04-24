@@ -2732,12 +2732,15 @@ fn map_persona_lease_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonaWak
 impl Database {
     /// Try to acquire a persona wake lease. Returns `Ok(true)` on success,
     /// `Ok(false)` when a live lease for `(persona_id, signal_id)` is already
-    /// held by someone else. Expired or soft-deleted leases are treated as
-    /// free -- the new acquire overwrites them.
+    /// held. Expired or soft-deleted leases are treated as free and may be
+    /// claimed by the caller.
     ///
-    /// Atomicity: the check-then-insert runs inside a transaction, and SQLite
-    /// serializes writers per connection. Cross-host races are resolved by
-    /// `apply_persona_wake_lease_delta` using earlier `acquired_at` wins.
+    /// Atomicity: a single `UPDATE ... WHERE expires_at <= now OR deleted_at IS NOT NULL`
+    /// followed by `INSERT OR IGNORE` runs inside a transaction. Both
+    /// statements take SQLite's write lock so cross-process races are
+    /// serialized by the DB file lock; the caller sees the outcome via
+    /// `rows_changed()`. This matches the issue spec: "INSERT OR FAIL with
+    /// primary-key collision; first-writer-wins."
     pub fn try_acquire_persona_lease(
         &self,
         persona_id: &str,
@@ -2754,31 +2757,42 @@ impl Database {
 
         let tx = self.conn.unchecked_transaction()?;
 
-        let existing: Option<String> = tx
-            .query_row(
-                "SELECT acquired_by_host FROM persona_wake_leases \
-                 WHERE persona_id = ?1 AND signal_id = ?2 \
-                   AND deleted_at IS NULL AND expires_at > ?3",
-                rusqlite::params![persona_id, signal_id, &now_str],
-                |r| r.get(0),
-            )
-            .optional()?;
-
-        if existing.is_some() {
-            tx.commit()?;
-            return Ok(false);
-        }
-
+        // Reclaim stale rows so INSERT OR IGNORE below can succeed against
+        // them. Scoped by PK so this only touches the row we are trying to
+        // acquire -- no broad sweep here.
         tx.execute(
-            "INSERT OR REPLACE INTO persona_wake_leases \
+            "UPDATE persona_wake_leases \
+             SET acquired_by_host = ?1, acquired_at = ?2, heartbeat_at = ?2, \
+                 expires_at = ?3, updated_at = ?2, deleted_at = NULL \
+             WHERE persona_id = ?4 AND signal_id = ?5 \
+               AND (deleted_at IS NOT NULL OR expires_at <= ?2)",
+            rusqlite::params![host, &now_str, &expires, persona_id, signal_id],
+        )?;
+
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO persona_wake_leases \
              (persona_id, signal_id, acquired_by_host, acquired_at, heartbeat_at, \
               expires_at, updated_at, deleted_at) \
              VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?4, NULL)",
             rusqlite::params![persona_id, signal_id, host, &now_str, &expires],
         )?;
 
+        // If INSERT OR IGNORE inserted (1) or the reclaim UPDATE touched a
+        // stale row we now own, the lease is ours. Confirm we hold it by
+        // reading back -- covers the edge case where the stale-reclaim
+        // UPDATE succeeded but the INSERT was a no-op.
+        let holder: Option<String> = tx
+            .query_row(
+                "SELECT acquired_by_host FROM persona_wake_leases \
+                 WHERE persona_id = ?1 AND signal_id = ?2 AND deleted_at IS NULL",
+                rusqlite::params![persona_id, signal_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
         tx.commit()?;
-        Ok(true)
+        let _ = inserted;
+        Ok(holder.as_deref() == Some(host))
     }
 
     /// Refresh every live lease held by `host`, extending `expires_at` to
@@ -2801,6 +2815,11 @@ impl Database {
 
     /// Soft-delete one lease by (persona_id, signal_id). Returns true if a
     /// matching live lease existed. Idempotent on an already-released lease.
+    ///
+    /// Unscoped by host -- used by the operator CLI to forcibly drop any
+    /// stuck lease. The watch reaper uses `release_persona_lease_if_owner`
+    /// instead so a late-loser whose lease was overwritten by sync cannot
+    /// accidentally release the winner's row.
     pub fn release_persona_lease(&self, persona_id: &str, signal_id: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
         let updated = self.conn.execute(
@@ -2808,6 +2827,27 @@ impl Database {
              SET deleted_at = ?1, updated_at = ?1 \
              WHERE persona_id = ?2 AND signal_id = ?3 AND deleted_at IS NULL",
             rusqlite::params![&now, persona_id, signal_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Like `release_persona_lease`, but only if the lease is still held by
+    /// `host`. Used by the watch reaper so a late-loser whose lease was
+    /// overwritten by a sync-resolved peer cannot release the peer's row.
+    /// Returns true only when this host's row was released.
+    pub fn release_persona_lease_if_owner(
+        &self,
+        persona_id: &str,
+        signal_id: &str,
+        host: &str,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE persona_wake_leases \
+             SET deleted_at = ?1, updated_at = ?1 \
+             WHERE persona_id = ?2 AND signal_id = ?3 \
+               AND acquired_by_host = ?4 AND deleted_at IS NULL",
+            rusqlite::params![&now, persona_id, signal_id, host],
         )?;
         Ok(updated > 0)
     }
@@ -5127,33 +5167,190 @@ mod tests {
 
     #[test]
     fn persona_lease_apply_delta_earlier_acquired_at_wins() {
-        let db = test_db();
-        // Local lease acquired now (later than the incoming delta).
-        db.try_acquire_persona_lease("legion", "sig-1", "local", Duration::from_secs(60))
-            .unwrap();
+        // Two real acquires against separate databases, 50ms apart, then
+        // sync-apply the earlier one onto the later's database and assert
+        // the earlier wins. Uses realistic clock deltas rather than hardcoded
+        // ancient timestamps so the test exercises actual RFC3339 ordering
+        // at sub-second precision.
+        let peer_db = test_db();
+        assert!(
+            peer_db
+                .try_acquire_persona_lease("legion", "sig-1", "peer", Duration::from_secs(3600))
+                .unwrap()
+        );
+        let peer_row = peer_db.list_persona_leases(None).unwrap().remove(0);
 
+        std::thread::sleep(Duration::from_millis(50));
+
+        let local_db = test_db();
+        assert!(
+            local_db
+                .try_acquire_persona_lease("legion", "sig-1", "local", Duration::from_secs(3600))
+                .unwrap()
+        );
+
+        // Peer's lease is older; when its delta reaches local, local is the
+        // late loser.
         let delta = crate::sync::PersonaWakeLeaseDelta {
-            persona_id: "legion".into(),
-            signal_id: "sig-1".into(),
-            acquired_by_host: "peer".into(),
-            acquired_at: "2000-01-01T00:00:00Z".into(), // ancient -- earlier wins
-            heartbeat_at: "2000-01-01T00:00:00Z".into(),
-            expires_at: "2099-01-01T00:00:00Z".into(),
-            updated_at: "2000-01-01T00:00:00Z".into(),
-            deleted_at: None,
+            persona_id: peer_row.persona_id,
+            signal_id: peer_row.signal_id,
+            acquired_by_host: peer_row.acquired_by_host,
+            acquired_at: peer_row.acquired_at.clone(),
+            heartbeat_at: peer_row.heartbeat_at,
+            expires_at: peer_row.expires_at,
+            updated_at: peer_row.updated_at,
+            deleted_at: peer_row.deleted_at,
         };
-        let late = db.apply_persona_wake_lease_delta(&delta).unwrap();
+        let late = local_db.apply_persona_wake_lease_delta(&delta).unwrap();
         assert_eq!(
             late.as_deref(),
             Some("local"),
             "local node is the late loser; its host identity must surface"
         );
 
-        let listed = db.list_persona_leases(None).unwrap();
+        let listed = local_db.list_persona_leases(None).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(
             listed[0].acquired_by_host, "peer",
             "peer's earlier lease must win"
+        );
+        assert_eq!(
+            listed[0].acquired_at, delta.acquired_at,
+            "winning acquired_at must be peer's, not local's"
+        );
+    }
+
+    #[test]
+    fn persona_lease_acquire_succeeds_after_ttl_expires_without_release() {
+        // Crash-recovery path: the holder acquires with a short TTL, never
+        // calls release (simulating a crash), and after the TTL elapses the
+        // next acquirer succeeds. This is the behavior the issue calls out:
+        // "session crashes without releasing -> lease expires via heartbeat
+        // TTL. Another wake on the same signal succeeds after expiration."
+        let db = test_db();
+        assert!(
+            db.try_acquire_persona_lease(
+                "legion",
+                "sig-1",
+                "crashy-host",
+                Duration::from_millis(100)
+            )
+            .unwrap()
+        );
+
+        // While the lease is still live, a second acquire must fail.
+        assert!(
+            !db.try_acquire_persona_lease(
+                "legion",
+                "sig-1",
+                "recovery-host",
+                Duration::from_secs(3600)
+            )
+            .unwrap(),
+            "live lease (even near expiry) must block a concurrent acquire"
+        );
+
+        // Wait past the TTL without calling release.
+        std::thread::sleep(Duration::from_millis(200));
+
+        assert!(
+            db.try_acquire_persona_lease(
+                "legion",
+                "sig-1",
+                "recovery-host",
+                Duration::from_secs(3600)
+            )
+            .unwrap(),
+            "after TTL elapses, a new acquirer must succeed"
+        );
+
+        let listed = db.list_persona_leases(None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].acquired_by_host, "recovery-host",
+            "recovery host must own the post-crash lease"
+        );
+    }
+
+    #[test]
+    fn persona_lease_acquire_is_cross_connection_race_safe() {
+        // Issue #308 atomicity contract: two independent Database handles
+        // against the same file race to acquire the same (persona, signal).
+        // Each thread opens its own handle (Database is !Send because it
+        // wraps rusqlite::Connection; ownership stays thread-local). Exactly
+        // one must win; neither can surface SQLITE_BUSY as Err.
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("race.sqlite");
+
+        // Prime the schema once so neither racing thread takes the migration
+        // path (what's being tested is acquire atomicity, not open atomicity).
+        let _ = Database::open(&db_path).unwrap();
+
+        let path_a = db_path.clone();
+        let path_b = db_path.clone();
+
+        let t_a = thread::spawn(move || -> Result<bool> {
+            let db = Database::open(&path_a)?;
+            db.try_acquire_persona_lease("legion", "sig-race", "host-A", Duration::from_secs(60))
+        });
+        let t_b = thread::spawn(move || -> Result<bool> {
+            let db = Database::open(&path_b)?;
+            db.try_acquire_persona_lease("legion", "sig-race", "host-B", Duration::from_secs(60))
+        });
+
+        let r_a = t_a.join().unwrap();
+        let r_b = t_b.join().unwrap();
+
+        let mut wins = 0usize;
+        for r in [&r_a, &r_b] {
+            match r {
+                Ok(true) => wins += 1,
+                Ok(false) => {}
+                Err(e) => panic!("acquire surfaced SQLITE_BUSY as Err: {e}"),
+            }
+        }
+        assert_eq!(
+            wins, 1,
+            "exactly one concurrent acquire must win (got {} winners)",
+            wins
+        );
+
+        let observer = Database::open(&db_path).unwrap();
+        let listed = observer.list_persona_leases(None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(
+            listed[0].acquired_by_host == "host-A" || listed[0].acquired_by_host == "host-B",
+            "unexpected host recorded: {}",
+            listed[0].acquired_by_host
+        );
+    }
+
+    #[test]
+    fn persona_lease_release_if_owner_refuses_foreign_host() {
+        // Guards the late-loser reaper scenario: after sync conflict
+        // resolution overwrites local's row with peer's, local's AgentTracker
+        // will try to reap and release the lease it thought it held. The
+        // host-scoped release must refuse because the row now belongs to
+        // peer, preventing the late-loser from dropping the winner's lease.
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "peer", Duration::from_secs(60))
+            .unwrap();
+
+        let released = db
+            .release_persona_lease_if_owner("legion", "sig-1", "late-loser")
+            .unwrap();
+        assert!(
+            !released,
+            "host-scoped release must refuse to touch a row owned by another host"
+        );
+
+        let listed = db.list_persona_leases(None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].acquired_by_host, "peer",
+            "peer's lease must survive the late-loser's release attempt"
         );
     }
 

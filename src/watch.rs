@@ -749,7 +749,12 @@ pub fn spawn_agent(workdir: &str, prompt: &str) -> Result<Child> {
 pub struct TrackedChild {
     pub repo: String,
     pub child: Child,
+    /// `(persona_id, signal_id)` pairs this child acquired at spawn.
     pub held_leases: Vec<(String, String)>,
+    /// Host identity the leases were acquired under. Required for the
+    /// host-scoped release so a sync-resolved late-loser cannot drop the
+    /// peer winner's row.
+    pub host: String,
 }
 
 pub struct AgentTracker {
@@ -763,18 +768,28 @@ impl AgentTracker {
         }
     }
 
-    /// Record a spawned child process together with the leases it holds.
-    pub fn track(&mut self, repo: String, child: Child, held_leases: Vec<(String, String)>) {
+    /// Record a spawned child process together with the leases it holds and
+    /// the host identity under which they were acquired.
+    pub fn track(
+        &mut self,
+        repo: String,
+        child: Child,
+        held_leases: Vec<(String, String)>,
+        host: String,
+    ) {
         self.children.push(TrackedChild {
             repo,
             child,
             held_leases,
+            host,
         });
     }
 
     /// Reap finished child processes, removing them from tracking and
-    /// releasing their held persona wake leases. Lease release errors are
-    /// logged but not propagated -- a missed release will age out via TTL.
+    /// releasing their held persona wake leases. Uses host-scoped release so
+    /// a late-loser whose lease was overwritten by sync conflict resolution
+    /// cannot accidentally drop the peer winner's row. Release errors are
+    /// logged but not propagated -- a missed release ages out via TTL.
     pub fn reap_finished(&mut self, db: Option<&Database>) {
         self.children
             .retain_mut(|tracked| match tracked.child.try_wait() {
@@ -786,7 +801,9 @@ impl AgentTracker {
                     );
                     if let Some(db) = db {
                         for (persona, signal_id) in &tracked.held_leases {
-                            if let Err(e) = db.release_persona_lease(persona, signal_id) {
+                            if let Err(e) =
+                                db.release_persona_lease_if_owner(persona, signal_id, &tracked.host)
+                            {
                                 eprintln!(
                                     "[legion watch] failed to release lease {}/{}: {}",
                                     persona, signal_id, e
@@ -965,16 +982,12 @@ pub fn poll_cycle(
                         recipient,
                         skipped.len()
                     );
-                    // Mark locally so we don't retry on the next poll; whoever
-                    // holds the lease is the authoritative handler.
-                    for id in &skipped {
-                        if let Err(e) = db.mark_signal_handled_for_repo(id, &repo.name) {
-                            eprintln!(
-                                "[legion watch] failed to mark signal {} as handled for {}: {}",
-                                id, repo.name, e
-                            );
-                        }
-                    }
+                    // Do NOT mark signals handled here. The lease TTL is the
+                    // authoritative signal for "is the holder still alive."
+                    // If the holder crashes before spawning, its lease ages
+                    // out and the next poll on this host can try again. Local
+                    // handled-marking would turn a crashed peer into a
+                    // permanently-lost signal from our perspective.
                     continue;
                 }
                 acquired
@@ -1017,7 +1030,8 @@ pub fn poll_cycle(
                         repo.name, e
                     );
                 }
-                tracker.track(repo.name.clone(), child, held_leases);
+                let track_host = lease_gate.map(|g| g.host.to_string()).unwrap_or_default();
+                tracker.track(repo.name.clone(), child, held_leases, track_host);
                 cooldown.record_wake(&repo.name);
                 spawned += 1;
                 eprintln!("[legion watch] spawned agent for {}", repo.name);
