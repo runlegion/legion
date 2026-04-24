@@ -570,26 +570,67 @@ pub fn find_pending_signals(
 
 // -- Agent Spawning ----------------------------------------------------------
 
+/// Signal verbs that require the recipient to reply, even if the reply is a refusal.
+///
+/// A directed question or request without a reply is ghosting. Every other verb
+/// (announce, update, review:approved, etc.) falls under the wake-storm guard:
+/// silence is acknowledgment unless the agent has something substantive to add.
+fn signal_requires_reply(text: &str) -> bool {
+    match signal::parse_signal(text) {
+        Some(sig) => matches!(sig.verb.as_str(), "question" | "request"),
+        None => false,
+    }
+}
+
 /// Build the prompt context for a woken agent from pending signals.
+///
+/// Signals are split into two buckets:
+/// - **Requires reply**: directed questions and requests. The agent MUST reply,
+///   even if the reply is "no", "can't help", or "handing to X". Ghosting is not
+///   an option -- it breaks team trust.
+/// - **Informational**: announcements, updates, approvals. Silence is
+///   acknowledgment; only reply if there is new information, concern, or dissent.
 pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) -> String {
+    let (must_reply, informational): (Vec<_>, Vec<_>) = signals
+        .iter()
+        .partition(|(_, text, _)| signal_requires_reply(text));
+
     let mut prompt = format!(
-        "You were auto-woken by legion watch. The following signal(s) are directed at you ({}):\n\n",
+        "You were auto-woken by legion watch. The following signal(s) are directed at you ({}).\n",
         repo_name
     );
 
-    for (id, text, from_repo) in signals {
-        prompt.push_str(&format!("- [from {}] {} (id: {})\n", from_repo, text, id));
-    }
+    let mut append_section = |header: &str, bucket: &[&(String, String, String)]| {
+        if bucket.is_empty() {
+            return;
+        }
+        prompt.push('\n');
+        prompt.push_str(header);
+        prompt.push_str("\n\n");
+        for (id, text, from_repo) in bucket {
+            prompt.push_str(&format!("- [from {}] {} (id: {})\n", from_repo, text, id));
+        }
+    };
+
+    append_section(
+        "REQUIRES A REPLY -- these are directed questions or requests. \
+         You MUST reply to each one, even if the reply is \"no\", \"can't help\", \
+         or \"handing to X\". Silence on a directed question is ghosting, not \
+         acknowledgment. A short refusal is a valid reply; no reply is not.",
+        &must_reply,
+    );
+
+    append_section(
+        "INFORMATIONAL -- announcements, updates, approvals. \
+         Silence is acknowledgment. Only reply if you have NEW information, \
+         a concern, dissent, or an action item. Empty acknowledgments like \
+         \"acknowledged, no action needed\" waste tokens and trigger wake storms.",
+        &informational,
+    );
 
     prompt.push_str(
-        "\nRead and respond to each signal. Use `legion signal` to reply if needed. \
-         Use `legion bullpen` to check for broader context. When done, use `legion reflect` \
-         to store any learnings.\n\n\
-         IMPORTANT: Do NOT respond to announcements or signals that don't need a response. \
-         Silence is acknowledgment. Only respond if you have NEW information, a concern, \
-         a dissent, or an action item. Empty acknowledgments like 'acknowledged, no action needed' \
-         waste tokens and trigger wake storms. If you have nothing substantive to add, \
-         reflect and exit.",
+        "\nUse `legion signal` to reply, `legion bullpen` for broader context, and \
+         `legion reflect` to store any learnings before you exit.",
     );
 
     prompt
@@ -1135,6 +1176,80 @@ workdir = "/tmp"
         assert!(prompt.contains("@all announce: shipped"));
         assert!(prompt.contains("from kelex"));
         assert!(prompt.contains("from rafters"));
+    }
+
+    #[test]
+    fn build_wake_prompt_splits_questions_from_announcements() {
+        let signals = vec![
+            (
+                "id-q".to_string(),
+                "@kessel question:help -- can you extract geometry?".to_string(),
+                "huttspawn".to_string(),
+            ),
+            (
+                "id-a".to_string(),
+                "@all announce:ready -- dev tracker RSS unlocked".to_string(),
+                "huttspawn".to_string(),
+            ),
+            (
+                "id-r".to_string(),
+                "@platform request:help -- need embeddings review".to_string(),
+                "kelex".to_string(),
+            ),
+        ];
+
+        let prompt = build_wake_prompt("kessel", &signals);
+
+        // Directed questions/requests MUST be flagged as reply-required.
+        assert!(
+            prompt.contains("REQUIRES A REPLY"),
+            "directed question should trigger reply-required section"
+        );
+        assert!(
+            prompt.contains("id-q"),
+            "question signal missing from prompt"
+        );
+        assert!(
+            prompt.contains("id-r"),
+            "request signal missing from prompt"
+        );
+
+        // Announcements belong in the informational section.
+        assert!(
+            prompt.contains("INFORMATIONAL"),
+            "announcement should trigger informational section"
+        );
+        assert!(
+            prompt.contains("id-a"),
+            "announce signal missing from prompt"
+        );
+
+        // The reply-required section must appear BEFORE the informational one so
+        // the agent reads its obligations first.
+        let reply_idx = prompt.find("REQUIRES A REPLY").expect("reply section");
+        let info_idx = prompt.find("INFORMATIONAL").expect("info section");
+        assert!(reply_idx < info_idx, "reply-required must come first");
+    }
+
+    #[test]
+    fn build_wake_prompt_omits_sections_when_empty() {
+        let announce_only = vec![(
+            "id-a".to_string(),
+            "@all announce: shipped v0.9.3".to_string(),
+            "rafters".to_string(),
+        )];
+        let prompt = build_wake_prompt("legion", &announce_only);
+        assert!(!prompt.contains("REQUIRES A REPLY"));
+        assert!(prompt.contains("INFORMATIONAL"));
+
+        let question_only = vec![(
+            "id-q".to_string(),
+            "@eavesdrop question: when does the feed index?".to_string(),
+            "huttspawn".to_string(),
+        )];
+        let prompt = build_wake_prompt("eavesdrop", &question_only);
+        assert!(prompt.contains("REQUIRES A REPLY"));
+        assert!(!prompt.contains("INFORMATIONAL"));
     }
 
     #[test]
