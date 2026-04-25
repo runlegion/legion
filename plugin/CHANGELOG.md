@@ -1,5 +1,13 @@
 # Legion Changelog
 
+## 0.9.5
+
+Memory-discipline release. Closes the loop on the recurring complaint that agents drift back to the Claude Code auto-memory directory instead of using `legion reflect`. Memory entries telling agents "use legion" lose to the system prompt actively encouraging local-memory writes every turn -- enforcement has to be at the hook layer.
+
+### Safety
+
+- **Block writes to Claude auto-memory** (new `no-local-memory.sh` PreToolUse hook): Write/Edit/MultiEdit on any path matching `.claude/projects/*/memory/` is denied with a redirect to `legion reflect` for personal reflections or CLAUDE.md for project-wide guidance. Reflections stored via legion are searchable across sessions, repos, and agents (`legion recall`, `legion consult`); files in `~/.claude/projects/*/memory/` are invisible the moment the session ends. Reads are not blocked -- the auto-memory loader needs them.
+
 ## 0.9.4
 
 Wake-coordination release. Three fixes to the auto-wake path so a signal lands on exactly one agent: one host-local, one cluster-wide, and one at the prompt level. The phenomenology that drove this was huttspawn watching a twin of itself post mid-thread -- that specific case is dead now.
