@@ -1,5 +1,34 @@
 # Legion Changelog
 
+## 0.9.5
+
+Memory-discipline release. Closes the loop on the recurring complaint that agents drift back to the Claude Code auto-memory directory instead of using `legion reflect`. Memory entries telling agents "use legion" lose to the system prompt actively encouraging local-memory writes every turn -- enforcement has to be at the hook layer.
+
+### Safety
+
+- **Block writes to Claude auto-memory** (new `no-local-memory.sh` PreToolUse hook): Write/Edit/MultiEdit on any path matching `.claude/projects/*/memory/` is denied with a redirect to `legion reflect` for personal reflections or CLAUDE.md for project-wide guidance. Reflections stored via legion are searchable across sessions, repos, and agents (`legion recall`, `legion consult`); files in `~/.claude/projects/*/memory/` are invisible the moment the session ends. Reads are not blocked -- the auto-memory loader needs them.
+
+## 0.9.4
+
+Wake-coordination release. Three fixes to the auto-wake path so a signal lands on exactly one agent: one host-local, one cluster-wide, and one at the prompt level. The phenomenology that drove this was huttspawn watching a twin of itself post mid-thread -- that specific case is dead now.
+
+### New
+
+- **Persona wake leases** (#308, #314): `watch` acquires a cluster-synced lease on `(persona_id, signal_id)` before spawning. Held lease on any node -- or any prior poll cycle on this node -- blocks a second spawn. Lease refreshes every poll via `heartbeat_persona_leases`; crashes age out via TTL (default 600s). `apply_persona_wake_lease_delta` implements earlier-`acquired_at`-wins for two-live-lease conflict resolution; tombstones resolve via LWW. Wire transport is the same TODO as reflections/cards/schedules -- delta types ship ready to broadcast. New `legion watch leases list [--persona P]` / `leases release --persona P --signal S` CLI surface. Migration 17 adds `persona_wake_leases` with soft-delete + `updated_at` for smugglr sync.
+- **Per-repo session lockfile** (#274, #313): Same-host companion to persona leases. `<data-dir>/sessions/<repo>.lock` holds the last spawn's PID; `poll_cycle` skips any repo whose lockfile points to a live PID with mtime within `session_lock_ttl_secs` (default 3600s). Dead PID or stale mtime = abandoned, overwritten on next spawn. No explicit release on clean exit; next poll sees the dead PID and proceeds.
+
+### Safety
+
+- **Wake prompt splits reply-required from informational** (#311, #312): `build_wake_prompt` parses each signal's verb and routes `question:*` / `request:*` to a "REQUIRES A REPLY" section that explicitly states directed questions must be answered (even a refusal is a valid reply). Announcements and other verbs keep the existing silence-is-acknowledgment guard. Before this, the blanket "silence is acknowledgment" rule produced ghosting on directed questions -- huttspawn's `@kessel question:help` and `@eavesdrop` signals were exited silently because the prompt told the woken agent to.
+- **Cross-process atomic acquire** (#308, #314): Lease acquire path is a reclaim-UPDATE + `INSERT OR IGNORE` + read-back, all inside one transaction. Two processes on the same DB file cannot both pass a SELECT and then race on INSERT; the second writer's `INSERT OR IGNORE` is a no-op and the read-back tells it it didn't win. Cross-connection race test in `persona_lease_acquire_is_cross_connection_race_safe` opens two handles in separate threads and asserts exactly one winner, no SQLITE_BUSY surfaced as `Err`.
+- **Host-scoped reap release** (#308, #314): `release_persona_lease_if_owner` scopes the tombstone UPDATE to `AND acquired_by_host = ?` so a late-loser whose lease was overwritten by sync conflict resolution cannot drop the peer winner's row when its tracked child exits. Unscoped `release_persona_lease` is kept for the operator CLI where forcibly dropping a stuck lease is the intended operation.
+- **Skip-branch no longer marks signals handled** (#308, #314): When a persona lease is held by a peer, this host skips the spawn but leaves the signal unhandled in `watch_handled`. If the holder crashes pre-spawn, the next poll on this host retries naturally after TTL expiry; previously the local mark turned a crashed peer into a permanently-lost signal from every other node's view.
+
+### Polish
+
+- **Skip log names the PID holding the gate** (#274, #313): Session-lock skip log now reads `skipping <repo>: active session (pid <n>)` so operators can immediately see which session is blocking, instead of just "session already active for <repo>". `SessionLockTracker::active_pid` returns `Option<u32>`.
+- **`TrackedChild` carries acquire host** (#308, #314): `AgentTracker::track` takes the host identity the leases were acquired under and stores it on `TrackedChild`. Reap uses the stored host for the scoped release. Cleaner than holding a separate parallel map of child-id to host.
+
 ## 0.9.3
 
 Daily-loop release. New read-side `legion pr` surface closes the write-only monologue so agents can actually read reviews, comments, and failing-check logs through legion instead of the blocked `gh` CLI. Plugin timeout and statusline polish ride along.
