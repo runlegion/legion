@@ -1,5 +1,14 @@
 # Legion Changelog
 
+## 0.9.6
+
+Identity-affordance release. Agents intuitively reach for `legion whoami` at session start; this release makes the command real and routes the SessionStart hook through it for a clearer header.
+
+### New
+
+- **`legion whoami --repo <name>`** (#324, #325): Top-level subcommand that prints identity reflections (domain=identity) for a repo. Thin alias over the existing `recall_by_domain` primitive -- no new storage, no new logic. Output uses `[Legion] Identity for <repo>:` header (no score field) instead of the misleading `[Legion] Relevant reflections for <repo>:` that `recall --domain identity` produced. Tests cover happy path, empty case, missing-arg, cross-repo isolation, domain filtering, and `--limit`.
+- **SessionStart hook routes identity through `whoami`**: `plugin/hooks/session-start.sh` now calls `legion whoami --repo "$REPO" --limit 1` instead of `legion recall --repo "$REPO" --domain identity --limit 1`. Same query, cleaner header in the SessionStart additionalContext blob.
+
 ## 0.9.5
 
 Memory-discipline release. Closes the loop on the recurring complaint that agents drift back to the Claude Code auto-memory directory instead of using `legion reflect`. Memory entries telling agents "use legion" lose to the system prompt actively encouraging local-memory writes every turn -- enforcement has to be at the hook layer.
