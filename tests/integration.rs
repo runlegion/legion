@@ -291,6 +291,67 @@ fn whoami_works_with_compound_repo() {
     }
 }
 
+#[test]
+fn whoami_subcommand_returns_identity_reflections() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--whoami",
+            "--text",
+            "I am the test agent",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = legion_cmd(dir.path())
+        .args(["whoami", "--repo", "test"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "whoami subcommand failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("[Legion] Identity for test:"),
+        "expected identity header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("I am the test agent"),
+        "expected identity text, got: {stdout}"
+    );
+}
+
+#[test]
+fn whoami_subcommand_silent_when_no_identity() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["whoami", "--repo", "empty"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "expected empty output, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn whoami_subcommand_requires_repo() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path()).args(["whoami"]).output().unwrap();
+    assert!(!out.status.success());
+}
+
 /// Validate that a string looks like a UUIDv7 (36 chars, 4 hyphens).
 fn assert_uuid_format(s: &str) {
     let trimmed = s.trim();
