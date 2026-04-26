@@ -54,8 +54,8 @@ fi
 OUTPUT=""
 
 # 1. Identity -- who am I
-IDENTITY=$("$LEGION" recall --repo "$REPO" --domain identity --limit 1 2>>"$LOG")
-legion_check $? "recall (identity)"
+IDENTITY=$("$LEGION" whoami --repo "$REPO" --limit 1 2>>"$LOG")
+legion_check $? "whoami"
 if [ -n "$IDENTITY" ]; then
   OUTPUT="$IDENTITY"
 fi
