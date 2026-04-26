@@ -348,6 +348,17 @@ enum Commands {
         repo: String,
     },
 
+    /// Print identity reflections for a repo (alias for recall --domain identity)
+    Whoami {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// Maximum number of identity reflections to return
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+
     /// Rebuild the search index from the database
     Reindex,
 
@@ -2614,6 +2625,18 @@ fn run() -> error::Result<()> {
             let output = surface::format_surface(&result, &repo);
             if !output.is_empty() {
                 print!("{output}");
+            }
+        }
+        Commands::Whoami { repo, limit } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let result = recall::recall_by_domain(&database, &repo, "identity", limit)?;
+            if result.reflections.is_empty() {
+                return Ok(());
+            }
+            println!("[Legion] Identity for {repo}:");
+            for r in &result.reflections {
+                println!("- {} (id: {})", r.text, r.id);
             }
         }
         Commands::Stats { repo } => {
