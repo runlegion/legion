@@ -653,14 +653,20 @@ pub fn find_pending_signals(
 
 // -- Agent Spawning ----------------------------------------------------------
 
-/// Signal verbs that require the recipient to reply, even if the reply is a refusal.
+/// Signals that require the recipient to reply, even if the reply is a refusal.
 ///
-/// A directed question or request without a reply is ghosting. Every other verb
-/// (announce, update, review:approved, etc.) falls under the wake-storm guard:
-/// silence is acknowledgment unless the agent has something substantive to add.
-fn signal_requires_reply(text: &str) -> bool {
+/// A directed question or request without a reply is ghosting. The trigger is
+/// either a request-shaped verb (`question`, `request`) OR a request-shaped
+/// status on any verb (e.g. `review:request`, `help:request`). Approval-shaped
+/// statuses (`approved`, `done`, `blocked`) and bare informational verbs
+/// (`announce`, `update`) fall under the wake-storm guard: silence is
+/// acknowledgment unless the agent has something substantive to add.
+pub fn signal_requires_reply(text: &str) -> bool {
     match signal::parse_signal(text) {
-        Some(sig) => matches!(sig.verb.as_str(), "question" | "request"),
+        Some(sig) => {
+            matches!(sig.verb.as_str(), "question" | "request")
+                || matches!(sig.status.as_deref(), Some("request" | "help"))
+        }
         None => false,
     }
 }
@@ -1467,6 +1473,52 @@ workdir = "/tmp"
         let reply_idx = prompt.find("REQUIRES A REPLY").expect("reply section");
         let info_idx = prompt.find("INFORMATIONAL").expect("info section");
         assert!(reply_idx < info_idx, "reply-required must come first");
+    }
+
+    #[test]
+    fn build_wake_prompt_treats_request_status_as_reply_required() {
+        // review:request -- a directed RFC review ask. Pre-fix this fell into
+        // INFORMATIONAL because the verb was `review`, not `question`/`request`.
+        // Real incident: smugglr asked platform to review an RFC, watch woke
+        // platform, prompt said "silence is acknowledgment", platform no-opped.
+        let signals = vec![
+            (
+                "id-rev".to_string(),
+                "@platform review:request {doc: rfc.md} -- review please".to_string(),
+                "smugglr".to_string(),
+            ),
+            (
+                "id-help".to_string(),
+                "@legion request:help -- need a hand".to_string(),
+                "kelex".to_string(),
+            ),
+            (
+                "id-ok".to_string(),
+                "@legion review:approved -- LGTM".to_string(),
+                "smugglr".to_string(),
+            ),
+        ];
+
+        let prompt = build_wake_prompt("platform", &signals);
+
+        assert!(prompt.contains("REQUIRES A REPLY"));
+        assert!(
+            prompt.contains("id-rev"),
+            "review:request must require reply"
+        );
+        assert!(
+            prompt.contains("id-help"),
+            "request:help must require reply"
+        );
+
+        // Approvals stay informational -- silence is acknowledgment.
+        assert!(prompt.contains("INFORMATIONAL"));
+        let reply_section = &prompt
+            [prompt.find("REQUIRES A REPLY").unwrap()..prompt.find("INFORMATIONAL").unwrap()];
+        assert!(
+            !reply_section.contains("id-ok"),
+            "review:approved must not require reply"
+        );
     }
 
     #[test]

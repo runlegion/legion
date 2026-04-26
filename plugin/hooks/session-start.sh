@@ -84,6 +84,21 @@ ${KANBAN}"
   fi
 fi
 
+# 4. Pending request-shaped signals -- directed asks waiting on a reply.
+# Surfaces with strong "REQUIRES A REPLY" framing so the additionalContext
+# system-reminder wrapper does not cause the agent to no-op the way platform
+# did on the smugglr-fence RFC review on 2026-04-26 (issue #318).
+PENDING=$("$LEGION" pending-replies --repo "$REPO" 2>>"$LOG")
+legion_check $? "pending-replies"
+if [ -n "$PENDING" ]; then
+  # Prepend so reply obligations land first in the context block.
+  if [ -n "$OUTPUT" ]; then
+    OUTPUT="${PENDING}"$'\n\n'"${OUTPUT}"
+  else
+    OUTPUT="$PENDING"
+  fi
+fi
+
 # Prepend warning block if any legion call failed
 WARN=$(legion_warnings_block)
 if [ -n "$WARN" ]; then

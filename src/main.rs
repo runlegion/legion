@@ -301,6 +301,18 @@ enum Commands {
         tags: Option<String>,
     },
 
+    /// Print a wake-prompt for pending request-shaped signals.
+    ///
+    /// Used by SessionStart hooks to surface directed questions/requests with
+    /// strong "REQUIRES A REPLY" framing that survives the additionalContext
+    /// system-reminder wrapper. Prints nothing (and exits 0) if there are no
+    /// pending reply-required signals targeting this repo.
+    PendingReplies {
+        /// Repository name (the recipient)
+        #[arg(long)]
+        repo: String,
+    },
+
     /// Read the bullpen or check for unread posts
     #[command(alias = "bp", alias = "board")]
     Bullpen {
@@ -2400,6 +2412,32 @@ fn run() -> error::Result<()> {
                 if n > 0 {
                     info!("[legion] embedded {} signals", n);
                 }
+            }
+        }
+        Commands::PendingReplies { repo } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            // Recipient is the agent name when configured via watch.toml,
+            // else the repo name. Fall back to repo for un-watched callers.
+            let recipient = watch::load_config(&base.join("watch.toml"))
+                .ok()
+                .and_then(|cfg| {
+                    cfg.repos
+                        .iter()
+                        .find(|r| r.name == repo)
+                        .map(|r| r.recipient().to_string())
+                })
+                .unwrap_or_else(|| repo.clone());
+
+            let signals = watch::find_pending_signals(&database, &repo, &recipient, None)?;
+            let reply_required: Vec<(String, String, String)> = signals
+                .into_iter()
+                .filter(|(_, text, _)| watch::signal_requires_reply(text))
+                .collect();
+
+            if !reply_required.is_empty() {
+                print!("{}", watch::build_wake_prompt(&repo, &reply_required));
             }
         }
         Commands::Boost { id } => {
