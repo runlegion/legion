@@ -352,6 +352,99 @@ fn whoami_subcommand_requires_repo() {
     assert!(!out.status.success());
 }
 
+#[test]
+fn whoami_subcommand_isolates_by_repo() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for (repo, text) in [("alpha", "alpha identity"), ("beta", "beta identity")] {
+        let out = legion_cmd(dir.path())
+            .args(["reflect", "--repo", repo, "--whoami", "--text", text])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    let out = legion_cmd(dir.path())
+        .args(["whoami", "--repo", "alpha"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("alpha identity"));
+    assert!(
+        !stdout.contains("beta identity"),
+        "whoami leaked beta identity into alpha repo: {stdout}"
+    );
+}
+
+#[test]
+fn whoami_subcommand_filters_to_identity_domain() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--whoami",
+            "--text",
+            "I am identity",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "plain non-identity reflection",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = legion_cmd(dir.path())
+        .args(["whoami", "--repo", "test"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("I am identity"));
+    assert!(
+        !stdout.contains("plain non-identity reflection"),
+        "whoami included non-identity reflection: {stdout}"
+    );
+}
+
+#[test]
+fn whoami_subcommand_respects_limit() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for i in 0..3 {
+        let text = format!("identity reflection {i}");
+        let out = legion_cmd(dir.path())
+            .args(["reflect", "--repo", "test", "--whoami", "--text", &text])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    let out = legion_cmd(dir.path())
+        .args(["whoami", "--repo", "test", "--limit", "1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let bullet_count = stdout.lines().filter(|l| l.starts_with("- ")).count();
+    assert_eq!(
+        bullet_count, 1,
+        "expected 1 bullet, got {bullet_count}: {stdout}"
+    );
+}
+
 /// Validate that a string looks like a UUIDv7 (36 chars, 4 hyphens).
 fn assert_uuid_format(s: &str) {
     let trimmed = s.trim();
