@@ -1,9 +1,11 @@
 #!/bin/bash
-# Legion PreCompact hook: block auto-compaction and prompt the model to run
-# /snooze then /clear. Auto-compaction is mechanical -- /snooze consolidates
-# the session into legion memory (boost, summary, bullpen), then /clear starts
-# fresh. The checkpoint reflection below is a safety net in case the block
-# is overridden.
+# Legion PreCompact hook: block auto-compaction and surface a message to the
+# user telling them to run /snooze then /clear. Per Claude Code's hook spec,
+# PreCompact's `reason` is shown to the USER, not the model -- so the text
+# below addresses the human operator, who decides what to do next.
+# See: https://code.claude.com/docs/en/hooks.md (Decision control table)
+# A safety-net checkpoint reflection is still written below in case the user
+# overrides the block; losing the checkpoint silently caused #209.
 
 # Hook subshells do not inherit the plugin bin dir on PATH -- only the Bash
 # tool does. Invoke via full CLAUDE_PLUGIN_ROOT path (fixes #204).
@@ -25,11 +27,13 @@ CHECKPOINT_MARKER="/tmp/legion-checkpoint-failed-${CWD_HASH}"
 # Extract recent assistant text from transcript JSONL as a safety-net checkpoint
 CONTEXT=""
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+  # Grab last 200 lines, pull assistant text content, keep last ~2000 chars
   CONTEXT=$(tail -200 "$TRANSCRIPT" 2>/dev/null | \
     jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text // empty' 2>/dev/null | \
     tail -c 2000)
 fi
 
+# Fallback: try alternate JSONL format
 if [ -z "$CONTEXT" ]; then
   CONTEXT=$(tail -200 "$TRANSCRIPT" 2>/dev/null | \
     jq -r 'select(.role == "assistant") | .content // empty' 2>/dev/null | \
@@ -40,16 +44,18 @@ if [ -z "$CONTEXT" ]; then
   CONTEXT="(no transcript context extracted)"
 fi
 
-# Safety-net checkpoint reflection in case the model bypasses the block.
-# See #209 -- losing a checkpoint silently is what caused the original incident.
+# Safety-net checkpoint reflection. See #209 -- losing a checkpoint silently
+# was the original incident this hook was built to prevent.
 if ! "$LEGION" reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>>"$LOG"; then
   touch "$CHECKPOINT_MARKER" 2>/dev/null
 else
+  # Previous run may have left a stale marker; clear it on successful reflect.
   rm -f "$CHECKPOINT_MARKER" 2>/dev/null
 fi
 
-# Block auto-compaction and direct the model to consolidate properly.
-jq -n '{
-  "decision": "block",
-  "reason": "Context is about to auto-compact, which loses everything not in the transcript tail. Do not let it. Run /snooze to consolidate this session into legion memory (review decisions, boost reflections that helped, write a domain=snooze summary the next session will recall, cross-pollinate to the bullpen), then run /clear to start fresh. A checkpoint reflection has been written as a fallback, but it is mechanical -- /snooze captures the why."
-}'
+# Block auto-compaction. PreCompact reason text goes to the user, not the
+# model, so this is a static heredoc -- no jq dependency, no failure path
+# that would silently let compaction proceed.
+cat <<'EOF'
+{"decision":"block","reason":"Auto-compaction would lose everything not in the transcript tail. Blocked. Run /snooze to consolidate this session into legion memory (boost reflections that helped, write a domain=snooze summary the next session will recall, cross-pollinate to the bullpen), then /clear to start fresh. A checkpoint reflection has been written as a fallback."}
+EOF
