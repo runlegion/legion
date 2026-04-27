@@ -1360,6 +1360,92 @@ fn chain_with_follows() {
 }
 
 #[test]
+fn chain_full_single_node_emits_one_boundary() {
+    // The identity-chain-load.sh hook (#345) counts boundary markers to
+    // decide whether to skip injection (single-node chains are redundant
+    // with the SessionStart banner). Lock the contract: lone-root chain
+    // emits exactly one `--- ` line.
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "kelex", "--text", "lone root"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args(["chain", "--id", &id, "--full"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let boundary_count = stdout.lines().filter(|l| l.starts_with("--- ")).count();
+    assert_eq!(
+        boundary_count, 1,
+        "single-node chain should emit exactly one boundary marker, got: {stdout}"
+    );
+}
+
+#[test]
+fn chain_full_emits_complete_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let long_text = "A".repeat(500);
+
+    let out = legion_cmd(dir.path())
+        .args(["reflect", "--repo", "kelex", "--text", &long_text])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let parent_id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let child_text = "B".repeat(400);
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "kelex",
+            "--text",
+            &child_text,
+            "--follows",
+            &parent_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let default_output = legion_cmd(dir.path())
+        .args(["chain", "--id", &parent_id])
+        .output()
+        .unwrap();
+    let default_stdout = String::from_utf8_lossy(&default_output.stdout);
+    assert!(
+        default_stdout.contains("..."),
+        "default chain output should show truncation ellipsis"
+    );
+    assert!(!default_stdout.contains(&long_text));
+
+    let full_output = legion_cmd(dir.path())
+        .args(["chain", "--id", &parent_id, "--full"])
+        .output()
+        .unwrap();
+    assert!(full_output.status.success());
+    let full_stdout = String::from_utf8_lossy(&full_output.stdout);
+    assert!(
+        full_stdout.contains(&long_text),
+        "--full should emit complete parent text"
+    );
+    assert!(
+        full_stdout.contains(&child_text),
+        "--full should emit complete child text"
+    );
+    assert!(
+        full_stdout.contains("--- "),
+        "--full should use the boundary marker between reflections"
+    );
+}
+
+#[test]
 fn boost_nonexistent_id() {
     let dir = tempfile::tempdir().unwrap();
 

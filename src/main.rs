@@ -260,6 +260,11 @@ enum Commands {
         /// Any reflection ID in the chain
         #[arg(long)]
         id: String,
+        /// Emit full reflection text instead of the 80-char preview. Used by
+        /// hooks that inject chain content into agent context, where the
+        /// truncated visualization is insufficient.
+        #[arg(long)]
+        full: bool,
     },
 
     /// Send a structured signal to another agent
@@ -2461,13 +2466,29 @@ fn run() -> error::Result<()> {
                 eprintln!("[legion] reflection not found: {}", id);
             }
         }
-        Commands::Chain { id } => {
+        Commands::Chain { id, full } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
 
             let chain = database.get_chain(&id)?;
             if chain.is_empty() {
                 info!("[legion] no chain found for {}", id);
+            } else if full {
+                // Boundary marker `--- ` is parsed by the
+                // identity-chain-load.sh UserPromptSubmit hook (#345) to
+                // count chain links. Do not change the prefix without
+                // updating the hook script.
+                for r in &chain {
+                    let date = db::format_date(&r.created_at);
+                    let domain_tag = r
+                        .domain
+                        .as_deref()
+                        .map(|d| format!(" [{}]", d))
+                        .unwrap_or_default();
+                    println!("--- {} {}{} (id: {}) ---", r.repo, date, domain_tag, r.id);
+                    println!("{}", r.text);
+                    println!();
+                }
             } else {
                 for (i, r) in chain.iter().enumerate() {
                     let prefix = if i == 0 {

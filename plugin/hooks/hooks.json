@@ -152,6 +152,17 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/identity-chain-load.sh",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [
