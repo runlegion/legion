@@ -852,23 +852,24 @@ impl Database {
         Ok(chain)
     }
 
-    /// True if this reflection participates in a chain -- either it has a
-    /// parent or at least one child. Used by `whoami` to decide whether to
-    /// surface a `legion chain --id <id>` pointer without forcing callers to
-    /// walk the full chain.
+    /// True if this reflection (live, not soft-deleted) participates in a
+    /// chain -- either it has a parent or at least one live child. Used by
+    /// `whoami` to decide whether to surface a `legion chain --id <id>`
+    /// pointer without forcing callers to walk the full chain.
     pub fn is_in_chain(&self, id: &str) -> Result<bool> {
         let row: Option<i64> = self
             .conn
             .query_row(
-                "SELECT 1 FROM reflections WHERE id = ?1 AND parent_id IS NOT NULL AND deleted_at IS NULL",
+                "SELECT 1 FROM reflections r \
+                 WHERE r.id = ?1 AND r.deleted_at IS NULL \
+                   AND (r.parent_id IS NOT NULL \
+                        OR EXISTS (SELECT 1 FROM reflections c \
+                                   WHERE c.parent_id = r.id AND c.deleted_at IS NULL))",
                 [id],
                 |row| row.get(0),
             )
             .optional()?;
-        if row.is_some() {
-            return Ok(true);
-        }
-        Ok(self.find_child(id)?.is_some())
+        Ok(row.is_some())
     }
 
     /// Find the child reflection that follows the given parent ID.

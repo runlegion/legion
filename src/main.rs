@@ -2634,7 +2634,7 @@ fn run() -> error::Result<()> {
             if result.reflections.is_empty() {
                 return Ok(());
             }
-            println!("=== WHO YOU ARE -- READ THIS ===");
+            println!("{}", recall::WHOAMI_BANNER_OPEN);
             println!("[Legion] Identity for {repo}:");
             for r in &result.reflections {
                 println!("- {} (id: {})", r.text, r.id);
@@ -2642,7 +2642,7 @@ fn run() -> error::Result<()> {
                     println!("  \u{21b3} chain context: legion chain --id {}", r.id);
                 }
             }
-            println!("=== END IDENTITY ===");
+            println!("{}", recall::WHOAMI_BANNER_CLOSE);
         }
         Commands::Stats { repo } => {
             let base = data_dir()?;
