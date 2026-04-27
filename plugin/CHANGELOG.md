@@ -1,5 +1,20 @@
 # Legion Changelog
 
+## 0.9.8
+
+Boot-context cleanup release. Sampled rafters' SessionStart shape and discovered identity was being drowned under 100KB of pending-reply framing, the Stop hook was prompting reflections on prose-only Q&A sessions, and the legion project CLAUDE.md was 290 lines of reference material every session re-read. All addressed.
+
+### New
+
+- **`/legion:migrate-memory` skill** (#339): walks the agent's auto-memory directory (`~/.claude/projects/<encoded-cwd>/memory/`), categorizes each file by prefix and content, and proposes a migration plan into legion reflections (identity / regular / snooze / reference) plus a /tmp/ proposals file for technical invariants. Default `--dry-run`. CLAUDE.md never auto-written. `user_*` files never touched. Frame: "this is so you can live on any node" -- auto-memory binds you to one laptop; legion reflections sync via the cluster.
+- **PostToolUse `mark-work.sh` hook**: touches `/tmp/legion-work-<md5(cwd)>` on actual tool use. The Stop hook's reflect prompt now fires only when the session did real work; prose-only Q&A sessions skip it.
+
+### Changed
+
+- **SessionStart identity-first ordering** (#338, #340): additionalContext now leads with the whoami banner, then pending-replies, then snooze, then kanban. Rafters has a 600-word first-person identity chain that shipped in v0.9.7 but was buried under pending-reply framing on a fresh session, so the agent defaulted to generic Claude prose. Identity informs the reply voice -- it has to land first.
+- **Pending-replies cap**: `build_wake_prompt` truncates each bucket (10 reply-required, 5 informational) with a tail line pointing at `legion bullpen --signals`. Caps prevent the SessionStart block from being drowned by deep backlogs (rafters' pending block was 100KB pre-cap).
+- **Project CLAUDE.md trim**: legion's own CLAUDE.md from 290 -> 38 lines. Architecture, command catalog, hook integration, project layout, phase plan all moved to docs/site/ -- recall on demand instead of every-session dump. Identity prose, voice, doctrine, and universal rules live in identity reflections (whoami banner) per the new doctrine. Dogfood pass for the broader 12-repo trim.
+
 ## 0.9.7
 
 Session-boundary release. Auto-compaction was silently dropping consolidation work, and the SessionStart identity block was easy to skim past. Both fixed.
