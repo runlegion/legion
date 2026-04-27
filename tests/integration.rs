@@ -445,6 +445,86 @@ fn whoami_subcommand_respects_limit() {
     );
 }
 
+#[test]
+fn whoami_subcommand_emits_banner_and_chain_pointer() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Standalone identity reflection -- no chain.
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--whoami",
+            "--text",
+            "standalone identity",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Chain head: identity reflection plus a follow-up that links via --follows.
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--whoami",
+            "--text",
+            "chained identity",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let head_id = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "reflect",
+            "--repo",
+            "test",
+            "--text",
+            "follow-up reflection",
+            "--follows",
+            &head_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "follow-up reflect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = legion_cmd(dir.path())
+        .args(["whoami", "--repo", "test"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+
+    assert!(
+        stdout.contains("=== WHO YOU ARE -- READ THIS ==="),
+        "missing opening banner: {stdout}"
+    );
+    assert!(
+        stdout.contains("=== END IDENTITY ==="),
+        "missing closing banner: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("legion chain --id {head_id}")),
+        "missing chain pointer for chain head {head_id}: {stdout}"
+    );
+    let chain_lines = stdout
+        .lines()
+        .filter(|l| l.contains("legion chain --id"))
+        .count();
+    assert_eq!(
+        chain_lines, 1,
+        "expected exactly one chain pointer (only the chained reflection), got {chain_lines}: {stdout}"
+    );
+}
+
 /// Validate that a string looks like a UUIDv7 (36 chars, 4 hyphens).
 fn assert_uuid_format(s: &str) {
     let trimmed = s.trim();

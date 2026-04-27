@@ -2634,10 +2634,15 @@ fn run() -> error::Result<()> {
             if result.reflections.is_empty() {
                 return Ok(());
             }
+            println!("=== WHO YOU ARE -- READ THIS ===");
             println!("[Legion] Identity for {repo}:");
             for r in &result.reflections {
                 println!("- {} (id: {})", r.text, r.id);
+                if database.is_in_chain(&r.id)? {
+                    println!("  \u{21b3} chain context: legion chain --id {}", r.id);
+                }
             }
+            println!("=== END IDENTITY ===");
         }
         Commands::Stats { repo } => {
             let base = data_dir()?;

@@ -53,8 +53,8 @@ fi
 
 OUTPUT=""
 
-# 1. Identity -- who am I
-IDENTITY=$("$LEGION" whoami --repo "$REPO" --limit 1 2>>"$LOG")
+# 1. Identity -- who am I (front and center, banner-wrapped by the binary)
+IDENTITY=$("$LEGION" whoami --repo "$REPO" --limit 5 2>>"$LOG")
 legion_check $? "whoami"
 if [ -n "$IDENTITY" ]; then
   OUTPUT="$IDENTITY"
