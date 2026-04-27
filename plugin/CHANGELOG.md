@@ -1,5 +1,22 @@
 # Legion Changelog
 
+## 0.9.9
+
+Identity-chain delivery release. The chain-based identity migration that landed in v0.9.8 had a sharp edge: pushing all doctrine into the identity domain made `legion whoami` eagerly dump everything, ballooning the SessionStart banner from a few KB to 21.8KB on a fully-migrated repo. The harness persisted the overflow to disk and inlined only a 2KB head preview, silently dropping doctrines past the cutoff -- the exact failure mode the banner was built to prevent. Both halves of the fix ship here.
+
+### New
+
+- **UserPromptSubmit hook lazy-loads identity chain** (#345, #347): new `plugin/hooks/identity-chain-load.sh` finds the newest identity reflection on first prompt of a session, walks the chain via `legion chain --id <root> --full`, and injects the full content as additionalContext. Idempotent via per-session sentinel under `${XDG_CACHE_HOME:-$HOME/.cache}/legion/`. Single-node chains skip injection (already in the banner). Always exits 0 so a degraded legion never blocks user prompts. The chain pays for itself once per session, when the agent actually starts working -- not at boot.
+- **`legion chain --full`** (#345): emits complete reflection text instead of the 80-char truncation default. Used by the UserPromptSubmit hook for context injection. Default behavior unchanged for human eyeballing.
+
+### Changed
+
+- **`legion whoami` capped at 2KB, surfaces only chain roots** (#342, #344): new `db::get_identity_roots(repo, limit)` selects identity reflections where `parent_id IS NULL` (chain roots and orphans). Chain children stay reachable via `legion chain --id <root>`; they don't need to be inlined in the boot banner. New `recall::format_whoami` pure formatter caps total output at 2048 bytes -- accumulates entries until the next would push past the cap, then emits a `(N more identity reflections truncated; recall via legion recall --repo <r> --domain identity)` pointer and stops. First entry always emitted regardless of size (partial identity beats absent identity). Verified live: 21.8KB -> 2.3KB on the legion repo.
+
+### Pattern delivered
+
+Push minimal, pull deep. SessionStart banner stays slim and always inlines. UserPromptSubmit pulls the deep doctrine on first prompt, once per session. Subsequent prompts pay nothing. This shape generalizes for any expensive context that isn't always needed.
+
 ## 0.9.8
 
 Boot-context cleanup release. Sampled rafters' SessionStart shape and discovered identity was being drowned under 100KB of pending-reply framing, the Stop hook was prompting reflections on prose-only Q&A sessions, and the legion project CLAUDE.md was 290 lines of reference material every session re-read. All addressed.
