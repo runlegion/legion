@@ -2628,21 +2628,42 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Whoami { repo, limit } => {
+            const WHOAMI_BYTE_CAP: usize = 2048;
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
-            let result = recall::recall_by_domain(&database, &repo, "identity", limit)?;
-            if result.reflections.is_empty() {
+            let roots = database.get_identity_roots(&repo, limit)?;
+            if roots.is_empty() {
                 return Ok(());
             }
-            println!("{}", recall::WHOAMI_BANNER_OPEN);
-            println!("[Legion] Identity for {repo}:");
-            for r in &result.reflections {
-                println!("- {} (id: {})", r.text, r.id);
-                if database.is_in_chain(&r.id)? {
-                    println!("  \u{21b3} chain context: legion chain --id {}", r.id);
+            let header = format!(
+                "{}\n[Legion] Identity for {repo}:\n",
+                recall::WHOAMI_BANNER_OPEN
+            );
+            let footer = format!("{}\n", recall::WHOAMI_BANNER_CLOSE);
+            let mut buf = String::new();
+            buf.push_str(&header);
+            let mut emitted = 0usize;
+            for r in &roots {
+                let chain_line = if database.is_in_chain(&r.id)? {
+                    format!("  \u{21b3} chain context: legion chain --id {}\n", r.id)
+                } else {
+                    String::new()
+                };
+                let entry = format!("- {} (id: {})\n{}", r.text, r.id, chain_line);
+                if buf.len() + entry.len() + footer.len() > WHOAMI_BYTE_CAP && emitted > 0 {
+                    break;
                 }
+                buf.push_str(&entry);
+                emitted += 1;
             }
-            println!("{}", recall::WHOAMI_BANNER_CLOSE);
+            let remaining = roots.len().saturating_sub(emitted);
+            if remaining > 0 {
+                buf.push_str(&format!(
+                    "- ({remaining} more identity reflections truncated; recall via `legion recall --repo {repo} --domain identity`)\n"
+                ));
+            }
+            buf.push_str(&footer);
+            print!("{buf}");
         }
         Commands::Stats { repo } => {
             let base = data_dir()?;
