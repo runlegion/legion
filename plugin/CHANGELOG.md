@@ -1,5 +1,17 @@
 # Legion Changelog
 
+## 0.9.10
+
+CI maintenance release. Node 20 reaches EOL April 2026 and GitHub Actions runners default to Node 24 starting June 2, 2026; the bump uncovered a phantom submodule entry that had been quietly poisoning the index since #214.
+
+### Changed
+
+- **GitHub Actions bumped to Node 24-targeting versions** (#349): \`actions/checkout@v4 -> v5\`, \`actions/upload-artifact@v4 -> v6\`, \`actions/download-artifact@v4 -> v7\`, \`softprops/action-gh-release@v2 -> v3\`. \`Swatinem/rust-cache@v2\` floats; already on Node 24 via v2.9.0. Each action versions independently -- the first-Node-24 major differs per action and they cannot be assumed in lockstep.
+
+### Fixed
+
+- **Phantom submodule entry blocking checkout@v5 cleanup** (#350): \`.claude/worktrees/agent-a564c870\` was committed at gitlink mode 160000 in #214 with no entry in \`.gitmodules\`. \`checkout@v4\` ignored the inconsistency; \`checkout@v5\`'s post-job submodule deinit failed with \"No url found for submodule path\" on Windows runners. Untracked the phantom and added \`.claude/worktrees/\` to \`.gitignore\` so the Task tool's worktree isolation mode cannot reintroduce the same problem.
+
 ## 0.9.9
 
 Identity-chain delivery release. The chain-based identity migration that landed in v0.9.8 had a sharp edge: pushing all doctrine into the identity domain made `legion whoami` eagerly dump everything, ballooning the SessionStart banner from a few KB to 21.8KB on a fully-migrated repo. The harness persisted the overflow to disk and inlined only a 2KB head preview, silently dropping doctrines past the cutoff -- the exact failure mode the banner was built to prevent. Both halves of the fix ship here.
