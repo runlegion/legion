@@ -1177,6 +1177,22 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Retrieve identity reflections that are chain roots or orphans for
+    /// `whoami`. Excludes reflections with a `parent_id` (chain children),
+    /// because their content is reachable via `legion chain --id <root>`
+    /// and including them would bloat the whoami banner past the inline
+    /// context budget. Ordered newest first.
+    pub fn get_identity_roots(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE repo = ?1 AND domain = 'identity' AND parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![repo, limit], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     /// Retrieve active (non-archived) bullpen posts, ordered newest first.
     pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
@@ -3865,6 +3881,93 @@ mod tests {
         let from_middle = db.get_chain(&second.id).unwrap();
         assert_eq!(from_middle.len(), 3);
         assert_eq!(from_middle[0].id, first.id);
+    }
+
+    #[test]
+    fn get_identity_roots_excludes_chain_children() {
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "root identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let _child = db
+            .insert_reflection_with_meta(
+                "legion",
+                "chain child identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    parent_id: Some(root.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let orphan = db
+            .insert_reflection_with_meta(
+                "legion",
+                "orphan identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        let ids: Vec<&str> = roots.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(roots.len(), 2);
+        assert!(ids.contains(&root.id.as_str()));
+        assert!(ids.contains(&orphan.id.as_str()));
+    }
+
+    #[test]
+    fn get_identity_roots_filters_by_repo_and_domain() {
+        let db = test_db();
+        let _other_domain = db
+            .insert_reflection_with_meta(
+                "legion",
+                "not identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("architecture".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let _other_repo = db
+            .insert_reflection_with_meta(
+                "kelex",
+                "wrong repo",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let target = db
+            .insert_reflection_with_meta(
+                "legion",
+                "right one",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, target.id);
     }
 
     #[test]

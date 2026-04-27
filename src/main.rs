@@ -2630,19 +2630,21 @@ fn run() -> error::Result<()> {
         Commands::Whoami { repo, limit } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
-            let result = recall::recall_by_domain(&database, &repo, "identity", limit)?;
-            if result.reflections.is_empty() {
+            let roots = database.get_identity_roots(&repo, limit)?;
+            if roots.is_empty() {
                 return Ok(());
             }
-            println!("{}", recall::WHOAMI_BANNER_OPEN);
-            println!("[Legion] Identity for {repo}:");
-            for r in &result.reflections {
-                println!("- {} (id: {})", r.text, r.id);
-                if database.is_in_chain(&r.id)? {
-                    println!("  \u{21b3} chain context: legion chain --id {}", r.id);
-                }
+            let mut entries = Vec::with_capacity(roots.len());
+            for r in roots {
+                let in_chain = database.is_in_chain(&r.id)?;
+                entries.push(recall::WhoamiEntry {
+                    id: r.id,
+                    text: r.text,
+                    in_chain,
+                });
             }
-            println!("{}", recall::WHOAMI_BANNER_CLOSE);
+            let output = recall::format_whoami(&repo, &entries);
+            print!("{output}");
         }
         Commands::Stats { repo } => {
             let base = data_dir()?;

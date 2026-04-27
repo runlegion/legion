@@ -17,6 +17,57 @@ const COSINE_MIN_THRESHOLD: f32 = 0.3;
 pub const WHOAMI_BANNER_OPEN: &str = "=== WHO YOU ARE -- READ THIS ===";
 pub const WHOAMI_BANNER_CLOSE: &str = "=== END IDENTITY ===";
 
+/// Soft byte budget for `legion whoami` output. Sized for the SessionStart
+/// inline context window -- larger payloads are truncated by the harness to
+/// a 2KB preview, which silently drops doctrines past the cutoff. Keeping
+/// the whole banner under this budget guarantees nothing is dropped.
+pub const WHOAMI_BYTE_CAP: usize = 2048;
+
+/// A single entry passed to `format_whoami`. The flag indicates whether
+/// the reflection has chain context worth pointing the reader at.
+pub struct WhoamiEntry {
+    pub id: String,
+    pub text: String,
+    pub in_chain: bool,
+}
+
+/// Render the whoami banner from the supplied identity reflections, capped at
+/// `WHOAMI_BYTE_CAP` bytes total. Iterates entries in order; each entry is
+/// emitted in full if its addition keeps the buffer (plus footer) under the
+/// cap. The first entry is always emitted regardless of size to avoid an
+/// empty banner -- a single oversized root is preferable to silent absence.
+/// Remaining entries are summarized with a recall pointer.
+pub fn format_whoami(repo: &str, entries: &[WhoamiEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let header = format!("{WHOAMI_BANNER_OPEN}\n[Legion] Identity for {repo}:\n");
+    let footer = format!("{WHOAMI_BANNER_CLOSE}\n");
+    let mut buf = header;
+    let mut emitted = 0usize;
+    for entry in entries {
+        let chain_line = if entry.in_chain {
+            format!("  \u{21b3} chain context: legion chain --id {}\n", entry.id)
+        } else {
+            String::new()
+        };
+        let body = format!("- {} (id: {})\n{}", entry.text, entry.id, chain_line);
+        if buf.len() + body.len() + footer.len() > WHOAMI_BYTE_CAP && emitted > 0 {
+            break;
+        }
+        buf.push_str(&body);
+        emitted += 1;
+    }
+    let remaining = entries.len().saturating_sub(emitted);
+    if remaining > 0 {
+        buf.push_str(&format!(
+            "- ({remaining} more identity reflections truncated; recall via `legion recall --repo {repo} --domain identity`)\n"
+        ));
+    }
+    buf.push_str(&footer);
+    buf
+}
+
 /// A set of recalled reflections matching a query, optionally scoped to a single repo.
 #[derive(Debug, serde::Serialize)]
 pub struct RecallResult {
@@ -1094,6 +1145,75 @@ mod tests {
             result.reflections.is_empty(),
             "orthogonal vector should be filtered by min_score 0.5"
         );
+    }
+
+    fn entry(id: &str, text: &str, in_chain: bool) -> WhoamiEntry {
+        WhoamiEntry {
+            id: id.to_string(),
+            text: text.to_string(),
+            in_chain,
+        }
+    }
+
+    #[test]
+    fn format_whoami_empty_returns_empty() {
+        assert_eq!(format_whoami("legion", &[]), "");
+    }
+
+    #[test]
+    fn format_whoami_single_short_entry_fits() {
+        let out = format_whoami("legion", &[entry("abc", "hi", false)]);
+        assert!(out.starts_with(WHOAMI_BANNER_OPEN));
+        assert!(out.contains("- hi (id: abc)"));
+        assert!(out.trim_end().ends_with(WHOAMI_BANNER_CLOSE));
+        assert!(!out.contains("truncated"));
+    }
+
+    #[test]
+    fn format_whoami_emits_chain_pointer_when_in_chain() {
+        let out = format_whoami("legion", &[entry("abc", "hi", true)]);
+        assert!(out.contains("legion chain --id abc"));
+    }
+
+    #[test]
+    fn format_whoami_skips_chain_pointer_when_not_in_chain() {
+        let out = format_whoami("legion", &[entry("abc", "hi", false)]);
+        assert!(!out.contains("legion chain --id"));
+    }
+
+    #[test]
+    fn format_whoami_caps_output_under_budget_with_truncation_pointer() {
+        let big = "x".repeat(800);
+        let entries: Vec<WhoamiEntry> = (0..5)
+            .map(|i| entry(&format!("id{i}"), &big, false))
+            .collect();
+        let out = format_whoami("legion", &entries);
+        assert!(out.contains("more identity reflections truncated"));
+        assert!(
+            out.len() < WHOAMI_BYTE_CAP + 200,
+            "output {} bytes should be near the cap",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn format_whoami_always_emits_first_entry_even_if_oversized() {
+        let huge = "x".repeat(WHOAMI_BYTE_CAP * 2);
+        let out = format_whoami("legion", &[entry("solo", &huge, false)]);
+        assert!(out.contains("solo"));
+        assert!(out.contains(WHOAMI_BANNER_OPEN));
+        assert!(out.contains(WHOAMI_BANNER_CLOSE));
+        assert!(!out.contains("truncated"));
+    }
+
+    #[test]
+    fn format_whoami_truncation_pointer_includes_repo() {
+        let big = "x".repeat(800);
+        let entries: Vec<WhoamiEntry> = (0..5)
+            .map(|i| entry(&format!("id{i}"), &big, false))
+            .collect();
+        let out = format_whoami("kelex", &entries);
+        assert!(out.contains("legion recall --repo kelex --domain identity"));
     }
 
     #[test]
