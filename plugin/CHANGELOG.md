@@ -1,5 +1,14 @@
 # Legion Changelog
 
+## 0.9.7
+
+Session-boundary release. Auto-compaction was silently dropping consolidation work, and the SessionStart identity block was easy to skim past. Both fixed.
+
+### Changed
+
+- **PreCompact blocks auto-compaction** (#329, #330): The `precompact.sh` hook now emits `{decision: block, reason: ...}` to halt auto-compaction and surface a message telling the operator to run `/snooze` then `/clear`. Auto-compaction is mechanical -- it drops everything not in the transcript tail. `/snooze` does real consolidation: boost reflections that helped, write a domain=snooze summary the next session recalls, cross-pollinate to the bullpen. The transcript-tail checkpoint reflection stays as a safety net (#209 invariant preserved). Static heredoc replaces `jq -n` so the block decision cannot silently fail if jq is missing.
+- **SessionStart whoami front-and-center** (#331, #336): `legion whoami` output is now wrapped in a `=== WHO YOU ARE -- READ THIS ===` banner so identity is visually unmissable. Same framing pattern that fixed #318's reply ghosting. Identity reflections that participate in a learning chain (`parent_id` set or live descendants) get a `legion chain --id <id>` pointer appended so agents discover their chains at startup. SessionStart hook bumps `whoami --limit` from 1 to 5 so the full picture lands. New `Database::is_in_chain` is a single soft-delete-safe query.
+
 ## 0.9.6
 
 Identity-affordance release. Agents intuitively reach for `legion whoami` at session start; this release makes the command real and routes the SessionStart hook through it for a clearer header.
