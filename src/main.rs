@@ -2634,10 +2634,15 @@ fn run() -> error::Result<()> {
             if result.reflections.is_empty() {
                 return Ok(());
             }
+            println!("{}", recall::WHOAMI_BANNER_OPEN);
             println!("[Legion] Identity for {repo}:");
             for r in &result.reflections {
                 println!("- {} (id: {})", r.text, r.id);
+                if database.is_in_chain(&r.id)? {
+                    println!("  \u{21b3} chain context: legion chain --id {}", r.id);
+                }
             }
+            println!("{}", recall::WHOAMI_BANNER_CLOSE);
         }
         Commands::Stats { repo } => {
             let base = data_dir()?;

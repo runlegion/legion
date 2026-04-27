@@ -11,6 +11,12 @@ use crate::search::{SearchIndex, SearchResult};
 /// Prevents noise from weak semantic matches when BM25 found nothing.
 const COSINE_MIN_THRESHOLD: f32 = 0.3;
 
+/// Banner that wraps `legion whoami` output. Identity is the first thing an
+/// agent sees on session start, and the banner is what makes it impossible
+/// to skim past.
+pub const WHOAMI_BANNER_OPEN: &str = "=== WHO YOU ARE -- READ THIS ===";
+pub const WHOAMI_BANNER_CLOSE: &str = "=== END IDENTITY ===";
+
 /// A set of recalled reflections matching a query, optionally scoped to a single repo.
 #[derive(Debug, serde::Serialize)]
 pub struct RecallResult {
