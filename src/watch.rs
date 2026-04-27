@@ -671,6 +671,13 @@ pub fn signal_requires_reply(text: &str) -> bool {
     }
 }
 
+/// Maximum reply-required signals rendered inline in the wake prompt; the
+/// rest collapse into a tail line pointing at `legion bullpen --signals`.
+/// Caps prevent the SessionStart additionalContext block from being drowned
+/// by deep backlogs (rafters' pending block was 100KB pre-cap).
+const PENDING_REPLY_CAP: usize = 10;
+const PENDING_INFORMATIONAL_CAP: usize = 5;
+
 /// Build the prompt context for a woken agent from pending signals.
 ///
 /// Signals are split into two buckets:
@@ -689,15 +696,22 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
         repo_name
     );
 
-    let mut append_section = |header: &str, bucket: &[&(String, String, String)]| {
+    let mut append_section = |header: &str, bucket: &[&(String, String, String)], cap: usize| {
         if bucket.is_empty() {
             return;
         }
         prompt.push('\n');
         prompt.push_str(header);
         prompt.push_str("\n\n");
-        for (id, text, from_repo) in bucket {
+        for (id, text, from_repo) in bucket.iter().take(cap) {
             prompt.push_str(&format!("- [from {}] {} (id: {})\n", from_repo, text, id));
+        }
+        if bucket.len() > cap {
+            let extra = bucket.len() - cap;
+            prompt.push_str(&format!(
+                "- ... and {} more. Run `legion bullpen --repo {} --signals` to see them all.\n",
+                extra, repo_name
+            ));
         }
     };
 
@@ -707,6 +721,7 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
          or \"handing to X\". Silence on a directed question is ghosting, not \
          acknowledgment. A short refusal is a valid reply; no reply is not.",
         &must_reply,
+        PENDING_REPLY_CAP,
     );
 
     append_section(
@@ -715,6 +730,7 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
          a concern, dissent, or an action item. Empty acknowledgments like \
          \"acknowledged, no action needed\" waste tokens and trigger wake storms.",
         &informational,
+        PENDING_INFORMATIONAL_CAP,
     );
 
     prompt.push_str(
@@ -1518,6 +1534,55 @@ workdir = "/tmp"
         assert!(
             !reply_section.contains("id-ok"),
             "review:approved must not require reply"
+        );
+    }
+
+    #[test]
+    fn build_wake_prompt_caps_long_buckets() {
+        // 15 reply-required questions: cap is 10, expect 10 rendered + tail.
+        let questions: Vec<(String, String, String)> = (0..15)
+            .map(|i| {
+                (
+                    format!("id-q-{i}"),
+                    format!("@legion question: thing {i}?"),
+                    "rafters".to_string(),
+                )
+            })
+            .collect();
+        let prompt = build_wake_prompt("legion", &questions);
+        let rendered = prompt.matches("(id: id-q-").count();
+        assert_eq!(
+            rendered, PENDING_REPLY_CAP,
+            "expected exactly {PENDING_REPLY_CAP} rendered ids, got {rendered}: {prompt}"
+        );
+        assert!(
+            prompt.contains("... and 5 more"),
+            "expected tail line for 5 overflow signals: {prompt}"
+        );
+        assert!(
+            prompt.contains("legion bullpen --repo legion --signals"),
+            "tail should point at bullpen --signals: {prompt}"
+        );
+
+        // 8 informational announcements: cap is 5.
+        let announcements: Vec<(String, String, String)> = (0..8)
+            .map(|i| {
+                (
+                    format!("id-a-{i}"),
+                    format!("@all announce: thing {i}"),
+                    "rafters".to_string(),
+                )
+            })
+            .collect();
+        let prompt = build_wake_prompt("legion", &announcements);
+        let rendered = prompt.matches("(id: id-a-").count();
+        assert_eq!(
+            rendered, PENDING_INFORMATIONAL_CAP,
+            "expected exactly {PENDING_INFORMATIONAL_CAP} rendered ids, got {rendered}: {prompt}"
+        );
+        assert!(
+            prompt.contains("... and 3 more"),
+            "expected tail line for 3 overflow announcements: {prompt}"
         );
     }
 

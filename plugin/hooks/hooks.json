@@ -151,6 +151,17 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/mark-work.sh",
+            "timeout": 3
+          }
+        ]
+      }
     ]
   }
 }
