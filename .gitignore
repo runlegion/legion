@@ -8,3 +8,9 @@ node_modules/
 
 # Runtime artifacts written by bin/legion wrapper or setup-binary.sh
 plugin/.legion-binary-path
+
+# Agent worktrees created by the Task tool's worktree isolation mode.
+# These contain .git references back to the parent and must never be
+# committed -- a stray gitlink mode 160000 entry will break checkout@v5
+# submodule cleanup on Windows runners.
+.claude/worktrees/
