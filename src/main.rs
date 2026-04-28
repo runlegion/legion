@@ -207,13 +207,22 @@ enum Commands {
 
     /// Search reflections across all repos for cross-agent consultation
     Consult {
-        /// Context describing the problem to search for
+        /// Context describing the problem to search for (BM25 path).
+        /// Either --context, --symbol, or both must be provided.
         #[arg(long)]
-        context: String,
+        context: Option<String>,
 
-        /// Maximum number of reflections to return
+        /// Symbol name to look up across every indexed repo via SCIP (#285).
+        #[arg(long)]
+        symbol: Option<String>,
+
+        /// Maximum number of reflections (BM25) and symbol rows returned.
         #[arg(long, default_value = "3")]
         limit: usize,
+
+        /// Emit JSON output (combines BM25 + symbol sections under top-level keys).
+        #[arg(long)]
+        json: bool,
     },
 
     /// Configure Claude Code hooks for legion
@@ -2579,20 +2588,88 @@ fn run() -> error::Result<()> {
                 }
             }
         }
-        Commands::Consult { context, limit } => {
+        Commands::Consult {
+            context,
+            symbol,
+            limit,
+            json,
+        } => {
+            if context.is_none() && symbol.is_none() {
+                return Err(error::LegionError::WatchConfig(
+                    "consult requires --context, --symbol, or both".to_string(),
+                ));
+            }
+
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
-            let index = search::SearchIndex::open(&base.join("index"))?;
+            let watch_path = base.join("watch.toml");
 
-            let result = match try_load_embed_model() {
-                Some(model) => recall::consult(&database, &index, &model, &context, limit)?,
-                None => recall::consult_bm25(&database, &index, &context, limit)?,
-            };
-            let output = recall::format_for_consult(&result);
-            if output.is_empty() {
-                info!("[legion] no reflections matched context: \"{}\"", context);
+            let bm25 = if let Some(ctx) = context.as_deref() {
+                let index = search::SearchIndex::open(&base.join("index"))?;
+                let result = match try_load_embed_model() {
+                    Some(model) => recall::consult(&database, &index, &model, ctx, limit)?,
+                    None => recall::consult_bm25(&database, &index, ctx, limit)?,
+                };
+                Some((ctx.to_string(), result))
             } else {
-                print!("{output}");
+                None
+            };
+
+            let symbol_rows = if let Some(name) = symbol.as_deref() {
+                let repos = watch::list_repos_in_config(&watch_path)
+                    .ok()
+                    .map(|rs| rs.into_iter().map(|r| r.name).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let mut rows = sym::cross_repo_symbol_query(&database, name, &repos)?;
+                rows.truncate(limit);
+                Some((name.to_string(), rows))
+            } else {
+                None
+            };
+
+            if json {
+                let bm25_text = bm25.as_ref().map(|(_ctx, r)| recall::format_for_consult(r));
+                let body = serde_json::json!({
+                    "bm25_text": bm25_text,
+                    "symbol_results": symbol_rows.as_ref().map(|(_n, rows)| rows),
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string(&body).map_err(|e| error::LegionError::Search(
+                        format!("serialize consult: {e}")
+                    ))?
+                );
+            } else {
+                if let Some((ctx, result)) = bm25.as_ref() {
+                    let output = recall::format_for_consult(result);
+                    if output.is_empty() {
+                        info!("[legion] no reflections matched context: \"{}\"", ctx);
+                    } else {
+                        println!("## BM25 results for `{ctx}`");
+                        print!("{output}");
+                    }
+                }
+                if let Some((name, rows)) = symbol_rows.as_ref() {
+                    if rows.is_empty() {
+                        println!("## Symbol results for `{name}`");
+                        println!(
+                            "no SCIP indexes contain `{name}`; run `legion index <repo>` to build one"
+                        );
+                    } else {
+                        println!();
+                        println!("## Symbol results for `{name}`");
+                        for r in rows {
+                            let def_str = match &r.def_location {
+                                Some(loc) => format!("{}:{}", loc.file, loc.line),
+                                None => "(no definition found)".to_string(),
+                            };
+                            println!(
+                                "{} ({}): {}  [{} refs]",
+                                r.repo, r.lang, def_str, r.refs_count
+                            );
+                        }
+                    }
+                }
             }
         }
         Commands::Post {
