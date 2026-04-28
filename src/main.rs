@@ -386,14 +386,21 @@ enum Commands {
     /// file is re-indexed (#280). Repo is resolved by longest-prefix
     /// match against watch.toml workdirs when omitted.
     Index {
-        /// Repo name (looked up in watch.toml). Optional when --file is
-        /// used and the path is unambiguous.
-        #[arg(required_unless_present = "file")]
+        /// Repo name (looked up in watch.toml). Optional when --file or
+        /// --status is given.
+        #[arg(required_unless_present_any = ["file", "status"])]
         repo: Option<String>,
         /// Re-index only the language for this single file (absolute or
         /// repo-relative path).
         #[arg(long)]
         file: Option<std::path::PathBuf>,
+        /// Print background index job status from the local store
+        /// instead of running a fresh index (#284).
+        #[arg(long)]
+        status: bool,
+        /// Emit JSON output (currently only meaningful with --status).
+        #[arg(long)]
+        json: bool,
     },
 
     /// Rebuild the search index from the database
@@ -1721,6 +1728,60 @@ fn run_sym(action: SymAction) -> error::Result<()> {
     Ok(())
 }
 
+/// Implements `legion index --status [--repo X] [--json]` (#284).
+fn run_index_status(repo: Option<&str>, json: bool) -> error::Result<()> {
+    let base = data_dir()?;
+    let database = db::Database::open(&base.join("legion.db"))?;
+    let jobs = database.list_index_jobs()?;
+    let filtered: Vec<&scip::IndexJob> = match repo {
+        Some(name) => jobs.iter().filter(|j| j.repo == name).collect(),
+        None => jobs.iter().collect(),
+    };
+
+    if json {
+        let body = serde_json::to_string(&filtered)
+            .map_err(|e| error::LegionError::Search(format!("serialize index_jobs: {e}")))?;
+        println!("{body}");
+        return Ok(());
+    }
+
+    if filtered.is_empty() {
+        if let Some(name) = repo {
+            println!("no index job found for {name}");
+        } else {
+            println!("no index jobs recorded");
+        }
+        return Ok(());
+    }
+
+    for job in filtered {
+        let langs = if job.languages.is_empty() {
+            "(none)".to_string()
+        } else {
+            job.languages.join(",")
+        };
+        let eta = job
+            .eta_secs
+            .map(|s| format!("eta={s}s"))
+            .unwrap_or_default();
+        let err = job
+            .error
+            .as_deref()
+            .map(|e| format!(" error={e}"))
+            .unwrap_or_default();
+        println!(
+            "{}: {} {}% [{}] {}{}",
+            job.repo,
+            job.status.as_str(),
+            job.progress_pct,
+            langs,
+            eta,
+            err
+        );
+    }
+    Ok(())
+}
+
 fn print_locations(hits: &[sym::SymbolLocation], json: bool) {
     if json {
         println!(
@@ -2799,7 +2860,16 @@ fn run() -> error::Result<()> {
         Commands::Sym { action } => {
             run_sym(action)?;
         }
-        Commands::Index { repo, file } => {
+        Commands::Index {
+            repo,
+            file,
+            status,
+            json,
+        } => {
+            if status {
+                run_index_status(repo.as_deref(), json)?;
+                return Ok(());
+            }
             let base = data_dir()?;
             let watch_path = base.join("watch.toml");
             let repos = watch::list_repos_in_config(&watch_path)?;
@@ -4523,6 +4593,16 @@ fn run() -> error::Result<()> {
                     eprintln!(
                         "[legion] `legion watch` is deprecated -- use `legion daemon` to run channel + watch in one process"
                     );
+                    // #284: drain pending index jobs once at watch startup.
+                    // Long-running poll integration is a follow-on; this
+                    // covers the "queue on add, drain on next watch start"
+                    // case which is the most common operator workflow.
+                    let database = db::Database::open(&base.join("legion.db"))?;
+                    let watch_path = base.join("watch.toml");
+                    if let Err(e) = scip::run_pending_index_jobs(&database, &watch_path) {
+                        eprintln!("[legion watch] index drain failed: {e}");
+                    }
+                    drop(database);
                     watch::run(&base)?;
                 }
                 Some(WatchAction::Add { path, name, agent }) => {
@@ -4566,6 +4646,33 @@ fn run() -> error::Result<()> {
                             path.display(),
                             agent_note
                         );
+
+                        // #284: queue a background index job for the new repo
+                        // unless one is already recorded. Detection is best
+                        // effort -- empty languages means the daemon will
+                        // re-detect when it picks up the queued row.
+                        let database = db::Database::open(&base.join("legion.db"))?;
+                        if database.get_index_job(&effective_name)?.is_none() {
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let job = scip::IndexJob {
+                                id: uuid::Uuid::now_v7().to_string(),
+                                repo: effective_name.clone(),
+                                status: scip::IndexJobStatus::Queued,
+                                languages: Vec::new(),
+                                progress_pct: 0,
+                                eta_secs: None,
+                                error: None,
+                                created_at: now.clone(),
+                                updated_at: now,
+                            };
+                            if let Err(e) = database.upsert_index_job(&job) {
+                                eprintln!(
+                                    "[legion watch] failed to queue index job for {effective_name}: {e}"
+                                );
+                            } else {
+                                println!("queued background index job for {effective_name}");
+                            }
+                        }
                     } else {
                         println!("already present: {}", effective_name);
                     }
