@@ -180,8 +180,25 @@ Results include repo attribution so you know which domain the knowledge came fro
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--context` | required | Problem description to search for |
-| `--limit` | `3` | Maximum reflections to return |
+| `--context` | optional | BM25 problem description to search for |
+| `--symbol` | optional | Cross-repo SCIP symbol lookup (#285) |
+| `--limit` | `3` | Maximum reflections / symbol rows to return |
+
+At least one of `--context` or `--symbol` must be provided.
+
+## Code intelligence (SCIP)
+
+For agent code navigation, prefer `legion index` + `legion sym` over per-session LSP plugins. SCIP indexes are written once per repo, persist across sessions, and answer symbol queries in bytes rather than full file loads:
+
+```bash
+legion watch add /path/to/myrepo myrepo   # queues a background index job
+legion sym def MyStruct --repo myrepo     # definition locations
+legion sym refs MyStruct --repo myrepo    # call sites
+legion sym hover MyStruct --repo myrepo   # signature + docstring
+legion index --status                     # job state for every queued repo
+```
+
+Index jobs run in the background when `legion watch` (or `legion daemon`) is up. The PostToolUse hook keeps the index fresh on every Edit/Write, and `legion sym` answers cross every watched repo when `--repo` is omitted.
 
 ## Bullpen
 
