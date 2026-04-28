@@ -114,6 +114,115 @@ const SKIP_DIRS: &[&str] = &[
 
 const SCAN_DEPTH: usize = 2;
 
+/// Resolve the language for a single file path by extension. Returns
+/// the canonical legion lang tag (e.g. "rust"). The built-in extension
+/// table is the single source of truth -- `IndexConfig.indexers`
+/// overrides binaries, not extension recognition.
+pub fn lang_for_path(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    for spec in LANG_TABLE {
+        if spec.extensions.iter().any(|e| *e == ext) {
+            return Some(spec.lang.to_string());
+        }
+    }
+    None
+}
+
+/// Resolve the binary used for a given language under `config`.
+fn binary_for_lang(lang: &str, config: &IndexConfig) -> Option<String> {
+    if let Some(map) = config.indexers.as_ref()
+        && let Some(b) = map.get(lang)
+    {
+        return Some(b.clone());
+    }
+    LANG_TABLE
+        .iter()
+        .find(|s| s.lang == lang)
+        .map(|s| s.default_binary.to_string())
+}
+
+/// Re-index the language for `file_path` and store the resulting blob
+/// against (repo, lang). When the language indexer does not support
+/// per-file mode, falls back to a single-language full repo index --
+/// the fallback emits a stderr warning so the operator knows the
+/// command did more work than the name suggests.
+///
+/// Returns the new content_hash on success.
+pub fn incremental_index_file(
+    db: &crate::db::Database,
+    repo: &str,
+    repo_path: &Path,
+    file_path: &Path,
+    config: &IndexConfig,
+) -> Result<String> {
+    incremental_index_file_with(db, repo, repo_path, file_path, config, run_indexer)
+}
+
+/// Internal entry point that lets tests inject a stub indexer instead
+/// of shelling out to `scip-<lang>`. Production callers go through
+/// [`incremental_index_file`].
+pub(crate) fn incremental_index_file_with<F>(
+    db: &crate::db::Database,
+    repo: &str,
+    repo_path: &Path,
+    file_path: &Path,
+    config: &IndexConfig,
+    runner: F,
+) -> Result<String>
+where
+    F: Fn(&DetectedLanguage, &Path) -> Result<Vec<u8>>,
+{
+    if !file_path.exists() {
+        return Err(LegionError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("file not found: {}", file_path.display()),
+        )));
+    }
+
+    let ext_for_msg = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("(none)")
+        .to_string();
+
+    let lang = lang_for_path(file_path).ok_or_else(|| LegionError::IndexerNotFound {
+        lang: ext_for_msg.clone(),
+        binary: "(unknown)".to_string(),
+    })?;
+
+    let binary = binary_for_lang(&lang, config).ok_or_else(|| LegionError::IndexerNotFound {
+        lang: lang.clone(),
+        binary: "(unknown)".to_string(),
+    })?;
+
+    // No scip-<lang> tool currently exposes a per-file mode legion can
+    // rely on -- spec acknowledges this by mandating a fallback path.
+    // Always log the fallback so operators understand the cost.
+    eprintln!(
+        "[legion index] fallback to full single-language re-index for {lang} (file: {})",
+        file_path.display()
+    );
+
+    let entry = DetectedLanguage {
+        lang: lang.clone(),
+        binary,
+    };
+    let blob = runner(&entry, repo_path)?;
+    let hash = content_hash(&blob);
+
+    let index = ScipIndex {
+        id: uuid::Uuid::now_v7().to_string(),
+        repo: repo.to_string(),
+        lang,
+        content_hash: hash.clone(),
+        blob,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        deleted_at: None,
+    };
+    db.upsert_scip_index(&index)?;
+    Ok(hash)
+}
+
 /// SHA-256 of `bytes` rendered as lowercase hex.
 pub fn content_hash(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -342,6 +451,126 @@ mod tests {
                 assert_eq!(binary, "definitely-not-on-path-xyz");
             }
             other => panic!("expected IndexerNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lang_for_path_recognises_known_extensions() {
+        assert_eq!(
+            lang_for_path(Path::new("src/main.rs")).as_deref(),
+            Some("rust")
+        );
+        assert_eq!(
+            lang_for_path(Path::new("app/handler.ts")).as_deref(),
+            Some("typescript")
+        );
+        assert_eq!(
+            lang_for_path(Path::new("scripts/run.py")).as_deref(),
+            Some("python")
+        );
+    }
+
+    #[test]
+    fn lang_for_path_returns_none_for_unknown() {
+        assert!(lang_for_path(Path::new("README.md")).is_none());
+        assert!(lang_for_path(Path::new("data.bin.unknown")).is_none());
+    }
+
+    fn open_test_db() -> crate::db::Database {
+        let dir = TempDir::new().unwrap();
+        let db = crate::db::Database::open(&dir.path().join("test.sqlite")).unwrap();
+        // TempDir would be dropped at end of expression; leak it so the
+        // sqlite file outlives the test.
+        std::mem::forget(dir);
+        db
+    }
+
+    #[test]
+    fn incremental_index_file_creates_row_then_updates_in_place() {
+        let db = open_test_db();
+        let repo_dir = TempDir::new().unwrap();
+        let file_path = repo_dir.path().join("main.rs");
+        fs::write(&file_path, "fn main() {}").unwrap();
+        let cfg = IndexConfig::default();
+
+        // First call: stub runner returns "v1" -- expect a fresh row.
+        let hash1 = incremental_index_file_with(
+            &db,
+            "testrepo",
+            repo_dir.path(),
+            &file_path,
+            &cfg,
+            |_, _| Ok(b"v1".to_vec()),
+        )
+        .unwrap();
+        let row1 = db.get_scip_index("testrepo", "rust").unwrap().unwrap();
+        assert_eq!(row1.content_hash, hash1);
+        assert_eq!(row1.blob, b"v1");
+
+        // Second call with identical bytes: hash unchanged, row id stable.
+        let hash2 = incremental_index_file_with(
+            &db,
+            "testrepo",
+            repo_dir.path(),
+            &file_path,
+            &cfg,
+            |_, _| Ok(b"v1".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(hash1, hash2);
+        let row2 = db.get_scip_index("testrepo", "rust").unwrap().unwrap();
+        assert_eq!(row2.id, row1.id);
+
+        // Third call with different bytes: hash changes, row updates.
+        let hash3 = incremental_index_file_with(
+            &db,
+            "testrepo",
+            repo_dir.path(),
+            &file_path,
+            &cfg,
+            |_, _| Ok(b"v2".to_vec()),
+        )
+        .unwrap();
+        assert_ne!(hash3, hash1);
+        let row3 = db.get_scip_index("testrepo", "rust").unwrap().unwrap();
+        assert_eq!(row3.blob, b"v2");
+    }
+
+    #[test]
+    fn incremental_index_file_unknown_extension_errors_with_unknown_binary() {
+        let db = open_test_db();
+        let repo_dir = TempDir::new().unwrap();
+        let file_path = repo_dir.path().join("notes.txt");
+        fs::write(&file_path, "hello").unwrap();
+        let cfg = IndexConfig::default();
+        let err = incremental_index_file(&db, "r", repo_dir.path(), &file_path, &cfg).unwrap_err();
+        match err {
+            LegionError::IndexerNotFound { lang, binary } => {
+                assert_eq!(lang, "txt");
+                assert_eq!(binary, "(unknown)");
+            }
+            other => panic!("expected IndexerNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn incremental_index_file_missing_file_returns_io_not_found() {
+        let db = open_test_db();
+        let repo_dir = TempDir::new().unwrap();
+        let cfg = IndexConfig::default();
+        let err = incremental_index_file(
+            &db,
+            "r",
+            repo_dir.path(),
+            &repo_dir.path().join("ghost.rs"),
+            &cfg,
+        )
+        .unwrap_err();
+        match err {
+            LegionError::Io(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected Io NotFound, got {other:?}"),
         }
     }
 }
