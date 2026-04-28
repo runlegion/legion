@@ -23,6 +23,7 @@ mod stats;
 mod status;
 mod statusline;
 mod surface;
+mod sym;
 mod sync;
 mod sync_actor;
 mod task;
@@ -363,6 +364,15 @@ enum Commands {
         /// Maximum number of identity reflections to return
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+
+    /// Symbol queries against stored SCIP indexes (#282).
+    ///
+    /// Answers def/refs/impl/hover questions by parsing the protobuf
+    /// blobs written by `legion index` -- bytes, not full file loads.
+    Sym {
+        #[command(subcommand)]
+        action: SymAction,
     },
 
     /// Build or refresh the SCIP code-intelligence index for a repo (#278).
@@ -709,6 +719,54 @@ enum TaskAction {
         /// Task ID
         #[arg(long)]
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SymAction {
+    /// Print definition locations for the given symbol name.
+    Def {
+        name: String,
+        /// Restrict to a single repo. Default scans every stored index.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Restrict to a single language.
+        #[arg(long)]
+        lang: Option<String>,
+        /// Emit JSON instead of human-readable file:line lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print reference locations (call sites) for the given name.
+    Refs {
+        name: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print structs/types that implement the named trait or interface.
+    Impl {
+        #[arg(value_name = "TRAIT")]
+        name: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print signature + docstring for the symbol.
+    Hover {
+        name: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1522,6 +1580,160 @@ pub(crate) fn data_dir() -> error::Result<PathBuf> {
 
     let _ = CACHED.set(path.clone());
     Ok(path)
+}
+
+/// Dispatch `legion sym <action>` against the local SCIP index store.
+fn run_sym(action: SymAction) -> error::Result<()> {
+    let base = data_dir()?;
+    let database = db::Database::open(&base.join("legion.db"))?;
+
+    let watch_path = base.join("watch.toml");
+    let blobs_for =
+        |repo: Option<&str>, lang: Option<&str>| -> error::Result<Vec<scip::ScipIndex>> {
+            let mut out: Vec<scip::ScipIndex> = Vec::new();
+            if let Some(r) = repo {
+                if let Some(l) = lang {
+                    if let Some(idx) = database.get_scip_index(r, l)? {
+                        out.push(idx);
+                    }
+                } else {
+                    out.extend(database.list_scip_indexes(r)?);
+                }
+            } else {
+                let repos = watch::list_repos_in_config(&watch_path)?;
+                for entry in repos {
+                    let mut for_repo = database.list_scip_indexes(&entry.name)?;
+                    if let Some(l) = lang {
+                        for_repo.retain(|i| i.lang == l);
+                    }
+                    out.append(&mut for_repo);
+                }
+            }
+            Ok(out)
+        };
+
+    let ensure_some =
+        |blobs: &[scip::ScipIndex], repo: Option<&str>, lang: Option<&str>| -> error::Result<()> {
+            if blobs.is_empty() {
+                let r = repo.unwrap_or("(any)");
+                let l = lang.unwrap_or("(any)");
+                return Err(error::LegionError::Search(format!(
+                    "no SCIP index found for {r}/{l}; run `legion index <repo>` first"
+                )));
+            }
+            Ok(())
+        };
+
+    match action {
+        SymAction::Def {
+            name,
+            repo,
+            lang,
+            json,
+        } => {
+            let blobs = blobs_for(repo.as_deref(), lang.as_deref())?;
+            ensure_some(&blobs, repo.as_deref(), lang.as_deref())?;
+            let mut hits: Vec<sym::SymbolLocation> = Vec::new();
+            for idx in &blobs {
+                hits.extend(sym::query_definitions(
+                    &idx.blob, &name, &idx.repo, &idx.lang,
+                )?);
+            }
+            print_locations(&hits, json);
+        }
+        SymAction::Refs {
+            name,
+            repo,
+            lang,
+            json,
+        } => {
+            let blobs = blobs_for(repo.as_deref(), lang.as_deref())?;
+            ensure_some(&blobs, repo.as_deref(), lang.as_deref())?;
+            let mut hits: Vec<sym::SymbolLocation> = Vec::new();
+            for idx in &blobs {
+                hits.extend(sym::query_references(
+                    &idx.blob, &name, &idx.repo, &idx.lang,
+                )?);
+            }
+            print_locations(&hits, json);
+        }
+        SymAction::Impl {
+            name,
+            repo,
+            lang,
+            json,
+        } => {
+            let blobs = blobs_for(repo.as_deref(), lang.as_deref())?;
+            ensure_some(&blobs, repo.as_deref(), lang.as_deref())?;
+            let mut hits: Vec<sym::SymbolLocation> = Vec::new();
+            for idx in &blobs {
+                hits.extend(sym::query_implementors(
+                    &idx.blob, &name, &idx.repo, &idx.lang,
+                )?);
+            }
+            if hits.is_empty() {
+                eprintln!(
+                    "[legion sym impl] no implementors found for '{name}' (note: only languages whose SCIP indexer emits is_implementation relationships will return results)"
+                );
+                return Ok(());
+            }
+            print_locations(&hits, json);
+        }
+        SymAction::Hover {
+            name,
+            repo,
+            lang,
+            json,
+        } => {
+            let blobs = blobs_for(repo.as_deref(), lang.as_deref())?;
+            ensure_some(&blobs, repo.as_deref(), lang.as_deref())?;
+            let mut hover: Option<sym::HoverInfo> = None;
+            for idx in &blobs {
+                if let Some(h) = sym::query_hover(&idx.blob, &name, &idx.repo, &idx.lang)? {
+                    hover = Some(h);
+                    break;
+                }
+            }
+            match (hover, json) {
+                (Some(h), true) => println!(
+                    "{}",
+                    // HoverInfo has only String/Option<String> fields, so
+                    // serde_json::to_string cannot fail in practice; the
+                    // fallback is defensive against future shape changes.
+                    serde_json::to_string(&h).unwrap_or_else(|_| "{}".to_string())
+                ),
+                (Some(h), false) => {
+                    println!("{}", h.symbol);
+                    if let Some(sig) = h.signature.as_deref() {
+                        println!("{sig}");
+                    }
+                    if let Some(doc) = h.docstring.as_deref() {
+                        println!();
+                        println!("{doc}");
+                    }
+                }
+                (None, _) => {
+                    eprintln!("[legion sym hover] no info found for '{name}'");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_locations(hits: &[sym::SymbolLocation], json: bool) {
+    if json {
+        println!(
+            "{}",
+            // SymbolLocation has only string + integer fields, so this
+            // serializer call is effectively infallible.
+            serde_json::to_string(hits).unwrap_or_else(|_| "[]".to_string())
+        );
+        return;
+    }
+    for h in hits {
+        println!("{}:{}:{} ({}/{})", h.file, h.line, h.column, h.repo, h.lang);
+    }
 }
 
 /// Migrate legion state from the plugin data dir back to the ProjectDirs target.
@@ -2583,6 +2795,9 @@ fn run() -> error::Result<()> {
                     }
                 }
             }
+        }
+        Commands::Sym { action } => {
+            run_sym(action)?;
         }
         Commands::Index { repo, file } => {
             let base = data_dir()?;
