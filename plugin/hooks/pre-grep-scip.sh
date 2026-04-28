@@ -38,7 +38,7 @@ REPO="${LEGION_REPO:-$(basename "$CWD")}"
 
 # Coverage gate (#353): no-op silently in uncovered repos.
 if [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh" ]; then
-  # shellcheck source=_legion-covered.sh
+  # shellcheck source=/dev/null
   source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh"
   if ! legion_covered "$SESSION_ID" "$REPO"; then
     exit 0
@@ -53,12 +53,11 @@ if [ "${#TRIMMED}" -le 2 ]; then
   exit 0
 fi
 
-# Reject if any regex metacharacter is present. Backslashes count too.
-case "$TRIMMED" in
-  *[\.\*\+\?\[\]\(\)\{\}\^\$\|\\]*)
-    exit 0
-    ;;
-esac
+# Reject if any regex metacharacter is present. Bash regex form
+# avoids the case-pattern bracket-expression escaping minefield.
+if [[ "$TRIMMED" =~ [.*+?\[\](){}^\$\|\\] ]]; then
+  exit 0
+fi
 
 # Allow only word chars with optional :: or . separators. We already
 # rejected `.` above, so the only legal separators here are `::`.
