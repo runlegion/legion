@@ -15,6 +15,7 @@ mod mesh;
 mod pr_view;
 mod recall;
 mod reflect;
+mod scip;
 mod search;
 mod serve;
 mod signal;
@@ -362,6 +363,17 @@ enum Commands {
         /// Maximum number of identity reflections to return
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+
+    /// Build or refresh the SCIP code-intelligence index for a repo (#278).
+    ///
+    /// Resolves the repo path from `watch.toml`, detects the dominant
+    /// language, runs the corresponding SCIP indexer (e.g. `scip-rust`)
+    /// as a subprocess, and stores the resulting protobuf blob keyed
+    /// on (repo, lang). Idempotent on content hash.
+    Index {
+        /// Repo name (must be present in watch.toml)
+        repo: String,
     },
 
     /// Rebuild the search index from the database
@@ -2561,6 +2573,47 @@ fn run() -> error::Result<()> {
                     }
                 }
             }
+        }
+        Commands::Index { repo } => {
+            let base = data_dir()?;
+            let watch_path = base.join("watch.toml");
+            let repos = watch::list_repos_in_config(&watch_path)?;
+            let entry = repos.iter().find(|r| r.name == repo).ok_or_else(|| {
+                error::LegionError::WatchConfig(format!(
+                    "repo '{repo}' not in watch.toml. Add it with `legion watch add {repo} <path>`."
+                ))
+            })?;
+            let repo_path = std::path::PathBuf::from(&entry.workdir);
+
+            let lang = scip::detect_language(&repo_path).ok_or_else(|| {
+                error::LegionError::WatchConfig(format!(
+                    "no supported language detected at {}",
+                    repo_path.display()
+                ))
+            })?;
+
+            let blob = scip::run_indexer(lang, &repo_path)?;
+            let hash = scip::content_hash(&blob);
+            let now = chrono::Utc::now().to_rfc3339();
+            let index = scip::ScipIndex {
+                id: uuid::Uuid::now_v7().to_string(),
+                repo: repo.clone(),
+                lang: lang.to_string(),
+                content_hash: hash,
+                blob,
+                updated_at: now,
+                deleted_at: None,
+            };
+
+            let database = db::Database::open(&base.join("legion.db"))?;
+            database.upsert_scip_index(&index)?;
+            eprintln!(
+                "[legion] indexed {} ({}): {} bytes, hash {}",
+                repo,
+                lang,
+                index.blob.len(),
+                &index.content_hash[..16]
+            );
         }
         Commands::Reindex => {
             let base = data_dir()?;
