@@ -37,6 +37,16 @@ fi
 
 REPO=$(basename "$CWD")
 
+# Skip injection in repos legion does not cover (#353).
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+if [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh" ]; then
+  # shellcheck source=_legion-covered.sh
+  source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh"
+  if ! legion_covered "$SESSION_ID" "$REPO"; then
+    exit 0
+  fi
+fi
+
 # Check the clamp list -- skip recall for tools that burn tokens without value
 CLAMP_FILE="${CLAUDE_PLUGIN_ROOT}/hooks/recall-clamp.conf"
 if [ -f "$CLAMP_FILE" ] && grep -qx "$TOOL" "$CLAMP_FILE"; then
