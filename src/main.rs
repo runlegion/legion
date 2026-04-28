@@ -367,13 +367,23 @@ enum Commands {
 
     /// Build or refresh the SCIP code-intelligence index for a repo (#278).
     ///
-    /// Resolves the repo path from `watch.toml`, detects the dominant
-    /// language, runs the corresponding SCIP indexer (e.g. `scip-rust`)
-    /// as a subprocess, and stores the resulting protobuf blob keyed
-    /// on (repo, lang). Idempotent on content hash.
+    /// Resolves the repo path from `watch.toml`, detects every supported
+    /// language present, runs each indexer (e.g. `scip-rust`) as a
+    /// subprocess, and stores one row per (repo, lang). Idempotent on
+    /// content hash.
+    ///
+    /// When `--file <path>` is given, only the single language for that
+    /// file is re-indexed (#280). Repo is resolved by longest-prefix
+    /// match against watch.toml workdirs when omitted.
     Index {
-        /// Repo name (must be present in watch.toml)
-        repo: String,
+        /// Repo name (looked up in watch.toml). Optional when --file is
+        /// used and the path is unambiguous.
+        #[arg(required_unless_present = "file")]
+        repo: Option<String>,
+        /// Re-index only the language for this single file (absolute or
+        /// repo-relative path).
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
     },
 
     /// Rebuild the search index from the database
@@ -2574,15 +2584,59 @@ fn run() -> error::Result<()> {
                 }
             }
         }
-        Commands::Index { repo } => {
+        Commands::Index { repo, file } => {
             let base = data_dir()?;
             let watch_path = base.join("watch.toml");
             let repos = watch::list_repos_in_config(&watch_path)?;
-            let entry = repos.iter().find(|r| r.name == repo).ok_or_else(|| {
-                error::LegionError::WatchConfig(format!(
-                    "repo '{repo}' not in watch.toml. Add it with `legion watch add {repo} <path>`."
-                ))
-            })?;
+
+            // When --file is given, resolve the enclosing repo by longest
+            // workdir prefix. Otherwise the repo arg is mandatory and
+            // looked up by name.
+            let entry = if let Some(file_arg) = &file {
+                let abs = if file_arg.is_absolute() {
+                    file_arg.clone()
+                } else {
+                    std::env::current_dir()?.join(file_arg)
+                };
+                let canon = std::fs::canonicalize(&abs).unwrap_or(abs);
+                let mut best: Option<&watch::WatchRepoConfig> = None;
+                let mut best_len = 0usize;
+                for r in &repos {
+                    let workdir = std::path::Path::new(&r.workdir);
+                    if canon.starts_with(workdir) && r.workdir.len() > best_len {
+                        best = Some(r);
+                        best_len = r.workdir.len();
+                    }
+                }
+                let chosen = best.ok_or_else(|| {
+                    error::LegionError::WatchConfig(format!(
+                        "no watch.toml repo encloses {}. Add the parent with `legion watch add <name> <path>`.",
+                        canon.display()
+                    ))
+                })?;
+                if let Some(name) = repo.as_deref()
+                    && name != chosen.name
+                {
+                    return Err(error::LegionError::WatchConfig(format!(
+                        "file path is under repo '{}', not '{name}'",
+                        chosen.name
+                    )));
+                }
+                chosen
+            } else {
+                let name = repo.as_deref().ok_or_else(|| {
+                    error::LegionError::WatchConfig(
+                        "repo name required when --file is not given".to_string(),
+                    )
+                })?;
+                repos.iter().find(|r| r.name == name).ok_or_else(|| {
+                    error::LegionError::WatchConfig(format!(
+                        "repo '{name}' not in watch.toml. Add it with `legion watch add {name} <path>`."
+                    ))
+                })?
+            };
+
+            let repo_name = entry.name.clone();
             let repo_path = std::path::PathBuf::from(&entry.workdir);
 
             // Per-repo IndexConfig lives in the watch.toml `extra` table
@@ -2593,11 +2647,33 @@ fn run() -> error::Result<()> {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!(
-                        "[legion index] warning: malformed indexer config for {repo}: {e}; using defaults"
+                        "[legion index] warning: malformed indexer config for {repo_name}: {e}; using defaults"
                     );
                     scip::IndexConfig::default()
                 }
             };
+
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            // --file branch: re-index the single language for the file.
+            if let Some(file_arg) = file {
+                let abs = if file_arg.is_absolute() {
+                    file_arg.clone()
+                } else {
+                    std::env::current_dir()?.join(&file_arg)
+                };
+                let canon = std::fs::canonicalize(&abs).unwrap_or(abs);
+                let hash =
+                    scip::incremental_index_file(&database, &repo_name, &repo_path, &canon, &cfg)?;
+                let hash_short: String = hash.chars().take(16).collect();
+                eprintln!(
+                    "[legion index] indexed {} (file: {}): hash {}",
+                    repo_name,
+                    canon.display(),
+                    hash_short
+                );
+                return Ok(());
+            }
 
             let detection = scip::detect_languages(&repo_path, &cfg);
 
@@ -2615,7 +2691,6 @@ fn run() -> error::Result<()> {
                 )));
             }
 
-            let database = db::Database::open(&base.join("legion.db"))?;
             let mut indexed = 0usize;
             let mut failed: Vec<(String, String)> = Vec::new();
 
@@ -2628,7 +2703,7 @@ fn run() -> error::Result<()> {
                         let hash_short = hash.chars().take(16).collect::<String>();
                         let index = scip::ScipIndex {
                             id: uuid::Uuid::now_v7().to_string(),
-                            repo: repo.clone(),
+                            repo: repo_name.clone(),
                             lang: lang_entry.lang.clone(),
                             content_hash: hash,
                             blob,
@@ -2651,7 +2726,7 @@ fn run() -> error::Result<()> {
 
             eprintln!(
                 "[legion index] summary {}: {} indexed, {} skipped, {} failed",
-                repo,
+                repo_name,
                 indexed,
                 detection.missing_binary.len(),
                 failed.len()
