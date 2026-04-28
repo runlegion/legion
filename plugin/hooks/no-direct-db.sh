@@ -38,6 +38,18 @@ if [ -z "$CMD" ]; then
   exit 0
 fi
 
+# Skip enforcement in repos legion does not cover (#353).
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+REPO="${LEGION_REPO:-$(basename "${CWD:-$PWD}")}"
+if [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh" ]; then
+  # shellcheck source=_legion-covered.sh
+  source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh"
+  if ! legion_covered "$SESSION_ID" "$REPO"; then
+    exit 0
+  fi
+fi
+
 if echo "$CMD" | grep -qE 'legion\.db'; then
   jq -n --arg reason "Blocked: this command references \`legion.db\` directly. Use the \`legion\` CLI instead. Legion is the sole API for legion state -- direct DB access bypasses migrations, constraints, and the audit log. Commands like \`legion kanban view\`, \`legion recall\`, \`legion bullpen\`, \`legion reflect\`, and \`legion status\` expose structured fields through the binary. If you need something the CLI does not expose, file an issue for a new CLI command or JSON output flag -- do not reach past the binary." '
     {
