@@ -8,6 +8,18 @@ if [ -z "$COMMAND" ]; then
   exit 0
 fi
 
+# Skip enforcement in repos legion does not cover (#353).
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+REPO="${LEGION_REPO:-$(basename "${CWD:-$PWD}")}"
+if [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh" ]; then
+  # shellcheck source=_legion-covered.sh
+  source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh"
+  if ! legion_covered "$SESSION_ID" "$REPO"; then
+    exit 0
+  fi
+fi
+
 # Check if the command starts with gh (ignoring leading whitespace)
 TRIMMED="${COMMAND#"${COMMAND%%[![:space:]]*}"}"
 case "$TRIMMED" in
