@@ -2585,35 +2585,89 @@ fn run() -> error::Result<()> {
             })?;
             let repo_path = std::path::PathBuf::from(&entry.workdir);
 
-            let lang = scip::detect_language(&repo_path).ok_or_else(|| {
-                error::LegionError::WatchConfig(format!(
-                    "no supported language detected at {}",
-                    repo_path.display()
-                ))
-            })?;
-
-            let blob = scip::run_indexer(lang, &repo_path)?;
-            let hash = scip::content_hash(&blob);
-            let now = chrono::Utc::now().to_rfc3339();
-            let index = scip::ScipIndex {
-                id: uuid::Uuid::now_v7().to_string(),
-                repo: repo.clone(),
-                lang: lang.to_string(),
-                content_hash: hash,
-                blob,
-                updated_at: now,
-                deleted_at: None,
+            // Per-repo IndexConfig lives in the watch.toml `extra` table
+            // alongside other integration config. Missing -> defaults.
+            // A malformed table is surfaced on stderr but does not abort
+            // -- a typo in one repo's overrides should not block indexing.
+            let cfg: scip::IndexConfig = match entry.extra.clone().try_into() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "[legion index] warning: malformed indexer config for {repo}: {e}; using defaults"
+                    );
+                    scip::IndexConfig::default()
+                }
             };
 
+            let detection = scip::detect_languages(&repo_path, &cfg);
+
+            for missing in &detection.missing_binary {
+                eprintln!(
+                    "[legion index] skipping {}: {} not found on PATH",
+                    missing.lang, missing.binary
+                );
+            }
+
+            if detection.indexable.is_empty() && detection.missing_binary.is_empty() {
+                return Err(error::LegionError::WatchConfig(format!(
+                    "no supported language detected at {}",
+                    repo_path.display()
+                )));
+            }
+
             let database = db::Database::open(&base.join("legion.db"))?;
-            database.upsert_scip_index(&index)?;
+            let mut indexed = 0usize;
+            let mut failed: Vec<(String, String)> = Vec::new();
+
+            for lang_entry in &detection.indexable {
+                match scip::run_indexer(lang_entry, &repo_path) {
+                    Ok(blob) => {
+                        let hash = scip::content_hash(&blob);
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let blob_len = blob.len();
+                        let hash_short = hash.chars().take(16).collect::<String>();
+                        let index = scip::ScipIndex {
+                            id: uuid::Uuid::now_v7().to_string(),
+                            repo: repo.clone(),
+                            lang: lang_entry.lang.clone(),
+                            content_hash: hash,
+                            blob,
+                            updated_at: now,
+                            deleted_at: None,
+                        };
+                        database.upsert_scip_index(&index)?;
+                        eprintln!(
+                            "[legion index] indexed {}: {} bytes, hash {}",
+                            lang_entry.lang, blob_len, hash_short
+                        );
+                        indexed += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("[legion index] failed {}: {}", lang_entry.lang, e);
+                        failed.push((lang_entry.lang.clone(), e.to_string()));
+                    }
+                }
+            }
+
             eprintln!(
-                "[legion] indexed {} ({}): {} bytes, hash {}",
+                "[legion index] summary {}: {} indexed, {} skipped, {} failed",
                 repo,
-                lang,
-                index.blob.len(),
-                &index.content_hash[..16]
+                indexed,
+                detection.missing_binary.len(),
+                failed.len()
             );
+
+            if indexed == 0 {
+                // We reach here whenever languages were detected but none
+                // produced a stored index -- either every attempt failed
+                // outright, or every detected lang's binary was absent.
+                // The "no language detected" case returned earlier as a
+                // WatchConfig error, so this is always user-actionable.
+                return Err(error::LegionError::IndexerFailed {
+                    lang: "all".to_string(),
+                    stderr: "no language indexed successfully -- see warnings above".to_string(),
+                });
+            }
         }
         Commands::Reindex => {
             let base = data_dir()?;
