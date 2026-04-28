@@ -12,8 +12,10 @@
 //! column (see `Database::upsert_scip_index`).
 
 use crate::error::{LegionError, Result};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A stored SCIP index for one (repo, lang) pair.
@@ -31,6 +33,87 @@ pub struct ScipIndex {
     pub deleted_at: Option<String>,
 }
 
+/// A language detected in a repo and the binary used to index it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedLanguage {
+    pub lang: String,
+    pub binary: String,
+}
+
+/// Result of scanning a repo for indexable languages.
+#[derive(Debug, Default)]
+pub struct DetectionResult {
+    /// Languages whose `scip-<lang>` binary is on PATH and ready to run.
+    pub indexable: Vec<DetectedLanguage>,
+    /// Languages we recognized in the source tree but whose indexer
+    /// binary was not found on PATH. Surfaced as warnings, not errors.
+    pub missing_binary: Vec<DetectedLanguage>,
+}
+
+/// Per-repo index configuration. Loaded from the per-repo `extra` table
+/// in `watch.toml`; the field is optional so an empty config falls back
+/// to the built-in language table.
+#[derive(Debug, Default, Deserialize)]
+pub struct IndexConfig {
+    /// Override or extend the built-in lang -> binary map. A key here
+    /// supersedes the default for the same language. Keys outside the
+    /// detection table are ignored (they have no extension to match on).
+    pub indexers: Option<HashMap<String, String>>,
+}
+
+/// Built-in language table: extension markers and the default binary.
+/// Sorted alphabetically by language name so iteration order is stable
+/// across runs and `detect_languages` returns indexable + missing in
+/// the same canonical order.
+struct LangSpec {
+    lang: &'static str,
+    extensions: &'static [&'static str],
+    default_binary: &'static str,
+}
+
+const LANG_TABLE: &[LangSpec] = &[
+    LangSpec {
+        lang: "go",
+        extensions: &["go"],
+        default_binary: "scip-go",
+    },
+    LangSpec {
+        lang: "javascript",
+        extensions: &["js", "jsx"],
+        default_binary: "scip-typescript",
+    },
+    LangSpec {
+        lang: "python",
+        extensions: &["py"],
+        default_binary: "scip-python",
+    },
+    LangSpec {
+        lang: "rust",
+        extensions: &["rs"],
+        default_binary: "scip-rust",
+    },
+    LangSpec {
+        lang: "typescript",
+        extensions: &["ts", "tsx"],
+        default_binary: "scip-typescript",
+    },
+];
+
+/// Directory names a shallow scan should never descend into. Indexers
+/// emit their own SCIP output here in some configurations and we don't
+/// want vendored or build-artifact languages confusing detection.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "vendor",
+    "dist",
+    "build",
+    "__pycache__",
+];
+
+const SCAN_DEPTH: usize = 2;
+
 /// SHA-256 of `bytes` rendered as lowercase hex.
 pub fn content_hash(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -39,42 +122,95 @@ pub fn content_hash(bytes: &[u8]) -> String {
     hex::encode(digest)
 }
 
-/// Detect the dominant language of a repo by looking for marker files.
-/// Returns the language tag legion uses internally (e.g. "rust"), or
-/// None when no indexer-supported language is recognized.
+/// Scan `repo_root` for source files matching the built-in extension
+/// table and return languages partitioned into indexable (binary on
+/// PATH) and missing (binary absent). Order within each list is
+/// alphabetical by language name.
 ///
-/// This issue (#278) only handles Rust. Multi-language detection lives
-/// in #279; this function exists here so the dispatch path is already
-/// shaped correctly.
-pub fn detect_language(repo_path: &Path) -> Option<&'static str> {
-    if repo_path.join("Cargo.toml").is_file() {
-        return Some("rust");
+/// `config.indexers` overrides the default binary per language. Keys
+/// outside `LANG_TABLE` are ignored -- without an extension marker we
+/// have no way to detect that language anyway.
+pub fn detect_languages(repo_root: &Path, config: &IndexConfig) -> DetectionResult {
+    let extensions_seen = scan_extensions(repo_root);
+    let overrides = config.indexers.as_ref();
+
+    let mut result = DetectionResult::default();
+    for spec in LANG_TABLE {
+        if !spec.extensions.iter().any(|e| extensions_seen.contains(*e)) {
+            continue;
+        }
+        let binary = overrides
+            .and_then(|m| m.get(spec.lang))
+            .map(String::as_str)
+            .unwrap_or(spec.default_binary)
+            .to_string();
+        let entry = DetectedLanguage {
+            lang: spec.lang.to_string(),
+            binary,
+        };
+        if binary_on_path(&entry.binary) {
+            result.indexable.push(entry);
+        } else {
+            result.missing_binary.push(entry);
+        }
     }
-    None
+    result
 }
 
-/// Run the appropriate SCIP indexer for `lang` against `repo_path` and
+/// Return true when an executable named `name` exists on PATH.
+fn binary_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file()
+    })
+}
+
+/// Walk the repo root up to `SCAN_DEPTH` levels deep and collect every
+/// file extension seen, skipping vendored/build directories. Returns
+/// extensions without leading dots.
+fn scan_extensions(root: &Path) -> BTreeSet<String> {
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            let file_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                if SKIP_DIRS.iter().any(|s| *s == name_str) {
+                    continue;
+                }
+                if depth + 1 < SCAN_DEPTH {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                found.insert(ext.to_lowercase());
+            }
+        }
+    }
+    found
+}
+
+/// Run the SCIP indexer named by `entry.binary` against `repo_path` and
 /// return the resulting protobuf bytes.
-///
-/// Errors:
-/// - `IndexerNotFound` when the binary is missing from PATH
-/// - `IndexerFailed` when the subprocess exits non-zero (carries stderr)
-/// - `Io` when the protobuf output file cannot be read
-pub fn run_indexer(lang: &str, repo_path: &Path) -> Result<Vec<u8>> {
-    match lang {
-        "rust" => run_scip_rust(repo_path),
-        other => Err(LegionError::IndexerNotFound {
-            lang: other.to_string(),
-            binary: format!("scip-{other}"),
-        }),
-    }
-}
-
-/// Invoke `scip-rust index` against `repo_path` and read the resulting
-/// `index.scip` protobuf bytes from the repo root.
-fn run_scip_rust(repo_path: &Path) -> Result<Vec<u8>> {
-    let binary = "scip-rust";
-    let output = Command::new(binary)
+pub fn run_indexer(entry: &DetectedLanguage, repo_path: &Path) -> Result<Vec<u8>> {
+    let output = Command::new(&entry.binary)
         .arg("index")
         .current_dir(repo_path)
         .output();
@@ -83,8 +219,8 @@ fn run_scip_rust(repo_path: &Path) -> Result<Vec<u8>> {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(LegionError::IndexerNotFound {
-                lang: "rust".to_string(),
-                binary: binary.to_string(),
+                lang: entry.lang.clone(),
+                binary: entry.binary.clone(),
             });
         }
         Err(e) => return Err(LegionError::Io(e)),
@@ -93,7 +229,7 @@ fn run_scip_rust(repo_path: &Path) -> Result<Vec<u8>> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(LegionError::IndexerFailed {
-            lang: "rust".to_string(),
+            lang: entry.lang.clone(),
             stderr,
         });
     }
@@ -109,6 +245,10 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn touch(dir: &Path, name: &str) {
+        fs::write(dir.join(name), b"").unwrap();
+    }
+
     #[test]
     fn content_hash_is_deterministic_and_distinct() {
         let a = content_hash(b"hello");
@@ -116,31 +256,90 @@ mod tests {
         let c = content_hash(b"world");
         assert_eq!(a, b);
         assert_ne!(a, c);
-        assert_eq!(a.len(), 64); // 32 bytes -> 64 hex chars
+        assert_eq!(a.len(), 64);
     }
 
     #[test]
-    fn detect_language_rust_for_cargo_toml() {
+    fn detect_languages_rust_only_for_rs_files() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"").unwrap();
-        assert_eq!(detect_language(dir.path()), Some("rust"));
+        touch(dir.path(), "main.rs");
+        let combined = detect_languages(dir.path(), &IndexConfig::default());
+        let langs: Vec<&str> = combined
+            .indexable
+            .iter()
+            .chain(combined.missing_binary.iter())
+            .map(|d| d.lang.as_str())
+            .collect();
+        assert_eq!(langs, vec!["rust"]);
     }
 
     #[test]
-    fn detect_language_none_for_unsupported() {
+    fn detect_languages_returns_alphabetical_order_for_mixed_repo() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("README.md"), "hi").unwrap();
-        assert_eq!(detect_language(dir.path()), None);
+        touch(dir.path(), "main.rs");
+        touch(dir.path(), "script.py");
+        let combined = detect_languages(dir.path(), &IndexConfig::default());
+        let langs: Vec<&str> = combined
+            .indexable
+            .iter()
+            .chain(combined.missing_binary.iter())
+            .map(|d| d.lang.as_str())
+            .collect();
+        // Python sorts before Rust alphabetically -- the table is
+        // iterated in canonical order regardless of which list each
+        // lang lands in.
+        let mut sorted = langs.clone();
+        sorted.sort();
+        assert_eq!(langs, sorted);
+        assert!(langs.contains(&"python"));
+        assert!(langs.contains(&"rust"));
+    }
+
+    // Test for partition-on-PATH-presence omitted: it would require
+    // mutating $PATH, which races with other tests under the parallel
+    // harness. The partitioning logic is exercised end-to-end whenever
+    // `legion index` runs against a repo whose binary is/is-not on PATH.
+
+    #[test]
+    fn detect_languages_skips_vendor_dirs() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("node_modules")).unwrap();
+        touch(&dir.path().join("node_modules"), "noise.rs");
+        let result = detect_languages(dir.path(), &IndexConfig::default());
+        assert!(result.indexable.is_empty() && result.missing_binary.is_empty());
     }
 
     #[test]
-    fn run_indexer_unsupported_language_errors() {
+    fn detect_languages_honors_indexer_override() {
         let dir = TempDir::new().unwrap();
-        let err = run_indexer("klingon", dir.path()).unwrap_err();
+        touch(dir.path(), "main.rs");
+        let mut overrides = HashMap::new();
+        overrides.insert("rust".to_string(), "scip-custom".to_string());
+        let cfg = IndexConfig {
+            indexers: Some(overrides),
+        };
+        let result = detect_languages(dir.path(), &cfg);
+        let entry = result
+            .indexable
+            .iter()
+            .chain(result.missing_binary.iter())
+            .find(|d| d.lang == "rust")
+            .unwrap();
+        assert_eq!(entry.binary, "scip-custom");
+    }
+
+    #[test]
+    fn run_indexer_missing_binary_returns_indexer_not_found() {
+        let dir = TempDir::new().unwrap();
+        let entry = DetectedLanguage {
+            lang: "klingon".to_string(),
+            binary: "definitely-not-on-path-xyz".to_string(),
+        };
+        let err = run_indexer(&entry, dir.path()).unwrap_err();
         match err {
             LegionError::IndexerNotFound { lang, binary } => {
                 assert_eq!(lang, "klingon");
-                assert_eq!(binary, "scip-klingon");
+                assert_eq!(binary, "definitely-not-on-path-xyz");
             }
             other => panic!("expected IndexerNotFound, got {other:?}"),
         }
