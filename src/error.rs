@@ -97,6 +97,14 @@ pub enum LegionError {
 
     #[error("mesh error: {0}")]
     Mesh(String),
+
+    #[error(
+        "indexer not found: '{binary}' is not on PATH (required for {lang} indexing). Install per the SCIP ecosystem docs (e.g. https://github.com/sourcegraph/scip-rust for Rust)."
+    )]
+    IndexerNotFound { lang: String, binary: String },
+
+    #[error("indexer failed for {lang}: {stderr}")]
+    IndexerFailed { lang: String, stderr: String },
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;

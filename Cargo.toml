@@ -28,6 +28,10 @@ sysinfo = { version = "0.34", default-features = false, features = ["system", "c
 rlimit = "0.11"
 wait-timeout = "0.2"
 
+# SCIP code intelligence (#278+). The `scip` protobuf crate lands with
+# the query CLI in #282 -- this base only stores opaque blob bytes.
+sha2 = "0.10"
+
 # Multi-node sync via LAN broadcast
 smugglr-core = { git = "https://github.com/rafters-studio/smugglr", default-features = false, features = ["native"] }
 rand = "0.9"
