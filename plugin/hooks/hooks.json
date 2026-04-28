@@ -61,6 +61,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-grep-scip.sh",
+            "timeout": 6
+          },
+          {
+            "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-grep-recall.sh",
             "timeout": 6
           }
@@ -69,6 +74,11 @@
       {
         "matcher": "Glob",
         "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-grep-scip.sh",
+            "timeout": 6
+          },
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-grep-recall.sh",
