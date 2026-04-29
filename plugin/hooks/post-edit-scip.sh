@@ -39,7 +39,7 @@ REPO="${LEGION_REPO:-$(basename "${CWD:-$PWD}")}"
 
 # Coverage gate (#353): no-op silently in uncovered repos.
 if [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh" ]; then
-  # shellcheck source=_legion-covered.sh
+  # shellcheck source=/dev/null
   source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh"
   if ! legion_covered "$SESSION_ID" "$REPO"; then
     exit 0

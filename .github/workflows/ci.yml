@@ -3,8 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+  # Run on every PR regardless of base branch so stacked PRs (whose base
+  # is a sibling feat/* branch, not main) still gate on CI before merge.
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
