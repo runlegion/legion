@@ -61,6 +61,17 @@ if [ -z "$REPO" ]; then
   exit 0
 fi
 
+# Skip injection in repos legion does not cover (#353).
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+if [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh" ]; then
+  # shellcheck source=_legion-covered.sh
+  source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh"
+  if ! legion_covered "$SESSION_ID" "$REPO"; then
+    echo "[legion-pre-grep] skipped (repo not legion-covered: ${REPO})" >&2
+    exit 0
+  fi
+fi
+
 # Extract a semantic query from the tool input based on the tool type.
 QUERY=""
 case "$TOOL" in

@@ -47,7 +47,6 @@ chmod +x "$SANDBOX/plugin/bin/legion"
 
 run_hook() {
   local file_path="$1"
-  local extra_env="$2"
   local input
   input=$(jq -n --arg fp "$file_path" --arg cwd "$SANDBOX" --arg sid "test-session" '{
     tool_input: { file_path: $fp },
@@ -99,12 +98,12 @@ reset_log() {
 
 echo "Test: rust file path triggers legion index --file"
 reset_log
-run_hook "/tmp/sample.rs" ""
+run_hook "/tmp/sample.rs"
 assert_argv_contains "spawned legion with --file argument" "--file /tmp/sample.rs"
 
 echo "Test: non-source extension is filtered out"
 reset_log
-run_hook "/tmp/notes.md" ""
+run_hook "/tmp/notes.md"
 assert_no_spawn "markdown file does not trigger spawn"
 
 echo "Test: missing file_path is silently skipped"
@@ -119,7 +118,7 @@ assert_no_spawn "empty file_path -> no spawn"
 
 echo "Test: LEGION_SKIP_POST_EDIT_SCIP=1 suppresses spawn"
 reset_log
-LEGION_SKIP_POST_EDIT_SCIP=1 run_hook "/tmp/sample.rs" ""
+LEGION_SKIP_POST_EDIT_SCIP=1 run_hook "/tmp/sample.rs"
 assert_no_spawn "skip override -> no spawn"
 
 echo
