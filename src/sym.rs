@@ -154,6 +154,89 @@ pub fn query_implementors(
     Ok(out)
 }
 
+/// One row of cross-repo symbol consult output.
+#[derive(Debug, Clone, Serialize)]
+pub struct CrossRepoSymbol {
+    pub repo: String,
+    pub lang: String,
+    pub def_location: Option<SymbolLocation>,
+    pub refs_count: usize,
+}
+
+/// Walk every stored SCIP blob (filtered to `repos` when non-empty)
+/// and return per-(repo, lang) hits for `symbol_name`. Sorted by
+/// `refs_count` descending, then by repo alphabetically. Repos with
+/// no stored index, and blobs that fail to parse, are skipped with a
+/// stderr warning -- one bad blob never aborts the consult.
+pub fn cross_repo_symbol_query(
+    db: &crate::db::Database,
+    symbol_name: &str,
+    repos: &[String],
+) -> Result<Vec<CrossRepoSymbol>> {
+    let mut out: Vec<CrossRepoSymbol> = Vec::new();
+
+    let candidate_repos: Vec<String> = if repos.is_empty() {
+        Vec::new()
+    } else {
+        repos.to_vec()
+    };
+
+    let blobs: Vec<crate::scip::ScipIndex> = if candidate_repos.is_empty() {
+        // Caller did not narrow -- list every repo that has an index row.
+        // We cheat the lack of "list everything" by doing a no-arg get on
+        // every repo we've ever heard of; without that, we surface nothing,
+        // which is a fail-quiet UX. db::list_index_jobs gives us a
+        // superset of relevant repo names.
+        let mut found: Vec<crate::scip::ScipIndex> = Vec::new();
+        for job in db.list_index_jobs()? {
+            found.extend(db.list_scip_indexes(&job.repo)?);
+        }
+        found
+    } else {
+        let mut found: Vec<crate::scip::ScipIndex> = Vec::new();
+        for r in &candidate_repos {
+            found.extend(db.list_scip_indexes(r)?);
+        }
+        found
+    };
+
+    for idx in &blobs {
+        let defs = match query_definitions(&idx.blob, symbol_name, &idx.repo, &idx.lang) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[legion consult] skipping {}/{}: {e}", idx.repo, idx.lang);
+                continue;
+            }
+        };
+        let refs = match query_references(&idx.blob, symbol_name, &idx.repo, &idx.lang) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "[legion consult] skipping {}/{} refs: {e}",
+                    idx.repo, idx.lang
+                );
+                continue;
+            }
+        };
+        if defs.is_empty() && refs.is_empty() {
+            continue;
+        }
+        out.push(CrossRepoSymbol {
+            repo: idx.repo.clone(),
+            lang: idx.lang.clone(),
+            def_location: defs.into_iter().next(),
+            refs_count: refs.len(),
+        });
+    }
+
+    out.sort_by(|a, b| {
+        b.refs_count
+            .cmp(&a.refs_count)
+            .then_with(|| a.repo.cmp(&b.repo))
+    });
+    Ok(out)
+}
+
 pub fn query_hover(blob: &[u8], name: &str, repo: &str, lang: &str) -> Result<Option<HoverInfo>> {
     let idx = parse_index(blob)?;
     for doc in &idx.documents {
@@ -297,6 +380,99 @@ mod tests {
         let blob = build_blob();
         let hover = query_hover(&blob, "NoSuch", "fixture", "rust").unwrap();
         assert!(hover.is_none());
+    }
+
+    fn make_blob() -> Vec<u8> {
+        build_blob()
+    }
+
+    fn open_test_db() -> crate::db::Database {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = crate::db::Database::open(&dir.path().join("test.sqlite")).unwrap();
+        std::mem::forget(dir);
+        db
+    }
+
+    #[test]
+    fn cross_repo_symbol_query_collects_per_repo_hits() {
+        let db = open_test_db();
+        let blob = make_blob();
+        let now = "2026-04-28T00:00:00Z";
+
+        for (repo, lang) in [("alpha", "rust"), ("beta", "rust")] {
+            db.upsert_scip_index(&crate::scip::ScipIndex {
+                id: uuid::Uuid::now_v7().to_string(),
+                repo: repo.to_string(),
+                lang: lang.to_string(),
+                content_hash: crate::scip::content_hash(&blob),
+                blob: blob.clone(),
+                updated_at: now.to_string(),
+                deleted_at: None,
+            })
+            .unwrap();
+        }
+
+        let rows =
+            cross_repo_symbol_query(&db, "MyStruct", &["alpha".to_string(), "beta".to_string()])
+                .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].refs_count, 1);
+        assert_eq!(rows[1].refs_count, 1);
+    }
+
+    #[test]
+    fn cross_repo_symbol_query_repo_with_no_index_is_skipped() {
+        let db = open_test_db();
+        let rows = cross_repo_symbol_query(&db, "MyStruct", &["nope".to_string()]).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn cross_repo_symbol_query_sorted_by_refs_count_desc() {
+        // Build two indexes -- the second has the symbol referenced more
+        // often, so it should sort first.
+        let db = open_test_db();
+        let now = "2026-04-28T00:00:00Z";
+
+        // Repo "few": one ref.
+        let blob_few = make_blob();
+        db.upsert_scip_index(&crate::scip::ScipIndex {
+            id: uuid::Uuid::now_v7().to_string(),
+            repo: "few".to_string(),
+            lang: "rust".to_string(),
+            content_hash: crate::scip::content_hash(&blob_few),
+            blob: blob_few,
+            updated_at: now.to_string(),
+            deleted_at: None,
+        })
+        .unwrap();
+
+        // Repo "many": multiple ref occurrences for the same symbol.
+        let mut idx = build_index();
+        for i in 0..3 {
+            let mut occ = scip::types::Occurrence::new();
+            occ.symbol = "rust . crate . `fixture` . MyStruct#".to_string();
+            occ.range = vec![100 + i, 0, 100 + i, 5];
+            occ.symbol_roles = 0;
+            idx.documents[0].occurrences.push(occ);
+        }
+        let blob_many = idx.write_to_bytes().unwrap();
+        db.upsert_scip_index(&crate::scip::ScipIndex {
+            id: uuid::Uuid::now_v7().to_string(),
+            repo: "many".to_string(),
+            lang: "rust".to_string(),
+            content_hash: crate::scip::content_hash(&blob_many),
+            blob: blob_many,
+            updated_at: now.to_string(),
+            deleted_at: None,
+        })
+        .unwrap();
+
+        let rows =
+            cross_repo_symbol_query(&db, "MyStruct", &["few".to_string(), "many".to_string()])
+                .unwrap();
+        assert_eq!(rows[0].repo, "many");
+        assert!(rows[0].refs_count > rows[1].refs_count);
     }
 
     #[test]
