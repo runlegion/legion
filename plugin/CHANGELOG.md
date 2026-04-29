@@ -1,5 +1,32 @@
 # Legion Changelog
 
+## 0.10.0
+
+The SCIP pillar. Agents now answer symbol-navigation questions in bytes from a precomputed protobuf index instead of paying for full file loads on every Grep. cache_read was 98% of raw token burn on heavy sessions; SCIP collapses the worst class of that into `legion sym def|refs|impl|hover` answered locally, synced cross-host via smugglr content-hash deltas.
+
+Ten issues, stacked merges; the whole pillar is gated behind `_legion-covered.sh` so universal hooks no-op cleanly in repos legion does not manage.
+
+### New
+
+- **Coverage gate** (#353): `_legion-covered.sh` helper short-circuits no-direct-db, no-gh, no-local-memory, pre-grep-recall, recall-first when the current repo is neither in `watch.toml` nor has any reflections. Cached per (session, repo) under `XDG_CACHE_HOME/legion/`. Precondition for the SCIP hooks landing on universal mounts without poisoning unrelated repos.
+- **SCIP storage layer** (#278): new `scip_indexes` table with one live row per (repo, lang) holding the protobuf blob, SHA-256 `content_hash`, and soft-delete tombstone for sync. `Database::upsert_scip_index` is idempotent on hash; `legion index <repo>` resolves the path from `watch.toml`, detects language from `Cargo.toml`, and shells to `scip-rust`.
+- **Multi-language indexing** (#279): built-in detection table covers go, javascript, python, rust, typescript. `legion index` runs each language independently with partial-failure tolerance and a summary line. `IndexConfig.indexers` in the per-repo `watch.toml` `extra` table overrides the default binary per language.
+- **Per-file incremental** (#280): `legion index --file <path>` resolves the enclosing repo by longest-prefix match against `watch.toml` workdirs. No `scip-<lang>` tool currently exposes a per-file mode legion can rely on, so the call falls back to a single-language full re-index with a stderr warning -- spec-mandated visible signal so operators know the cost.
+- **Re-index on edit** (#281): `plugin/hooks/post-edit-scip.sh` fires PostToolUse for Edit/Write/MultiEdit, debounces per-file under `XDG_CACHE_HOME/legion/scip-debounce/`, and spawns `legion index --file` fully detached so the originating tool call never blocks.
+- **Symbol query CLI** (#282): `legion sym def|refs|impl|hover <name> [--repo X] [--lang Y] [--json]` parses stored blobs in-process via the `scip` crate. Substring match on SCIP-encoded fully qualified identifiers; output sorted by `(file, line)` for deterministic ordering.
+- **PreToolUse SCIP injection** (#283): `pre-grep-scip.sh` runs first in the Grep/Glob hook chain. Symbol-intent heuristic accepts bare identifiers and `::`-qualified paths, rejects regex meta and short patterns; injects `legion sym` results as `additionalContext` so agents skip the grep when the index already has the answer.
+- **Background index daemon** (#284): `index_jobs` table with queued/running/done/failed lifecycle. `legion watch add <path>` queues a job, `legion watch` startup drains pending jobs and resets interrupted `running` rows back to `queued`. `legion index --status [--repo X] [--json]` surfaces job state, progress percentage, and last error.
+- **Cross-repo symbol consult** (#285): `legion consult --symbol <name>` walks every stored SCIP blob and returns per-(repo, lang) rows sorted by reference count descending. Combines with `--context` for a unified BM25 + symbol consult; either flag (or both) is required.
+
+### Changed
+
+- **`legion consult` flag surface**: `--context` and `--symbol` are now optional individually, but at least one must be provided. `--json` shape changes to `{ bm25_text, symbol_results }`.
+- **Documentation**: `docs/site/getting-started.md` gains a "Code intelligence (SCIP)" section pointing operators at the SCIP workflow. The audit for `rust-analyzer-lsp` / `typescript-lsp` recommendations across docs, install scripts, and plugin config returned zero hits -- legion never recommended them in its own docs (#286).
+
+### Schema
+
+Migration 18 (`scip_indexes`) and migration 19 (`index_jobs`). Both use the same soft-delete + updated_at pattern as the rest of the syncable tables; smugglr deltas pick them up automatically once registered.
+
 ## 0.9.10
 
 CI maintenance release. Node 20 reaches EOL April 2026 and GitHub Actions runners default to Node 24 starting June 2, 2026; the bump uncovered a phantom submodule entry that had been quietly poisoning the index since #214.
