@@ -659,7 +659,7 @@ impl Database {
                 ON persona_wake_leases(expires_at) WHERE deleted_at IS NULL;",
         )?;
 
-        // Migration 17: SCIP indexes for code intelligence (#278).
+        // Migration 18: SCIP indexes for code intelligence (#278).
         // One active row per (repo, lang) holds the protobuf blob legion
         // queries against. content_hash is SHA-256 hex of the blob; an
         // upsert with an unchanged hash short-circuits to bumping
@@ -678,6 +678,29 @@ impl Database {
                 ON scip_indexes(repo, lang) WHERE deleted_at IS NULL;
             CREATE INDEX IF NOT EXISTS idx_scip_indexes_repo
                 ON scip_indexes(repo) WHERE deleted_at IS NULL;",
+        )?;
+
+        // Migration 19: Background index jobs (#284). One live row per
+        // repo (unique on repo where deleted_at IS NULL); upsert keyed
+        // on repo so re-queueing replaces the prior job. languages is
+        // a comma-joined list of language tags (e.g. "rust,typescript").
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS index_jobs (
+                id TEXT PRIMARY KEY,
+                repo TEXT NOT NULL,
+                status TEXT NOT NULL,
+                languages TEXT NOT NULL,
+                progress_pct INTEGER NOT NULL DEFAULT 0,
+                eta_secs INTEGER,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_index_jobs_repo_live
+                ON index_jobs(repo) WHERE deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_index_jobs_status
+                ON index_jobs(status) WHERE deleted_at IS NULL;",
         )?;
 
         Ok(())
@@ -3397,6 +3420,104 @@ impl Database {
         Ok(row)
     }
 
+    /// Upsert an `IndexJob` keyed on (repo) where deleted_at IS NULL.
+    /// Re-queueing replaces the prior job in place; observers reading by
+    /// repo always see the latest state.
+    pub fn upsert_index_job(&self, job: &crate::scip::IndexJob) -> Result<()> {
+        let langs = job.languages.join(",");
+        let status = job.status.as_str();
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM index_jobs WHERE repo = ?1 AND deleted_at IS NULL",
+                rusqlite::params![&job.repo],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match existing {
+            Some(id) => {
+                self.conn.execute(
+                    "UPDATE index_jobs
+                     SET status = ?1, languages = ?2, progress_pct = ?3,
+                         eta_secs = ?4, error = ?5, updated_at = ?6
+                     WHERE id = ?7",
+                    rusqlite::params![
+                        status,
+                        &langs,
+                        job.progress_pct as i64,
+                        job.eta_secs.map(|v| v as i64),
+                        &job.error,
+                        &job.updated_at,
+                        &id,
+                    ],
+                )?;
+            }
+            None => {
+                self.conn.execute(
+                    "INSERT INTO index_jobs
+                       (id, repo, status, languages, progress_pct, eta_secs, error,
+                        created_at, updated_at, deleted_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
+                    rusqlite::params![
+                        &job.id,
+                        &job.repo,
+                        status,
+                        &langs,
+                        job.progress_pct as i64,
+                        job.eta_secs.map(|v| v as i64),
+                        &job.error,
+                        &job.created_at,
+                        &job.updated_at,
+                    ],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read the active job for `repo`, if any.
+    pub fn get_index_job(&self, repo: &str) -> Result<Option<crate::scip::IndexJob>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, repo, status, languages, progress_pct, eta_secs, error,
+                        created_at, updated_at
+                 FROM index_jobs
+                 WHERE repo = ?1 AND deleted_at IS NULL",
+                rusqlite::params![repo],
+                map_index_job_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// List all live job rows.
+    pub fn list_index_jobs(&self) -> Result<Vec<crate::scip::IndexJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, status, languages, progress_pct, eta_secs, error,
+                    created_at, updated_at
+             FROM index_jobs
+             WHERE deleted_at IS NULL
+             ORDER BY repo",
+        )?;
+        let rows = stmt
+            .query_map([], map_index_job_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Reset every `running` job to `queued`. Called at daemon startup
+    /// to recover from interrupted jobs.
+    pub fn reset_running_jobs_to_queued(&self, now_iso: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE index_jobs
+             SET status = 'queued', progress_pct = 0, updated_at = ?1
+             WHERE status = 'running' AND deleted_at IS NULL",
+            rusqlite::params![now_iso],
+        )?;
+        Ok(n)
+    }
+
     /// List all non-deleted SCIP indexes for a repo.
     /// Read path consumed by `legion consult --symbol` in #285.
     #[allow(dead_code)]
@@ -3422,6 +3543,36 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+}
+
+/// Hydrate an `IndexJob` from an `index_jobs` row in the canonical
+/// SELECT order: (id, repo, status, languages, progress_pct, eta_secs,
+/// error, created_at, updated_at). Used by `get_index_job` and
+/// `list_index_jobs`.
+fn map_index_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::scip::IndexJob> {
+    let status_str: String = row.get(2)?;
+    let status = crate::scip::IndexJobStatus::parse(&status_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let langs_str: String = row.get(3)?;
+    let languages: Vec<String> = if langs_str.is_empty() {
+        Vec::new()
+    } else {
+        langs_str.split(',').map(|s| s.to_string()).collect()
+    };
+    let progress: i64 = row.get(4)?;
+    let eta: Option<i64> = row.get(5)?;
+    Ok(crate::scip::IndexJob {
+        id: row.get(0)?,
+        repo: row.get(1)?,
+        status,
+        languages,
+        progress_pct: progress.clamp(0, 100) as u8,
+        eta_secs: eta.map(|v| v.max(0) as u32),
+        error: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
 }
 
 #[cfg(test)]
@@ -5717,6 +5868,95 @@ mod tests {
             .collect();
         langs.sort();
         assert_eq!(langs, vec!["rust".to_string(), "ts".to_string()]);
+    }
+
+    fn make_job(repo: &str, status: crate::scip::IndexJobStatus) -> crate::scip::IndexJob {
+        crate::scip::IndexJob {
+            id: uuid::Uuid::now_v7().to_string(),
+            repo: repo.to_string(),
+            status,
+            languages: vec!["rust".to_string()],
+            progress_pct: 0,
+            eta_secs: None,
+            error: None,
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+            updated_at: "2026-04-28T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn index_job_upsert_then_get_round_trip() {
+        let db = test_db();
+        let job = make_job("legion", crate::scip::IndexJobStatus::Queued);
+        db.upsert_index_job(&job).unwrap();
+        let got = db.get_index_job("legion").unwrap().unwrap();
+        assert_eq!(got.repo, "legion");
+        assert_eq!(got.status, crate::scip::IndexJobStatus::Queued);
+        assert_eq!(got.languages, vec!["rust".to_string()]);
+    }
+
+    #[test]
+    fn index_job_upsert_replaces_existing_row() {
+        let db = test_db();
+        db.upsert_index_job(&make_job("legion", crate::scip::IndexJobStatus::Queued))
+            .unwrap();
+        let id = db.get_index_job("legion").unwrap().unwrap().id;
+
+        let mut updated = make_job("legion", crate::scip::IndexJobStatus::Done);
+        updated.id = "new-id-ignored".to_string();
+        updated.progress_pct = 100;
+        db.upsert_index_job(&updated).unwrap();
+
+        let after = db.get_index_job("legion").unwrap().unwrap();
+        assert_eq!(after.id, id, "row identity must be preserved on upsert");
+        assert_eq!(after.status, crate::scip::IndexJobStatus::Done);
+        assert_eq!(after.progress_pct, 100);
+    }
+
+    #[test]
+    fn list_index_jobs_returns_all_statuses() {
+        let db = test_db();
+        db.upsert_index_job(&make_job("a", crate::scip::IndexJobStatus::Queued))
+            .unwrap();
+        db.upsert_index_job(&make_job("b", crate::scip::IndexJobStatus::Failed))
+            .unwrap();
+        db.upsert_index_job(&make_job("c", crate::scip::IndexJobStatus::Done))
+            .unwrap();
+        let jobs = db.list_index_jobs().unwrap();
+        let repos: Vec<String> = jobs.iter().map(|j| j.repo.clone()).collect();
+        assert_eq!(
+            repos,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn reset_running_to_queued_only_touches_running() {
+        let db = test_db();
+        db.upsert_index_job(&make_job("a", crate::scip::IndexJobStatus::Running))
+            .unwrap();
+        db.upsert_index_job(&make_job("b", crate::scip::IndexJobStatus::Queued))
+            .unwrap();
+        db.upsert_index_job(&make_job("c", crate::scip::IndexJobStatus::Done))
+            .unwrap();
+
+        let reset = db
+            .reset_running_jobs_to_queued("2026-04-29T00:00:00Z")
+            .unwrap();
+        assert_eq!(reset, 1);
+
+        assert_eq!(
+            db.get_index_job("a").unwrap().unwrap().status,
+            crate::scip::IndexJobStatus::Queued
+        );
+        assert_eq!(
+            db.get_index_job("b").unwrap().unwrap().status,
+            crate::scip::IndexJobStatus::Queued
+        );
+        assert_eq!(
+            db.get_index_job("c").unwrap().unwrap().status,
+            crate::scip::IndexJobStatus::Done
+        );
     }
 
     #[test]

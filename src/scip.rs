@@ -12,7 +12,7 @@
 //! column (see `Database::upsert_scip_index`).
 
 use crate::error::{LegionError, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -31,6 +31,55 @@ pub struct ScipIndex {
     /// cleanup paths (#284 daemon indexer); not read by the #278 base.
     #[allow(dead_code)]
     pub deleted_at: Option<String>,
+}
+
+/// Lifecycle states for a background index job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexJobStatus {
+    Queued,
+    Running,
+    Done,
+    Failed,
+}
+
+impl IndexJobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IndexJobStatus::Queued => "queued",
+            IndexJobStatus::Running => "running",
+            IndexJobStatus::Done => "done",
+            IndexJobStatus::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "queued" => Ok(IndexJobStatus::Queued),
+            "running" => Ok(IndexJobStatus::Running),
+            "done" => Ok(IndexJobStatus::Done),
+            "failed" => Ok(IndexJobStatus::Failed),
+            other => Err(LegionError::Search(format!(
+                "unknown index job status: {other}"
+            ))),
+        }
+    }
+}
+
+/// A background index job persisted to `index_jobs`. Daemon picks up
+/// `Queued` rows, sets them to `Running` while processing, and either
+/// `Done` or `Failed` on completion. Restart resets `Running` -> `Queued`.
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexJob {
+    pub id: String,
+    pub repo: String,
+    pub status: IndexJobStatus,
+    pub languages: Vec<String>,
+    pub progress_pct: u8,
+    pub eta_secs: Option<u32>,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// A language detected in a repo and the binary used to index it.
@@ -221,6 +270,121 @@ where
     };
     db.upsert_scip_index(&index)?;
     Ok(hash)
+}
+
+/// Run every queued index job once. Picks up `Queued` rows from
+/// `index_jobs`, resolves each repo's path from `watch.toml`, runs
+/// the multi-language indexer, and updates the row to `Done` or
+/// `Failed` depending on outcome.
+///
+/// Best-effort: a failure indexing one repo does not abort the others.
+/// Caller is responsible for invoking this on a cadence (daemon poll
+/// loop or one-shot at startup).
+pub fn run_pending_index_jobs(db: &crate::db::Database, watch_path: &Path) -> Result<usize> {
+    let now = chrono::Utc::now().to_rfc3339();
+    db.reset_running_jobs_to_queued(&now)?;
+
+    let jobs = db.list_index_jobs()?;
+    let mut completed = 0usize;
+    for mut job in jobs {
+        if job.status != IndexJobStatus::Queued {
+            continue;
+        }
+        let repos = match crate::watch::list_repos_in_config(watch_path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let entry = match repos.iter().find(|r| r.name == job.repo) {
+            Some(e) => e.clone(),
+            None => {
+                job.status = IndexJobStatus::Failed;
+                job.error = Some("repo no longer in watch.toml".to_string());
+                job.updated_at = chrono::Utc::now().to_rfc3339();
+                if let Err(e) = db.upsert_index_job(&job) {
+                    eprintln!(
+                        "[legion index] job state write failed for {}: {e}",
+                        job.repo
+                    );
+                }
+                continue;
+            }
+        };
+        let repo_path = PathBuf::from(&entry.workdir);
+        let cfg: IndexConfig = match entry.extra.clone().try_into() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "[legion index] warning: malformed indexer config for {}: {e}; using defaults",
+                    job.repo
+                );
+                IndexConfig::default()
+            }
+        };
+
+        let detection = detect_languages(&repo_path, &cfg);
+        let total = detection.indexable.len().max(1);
+
+        job.status = IndexJobStatus::Running;
+        job.languages = detection.indexable.iter().map(|d| d.lang.clone()).collect();
+        job.progress_pct = 0;
+        job.error = None;
+        job.updated_at = chrono::Utc::now().to_rfc3339();
+        let _ = db.upsert_index_job(&job);
+
+        let mut last_err: Option<String> = None;
+        let mut indexed = 0usize;
+        for (i, lang_entry) in detection.indexable.iter().enumerate() {
+            match run_indexer(lang_entry, &repo_path) {
+                Ok(blob) => {
+                    let hash = content_hash(&blob);
+                    let idx = ScipIndex {
+                        id: uuid::Uuid::now_v7().to_string(),
+                        repo: job.repo.clone(),
+                        lang: lang_entry.lang.clone(),
+                        content_hash: hash,
+                        blob,
+                        updated_at: chrono::Utc::now().to_rfc3339(),
+                        deleted_at: None,
+                    };
+                    if let Err(e) = db.upsert_scip_index(&idx) {
+                        eprintln!(
+                            "[legion index] blob write failed for {}/{}: {e}",
+                            job.repo, lang_entry.lang
+                        );
+                    }
+                    indexed += 1;
+                }
+                Err(e) => {
+                    last_err = Some(format!("{}: {e}", lang_entry.lang));
+                }
+            }
+            job.progress_pct = (((i + 1) as u64 * 100) / total as u64).min(100) as u8;
+            job.updated_at = chrono::Utc::now().to_rfc3339();
+            let _ = db.upsert_index_job(&job);
+        }
+
+        job.status = if indexed > 0 {
+            IndexJobStatus::Done
+        } else {
+            IndexJobStatus::Failed
+        };
+        job.error = last_err.or_else(|| {
+            if detection.indexable.is_empty() {
+                Some("no indexable languages detected".to_string())
+            } else {
+                None
+            }
+        });
+        job.progress_pct = if matches!(job.status, IndexJobStatus::Done) {
+            100
+        } else {
+            job.progress_pct
+        };
+        job.updated_at = chrono::Utc::now().to_rfc3339();
+        let _ = db.upsert_index_job(&job);
+        completed += 1;
+    }
+    Ok(completed)
 }
 
 /// SHA-256 of `bytes` rendered as lowercase hex.
