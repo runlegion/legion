@@ -33,11 +33,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/no-bullshit.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh",
             "timeout": 10
           }
