@@ -23,6 +23,7 @@ mod stats;
 mod status;
 mod statusline;
 mod surface;
+mod sym;
 mod sync;
 mod sync_actor;
 mod task;
@@ -376,6 +377,15 @@ enum Commands {
         repo: String,
     },
 
+    /// Query SCIP symbol indexes (def, refs, impl, hover).
+    ///
+    /// Reads stored protobuf blobs from `scip_indexes` and answers symbol
+    /// lookups in-process. Run `legion index <repo>` first to populate.
+    Sym {
+        #[command(subcommand)]
+        action: SymAction,
+    },
+
     /// Rebuild the search index from the database
     Reindex,
 
@@ -624,6 +634,58 @@ enum Commands {
         by_repo: bool,
 
         /// Output as JSON instead of a human-readable table
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SymAction {
+    /// Print definitions of a symbol
+    Def {
+        /// Symbol name to look up (substring-matched against SCIP symbol strings)
+        name: String,
+        /// Restrict to a single repo (default: every repo with a stored index)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Restrict to a single language (default: every language with a stored index)
+        #[arg(long)]
+        lang: Option<String>,
+        /// Emit results as a JSON array of SymbolLocation objects
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print references / call sites of a symbol
+    Refs {
+        name: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print types implementing a trait or interface
+    Impl {
+        /// Trait or interface name
+        trait_name: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print signature + docstring for a symbol
+    Hover {
+        name: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        lang: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -2064,6 +2126,177 @@ fn format_age(d: std::time::Duration) -> String {
     }
 }
 
+/// Dispatch `legion sym <action>` against the local index store.
+///
+/// Loads every matching `scip_indexes` row (filtered by optional repo and
+/// language), runs the per-blob query, and prints results to stdout.
+/// Exits with code 1 and a stderr message when no index rows match the
+/// filter, distinguishing "no data" from "empty result."
+fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<()> {
+    use std::io::Write;
+
+    fn print_locations_human(
+        out: &mut impl Write,
+        locs: &[sym::SymbolLocation],
+    ) -> std::io::Result<()> {
+        for loc in locs {
+            writeln!(
+                out,
+                "{}:{}:{}\t[{}/{}]",
+                loc.file, loc.line, loc.column, loc.repo, loc.lang
+            )?;
+        }
+        Ok(())
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    match action {
+        SymAction::Def {
+            name,
+            repo,
+            lang,
+            json,
+        } => {
+            let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
+            if indexes.is_empty() {
+                no_index_found(repo.as_deref(), lang.as_deref());
+                std::process::exit(1);
+            }
+            let mut all = Vec::new();
+            for idx in &indexes {
+                let mut hits = sym::query_definitions(&idx.blob, &name, &idx.repo, &idx.lang)?;
+                all.append(&mut hits);
+            }
+            all.sort_by(|a, b| {
+                a.repo
+                    .cmp(&b.repo)
+                    .then(a.lang.cmp(&b.lang))
+                    .then(a.file.cmp(&b.file))
+                    .then(a.line.cmp(&b.line))
+            });
+            if json {
+                serde_json::to_writer(&mut out, &all)?;
+                writeln!(out)?;
+            } else {
+                print_locations_human(&mut out, &all)?;
+            }
+        }
+        SymAction::Refs {
+            name,
+            repo,
+            lang,
+            json,
+        } => {
+            let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
+            if indexes.is_empty() {
+                no_index_found(repo.as_deref(), lang.as_deref());
+                std::process::exit(1);
+            }
+            let mut all = Vec::new();
+            for idx in &indexes {
+                let mut hits = sym::query_references(&idx.blob, &name, &idx.repo, &idx.lang)?;
+                all.append(&mut hits);
+            }
+            all.sort_by(|a, b| {
+                a.repo
+                    .cmp(&b.repo)
+                    .then(a.lang.cmp(&b.lang))
+                    .then(a.file.cmp(&b.file))
+                    .then(a.line.cmp(&b.line))
+            });
+            if json {
+                serde_json::to_writer(&mut out, &all)?;
+                writeln!(out)?;
+            } else {
+                print_locations_human(&mut out, &all)?;
+            }
+        }
+        SymAction::Impl {
+            trait_name,
+            repo,
+            lang,
+            json,
+        } => {
+            let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
+            if indexes.is_empty() {
+                no_index_found(repo.as_deref(), lang.as_deref());
+                std::process::exit(1);
+            }
+            let mut all = Vec::new();
+            for idx in &indexes {
+                if idx.lang != "rust" {
+                    eprintln!(
+                        "[legion] note: 'impl' relationships not modeled for {} -- skipping {}/{}",
+                        idx.lang, idx.repo, idx.lang
+                    );
+                    continue;
+                }
+                let mut hits =
+                    sym::query_implementors(&idx.blob, &trait_name, &idx.repo, &idx.lang)?;
+                all.append(&mut hits);
+            }
+            all.sort_by(|a, b| {
+                a.repo
+                    .cmp(&b.repo)
+                    .then(a.lang.cmp(&b.lang))
+                    .then(a.file.cmp(&b.file))
+                    .then(a.line.cmp(&b.line))
+            });
+            if json {
+                serde_json::to_writer(&mut out, &all)?;
+                writeln!(out)?;
+            } else {
+                print_locations_human(&mut out, &all)?;
+            }
+        }
+        SymAction::Hover {
+            name,
+            repo,
+            lang,
+            json,
+        } => {
+            let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
+            if indexes.is_empty() {
+                no_index_found(repo.as_deref(), lang.as_deref());
+                std::process::exit(1);
+            }
+            let mut hover: Option<sym::HoverInfo> = None;
+            for idx in &indexes {
+                if let Some(h) = sym::query_hover(&idx.blob, &name, &idx.repo, &idx.lang)? {
+                    hover = Some(h);
+                    break;
+                }
+            }
+            if json {
+                serde_json::to_writer(&mut out, &hover)?;
+                writeln!(out)?;
+            } else if let Some(h) = hover {
+                writeln!(out, "{}", h.symbol)?;
+                if let Some(sig) = h.signature {
+                    writeln!(out, "{sig}")?;
+                }
+                if let Some(doc) = h.docstring {
+                    writeln!(out)?;
+                    writeln!(out, "{doc}")?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn no_index_found(repo: Option<&str>, lang: Option<&str>) {
+    let scope = match (repo, lang) {
+        (Some(r), Some(l)) => format!("{r}/{l}"),
+        (Some(r), None) => r.to_string(),
+        (None, Some(l)) => format!("(any repo)/{l}"),
+        (None, None) => "(any repo)".to_string(),
+    };
+    eprintln!("[legion] no index found for {scope}; run `legion index <repo>` first");
+}
+
 fn main() -> error::Result<()> {
     // Windows default stack (1MB) is too small for clap + Tantivy init.
     // Spawn with 8MB stack to match macOS/Linux defaults.
@@ -2614,6 +2847,11 @@ fn run() -> error::Result<()> {
                 index.blob.len(),
                 &index.content_hash[..16]
             );
+        }
+        Commands::Sym { action } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            run_sym_action(&database, action)?;
         }
         Commands::Reindex => {
             let base = data_dir()?;
