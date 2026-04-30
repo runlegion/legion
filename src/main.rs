@@ -2133,155 +2133,145 @@ fn format_age(d: std::time::Duration) -> String {
 /// Exits with code 1 and a stderr message when no index rows match the
 /// filter, distinguishing "no data" from "empty result."
 fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<()> {
-    use std::io::Write;
-
-    fn print_locations_human(
-        out: &mut impl Write,
-        locs: &[sym::SymbolLocation],
-    ) -> std::io::Result<()> {
-        for loc in locs {
-            writeln!(
-                out,
-                "{}:{}:{}\t[{}/{}]",
-                loc.file, loc.line, loc.column, loc.repo, loc.lang
-            )?;
-        }
-        Ok(())
-    }
-
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-
     match action {
         SymAction::Def {
             name,
             repo,
             lang,
             json,
-        } => {
-            let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
-            if indexes.is_empty() {
-                no_index_found(repo.as_deref(), lang.as_deref());
-                std::process::exit(1);
-            }
-            let mut all = Vec::new();
-            for idx in &indexes {
-                let mut hits = sym::query_definitions(&idx.blob, &name, &idx.repo, &idx.lang)?;
-                all.append(&mut hits);
-            }
-            all.sort_by(|a, b| {
-                a.repo
-                    .cmp(&b.repo)
-                    .then(a.lang.cmp(&b.lang))
-                    .then(a.file.cmp(&b.file))
-                    .then(a.line.cmp(&b.line))
-            });
-            if json {
-                serde_json::to_writer(&mut out, &all)?;
-                writeln!(out)?;
-            } else {
-                print_locations_human(&mut out, &all)?;
-            }
-        }
+        } => run_location_query(database, repo, lang, json, false, |idx| {
+            sym::query_definitions(&idx.blob, &name, &idx.repo, &idx.lang)
+        }),
         SymAction::Refs {
             name,
             repo,
             lang,
             json,
-        } => {
-            let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
-            if indexes.is_empty() {
-                no_index_found(repo.as_deref(), lang.as_deref());
-                std::process::exit(1);
-            }
-            let mut all = Vec::new();
-            for idx in &indexes {
-                let mut hits = sym::query_references(&idx.blob, &name, &idx.repo, &idx.lang)?;
-                all.append(&mut hits);
-            }
-            all.sort_by(|a, b| {
-                a.repo
-                    .cmp(&b.repo)
-                    .then(a.lang.cmp(&b.lang))
-                    .then(a.file.cmp(&b.file))
-                    .then(a.line.cmp(&b.line))
-            });
-            if json {
-                serde_json::to_writer(&mut out, &all)?;
-                writeln!(out)?;
-            } else {
-                print_locations_human(&mut out, &all)?;
-            }
-        }
+        } => run_location_query(database, repo, lang, json, false, |idx| {
+            sym::query_references(&idx.blob, &name, &idx.repo, &idx.lang)
+        }),
         SymAction::Impl {
             trait_name,
             repo,
             lang,
             json,
-        } => {
-            let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
-            if indexes.is_empty() {
-                no_index_found(repo.as_deref(), lang.as_deref());
-                std::process::exit(1);
-            }
-            let mut all = Vec::new();
-            for idx in &indexes {
-                if idx.lang != "rust" {
-                    eprintln!(
-                        "[legion] note: 'impl' relationships not modeled for {} -- skipping {}/{}",
-                        idx.lang, idx.repo, idx.lang
-                    );
-                    continue;
-                }
-                let mut hits =
-                    sym::query_implementors(&idx.blob, &trait_name, &idx.repo, &idx.lang)?;
-                all.append(&mut hits);
-            }
-            all.sort_by(|a, b| {
-                a.repo
-                    .cmp(&b.repo)
-                    .then(a.lang.cmp(&b.lang))
-                    .then(a.file.cmp(&b.file))
-                    .then(a.line.cmp(&b.line))
-            });
-            if json {
-                serde_json::to_writer(&mut out, &all)?;
-                writeln!(out)?;
-            } else {
-                print_locations_human(&mut out, &all)?;
-            }
-        }
+        } => run_location_query(database, repo, lang, json, true, |idx| {
+            sym::query_implementors(&idx.blob, &trait_name, &idx.repo, &idx.lang)
+        }),
         SymAction::Hover {
             name,
             repo,
             lang,
             json,
-        } => {
-            let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
-            if indexes.is_empty() {
-                no_index_found(repo.as_deref(), lang.as_deref());
-                std::process::exit(1);
+        } => run_hover_query(database, &name, repo, lang, json),
+    }
+}
+
+/// Shared executor for the three location-returning sym actions
+/// (def, refs, impl). Each caller supplies a closure that turns one
+/// `ScipIndex` into a `Vec<SymbolLocation>`; this function handles the
+/// scoping (repo/lang filters), the rust-only gate for `impl`, the
+/// "no index found" exit, deterministic sort, and human/JSON output.
+fn run_location_query<F>(
+    database: &db::Database,
+    repo: Option<String>,
+    lang: Option<String>,
+    json: bool,
+    rust_only: bool,
+    mut query: F,
+) -> error::Result<()>
+where
+    F: FnMut(&scip::ScipIndex) -> error::Result<Vec<sym::SymbolLocation>>,
+{
+    use std::io::Write;
+    let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
+    if indexes.is_empty() {
+        no_index_found(repo.as_deref(), lang.as_deref());
+        std::process::exit(1);
+    }
+
+    // Skip non-rust indexes for `impl` queries (SCIP only models the
+    // relationship for languages with traits/interfaces). Stay quiet
+    // when `--lang` already restricts the scope -- the user clearly
+    // knows the constraint.
+    let lang_filter_active = lang.is_some();
+    let mut all = Vec::new();
+    for idx in &indexes {
+        if rust_only && idx.lang != "rust" {
+            if !lang_filter_active {
+                eprintln!(
+                    "[legion] note: 'impl' relationships not modeled for {} -- skipping {}/{}",
+                    idx.lang, idx.repo, idx.lang
+                );
             }
-            let mut hover: Option<sym::HoverInfo> = None;
-            for idx in &indexes {
-                if let Some(h) = sym::query_hover(&idx.blob, &name, &idx.repo, &idx.lang)? {
-                    hover = Some(h);
-                    break;
-                }
-            }
-            if json {
-                serde_json::to_writer(&mut out, &hover)?;
-                writeln!(out)?;
-            } else if let Some(h) = hover {
-                writeln!(out, "{}", h.symbol)?;
-                if let Some(sig) = h.signature {
-                    writeln!(out, "{sig}")?;
-                }
-                if let Some(doc) = h.docstring {
-                    writeln!(out)?;
-                    writeln!(out, "{doc}")?;
-                }
-            }
+            continue;
+        }
+        let mut hits = query(idx)?;
+        all.append(&mut hits);
+    }
+    all.sort_by(|a, b| {
+        a.repo
+            .cmp(&b.repo)
+            .then(a.lang.cmp(&b.lang))
+            .then(a.file.cmp(&b.file))
+            .then(a.line.cmp(&b.line))
+    });
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        serde_json::to_writer(&mut out, &all)?;
+        writeln!(out)?;
+    } else {
+        for loc in &all {
+            writeln!(
+                out,
+                "{}:{}:{}\t[{}/{}]",
+                loc.file, loc.line, loc.column, loc.repo, loc.lang
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// First-match hover lookup. Iterates indexes in the order returned by
+/// `list_scip_indexes_filtered` (sorted by repo, lang) and returns the
+/// first symbol that matches. When the query spans multiple indexes,
+/// callers typically scope with `--repo` / `--lang` to disambiguate.
+fn run_hover_query(
+    database: &db::Database,
+    name: &str,
+    repo: Option<String>,
+    lang: Option<String>,
+    json: bool,
+) -> error::Result<()> {
+    use std::io::Write;
+    let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
+    if indexes.is_empty() {
+        no_index_found(repo.as_deref(), lang.as_deref());
+        std::process::exit(1);
+    }
+    let mut hover: Option<sym::HoverInfo> = None;
+    for idx in &indexes {
+        if let Some(h) = sym::query_hover(&idx.blob, name, &idx.repo, &idx.lang)? {
+            hover = Some(h);
+            break;
+        }
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        serde_json::to_writer(&mut out, &hover)?;
+        writeln!(out)?;
+    } else if let Some(h) = hover {
+        writeln!(out, "{}", h.symbol)?;
+        if let Some(sig) = h.signature {
+            writeln!(out, "{sig}")?;
+        }
+        if let Some(doc) = h.docstring {
+            writeln!(out)?;
+            writeln!(out, "{doc}")?;
         }
     }
     Ok(())
