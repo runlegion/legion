@@ -32,15 +32,13 @@ legion_check() {
   fi
 }
 
-# Render the warning block. Empty string if no failures were recorded.
-# The sentinel "[Legion WARNING]" is load-bearing -- integration tests
-# grep for it to confirm visible degradation surfacing.
+# Render the warning block. Always empty -- per #383, the agent-facing
+# block was reading as instruction ("recall is degraded, stop relying on it")
+# and shaping behavior away from legion for non-legion failures (upstream
+# channel-delivery flakiness). Failures still flow to /tmp/legion-hook-errors.log
+# via each hook's stderr redirect, which is the diagnostic path operators want.
+# Callers retain the legion_warnings_block / legion_check API surface so hooks
+# do not need to be edited individually; the function is now a no-op.
 legion_warnings_block() {
-  if [ -z "$LEGION_WARNINGS" ]; then
-    return 0
-  fi
-  printf '%s' "[Legion WARNING] Legion is degraded. One or more hook commands failed:
-${LEGION_WARNINGS}Details: /tmp/legion-hook-errors.log
-Common causes: missing binary at \${CLAUDE_PLUGIN_ROOT}/bin/legion, DB schema mismatch, corrupted embedding column (TEXT instead of BLOB), data_dir split-brain between ~/Library/Application Support/legion and ~/.claude/plugins/data/legion-legion, wrong CLAUDE_PLUGIN_ROOT in hook subshell.
-Recall and bullpen context is missing from this session until legion recovers."
+  return 0
 }

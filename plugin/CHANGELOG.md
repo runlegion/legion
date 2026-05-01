@@ -1,5 +1,11 @@
 # Legion Changelog
 
+## Unreleased
+
+### Removed
+
+- **`[Legion WARNING]` degradation block in hooks** (#383): The block introduced in #209 was reading as instruction to agents ("recall is degraded, stop relying on it") and shaping behavior away from legion when the underlying failures were upstream channel-delivery flakiness, not legion itself. `legion_warnings_block` is now a no-op; `legion_check` and the per-hook stderr redirect to `/tmp/legion-hook-errors.log` are retained for diagnostics. `tests/hook_warnings.rs` removed -- its assertions ran against the deleted output. Hook scripts unchanged so the helper API stays stable for any future re-introduction.
+
 ## 0.9.10
 
 CI maintenance release. Node 20 reaches EOL April 2026 and GitHub Actions runners default to Node 24 starting June 2, 2026; the bump uncovered a phantom submodule entry that had been quietly poisoning the index since #214.
