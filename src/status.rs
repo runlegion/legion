@@ -26,6 +26,10 @@ pub struct StatusOutput {
     pub active_task_count: usize,
     /// Subset of `active_task_count` that are currently blocked.
     pub blocked_task_count: usize,
+    /// Watch session diagnostic for the past 24h (#389). Surfaces when an
+    /// agent has had unproductive watch wakes (spawned, exited, no
+    /// observable artifact). `None` when there is nothing to report.
+    pub session_health: Option<String>,
 }
 
 /// Hours to look back for team posts in status output.
@@ -48,6 +52,8 @@ pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
     let (team_needs, seen_ids) = get_team_needs(&posts, repo);
     let what_changed = get_what_changed(&posts, repo, &seen_ids);
 
+    let session_health = session_health_line(db, repo)?;
+
     Ok(StatusOutput {
         repo: repo.to_string(),
         your_work,
@@ -55,7 +61,42 @@ pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
         what_changed,
         active_task_count,
         blocked_task_count,
+        session_health,
     })
+}
+
+/// Build the watch-session diagnostic line for `repo` (#389). Returns
+/// `Some(...)` when there has been at least one unproductive session in the
+/// last 24 hours, otherwise `None`. Productive-only or no-sessions stays
+/// silent so the status surface does not grow noise during normal operation.
+fn session_health_line(db: &Database, repo: &str) -> Result<Option<String>> {
+    let since = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    let counts = db.agent_session_counts_since(&since)?;
+    let row = counts.into_iter().find(|r| r.0 == repo);
+    let Some((_, total, productive, unproductive, errored, last_signal, last_exit_at)) = row else {
+        return Ok(None);
+    };
+    if unproductive == 0 && errored == 0 {
+        return Ok(None);
+    }
+    let mut line =
+        format!("{total} sessions/24h: {productive} productive, {unproductive} unproductive");
+    if errored > 0 {
+        line.push_str(&format!(", {errored} errored"));
+    }
+    if let (Some(sig), Some(exit_at)) = (last_signal, last_exit_at) {
+        line.push_str(&format!(
+            " (last unproductive: signal {}, {})",
+            short_id(&sig),
+            relative_time(&exit_at)
+        ));
+    }
+    Ok(Some(line))
+}
+
+/// First 8 hex chars of a UUID -- enough to look the row up by prefix in CLI.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
 }
 
 /// Result of a `legion done` operation.
@@ -137,7 +178,10 @@ pub fn format_summary(output: &StatusOutput) -> StatusSummary {
 
 /// Format status output for terminal display.
 pub fn format_status(output: &StatusOutput) -> String {
-    if output.your_work.is_empty() && output.team_needs.is_empty() && output.what_changed.is_empty()
+    if output.your_work.is_empty()
+        && output.team_needs.is_empty()
+        && output.what_changed.is_empty()
+        && output.session_health.is_none()
     {
         return String::new();
     }
@@ -146,6 +190,10 @@ pub fn format_status(output: &StatusOutput) -> String {
     format_section(&mut out, "YOUR WORK", &output.your_work);
     format_section(&mut out, "TEAM NEEDS YOU", &output.team_needs);
     format_section(&mut out, "WHAT CHANGED", &output.what_changed);
+    if let Some(line) = &output.session_health {
+        out.push_str("\nSESSION HEALTH:\n");
+        out.push_str(&format!("  {line}\n"));
+    }
     out
 }
 
@@ -499,6 +547,7 @@ mod tests {
             what_changed: vec![],
             active_task_count: 0,
             blocked_task_count: 0,
+            session_health: None,
         };
         assert!(format_status(&output).is_empty());
     }
@@ -527,6 +576,7 @@ mod tests {
             }],
             active_task_count: 1,
             blocked_task_count: 0,
+            session_health: None,
         };
         let formatted = format_status(&output);
         assert!(formatted.contains("[Legion] Status for kelex:"));
@@ -634,6 +684,7 @@ mod tests {
             }],
             active_task_count: 3,
             blocked_task_count: 1,
+            session_health: None,
         };
 
         let summary = format_summary(&output);
