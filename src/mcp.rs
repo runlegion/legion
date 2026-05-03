@@ -426,6 +426,12 @@ pub fn dispatch(
             None
         }
 
+        // Per MCP spec 2024-11-05, server must respond to ping with an empty
+        // result. Claude Code sends ping at ~5min intervals and SIGTERMs the
+        // MCP subprocess if we return an error or fail to respond, which
+        // silently breaks channel delivery mid-session. See anthropics/claude-code#54544.
+        "ping" => Some(success_response(&id, json!({}))),
+
         "tools/list" => Some(success_response(
             &id,
             json!({
@@ -1077,6 +1083,31 @@ mod tests {
             text.contains("nonexistent_tool"),
             "error text should name the tool"
         );
+    }
+
+    #[test]
+    fn ping_returns_empty_result() {
+        let tx = make_tx();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let req = make_request("ping", None);
+
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 1);
+        assert!(resp.get("error").is_none(), "ping must not return an error");
+        assert_eq!(resp["result"], json!({}));
+    }
+
+    #[test]
+    fn ping_is_idempotent_across_many_calls() {
+        let tx = make_tx();
+        let dir = tempfile::tempdir().expect("tempdir");
+        for _ in 0..100 {
+            let req = make_request("ping", None);
+            let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+            assert!(resp.get("error").is_none());
+            assert_eq!(resp["result"], json!({}));
+        }
     }
 
     #[test]
