@@ -797,6 +797,28 @@ impl Database {
             }
         }
 
+        // Migration 19: Signal/post resolution marker (#362).
+        //
+        // Threads converge on a decision but the originating signal stays
+        // open. Agents who did not see the convergence walk the thread again,
+        // posting the same conclusion. `resolved_at` + optional
+        // `resolved_by_reflection_id` mark a thread done. Resolved rows are
+        // filtered out of read paths by default; agents do not see them.
+        // Operator review uses `--include-resolved`.
+        if !Self::has_column(conn, "reflections", "resolved_at")? {
+            conn.execute_batch("ALTER TABLE reflections ADD COLUMN resolved_at TEXT;")?;
+        }
+        if !Self::has_column(conn, "reflections", "resolved_by_reflection_id")? {
+            conn.execute_batch(
+                "ALTER TABLE reflections ADD COLUMN resolved_by_reflection_id TEXT;",
+            )?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_reflections_team_unresolved \
+                 ON reflections(audience, resolved_at) \
+                 WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL;",
+        )?;
+
         Ok(())
     }
 
@@ -855,6 +877,32 @@ impl Database {
             last_recalled_at: None,
             parent_id: meta.parent_id.clone(),
         })
+    }
+
+    /// Mark a bullpen post or signal as resolved (#362).
+    ///
+    /// Records `resolved_at = now` and an optional reflection id pointing at
+    /// the reflection that holds the team's converged decision. Idempotent:
+    /// re-resolving a row updates `resolved_at` to the latest call but
+    /// preserves the reflection link unless a new one is provided.
+    ///
+    /// Returns `Ok(false)` when the id does not exist or is already
+    /// soft-deleted; `Ok(true)` when a row was updated.
+    pub fn resolve_post(
+        &self,
+        post_id: &str,
+        resolved_by_reflection_id: Option<&str>,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE reflections \
+             SET resolved_at = ?1, \
+                 resolved_by_reflection_id = COALESCE(?2, resolved_by_reflection_id), \
+                 updated_at = ?1 \
+             WHERE id = ?3 AND deleted_at IS NULL",
+            rusqlite::params![&now, resolved_by_reflection_id, post_id],
+        )?;
+        Ok(rows > 0)
     }
 
     /// Store an embedding BLOB for an existing reflection.
@@ -1345,19 +1393,34 @@ impl Database {
         self.get_board_posts_filtered(false)
     }
 
-    /// Like `get_board_posts` but with an opt-in switch to include past-TTL,
-    /// non-evergreen posts. Used by `legion bullpen --include-stale` for
-    /// operator review (#376). Agents must never reach this with `true`.
+    /// Like `get_board_posts` but with opt-in switches for past-TTL,
+    /// non-evergreen posts (#376) and resolved threads (#362). Used by
+    /// `legion bullpen --include-stale` / `--include-resolved` for operator
+    /// review. Agents must never reach this with either set to `true`.
     pub fn get_board_posts_filtered(&self, include_stale: bool) -> Result<Vec<Reflection>> {
+        self.get_board_posts_filtered_full(include_stale, false)
+    }
+
+    /// Full filter: independently opt into stale and resolved rows.
+    pub fn get_board_posts_filtered_full(
+        &self,
+        include_stale: bool,
+        include_resolved: bool,
+    ) -> Result<Vec<Reflection>> {
         let now = Utc::now().to_rfc3339();
         let decay_clause = if include_stale {
             ""
         } else {
             " AND (evergreen = 1 OR expires_at > ?1)"
         };
+        let resolved_clause = if include_resolved {
+            ""
+        } else {
+            " AND resolved_at IS NULL"
+        };
         let sql = format!(
             "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL{decay_clause} ORDER BY created_at DESC"
+             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL{decay_clause}{resolved_clause} ORDER BY created_at DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = if include_stale {
@@ -1410,6 +1473,7 @@ impl Database {
              FROM reflections \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
                AND (evergreen = 1 OR expires_at > ?4) \
+               AND resolved_at IS NULL \
                AND (created_at > ?1 OR (created_at = ?1 AND id > ?2)) \
              ORDER BY created_at ASC, id ASC \
              LIMIT ?3",
@@ -1468,6 +1532,7 @@ impl Database {
              FROM reflections \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              AND (evergreen = 1 OR expires_at > ?2) \
+             AND resolved_at IS NULL \
              AND created_at > COALESCE( \
                  (SELECT last_read_at FROM board_reads WHERE reader_repo = ?1), \
                  '' \
@@ -1548,6 +1613,7 @@ impl Database {
             "SELECT COUNT(*) FROM reflections WHERE audience = 'team' \
              AND archived_at IS NULL AND deleted_at IS NULL \
              AND (evergreen = 1 OR expires_at > ?2) \
+             AND resolved_at IS NULL \
              AND created_at > COALESCE( \
                  (SELECT last_read_at FROM board_reads WHERE reader_repo = ?1), \
                  '' \
@@ -1612,6 +1678,7 @@ impl Database {
              LEFT JOIN watch_handled wh ON wh.signal_id = r.id AND wh.repo_name = ?5 \
              WHERE r.audience = 'team' AND r.deleted_at IS NULL \
                AND (r.evergreen = 1 OR r.expires_at > ?6) \
+               AND r.resolved_at IS NULL \
                AND wh.signal_id IS NULL \
                AND (r.text LIKE ?1 OR r.text LIKE ?2 OR r.text LIKE ?3 OR r.text LIKE ?4) \
                AND r.repo != ?5{} \
@@ -1725,6 +1792,7 @@ impl Database {
             "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              AND (evergreen = 1 OR expires_at > ?2) \
+             AND resolved_at IS NULL \
              AND created_at > ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([&cutoff, &now_str], map_reflection_row)?;
@@ -6138,6 +6206,126 @@ mod tests {
             .unwrap();
         assert!(expires_at.is_some(), "team post must get expires_at");
         assert_eq!(evergreen, 0);
+    }
+
+    // -- Resolution marker (#362) ----------------------------------------
+
+    #[test]
+    fn resolve_post_marks_row_resolved() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("kelex", "fresh broadcast", "team")
+            .unwrap();
+        let updated = db.resolve_post(&r.id, None).unwrap();
+        assert!(updated);
+
+        let resolved_at: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT resolved_at FROM reflections WHERE id = ?1",
+                [&r.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(resolved_at.is_some(), "resolved_at must be populated");
+    }
+
+    #[test]
+    fn resolve_post_links_reflection_id() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("kelex", "fresh broadcast", "team")
+            .unwrap();
+        let conclusion = db
+            .insert_reflection("kelex", "team agreed on X", "self")
+            .unwrap();
+        db.resolve_post(&r.id, Some(&conclusion.id)).unwrap();
+
+        let linked: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT resolved_by_reflection_id FROM reflections WHERE id = ?1",
+                [&r.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked, Some(conclusion.id));
+    }
+
+    #[test]
+    fn resolve_post_returns_false_for_missing_id() {
+        let db = test_db();
+        let updated = db
+            .resolve_post("00000000-0000-0000-0000-000000000000", None)
+            .unwrap();
+        assert!(!updated);
+    }
+
+    #[test]
+    fn get_board_posts_filters_resolved() {
+        let db = test_db();
+        let kept = db
+            .insert_reflection("kelex", "open thread", "team")
+            .unwrap();
+        let r = db
+            .insert_reflection("kelex", "converged thread", "team")
+            .unwrap();
+        db.resolve_post(&r.id, None).unwrap();
+
+        let posts = db.get_board_posts().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].id, kept.id);
+    }
+
+    #[test]
+    fn get_board_posts_include_resolved_returns_resolved() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("kelex", "converged thread", "team")
+            .unwrap();
+        db.resolve_post(&r.id, None).unwrap();
+        let active = db.get_board_posts_filtered_full(false, false).unwrap();
+        assert!(active.is_empty());
+        let with_resolved = db.get_board_posts_filtered_full(false, true).unwrap();
+        assert_eq!(with_resolved.len(), 1);
+    }
+
+    #[test]
+    fn get_board_posts_since_skips_resolved() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("kelex", "converged thread", "team")
+            .unwrap();
+        db.resolve_post(&r.id, None).unwrap();
+        let batch = db
+            .get_board_posts_since("2026-01-01T00:00:00+00:00", "", 100)
+            .unwrap();
+        assert!(batch.is_empty(), "channel must not push resolved posts");
+    }
+
+    #[test]
+    fn get_unhandled_signals_skips_resolved() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("platform", "@kessel needs answer ", "team")
+            .unwrap();
+        db.resolve_post(&r.id, None).unwrap();
+        let signals = db
+            .get_unhandled_signals_for_repo("kessel", "kessel", None)
+            .unwrap();
+        assert!(
+            signals.is_empty(),
+            "wake loop must not deliver resolved signals"
+        );
+    }
+
+    #[test]
+    fn get_unread_count_skips_resolved() {
+        let db = test_db();
+        let r = db.insert_reflection("kelex", "converged", "team").unwrap();
+        db.resolve_post(&r.id, None).unwrap();
+        let count = db.get_unread_count("smugglr").unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

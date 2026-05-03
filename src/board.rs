@@ -94,19 +94,20 @@ pub fn bullpen_filtered(
     reader_repo: &str,
     filter: BullpenFilter,
 ) -> Result<Vec<Reflection>> {
-    bullpen_filtered_with_decay(db, reader_repo, filter, false)
+    bullpen_filtered_with_decay(db, reader_repo, filter, false, false)
 }
 
-/// Like `bullpen_filtered` but with an opt-in switch to include past-TTL,
-/// non-evergreen posts. Operator review only -- agents must not pass `true`
-/// (#376).
+/// Like `bullpen_filtered` but with opt-in switches for past-TTL posts (#376)
+/// and resolved threads (#362). Operator review only -- agents must not pass
+/// either as `true`.
 pub fn bullpen_filtered_with_decay(
     db: &Database,
     reader_repo: &str,
     filter: BullpenFilter,
     include_stale: bool,
+    include_resolved: bool,
 ) -> Result<Vec<Reflection>> {
-    let posts = db.get_board_posts_filtered(include_stale)?;
+    let posts = db.get_board_posts_filtered_full(include_stale, include_resolved)?;
 
     match filter {
         BullpenFilter::All => {
