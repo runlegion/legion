@@ -777,6 +777,14 @@ pub struct TrackedChild {
     /// host-scoped release so a sync-resolved late-loser cannot drop the
     /// peer winner's row.
     pub host: String,
+    /// UUIDv7 session id for the agent_session_log row (#389).
+    pub session_id: String,
+    /// RFC3339 timestamp of spawn -- defines the lower bound of the
+    /// classification window for productive vs unproductive outcome.
+    pub spawn_at: String,
+    /// All signal ids bundled into this wake. Used to look up
+    /// reflection-parent_id matches at reap time.
+    pub signal_ids: Vec<String>,
 }
 
 pub struct AgentTracker {
@@ -792,18 +800,25 @@ impl AgentTracker {
 
     /// Record a spawned child process together with the leases it holds and
     /// the host identity under which they were acquired.
+    #[allow(clippy::too_many_arguments)]
     pub fn track(
         &mut self,
         repo: String,
         child: Child,
         held_leases: Vec<(String, String)>,
         host: String,
+        session_id: String,
+        spawn_at: String,
+        signal_ids: Vec<String>,
     ) {
         self.children.push(TrackedChild {
             repo,
             child,
             held_leases,
             host,
+            session_id,
+            spawn_at,
+            signal_ids,
         });
     }
 
@@ -831,6 +846,49 @@ impl AgentTracker {
                                     persona, signal_id, e
                                 );
                             }
+                        }
+
+                        // #389: classify and persist the session outcome.
+                        // Defensive: errors here log to stderr but never break
+                        // the reap loop -- a missed log row is recoverable, a
+                        // panic in the watch thread is not.
+                        let exit_at = chrono::Utc::now().to_rfc3339();
+                        let exit_status = if status.success() { "ok" } else { "error" };
+                        let outcome = if !status.success() {
+                            Database::OUTCOME_ERRORED
+                        } else {
+                            match db.classify_session(
+                                &tracked.repo,
+                                &tracked.signal_ids,
+                                &tracked.spawn_at,
+                                &exit_at,
+                            ) {
+                                Ok(true) => Database::OUTCOME_PRODUCTIVE,
+                                Ok(false) => Database::OUTCOME_UNPRODUCTIVE,
+                                Err(e) => {
+                                    eprintln!(
+                                        "[legion watch] classify failed for {} ({}): {}",
+                                        tracked.repo, tracked.session_id, e
+                                    );
+                                    // Conservative: do not record an unknown
+                                    // outcome as productive. Skip the row.
+                                    return false;
+                                }
+                            }
+                        };
+                        if let Err(e) = db.record_session_outcome(
+                            &tracked.session_id,
+                            &tracked.repo,
+                            &tracked.signal_ids,
+                            &tracked.spawn_at,
+                            &exit_at,
+                            exit_status,
+                            outcome,
+                        ) {
+                            eprintln!(
+                                "[legion watch] failed to record session outcome for {} ({}): {}",
+                                tracked.repo, tracked.session_id, e
+                            );
                         }
                     }
                     false // remove from list
@@ -1053,7 +1111,18 @@ pub fn poll_cycle(
                     );
                 }
                 let track_host = lease_gate.map(|g| g.host.to_string()).unwrap_or_default();
-                tracker.track(repo.name.clone(), child, held_leases, track_host);
+                let session_id = uuid::Uuid::now_v7().to_string();
+                let spawn_at = chrono::Utc::now().to_rfc3339();
+                let signal_ids: Vec<String> = signals.iter().map(|(id, _, _)| id.clone()).collect();
+                tracker.track(
+                    repo.name.clone(),
+                    child,
+                    held_leases,
+                    track_host,
+                    session_id,
+                    spawn_at,
+                    signal_ids,
+                );
                 cooldown.record_wake(&repo.name);
                 spawned += 1;
                 eprintln!("[legion watch] spawned agent for {}", repo.name);
