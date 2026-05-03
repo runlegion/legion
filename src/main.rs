@@ -346,6 +346,11 @@ enum Commands {
         /// Show archived posts instead of active ones
         #[arg(long, conflicts_with_all = ["count", "signals", "musings", "archive"])]
         archived: bool,
+
+        /// Include past-TTL non-evergreen posts (operator review only -- agents
+        /// must not pass this flag, see #376).
+        #[arg(long)]
+        include_stale: bool,
     },
 
     /// Surface cross-repo highlights for a session start
@@ -2753,6 +2758,7 @@ fn run() -> error::Result<()> {
             musings,
             archive,
             archived,
+            include_stale,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
@@ -2784,7 +2790,12 @@ fn run() -> error::Result<()> {
                     } else {
                         board::BullpenFilter::All
                     };
-                    let posts = board::bullpen_filtered(&database, &repo, filter)?;
+                    let posts = board::bullpen_filtered_with_decay(
+                        &database,
+                        &repo,
+                        filter,
+                        include_stale,
+                    )?;
                     let mut output = board::format_bullpen(&posts);
                     if filter == board::BullpenFilter::All {
                         let pending_tasks = task::get_pending_inbound(&database, &repo)?;

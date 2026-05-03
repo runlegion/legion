@@ -122,6 +122,52 @@ pub struct ReflectionMeta {
     pub parent_id: Option<String>,
 }
 
+/// TTL hours for design or architecture posts.
+const TTL_DESIGN_HOURS: i64 = 14 * 24;
+/// TTL hours for signal-shaped posts (text starts with `@`).
+const TTL_SIGNAL_HOURS: i64 = 7 * 24;
+/// TTL hours for default broadcast posts.
+const TTL_DEFAULT_HOURS: i64 = 48;
+
+/// Compute (expires_at, evergreen) for a stored reflection (#376).
+///
+/// Non-team rows return (None, false): decay applies only to bullpen posts,
+/// not to private reflections recalled by embedding similarity.
+///
+/// Team rows resolve in priority order:
+/// 1. domain == "identity" or tags contains "doctrine" -> evergreen
+/// 2. tags contains "design" or "architecture" -> 14 days
+/// 3. text starts with `@` (directed signal or @all broadcast) -> 7 days
+/// 4. default -> 48 hours
+fn compute_post_ttl(
+    audience: &str,
+    domain: Option<&str>,
+    tags: Option<&str>,
+    text: &str,
+    created_at: chrono::DateTime<Utc>,
+) -> (Option<String>, bool) {
+    if audience != "team" {
+        return (None, false);
+    }
+    let tag_list: Vec<&str> = tags
+        .map(|t| t.split(',').map(str::trim).collect())
+        .unwrap_or_default();
+    let has_tag = |needle: &str| tag_list.contains(&needle);
+
+    if domain == Some("identity") || has_tag("doctrine") {
+        return (None, true);
+    }
+    let hours = if has_tag("design") || has_tag("architecture") {
+        TTL_DESIGN_HOURS
+    } else if text.starts_with('@') {
+        TTL_SIGNAL_HOURS
+    } else {
+        TTL_DEFAULT_HOURS
+    };
+    let expires = created_at + chrono::Duration::hours(hours);
+    (Some(expires.to_rfc3339()), false)
+}
+
 /// A scheduled command that fires on a cron-like schedule.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Schedule {
@@ -680,6 +726,77 @@ impl Database {
                 ON scip_indexes(repo) WHERE deleted_at IS NULL;",
         )?;
 
+        // Migration 18: Bullpen post decay (#376).
+        //
+        // Stale bullpen posts were landing in agent context via the channel
+        // notification path, costing tokens to read and reason about threads
+        // long since resolved. Filter at injection: every team-audience post
+        // gets either an `expires_at` timestamp (computed at insert from
+        // domain/tags/text shape) or `evergreen=1` (identity/doctrine).
+        // Read-side queries filter out expired non-evergreen rows. Posts stay
+        // in the DB; they are simply invisible to the agent surface.
+        let new_expires = !Self::has_column(conn, "reflections", "expires_at")?;
+        let new_evergreen = !Self::has_column(conn, "reflections", "evergreen")?;
+        if new_expires {
+            conn.execute_batch("ALTER TABLE reflections ADD COLUMN expires_at TEXT;")?;
+        }
+        if new_evergreen {
+            conn.execute_batch(
+                "ALTER TABLE reflections ADD COLUMN evergreen INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_reflections_team_expires \
+                 ON reflections(audience, expires_at) \
+                 WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL;",
+        )?;
+
+        // Backfill: compute TTL for every team row that lacks one. Done in
+        // Rust (not pure SQL) so the same `compute_post_ttl` rule used at
+        // insert applies to historical rows -- no drift between migration
+        // logic and runtime logic.
+        if new_expires || new_evergreen {
+            // Backfill row tuple: (id, created_at, audience, domain, tags, text).
+            type BackfillRow = (
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+            );
+            let mut stmt = conn.prepare(
+                "SELECT id, created_at, audience, domain, tags, text \
+                 FROM reflections \
+                 WHERE audience = 'team' AND expires_at IS NULL AND evergreen = 0",
+            )?;
+            let rows: Vec<BackfillRow> = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+
+            for (id, created_at, audience, domain, tags, text) in rows {
+                let parsed = chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let (expires_at, evergreen) =
+                    compute_post_ttl(&audience, domain.as_deref(), tags.as_deref(), &text, parsed);
+                conn.execute(
+                    "UPDATE reflections SET expires_at = ?1, evergreen = ?2 WHERE id = ?3",
+                    rusqlite::params![expires_at, evergreen as i32, id],
+                )?;
+            }
+        }
+
         Ok(())
     }
 
@@ -705,14 +822,23 @@ impl Database {
         meta: &ReflectionMeta,
     ) -> Result<Reflection> {
         let id = Uuid::now_v7().to_string();
-        let created_at = Utc::now().to_rfc3339();
+        let created_at_dt = Utc::now();
+        let created_at = created_at_dt.to_rfc3339();
+        let (expires_at, evergreen) = compute_post_ttl(
+            audience,
+            meta.domain.as_deref(),
+            meta.tags.as_deref(),
+            text,
+            created_at_dt,
+        );
 
         self.conn.execute(
-            "INSERT INTO reflections (id, repo, text, created_at, updated_at, audience, domain, tags, parent_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO reflections (id, repo, text, created_at, updated_at, audience, domain, tags, parent_id, expires_at, evergreen) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 &id, repo, text, &created_at, &created_at, audience,
                 &meta.domain, &meta.tags, &meta.parent_id,
+                expires_at, evergreen as i32,
             ],
         )?;
 
@@ -1216,14 +1342,32 @@ impl Database {
 
     /// Retrieve active (non-archived) bullpen posts, ordered newest first.
     pub fn get_board_posts(&self) -> Result<Vec<Reflection>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL ORDER BY created_at DESC",
-        )?;
+        self.get_board_posts_filtered(false)
+    }
 
-        let rows = stmt.query_map([], map_reflection_row)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(LegionError::Database)
+    /// Like `get_board_posts` but with an opt-in switch to include past-TTL,
+    /// non-evergreen posts. Used by `legion bullpen --include-stale` for
+    /// operator review (#376). Agents must never reach this with `true`.
+    pub fn get_board_posts_filtered(&self, include_stale: bool) -> Result<Vec<Reflection>> {
+        let now = Utc::now().to_rfc3339();
+        let decay_clause = if include_stale {
+            ""
+        } else {
+            " AND (evergreen = 1 OR expires_at > ?1)"
+        };
+        let sql = format!(
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL{decay_clause} ORDER BY created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = if include_stale {
+            stmt.query_map([], map_reflection_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+        } else {
+            stmt.query_map([&now], map_reflection_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+        };
+        rows.map_err(LegionError::Database)
     }
 
     /// Retrieve up to `limit` active bullpen posts strictly after the given
@@ -1255,17 +1399,24 @@ impl Database {
         // (created_at = ?1 AND id > ?2)`. Flipping either comparator to
         // inclusive re-emits the cursor row on every poll tick and
         // produces an infinite duplicate-notification loop.
+        //
+        // Decay filter (#376): the channel notification path is the most
+        // expensive token-cost surface for stale posts, so the filter applies
+        // here too. Backdated inserts past TTL are silently skipped instead of
+        // pushed.
+        let now = Utc::now().to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
+               AND (evergreen = 1 OR expires_at > ?4) \
                AND (created_at > ?1 OR (created_at = ?1 AND id > ?2)) \
              ORDER BY created_at ASC, id ASC \
              LIMIT ?3",
         )?;
 
         let rows = stmt.query_map(
-            rusqlite::params![since_created_at, since_id, limit as i64],
+            rusqlite::params![since_created_at, since_id, limit as i64, now],
             map_reflection_row,
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1316,6 +1467,7 @@ impl Database {
             "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
              FROM reflections \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
+             AND (evergreen = 1 OR expires_at > ?2) \
              AND created_at > COALESCE( \
                  (SELECT last_read_at FROM board_reads WHERE reader_repo = ?1), \
                  '' \
@@ -1391,9 +1543,11 @@ impl Database {
     /// If the reader has no entry in board_reads, all team posts are unread.
     /// Only counts non-archived posts.
     pub fn get_unread_count(&self, reader_repo: &str) -> Result<u64> {
+        let now = Utc::now().to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT COUNT(*) FROM reflections WHERE audience = 'team' \
              AND archived_at IS NULL AND deleted_at IS NULL \
+             AND (evergreen = 1 OR expires_at > ?2) \
              AND created_at > COALESCE( \
                  (SELECT last_read_at FROM board_reads WHERE reader_repo = ?1), \
                  '' \
@@ -1401,7 +1555,7 @@ impl Database {
         )?;
 
         let count: u64 = stmt
-            .query_row([reader_repo], |row| row.get(0))
+            .query_row(rusqlite::params![reader_repo, &now], |row| row.get(0))
             .map_err(LegionError::Database)?;
 
         Ok(count)
@@ -1442,8 +1596,12 @@ impl Database {
         let pattern_mid = format!("%@{} %", recipient);
         let pattern_all_start = "@all %";
         let pattern_all_mid = "%@all %";
+        let now = Utc::now().to_rfc3339();
+        // Decay (#376): wake-loop must never deliver a stale signal. Without
+        // this filter, a multi-day-dormant agent wakes to month-old @<me>
+        // mentions and posts replies into long-dead threads.
         let since_clause = if since.is_some() {
-            " AND r.created_at > ?6"
+            " AND r.created_at > ?7"
         } else {
             ""
         };
@@ -1453,6 +1611,7 @@ impl Database {
              FROM reflections r \
              LEFT JOIN watch_handled wh ON wh.signal_id = r.id AND wh.repo_name = ?5 \
              WHERE r.audience = 'team' AND r.deleted_at IS NULL \
+               AND (r.evergreen = 1 OR r.expires_at > ?6) \
                AND wh.signal_id IS NULL \
                AND (r.text LIKE ?1 OR r.text LIKE ?2 OR r.text LIKE ?3 OR r.text LIKE ?4) \
                AND r.repo != ?5{} \
@@ -1468,6 +1627,7 @@ impl Database {
                     pattern_all_start,
                     pattern_all_mid,
                     repo_name,
+                    &now,
                     since_ts
                 ],
                 map_reflection_row,
@@ -1479,7 +1639,8 @@ impl Database {
                     &pattern_mid,
                     pattern_all_start,
                     pattern_all_mid,
-                    repo_name
+                    repo_name,
+                    &now
                 ],
                 map_reflection_row,
             )?
@@ -1557,12 +1718,16 @@ impl Database {
 
     /// Get recent bullpen posts (within last N hours).
     pub fn get_recent_board_posts(&self, hours: i64) -> Result<Vec<Reflection>> {
-        let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+        let now = Utc::now();
+        let cutoff = (now - chrono::Duration::hours(hours)).to_rfc3339();
+        let now_str = now.to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC",
+             FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
+             AND (evergreen = 1 OR expires_at > ?2) \
+             AND created_at > ?1 ORDER BY created_at DESC",
         )?;
-        let rows = stmt.query_map([&cutoff], map_reflection_row)?;
+        let rows = stmt.query_map([&cutoff, &now_str], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }
@@ -3669,18 +3834,21 @@ mod tests {
         let id_a = "01000000-0000-7000-8000-000000000001";
         let id_b = "01000000-0000-7000-8000-000000000002";
 
+        // expires_at far in the future so the #376 decay filter does not
+        // exclude these rows. The test predates the decay column.
+        let far_future = "2099-01-01T00:00:00+00:00";
         db.conn
             .execute(
-                "INSERT INTO reflections (id, repo, text, created_at, audience) \
-                 VALUES (?1, 'kelex', 'tied A', ?2, 'team')",
-                rusqlite::params![id_a, shared_ts],
+                "INSERT INTO reflections (id, repo, text, created_at, audience, expires_at) \
+                 VALUES (?1, 'kelex', 'tied A', ?2, 'team', ?3)",
+                rusqlite::params![id_a, shared_ts, far_future],
             )
             .unwrap();
         db.conn
             .execute(
-                "INSERT INTO reflections (id, repo, text, created_at, audience) \
-                 VALUES (?1, 'kelex', 'tied B', ?2, 'team')",
-                rusqlite::params![id_b, shared_ts],
+                "INSERT INTO reflections (id, repo, text, created_at, audience, expires_at) \
+                 VALUES (?1, 'kelex', 'tied B', ?2, 'team', ?3)",
+                rusqlite::params![id_b, shared_ts, far_future],
             )
             .unwrap();
 
@@ -5789,5 +5957,204 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM scip_indexes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    // -- Bullpen decay (#376) --------------------------------------------
+
+    fn t_now() -> chrono::DateTime<Utc> {
+        Utc::now()
+    }
+
+    #[test]
+    fn ttl_default_post_is_48_hours() {
+        let (e, ev) = compute_post_ttl("team", None, None, "broadcast", t_now());
+        assert!(!ev);
+        let exp = chrono::DateTime::parse_from_rfc3339(&e.expect("expires_at")).unwrap();
+        let delta = exp.signed_duration_since(t_now()).num_hours();
+        assert!(
+            (47..=48).contains(&delta),
+            "default TTL must be 48h, got {delta}"
+        );
+    }
+
+    #[test]
+    fn ttl_signal_post_is_7_days() {
+        let (e, _) = compute_post_ttl("team", None, None, "@smugglr review:requested", t_now());
+        let exp = chrono::DateTime::parse_from_rfc3339(&e.expect("expires_at")).unwrap();
+        let hours = exp.signed_duration_since(t_now()).num_hours();
+        assert!(
+            (167..=168).contains(&hours),
+            "signal TTL must be 7d (~168h), got {hours}"
+        );
+    }
+
+    #[test]
+    fn ttl_design_tag_is_14_days() {
+        let (e, _) = compute_post_ttl(
+            "team",
+            None,
+            Some("design,blueprint"),
+            "design proposal",
+            t_now(),
+        );
+        let exp = chrono::DateTime::parse_from_rfc3339(&e.expect("expires_at")).unwrap();
+        let hours = exp.signed_duration_since(t_now()).num_hours();
+        assert!(
+            (335..=336).contains(&hours),
+            "design TTL must be 14d (~336h), got {hours}"
+        );
+    }
+
+    #[test]
+    fn ttl_identity_domain_is_evergreen() {
+        let (e, ev) = compute_post_ttl("team", Some("identity"), None, "who I am", t_now());
+        assert_eq!(e, None, "evergreen rows have no expires_at");
+        assert!(ev);
+    }
+
+    #[test]
+    fn ttl_doctrine_tag_is_evergreen() {
+        let (e, ev) = compute_post_ttl("team", None, Some("doctrine"), "doctrine post", t_now());
+        assert_eq!(e, None);
+        assert!(ev);
+    }
+
+    #[test]
+    fn ttl_non_team_audience_is_skipped() {
+        let (e, ev) = compute_post_ttl("self", None, None, "private", t_now());
+        assert_eq!(e, None);
+        assert!(!ev);
+    }
+
+    #[test]
+    fn get_board_posts_filters_expired() {
+        let db = test_db();
+        // Fresh team post -- visible.
+        db.insert_reflection("kelex", "fresh broadcast", "team")
+            .unwrap();
+        // Manually-aged team post (created 10 days ago, expires 48h after that).
+        let aged = "2026-04-15T00:00:00+00:00";
+        let aged_exp = "2026-04-17T00:00:00+00:00";
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, audience, expires_at, evergreen) \
+                 VALUES (?1, 'kelex', 'stale post', ?2, 'team', ?3, 0)",
+                rusqlite::params![Uuid::now_v7().to_string(), aged, aged_exp],
+            )
+            .unwrap();
+
+        let posts = db.get_board_posts().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].text, "fresh broadcast");
+    }
+
+    #[test]
+    fn get_board_posts_include_stale_returns_expired() {
+        let db = test_db();
+        let aged = "2026-04-15T00:00:00+00:00";
+        let aged_exp = "2026-04-17T00:00:00+00:00";
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, audience, expires_at, evergreen) \
+                 VALUES (?1, 'kelex', 'stale post', ?2, 'team', ?3, 0)",
+                rusqlite::params![Uuid::now_v7().to_string(), aged, aged_exp],
+            )
+            .unwrap();
+        let active = db.get_board_posts_filtered(false).unwrap();
+        assert!(active.is_empty());
+        let all = db.get_board_posts_filtered(true).unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn get_board_posts_keeps_evergreen() {
+        let db = test_db();
+        let aged = "2026-01-01T00:00:00+00:00";
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, audience, expires_at, evergreen) \
+                 VALUES (?1, 'kelex', 'doctrine post', ?2, 'team', NULL, 1)",
+                rusqlite::params![Uuid::now_v7().to_string(), aged],
+            )
+            .unwrap();
+        let posts = db.get_board_posts().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].text, "doctrine post");
+    }
+
+    #[test]
+    fn get_board_posts_since_filters_expired() {
+        let db = test_db();
+        let aged = "2026-04-15T00:00:00+00:00";
+        let aged_exp = "2026-04-17T00:00:00+00:00";
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, audience, expires_at, evergreen) \
+                 VALUES (?1, 'kelex', 'stale signal', ?2, 'team', ?3, 0)",
+                rusqlite::params![Uuid::now_v7().to_string(), aged, aged_exp],
+            )
+            .unwrap();
+        // Cursor before the aged row -- with decay filter, batch must be empty.
+        let batch = db
+            .get_board_posts_since("2026-01-01T00:00:00+00:00", "", 100)
+            .unwrap();
+        assert!(batch.is_empty(), "stale post must not push notifications");
+    }
+
+    #[test]
+    fn get_unhandled_signals_filters_expired() {
+        let db = test_db();
+        let aged = "2026-04-15T00:00:00+00:00";
+        let aged_exp = "2026-04-17T00:00:00+00:00";
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, audience, expires_at, evergreen) \
+                 VALUES (?1, 'platform', '@kessel reply please ', ?2, 'team', ?3, 0)",
+                rusqlite::params![Uuid::now_v7().to_string(), aged, aged_exp],
+            )
+            .unwrap();
+        let signals = db
+            .get_unhandled_signals_for_repo("kessel", "kessel", None)
+            .unwrap();
+        assert!(
+            signals.is_empty(),
+            "wake loop must not deliver stale @kessel signals"
+        );
+    }
+
+    #[test]
+    fn insert_team_post_sets_decay_metadata() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("kelex", "fresh broadcast", "team")
+            .unwrap();
+        let (expires_at, evergreen): (Option<String>, i32) = db
+            .conn
+            .query_row(
+                "SELECT expires_at, evergreen FROM reflections WHERE id = ?1",
+                [&r.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(expires_at.is_some(), "team post must get expires_at");
+        assert_eq!(evergreen, 0);
+    }
+
+    #[test]
+    fn insert_self_reflection_skips_decay() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("kelex", "private note", "self")
+            .unwrap();
+        let (expires_at, evergreen): (Option<String>, i32) = db
+            .conn
+            .query_row(
+                "SELECT expires_at, evergreen FROM reflections WHERE id = ?1",
+                [&r.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(expires_at, None, "self audience never expires");
+        assert_eq!(evergreen, 0);
     }
 }

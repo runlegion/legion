@@ -88,12 +88,25 @@ pub fn bullpen(db: &Database, reader_repo: &str) -> Result<Vec<Reflection>> {
 /// Only marks posts as read when viewing All (unfiltered). Filtered views
 /// (signals-only, musings-only) do not mark anything as read, since the
 /// reader has not seen the full bullpen.
+#[cfg(test)]
 pub fn bullpen_filtered(
     db: &Database,
     reader_repo: &str,
     filter: BullpenFilter,
 ) -> Result<Vec<Reflection>> {
-    let posts = db.get_board_posts()?;
+    bullpen_filtered_with_decay(db, reader_repo, filter, false)
+}
+
+/// Like `bullpen_filtered` but with an opt-in switch to include past-TTL,
+/// non-evergreen posts. Operator review only -- agents must not pass `true`
+/// (#376).
+pub fn bullpen_filtered_with_decay(
+    db: &Database,
+    reader_repo: &str,
+    filter: BullpenFilter,
+    include_stale: bool,
+) -> Result<Vec<Reflection>> {
+    let posts = db.get_board_posts_filtered(include_stale)?;
 
     match filter {
         BullpenFilter::All => {
