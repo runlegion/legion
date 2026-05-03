@@ -257,6 +257,22 @@ enum Commands {
         id: String,
     },
 
+    /// Mark a bullpen post or signal as resolved (#362).
+    ///
+    /// Stops a converged thread from re-surfacing in the bullpen, channel
+    /// notifications, and the wake-loop signal feed. Optional `--reflection`
+    /// links the converged decision so future recall surfaces it together
+    /// with the resolved post.
+    Resolve {
+        /// Bullpen post or signal ID to mark resolved
+        #[arg(long)]
+        id: String,
+
+        /// Reflection ID holding the team's converged decision
+        #[arg(long)]
+        reflection: Option<String>,
+    },
+
     /// Trace a learning chain from a reflection
     Chain {
         /// Any reflection ID in the chain
@@ -351,6 +367,11 @@ enum Commands {
         /// must not pass this flag, see #376).
         #[arg(long)]
         include_stale: bool,
+
+        /// Include resolved threads (operator review only -- agents must not
+        /// pass this flag, see #362).
+        #[arg(long)]
+        include_resolved: bool,
     },
 
     /// Surface cross-repo highlights for a session start
@@ -2706,6 +2727,17 @@ fn run() -> error::Result<()> {
                 eprintln!("[legion] reflection not found: {}", id);
             }
         }
+        Commands::Resolve { id, reflection } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            if database.resolve_post(&id, reflection.as_deref())? {
+                info!("[legion] resolved {}", id);
+            } else {
+                eprintln!("[legion] post not found: {}", id);
+                std::process::exit(1);
+            }
+        }
         Commands::Chain { id, full } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
@@ -2759,6 +2791,7 @@ fn run() -> error::Result<()> {
             archive,
             archived,
             include_stale,
+            include_resolved,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
@@ -2795,6 +2828,7 @@ fn run() -> error::Result<()> {
                         &repo,
                         filter,
                         include_stale,
+                        include_resolved,
                     )?;
                     let mut output = board::format_bullpen(&posts);
                     if filter == board::BullpenFilter::All {
