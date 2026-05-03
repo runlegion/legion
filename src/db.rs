@@ -3397,6 +3397,49 @@ impl Database {
         Ok(row)
     }
 
+    /// List non-deleted SCIP indexes filtered by optional repo and language.
+    /// `None` on either field disables that filter; `(None, None)` returns
+    /// every live index. Used by `legion sym` query dispatch (#282) so a
+    /// single call covers `--repo`/`--lang` scoping.
+    pub fn list_scip_indexes_filtered(
+        &self,
+        repo: Option<&str>,
+        lang: Option<&str>,
+    ) -> Result<Vec<crate::scip::ScipIndex>> {
+        let mut sql = String::from(
+            "SELECT id, repo, lang, content_hash, blob, updated_at, deleted_at
+             FROM scip_indexes
+             WHERE deleted_at IS NULL",
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(r) = repo {
+            sql.push_str(" AND repo = ?");
+            params.push(Box::new(r.to_string()));
+        }
+        if let Some(l) = lang {
+            sql.push_str(" AND lang = ?");
+            params.push(Box::new(l.to_string()));
+        }
+        sql.push_str(" ORDER BY repo, lang");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(param_refs), |row| {
+                Ok(crate::scip::ScipIndex {
+                    id: row.get(0)?,
+                    repo: row.get(1)?,
+                    lang: row.get(2)?,
+                    content_hash: row.get(3)?,
+                    blob: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    deleted_at: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// List all non-deleted SCIP indexes for a repo.
     /// Read path consumed by `legion consult --symbol` in #285.
     #[allow(dead_code)]
