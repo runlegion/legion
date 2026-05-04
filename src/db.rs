@@ -1876,12 +1876,13 @@ impl Database {
     /// recorded here is excluded from re-emission on the next poll.
     /// Called by the MCP notifier after each successful delivery.
     ///
-    /// `last_read_at` MUST be an RFC3339 timestamp in UTC with a `Z` suffix
-    /// (the format `chrono::Utc::now().to_rfc3339()` and every other legion
-    /// write path produce). Lexicographic SQL `>` comparison is correct only
-    /// for that fixed-offset shape; mixing offsets (`+00:00`, `-07:00`)
-    /// would mis-order timestamps that compare correctly chronologically.
-    /// Every caller in-tree obeys this; the contract is documented here so
+    /// `last_read_at` MUST share the offset shape every other legion write
+    /// path uses -- `chrono::Utc::now().to_rfc3339()`, which renders a
+    /// `+00:00` suffix (NOT `Z`). Lexicographic SQL `>` is correct only when
+    /// every timestamp it compares is rendered with the same fixed offset
+    /// string; mixing `+00:00` with `Z` (or any other offset) would
+    /// mis-order rows that compare correctly chronologically. Every caller
+    /// in-tree obeys this convention; the contract is documented here so
     /// future callers do not need to rediscover the constraint.
     pub fn advance_board_read_cursor(
         &self,
@@ -4429,40 +4430,40 @@ mod tests {
     #[test]
     fn advance_board_read_cursor_creates_then_moves_forward() {
         let db = test_db();
-        db.advance_board_read_cursor("kessel", "2026-05-04T01:00:00Z", "id-a")
+        db.advance_board_read_cursor("kessel", "2026-05-04T01:00:00+00:00", "id-a")
             .unwrap();
         assert_eq!(
             db.get_board_read_cursor("kessel").unwrap(),
-            Some(("2026-05-04T01:00:00Z".to_string(), "id-a".to_string()))
+            Some(("2026-05-04T01:00:00+00:00".to_string(), "id-a".to_string()))
         );
 
         // Forward move accepted.
-        db.advance_board_read_cursor("kessel", "2026-05-04T02:00:00Z", "id-b")
+        db.advance_board_read_cursor("kessel", "2026-05-04T02:00:00+00:00", "id-b")
             .unwrap();
         assert_eq!(
             db.get_board_read_cursor("kessel").unwrap(),
-            Some(("2026-05-04T02:00:00Z".to_string(), "id-b".to_string()))
+            Some(("2026-05-04T02:00:00+00:00".to_string(), "id-b".to_string()))
         );
     }
 
     #[test]
     fn advance_board_read_cursor_refuses_backward_move() {
         let db = test_db();
-        db.advance_board_read_cursor("kessel", "2026-05-04T02:00:00Z", "id-b")
+        db.advance_board_read_cursor("kessel", "2026-05-04T02:00:00+00:00", "id-b")
             .unwrap();
         // Older timestamp must not overwrite.
-        db.advance_board_read_cursor("kessel", "2026-05-04T01:00:00Z", "id-a")
+        db.advance_board_read_cursor("kessel", "2026-05-04T01:00:00+00:00", "id-a")
             .unwrap();
         assert_eq!(
             db.get_board_read_cursor("kessel").unwrap(),
-            Some(("2026-05-04T02:00:00Z".to_string(), "id-b".to_string()))
+            Some(("2026-05-04T02:00:00+00:00".to_string(), "id-b".to_string()))
         );
     }
 
     #[test]
     fn advance_board_read_cursor_breaks_tie_on_id() {
         let db = test_db();
-        let ts = "2026-05-04T02:00:00Z";
+        let ts = "2026-05-04T02:00:00+00:00";
         db.advance_board_read_cursor("kessel", ts, "id-a").unwrap();
         // Same timestamp, larger id -> accepted.
         db.advance_board_read_cursor("kessel", ts, "id-b").unwrap();

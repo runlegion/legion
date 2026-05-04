@@ -1304,7 +1304,7 @@ mod tests {
     #[test]
     fn seed_notifier_cursor_known_recipient_with_history_uses_board_reads() {
         let (db, _dir) = mcp_test_dir();
-        let pinned_ts = "2026-04-01T12:00:00Z";
+        let pinned_ts = "2026-04-01T12:00:00+00:00";
         let pinned_id = "019dabcd-0000-7000-8000-000000000001";
         db.advance_board_read_cursor("kessel", pinned_ts, pinned_id)
             .unwrap();
