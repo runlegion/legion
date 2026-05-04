@@ -641,6 +641,15 @@ fn run_notifier_loop(
 
     let poll_interval = mcp_poll_interval();
     let mut consecutive_cap_hits: u32 = 0;
+    // #393: a transient stdout write/flush blip used to kill the notifier
+    // thread permanently, leaving the MCP responsive to JSON-RPC but unable
+    // to push any further notifications -- the symptom is "agents miss every
+    // post except the one immediately after their fresh session start."
+    // Track consecutive write failures and only exit after the configured
+    // threshold so a brief EPIPE or back-pressure event does not silently
+    // dark the channel forever.
+    let mut consecutive_write_failures: u32 = 0;
+    const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 5;
 
     loop {
         std::thread::sleep(poll_interval);
@@ -744,17 +753,38 @@ fn run_notifier_loop(
                 std::process::abort();
             };
 
-            // A write or flush failure on stdout almost always means the
-            // client hung up (EPIPE). Continuing to loop against a dead pipe
-            // would burn CPU silently forever -- exit the notifier thread
-            // instead.
-            if let Err(e) = writeln!(locked, "{s}") {
-                eprintln!("[legion mcp notif] stdout write failed ({e}); notifier thread exiting");
-                return;
-            }
-            if let Err(e) = locked.flush() {
-                eprintln!("[legion mcp notif] stdout flush failed ({e}); notifier thread exiting");
-                return;
+            // A write or flush failure on stdout is usually EPIPE (client
+            // hung up) but can also be a transient back-pressure event. The
+            // historical behaviour was to exit the notifier on the first
+            // failure, which silently darked the channel for the rest of
+            // the session even when stdout recovered. Track consecutive
+            // failures and only exit after MAX_CONSECUTIVE_WRITE_FAILURES
+            // -- a long-dead pipe still gets us out of the loop, while a
+            // single hiccup no longer kills delivery permanently. The
+            // mutex-poisoned case above stays as `abort()` because that
+            // one is genuinely unrecoverable.
+            //
+            // The cursor was already advanced for this batch (at the top
+            // of the for-loop's enclosing scope), so failed posts are not
+            // retried -- accept the loss in exchange for keeping the
+            // thread alive. Loss-tolerant beats dead-tolerant.
+            let write_ok = writeln!(locked, "{s}").is_ok() && locked.flush().is_ok();
+            drop(locked);
+            if write_ok {
+                consecutive_write_failures = 0;
+            } else {
+                consecutive_write_failures = consecutive_write_failures.saturating_add(1);
+                eprintln!(
+                    "[legion mcp notif] stdout write failed ({}/{}) for post {}",
+                    consecutive_write_failures, MAX_CONSECUTIVE_WRITE_FAILURES, post.id
+                );
+                if consecutive_write_failures >= MAX_CONSECUTIVE_WRITE_FAILURES {
+                    eprintln!(
+                        "[legion mcp notif] {} consecutive write failures; notifier thread exiting (channel push is now inoperative for this session)",
+                        consecutive_write_failures
+                    );
+                    return;
+                }
             }
         }
     }
