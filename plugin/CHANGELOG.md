@@ -1,5 +1,22 @@
 # Legion Changelog
 
+## 0.10.1
+
+Verb-driven wake + SCIP indexer fallback + docs honesty pass. Closes the "what does --verb actually do" gap by making the wake gate consult a small set of wake-worthy verbs instead of a text-prefix `is_signal()` check, ships the rust-analyzer fallback that unblocks the SCIP read pillar end-to-end, and rewrites the post/signal/verb framing across the docs to match the code.
+
+### New
+
+- **Verb-driven wake gate** (#405, closes #404): Watch wakes a recipient only when an incoming signal's `--verb` is in `WAKE_WORTHY_VERBS = ["question", "request", "help", "blocker"]`. Other verbs (`announce`, `ack`, `info`, `answer`, bare `review`) deliver to live sessions via the channel push but no longer page an asleep agent. Posts never wake -- post = broadcast. `signal_requires_reply` now delegates to `is_wake_worthy` so the wake decision and the REQUIRES A REPLY routing in `build_wake_prompt` use one verb cut. The pre-#404 status fallback (`review:request` / `help:request` as reply-required on any verb) was a workaround for the broken text-prefix gate and is dropped; senders who want a reply use a wake-worthy verb directly.
+- **`rust-analyzer scip` indexer fallback** (#392, closes #381): `src/scip.rs::run_scip_rust` now falls through from `scip-rust` (legacy, archived) to `rust-analyzer scip .` when the canonical binary is missing. `rust-analyzer` ships with rustup so most dev machines have it. `LegionError::IndexerNotFound` updated to recommend `rustup component add rust-analyzer`. Unblocks #282 (`legion sym`) end-to-end on real repos and the rest of the SCIP pillar (#283 pre-grep hook, #284 daemon indexer, #285 cross-repo consult).
+
+### Changed
+
+- **Docs sync to post/signal/verb model** (#403, closes #402): `docs/site/concepts.md`, `architecture.md`, `getting-started.md`, and `llms-full.txt` rewritten to teach the two primitives (post = broadcast, signal = directed) and the verb-driven wake gate. Prior text described the OLD blanket "silence is acknowledgment" wake prompt and an RFC-shaped `@recipient verb:status {key} -- note` grammar as canonical; new text frames the lightweight `--verb question` tweet as the default and the structured grammar as opt-in for RFCs.
+
+### Open follow-ups
+
+- **#406**: Interactive Claude Code sessions don't write a session lock, so watch can spawn a duplicate against an awake recipient. Independent of #404 -- with the verb gate now firing on lightweight tweets, wake frequency is up and the lock gap surfaces in every session. Fix is a `legion session-lock` subcommand wired into SessionStart + Stop hooks (specced in snooze 019df0e2).
+
 ## 0.10.0
 
 Channel-reliability release. Bullpen volume cliffed from 200-280 posts/day to 3-100/day on 2026-04-08 with the channel-MCP rewrite, and the regression took five speculative PRs to corner before the diagnostic surface from #397 made the actual root causes visible. Once we could see what the system was doing, two compounding bugs fell out (#401). The SCIP query CLI also lands as the first user-facing surface on top of the SCIP indexing groundwork.
