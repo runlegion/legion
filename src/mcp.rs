@@ -1099,12 +1099,15 @@ fn run_notifier_loop(
                 // backwards and race us into re-delivery. Best-effort: a
                 // failure here is logged but does not kill the loop -- worst
                 // case is one redundant replay on the next boot.
-                // Cursor advance is intentionally scoped to delivered
-                // posts, not skipped ones. A skipped post is filtered
-                // again on next boot (cheap, idempotent); advancing past
-                // it would also move the cursor past any directed
-                // signal that races in at the same `created_at`,
-                // silently swallowing it.
+                // Persisted cursor advances only on delivered rows.
+                // Skipped rows are re-filtered on the next cold boot
+                // (idempotent), and the cross-process race a stale
+                // persisted cursor could mask -- a directed signal
+                // arriving at the same `created_at` from another
+                // process between boots -- stays narrow this way.
+                // The in-memory `last_seen_at` already passes skipped
+                // rows within this running loop; that's a separate
+                // single-process advance, not the same invariant.
                 if let Some(recipient) = client_repo
                     && let Err(e) =
                         db.advance_board_read_cursor(recipient, &post.created_at, &post.id)
