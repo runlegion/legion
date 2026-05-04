@@ -653,22 +653,38 @@ pub fn find_pending_signals(
 
 // -- Agent Spawning ----------------------------------------------------------
 
-/// Signals that require the recipient to reply, even if the reply is a refusal.
+/// Verbs whose presence in a directed signal triggers a watch wake (#404).
 ///
-/// A directed question or request without a reply is ghosting. The trigger is
-/// either a request-shaped verb (`question`, `request`) OR a request-shaped
-/// status on any verb (e.g. `review:request`, `help:request`). Approval-shaped
-/// statuses (`approved`, `done`, `blocked`) and bare informational verbs
-/// (`announce`, `update`) fall under the wake-storm guard: silence is
-/// acknowledgment unless the agent has something substantive to add.
-pub fn signal_requires_reply(text: &str) -> bool {
+/// `--verb` was designed to express intent; this set is the subsection of
+/// intents that warrant spawning an asleep recipient. Other verbs
+/// (`announce`, `ack`, `info`, `answer`, bare `review`) deliver to live
+/// sessions via the channel push but do not page an asleep agent.
+///
+/// Posts (text without a leading `@recipient`) never wake -- posts are
+/// broadcasts; the `legion signal --to <agent> --verb <wake-worthy>`
+/// primitive is the agent equivalent of a tweet at someone.
+pub const WAKE_WORTHY_VERBS: &[&str] = &["question", "request", "help", "blocker"];
+
+/// Whether a signal text triggers a wake under the verb-driven gate.
+///
+/// Returns `false` for posts, malformed signals, and signals whose verb is
+/// outside [`WAKE_WORTHY_VERBS`]. The decision is verb-only -- status is
+/// decoration that downstream tools may use, but the wake gate ignores it.
+pub fn is_wake_worthy(text: &str) -> bool {
     match signal::parse_signal(text) {
-        Some(sig) => {
-            matches!(sig.verb.as_str(), "question" | "request")
-                || matches!(sig.status.as_deref(), Some("request" | "help"))
-        }
+        Some(sig) => WAKE_WORTHY_VERBS.contains(&sig.verb.as_str()),
         None => false,
     }
+}
+
+/// Signals that require the recipient to reply, even if the reply is a refusal.
+///
+/// Same gate as [`is_wake_worthy`] -- the wake decision and the
+/// REQUIRES A REPLY routing in [`build_wake_prompt`] use one verb cut so a
+/// signal that woke the agent always lands in the section the agent must
+/// answer.
+pub fn signal_requires_reply(text: &str) -> bool {
+    is_wake_worthy(text)
 }
 
 /// Maximum reply-required signals rendered inline in the wake prompt; the
@@ -1030,6 +1046,24 @@ pub fn poll_cycle(
         let recipient = repo.recipient();
         let signals = find_pending_signals(db, &repo.name, recipient, since)?;
         if signals.is_empty() {
+            continue;
+        }
+
+        // Verb-driven wake gate (#404). Only spawn when at least one signal
+        // carries a wake-worthy verb. Informational signals targeting this
+        // repo (announce/ack/info/answer/review-without-request) are marked
+        // handled here so they do not re-poll forever; they remain visible
+        // via `legion bullpen` and were already delivered to live sessions
+        // by the channel push.
+        if !signals.iter().any(|(_, text, _)| is_wake_worthy(text)) {
+            for (id, _, _) in &signals {
+                if let Err(e) = db.mark_signal_handled_for_repo(id, &repo.name) {
+                    eprintln!(
+                        "[legion watch] failed to mark informational signal {} as handled for {}: {}",
+                        id, repo.name, e
+                    );
+                }
+            }
             continue;
         }
 
@@ -1561,25 +1595,32 @@ workdir = "/tmp"
     }
 
     #[test]
-    fn build_wake_prompt_treats_request_status_as_reply_required() {
-        // review:request -- a directed RFC review ask. Pre-fix this fell into
-        // INFORMATIONAL because the verb was `review`, not `question`/`request`.
-        // Real incident: smugglr asked platform to review an RFC, watch woke
-        // platform, prompt said "silence is acknowledgment", platform no-opped.
+    fn build_wake_prompt_routes_by_verb_only() {
+        // #404: wake/reply decision is verb-only. Status is decoration.
+        // The pre-#404 fallback that treated `status=request` or `status=help`
+        // on any verb as reply-required was a workaround for the broken
+        // text-prefix wake gate. Senders who want a reply now use a
+        // wake-worthy verb directly: `--verb request`, `--verb help`,
+        // `--verb question`, `--verb blocker`.
         let signals = vec![
             (
-                "id-rev".to_string(),
+                "id-rev-req".to_string(),
                 "@platform review:request {doc: rfc.md} -- review please".to_string(),
                 "smugglr".to_string(),
             ),
             (
-                "id-help".to_string(),
-                "@legion request:help -- need a hand".to_string(),
+                "id-help-verb".to_string(),
+                "@platform help -- need a hand on the rfc".to_string(),
                 "kelex".to_string(),
             ),
             (
-                "id-ok".to_string(),
-                "@legion review:approved -- LGTM".to_string(),
+                "id-request-verb".to_string(),
+                "@platform request -- could you review this".to_string(),
+                "kelex".to_string(),
+            ),
+            (
+                "id-approved".to_string(),
+                "@platform review:approved -- LGTM".to_string(),
                 "smugglr".to_string(),
             ),
         ];
@@ -1587,22 +1628,67 @@ workdir = "/tmp"
         let prompt = build_wake_prompt("platform", &signals);
 
         assert!(prompt.contains("REQUIRES A REPLY"));
-        assert!(
-            prompt.contains("id-rev"),
-            "review:request must require reply"
-        );
-        assert!(
-            prompt.contains("id-help"),
-            "request:help must require reply"
-        );
-
-        // Approvals stay informational -- silence is acknowledgment.
         assert!(prompt.contains("INFORMATIONAL"));
         let reply_section = &prompt
             [prompt.find("REQUIRES A REPLY").unwrap()..prompt.find("INFORMATIONAL").unwrap()];
+
         assert!(
-            !reply_section.contains("id-ok"),
-            "review:approved must not require reply"
+            reply_section.contains("id-help-verb"),
+            "verb=help must require reply"
+        );
+        assert!(
+            reply_section.contains("id-request-verb"),
+            "verb=request must require reply"
+        );
+        assert!(
+            !reply_section.contains("id-rev-req"),
+            "verb=review with status=request is no longer wake-worthy (#404 verb-only gate)"
+        );
+        assert!(
+            !reply_section.contains("id-approved"),
+            "verb=review with status=approved must not require reply"
+        );
+    }
+
+    #[test]
+    fn is_wake_worthy_recognizes_designated_verbs() {
+        for verb in WAKE_WORTHY_VERBS {
+            let text = format!("@kessel {verb} -- something");
+            assert!(
+                is_wake_worthy(&text),
+                "verb `{verb}` should be wake-worthy: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_wake_worthy_rejects_informational_verbs() {
+        for verb in ["announce", "ack", "info", "answer", "review"] {
+            let text = format!("@kessel {verb} -- fyi");
+            assert!(
+                !is_wake_worthy(&text),
+                "verb `{verb}` must not be wake-worthy: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_wake_worthy_rejects_posts() {
+        // Posts don't start with @recipient -- never wake.
+        assert!(!is_wake_worthy("just a musing about something"));
+        assert!(!is_wake_worthy("checking in @kessel did you see #401"));
+    }
+
+    #[test]
+    fn is_wake_worthy_ignores_status_decoration() {
+        // Status no longer gates wake; only the verb does.
+        assert!(
+            !is_wake_worthy("@platform review:request {doc: rfc.md}"),
+            "verb=review with status=request must not wake under verb-only gate"
+        );
+        assert!(
+            is_wake_worthy("@platform request:help -- pls"),
+            "verb=request stays wake-worthy regardless of status"
         );
     }
 

@@ -385,6 +385,23 @@ impl Database {
             );",
         )?;
 
+        // Migration: add last_read_id to board_reads (#400).
+        //
+        // Without an id alongside the timestamp, the MCP notifier's
+        // per-recipient cursor cannot disambiguate two rows that share a
+        // created_at -- the strict-`>` comparator in `get_board_posts_since`
+        // is `(created_at > ?1) OR (created_at = ?1 AND id > ?2)`, and
+        // `?2 = ""` (the empty seed) makes any non-empty id satisfy the
+        // tie-break and re-emits the just-delivered row on every boot. The
+        // empty-string default is correct for existing rows: it means "no
+        // id known, treat the timestamp as the only ordering signal" --
+        // identical to the pre-#400 behaviour the row was inserted under.
+        if !Self::has_column(conn, "board_reads", "last_read_id")? {
+            conn.execute_batch(
+                "ALTER TABLE board_reads ADD COLUMN last_read_id TEXT NOT NULL DEFAULT '';",
+            )?;
+        }
+
         // Migration 2: Phase 2.0 Synapse metadata columns.
         if !Self::has_column(conn, "reflections", "domain")? {
             conn.execute_batch("ALTER TABLE reflections ADD COLUMN domain TEXT;")?;
@@ -1829,6 +1846,61 @@ impl Database {
             (reader_repo, &now),
         )?;
 
+        Ok(())
+    }
+
+    /// Read the channel-delivery cursor for `reader_repo`.
+    ///
+    /// Used by the MCP notifier at cold boot so a session that was offline
+    /// while a directed signal was filed picks it up on the first poll tick
+    /// after it comes back online. Returns `(last_read_at, last_read_id)`,
+    /// matching what `advance_board_read_cursor` writes. `last_read_id` is
+    /// an empty string for rows written before the #400 migration.
+    pub fn get_board_read_cursor(&self, reader_repo: &str) -> Result<Option<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT last_read_at, last_read_id FROM board_reads WHERE reader_repo = ?1")?;
+        stmt.query_row([reader_repo], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()
+        .map_err(LegionError::Database)
+    }
+
+    /// Advance the channel-delivery cursor for `reader_repo` to
+    /// `(last_read_at, last_read_id)`.
+    ///
+    /// Forward-only: the upsert refuses to move the cursor backwards. The
+    /// composite ordering is `(last_read_at, last_read_id)`, which mirrors
+    /// the strict-`>` comparator used by `get_board_posts_since` so a row
+    /// recorded here is excluded from re-emission on the next poll.
+    /// Called by the MCP notifier after each successful delivery.
+    ///
+    /// `last_read_at` MUST share the offset shape every other legion write
+    /// path uses -- `chrono::Utc::now().to_rfc3339()`, which renders a
+    /// `+00:00` suffix (NOT `Z`). Lexicographic SQL `>` is correct only when
+    /// every timestamp it compares is rendered with the same fixed offset
+    /// string; mixing `+00:00` with `Z` (or any other offset) would
+    /// mis-order rows that compare correctly chronologically. Every caller
+    /// in-tree obeys this convention; the contract is documented here so
+    /// future callers do not need to rediscover the constraint.
+    pub fn advance_board_read_cursor(
+        &self,
+        reader_repo: &str,
+        last_read_at: &str,
+        last_read_id: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO board_reads (reader_repo, last_read_at, last_read_id) \
+             VALUES (?1, ?2, ?3) \
+             ON CONFLICT(reader_repo) DO UPDATE SET \
+                 last_read_at = excluded.last_read_at, \
+                 last_read_id = excluded.last_read_id \
+             WHERE excluded.last_read_at > board_reads.last_read_at \
+                OR (excluded.last_read_at = board_reads.last_read_at \
+                    AND excluded.last_read_id > board_reads.last_read_id)",
+            (reader_repo, last_read_at, last_read_id),
+        )?;
         Ok(())
     }
 
@@ -4347,6 +4419,64 @@ mod tests {
         db.mark_board_read("kelex").unwrap();
         db.mark_board_read("kelex").unwrap();
         assert_eq!(db.get_unread_count("kelex").unwrap(), 0);
+    }
+
+    #[test]
+    fn get_board_read_cursor_none_for_fresh_repo() {
+        let db = test_db();
+        assert!(db.get_board_read_cursor("kessel").unwrap().is_none());
+    }
+
+    #[test]
+    fn advance_board_read_cursor_creates_then_moves_forward() {
+        let db = test_db();
+        db.advance_board_read_cursor("kessel", "2026-05-04T01:00:00+00:00", "id-a")
+            .unwrap();
+        assert_eq!(
+            db.get_board_read_cursor("kessel").unwrap(),
+            Some(("2026-05-04T01:00:00+00:00".to_string(), "id-a".to_string()))
+        );
+
+        // Forward move accepted.
+        db.advance_board_read_cursor("kessel", "2026-05-04T02:00:00+00:00", "id-b")
+            .unwrap();
+        assert_eq!(
+            db.get_board_read_cursor("kessel").unwrap(),
+            Some(("2026-05-04T02:00:00+00:00".to_string(), "id-b".to_string()))
+        );
+    }
+
+    #[test]
+    fn advance_board_read_cursor_refuses_backward_move() {
+        let db = test_db();
+        db.advance_board_read_cursor("kessel", "2026-05-04T02:00:00+00:00", "id-b")
+            .unwrap();
+        // Older timestamp must not overwrite.
+        db.advance_board_read_cursor("kessel", "2026-05-04T01:00:00+00:00", "id-a")
+            .unwrap();
+        assert_eq!(
+            db.get_board_read_cursor("kessel").unwrap(),
+            Some(("2026-05-04T02:00:00+00:00".to_string(), "id-b".to_string()))
+        );
+    }
+
+    #[test]
+    fn advance_board_read_cursor_breaks_tie_on_id() {
+        let db = test_db();
+        let ts = "2026-05-04T02:00:00+00:00";
+        db.advance_board_read_cursor("kessel", ts, "id-a").unwrap();
+        // Same timestamp, larger id -> accepted.
+        db.advance_board_read_cursor("kessel", ts, "id-b").unwrap();
+        assert_eq!(
+            db.get_board_read_cursor("kessel").unwrap(),
+            Some((ts.to_string(), "id-b".to_string()))
+        );
+        // Same timestamp, smaller id -> refused.
+        db.advance_board_read_cursor("kessel", ts, "id-a").unwrap();
+        assert_eq!(
+            db.get_board_read_cursor("kessel").unwrap(),
+            Some((ts.to_string(), "id-b".to_string()))
+        );
     }
 
     #[test]
