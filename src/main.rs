@@ -584,6 +584,22 @@ enum Commands {
     /// MCP stdio server for Claude Code channel integration
     Mcp,
 
+    /// Show or tail the most recent MCP process log file (#395). Each MCP
+    /// subprocess redirects its stderr to a per-PID file under
+    /// `~/Library/Logs/legion/mcp/<pid>.log` (macOS) or the XDG state dir
+    /// (Linux). Use this to see notifier seed errors, per-poll cursor state,
+    /// per-post deliver decisions, and write failures that would otherwise
+    /// be swallowed by Claude Code's MCP transport.
+    McpLogs {
+        /// Specific PID to tail (default: most recently modified .log file).
+        #[arg(long)]
+        pid: Option<u32>,
+        /// Follow the file (like `tail -f`). Default prints existing
+        /// contents and exits.
+        #[arg(long)]
+        tail: bool,
+    },
+
     /// Start the legion daemon (channel + watch)
     Daemon {
         /// HTTP port for the channel server
@@ -2006,12 +2022,15 @@ fn run_compound_command_with_meta(
 
 /// Try to load the embedding model. Returns None if not available.
 ///
-/// Logs a warning to stderr on failure so degraded hybrid search is visible.
+/// Logs a warning via `info!` on failure so degraded hybrid search is visible
+/// in `--verbose` mode without spamming default-quiet runs (which otherwise
+/// fail integration tests asserting `stderr.is_empty()` whenever the model
+/// fetch hits a transient network error like HuggingFace 429).
 fn try_load_embed_model() -> Option<embed::EmbedModel> {
     match embed::EmbedModel::load() {
         Ok(model) => Some(model),
         Err(e) => {
-            eprintln!("[legion] embedding model unavailable, falling back to BM25: {e}");
+            info!("[legion] embedding model unavailable, falling back to BM25: {e}");
             None
         }
     }
@@ -4567,6 +4586,40 @@ fn run() -> error::Result<()> {
             let version = env!("CARGO_PKG_VERSION").to_string();
             let (tx, _rx) = tokio::sync::broadcast::channel(16);
             mcp::run_stdio_loop(base, version, tx)?;
+        }
+        Commands::McpLogs { pid, tail } => {
+            let path = match pid {
+                Some(p) => mcp::mcp_log_path(p)?,
+                None => match mcp::most_recent_mcp_log()? {
+                    Some(p) => p,
+                    None => {
+                        eprintln!(
+                            "[legion] no MCP log files found at {}",
+                            mcp::mcp_log_dir()?.display()
+                        );
+                        return Ok(());
+                    }
+                },
+            };
+            if !path.exists() {
+                eprintln!("[legion] log file does not exist: {}", path.display());
+                return Ok(());
+            }
+            if tail {
+                let status = std::process::Command::new("tail")
+                    .args(["-F", "-n", "+1"])
+                    .arg(&path)
+                    .status()
+                    .map_err(error::LegionError::Io)?;
+                if !status.success() {
+                    return Err(error::LegionError::WorkSource(format!(
+                        "tail exited with status {status}"
+                    )));
+                }
+            } else {
+                let contents = std::fs::read_to_string(&path)?;
+                print!("{contents}");
+            }
         }
         Commands::Daemon { port } => {
             let base = data_dir()?;

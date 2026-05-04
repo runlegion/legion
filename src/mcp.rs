@@ -25,6 +25,121 @@ use crate::task;
 /// Protocol version string returned by initialize.
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Resolve the MCP-process log file (#395). One file per running MCP
+/// subprocess so tailing one repo's MCP does not require de-interleaving
+/// from another's. macOS uses `~/Library/Logs/legion/mcp/<pid>.log`;
+/// other platforms use XDG state.
+pub fn mcp_log_path(pid: u32) -> Result<PathBuf> {
+    let base = mcp_log_dir()?;
+    Ok(base.join(format!("{pid}.log")))
+}
+
+/// Directory holding all MCP process log files. Created if missing.
+pub fn mcp_log_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| LegionError::NoHomeDir)?;
+        Ok(home.join("Library/Logs/legion/mcp"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let state_home = if let Ok(d) = std::env::var("XDG_STATE_HOME") {
+            PathBuf::from(d)
+        } else {
+            let home = std::env::var("HOME")
+                .map(PathBuf::from)
+                .map_err(|_| LegionError::NoHomeDir)?;
+            home.join(".local/state")
+        };
+        Ok(state_home.join("legion/mcp"))
+    }
+}
+
+/// Redirect this process's stderr to the per-PID MCP log file (#395).
+/// Existing eprintln! calls keep working unchanged; their output now lands
+/// in the file instead of being swallowed by Claude Code. Failures here
+/// are non-fatal -- without redirection the MCP still functions, we just
+/// lose observability.
+#[cfg(unix)]
+fn redirect_stderr_to_log() {
+    let pid = std::process::id();
+    let Ok(path) = mcp_log_path(pid) else {
+        return;
+    };
+    if let Some(parent) = path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    use std::os::unix::io::AsRawFd;
+    // Safety: dup2 is async-signal-safe and redirects fd 2 (stderr) to the
+    // file. The OwnedFd is leaked via Box::leak so the underlying fd stays
+    // open for the process lifetime; closing it would invalidate stderr.
+    unsafe {
+        if libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) >= 0 {
+            Box::leak(Box::new(file));
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn redirect_stderr_to_log() {}
+
+/// Emit a trace event to stderr (which #395 redirects to the per-PID log
+/// file). Lifecycle and error events use this unconditionally; verbose
+/// events (per-poll, per-post-decision) gate on `LEGION_MCP_TRACE=1` so
+/// production sessions do not pay the log-volume cost. Format is
+/// `<rfc3339> [legion mcp pid=<pid>] <event> <key>=<value> ...`.
+pub fn mcp_trace(event: &str, kvs: &[(&str, &str)]) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let pid = std::process::id();
+    let mut line = format!("{now} [legion mcp pid={pid}] {event}");
+    for (k, v) in kvs {
+        line.push(' ');
+        line.push_str(k);
+        line.push('=');
+        line.push_str(v);
+    }
+    eprintln!("{line}");
+}
+
+/// Whether verbose tracing is enabled (per-poll, per-post-decision).
+fn mcp_verbose() -> bool {
+    std::env::var("LEGION_MCP_TRACE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Tail-friendly path lookup helper used by `legion mcp-logs --tail`.
+pub fn most_recent_mcp_log() -> Result<Option<PathBuf>> {
+    let dir = mcp_log_dir()?;
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("log") {
+            continue;
+        }
+        let mtime = entry.metadata()?.modified()?;
+        if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
+            newest = Some((mtime, path));
+        }
+    }
+    Ok(newest.map(|(_, p)| p))
+}
+
 /// Maximum tool result content length before truncation.
 const MAX_TOOL_RESULT_LEN: usize = 2000;
 
@@ -390,17 +505,24 @@ pub fn dispatch(
             // process lifetime. A second initialize (unexpected under the
             // current plugin model) would silently no-op -- documented here
             // so future deployment changes catch it.
-            if let Some(cell) = client_repo_cell
-                && let Some(name) = request
+            if let Some(cell) = client_repo_cell {
+                if let Some(name) = request
                     .get("params")
                     .and_then(|p| p.get("clientInfo"))
                     .and_then(|ci| ci.get("name"))
                     .and_then(|n| n.as_str())
-                && cell.set(name.to_string()).is_err()
-            {
-                eprintln!(
-                    "[legion mcp] duplicate initialize ignored; client_repo already set (one process = one session)"
-                );
+                {
+                    if cell.set(name.to_string()).is_err() {
+                        mcp_trace("mcp.initialize.duplicate", &[("ignored_name", name)]);
+                        eprintln!(
+                            "[legion mcp] duplicate initialize ignored; client_repo already set (one process = one session)"
+                        );
+                    } else {
+                        mcp_trace("mcp.initialize", &[("client_repo", name)]);
+                    }
+                } else {
+                    mcp_trace("mcp.initialize", &[("client_repo", "<missing>")]);
+                }
             }
             Some(success_response(
                 &id,
@@ -629,15 +751,36 @@ fn run_notifier_loop(
     let (mut last_seen_at, mut last_seen_id): (String, String) = match db
         .get_board_cursor_watermark()
     {
-        Ok(Some((ts, id))) => (ts, id),
-        Ok(None) => (chrono::Utc::now().to_rfc3339(), String::new()),
+        Ok(Some((ts, id))) => {
+            mcp_trace(
+                "notifier.cursor.seed",
+                &[("at", &ts), ("id", &id), ("source", "watermark")],
+            );
+            (ts, id)
+        }
+        Ok(None) => {
+            let now = chrono::Utc::now().to_rfc3339();
+            mcp_trace(
+                "notifier.cursor.seed",
+                &[("at", &now), ("source", "now_empty_table")],
+            );
+            (now, String::new())
+        }
         Err(e) => {
+            mcp_trace("notifier.seed.failed", &[("err", &e.to_string())]);
             eprintln!(
                 "[legion mcp notif] failed to seed cursor from db watermark: {e}; notifier thread exiting (channel push is now inoperative for this session)"
             );
             return;
         }
     };
+    mcp_trace(
+        "notifier.start",
+        &[(
+            "poll_interval_ms",
+            &format!("{}", mcp_poll_interval().as_millis()),
+        )],
+    );
 
     let poll_interval = mcp_poll_interval();
     let mut consecutive_cap_hits: u32 = 0;
@@ -658,10 +801,22 @@ fn run_notifier_loop(
             match db.get_board_posts_since(&last_seen_at, &last_seen_id, NOTIFIER_BATCH_LIMIT) {
                 Ok(posts) => posts,
                 Err(e) => {
+                    mcp_trace("notifier.poll.failed", &[("err", &e.to_string())]);
                     eprintln!("[legion mcp notif] db poll failed: {e}; continuing");
                     continue;
                 }
             };
+
+        if mcp_verbose() {
+            mcp_trace(
+                "notifier.poll",
+                &[
+                    ("cursor_at", &last_seen_at),
+                    ("cursor_id", &last_seen_id),
+                    ("returned", &new_posts.len().to_string()),
+                ],
+            );
+        }
 
         if new_posts.is_empty() {
             consecutive_cap_hits = 0;
@@ -716,7 +871,22 @@ fn run_notifier_loop(
                 );
             }
 
-            if !should_notify(&post.text, &post.repo, client_repo) {
+            let deliver = should_notify(&post.text, &post.repo, client_repo);
+            if mcp_verbose() {
+                let preview: String = post.text.chars().take(40).collect();
+                mcp_trace(
+                    "notifier.decision",
+                    &[
+                        ("post_id", &post.id),
+                        ("from_repo", &post.repo),
+                        ("client_repo", client_repo.unwrap_or("<unset>")),
+                        ("is_signal", &is_signal.to_string()),
+                        ("deliver", &deliver.to_string()),
+                        ("text_prefix", &preview.replace('\n', " ")),
+                    ],
+                );
+            }
+            if !deliver {
                 continue;
             }
 
@@ -814,6 +984,18 @@ pub fn run_stdio_loop(
     version: String,
     tx: broadcast::Sender<ChannelEvent>,
 ) -> Result<()> {
+    // Redirect stderr to the per-PID log file (#395) before any other code
+    // emits a diagnostic. Without this, every eprintln! is swallowed by
+    // Claude Code's MCP transport and channel-darkness debugging is blind.
+    redirect_stderr_to_log();
+    mcp_trace(
+        "mcp.start",
+        &[
+            ("data_dir", &data_dir.display().to_string()),
+            ("version", &version),
+        ],
+    );
+
     // Shared stdout writer -- both the request loop and the notification thread
     // write to stdout. The Mutex serialises their writes so lines never interleave.
     let stdout = std::io::stdout();
