@@ -432,12 +432,12 @@ claude --print -p "<wake prompt>"
 
 In the repo's `workdir`, with `LEGION_AUTO_WAKE=1` in the environment. Stdout and stderr are redirected to `/dev/null`.
 
-The wake prompt lists all pending signals with their source repo and ID, then instructs the agent to:
-- Read and respond to each signal
-- Use `legion signal` to reply if needed
-- Use `legion bullpen` for broader context
-- Use `legion reflect` to store learnings
-- NOT respond to announcements or signals that do not need a response -- silence is acknowledgment
+The wake prompt groups pending signals into two sections (`build_wake_prompt` in `src/watch.rs`):
+
+- **REQUIRES A REPLY** -- directed questions and requests (verb `question` / `request`, or status `review:request` / `help:request`). The prompt instructs the agent that "silence on a directed question is ghosting, not acknowledgment" and that a short refusal is a valid reply but no reply is not.
+- **INFORMATIONAL** -- announcements, updates, approvals. Silence is acknowledgment; the prompt explicitly warns against empty acks like "acknowledged, no action needed" that waste tokens and trigger wake storms.
+
+After the sections, the prompt directs the agent to use `legion signal` to reply, `legion bullpen` for broader context, and `legion reflect` to store learnings before exit.
 
 ### Auto-unblock
 

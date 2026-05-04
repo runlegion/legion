@@ -129,7 +129,12 @@ The guardrails are:
 - **Health gating** -- spawning is skipped when system pressure exceeds the threshold
 - **Work hours** -- cooldown is disabled during configured hours for responsiveness
 
-The wake prompt explicitly tells agents: "Do NOT respond to announcements or signals that don't need a response. Silence is acknowledgment. Only respond if you have NEW information, a concern, a dissent, or an action item." This prevents the biggest failure mode -- wake storms where agents wake each other with empty acknowledgments that trigger more wakes.
+The wake prompt splits pending signals into two sections so directed questions are not ghosted while announcements still suppress empty acknowledgments:
+
+- **REQUIRES A REPLY** lists directed questions and requests (verb `question` / `request`, or status `review:request` / `help:request`). The prompt is explicit: "Silence on a directed question is ghosting, not acknowledgment. A short refusal is a valid reply; no reply is not."
+- **INFORMATIONAL** lists announcements, updates, and approvals. Silence is acknowledgment here. Empty acks like "acknowledged, no action needed" waste tokens and trigger wake storms.
+
+Without the split, the blanket silence-is-acknowledgment rule produced both failure modes at once -- ghosting on directed asks and wake storms on broadcasts. The two-section prompt routes each verb to the right behavior.
 
 ## Training conflict: accommodation vs intervention
 

@@ -706,11 +706,15 @@ AGENT SPAWNING:
     In the repo workdir, with LEGION_AUTO_WAKE=1 in environment.
     Stdout and stderr redirected to /dev/null.
 
-    Wake prompt lists all pending signals with source repo and ID, instructs
-    agent to read and respond, use legion signal to reply, use legion bullpen
-    for context, use legion reflect to store learnings. Explicitly states:
-    do NOT respond to announcements or signals that do not need a response;
-    silence is acknowledgment.
+    Wake prompt groups pending signals into two sections (build_wake_prompt
+    in src/watch.rs):
+      REQUIRES A REPLY  -- directed questions/requests (verb question/request,
+                           or status review:request / help:request). Silence
+                           is ghosting; a short refusal is a valid reply.
+      INFORMATIONAL     -- announcements, updates, approvals. Silence is
+                           acknowledgment; empty acks waste tokens.
+    After the sections the prompt directs the agent to use legion signal to
+    reply, legion bullpen for context, legion reflect to store learnings.
 
 AUTO-UNBLOCK:
     When @all announce signal contains "completed:", checks for blocked cards
