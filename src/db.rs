@@ -1832,6 +1832,37 @@ impl Database {
         Ok(())
     }
 
+    /// Read the channel-delivery cursor for `reader_repo`.
+    ///
+    /// Used by the MCP notifier at cold boot so a session that was offline
+    /// while a directed signal was filed picks it up on the first poll tick
+    /// after it comes back online. Returns the same `last_read_at` value
+    /// `mark_board_read` writes.
+    pub fn get_board_read_cursor(&self, reader_repo: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT last_read_at FROM board_reads WHERE reader_repo = ?1")?;
+        stmt.query_row([reader_repo], |row| row.get::<_, String>(0))
+            .optional()
+            .map_err(LegionError::Database)
+    }
+
+    /// Advance the channel-delivery cursor for `reader_repo` to `last_read_at`.
+    ///
+    /// Forward-only: the upsert refuses to move the cursor backwards. Called
+    /// by the MCP notifier after each successful delivery so the next cold
+    /// boot resumes from the right point and does not replay already-seen
+    /// posts.
+    pub fn advance_board_read_cursor(&self, reader_repo: &str, last_read_at: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO board_reads (reader_repo, last_read_at) VALUES (?1, ?2) \
+             ON CONFLICT(reader_repo) DO UPDATE SET last_read_at = excluded.last_read_at \
+             WHERE excluded.last_read_at > board_reads.last_read_at",
+            (reader_repo, last_read_at),
+        )?;
+        Ok(())
+    }
+
     /// Find unhandled signals directed at a specific repo.
     ///
     /// Returns team posts that mention `@<repo_name>` (at start or mid-text)
@@ -4347,6 +4378,45 @@ mod tests {
         db.mark_board_read("kelex").unwrap();
         db.mark_board_read("kelex").unwrap();
         assert_eq!(db.get_unread_count("kelex").unwrap(), 0);
+    }
+
+    #[test]
+    fn get_board_read_cursor_none_for_fresh_repo() {
+        let db = test_db();
+        assert!(db.get_board_read_cursor("kessel").unwrap().is_none());
+    }
+
+    #[test]
+    fn advance_board_read_cursor_creates_then_moves_forward() {
+        let db = test_db();
+        db.advance_board_read_cursor("kessel", "2026-05-04T01:00:00Z")
+            .unwrap();
+        assert_eq!(
+            db.get_board_read_cursor("kessel").unwrap().as_deref(),
+            Some("2026-05-04T01:00:00Z")
+        );
+
+        // Forward move accepted.
+        db.advance_board_read_cursor("kessel", "2026-05-04T02:00:00Z")
+            .unwrap();
+        assert_eq!(
+            db.get_board_read_cursor("kessel").unwrap().as_deref(),
+            Some("2026-05-04T02:00:00Z")
+        );
+    }
+
+    #[test]
+    fn advance_board_read_cursor_refuses_backward_move() {
+        let db = test_db();
+        db.advance_board_read_cursor("kessel", "2026-05-04T02:00:00Z")
+            .unwrap();
+        // Older timestamp must not overwrite.
+        db.advance_board_read_cursor("kessel", "2026-05-04T01:00:00Z")
+            .unwrap();
+        assert_eq!(
+            db.get_board_read_cursor("kessel").unwrap().as_deref(),
+            Some("2026-05-04T02:00:00Z")
+        );
     }
 
     #[test]

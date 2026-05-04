@@ -701,6 +701,63 @@ fn mcp_poll_interval() -> std::time::Duration {
     std::time::Duration::from_millis(ms)
 }
 
+/// Replay window applied at cold boot when this recipient has no
+/// `board_reads` cursor yet -- a fresh agent picks up directed signals filed
+/// in the last 24 hours instead of starting from the live watermark and
+/// silently swallowing them. Bounded so the first boot after a long absence
+/// is not a flood.
+const NOTIFIER_COLD_BOOT_REPLAY: chrono::Duration = chrono::Duration::hours(24);
+
+/// Resolve the agent name for the current MCP subprocess from `watch.toml`
+/// keyed on cwd.
+///
+/// The MCP `initialize` handshake reports `clientInfo.name = "claude-code"`
+/// for every Claude Code session, which is the *client software* identity,
+/// not the *agent* identity. Routing channel notifications by that token
+/// breaks every directed signal because every session collides on the same
+/// name. The agent identity is what `legion --repo <name>` carries on every
+/// CLI call; here we recover it by canonicalising cwd and looking up the
+/// matching `WatchRepoConfig.recipient()`.
+///
+/// Returns `None` (and the caller falls back to the legacy `clientInfo.name`
+/// handshake value) when:
+///   - watch.toml is missing or empty
+///   - cwd cannot be canonicalised
+///   - no entry's canonicalised workdir matches the current cwd
+///
+/// All three failure modes are non-fatal: a misconfigured workstation gets
+/// the pre-fix behaviour (broadcasts only) rather than no channel at all.
+fn resolve_session_repo_from_cwd(data_dir: &std::path::Path) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    resolve_session_repo_for_cwd(data_dir, &cwd)
+}
+
+/// Inner form of [`resolve_session_repo_from_cwd`] with the cwd injected.
+/// Split out so unit tests can exercise the watch.toml lookup against a
+/// fixture directory without mutating the global process cwd.
+fn resolve_session_repo_for_cwd(
+    data_dir: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Option<String> {
+    let watch_path = data_dir.join("watch.toml");
+    let repos = match crate::watch::list_repos_in_config(&watch_path) {
+        Ok(r) if !r.is_empty() => r,
+        _ => return None,
+    };
+
+    let cwd_canon = std::fs::canonicalize(cwd).ok()?;
+
+    for repo in repos {
+        let workdir = std::path::Path::new(&repo.workdir);
+        if let Ok(workdir_canon) = std::fs::canonicalize(workdir)
+            && workdir_canon == cwd_canon
+        {
+            return Some(repo.recipient().to_string());
+        }
+    }
+    None
+}
+
 /// Body of the notifier thread spawned by `run_stdio_loop`.
 ///
 /// Polls the `reflections` table for new bullpen rows and writes a
@@ -727,52 +784,91 @@ fn run_notifier_loop(
         }
     };
 
-    // Seed the cursor to the DB's current team-board watermark so the
-    // notifier only emits for posts that land after the MCP subprocess
-    // started. Replaying historical bullpen content would flood the
-    // session with messages the user has already seen.
+    // Seed the cursor.
     //
-    // Using a DB-derived watermark rather than `now()` eliminates a
-    // small-but-real race: a post committed in the same nanosecond as
-    // the notifier's wall-clock seed would be dropped by the strict-`>`
-    // comparator on the next poll. The DB watermark is consistent with
-    // the rows the notifier is filtering against.
+    // When the agent identity is known (resolved from watch.toml at MCP
+    // boot, see #400) we want directed signals filed while the agent was
+    // offline to be picked up on the first poll tick after wake. Two-step
+    // resolution:
     //
-    // On seed error (the reflections table exists but the query failed)
-    // the notifier thread exits cleanly rather than falling back to
-    // `now()`, because the fallback would silently reintroduce the very
-    // race the watermark closes, AND the next poll against the same
-    // connection would almost certainly fail the same way. A dead
-    // notifier at least does not give a false "channel is working"
-    // signal to the rest of the process.
+    //   1. If `board_reads.last_read_at` is set for this recipient, seed
+    //      from there -- the cursor advances on every successful delivery
+    //      (further down this loop), so this is the authoritative
+    //      per-recipient resume point. Subsequent boots see only what
+    //      arrived since the last delivery.
+    //   2. Otherwise (first time this recipient has booted, or
+    //      board_reads pruned), seed at `now - NOTIFIER_COLD_BOOT_REPLAY`
+    //      so a fresh agent picks up at most the last day of directed
+    //      traffic instead of the whole history. `should_notify` and
+    //      `resolved_at IS NULL` keep the replay narrow: own posts and
+    //      already-resolved signals are filtered.
     //
-    // Empty table (`None`) seeds from `now()` because there is no race
-    // window when there are no rows.
-    let (mut last_seen_at, mut last_seen_id): (String, String) = match db
-        .get_board_cursor_watermark()
-    {
-        Ok(Some((ts, id))) => {
-            mcp_trace(
-                "notifier.cursor.seed",
-                &[("at", &ts), ("id", &id), ("source", "watermark")],
-            );
-            (ts, id)
-        }
-        Ok(None) => {
-            let now = chrono::Utc::now().to_rfc3339();
-            mcp_trace(
-                "notifier.cursor.seed",
-                &[("at", &now), ("source", "now_empty_table")],
-            );
-            (now, String::new())
-        }
-        Err(e) => {
-            mcp_trace("notifier.seed.failed", &[("err", &e.to_string())]);
-            eprintln!(
-                "[legion mcp notif] failed to seed cursor from db watermark: {e}; notifier thread exiting (channel push is now inoperative for this session)"
-            );
-            return;
-        }
+    // When the agent identity is unknown (no watch.toml entry for cwd),
+    // fall back to the pre-#400 watermark seed -- the notifier cannot
+    // route directed signals anyway in that state, so behaviour matches
+    // the prior version: live posts only, no replay.
+    //
+    // On seed error (DB query failed) the notifier exits cleanly rather
+    // than guessing, because the next poll would almost certainly fail the
+    // same way and a silent fallback would mask the breakage.
+    let known_recipient: Option<String> = client_repo_cell.get().cloned();
+    let (mut last_seen_at, mut last_seen_id): (String, String) = match known_recipient.as_deref() {
+        Some(recipient) => match db.get_board_read_cursor(recipient) {
+            Ok(Some(ts)) => {
+                mcp_trace(
+                    "notifier.cursor.seed",
+                    &[
+                        ("at", &ts),
+                        ("source", "board_reads"),
+                        ("recipient", recipient),
+                    ],
+                );
+                (ts, String::new())
+            }
+            Ok(None) => {
+                let backstop = (chrono::Utc::now() - NOTIFIER_COLD_BOOT_REPLAY).to_rfc3339();
+                mcp_trace(
+                    "notifier.cursor.seed",
+                    &[
+                        ("at", &backstop),
+                        ("source", "cold_boot_replay"),
+                        ("recipient", recipient),
+                    ],
+                );
+                (backstop, String::new())
+            }
+            Err(e) => {
+                mcp_trace("notifier.seed.failed", &[("err", &e.to_string())]);
+                eprintln!(
+                    "[legion mcp notif] failed to read board_reads cursor: {e}; notifier thread exiting (channel push is now inoperative for this session)"
+                );
+                return;
+            }
+        },
+        None => match db.get_board_cursor_watermark() {
+            Ok(Some((ts, id))) => {
+                mcp_trace(
+                    "notifier.cursor.seed",
+                    &[("at", &ts), ("id", &id), ("source", "watermark")],
+                );
+                (ts, id)
+            }
+            Ok(None) => {
+                let now = chrono::Utc::now().to_rfc3339();
+                mcp_trace(
+                    "notifier.cursor.seed",
+                    &[("at", &now), ("source", "now_empty_table")],
+                );
+                (now, String::new())
+            }
+            Err(e) => {
+                mcp_trace("notifier.seed.failed", &[("err", &e.to_string())]);
+                eprintln!(
+                    "[legion mcp notif] failed to seed cursor from db watermark: {e}; notifier thread exiting (channel push is now inoperative for this session)"
+                );
+                return;
+            }
+        },
     };
     mcp_trace(
         "notifier.start",
@@ -942,6 +1038,25 @@ fn run_notifier_loop(
             drop(locked);
             if write_ok {
                 consecutive_write_failures = 0;
+                // Advance the per-recipient delivery cursor so the next cold
+                // boot resumes from this post rather than replaying it. The
+                // upsert is forward-only; concurrent writers (e.g. the HTTP
+                // backlog path's mark_board_read) cannot move the cursor
+                // backwards and race us into re-delivery. Best-effort: a
+                // failure here is logged but does not kill the loop -- worst
+                // case is one redundant replay on the next boot.
+                if let Some(recipient) = client_repo
+                    && let Err(e) = db.advance_board_read_cursor(recipient, &post.created_at)
+                {
+                    mcp_trace(
+                        "notifier.cursor.advance.failed",
+                        &[
+                            ("recipient", recipient),
+                            ("post_id", &post.id),
+                            ("err", &e.to_string()),
+                        ],
+                    );
+                }
             } else {
                 consecutive_write_failures = consecutive_write_failures.saturating_add(1);
                 eprintln!(
@@ -1003,8 +1118,29 @@ pub fn run_stdio_loop(
         Arc::new(Mutex::new(std::io::BufWriter::new(stdout)));
 
     // Shared cell so the request loop can inform the notification thread which
-    // repo the connected client belongs to (extracted from initialize clientInfo.name).
+    // repo the connected client belongs to.
+    //
+    // Pre-populated from cwd via watch.toml when possible, so the notifier
+    // knows the *agent* identity (kessel, legion, ...) rather than the
+    // *client software* identity (`claude-code`, the literal value every
+    // Claude Code session sends in initialize.clientInfo.name). Without this
+    // pre-fill, every directed signal collapses onto the same `claude-code`
+    // recipient and is suppressed in every session. See #400.
+    //
+    // OnceLock is set first by cwd-resolution; the subsequent `initialize`
+    // handler's set is a no-op (logged as duplicate), so the cwd answer
+    // wins. Falls back to the handshake value when watch.toml has no entry
+    // for cwd.
     let client_repo_cell: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+    if let Some(name) = resolve_session_repo_from_cwd(&data_dir) {
+        mcp_trace(
+            "mcp.client_repo.resolved",
+            &[("name", &name), ("source", "watch_toml_cwd")],
+        );
+        let _ = client_repo_cell.set(name);
+    } else {
+        mcp_trace("mcp.client_repo.resolved", &[("source", "unresolved")]);
+    }
 
     // Spawn the notification emitter thread before entering the blocking read loop.
     let notif_out = Arc::clone(&out);
@@ -1095,6 +1231,62 @@ mod tests {
     fn make_tx() -> broadcast::Sender<ChannelEvent> {
         let (tx, _rx) = broadcast::channel(16);
         tx
+    }
+
+    #[test]
+    fn resolve_session_repo_returns_none_when_watch_toml_missing() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let cwd = tempfile::tempdir().expect("cwd dir");
+        assert_eq!(
+            resolve_session_repo_for_cwd(data_dir.path(), cwd.path()),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_session_repo_matches_canonicalized_workdir() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let cwd = tempfile::tempdir().expect("cwd dir");
+        let watch_path = data_dir.path().join("watch.toml");
+
+        crate::watch::add_repo_to_config(&watch_path, "kessel", cwd.path(), None)
+            .expect("add repo");
+
+        assert_eq!(
+            resolve_session_repo_for_cwd(data_dir.path(), cwd.path()).as_deref(),
+            Some("kessel")
+        );
+    }
+
+    #[test]
+    fn resolve_session_repo_prefers_agent_alias_over_name() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let cwd = tempfile::tempdir().expect("cwd dir");
+        let watch_path = data_dir.path().join("watch.toml");
+
+        crate::watch::add_repo_to_config(&watch_path, "kessel", cwd.path(), Some("kessel-agent"))
+            .expect("add repo");
+
+        assert_eq!(
+            resolve_session_repo_for_cwd(data_dir.path(), cwd.path()).as_deref(),
+            Some("kessel-agent")
+        );
+    }
+
+    #[test]
+    fn resolve_session_repo_returns_none_for_unmatched_cwd() {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let cwd = tempfile::tempdir().expect("cwd dir");
+        let other = tempfile::tempdir().expect("other dir");
+        let watch_path = data_dir.path().join("watch.toml");
+
+        crate::watch::add_repo_to_config(&watch_path, "kessel", other.path(), None)
+            .expect("add repo");
+
+        assert_eq!(
+            resolve_session_repo_for_cwd(data_dir.path(), cwd.path()),
+            None
+        );
     }
 
     fn make_request(method: &str, params: Option<Value>) -> Value {
