@@ -223,7 +223,11 @@ enum Commands {
         force: bool,
     },
 
-    /// Post a message to the shared bullpen for other agents
+    /// Post a broadcast to the shared bullpen.
+    ///
+    /// Posts have no recipient and never wake an asleep agent. Use
+    /// `legion signal --to <agent> --verb <wake-worthy-verb>` for directed
+    /// asks that need a reply (see `legion signal --help` for the verb set).
     Post {
         /// Repository name(s), comma-separated (e.g., "myrepo" or "frontend,backend")
         #[arg(long, value_delimiter = ',', required = true)]
@@ -285,7 +289,16 @@ enum Commands {
         full: bool,
     },
 
-    /// Send a structured signal to another agent
+    /// Send a directed message to another agent.
+    ///
+    /// Watch wakes the recipient when `--verb` is in the wake-worthy set
+    /// (`question`, `request`, `help`, `blocker`). Other verbs (`announce`,
+    /// `ack`, `info`, `answer`, bare `review`) deliver to live sessions via
+    /// the channel push but do not wake an asleep recipient.
+    ///
+    /// The minimum form is `--to <agent> --verb <verb>`; everything else is
+    /// optional structure for RFC-shaped asks. For a one-line ask, just
+    /// `--verb question --note "..."` is enough.
     Signal {
         /// Repository name (identifies the sender)
         #[arg(long)]
@@ -295,11 +308,15 @@ enum Commands {
         #[arg(long)]
         to: String,
 
-        /// Signal verb (e.g., review, request, announce, question, blocker)
+        /// Signal verb. Wake-worthy: question, request, help, blocker
+        /// (these spawn an asleep recipient). Informational: announce, ack,
+        /// info, answer, review (deliver to live sessions only).
         #[arg(long)]
         verb: String,
 
-        /// Signal status (e.g., approved, blocked, ready)
+        /// Optional status decoration (e.g., approved, blocked, ready). Does
+        /// NOT affect wake routing -- only `--verb` does. Useful for RFC-
+        /// shaped asks that downstream tools may parse.
         #[arg(long)]
         status: Option<String>,
 
@@ -324,12 +341,13 @@ enum Commands {
         tags: Option<String>,
     },
 
-    /// Print a wake-prompt for pending request-shaped signals.
+    /// Print a wake-prompt for pending wake-worthy signals.
     ///
-    /// Used by SessionStart hooks to surface directed questions/requests with
+    /// Used by SessionStart hooks to surface directed signals carrying a
+    /// wake-worthy verb (`question`, `request`, `help`, `blocker`) with
     /// strong "REQUIRES A REPLY" framing that survives the additionalContext
     /// system-reminder wrapper. Prints nothing (and exits 0) if there are no
-    /// pending reply-required signals targeting this repo.
+    /// pending wake-worthy signals targeting this repo.
     PendingReplies {
         /// Repository name (the recipient)
         #[arg(long)]
