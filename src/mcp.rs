@@ -646,6 +646,35 @@ pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool 
     true
 }
 
+/// Replay-mode delivery filter (#400). Stricter than `should_notify`:
+/// drops broadcasts and cross-repo musings, delivers only signals
+/// directed at this recipient.
+///
+/// Used when a post predates the MCP subprocess boot timestamp -- the
+/// agent was offline when it landed, and the only thing the channel
+/// should backfill on cold boot is a directed signal someone meant for
+/// them. Stale `@all` broadcasts and team musings are not worth the
+/// flood when 24h of bullpen activity is replayed.
+///
+/// Mirrors `should_notify`'s recipient parsing so `@kessel:`, `@kessel `,
+/// and `@kessel\n` all match (the `:` trim and whitespace split). When
+/// `client_repo` is unknown the function returns false -- without an
+/// identity we cannot safely deliver any directed signal anyway.
+pub fn replay_should_deliver(text: &str, client_repo: Option<&str>) -> bool {
+    let Some(recipient) = client_repo else {
+        return false;
+    };
+    let Some(rest) = text.strip_prefix('@') else {
+        return false;
+    };
+    let token_raw = rest.split_whitespace().next().unwrap_or("");
+    let token = token_raw.trim_end_matches(':');
+    if token.is_empty() || token.starts_with('@') {
+        return false;
+    }
+    token == recipient
+}
+
 /// Split a CDATA body around any literal `]]>` occurrences so the terminator
 /// cannot escape the section. The standard XML trick is to replace every
 /// `]]>` with `]]]]><![CDATA[>` -- close the current section after the first
@@ -870,6 +899,17 @@ fn run_notifier_loop(
             return;
         }
     };
+
+    // Boot timestamp partitions posts into replay (older than boot) vs
+    // live (newer). Replay is narrowed to directed signals for this
+    // recipient (#400): a fresh-boot agent should pick up signals they
+    // missed while offline, but should NOT be flooded by 24h of cross-repo
+    // musings or `@all` broadcasts the team has long since moved past.
+    // Live posts run through the full `should_notify` filter unchanged,
+    // so once boot is past the agent receives the same flow they always
+    // did.
+    let boot_at = chrono::Utc::now().to_rfc3339();
+
     mcp_trace(
         "notifier.start",
         &[(
@@ -967,7 +1007,20 @@ fn run_notifier_loop(
                 );
             }
 
-            let deliver = should_notify(&post.text, &post.repo, client_repo);
+            // Replay window narrows delivery to directed-to-this-recipient
+            // signals only (#400). A post strictly older than `boot_at`
+            // means we are catching up after the recipient was offline;
+            // delivering generic musings or `@all` broadcasts from that
+            // window would flood the session with stale content the team
+            // has already metabolised. Live posts (created at or after
+            // boot) use the unchanged `should_notify` rule so the steady
+            // state matches what the channel always delivered.
+            let is_replay = post.created_at < boot_at;
+            let deliver = if is_replay {
+                replay_should_deliver(&post.text, client_repo)
+            } else {
+                should_notify(&post.text, &post.repo, client_repo)
+            };
             if mcp_verbose() {
                 let preview: String = post.text.chars().take(40).collect();
                 mcp_trace(
@@ -977,6 +1030,7 @@ fn run_notifier_loop(
                         ("from_repo", &post.repo),
                         ("client_repo", client_repo.unwrap_or("<unset>")),
                         ("is_signal", &is_signal.to_string()),
+                        ("is_replay", &is_replay.to_string()),
                         ("deliver", &deliver.to_string()),
                         ("text_prefix", &preview.replace('\n', " ")),
                     ],
@@ -1045,6 +1099,12 @@ fn run_notifier_loop(
                 // backwards and race us into re-delivery. Best-effort: a
                 // failure here is logged but does not kill the loop -- worst
                 // case is one redundant replay on the next boot.
+                // Cursor advance is intentionally scoped to delivered
+                // posts, not skipped ones. A skipped post is filtered
+                // again on next boot (cheap, idempotent); advancing past
+                // it would also move the cursor past any directed
+                // signal that races in at the same `created_at`,
+                // silently swallowing it.
                 if let Some(recipient) = client_repo
                     && let Err(e) =
                         db.advance_board_read_cursor(recipient, &post.created_at, &post.id)
@@ -1311,6 +1371,56 @@ mod tests {
         let (ts, id) = seed_notifier_cursor(&db, Some("kessel")).expect("seed");
         assert_eq!(ts, pinned_ts);
         assert_eq!(id, pinned_id);
+    }
+
+    #[test]
+    fn replay_should_deliver_directed_signal_to_this_recipient() {
+        assert!(replay_should_deliver(
+            "@kessel ping:open hello",
+            Some("kessel")
+        ));
+    }
+
+    #[test]
+    fn replay_should_deliver_handles_colon_suffix() {
+        assert!(replay_should_deliver(
+            "@kessel: please review",
+            Some("kessel")
+        ));
+    }
+
+    #[test]
+    fn replay_should_deliver_drops_broadcast_all() {
+        // @all is a live-time courtesy, not worth replaying when stale.
+        assert!(!replay_should_deliver("@all team standup", Some("kessel")));
+    }
+
+    #[test]
+    fn replay_should_deliver_drops_directed_to_other_agent() {
+        assert!(!replay_should_deliver(
+            "@huttspawn check this",
+            Some("kessel")
+        ));
+    }
+
+    #[test]
+    fn replay_should_deliver_drops_general_musing() {
+        // Plain post with no @ prefix is a musing -- skip on replay.
+        assert!(!replay_should_deliver(
+            "thinking about color tokens",
+            Some("kessel")
+        ));
+    }
+
+    #[test]
+    fn replay_should_deliver_returns_false_when_recipient_unknown() {
+        assert!(!replay_should_deliver("@kessel ping", None));
+    }
+
+    #[test]
+    fn replay_should_deliver_rejects_at_at_prefix() {
+        // Same edge case as should_notify: `@@all` is a fat-finger, not a broadcast.
+        assert!(!replay_should_deliver("@@all hi", Some("kessel")));
     }
 
     #[test]
