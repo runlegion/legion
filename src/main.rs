@@ -2022,12 +2022,15 @@ fn run_compound_command_with_meta(
 
 /// Try to load the embedding model. Returns None if not available.
 ///
-/// Logs a warning to stderr on failure so degraded hybrid search is visible.
+/// Logs a warning via `info!` on failure so degraded hybrid search is visible
+/// in `--verbose` mode without spamming default-quiet runs (which otherwise
+/// fail integration tests asserting `stderr.is_empty()` whenever the model
+/// fetch hits a transient network error like HuggingFace 429).
 fn try_load_embed_model() -> Option<embed::EmbedModel> {
     match embed::EmbedModel::load() {
         Ok(model) => Some(model),
         Err(e) => {
-            eprintln!("[legion] embedding model unavailable, falling back to BM25: {e}");
+            info!("[legion] embedding model unavailable, falling back to BM25: {e}");
             None
         }
     }
