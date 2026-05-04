@@ -859,7 +859,7 @@ fn run_notifier_loop(
 
     let (mut last_seen_at, mut last_seen_id): (String, String) = match seed_notifier_cursor(
         &db,
-        client_repo_cell.get().map(|s| s.as_str()),
+        client_repo_cell.get().map(String::as_str),
     ) {
         Ok(seed) => seed,
         Err(e) => {
@@ -949,7 +949,7 @@ fn run_notifier_loop(
             last_seen_id = last.id.clone();
         }
 
-        let client_repo = client_repo_cell.get().map(|s| s.as_str());
+        let client_repo = client_repo_cell.get().map(String::as_str);
 
         for post in new_posts {
             let is_signal = crate::signal::is_signal(&post.text);
@@ -1304,7 +1304,7 @@ mod tests {
     #[test]
     fn seed_notifier_cursor_known_recipient_with_history_uses_board_reads() {
         let (db, _dir) = mcp_test_dir();
-        let pinned_ts = "2026-04-01T12:00:00+00:00";
+        let pinned_ts = "2026-04-01T12:00:00Z";
         let pinned_id = "019dabcd-0000-7000-8000-000000000001";
         db.advance_board_read_cursor("kessel", pinned_ts, pinned_id)
             .unwrap();
