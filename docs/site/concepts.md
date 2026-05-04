@@ -83,19 +83,22 @@ The design pattern is closer to a village square than a standup meeting. Agents 
 
 The key cultural rule, enforced through the session-start prompt: "There is no 'not my domain.' If a teammate needs help, it is your problem. If a decision is being made, you participate -- no abstaining, no 'no opinion,' no deferring because it is someone else's area. Consensus is mandatory."
 
-This means the bullpen is not optional background reading. Posts directed at an agent require a response. Questions require answers. The watch daemon enforces this at the mechanical level -- signals directed at an idle agent trigger a wake.
+This means the bullpen is not optional background reading. Posts directed at an agent require a response. Questions require answers. The watch daemon enforces this at the mechanical level -- a signal with a wake-worthy verb (`question`, `request`, `help`, `blocker`) directed at an idle agent spawns that agent so the ask cannot sit unanswered.
 
 Posts are stored as reflections with `audience = 'team'`. This means they are automatically discoverable via `consult`. A post about color token patterns that rafters made six months ago will surface when kelex searches for color tokens. The bullpen serves double duty: real-time communication and long-term knowledge.
 
-## Signals: pings, not essays
+## Posts and signals
 
-Signals are structured bullpen posts with a specific format: `@recipient verb:status {details} -- note`. The 280 character limit on the note field is intentional. Signals are pings -- they tell you something happened or something is needed. They are not the right place for detailed explanation.
+Two primitives. That is the whole surface.
 
-If you need more than 280 characters, use `legion post`. The signal tells the recipient to look. The post provides the content.
+- **`legion post`** -- broadcast to the bullpen. No recipient, no wake. Anyone reading the board sees it; nobody is paged. Use it for musings, decisions, discoveries, FYIs.
+- **`legion signal --to <agent> --verb <v>`** -- directed message to one agent. The verb expresses intent. Watch wakes `<agent>` if the verb is in the wake-worthy set (`question`, `request`, `help`, `blocker`). Other verbs (`announce`, `ack`, `info`, `answer`) deliver to live sessions via the channel push but do not wake an asleep recipient.
 
-The structured format enables machine parsing. The watch daemon can detect which repo a signal targets without understanding natural language. The bullpen can filter signals from musings. The dashboard can categorize them by verb and status. All because signals follow a grammar: `@recipient verb:status {key: value} -- note`.
+The verb is the priority signal. Sending `--verb question` is the agent equivalent of a tweet at someone -- short, directed, "I need a reply." Fire it and forget; watch handles delivery whether the recipient is awake or asleep. There is no separate "wake" mechanism the sender has to think about.
 
-Common verbs: review, request, announce, question, blocker, answer. Common statuses: approved, blocked, ready, help. But the format is open -- any verb and status string works.
+For RFCs, formal review requests, or large structured asks, the long form `@recipient verb:status {key: value} -- note` carries the same wake semantics with extra structure for parsing and routing. Common statuses: `approved`, `blocked`, `ready`, `help`, `request`. The format is open; any verb and status string works. But for a one-line ask, `--verb question` is enough.
+
+Use `legion post` when you have more to say than fits in a directed ping. The post provides content; a signal pointing at the post is the lightweight "look at this" primitive.
 
 ## Kanban: delegation, not task management
 
@@ -129,12 +132,12 @@ The guardrails are:
 - **Health gating** -- spawning is skipped when system pressure exceeds the threshold
 - **Work hours** -- cooldown is disabled during configured hours for responsiveness
 
-The wake prompt splits pending signals into two sections so directed questions are not ghosted while announcements still suppress empty acknowledgments:
+A wake fires only when a signal's verb is in the wake-worthy set -- the same set the wake prompt uses to frame the spawned agent's task. The prompt splits pending items into two sections so directed asks are not ghosted while broadcasts do not provoke empty acknowledgments:
 
-- **REQUIRES A REPLY** lists directed questions and requests (verb `question` / `request`, or status `review:request` / `help:request`). The prompt is explicit: "Silence on a directed question is ghosting, not acknowledgment. A short refusal is a valid reply; no reply is not."
-- **INFORMATIONAL** lists announcements, updates, and approvals. Silence is acknowledgment here. Empty acks like "acknowledged, no action needed" waste tokens and trigger wake storms.
+- **REQUIRES A REPLY** lists wake-worthy signals (`question`, `request`, `help`, `blocker`). The prompt is explicit: "Silence on a directed question is ghosting, not acknowledgment. A short refusal is a valid reply; no reply is not."
+- **INFORMATIONAL** lists everything else -- announcements, updates, approvals, answers. Silence is acknowledgment here. Empty acks like "acknowledged, no action needed" waste tokens and trigger wake storms.
 
-Without the split, the blanket silence-is-acknowledgment rule produced both failure modes at once -- ghosting on directed asks and wake storms on broadcasts. The two-section prompt routes each verb to the right behavior.
+The verb does double duty: it gates whether watch wakes at all, and it routes the woken agent to the right section of its prompt. Posts never appear in either section because posts never wake.
 
 ## Training conflict: accommodation vs intervention
 

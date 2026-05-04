@@ -706,13 +706,16 @@ AGENT SPAWNING:
     In the repo workdir, with LEGION_AUTO_WAKE=1 in environment.
     Stdout and stderr redirected to /dev/null.
 
-    Wake prompt groups pending signals into two sections (build_wake_prompt
-    in src/watch.rs):
-      REQUIRES A REPLY  -- directed questions/requests (verb question/request,
-                           or status review:request / help:request). Silence
-                           is ghosting; a short refusal is a valid reply.
-      INFORMATIONAL     -- announcements, updates, approvals. Silence is
-                           acknowledgment; empty acks waste tokens.
+    Wake fires only for signals whose --verb is in the wake-worthy set:
+    question, request, help, blocker. Other verbs (announce, ack, info,
+    answer) deliver via channel push to live sessions but do not spawn an
+    asleep recipient. Posts never wake (post = broadcast, no recipient).
+
+    On wake, build_wake_prompt (src/watch.rs) groups pending signals into:
+      REQUIRES A REPLY  -- wake-worthy verbs. Silence is ghosting; a short
+                           refusal is a valid reply.
+      INFORMATIONAL     -- everything else. Silence is acknowledgment;
+                           empty acks waste tokens.
     After the sections the prompt directs the agent to use legion signal to
     reply, legion bullpen for context, legion reflect to store learnings.
 

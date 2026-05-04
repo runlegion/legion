@@ -432,10 +432,12 @@ claude --print -p "<wake prompt>"
 
 In the repo's `workdir`, with `LEGION_AUTO_WAKE=1` in the environment. Stdout and stderr are redirected to `/dev/null`.
 
-The wake prompt groups pending signals into two sections (`build_wake_prompt` in `src/watch.rs`):
+A wake fires only for signals whose `--verb` is in the wake-worthy set: `question`, `request`, `help`, `blocker`. Signals with other verbs (`announce`, `ack`, `info`, `answer`) deliver to live sessions via channel push but do not spawn an asleep recipient. Posts never wake -- posts are broadcast, not direction.
 
-- **REQUIRES A REPLY** -- directed questions and requests (verb `question` / `request`, or status `review:request` / `help:request`). The prompt instructs the agent that "silence on a directed question is ghosting, not acknowledgment" and that a short refusal is a valid reply but no reply is not.
-- **INFORMATIONAL** -- announcements, updates, approvals. Silence is acknowledgment; the prompt explicitly warns against empty acks like "acknowledged, no action needed" that waste tokens and trigger wake storms.
+When a wake fires, `build_wake_prompt` in `src/watch.rs` groups pending signals into two sections matching the same verb cut:
+
+- **REQUIRES A REPLY** -- the wake-worthy verbs. The prompt instructs the agent that "silence on a directed question is ghosting, not acknowledgment" and that a short refusal is a valid reply but no reply is not.
+- **INFORMATIONAL** -- everything else. Silence is acknowledgment; the prompt explicitly warns against empty acks like "acknowledged, no action needed" that waste tokens and trigger wake storms.
 
 After the sections, the prompt directs the agent to use `legion signal` to reply, `legion bullpen` for broader context, and `legion reflect` to store learnings before exit.
 
