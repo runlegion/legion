@@ -4889,8 +4889,9 @@ fn mesh_stale_cutoff_env_override_is_respected() {
 fn pending_replies_emits_wake_prompt_for_request_signals() {
     let dir = tempfile::tempdir().unwrap();
 
-    // smugglr asks platform to review an RFC -- the exact signal shape that
-    // dropped on 2026-04-26.
+    // smugglr asks platform to review an RFC. Under #404 the wake/reply gate
+    // is verb-only, so the right shape is `--verb request` (not the pre-#404
+    // `--verb review --status request` workaround).
     let out = legion_cmd(dir.path())
         .args([
             "signal",
@@ -4899,11 +4900,9 @@ fn pending_replies_emits_wake_prompt_for_request_signals() {
             "--to",
             "platform",
             "--verb",
-            "review",
-            "--status",
             "request",
             "--note",
-            "RFC at vault-2026/projects/smuggler/fence/rfc.md",
+            "RFC review at vault-2026/projects/smuggler/fence/rfc.md",
         ])
         .output()
         .unwrap();
@@ -4938,11 +4937,11 @@ fn pending_replies_emits_wake_prompt_for_request_signals() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("REQUIRES A REPLY"),
-        "review:request must surface as reply-required, got: {stdout}"
+        "verb=request must surface as reply-required, got: {stdout}"
     );
     assert!(
-        stdout.contains("review:request"),
-        "expected the signal text in the prompt, got: {stdout}"
+        stdout.contains("RFC review"),
+        "expected the signal note in the prompt, got: {stdout}"
     );
     assert!(
         !stdout.contains("v0.9.5 shipped"),
