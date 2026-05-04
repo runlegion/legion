@@ -758,6 +758,79 @@ fn resolve_session_repo_for_cwd(
     None
 }
 
+/// Compute the initial `(last_seen_at, last_seen_id)` cursor for the
+/// notifier thread.
+///
+/// Three-way resolution (#400):
+///
+///   1. **Known recipient with a `board_reads` cursor** -- seed from
+///      that timestamp. The cursor advances on every successful delivery
+///      so subsequent boots see only what arrived since the last delivery.
+///   2. **Known recipient, no cursor yet** -- seed at
+///      `now - NOTIFIER_COLD_BOOT_REPLAY` so a fresh agent picks up the
+///      recent past instead of starting at the live watermark and
+///      silently swallowing offline-window posts. `should_notify` and
+///      `resolved_at IS NULL` keep replay narrow.
+///   3. **Unknown recipient** (no watch.toml entry for cwd) -- fall back
+///      to the pre-#400 watermark. The notifier cannot route directed
+///      signals in that state anyway, so behaviour matches the prior
+///      version: live posts only, no replay.
+///
+/// In case 1 the id comes from `board_reads.last_read_id`, written
+/// alongside the timestamp on every successful delivery, so the
+/// strict-`>` comparator in `get_board_posts_since` excludes the
+/// already-delivered row even when its `created_at` collides with a
+/// neighbour. In case 2 the id is empty (no prior delivery exists), and
+/// in case 3 the id comes from the watermark row.
+fn seed_notifier_cursor(db: &Database, client_repo: Option<&str>) -> Result<(String, String)> {
+    if let Some(recipient) = client_repo {
+        match db.get_board_read_cursor(recipient)? {
+            Some((ts, id)) => {
+                mcp_trace(
+                    "notifier.cursor.seed",
+                    &[
+                        ("at", &ts),
+                        ("id", &id),
+                        ("source", "board_reads"),
+                        ("recipient", recipient),
+                    ],
+                );
+                Ok((ts, id))
+            }
+            None => {
+                let backstop = (chrono::Utc::now() - NOTIFIER_COLD_BOOT_REPLAY).to_rfc3339();
+                mcp_trace(
+                    "notifier.cursor.seed",
+                    &[
+                        ("at", &backstop),
+                        ("source", "cold_boot_replay"),
+                        ("recipient", recipient),
+                    ],
+                );
+                Ok((backstop, String::new()))
+            }
+        }
+    } else {
+        match db.get_board_cursor_watermark()? {
+            Some((ts, id)) => {
+                mcp_trace(
+                    "notifier.cursor.seed",
+                    &[("at", &ts), ("id", &id), ("source", "watermark")],
+                );
+                Ok((ts, id))
+            }
+            None => {
+                let now = chrono::Utc::now().to_rfc3339();
+                mcp_trace(
+                    "notifier.cursor.seed",
+                    &[("at", &now), ("source", "now_empty_table")],
+                );
+                Ok((now, String::new()))
+            }
+        }
+    }
+}
+
 /// Body of the notifier thread spawned by `run_stdio_loop`.
 ///
 /// Polls the `reflections` table for new bullpen rows and writes a
@@ -784,91 +857,18 @@ fn run_notifier_loop(
         }
     };
 
-    // Seed the cursor.
-    //
-    // When the agent identity is known (resolved from watch.toml at MCP
-    // boot, see #400) we want directed signals filed while the agent was
-    // offline to be picked up on the first poll tick after wake. Two-step
-    // resolution:
-    //
-    //   1. If `board_reads.last_read_at` is set for this recipient, seed
-    //      from there -- the cursor advances on every successful delivery
-    //      (further down this loop), so this is the authoritative
-    //      per-recipient resume point. Subsequent boots see only what
-    //      arrived since the last delivery.
-    //   2. Otherwise (first time this recipient has booted, or
-    //      board_reads pruned), seed at `now - NOTIFIER_COLD_BOOT_REPLAY`
-    //      so a fresh agent picks up at most the last day of directed
-    //      traffic instead of the whole history. `should_notify` and
-    //      `resolved_at IS NULL` keep the replay narrow: own posts and
-    //      already-resolved signals are filtered.
-    //
-    // When the agent identity is unknown (no watch.toml entry for cwd),
-    // fall back to the pre-#400 watermark seed -- the notifier cannot
-    // route directed signals anyway in that state, so behaviour matches
-    // the prior version: live posts only, no replay.
-    //
-    // On seed error (DB query failed) the notifier exits cleanly rather
-    // than guessing, because the next poll would almost certainly fail the
-    // same way and a silent fallback would mask the breakage.
-    let known_recipient: Option<String> = client_repo_cell.get().cloned();
-    let (mut last_seen_at, mut last_seen_id): (String, String) = match known_recipient.as_deref() {
-        Some(recipient) => match db.get_board_read_cursor(recipient) {
-            Ok(Some(ts)) => {
-                mcp_trace(
-                    "notifier.cursor.seed",
-                    &[
-                        ("at", &ts),
-                        ("source", "board_reads"),
-                        ("recipient", recipient),
-                    ],
-                );
-                (ts, String::new())
-            }
-            Ok(None) => {
-                let backstop = (chrono::Utc::now() - NOTIFIER_COLD_BOOT_REPLAY).to_rfc3339();
-                mcp_trace(
-                    "notifier.cursor.seed",
-                    &[
-                        ("at", &backstop),
-                        ("source", "cold_boot_replay"),
-                        ("recipient", recipient),
-                    ],
-                );
-                (backstop, String::new())
-            }
-            Err(e) => {
-                mcp_trace("notifier.seed.failed", &[("err", &e.to_string())]);
-                eprintln!(
-                    "[legion mcp notif] failed to read board_reads cursor: {e}; notifier thread exiting (channel push is now inoperative for this session)"
-                );
-                return;
-            }
-        },
-        None => match db.get_board_cursor_watermark() {
-            Ok(Some((ts, id))) => {
-                mcp_trace(
-                    "notifier.cursor.seed",
-                    &[("at", &ts), ("id", &id), ("source", "watermark")],
-                );
-                (ts, id)
-            }
-            Ok(None) => {
-                let now = chrono::Utc::now().to_rfc3339();
-                mcp_trace(
-                    "notifier.cursor.seed",
-                    &[("at", &now), ("source", "now_empty_table")],
-                );
-                (now, String::new())
-            }
-            Err(e) => {
-                mcp_trace("notifier.seed.failed", &[("err", &e.to_string())]);
-                eprintln!(
-                    "[legion mcp notif] failed to seed cursor from db watermark: {e}; notifier thread exiting (channel push is now inoperative for this session)"
-                );
-                return;
-            }
-        },
+    let (mut last_seen_at, mut last_seen_id): (String, String) = match seed_notifier_cursor(
+        &db,
+        client_repo_cell.get().map(|s| s.as_str()),
+    ) {
+        Ok(seed) => seed,
+        Err(e) => {
+            mcp_trace("notifier.seed.failed", &[("err", &e.to_string())]);
+            eprintln!(
+                "[legion mcp notif] failed to seed cursor: {e}; notifier thread exiting (channel push is now inoperative for this session)"
+            );
+            return;
+        }
     };
     mcp_trace(
         "notifier.start",
@@ -1046,7 +1046,8 @@ fn run_notifier_loop(
                 // failure here is logged but does not kill the loop -- worst
                 // case is one redundant replay on the next boot.
                 if let Some(recipient) = client_repo
-                    && let Err(e) = db.advance_board_read_cursor(recipient, &post.created_at)
+                    && let Err(e) =
+                        db.advance_board_read_cursor(recipient, &post.created_at, &post.id)
                 {
                     mcp_trace(
                         "notifier.cursor.advance.failed",
@@ -1270,6 +1271,90 @@ mod tests {
         assert_eq!(
             resolve_session_repo_for_cwd(data_dir.path(), cwd.path()).as_deref(),
             Some("kessel-agent")
+        );
+    }
+
+    #[test]
+    fn seed_notifier_cursor_unknown_client_uses_watermark_when_table_empty() {
+        let (db, _dir) = mcp_test_dir();
+        let (ts, id) = seed_notifier_cursor(&db, None).expect("seed");
+        // Empty board -> seed at now() with empty id.
+        assert!(id.is_empty());
+        // Cannot equality-test `now`, but it parses as RFC3339.
+        chrono::DateTime::parse_from_rfc3339(&ts).expect("valid rfc3339");
+    }
+
+    #[test]
+    fn seed_notifier_cursor_known_recipient_no_history_uses_cold_boot_replay() {
+        let (db, _dir) = mcp_test_dir();
+        let (ts, id) = seed_notifier_cursor(&db, Some("kessel")).expect("seed");
+        assert!(id.is_empty());
+        let parsed = chrono::DateTime::parse_from_rfc3339(&ts).expect("valid rfc3339");
+        let age = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
+        // Should be roughly 24h old; allow 1h slack for slow runners.
+        let lo = NOTIFIER_COLD_BOOT_REPLAY - chrono::Duration::hours(1);
+        let hi = NOTIFIER_COLD_BOOT_REPLAY + chrono::Duration::hours(1);
+        assert!(
+            age >= lo && age <= hi,
+            "expected ~24h backstop, got {}",
+            age
+        );
+    }
+
+    #[test]
+    fn seed_notifier_cursor_known_recipient_with_history_uses_board_reads() {
+        let (db, _dir) = mcp_test_dir();
+        let pinned_ts = "2026-04-01T12:00:00+00:00";
+        let pinned_id = "019dabcd-0000-7000-8000-000000000001";
+        db.advance_board_read_cursor("kessel", pinned_ts, pinned_id)
+            .unwrap();
+        let (ts, id) = seed_notifier_cursor(&db, Some("kessel")).expect("seed");
+        assert_eq!(ts, pinned_ts);
+        assert_eq!(id, pinned_id);
+    }
+
+    #[test]
+    fn cold_boot_replay_picks_up_offline_signal_then_advance_prevents_redelivery() {
+        // End-to-end #400: signal filed while kessel is offline lands on
+        // first poll; advance_board_read_cursor on delivery means second
+        // boot does not re-replay the same row.
+        let (db, _dir) = mcp_test_dir();
+
+        // Pretend a directed signal was filed an hour ago, before kessel boots.
+        let post = db
+            .insert_reflection("legion", "@kessel ping:open from a test", "team")
+            .expect("insert");
+        let post_id = post.id.clone();
+        // Sanity: board_reads is empty for kessel.
+        assert!(db.get_board_read_cursor("kessel").unwrap().is_none());
+
+        // First boot: cold replay seed should be in the past, so the post is
+        // visible via get_board_posts_since.
+        let (seed_at, seed_id) = seed_notifier_cursor(&db, Some("kessel")).expect("seed");
+        let visible = db
+            .get_board_posts_since(&seed_at, &seed_id, NOTIFIER_BATCH_LIMIT)
+            .expect("posts");
+        let found = visible.iter().any(|p| p.id == post_id);
+        assert!(found, "cold-boot replay must surface the offline signal");
+
+        // Simulate successful delivery: advance the cursor to the post's
+        // (created_at, id).
+        let delivered = visible
+            .iter()
+            .find(|p| p.id == post_id)
+            .expect("post present");
+        db.advance_board_read_cursor("kessel", &delivered.created_at, &delivered.id)
+            .unwrap();
+
+        // Second boot: seed comes from board_reads now, equal to the post's
+        // created_at. Strict-`>` comparator means the post is NOT re-emitted.
+        let (seed_at_2, seed_id_2) = seed_notifier_cursor(&db, Some("kessel")).expect("seed");
+        let visible_2 = db
+            .get_board_posts_since(&seed_at_2, &seed_id_2, NOTIFIER_BATCH_LIMIT)
+            .expect("posts");
+        assert!(
+            !visible_2.iter().any(|p| p.id == post_id),
+            "advanced cursor must not re-replay an already-delivered post"
         );
     }
 
