@@ -2890,35 +2890,49 @@ fn run() -> error::Result<()> {
             })?;
             let repo_path = std::path::PathBuf::from(&entry.workdir);
 
-            let lang = scip::detect_language(&repo_path).ok_or_else(|| {
-                error::LegionError::WatchConfig(format!(
-                    "no supported language detected at {}",
+            let langs = scip::detect_languages(&repo_path);
+            if langs.is_empty() {
+                return Err(error::LegionError::WatchConfig(format!(
+                    "no supported language detected at {}. Markers checked: Cargo.toml, package.json, pyproject.toml, requirements.txt, go.mod.",
                     repo_path.display()
-                ))
-            })?;
-
-            let blob = scip::run_indexer(lang, &repo_path)?;
-            let hash = scip::content_hash(&blob);
-            let now = chrono::Utc::now().to_rfc3339();
-            let index = scip::ScipIndex {
-                id: uuid::Uuid::now_v7().to_string(),
-                repo: repo.clone(),
-                lang: lang.to_string(),
-                content_hash: hash,
-                blob,
-                updated_at: now,
-                deleted_at: None,
-            };
+                )));
+            }
 
             let database = db::Database::open(&base.join("legion.db"))?;
-            database.upsert_scip_index(&index)?;
-            eprintln!(
-                "[legion] indexed {} ({}): {} bytes, hash {}",
-                repo,
-                lang,
-                index.blob.len(),
-                &index.content_hash[..16]
-            );
+            let mut indexed: u32 = 0;
+            for lang in &langs {
+                let blob = match scip::run_indexer(lang, &repo_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("[legion] skipped {repo} ({lang}): {e}");
+                        continue;
+                    }
+                };
+                let hash = scip::content_hash(&blob);
+                let now = chrono::Utc::now().to_rfc3339();
+                let index = scip::ScipIndex {
+                    id: uuid::Uuid::now_v7().to_string(),
+                    repo: repo.clone(),
+                    lang: (*lang).to_string(),
+                    content_hash: hash,
+                    blob,
+                    updated_at: now,
+                    deleted_at: None,
+                };
+                let bytes_len = index.blob.len();
+                let hash_prefix = &index.content_hash[..16];
+                database.upsert_scip_index(&index)?;
+                eprintln!(
+                    "[legion] indexed {repo} ({lang}): {bytes_len} bytes, hash {hash_prefix}"
+                );
+                indexed += 1;
+            }
+            if indexed == 0 {
+                return Err(error::LegionError::WatchConfig(format!(
+                    "no language indexed for {repo} -- every detected language ({}) failed; see warnings above",
+                    langs.join(", ")
+                )));
+            }
         }
         Commands::Sym { action } => {
             let base = data_dir()?;
