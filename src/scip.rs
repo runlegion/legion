@@ -70,16 +70,40 @@ pub fn run_indexer(lang: &str, repo_path: &Path) -> Result<Vec<u8>> {
     }
 }
 
-/// Invoke `scip-rust index` against `repo_path` and read the resulting
+/// Invoke a Rust SCIP indexer against `repo_path` and read the resulting
 /// `index.scip` protobuf bytes from the repo root.
+///
+/// Tries `scip-rust index` first (the original sourcegraph indexer), then
+/// falls back to `rust-analyzer scip .` (#381). The legacy scip-rust repo
+/// is archived and has no installable distribution on crates.io as of
+/// 2026-04, so most fresh dev machines only have rust-analyzer (shipped
+/// with rustup). Both produce the same SCIP protobuf shape.
 fn run_scip_rust(repo_path: &Path) -> Result<Vec<u8>> {
-    let binary = "scip-rust";
-    let output = Command::new(binary)
-        .arg("index")
-        .current_dir(repo_path)
-        .output();
+    match run_indexer_binary("scip-rust", &["index"], repo_path) {
+        Ok(bytes) => Ok(bytes),
+        Err(LegionError::IndexerNotFound { .. }) => {
+            run_indexer_binary("rust-analyzer", &["scip", "."], repo_path).map_err(|e| match e {
+                LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
+                    lang,
+                    binary: "scip-rust or rust-analyzer".to_string(),
+                },
+                other => other,
+            })
+        }
+        Err(other) => Err(other),
+    }
+}
 
-    let output = match output {
+/// Run a SCIP indexer binary against `repo_path`. Returns the bytes of the
+/// `index.scip` protobuf written into the repo root, or a typed error
+/// describing the failure mode (binary not on PATH, subprocess exited
+/// non-zero, output file unreadable).
+fn run_indexer_binary(binary: &str, args: &[&str], repo_path: &Path) -> Result<Vec<u8>> {
+    let output = match Command::new(binary)
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+    {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(LegionError::IndexerNotFound {
@@ -141,6 +165,77 @@ mod tests {
             LegionError::IndexerNotFound { lang, binary } => {
                 assert_eq!(lang, "klingon");
                 assert_eq!(binary, "scip-klingon");
+            }
+            other => panic!("expected IndexerNotFound, got {other:?}"),
+        }
+    }
+
+    /// Build a PATH that contains only the listed shim names (each shim a
+    /// minimal bash script the test wrote into a tempdir). Returns the
+    /// tempdir handle so the caller can keep it alive across the spawn.
+    fn isolate_path_with_shims(shims: &[(&str, &str)]) -> (TempDir, String) {
+        let dir = TempDir::new().unwrap();
+        for (name, body) in shims {
+            let path = dir.path().join(name);
+            fs::write(&path, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&path).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&path, perms).unwrap();
+            }
+        }
+        let path_str = dir.path().to_string_lossy().into_owned();
+        (dir, path_str)
+    }
+
+    /// Two cargo tests must not concurrently mutate $PATH. Combining the
+    /// fallback-success and both-missing assertions into a single test
+    /// avoids the parallel-test race without pulling in a serial-test
+    /// dependency.
+    #[cfg(unix)]
+    #[test]
+    fn run_scip_rust_fallback_chain() {
+        let prior = std::env::var("PATH").unwrap_or_default();
+
+        // Phase 1: rust-analyzer shim available -> fallback succeeds.
+        let body = "#!/bin/bash\nprintf 'fake-scip-bytes' > index.scip\nexit 0\n";
+        let (shim_dir, shim_path) = isolate_path_with_shims(&[("rust-analyzer", body)]);
+        let repo = TempDir::new().unwrap();
+        // Safety: cargo test default parallelism allows other tests in
+        // this binary to run concurrently. Other tests in this module do
+        // not invoke run_scip_rust or shell out via PATH, and we restore
+        // the prior PATH before exiting either phase.
+        unsafe {
+            std::env::set_var("PATH", &shim_path);
+        }
+        let bytes_result = run_scip_rust(repo.path());
+        unsafe {
+            std::env::set_var("PATH", &prior);
+        }
+        let bytes = bytes_result.expect("rust-analyzer fallback should succeed");
+        assert_eq!(bytes, b"fake-scip-bytes");
+        drop(shim_dir);
+
+        // Phase 2: empty PATH (no binaries) -> IndexerNotFound naming both.
+        let (empty_dir, empty_path) = isolate_path_with_shims(&[]);
+        let repo2 = TempDir::new().unwrap();
+        unsafe {
+            std::env::set_var("PATH", &empty_path);
+        }
+        let err = run_scip_rust(repo2.path()).unwrap_err();
+        unsafe {
+            std::env::set_var("PATH", &prior);
+        }
+        drop(empty_dir);
+        match err {
+            LegionError::IndexerNotFound { lang, binary } => {
+                assert_eq!(lang, "rust");
+                assert!(
+                    binary.contains("scip-rust") && binary.contains("rust-analyzer"),
+                    "error must name both binaries; got: {binary}"
+                );
             }
             other => panic!("expected IndexerNotFound, got {other:?}"),
         }

@@ -99,7 +99,7 @@ pub enum LegionError {
     Mesh(String),
 
     #[error(
-        "indexer not found: '{binary}' is not on PATH (required for {lang} indexing). Install per the SCIP ecosystem docs (e.g. https://github.com/sourcegraph/scip-rust for Rust)."
+        "indexer not found: '{binary}' is not on PATH (required for {lang} indexing). For Rust, install rust-analyzer (`rustup component add rust-analyzer`) which provides `rust-analyzer scip`; the legacy scip-rust repo is archived."
     )]
     IndexerNotFound { lang: String, binary: String },
 
