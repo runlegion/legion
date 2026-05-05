@@ -412,13 +412,24 @@ enum Commands {
 
     /// Build or refresh the SCIP code-intelligence index for a repo (#278).
     ///
-    /// Resolves the repo path from `watch.toml`, detects the dominant
-    /// language, runs the corresponding SCIP indexer (e.g. `scip-rust`)
-    /// as a subprocess, and stores the resulting protobuf blob keyed
-    /// on (repo, lang). Idempotent on content hash.
+    /// Resolves the repo path from `watch.toml`, detects every recognized
+    /// language, runs the corresponding SCIP indexer per language as a
+    /// subprocess, and stores each protobuf blob keyed on (repo, lang).
+    /// Idempotent on content hash.
+    ///
+    /// With `--file <path>`, resolves the owning repo by walking parents
+    /// against `watch.toml` and re-indexes that repo. Used by the
+    /// PostToolUse re-index hook (#281) so edits keep the index fresh.
+    /// `--repo` is optional in `--file` mode.
     Index {
-        /// Repo name (must be present in watch.toml)
-        repo: String,
+        /// Repo name (must be present in watch.toml). Optional when --file
+        /// is supplied; the repo is resolved from the file's path.
+        repo: Option<String>,
+        /// Re-index the repo containing this file path. Resolves the repo
+        /// by ancestor match against watch.toml. The whole repo is still
+        /// re-indexed; per-file granularity is a future refinement.
+        #[arg(long)]
+        file: Option<PathBuf>,
     },
 
     /// Query SCIP symbol indexes (def, refs, impl, hover).
@@ -2879,15 +2890,52 @@ fn run() -> error::Result<()> {
                 }
             }
         }
-        Commands::Index { repo } => {
+        Commands::Index { repo, file } => {
             let base = data_dir()?;
             let watch_path = base.join("watch.toml");
             let repos = watch::list_repos_in_config(&watch_path)?;
-            let entry = repos.iter().find(|r| r.name == repo).ok_or_else(|| {
-                error::LegionError::WatchConfig(format!(
-                    "repo '{repo}' not in watch.toml. Add it with `legion watch add {repo} <path>`."
-                ))
-            })?;
+
+            // --file overrides --repo: resolve the owning repo by walking
+            // ancestors of the file path against watch.toml workdirs.
+            // Falls through to the named-repo path with a synthesized repo
+            // name so the indexer + upsert loop is the single code path.
+            let (repo, entry): (String, &watch::WatchRepoConfig) = match (repo, file.as_ref()) {
+                (_, Some(file_path)) => {
+                    let canon = std::fs::canonicalize(file_path).map_err(|e| {
+                        error::LegionError::WatchConfig(format!(
+                            "cannot canonicalize {}: {e}",
+                            file_path.display()
+                        ))
+                    })?;
+                    let owner = repos
+                        .iter()
+                        .find(|r| {
+                            std::fs::canonicalize(&r.workdir)
+                                .map(|w| canon.starts_with(&w))
+                                .unwrap_or(false)
+                        })
+                        .ok_or_else(|| {
+                            error::LegionError::WatchConfig(format!(
+                                "no watch.toml entry owns {} -- file is outside every watched workdir",
+                                canon.display()
+                            ))
+                        })?;
+                    (owner.name.clone(), owner)
+                }
+                (Some(name), None) => {
+                    let owner = repos.iter().find(|r| r.name == name).ok_or_else(|| {
+                        error::LegionError::WatchConfig(format!(
+                            "repo '{name}' not in watch.toml. Add it with `legion watch add {name} <path>`."
+                        ))
+                    })?;
+                    (name, owner)
+                }
+                (None, None) => {
+                    return Err(error::LegionError::WatchConfig(
+                        "either <repo> or --file <path> is required".to_string(),
+                    ));
+                }
+            };
             let repo_path = std::path::PathBuf::from(&entry.workdir);
 
             let langs = scip::detect_languages(&repo_path);
