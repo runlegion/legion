@@ -1,5 +1,19 @@
 # Legion Changelog
 
+## 0.11.0
+
+SCIP indexer breadth + freshness. Phase A + B of the SCIP completion plan. The indexer now covers every primary language the team writes (Rust, TypeScript, Python, Go) and edits trigger background re-indexing so `legion sym` answers stay current. Phase C (consumption hooks -- the cost-control payoff) ships next as 0.12.0 in isolation so the cache_r reduction is measurable.
+
+### New
+
+- **Multi-language SCIP dispatch** (#412, closes #279): `detect_language -> Option<&str>` becomes `detect_languages -> Vec<&str>`. Polyglot repos index every recognized language into its own `(repo, lang)` row. Markers checked: `Cargo.toml` -> rust, `package.json` -> typescript, `pyproject.toml` or `requirements.txt` -> python, `go.mod` -> go. New helpers `run_scip_typescript` (`npm i -g @sourcegraph/scip-typescript`), `run_scip_python` (`pip install scip-python`), `run_scip_go` (`go install github.com/sourcegraph/scip-go/cmd/scip-go@latest`). Each carries an install hint in `IndexerNotFound.binary` so fresh dev machines see how to install the missing indexer. `legion index <repo>` loops over every detected language; a missing indexer for one language warns and continues, only failing the whole command when every detected language failed.
+- **`legion index --file <path>`** (#412, closes #280): resolves the owning repo by walking ancestors of the file path against `watch.toml` workdirs. Repo arg becomes optional in `--file` mode. Match arms cover `(_, Some(file))`, `(Some(name), None)`, `(None, None)` -- no stringly-typed sentinel.
+- **PostToolUse re-index hook** `plugin/hooks/post-edit-index.sh` (#412, closes #281): fires on Edit / Write / MultiEdit. Reads `tool_input.file_path`, debounces 500ms per path via `/tmp/legion-index-<md5>.lock`, runs `legion index --file` in the background (nohup + disown). Skips uncovered repos. Stderr appended to `/tmp/legion-hook-errors.log`; hook always exits 0.
+
+### Changed
+
+- **`run_indexer_binary` takes `lang` as a parameter.** Was previously hardcoded to `"rust"` in the error path, so multi-language failures incorrectly identified as Rust failures. Each language helper now passes its own tag.
+
 ## 0.10.1
 
 Verb-driven wake + SCIP indexer fallback + docs honesty pass. Closes the "what does --verb actually do" gap by making the wake gate consult a small set of wake-worthy verbs instead of a text-prefix `is_signal()` check, ships the rust-analyzer fallback that unblocks the SCIP read pillar end-to-end, and rewrites the post/signal/verb framing across the docs to match the code.
