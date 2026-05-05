@@ -112,22 +112,111 @@ If these answer your question, skip the ${TOOL}. Otherwise continue -- but consi
   fi
 fi
 
-# For Explore agents: deny the spawn if recall has a strong hit.
-# Extract the top score -- format is "score: 0.XX)" at end of each hit line.
-# If top score >= threshold, deny and return recall results instead.
+# For Explore agents (#413): run the full cheap chain before deciding.
+# recall alone is too narrow -- consult catches cross-agent memory,
+# surface catches recent cross-repo activity, sym catches code-intel
+# answers when the prompt mentions identifiers, consult --symbol covers
+# cross-repo code intel.
+#
+# Decision: deny when ANY source returns informative content. The closing
+# guidance points at Read with concrete paths from the results, not Grep
+# (the pre-#413 fallback shifted cost sideways instead of dropping it --
+# see reflection 019d84c7).
 DECISION="allow"
 REASON="legion recall hits for the query"
-if [ "$IS_EXPLORE" = true ] && [ -n "$HITS" ]; then
-  TOP_SCORE=$(echo "$HITS" | grep -oE 'score: [0-9]+\.[0-9]+' | head -1 | awk '{print $2}')
-  THRESHOLD="${LEGION_EXPLORE_THRESHOLD:-0.60}"
-  if [ -n "$TOP_SCORE" ] && awk "BEGIN{exit !($TOP_SCORE >= $THRESHOLD)}"; then
-    DECISION="deny"
-    REASON="legion recall answered this (score: ${TOP_SCORE}). Use the recall results instead of spawning Explore."
-    CTX="[Legion] Explore BLOCKED -- recall already has what you need:
+if [ "$IS_EXPLORE" = true ]; then
+  # Source 1 already done: HITS (recall). Score-based hit detection.
+  RECALL_HIT=false
+  if [ -n "$HITS" ]; then
+    TOP_SCORE=$(echo "$HITS" | grep -oE 'score: [0-9]+\.[0-9]+' | head -1 | awk '{print $2}')
+    THRESHOLD="${LEGION_EXPLORE_THRESHOLD:-0.60}"
+    if [ -n "$TOP_SCORE" ] && awk "BEGIN{exit !($TOP_SCORE >= $THRESHOLD)}"; then
+      RECALL_HIT=true
+    fi
+  fi
 
+  # Source 2: cross-agent memory. Best-effort; never errors out the hook.
+  CONSULT=$("$LEGION" consult --context "$QUERY" --limit 3 2>>"$LOG" || true)
+  CONSULT_HIT=false
+  if [ -n "$CONSULT" ] && echo "$CONSULT" | grep -q '^- '; then
+    CONSULT_HIT=true
+  fi
+
+  # Source 3: recent cross-repo activity. Topical surface for in-flight work.
+  SURFACE=$("$LEGION" surface --repo "$REPO" 2>>"$LOG" || true)
+  SURFACE_HIT=false
+  if [ -n "$SURFACE" ] && echo "$SURFACE" | grep -q '^- '; then
+    SURFACE_HIT=true
+  fi
+
+  # Source 4: code intelligence. Only fires when the prompt mentions an
+  # identifier-shaped token. Floor raised to 5 chars to filter out
+  # English stopwords (the, and, this, that, etc.) and the
+  # CASE_PATTERN excludes a small set of common-word-shapes that pass
+  # the regex but are obviously natural language.
+  #
+  # Both same-repo (sym def) and cross-repo (consult --symbol). The
+  # cross-repo flag may not exist yet (#285); the failure is silently
+  # absorbed by the trailing `|| true`.
+  IDENT=$(echo "$QUERY" \
+    | grep -oE '[A-Z][A-Za-z0-9_]{4,}|[a-z_][a-z_0-9]{4,}' \
+    | grep -viE '^(should|would|could|where|which|there|their|these|those|about|after|before|other|first|under|legion|claude|hooks|files|using)$' \
+    | head -1)
+  SYM=""
+  SYM_XREPO=""
+  SYM_HIT=false
+  if [ -n "$IDENT" ]; then
+    SYM=$("$LEGION" sym def --json "$IDENT" 2>>"$LOG" || true)
+    if [ -n "$SYM" ] && [ "$SYM" != "[]" ] && [ "$SYM" != "null" ]; then
+      SYM_HIT=true
+    fi
+    SYM_XREPO=$("$LEGION" consult --symbol "$IDENT" 2>>"$LOG" || true)
+    if [ -n "$SYM_XREPO" ] && echo "$SYM_XREPO" | grep -q '^- '; then
+      SYM_HIT=true
+    fi
+  fi
+
+  if [ "$RECALL_HIT" = true ] || [ "$CONSULT_HIT" = true ] || [ "$SURFACE_HIT" = true ] || [ "$SYM_HIT" = true ]; then
+    DECISION="deny"
+    REASON="legion's cheap-paths chain answered this. Use the injected results, then Read specific files if you need detail."
+
+    SECTIONS=""
+    if [ -n "$HITS" ]; then
+      SECTIONS="${SECTIONS}### legion recall (this repo)
 ${HITS}
 
-Use these results directly. If they are genuinely insufficient, rephrase your question and try a direct Grep or Read instead of Explore."
+"
+    fi
+    if [ -n "$CONSULT" ]; then
+      SECTIONS="${SECTIONS}### legion consult (cross-agent memory)
+${CONSULT}
+
+"
+    fi
+    if [ -n "$SURFACE" ]; then
+      SECTIONS="${SECTIONS}### legion surface (recent cross-repo activity)
+${SURFACE}
+
+"
+    fi
+    if [ -n "$SYM" ] && [ "$SYM" != "[]" ] && [ "$SYM" != "null" ]; then
+      SECTIONS="${SECTIONS}### legion sym def \`${IDENT}\` (this repo, SCIP)
+\`\`\`json
+${SYM}
+\`\`\`
+
+"
+    fi
+    if [ -n "$SYM_XREPO" ]; then
+      SECTIONS="${SECTIONS}### legion consult --symbol \`${IDENT}\` (cross-repo SCIP)
+${SYM_XREPO}
+
+"
+    fi
+
+    CTX="[Legion] Explore BLOCKED -- the cheap-paths chain already covers this:
+
+${SECTIONS}Read the specific files referenced in these results for detail. Do NOT switch to Grep -- it is not cheaper. The point is to skip the file scan, not to do it under a different tool name."
   fi
 fi
 
