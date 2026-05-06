@@ -205,15 +205,33 @@ enum Commands {
         json: bool,
     },
 
-    /// Search reflections across all repos for cross-agent consultation
+    /// Search across legion's cross-agent surfaces.
+    ///
+    /// Two query modes (mutually exclusive):
+    /// - `--context "<query>"` searches reflections across every repo.
+    /// - `--symbol <name>` searches SCIP indexes (#285) across every
+    ///   repo and reports `(repo, lang, def_location, refs_count)` for
+    ///   each match. Used by recall-first.sh's cheap chain to answer
+    ///   code-intelligence questions without spawning Explore.
     Consult {
-        /// Context describing the problem to search for
-        #[arg(long)]
-        context: String,
+        /// Context describing the problem to search for (reflection mode).
+        /// Mutually exclusive with --symbol.
+        #[arg(long, conflicts_with = "symbol")]
+        context: Option<String>,
 
-        /// Maximum number of reflections to return
+        /// Symbol name to look up across every indexed repo (SCIP mode).
+        /// Mutually exclusive with --context.
+        #[arg(long, conflicts_with = "context")]
+        symbol: Option<String>,
+
+        /// Maximum number of reflections to return (reflection mode only).
         #[arg(long, default_value = "3")]
         limit: usize,
+
+        /// Emit JSON for the symbol mode output (reflection mode is
+        /// always human-formatted today).
+        #[arg(long)]
+        json: bool,
     },
 
     /// Configure Claude Code hooks for legion
@@ -423,13 +441,19 @@ enum Commands {
     /// `--repo` is optional in `--file` mode.
     Index {
         /// Repo name (must be present in watch.toml). Optional when --file
-        /// is supplied; the repo is resolved from the file's path.
+        /// or --status is supplied.
         repo: Option<String>,
         /// Re-index the repo containing this file path. Resolves the repo
         /// by ancestor match against watch.toml. The whole repo is still
         /// re-indexed; per-file granularity is a future refinement.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "status")]
         file: Option<PathBuf>,
+        /// Show the current SCIP index inventory: per-row `(repo, lang,
+        /// blob_size, updated_at)` for everything in `scip_indexes`.
+        /// Used by operators to confirm a background indexer (#284)
+        /// finished after `legion watch add`.
+        #[arg(long, conflicts_with = "file")]
+        status: bool,
     },
 
     /// Query SCIP symbol indexes (def, refs, impl, hover).
@@ -2241,11 +2265,143 @@ fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<(
     }
 }
 
-/// Shared executor for the three location-returning sym actions
-/// (def, refs, impl). Each caller supplies a closure that turns one
-/// `ScipIndex` into a `Vec<SymbolLocation>`; this function handles the
-/// scoping (repo/lang filters), the rust-only gate for `impl`, the
-/// "no index found" exit, deterministic sort, and human/JSON output.
+/// One row in the cross-repo symbol consult output.
+#[derive(serde::Serialize)]
+struct ConsultSymbolHit {
+    repo: String,
+    lang: String,
+    file: String,
+    line: u32,
+    column: u32,
+    refs_count: usize,
+}
+
+/// Implementation of `legion consult --symbol <name>` (#285).
+///
+/// Walks every (repo, lang) pair in `scip_indexes`, finds matching
+/// definitions, counts references per match. Output is sorted by repo
+/// then lang then file. Empty result exits 0 silently in human mode and
+/// emits `[]` in JSON mode -- a thin response is data, not failure.
+fn run_consult_symbol(database: &db::Database, name: &str, json: bool) -> error::Result<()> {
+    use std::io::Write;
+    let indexes = database.list_scip_indexes_filtered(None, None)?;
+
+    let mut hits: Vec<ConsultSymbolHit> = Vec::new();
+    for idx in &indexes {
+        let defs = match sym::query_definitions(&idx.blob, name, &idx.repo, &idx.lang) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[legion] skipped {}/{}: {e}", idx.repo, idx.lang);
+                continue;
+            }
+        };
+        if defs.is_empty() {
+            continue;
+        }
+        let refs_count = sym::query_references(&idx.blob, name, &idx.repo, &idx.lang)
+            .map(|r| r.len())
+            .unwrap_or(0);
+        for d in defs {
+            hits.push(ConsultSymbolHit {
+                repo: d.repo,
+                lang: d.lang,
+                file: d.file,
+                line: d.line,
+                column: d.column,
+                refs_count,
+            });
+        }
+    }
+
+    hits.sort_by(|a, b| {
+        a.repo
+            .cmp(&b.repo)
+            .then(a.lang.cmp(&b.lang))
+            .then(a.file.cmp(&b.file))
+            .then(a.line.cmp(&b.line))
+    });
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        serde_json::to_writer(&mut out, &hits)?;
+        writeln!(out)?;
+    } else if hits.is_empty() {
+        info!("[legion] no SCIP index has a definition for `{}`", name);
+    } else {
+        for h in &hits {
+            writeln!(
+                out,
+                "{}/{}\t{}:{}:{}\t({} ref(s))",
+                h.repo, h.lang, h.file, h.line, h.column, h.refs_count
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Spawn `legion index <repo>` as a detached background process (#284).
+///
+/// Called from `WatchAction::Add` so a freshly-watched repo gets its
+/// SCIP indexes populated without blocking the operator. Both stdout
+/// and stderr go to a per-repo log file under the temp dir; on any
+/// failure the watch add still succeeds and a warning is printed --
+/// background indexing is best-effort, the operator can always run
+/// `legion index <repo>` manually later.
+fn spawn_background_indexer(repo_name: &str) {
+    let self_path = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[legion] background indexer not started: cannot resolve own binary: {e}");
+            return;
+        }
+    };
+    let log_path = std::env::temp_dir().join(format!("legion-index-{repo_name}.log"));
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+    let (stdout, stderr, log_note) = match log_file {
+        Ok(f) => match f.try_clone() {
+            Ok(f2) => (
+                std::process::Stdio::from(f),
+                std::process::Stdio::from(f2),
+                format!("indexing in background; log: {}", log_path.display()),
+            ),
+            Err(_) => (
+                std::process::Stdio::from(f),
+                std::process::Stdio::null(),
+                format!(
+                    "indexing in background; stdout log: {} (stderr discarded)",
+                    log_path.display()
+                ),
+            ),
+        },
+        Err(e) => {
+            eprintln!(
+                "[legion] background indexer log {} not writable: {e} -- spawning silently",
+                log_path.display()
+            );
+            (
+                std::process::Stdio::null(),
+                std::process::Stdio::null(),
+                "indexing in background (no log)".to_string(),
+            )
+        }
+    };
+    match std::process::Command::new(self_path)
+        .arg("index")
+        .arg(repo_name)
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+    {
+        Ok(_) => println!("{log_note}"),
+        Err(e) => eprintln!("[legion] background indexer spawn failed: {e}"),
+    }
+}
+
 fn run_location_query<F>(
     database: &db::Database,
     repo: Option<String>,
@@ -2593,20 +2749,43 @@ fn run() -> error::Result<()> {
                 }
             }
         }
-        Commands::Consult { context, limit } => {
+        Commands::Consult {
+            context,
+            symbol,
+            limit,
+            json,
+        } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
-            let index = search::SearchIndex::open(&base.join("index"))?;
 
-            let result = match try_load_embed_model() {
-                Some(model) => recall::consult(&database, &index, &model, &context, limit)?,
-                None => recall::consult_bm25(&database, &index, &context, limit)?,
-            };
-            let output = recall::format_for_consult(&result);
-            if output.is_empty() {
-                info!("[legion] no reflections matched context: \"{}\"", context);
-            } else {
-                print!("{output}");
+            match (context, symbol) {
+                (Some(ctx), None) => {
+                    let index = search::SearchIndex::open(&base.join("index"))?;
+                    let result = match try_load_embed_model() {
+                        Some(model) => recall::consult(&database, &index, &model, &ctx, limit)?,
+                        None => recall::consult_bm25(&database, &index, &ctx, limit)?,
+                    };
+                    let output = recall::format_for_consult(&result);
+                    if output.is_empty() {
+                        info!("[legion] no reflections matched context: \"{}\"", ctx);
+                    } else {
+                        print!("{output}");
+                    }
+                }
+                (None, Some(name)) => {
+                    run_consult_symbol(&database, &name, json)?;
+                }
+                (None, None) => {
+                    return Err(error::LegionError::WatchConfig(
+                        "either --context <query> or --symbol <name> is required".to_string(),
+                    ));
+                }
+                (Some(_), Some(_)) => {
+                    // clap's conflicts_with should reject this before we get here.
+                    return Err(error::LegionError::WatchConfig(
+                        "--context and --symbol are mutually exclusive".to_string(),
+                    ));
+                }
             }
         }
         Commands::Post {
@@ -2890,8 +3069,31 @@ fn run() -> error::Result<()> {
                 }
             }
         }
-        Commands::Index { repo, file } => {
+        Commands::Index { repo, file, status } => {
             let base = data_dir()?;
+
+            // --status: dump scip_indexes inventory and return.
+            if status {
+                let database = db::Database::open(&base.join("legion.db"))?;
+                let indexes = database.list_scip_indexes_filtered(None, None)?;
+                if indexes.is_empty() {
+                    info!("[legion] no SCIP indexes recorded yet");
+                } else {
+                    use std::io::Write;
+                    let stdout = std::io::stdout();
+                    let mut out = stdout.lock();
+                    for idx in &indexes {
+                        let bytes = idx.blob.len();
+                        writeln!(
+                            out,
+                            "{}/{}\t{} bytes\t{}",
+                            idx.repo, idx.lang, bytes, idx.updated_at
+                        )?;
+                    }
+                }
+                return Ok(());
+            }
+
             let watch_path = base.join("watch.toml");
             let repos = watch::list_repos_in_config(&watch_path)?;
 
@@ -4594,6 +4796,15 @@ fn run() -> error::Result<()> {
                             path.display(),
                             agent_note
                         );
+
+                        // #284: background-index the new repo so `legion sym`
+                        // and `legion consult --symbol` can answer immediately.
+                        // Spawn `legion index <name>` as a detached subprocess
+                        // with stdout/stderr redirected to a per-repo log so
+                        // the operator can confirm completion without a hung
+                        // foreground command. Failures along the way print a
+                        // warning -- the watch add itself still succeeded.
+                        spawn_background_indexer(&effective_name);
                     } else {
                         println!("already present: {}", effective_name);
                     }
