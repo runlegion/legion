@@ -1,5 +1,21 @@
 # Legion Changelog
 
+## 0.12.0
+
+SCIP consumption hooks. Phase C of the SCIP completion plan -- the cost-control payoff. Both surfaces are token-cheap legion CLI calls that prevent expensive tool calls. Ships standalone so the cache_r reduction is measurable in isolation: the 1B+ cache_r token explosion that prompted the SCIP completion push is the metric this release should move.
+
+### New
+
+- **`pre-grep-scip.sh` PreToolUse hook** (#414, closes #283): sibling of `pre-grep-recall.sh`. Intercepts Grep + Glob; if the pattern looks like a bare symbol (CamelCase or snake_case identifier, length > 2, no regex metacharacters), runs `legion sym def --json` and `legion sym refs --json`, injects results as `additionalContext`. Never blocks the tool. Skips on regex-shaped patterns, short patterns, missing legion binary, empty SCIP results, uncovered repos. 11-test smoke suite at `plugin/hooks/test-pre-grep-scip.sh`.
+
+### Changed
+
+- **`recall-first.sh` Explore branch upgraded to the full cheap chain** (#414, closes #413): the Agent(Explore) branch previously ran only `legion recall` and on a threshold hit told the agent to use Grep instead -- perverse-incentive failure mode that shifted cost sideways (per reflection 019d84c7). New chain: `recall` -> `consult` -> `surface` -> `sym def` + `consult --symbol` (when prompt mentions an identifier-shaped token). Decision: deny when ANY source returns informative content. Denial message rewritten to "Read the specific files referenced in these results for detail. Do NOT switch to Grep -- it is not cheaper." Identifier extraction floors at 5 chars and excludes a short stopword set so common words don't trigger sym calls.
+
+### Pattern delivered
+
+**Cheap-paths-first interception.** Every expensive read tool (Grep, Glob, Agent(Explore), WebFetch, WebSearch) now has a PreToolUse hook that exhausts legion's local indexes (recall, consult, surface, sym, consult --symbol) before the expensive call fires. The cache_r savings come from the agent getting its answer from the injection and never running the original tool, OR from running it with prior context that bounds the scan.
+
 ## 0.11.0
 
 SCIP indexer breadth + freshness. Phase A + B of the SCIP completion plan. The indexer now covers every primary language the team writes (Rust, TypeScript, Python, Go) and edits trigger background re-indexing so `legion sym` answers stay current. Phase C (consumption hooks -- the cost-control payoff) ships next as 0.12.0 in isolation so the cache_r reduction is measurable.
