@@ -180,8 +180,46 @@ Results include repo attribution so you know which domain the knowledge came fro
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--context` | required | Problem description to search for |
-| `--limit` | `3` | Maximum reflections to return |
+| `--context` | optional | Problem description to search reflections for (mutually exclusive with `--symbol`) |
+| `--symbol` | optional | Symbol name to look up across every indexed repo's SCIP blob (mutually exclusive with `--context`) |
+| `--limit` | `3` | Maximum reflections to return (reflection mode only) |
+| `--json` | off | Emit JSON for the symbol mode output |
+
+## Code intelligence
+
+Legion includes a SCIP-based code intelligence layer. SCIP (Source Code Intelligence Protocol) blobs are pre-computed indexes of definitions, references, implementations, and hover info per repo per language. Legion stores them in `scip_indexes` and answers queries from the cached protobuf in bytes -- no file scans, no live indexer spin-up.
+
+### Build an index
+
+```bash
+legion index legion           # index a watched repo by name
+legion index --file path/to.rs   # re-index the repo containing a file
+legion index --status         # list current index inventory
+```
+
+`legion index <repo>` detects every recognized language present in the repo and indexes each into its own `(repo, lang)` row. Markers checked: `Cargo.toml` (rust), `package.json` (typescript), `pyproject.toml` / `requirements.txt` (python), `go.mod` (go). A missing per-language indexer warns and continues; only fails when every detected language failed.
+
+`legion watch add <repo>` triggers the same indexer in the background -- the operator gets a confirmation line with the log path so progress can be tailed without a hung foreground command.
+
+### Query the index
+
+```bash
+legion sym def Database         # definitions in this repo
+legion sym refs find_pending    # references (sorted by file/line)
+legion sym impl Iterator        # implementors of a trait (Rust only)
+legion sym hover Database       # signature + docstring
+legion consult --symbol Database  # cross-repo lookup
+```
+
+`legion consult --symbol` walks every `(repo, lang)` pair and reports `(repo, lang, def_location, refs_count)` per match. Used by the recall-first hook (#413) to inject cross-repo code intelligence before an agent spawns Explore on a question SCIP can already answer.
+
+### Why SCIP, not an LSP plugin
+
+For human editors, language servers (rust-analyzer, tsserver) shine: live diagnostics, inline hover, refactoring at typing speed. For agents asking "where is this defined" a thousand times per session, LSP is net-negative -- it spins up per session, has no persistence, no cross-machine sync, and a 30-second cold start on macro-heavy Rust or large TypeScript projects.
+
+SCIP is the inverse: pre-computed once at indexing time, content-hash addressed, smugglr-syncable across the cluster, queryable in microseconds via a SQLite blob lookup + protobuf parse. The PreToolUse hooks (`pre-grep-scip.sh`, the Explore branch of `recall-first.sh`) inject SCIP results before grep / Explore spawns fire, so the agent gets its symbol answer for the cost of a local CLI call instead of a file scan or a fresh subagent context.
+
+Legion does not bundle or recommend rust-analyzer-lsp or typescript-lsp as Claude Code plugins -- if you personally use those for editing, keep them; for agent code intelligence, use `legion sym` and let SCIP carry the load.
 
 ## Bullpen
 
