@@ -5041,3 +5041,37 @@ fn pending_replies_silent_when_nothing_pending() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+#[test]
+fn index_status_empty_db() {
+    // #284: --status on a fresh DB exits 0 and emits the no-indexes message.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["--verbose", "index", "--status"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "index --status should succeed on empty DB: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no SCIP indexes recorded"),
+        "expected no-indexes message on stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn index_status_and_file_mutually_exclusive() {
+    // #284: --status conflicts with --file.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["index", "--status", "--file", "/tmp/x"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "index --status --file should fail at parse time"
+    );
+}
