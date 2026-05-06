@@ -1230,6 +1230,75 @@ fn consult_no_matches() {
 }
 
 #[test]
+fn consult_symbol_empty_db_human_mode() {
+    // #285: --symbol on a fresh DB with no SCIP indexes should exit 0
+    // and print "no SCIP index..." on stderr in human mode.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["--verbose", "consult", "--symbol", "Database"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "consult --symbol should succeed on empty DB: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no SCIP index has a definition for `Database`"),
+        "expected no-index message on stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn consult_symbol_empty_db_json_mode() {
+    // #285: --symbol --json on a fresh DB returns the empty array.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["consult", "--symbol", "Database", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "consult --symbol --json should succeed on empty DB: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout.trim(),
+        "[]",
+        "expected `[]` for empty result, got: {stdout}"
+    );
+}
+
+#[test]
+fn consult_requires_context_or_symbol() {
+    // #285: consult with neither --context nor --symbol must error.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path()).args(["consult"]).output().unwrap();
+    assert!(!output.status.success(), "consult with no args should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--context") && stderr.contains("--symbol"),
+        "error message should mention both modes, got: {stderr}"
+    );
+}
+
+#[test]
+fn consult_context_and_symbol_mutually_exclusive() {
+    // #285: clap's conflicts_with should reject both flags at parse time.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["consult", "--context", "x", "--symbol", "Y"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "consult with both --context and --symbol should fail at parse time"
+    );
+}
+
+#[test]
 fn reflect_with_metadata_flags() {
     let dir = tempfile::tempdir().unwrap();
 
