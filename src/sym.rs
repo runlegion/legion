@@ -21,6 +21,15 @@ pub struct SymbolLocation {
     pub lang: String,
 }
 
+/// One impact-radius row: a symbol whose definition was touched by the
+/// diff, plus the SCIP reference count across the indexed repo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImpactRadius {
+    pub symbol: String,
+    pub refs_count: u32,
+    pub def_location: Option<SymbolLocation>,
+}
+
 /// Hover information: signature + docstring extracted from a SCIP document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HoverInfo {
@@ -252,6 +261,132 @@ pub fn query_implementors(
     Ok(out)
 }
 
+/// One file's worth of changed line ranges from a unified diff. Stores
+/// `(start_line, end_line_inclusive)` on the new (post-diff) side. We
+/// extract from `@@ -old +new @@` hunk headers; per-line + / - markers
+/// inside the hunk are not needed for impact-radius -- the hunk new
+/// range is the "touched area" and any def whose start line falls in
+/// that range counts as touched.
+type LineRange = (u32, u32);
+
+/// Map relative_path -> Vec<LineRange> on the new side.
+type DiffRanges = std::collections::HashMap<String, Vec<LineRange>>;
+
+/// Parse a unified diff (the output of `git diff` or similar) into the
+/// minimal per-file new-side line ranges that `diff_impact_radius`
+/// needs. Lines that the diff format does not understand (binary diffs,
+/// rename-only entries with no `@@` hunk) are silently skipped.
+pub fn parse_unified_diff(diff_text: &str) -> DiffRanges {
+    let mut out: DiffRanges = std::collections::HashMap::new();
+    let mut current_path: Option<String> = None;
+    for line in diff_text.lines() {
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            // `+++ b/path/to/file.rs` -- strip the "b/" git convention.
+            // Plain `diff -u` appends a tab + mtime after the path, so
+            // split on the first whitespace before treating the rest as
+            // the filename. `/dev/null` (file deleted) leaves
+            // current_path None so the following hunks land nowhere.
+            let path = rest.split_whitespace().next().unwrap_or("").trim();
+            if path.is_empty() || path == "/dev/null" {
+                current_path = None;
+                continue;
+            }
+            let stripped = path.strip_prefix("b/").unwrap_or(path);
+            current_path = Some(stripped.to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            // "@@ -10,5 +12,7 @@ optional context"
+            // We want the +start,count token.
+            if let Some(plus_token) = rest.split_whitespace().find(|t| t.starts_with('+')) {
+                let plus = plus_token.trim_start_matches('+');
+                let (start_str, count_str) = match plus.split_once(',') {
+                    Some((s, c)) => (s, c),
+                    None => (plus, "1"),
+                };
+                let start: u32 = match start_str.parse() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                let count: u32 = count_str.parse().unwrap_or(1);
+                if let Some(path) = &current_path {
+                    let end = start.saturating_add(count.saturating_sub(1)).max(start);
+                    out.entry(path.clone()).or_default().push((start, end));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Given a SCIP index blob and a unified diff, return one ImpactRadius
+/// row for every symbol whose definition occurrence falls inside any
+/// changed line range. `refs_count` is the total non-definition
+/// occurrences for that symbol across the entire index. Result is
+/// unsorted; the CLI handler sorts descending by refs_count.
+///
+/// An empty index or a diff that touches no SCIP-indexed file returns
+/// an empty Vec, not an error -- callers route that to a friendly
+/// "nothing to report" message.
+pub fn diff_impact_radius(blob: &[u8], diff_text: &str) -> Result<Vec<ImpactRadius>> {
+    if blob.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ranges = parse_unified_diff(diff_text);
+    if ranges.is_empty() {
+        return Ok(Vec::new());
+    }
+    let index = parse_blob(blob)?;
+
+    // First pass: collect (symbol -> refs_count) across the entire index.
+    let mut refs_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for doc in &index.documents {
+        for occ in &doc.occurrences {
+            if !is_definition(occ.symbol_roles) {
+                *refs_count.entry(occ.symbol.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Second pass: pick definitions whose range falls inside a hunk on
+    // the file's diff entry. Dedup on symbol so a symbol with multiple
+    // definitions (rare but legal) only contributes one row.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut hits = Vec::new();
+    for doc in &index.documents {
+        let Some(file_ranges) = ranges.get(&doc.relative_path) else {
+            continue;
+        };
+        for occ in &doc.occurrences {
+            if !is_definition(occ.symbol_roles) {
+                continue;
+            }
+            let Some((line, column)) = range_start_1indexed(&occ.range) else {
+                continue;
+            };
+            if !file_ranges.iter().any(|(s, e)| line >= *s && line <= *e) {
+                continue;
+            }
+            if !seen.insert(occ.symbol.clone()) {
+                continue;
+            }
+            let count = refs_count.get(&occ.symbol).copied().unwrap_or(0);
+            hits.push(ImpactRadius {
+                symbol: occ.symbol.clone(),
+                refs_count: count,
+                def_location: Some(SymbolLocation {
+                    file: doc.relative_path.clone(),
+                    line,
+                    column,
+                    repo: String::new(),
+                    lang: String::new(),
+                }),
+            });
+        }
+    }
+    Ok(hits)
+}
+
 pub fn query_hover(
     blob: &[u8],
     symbol_name: &str,
@@ -354,21 +489,17 @@ mod tests {
         let scip_foo = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
         let scip_my_foo = "rust-analyzer cargo legion 0.9.10 src/sym.rs/MyFoo#";
         assert!(symbol_matches(scip_foo, "Foo"));
-        // Substring fallback would have matched MyFoo; precise name match does not.
         assert!(!symbol_matches(scip_my_foo, "Foo"));
     }
 
     #[test]
     fn bare_name_falls_back_to_substring_when_symbol_unparseable() {
-        // No leading scheme: scip parser rejects; we fall through to substring.
         let unparseable = "totally not a scip symbol but contains FooBar somewhere";
         assert!(symbol_matches(unparseable, "FooBar"));
     }
 
     #[test]
     fn descriptor_query_with_unparseable_symbol_falls_back_to_substring() {
-        // Symbol fails scip parse; explicit-suffix query falls back to substring of
-        // the raw query string, which still contains the descriptor characters.
         let unparseable = "garbage Foo# more garbage";
         assert!(symbol_matches(unparseable, "Foo#"));
     }
@@ -381,22 +512,149 @@ mod tests {
 
     #[test]
     fn empty_query_does_not_match_unparseable_symbol() {
-        // Locks down the contract: empty query never matches, even via the
-        // substring fallback path which would otherwise return true (every
-        // string contains the empty string).
         let unparseable = "garbage symbol string";
         assert!(!symbol_matches(unparseable, ""));
     }
 
     #[test]
     fn query_with_whitespace_rejects_descriptor_path_and_uses_substring() {
-        // Whitespace queries cannot be valid SCIP descriptors; the synthetic
-        // prefix would otherwise parse them in unexpected ways. We short-circuit
-        // descriptor parsing and route them through name/substring tiers.
         let scip = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
         assert!(!symbol_matches(scip, "Foo Bar"));
         assert!(!symbol_matches(scip, " Foo"));
         assert!(!symbol_matches(scip, "Foo "));
+    }
+
+    #[test]
+    fn parse_unified_diff_extracts_per_file_new_ranges() {
+        let diff = "\
+diff --git a/src/foo.rs b/src/foo.rs
+--- a/src/foo.rs
++++ b/src/foo.rs
+@@ -10,3 +12,5 @@ fn ctx
+ a
+-b
++c
++d
++e
+@@ -50,1 +60,2 @@
++x
++y
+diff --git a/src/bar.rs b/src/bar.rs
+--- a/src/bar.rs
++++ b/src/bar.rs
+@@ -1,2 +1,3 @@
+ keep
++new
++also new
+";
+        let ranges = parse_unified_diff(diff);
+        assert_eq!(ranges.get("src/foo.rs").unwrap(), &vec![(12, 16), (60, 61)]);
+        assert_eq!(ranges.get("src/bar.rs").unwrap(), &vec![(1, 3)]);
+    }
+
+    #[test]
+    fn parse_unified_diff_skips_dev_null_for_deleted_files() {
+        let diff = "\
+diff --git a/old.rs b/old.rs
+--- a/old.rs
++++ /dev/null
+@@ -1,3 +0,0 @@
+-removed
+";
+        let ranges = parse_unified_diff(diff);
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn parse_unified_diff_strips_diff_u_timestamp_after_path() {
+        // Plain `diff -u` (not git) emits "+++ path\t<mtime>" rather than
+        // "+++ b/path". The path-extraction must not include the trailing
+        // tab + timestamp or it never matches a SCIP relative_path.
+        let diff = "\
+--- old/lib.rs\t2026-05-01 12:00:00.000000000 +0000
++++ new/lib.rs\t2026-05-07 09:00:00.000000000 +0000
+@@ -1,1 +1,1 @@
+-old
++new
+";
+        let ranges = parse_unified_diff(diff);
+        // `b/` strip is a no-op here; key is `new/lib.rs` not the timestamp.
+        assert_eq!(ranges.get("new/lib.rs").unwrap(), &vec![(1, 1)]);
+    }
+
+    #[test]
+    fn parse_unified_diff_handles_single_line_hunks_without_count() {
+        let diff = "\
++++ b/src/lib.rs
+@@ -42 +42 @@
+-old
++new
+";
+        let ranges = parse_unified_diff(diff);
+        assert_eq!(ranges.get("src/lib.rs").unwrap(), &vec![(42, 42)]);
+    }
+
+    #[test]
+    fn diff_impact_radius_returns_definitions_in_changed_ranges_with_ref_counts() {
+        let blob = build_index(vec![doc(
+            "src/foo.rs",
+            vec![
+                occ("hot()", vec![19, 0, 19, 3], true),
+                occ("cold()", vec![100, 0, 100, 3], true),
+                occ("hot()", vec![5, 0, 5, 3], false),
+                occ("hot()", vec![6, 0, 6, 3], false),
+                occ("cold()", vec![200, 0, 200, 3], false),
+            ],
+        )]);
+        let diff = "\
++++ b/src/foo.rs
+@@ -18,3 +18,5 @@
+ ctx
++changed
++changed
+";
+        let hits = diff_impact_radius(&blob, diff).unwrap();
+        assert_eq!(hits.len(), 1, "only `hot` is in the changed range");
+        assert_eq!(hits[0].symbol, "hot()");
+        assert_eq!(hits[0].refs_count, 2);
+        let loc = hits[0].def_location.as_ref().unwrap();
+        assert_eq!(loc.file, "src/foo.rs");
+        assert_eq!(loc.line, 20);
+    }
+
+    #[test]
+    fn diff_impact_radius_empty_when_diff_touches_no_indexed_file() {
+        let blob = build_index(vec![doc(
+            "src/foo.rs",
+            vec![occ("Foo#", vec![5, 0, 5, 3], true)],
+        )]);
+        let diff = "\
++++ b/src/unrelated.rs
+@@ -1,1 +1,1 @@
+ line
+";
+        let hits = diff_impact_radius(&blob, diff).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn diff_impact_radius_dedupes_repeated_definitions() {
+        let blob = build_index(vec![
+            doc("src/a.rs", vec![occ("Foo#", vec![9, 0, 9, 3], true)]),
+            doc("src/b.rs", vec![occ("Foo#", vec![19, 0, 19, 3], true)]),
+        ]);
+        let diff = "\
++++ b/src/a.rs
+@@ -8,3 +8,3 @@
+ line
++changed
++++ b/src/b.rs
+@@ -18,3 +18,3 @@
+ line
++changed
+";
+        let hits = diff_impact_radius(&blob, diff).unwrap();
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]
