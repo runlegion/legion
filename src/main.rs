@@ -784,6 +784,21 @@ enum SymAction {
         #[arg(long)]
         json: bool,
     },
+
+    /// Impact radius: for every symbol whose definition the given diff
+    /// touches, report the SCIP reference count across the repo's index.
+    /// Used by smugglr to flag wide-blast-radius PRs at review time.
+    Impact {
+        /// Repo whose SCIP index to query
+        #[arg(long)]
+        repo: String,
+        /// Path to a unified diff file, or "-" to read from stdin
+        #[arg(long)]
+        diff: String,
+        /// Emit results as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2262,7 +2277,73 @@ fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<(
             lang,
             json,
         } => run_hover_query(database, &name, repo, lang, json),
+        SymAction::Impact { repo, diff, json } => run_sym_impact(database, &repo, &diff, json),
     }
+}
+
+/// Read the diff source -- file path or "-" for stdin -- and run impact
+/// radius analysis against the repo's SCIP index. Prints sorted output
+/// (highest refs_count first) as either text or JSON.
+fn run_sym_impact(
+    database: &db::Database,
+    repo: &str,
+    diff_arg: &str,
+    json: bool,
+) -> error::Result<()> {
+    use std::io::{Read, Write};
+
+    let diff_text = if diff_arg == "-" {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(error::LegionError::Io)?;
+        buf
+    } else {
+        std::fs::read_to_string(diff_arg).map_err(error::LegionError::Io)?
+    };
+
+    let indexes = database.list_scip_indexes_filtered(Some(repo), None)?;
+    if indexes.is_empty() {
+        eprintln!("[legion] no SCIP index for repo '{repo}' -- run `legion index {repo}` first");
+        return Ok(());
+    }
+
+    let mut all_hits: Vec<sym::ImpactRadius> = Vec::new();
+    for idx in &indexes {
+        let hits = sym::diff_impact_radius(&idx.blob, &diff_text)?;
+        all_hits.extend(hits);
+    }
+    all_hits.sort_by_key(|h| std::cmp::Reverse(h.refs_count));
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        let body = serde_json::to_string(&all_hits)
+            .map_err(|e| error::LegionError::Search(format!("impact json: {e}")))?;
+        writeln!(out, "{body}")?;
+        return Ok(());
+    }
+    if all_hits.is_empty() {
+        writeln!(out, "[legion] no symbol definitions touched by this diff")?;
+        return Ok(());
+    }
+    let high_threshold: u32 = std::env::var("LEGION_IMPACT_HIGH_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+    for hit in &all_hits {
+        let high = if hit.refs_count >= high_threshold {
+            "  HIGH"
+        } else {
+            ""
+        };
+        let loc = match &hit.def_location {
+            Some(loc) => format!("{}:{}", loc.file, loc.line),
+            None => "(no def location)".to_string(),
+        };
+        writeln!(out, "{loc}\t{}\trefs:{}{high}", hit.symbol, hit.refs_count)?;
+    }
+    Ok(())
 }
 
 /// One row in the cross-repo symbol consult output.
