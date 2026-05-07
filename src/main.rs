@@ -469,6 +469,13 @@ enum Commands {
         /// `--logs` (default 50).
         #[arg(long, requires = "logs", default_value_t = 50)]
         lines: usize,
+        /// Render a SessionStart-friendly status banner for one repo.
+        /// Silent on healthy (every detected language has a fresh index),
+        /// loud on stale or missing. Requires `<repo>` and `--status`.
+        /// Used by `plugin/hooks/session-start.sh` so agents see whether
+        /// `legion sym` will succeed before they try.
+        #[arg(long, requires = "status")]
+        banner: bool,
     },
 
     /// Query SCIP symbol indexes (def, refs, impl, hover).
@@ -2625,6 +2632,179 @@ fn run_index_logs(repo: Option<&str>, tail_lines: usize, follow: bool) -> error:
     }
 }
 
+/// Render a one-shot SCIP index health banner for a single repo, intended
+/// to be appended to the SessionStart hook output. Silent on healthy
+/// (every detected language has a fresh index); loud on stale, missing,
+/// or unindexable repos. Never errors -- a banner-mode failure prints
+/// "unavailable" and returns Ok so SessionStart never blocks on this.
+fn run_index_status_banner(base: &std::path::Path, repo: Option<&str>) -> error::Result<()> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    let Some(repo_name) = repo else {
+        // --banner without a repo is a misconfigured caller. Print a quiet
+        // hint so the failure is observable but exit cleanly.
+        writeln!(
+            out,
+            "[Legion] Index status: --banner requires <repo> -- pass the repo name positionally"
+        )?;
+        return Ok(());
+    };
+
+    let watch_path = base.join("watch.toml");
+    let repos = match watch::list_repos_in_config(&watch_path) {
+        Ok(r) => r,
+        Err(_) => {
+            writeln!(out, "[Legion] Index status: unavailable")?;
+            return Ok(());
+        }
+    };
+    let entry = match repos.iter().find(|r| r.name == repo_name) {
+        Some(e) => e,
+        None => {
+            // Repo is not watched. Quiet for SessionStart -- this is the
+            // common case for one-off shells in unrelated dirs.
+            return Ok(());
+        }
+    };
+    let repo_path = std::path::PathBuf::from(&entry.workdir);
+    let detected = scip::detect_languages(&repo_path);
+
+    let database = match db::Database::open(&base.join("legion.db")) {
+        Ok(d) => d,
+        Err(_) => {
+            writeln!(out, "[Legion] Index status: unavailable")?;
+            return Ok(());
+        }
+    };
+    let indexes = match database.list_scip_indexes_filtered(Some(repo_name), None) {
+        Ok(i) => i,
+        Err(_) => {
+            writeln!(out, "[Legion] Index status: unavailable")?;
+            return Ok(());
+        }
+    };
+
+    let now = chrono::Utc::now();
+    let banner = render_index_status_banner(repo_name, &detected, &indexes, now);
+    if !banner.is_empty() {
+        writeln!(out, "{banner}")?;
+    }
+    Ok(())
+}
+
+/// Pure renderer for the SessionStart index status banner. Empty string
+/// means "silent" (every detected language has a fresh index). Returns a
+/// multi-line block when anything is stale or missing.
+///
+/// Stale threshold: 7 days. Override-friendly through a build constant if
+/// future tuning needs it; not exposed as a CLI flag in v1.
+fn render_index_status_banner(
+    repo_name: &str,
+    detected_langs: &[&str],
+    indexes: &[scip::ScipIndex],
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    const STALE_THRESHOLD_DAYS: i64 = 7;
+
+    if detected_langs.is_empty() {
+        // No supported language detected -- silent. Avoids cluttering
+        // SessionStart for repos that legion does not index.
+        return String::new();
+    }
+
+    enum LangHealth {
+        Fresh { lang: String, age: String },
+        Stale { lang: String, age: String },
+        Missing { lang: String },
+    }
+
+    fn humanize_age(seconds: i64) -> String {
+        if seconds < 60 {
+            return "just now".to_string();
+        }
+        if seconds < 3600 {
+            return format!("{}m ago", seconds / 60);
+        }
+        if seconds < 86_400 {
+            return format!("{}h ago", seconds / 3600);
+        }
+        format!("{}d ago", seconds / 86_400)
+    }
+
+    let mut report = Vec::with_capacity(detected_langs.len());
+    for lang in detected_langs {
+        let row = indexes.iter().find(|i| i.lang == *lang);
+        match row {
+            Some(idx) => match chrono::DateTime::parse_from_rfc3339(&idx.updated_at) {
+                Ok(parsed) => {
+                    let age_seconds = (now - parsed.with_timezone(&chrono::Utc)).num_seconds();
+                    let age = humanize_age(age_seconds);
+                    if age_seconds > STALE_THRESHOLD_DAYS * 86_400 {
+                        report.push(LangHealth::Stale {
+                            lang: (*lang).to_string(),
+                            age,
+                        });
+                    } else {
+                        report.push(LangHealth::Fresh {
+                            lang: (*lang).to_string(),
+                            age,
+                        });
+                    }
+                }
+                Err(_) => {
+                    // Unparseable timestamp -- treat as stale so the operator
+                    // sees a signal to rebuild rather than silently trusting
+                    // an index whose freshness we cannot verify.
+                    report.push(LangHealth::Stale {
+                        lang: (*lang).to_string(),
+                        age: "unknown age".to_string(),
+                    });
+                }
+            },
+            None => report.push(LangHealth::Missing {
+                lang: (*lang).to_string(),
+            }),
+        }
+    }
+
+    let all_fresh = report.iter().all(|h| matches!(h, LangHealth::Fresh { .. }));
+    if all_fresh {
+        let summary: Vec<String> = report
+            .iter()
+            .map(|h| match h {
+                LangHealth::Fresh { lang, age } => format!("{lang}: fresh ({age})"),
+                _ => unreachable!(),
+            })
+            .collect();
+        return format!(
+            "[Legion] Index status for {repo_name}: {}",
+            summary.join(", ")
+        );
+    }
+
+    let mut lines = vec![format!("[Legion] Index status for {repo_name}:")];
+    for h in &report {
+        match h {
+            LangHealth::Fresh { lang, age } => {
+                lines.push(format!("  {lang}: fresh ({age})"));
+            }
+            LangHealth::Stale { lang, age } => {
+                lines.push(format!(
+                    "  {lang}: STALE -- last built {age}, run `legion index {repo_name}` to refresh"
+                ));
+            }
+            LangHealth::Missing { lang } => {
+                lines.push(format!(
+                    "  {lang}: not indexed -- run `legion index {repo_name}` or `legion watch add {repo_name}` to build"
+                ));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
 fn run_location_query<F>(
     database: &db::Database,
     repo: Option<String>,
@@ -3299,12 +3479,19 @@ fn run() -> error::Result<()> {
             logs,
             follow,
             lines,
+            banner,
         } => {
             let base = data_dir()?;
 
             // --logs: print recent background-indexer log content and return.
             if logs {
                 run_index_logs(repo.as_deref(), lines, follow)?;
+                return Ok(());
+            }
+
+            // --status --banner: SessionStart-friendly per-repo health line.
+            if status && banner {
+                run_index_status_banner(&base, repo.as_deref())?;
                 return Ok(());
             }
 
@@ -5787,5 +5974,104 @@ mod migration_tests {
             .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 3);
+    }
+}
+
+#[cfg(test)]
+mod index_banner_tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn idx(repo: &str, lang: &str, updated_at: &str) -> scip::ScipIndex {
+        scip::ScipIndex {
+            id: "id".to_string(),
+            repo: repo.to_string(),
+            lang: lang.to_string(),
+            content_hash: "h".to_string(),
+            blob: vec![1, 2, 3],
+            updated_at: updated_at.to_string(),
+            deleted_at: None,
+        }
+    }
+
+    #[test]
+    fn empty_when_no_languages_detected() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let banner = render_index_status_banner("legion", &[], &[], now);
+        assert!(banner.is_empty());
+    }
+
+    #[test]
+    fn one_line_summary_when_all_fresh() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let recent = "2026-05-07T10:00:00Z";
+        let indexes = vec![idx("legion", "rust", recent)];
+        let banner = render_index_status_banner("legion", &["rust"], &indexes, now);
+        assert!(banner.starts_with("[Legion] Index status for legion: "));
+        assert!(banner.contains("rust: fresh"));
+        assert_eq!(banner.lines().count(), 1, "fresh state must be one line");
+    }
+
+    #[test]
+    fn loud_block_when_missing_language() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let banner = render_index_status_banner("legion", &["rust", "typescript"], &[], now);
+        assert!(banner.contains("[Legion] Index status for legion:"));
+        assert!(banner.contains("rust: not indexed"));
+        assert!(banner.contains("typescript: not indexed"));
+        assert!(banner.contains("legion index legion"));
+    }
+
+    #[test]
+    fn loud_block_when_stale() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        // 14 days ago -- past the 7-day threshold.
+        let stale = "2026-04-23T12:00:00Z";
+        let indexes = vec![idx("legion", "rust", stale)];
+        let banner = render_index_status_banner("legion", &["rust"], &indexes, now);
+        assert!(banner.contains("rust: STALE"));
+        assert!(banner.contains("14d ago"));
+        assert!(banner.contains("legion index legion"));
+    }
+
+    #[test]
+    fn mixed_state_lists_all_languages_in_order() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let recent = "2026-05-07T10:00:00Z"; // 2h ago
+        let stale = "2026-04-23T12:00:00Z"; // 14d ago
+        let indexes = vec![
+            idx("legion", "rust", recent),
+            idx("legion", "typescript", stale),
+        ];
+        let banner =
+            render_index_status_banner("legion", &["rust", "typescript", "python"], &indexes, now);
+        assert!(banner.contains("rust: fresh"));
+        assert!(banner.contains("typescript: STALE"));
+        assert!(banner.contains("python: not indexed"));
+        // Multi-line block, not single line.
+        assert!(banner.lines().count() > 2);
+    }
+
+    #[test]
+    fn unparseable_timestamp_is_treated_as_stale() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let indexes = vec![idx("legion", "rust", "not-a-timestamp")];
+        let banner = render_index_status_banner("legion", &["rust"], &indexes, now);
+        assert!(banner.contains("rust: STALE"));
+        assert!(banner.contains("unknown age"));
+    }
+
+    #[test]
+    fn age_humanized_into_appropriate_unit() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        // 90 minutes ago -> "1h ago"
+        let one_hr_ago = "2026-05-07T10:30:00Z";
+        let banner = render_index_status_banner(
+            "legion",
+            &["rust"],
+            &[idx("legion", "rust", one_hr_ago)],
+            now,
+        );
+        assert!(banner.contains("1h ago"));
     }
 }
