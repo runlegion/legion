@@ -27,6 +27,7 @@ mod sym;
 mod sync;
 mod sync_actor;
 mod task;
+mod telemetry;
 #[cfg(test)]
 mod testutil;
 mod usage;
@@ -476,6 +477,11 @@ enum Commands {
         /// `legion sym` will succeed before they try.
         #[arg(long, requires = "status")]
         banner: bool,
+        /// Emit `--status` output as a JSON array of {repo, lang, size_bytes,
+        /// updated_at} objects. Hooks (#437/#438/#439) consume this to probe
+        /// whether a repo is indexed before applying enforcement.
+        #[arg(long, requires = "status", conflicts_with = "banner")]
+        json: bool,
     },
 
     /// Query SCIP symbol indexes (def, refs, impl, hover).
@@ -509,6 +515,16 @@ enum Commands {
 
     /// Compute embeddings for all reflections that are missing them
     Backfill,
+
+    /// Bypass telemetry: log when an agent escapes a grep/Read enforcement
+    /// hook (#438/#439), and read the log back. Append-only JSONL at
+    /// `${XDG_STATE_HOME:-~/.local/state}/legion/bypass.jsonl`. Feeds the
+    /// uncertainty engine (#354) -- bypass volume on a (repo, pattern) is a
+    /// signal that sym/recall is missing an answer agents expected.
+    Telemetry {
+        #[command(subcommand)]
+        action: TelemetryAction,
+    },
 
     /// Show reflection statistics
     Stats {
@@ -820,6 +836,55 @@ enum SymAction {
         /// Emit results as JSON instead of human-readable text
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelemetryAction {
+    /// Append one bypass row to `bypass.jsonl`. Called by the grep/Read
+    /// enforcement hooks (#438/#439) when an agent escapes via env var or
+    /// `# legion-bypass:` sentinel in a Bash command. Errors are surfaced;
+    /// the hook layer decides whether to swallow them (it does -- telemetry
+    /// must never break the agent).
+    RecordBypass {
+        /// Repo the bypass occurred in
+        #[arg(long)]
+        repo: String,
+        /// Claude Code session id (passed through from the hook input)
+        #[arg(long)]
+        session_id: String,
+        /// Tool name that was bypassed (`Bash`, `Grep`, `Glob`, `Read`)
+        #[arg(long)]
+        tool: String,
+        /// Pattern or path the bypass applied to
+        #[arg(long)]
+        pattern: String,
+        /// Free-form reason captured from the bypass mechanism (env value,
+        /// `# legion-bypass: <reason>` substring, etc).
+        #[arg(long)]
+        bypass_reason: String,
+        /// Whether `legion sym def/refs` had hits the agent ignored
+        #[arg(long)]
+        had_sym_hits: bool,
+        /// Whether `legion recall` had hits the agent ignored
+        #[arg(long)]
+        had_recall_hits: bool,
+        /// Optional agent identifier (default: empty). Hooks resolve this
+        /// once per session via `legion whoami` and pass it through.
+        #[arg(long, default_value = "")]
+        agent: String,
+    },
+
+    /// Read the bypass log. Filters by `--since` (duration like `24h`,
+    /// `7d`) and `--repo`. Used by `legion telemetry summary` (#440) and by
+    /// downstream consumers (uncertainty engine #354).
+    ListBypasses {
+        /// Drop rows older than this duration. Format: `30s`, `15m`, `24h`, `7d`.
+        #[arg(long)]
+        since: Option<String>,
+        /// Restrict to a single repo
+        #[arg(long)]
+        repo: Option<String>,
     },
 }
 
@@ -3480,6 +3545,7 @@ fn run() -> error::Result<()> {
             follow,
             lines,
             banner,
+            json,
         } => {
             let base = data_dir()?;
 
@@ -3498,8 +3564,21 @@ fn run() -> error::Result<()> {
             // --status: dump scip_indexes inventory and return.
             if status {
                 let database = db::Database::open(&base.join("legion.db"))?;
-                let indexes = database.list_scip_indexes_filtered(None, None)?;
-                if indexes.is_empty() {
+                let indexes = database.list_scip_indexes_filtered(repo.as_deref(), None)?;
+                if json {
+                    let rows: Vec<serde_json::Value> = indexes
+                        .iter()
+                        .map(|idx| {
+                            serde_json::json!({
+                                "repo": idx.repo,
+                                "lang": idx.lang,
+                                "size_bytes": idx.blob.len(),
+                                "updated_at": idx.updated_at,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string(&rows)?);
+                } else if indexes.is_empty() {
                     info!("[legion] no SCIP indexes recorded yet");
                 } else {
                     use std::io::Write;
@@ -3722,6 +3801,39 @@ fn run() -> error::Result<()> {
             let database = db::Database::open(&base.join("legion.db"))?;
             stats::stats(&database, repo.as_deref())?;
         }
+        Commands::Telemetry { action } => match action {
+            TelemetryAction::RecordBypass {
+                repo,
+                session_id,
+                tool,
+                pattern,
+                bypass_reason,
+                had_sym_hits,
+                had_recall_hits,
+                agent,
+            } => {
+                let record = telemetry::BypassRecord {
+                    ts: chrono::Utc::now(),
+                    repo,
+                    session_id,
+                    agent,
+                    tool,
+                    pattern,
+                    bypass_reason,
+                    had_sym_hits,
+                    had_recall_hits,
+                };
+                telemetry::append_bypass(&record)?;
+            }
+            TelemetryAction::ListBypasses { since, repo } => {
+                let since_dur = match since {
+                    Some(s) => Some(telemetry::parse_duration(&s)?),
+                    None => None,
+                };
+                let rows = telemetry::list_bypasses(since_dur, repo.as_deref())?;
+                println!("{}", serde_json::to_string(&rows)?);
+            }
+        },
         Commands::Serve { port } => {
             let base = data_dir()?;
             let watch_path = base.join("watch.toml");

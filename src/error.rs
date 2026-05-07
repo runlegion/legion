@@ -105,6 +105,9 @@ pub enum LegionError {
 
     #[error("indexer failed for {lang}: {stderr}")]
     IndexerFailed { lang: String, stderr: String },
+
+    #[error("telemetry error: {0}")]
+    Telemetry(String),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
