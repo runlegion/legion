@@ -214,10 +214,12 @@ pub fn parse_unified_diff(diff_text: &str) -> DiffRanges {
     for line in diff_text.lines() {
         if let Some(rest) = line.strip_prefix("+++ ") {
             // `+++ b/path/to/file.rs` -- strip the "b/" git convention.
-            // `/dev/null` (file deleted) leaves current_path None so the
-            // following hunks land nowhere.
-            let path = rest.trim();
-            if path == "/dev/null" {
+            // Plain `diff -u` appends a tab + mtime after the path, so
+            // split on the first whitespace before treating the rest as
+            // the filename. `/dev/null` (file deleted) leaves
+            // current_path None so the following hunks land nowhere.
+            let path = rest.split_whitespace().next().unwrap_or("").trim();
+            if path.is_empty() || path == "/dev/null" {
                 current_path = None;
                 continue;
             }
@@ -421,6 +423,23 @@ diff --git a/old.rs b/old.rs
 ";
         let ranges = parse_unified_diff(diff);
         assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn parse_unified_diff_strips_diff_u_timestamp_after_path() {
+        // Plain `diff -u` (not git) emits "+++ path\t<mtime>" rather than
+        // "+++ b/path". The path-extraction must not include the trailing
+        // tab + timestamp or it never matches a SCIP relative_path.
+        let diff = "\
+--- old/lib.rs\t2026-05-01 12:00:00.000000000 +0000
++++ new/lib.rs\t2026-05-07 09:00:00.000000000 +0000
+@@ -1,1 +1,1 @@
+-old
++new
+";
+        let ranges = parse_unified_diff(diff);
+        // `b/` strip is a no-op here; key is `new/lib.rs` not the timestamp.
+        assert_eq!(ranges.get("new/lib.rs").unwrap(), &vec![(1, 1)]);
     }
 
     #[test]
