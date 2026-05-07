@@ -71,6 +71,9 @@ fn is_definition(symbol_roles: i32) -> bool {
 ///   string. Defensive path for unusual indexer output. Preserves the v1
 ///   behavior in worst-case scenarios but should be rare in practice.
 fn symbol_matches(scip_symbol: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return false;
+    }
     let query_descs = parse_query_descriptors(query);
     match scip_parse_symbol(scip_symbol) {
         Ok(parsed) => match query_descs {
@@ -374,6 +377,15 @@ mod tests {
     fn empty_query_does_not_match_real_symbol() {
         let scip = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
         assert!(!symbol_matches(scip, ""));
+    }
+
+    #[test]
+    fn empty_query_does_not_match_unparseable_symbol() {
+        // Locks down the contract: empty query never matches, even via the
+        // substring fallback path which would otherwise return true (every
+        // string contains the empty string).
+        let unparseable = "garbage symbol string";
+        assert!(!symbol_matches(unparseable, ""));
     }
 
     #[test]
