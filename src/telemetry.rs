@@ -211,6 +211,22 @@ mod tests {
     }
 
     #[test]
+    fn list_filters_by_since_and_repo_combined() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bypass.jsonl");
+        let now = Utc::now();
+        // 4 rows: 2 legion (one stale, one fresh), 2 smugglr (one stale, one fresh).
+        append_bypass_to(&path, &sample("legion", now - Duration::hours(48))).unwrap();
+        append_bypass_to(&path, &sample("legion", now - Duration::minutes(5))).unwrap();
+        append_bypass_to(&path, &sample("smugglr", now - Duration::hours(48))).unwrap();
+        append_bypass_to(&path, &sample("smugglr", now - Duration::minutes(5))).unwrap();
+        let rows = list_bypasses_from(&path, Some(Duration::hours(24)), Some("legion")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].repo, "legion");
+        assert!(rows[0].ts > now - Duration::hours(24));
+    }
+
+    #[test]
     fn list_filters_by_since() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("bypass.jsonl");

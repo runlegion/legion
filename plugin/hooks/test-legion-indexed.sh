@@ -81,10 +81,24 @@ echo "==> empty repo arg returns 1"
 legion_indexed "sess-2" "" && actual="0" || actual="1"
 assert "empty repo treated as not indexed" "$actual" "1"
 
-echo "==> missing legion binary -> not indexed"
+echo "==> missing legion binary -> not indexed (no cache poison)"
 rm -f "$WORK/plugin/bin/legion"
 legion_indexed "sess-3" "rafters" && actual="0" || actual="1"
 assert "missing binary -> not indexed (block tier disabled)" "$actual" "1"
+# The missing-binary path must NOT cache the verdict; otherwise a transient
+# missing state becomes sticky for the rest of the session.
+assert "missing-binary path leaves no cache file" \
+  "$([ -f "$XDG_CACHE_HOME/legion/indexed-sess-3-rafters" ] && echo yes || echo no)" \
+  "no"
+
+echo "==> binary appears mid-session -> probe re-runs and succeeds"
+cat > "$WORK/plugin/bin/legion" <<'EOF'
+#!/bin/bash
+echo '[{"repo":"rafters","lang":"typescript","size_bytes":300,"updated_at":"2026-01-01T00:00:00Z"}]'
+EOF
+chmod +x "$WORK/plugin/bin/legion"
+legion_indexed "sess-3" "rafters" && actual="0" || actual="1"
+assert "binary returned -> rafters now indexed" "$actual" "0"
 
 echo
 echo "==> $PASS passed, $FAIL failed"

@@ -48,8 +48,10 @@ legion_indexed() {
     return 1
   fi
 
+  # Degraded environment: missing legion binary or missing jq. Do NOT cache
+  # the verdict -- mirrors _legion-covered.sh, so a transient missing-binary
+  # state during the session does not become sticky once the binary appears.
   if [ ! -x "$LEGION_INDEXED_BIN" ] || ! command -v jq >/dev/null 2>&1; then
-    printf '0' > "$cache_file" 2>/dev/null
     return 1
   fi
 
