@@ -90,7 +90,15 @@ SNOOZE=$("$LEGION" recall --repo "$REPO" --domain snooze --limit 1 --preview 500
 legion_check $? "recall (snooze)"
 append_block "$SNOOZE"
 
-# 4. Work source -- what's on my plate
+# 4. Index status -- one line if every detected language has a fresh
+# index, multi-line block if anything is stale or missing. Silent when
+# the repo is not in watch.toml or no language is detected. Lets the
+# agent see whether `legion sym` will succeed before they call it.
+INDEX_BANNER=$("$LEGION" index "$REPO" --status --banner 2>>"$LOG")
+legion_check $? "index --banner"
+append_block "$INDEX_BANNER"
+
+# 5. Work source -- what's on my plate
 KANBAN=$("$LEGION" kanban list --repo "$REPO" 2>>"$LOG")
 legion_check $? "kanban list"
 if [ -n "$KANBAN" ]; then
