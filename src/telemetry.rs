@@ -263,10 +263,10 @@ mod tests {
     #[test]
     fn bypass_log_path_uses_xdg_state_home() {
         let saved_xdg = std::env::var("XDG_STATE_HOME").ok();
-        let saved_home = std::env::var("HOME").ok();
-        // SAFETY: tests in this module touch process env. Run with
-        // `cargo test -- --test-threads=1` if env races become an issue.
-        // We restore env at the end of the test.
+        // SAFETY: this test mutates process env. Cargo runs tests in parallel
+        // by default, so a concurrent test reading XDG_STATE_HOME could
+        // observe the override. None do today; if that changes, run this
+        // module with `cargo test -- --test-threads=1`.
         unsafe {
             std::env::set_var("XDG_STATE_HOME", "/tmp/legion-xdg-test");
         }
@@ -276,10 +276,6 @@ mod tests {
             match saved_xdg {
                 Some(v) => std::env::set_var("XDG_STATE_HOME", v),
                 None => std::env::remove_var("XDG_STATE_HOME"),
-            }
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
             }
         }
     }
