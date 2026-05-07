@@ -361,7 +361,17 @@ pub fn index_log_dir() -> PathBuf {
     {
         return PathBuf::from(home).join(".local/state/legion/index-logs");
     }
-    std::env::temp_dir().join("legion-index-logs")
+    // Stripped container or similar: neither XDG_STATE_HOME nor HOME is
+    // set. Fall back to the system temp dir so logging still works, but
+    // surface a warning -- this path will not survive a reboot, defeating
+    // the migration's purpose. Operators should set HOME or
+    // XDG_STATE_HOME explicitly in this environment.
+    let fallback = std::env::temp_dir().join("legion-index-logs");
+    eprintln!(
+        "[legion] WARNING: neither XDG_STATE_HOME nor HOME set; index logs at {} will not survive reboot",
+        fallback.display()
+    );
+    fallback
 }
 
 /// Log file path for a single repo's background indexer output. Caller
