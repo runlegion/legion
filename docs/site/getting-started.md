@@ -197,7 +197,19 @@ legion index --file path/to.rs   # re-index the repo containing a file
 legion index --status         # list current index inventory
 ```
 
-`legion index <repo>` detects every recognized language present in the repo and indexes each into its own `(repo, lang)` row. Markers checked: `Cargo.toml` (rust), `package.json` (typescript), `pyproject.toml` / `requirements.txt` (python), `go.mod` (go). A missing per-language indexer warns and continues; only fails when every detected language failed.
+`legion index <repo>` detects every recognized language present in the repo and indexes each into its own `(repo, lang)` row. A missing per-language indexer warns and continues; only fails when every detected language failed.
+
+| Language | Marker(s) | Indexer | Install |
+|---|---|---|---|
+| Rust | `Cargo.toml` | `rust-analyzer scip` (fallback to `scip-rust`) | `rustup component add rust-analyzer` |
+| TypeScript | `package.json` | `scip-typescript` | `npm i -g @sourcegraph/scip-typescript` |
+| Python | `pyproject.toml` or `requirements.txt` | `scip-python` | `pip install scip-python` |
+| Go | `go.mod` | `scip-go` | `go install github.com/sourcegraph/scip-go/cmd/scip-go@latest` |
+| Java/Kotlin/Scala | `pom.xml`, `build.gradle`, or `build.gradle.kts` | `scip-java` | see [scip-java releases](https://github.com/sourcegraph/scip-java) -- requires `mvn compile` or `gradle build` first |
+| Ruby | `Gemfile` | `scip-ruby` | `gem install scip-ruby` |
+| C/C++ | `CMakeLists.txt` or `compile_commands.json` | `scip-clang` | [scip-clang releases](https://github.com/sourcegraph/scip-clang/releases) -- requires `compile_commands.json` (`cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` or `bear`) |
+| C# | any `*.csproj` or `*.sln` in repo root | `scip-dotnet` | `dotnet tool install -g sourcegraph.scip.dotnet` |
+| PHP | `composer.json` | `scip-php` | `composer global require sourcegraph/scip-php` |
 
 `legion watch add <repo>` triggers the same indexer in the background -- the operator gets a confirmation line with the log path so progress can be tailed without a hung foreground command.
 
