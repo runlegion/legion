@@ -216,12 +216,15 @@ legion index --status         # list current index inventory
 ### Query the index
 
 ```bash
-legion sym def Database         # definitions in this repo
-legion sym refs find_pending    # references (sorted by file/line)
-legion sym impl Iterator        # implementors of a trait (Rust only)
-legion sym hover Database       # signature + docstring
-legion consult --symbol Database  # cross-repo lookup
+legion sym def Database              # definitions in this repo
+legion sym refs find_pending         # references (sorted by file/line)
+legion sym impl Iterator             # implementors of a trait (Rust only)
+legion sym hover Database            # signature + docstring
+legion sym impact --repo legion --diff /path/to.diff   # impact radius from a diff
+legion consult --symbol Database     # cross-repo lookup
 ```
+
+`legion sym impact` parses a unified diff (file path or `-` for stdin), finds every symbol whose definition lives in a changed line range, and reports the SCIP reference count for each. Sorted by refs descending so wide-blast-radius diffs surface first. Pass `--json` for agent consumption. The `LEGION_IMPACT_HIGH_THRESHOLD` env var (default 50) controls the `HIGH` tag in text output. Reviewer agents (vault, smugglr) can call this against a PR diff to flag changes that touch heavily-referenced symbols.
 
 `legion consult --symbol` walks every `(repo, lang)` pair and reports `(repo, lang, def_location, refs_count)` per match. Used by the recall-first hook (#413) to inject cross-repo code intelligence before an agent spawns Explore on a question SCIP can already answer.
 
