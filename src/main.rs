@@ -440,20 +440,35 @@ enum Commands {
     /// PostToolUse re-index hook (#281) so edits keep the index fresh.
     /// `--repo` is optional in `--file` mode.
     Index {
-        /// Repo name (must be present in watch.toml). Optional when --file
-        /// or --status is supplied.
+        /// Repo name (must be present in watch.toml). Optional when --file,
+        /// --status, or --logs is supplied.
         repo: Option<String>,
         /// Re-index the repo containing this file path. Resolves the repo
         /// by ancestor match against watch.toml. The whole repo is still
         /// re-indexed; per-file granularity is a future refinement.
-        #[arg(long, conflicts_with = "status")]
+        #[arg(long, conflicts_with_all = ["status", "logs"])]
         file: Option<PathBuf>,
         /// Show the current SCIP index inventory: per-row `(repo, lang,
         /// blob_size, updated_at)` for everything in `scip_indexes`.
         /// Used by operators to confirm a background indexer (#284)
         /// finished after `legion watch add`.
-        #[arg(long, conflicts_with = "file")]
+        #[arg(long, conflicts_with_all = ["file", "logs"])]
         status: bool,
+        /// Print recent background-indexer log lines per repo. Reads the
+        /// XDG_STATE_HOME-rooted log directory (default
+        /// `~/.local/state/legion/index-logs/`). Use `--repo` to filter to
+        /// one repo, `--lines` to override the default 50-line tail, and
+        /// `--follow` to tail-follow new output.
+        #[arg(long, conflicts_with_all = ["file", "status"])]
+        logs: bool,
+        /// Tail-follow the log files when used with `--logs`. Polls every
+        /// 250ms; SIGINT (Ctrl-C) terminates.
+        #[arg(long, requires = "logs")]
+        follow: bool,
+        /// Number of trailing lines to print per log file when used with
+        /// `--logs` (default 50).
+        #[arg(long, requires = "logs", default_value_t = 50)]
+        lines: usize,
     },
 
     /// Query SCIP symbol indexes (def, refs, impl, hover).
@@ -2446,7 +2461,15 @@ fn spawn_background_indexer(repo_name: &str) {
             return;
         }
     };
-    let log_path = std::env::temp_dir().join(format!("legion-index-{repo_name}.log"));
+    // One-shot migration: on every spawn, sweep any leftover
+    // /tmp/legion-index-*.log files from the prior /tmp-rooted location into
+    // the new XDG_STATE_HOME directory. Idempotent so the next spawn is a
+    // no-op once the migration ran.
+    scip::migrate_legacy_index_logs();
+    let log_path = scip::index_log_path(repo_name);
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -2489,6 +2512,116 @@ fn spawn_background_indexer(repo_name: &str) {
     {
         Ok(_) => println!("{log_note}"),
         Err(e) => eprintln!("[legion] background indexer spawn failed: {e}"),
+    }
+}
+
+/// Print the tail of every per-repo background-indexer log, optionally
+/// filtered to one repo. With `follow = true`, tails new output as it
+/// arrives until SIGINT.
+fn run_index_logs(repo: Option<&str>, tail_lines: usize, follow: bool) -> error::Result<()> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    let initial = scip::read_index_logs(repo, tail_lines)?;
+    if initial.is_empty() {
+        let dir = scip::index_log_dir();
+        writeln!(
+            out,
+            "[legion] no index logs in {} -- run `legion watch add <repo>` or `legion index <repo>` to generate one",
+            dir.display()
+        )?;
+        return Ok(());
+    }
+    for (label, content) in &initial {
+        writeln!(out, "=== {label} ===")?;
+        writeln!(out, "{content}")?;
+        writeln!(out)?;
+    }
+    out.flush()?;
+    if !follow {
+        return Ok(());
+    }
+
+    // Track per-repo byte offsets so we only print new content on each
+    // poll. Initialized at current end-of-file so the first follow cycle
+    // emits only fresh writes (we already printed the initial tail above).
+    use std::collections::HashMap;
+    let mut offsets: HashMap<String, u64> = HashMap::new();
+    let dir = scip::index_log_dir();
+    if dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(&dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if let Some(filter) = repo
+                && stem != filter
+            {
+                continue;
+            }
+            if let Ok(meta) = std::fs::metadata(&path) {
+                offsets.insert(stem.to_string(), meta.len());
+            }
+        }
+    }
+
+    // SIGINT (Ctrl-C) terminates the process via the OS default handler;
+    // there is no per-iteration cleanup state to preserve, so the polling
+    // loop has no explicit signal handling.
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("log"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if let Some(filter) = repo
+                && stem != filter
+            {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            let last = offsets.get(stem).copied().unwrap_or(0);
+            let now = meta.len();
+            if now <= last {
+                continue;
+            }
+            // Read only the new bytes by seeking past `last`.
+            use std::io::{Read, Seek, SeekFrom};
+            let Ok(mut f) = std::fs::File::open(&path) else {
+                continue;
+            };
+            if f.seek(SeekFrom::Start(last)).is_err() {
+                continue;
+            }
+            let mut buf = String::new();
+            if f.read_to_string(&mut buf).is_err() {
+                continue;
+            }
+            if buf.is_empty() {
+                continue;
+            }
+            writeln!(out, "=== {stem} ===")?;
+            write!(out, "{buf}")?;
+            out.flush()?;
+            offsets.insert(stem.to_string(), now);
+        }
     }
 }
 
@@ -3159,8 +3292,21 @@ fn run() -> error::Result<()> {
                 }
             }
         }
-        Commands::Index { repo, file, status } => {
+        Commands::Index {
+            repo,
+            file,
+            status,
+            logs,
+            follow,
+            lines,
+        } => {
             let base = data_dir()?;
+
+            // --logs: print recent background-indexer log content and return.
+            if logs {
+                run_index_logs(repo.as_deref(), lines, follow)?;
+                return Ok(());
+            }
 
             // --status: dump scip_indexes inventory and return.
             if status {

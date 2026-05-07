@@ -13,7 +13,7 @@
 
 use crate::error::{LegionError, Result};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A stored SCIP index for one (repo, lang) pair.
@@ -345,11 +345,146 @@ fn run_indexer_binary(
     Ok(bytes)
 }
 
+/// Directory holding background-indexer log files. Rooted under
+/// `XDG_STATE_HOME` (default `~/.local/state/`) so logs survive a reboot --
+/// the previous `/tmp` location was wiped by the OS, which made debugging an
+/// overnight index that died at 3am impossible. The directory is created on
+/// demand by callers; this function only resolves the path.
+pub fn index_log_dir() -> PathBuf {
+    if let Ok(state) = std::env::var("XDG_STATE_HOME")
+        && !state.is_empty()
+    {
+        return PathBuf::from(state).join("legion").join("index-logs");
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home).join(".local/state/legion/index-logs");
+    }
+    // Stripped container or similar: neither XDG_STATE_HOME nor HOME is
+    // set. Fall back to the system temp dir so logging still works, but
+    // surface a warning -- this path will not survive a reboot, defeating
+    // the migration's purpose. Operators should set HOME or
+    // XDG_STATE_HOME explicitly in this environment.
+    let fallback = std::env::temp_dir().join("legion-index-logs");
+    eprintln!(
+        "[legion] WARNING: neither XDG_STATE_HOME nor HOME set; index logs at {} will not survive reboot",
+        fallback.display()
+    );
+    fallback
+}
+
+/// Log file path for a single repo's background indexer output. Caller
+/// must ensure the parent directory exists before opening for write.
+pub fn index_log_path(repo_name: &str) -> PathBuf {
+    index_log_dir().join(format!("{repo_name}.log"))
+}
+
+/// Move any leftover `legion-index-*.log` files from `legacy_temp_dir`
+/// into `new_dir`. Best-effort: per-file failures are silent (file may
+/// be in use, may not be ours, may have permissions we don't own).
+/// Idempotent -- safe to call repeatedly. Pure on its arguments so tests
+/// can exercise the migration without mutating process env.
+pub fn migrate_legacy_index_logs_in(new_dir: &Path, legacy_temp_dir: &Path) {
+    if std::fs::create_dir_all(new_dir).is_err() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(legacy_temp_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("legion-index-") || !name.ends_with(".log") {
+            continue;
+        }
+        let repo_name = name
+            .trim_start_matches("legion-index-")
+            .trim_end_matches(".log");
+        if repo_name.is_empty() {
+            continue;
+        }
+        let dest = new_dir.join(format!("{repo_name}.log"));
+        let _ = std::fs::rename(&path, &dest);
+    }
+}
+
+/// Production wrapper: migrate from `std::env::temp_dir()` into the
+/// XDG_STATE_HOME-rooted location. Called from `spawn_background_indexer`
+/// so the migration runs the first time any node touches the new code path.
+pub fn migrate_legacy_index_logs() {
+    let new_dir = index_log_dir();
+    let temp = std::env::temp_dir();
+    migrate_legacy_index_logs_in(&new_dir, &temp);
+}
+
+/// Read up to `tail_lines` lines from each per-repo log file under `dir`.
+/// When `repo_filter` is `Some`, returns only that repo's log; otherwise
+/// returns every file in the log directory in alphabetical order.
+///
+/// Each entry is `(repo_name, content)` where content is the last
+/// `tail_lines` lines joined by newlines. Missing log directory or no
+/// matching files yields an empty Vec, not an error -- callers print
+/// a friendly "no logs yet" message in that case.
+pub fn read_index_logs_in(
+    dir: &Path,
+    repo_filter: Option<&str>,
+    tail_lines: usize,
+) -> Result<Vec<(String, String)>> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let entries = std::fs::read_dir(dir).map_err(LegionError::Io)?;
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("log"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if let Some(filter) = repo_filter
+            && stem != filter
+        {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).map_err(LegionError::Io)?;
+        let tail: Vec<&str> = content.lines().rev().take(tail_lines).collect();
+        let joined = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+        out.push((stem.to_string(), joined));
+    }
+    Ok(out)
+}
+
+/// Production wrapper: read tails from the XDG_STATE_HOME-rooted
+/// directory. Used by the `legion index --logs` CLI handler.
+pub fn read_index_logs(
+    repo_filter: Option<&str>,
+    tail_lines: usize,
+) -> Result<Vec<(String, String)>> {
+    read_index_logs_in(&index_log_dir(), repo_filter, tail_lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    /// Serializes every test in this module that mutates `$PATH`. Cargo's
+    /// default parallel runner gives no env isolation, and three separate
+    /// PATH-mutating tests racing on Ubuntu CI consistently corrupted each
+    /// others' subprocess invocations even though every test individually
+    /// restored PATH at exit. Each PATH-touching test must lock this mutex
+    /// at entry and hold it through the final restore. See
+    /// `run_scip_rust_fallback_chain` for the canonical pattern.
+    static PATH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn content_hash_is_deterministic_and_distinct() {
@@ -478,6 +613,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_indexer_dispatches_each_language_to_its_helper() {
+        let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prior = std::env::var("PATH").unwrap_or_default();
         let (empty_dir, empty_path) = isolate_path_with_shims(&[]);
         let repo = TempDir::new().unwrap();
@@ -521,6 +657,57 @@ mod tests {
     }
 
     #[test]
+    fn migrate_legacy_index_logs_moves_tmp_files() {
+        let new_dir = TempDir::new().unwrap();
+        let legacy_dir = TempDir::new().unwrap();
+
+        let legacy = legacy_dir.path().join("legion-index-myrepo.log");
+        fs::write(&legacy, "old content\n").unwrap();
+        let unrelated = legacy_dir.path().join("other-tool.log");
+        fs::write(&unrelated, "leave me alone\n").unwrap();
+
+        let target = new_dir.path().join("index-logs");
+        migrate_legacy_index_logs_in(&target, legacy_dir.path());
+
+        let migrated = target.join("myrepo.log");
+        assert_eq!(std::fs::read_to_string(&migrated).unwrap(), "old content\n");
+        assert!(!legacy.exists(), "legacy file must be moved");
+        assert!(unrelated.exists(), "unrelated tmp file must be preserved");
+
+        // Idempotent: a second call with no legacy files left is a no-op.
+        migrate_legacy_index_logs_in(&target, legacy_dir.path());
+        assert_eq!(std::fs::read_to_string(&migrated).unwrap(), "old content\n");
+    }
+
+    #[test]
+    fn read_index_logs_returns_empty_when_dir_missing() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert!(read_index_logs_in(&missing, None, 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_index_logs_returns_tail_per_repo_with_filter() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("repoA.log"), "1\n2\n3\n4\n5\n").unwrap();
+        fs::write(dir.path().join("repoB.log"), "x\ny\n").unwrap();
+        // Files without .log extension are ignored.
+        fs::write(dir.path().join("README.md"), "skip me\n").unwrap();
+
+        let unfiltered = read_index_logs_in(dir.path(), None, 3).unwrap();
+        assert_eq!(unfiltered.len(), 2);
+        assert_eq!(unfiltered[0].0, "repoA");
+        assert_eq!(unfiltered[0].1, "3\n4\n5");
+        assert_eq!(unfiltered[1].0, "repoB");
+        assert_eq!(unfiltered[1].1, "x\ny");
+
+        let filtered = read_index_logs_in(dir.path(), Some("repoA"), 50).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, "repoA");
+        assert_eq!(filtered[0].1, "1\n2\n3\n4\n5");
+    }
+
+    #[test]
     fn run_indexer_unsupported_language_errors() {
         let dir = TempDir::new().unwrap();
         let err = run_indexer("klingon", dir.path()).unwrap_err();
@@ -539,6 +726,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn language_helpers_surface_install_hints_when_missing() {
+        let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prior = std::env::var("PATH").unwrap_or_default();
         let (empty_dir, empty_path) = isolate_path_with_shims(&[]);
         let repo = TempDir::new().unwrap();
@@ -639,6 +827,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_scip_rust_fallback_chain() {
+        let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prior = std::env::var("PATH").unwrap_or_default();
 
         // Phase 1: rust-analyzer shim available -> fallback succeeds.
