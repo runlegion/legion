@@ -7,7 +7,8 @@
 
 use crate::error::{LegionError, Result};
 use protobuf::Message;
-use scip::types::{Index, SymbolRole};
+use scip::symbol::parse_symbol as scip_parse_symbol;
+use scip::types::{Descriptor, Index, SymbolRole};
 use serde::Serialize;
 
 /// A resolved symbol location returned by def and refs queries.
@@ -51,13 +52,80 @@ fn is_definition(symbol_roles: i32) -> bool {
     (symbol_roles & SymbolRole::Definition as i32) != 0
 }
 
-/// Substring match against the SCIP symbol string. SCIP symbols look like
-/// `rust-analyzer cargo legion 0.9.10 src/sym.rs/SymbolLocation#`; the user
-/// typically supplies a short identifier, so substring is the pragmatic
-/// surface for v1. Future: descriptor-aware matching that respects
-/// `#`/`.`/`(` suffix semantics.
+/// Match a user query against a SCIP symbol string. Behavior depends on
+/// whether each side parses cleanly with `scip::symbol::parse_symbol`:
+///
+/// - Symbol parses + query has explicit suffix(es) -> descriptor path match.
+///   The query's descriptor sequence must appear as a contiguous run inside
+///   the symbol's descriptor path. `Foo#` matches `mod/Foo#new().`, but does
+///   not match `MyFoo#`. `Foo#bar().` matches `mod/Foo#bar().`. `mod/Foo#`
+///   matches only when both Namespace `mod` and Type `Foo` appear in order.
+///
+/// - Symbol parses + bare-name query -> exact-name match against any
+///   descriptor in the symbol. `Foo` matches `mod/Foo#` (descriptor name
+///   `Foo`) but not `MyFoo#` (descriptor name `MyFoo`). This is the
+///   precision win over substring -- bare queries no longer bleed into
+///   composite identifiers.
+///
+/// - Symbol fails to parse -> substring fallback against the raw symbol
+///   string. Defensive path for unusual indexer output. Preserves the v1
+///   behavior in worst-case scenarios but should be rare in practice.
 fn symbol_matches(scip_symbol: &str, query: &str) -> bool {
-    scip_symbol.contains(query)
+    if query.is_empty() {
+        return false;
+    }
+    let query_descs = parse_query_descriptors(query);
+    match scip_parse_symbol(scip_symbol) {
+        Ok(parsed) => match query_descs {
+            Some(qd) => descriptor_path_match(&parsed.descriptors, &qd),
+            None => parsed.descriptors.iter().any(|d| d.name == query),
+        },
+        Err(_) => scip_symbol.contains(query),
+    }
+}
+
+/// Parse the user's query string as if it were the descriptor portion of a
+/// SCIP symbol. Wraps the query with a synthetic `q . . . ` package prefix
+/// so `scip::symbol::parse_symbol` can do the heavy lifting -- it understands
+/// suffix escaping, package fields, and edge cases the issue spec calls out.
+///
+/// Returns `None` for bare names (no trailing suffix character) so the caller
+/// can route those through the exact-name / substring tiers instead.
+fn parse_query_descriptors(query: &str) -> Option<Vec<Descriptor>> {
+    if query.is_empty() || query.chars().any(|c| c.is_whitespace()) {
+        return None;
+    }
+    let synthetic = format!("q . . . {query}");
+    scip_parse_symbol(&synthetic).ok().and_then(|s| {
+        if s.descriptors.is_empty() {
+            None
+        } else {
+            Some(s.descriptors)
+        }
+    })
+}
+
+/// True when two descriptors agree on both name and SCIP suffix kind.
+fn descriptor_eq(q: &Descriptor, s: &Descriptor) -> bool {
+    q.name == s.name && q.suffix.enum_value_or_default() == s.suffix.enum_value_or_default()
+}
+
+/// Sliding-window match: true when `query_descs` appears as a contiguous
+/// subsequence inside `symbol_descs`. This anchors precision at the path
+/// level (Type `Foo` inside `mod/Foo#` matches a `Foo#` query) while still
+/// finding references whose surrounding context the user did not type out.
+fn descriptor_path_match(symbol_descs: &[Descriptor], query_descs: &[Descriptor]) -> bool {
+    if query_descs.is_empty() || query_descs.len() > symbol_descs.len() {
+        return false;
+    }
+    let qlen = query_descs.len();
+    let last_start = symbol_descs.len() - qlen;
+    (0..=last_start).any(|start| {
+        symbol_descs[start..start + qlen]
+            .iter()
+            .zip(query_descs.iter())
+            .all(|(s, q)| descriptor_eq(q, s))
+    })
 }
 
 fn sort_locations(locs: &mut [SymbolLocation]) {
@@ -247,6 +315,88 @@ mod tests {
         let mut idx = Index::new();
         idx.documents = documents;
         idx.write_to_bytes().unwrap()
+    }
+
+    #[test]
+    fn descriptor_query_with_type_suffix_matches_only_types() {
+        let scip_type = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        let scip_term = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo.";
+        assert!(symbol_matches(scip_type, "Foo#"));
+        assert!(!symbol_matches(scip_term, "Foo#"));
+    }
+
+    #[test]
+    fn descriptor_query_with_method_suffix_matches_only_methods() {
+        let scip_method = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#new().";
+        let scip_type = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        assert!(symbol_matches(scip_method, "new()."));
+        assert!(!symbol_matches(scip_type, "new()."));
+    }
+
+    #[test]
+    fn descriptor_path_query_anchors_to_type_then_method() {
+        let scip_method = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#bar().";
+        let scip_other = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Bar#bar().";
+        assert!(symbol_matches(scip_method, "Foo#bar()."));
+        assert!(!symbol_matches(scip_other, "Foo#bar()."));
+    }
+
+    #[test]
+    fn descriptor_query_with_namespace_prefix_filters_by_module() {
+        let scip_in_mod = "rust-analyzer cargo legion 0.9.10 mod/Foo#";
+        let scip_other_mod = "rust-analyzer cargo legion 0.9.10 other/Foo#";
+        assert!(symbol_matches(scip_in_mod, "mod/Foo#"));
+        assert!(!symbol_matches(scip_other_mod, "mod/Foo#"));
+    }
+
+    #[test]
+    fn bare_name_uses_exact_descriptor_name_match_not_substring() {
+        let scip_foo = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        let scip_my_foo = "rust-analyzer cargo legion 0.9.10 src/sym.rs/MyFoo#";
+        assert!(symbol_matches(scip_foo, "Foo"));
+        // Substring fallback would have matched MyFoo; precise name match does not.
+        assert!(!symbol_matches(scip_my_foo, "Foo"));
+    }
+
+    #[test]
+    fn bare_name_falls_back_to_substring_when_symbol_unparseable() {
+        // No leading scheme: scip parser rejects; we fall through to substring.
+        let unparseable = "totally not a scip symbol but contains FooBar somewhere";
+        assert!(symbol_matches(unparseable, "FooBar"));
+    }
+
+    #[test]
+    fn descriptor_query_with_unparseable_symbol_falls_back_to_substring() {
+        // Symbol fails scip parse; explicit-suffix query falls back to substring of
+        // the raw query string, which still contains the descriptor characters.
+        let unparseable = "garbage Foo# more garbage";
+        assert!(symbol_matches(unparseable, "Foo#"));
+    }
+
+    #[test]
+    fn empty_query_does_not_match_real_symbol() {
+        let scip = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        assert!(!symbol_matches(scip, ""));
+    }
+
+    #[test]
+    fn empty_query_does_not_match_unparseable_symbol() {
+        // Locks down the contract: empty query never matches, even via the
+        // substring fallback path which would otherwise return true (every
+        // string contains the empty string).
+        let unparseable = "garbage symbol string";
+        assert!(!symbol_matches(unparseable, ""));
+    }
+
+    #[test]
+    fn query_with_whitespace_rejects_descriptor_path_and_uses_substring() {
+        // Whitespace queries cannot be valid SCIP descriptors; the synthetic
+        // prefix would otherwise parse them in unexpected ways. We short-circuit
+        // descriptor parsing and route them through name/substring tiers.
+        let scip = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        assert!(!symbol_matches(scip, "Foo Bar"));
+        assert!(!symbol_matches(scip, " Foo"));
+        assert!(!symbol_matches(scip, "Foo "));
     }
 
     #[test]
