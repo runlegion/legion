@@ -2308,10 +2308,19 @@ fn run_sym_impact(
         return Ok(());
     }
 
+    // Cross-index dedup: a polyglot repo can have the same logical symbol
+    // appear in two language indexes. `diff_impact_radius` dedupes within
+    // one blob; this loop dedupes across blobs so the CLI never prints
+    // the same symbol twice.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut all_hits: Vec<sym::ImpactRadius> = Vec::new();
     for idx in &indexes {
         let hits = sym::diff_impact_radius(&idx.blob, &diff_text)?;
-        all_hits.extend(hits);
+        for hit in hits {
+            if seen.insert(hit.symbol.clone()) {
+                all_hits.push(hit);
+            }
+        }
     }
     all_hits.sort_by_key(|h| std::cmp::Reverse(h.refs_count));
 

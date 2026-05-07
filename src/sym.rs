@@ -282,10 +282,12 @@ pub fn parse_unified_diff(diff_text: &str) -> DiffRanges {
     for line in diff_text.lines() {
         if let Some(rest) = line.strip_prefix("+++ ") {
             // `+++ b/path/to/file.rs` -- strip the "b/" git convention.
-            // `/dev/null` (file deleted) leaves current_path None so the
-            // following hunks land nowhere.
-            let path = rest.trim();
-            if path == "/dev/null" {
+            // Plain `diff -u` appends a tab + mtime after the path, so
+            // split on the first whitespace before treating the rest as
+            // the filename. `/dev/null` (file deleted) leaves
+            // current_path None so the following hunks land nowhere.
+            let path = rest.split_whitespace().next().unwrap_or("").trim();
+            if path.is_empty() || path == "/dev/null" {
                 current_path = None;
                 continue;
             }
@@ -451,6 +453,78 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_query_with_type_suffix_matches_only_types() {
+        let scip_type = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        let scip_term = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo.";
+        assert!(symbol_matches(scip_type, "Foo#"));
+        assert!(!symbol_matches(scip_term, "Foo#"));
+    }
+
+    #[test]
+    fn descriptor_query_with_method_suffix_matches_only_methods() {
+        let scip_method = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#new().";
+        let scip_type = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        assert!(symbol_matches(scip_method, "new()."));
+        assert!(!symbol_matches(scip_type, "new()."));
+    }
+
+    #[test]
+    fn descriptor_path_query_anchors_to_type_then_method() {
+        let scip_method = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#bar().";
+        let scip_other = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Bar#bar().";
+        assert!(symbol_matches(scip_method, "Foo#bar()."));
+        assert!(!symbol_matches(scip_other, "Foo#bar()."));
+    }
+
+    #[test]
+    fn descriptor_query_with_namespace_prefix_filters_by_module() {
+        let scip_in_mod = "rust-analyzer cargo legion 0.9.10 mod/Foo#";
+        let scip_other_mod = "rust-analyzer cargo legion 0.9.10 other/Foo#";
+        assert!(symbol_matches(scip_in_mod, "mod/Foo#"));
+        assert!(!symbol_matches(scip_other_mod, "mod/Foo#"));
+    }
+
+    #[test]
+    fn bare_name_uses_exact_descriptor_name_match_not_substring() {
+        let scip_foo = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        let scip_my_foo = "rust-analyzer cargo legion 0.9.10 src/sym.rs/MyFoo#";
+        assert!(symbol_matches(scip_foo, "Foo"));
+        assert!(!symbol_matches(scip_my_foo, "Foo"));
+    }
+
+    #[test]
+    fn bare_name_falls_back_to_substring_when_symbol_unparseable() {
+        let unparseable = "totally not a scip symbol but contains FooBar somewhere";
+        assert!(symbol_matches(unparseable, "FooBar"));
+    }
+
+    #[test]
+    fn descriptor_query_with_unparseable_symbol_falls_back_to_substring() {
+        let unparseable = "garbage Foo# more garbage";
+        assert!(symbol_matches(unparseable, "Foo#"));
+    }
+
+    #[test]
+    fn empty_query_does_not_match_real_symbol() {
+        let scip = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        assert!(!symbol_matches(scip, ""));
+    }
+
+    #[test]
+    fn empty_query_does_not_match_unparseable_symbol() {
+        let unparseable = "garbage symbol string";
+        assert!(!symbol_matches(unparseable, ""));
+    }
+
+    #[test]
+    fn query_with_whitespace_rejects_descriptor_path_and_uses_substring() {
+        let scip = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        assert!(!symbol_matches(scip, "Foo Bar"));
+        assert!(!symbol_matches(scip, " Foo"));
+        assert!(!symbol_matches(scip, "Foo "));
+    }
+
+    #[test]
     fn parse_unified_diff_extracts_per_file_new_ranges() {
         let diff = "\
 diff --git a/src/foo.rs b/src/foo.rs
@@ -489,6 +563,23 @@ diff --git a/old.rs b/old.rs
 ";
         let ranges = parse_unified_diff(diff);
         assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn parse_unified_diff_strips_diff_u_timestamp_after_path() {
+        // Plain `diff -u` (not git) emits "+++ path\t<mtime>" rather than
+        // "+++ b/path". The path-extraction must not include the trailing
+        // tab + timestamp or it never matches a SCIP relative_path.
+        let diff = "\
+--- old/lib.rs\t2026-05-01 12:00:00.000000000 +0000
++++ new/lib.rs\t2026-05-07 09:00:00.000000000 +0000
+@@ -1,1 +1,1 @@
+-old
++new
+";
+        let ranges = parse_unified_diff(diff);
+        // `b/` strip is a no-op here; key is `new/lib.rs` not the timestamp.
+        assert_eq!(ranges.get("new/lib.rs").unwrap(), &vec![(1, 1)]);
     }
 
     #[test]
