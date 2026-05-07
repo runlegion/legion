@@ -48,6 +48,11 @@ pub fn content_hash(bytes: &[u8]) -> String {
 /// - `package.json` -> "typescript"
 /// - `pyproject.toml` or `requirements.txt` -> "python"
 /// - `go.mod` -> "go"
+/// - `pom.xml`, `build.gradle`, or `build.gradle.kts` -> "java"
+/// - `Gemfile` -> "ruby"
+/// - `CMakeLists.txt` or `compile_commands.json` -> "clang" (C/C++)
+/// - any `*.csproj` or `*.sln` in the repo root -> "csharp"
+/// - `composer.json` -> "php"
 ///
 /// A polyglot repo (e.g. Rust core + TS dashboard) returns multiple
 /// languages and the caller indexes each independently into its own
@@ -66,7 +71,49 @@ pub fn detect_languages(repo_path: &Path) -> Vec<&'static str> {
     if repo_path.join("go.mod").is_file() {
         langs.push("go");
     }
+    if repo_path.join("pom.xml").is_file()
+        || repo_path.join("build.gradle").is_file()
+        || repo_path.join("build.gradle.kts").is_file()
+    {
+        langs.push("java");
+    }
+    if repo_path.join("Gemfile").is_file() {
+        langs.push("ruby");
+    }
+    if repo_path.join("CMakeLists.txt").is_file()
+        || repo_path.join("compile_commands.json").is_file()
+    {
+        langs.push("clang");
+    }
+    if has_dotnet_project(repo_path) {
+        langs.push("csharp");
+    }
+    if repo_path.join("composer.json").is_file() {
+        langs.push("php");
+    }
     langs
+}
+
+/// True when the repo root contains any `*.csproj` or `*.sln` file. Unlike
+/// the other languages whose marker is a fixed filename, .NET projects
+/// pick arbitrary names for the project file -- the convention is the
+/// extension, not the basename. We scan the immediate root only; nested
+/// projects under subdirectories are out of scope for the v1 marker.
+fn has_dotnet_project(repo_path: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(repo_path) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("csproj") | Some("sln") => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Run the appropriate SCIP indexer for `lang` against `repo_path` and
@@ -82,6 +129,11 @@ pub fn run_indexer(lang: &str, repo_path: &Path) -> Result<Vec<u8>> {
         "typescript" => run_scip_typescript(repo_path),
         "python" => run_scip_python(repo_path),
         "go" => run_scip_go(repo_path),
+        "java" => run_scip_java(repo_path),
+        "ruby" => run_scip_ruby(repo_path),
+        "clang" => run_scip_clang(repo_path),
+        "csharp" => run_scip_dotnet(repo_path),
+        "php" => run_scip_php(repo_path),
         other => Err(LegionError::IndexerNotFound {
             lang: other.to_string(),
             binary: format!("scip-{other}"),
@@ -146,6 +198,93 @@ fn run_scip_python(repo_path: &Path) -> Result<Vec<u8>> {
         LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
             lang,
             binary: "scip-python (install: pip install scip-python)".to_string(),
+        },
+        other => other,
+    })
+}
+
+/// Invoke `scip-java index` against `repo_path`. Canonical Java/Kotlin/
+/// Scala indexer from sourcegraph (https://github.com/sourcegraph/scip-java).
+/// Requires the project to have been built first (`mvn compile` or
+/// `gradle build`) so target/build/ artifacts exist for scip-java to walk.
+/// Subprocess stderr surfaces that requirement when the build is absent.
+fn run_scip_java(repo_path: &Path) -> Result<Vec<u8>> {
+    run_indexer_binary("java", "scip-java", &["index"], repo_path).map_err(|e| match e {
+        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
+            lang,
+            binary: "scip-java (install: see https://github.com/sourcegraph/scip-java)".to_string(),
+        },
+        other => other,
+    })
+}
+
+/// Invoke `scip-ruby` against `repo_path`. Canonical Ruby indexer from
+/// sourcegraph (`gem install scip-ruby`). Writes the index to the path
+/// passed via `--index-file`.
+fn run_scip_ruby(repo_path: &Path) -> Result<Vec<u8>> {
+    run_indexer_binary(
+        "ruby",
+        "scip-ruby",
+        &["--index-file", "index.scip", "."],
+        repo_path,
+    )
+    .map_err(|e| match e {
+        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
+            lang,
+            binary: "scip-ruby (install: gem install scip-ruby)".to_string(),
+        },
+        other => other,
+    })
+}
+
+/// Invoke `scip-clang` against `repo_path`. Canonical C/C++ indexer from
+/// sourcegraph; distributed as a release binary, not a package manager
+/// install. Requires `compile_commands.json` -- generate via
+/// `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` or `bear -- make`.
+/// scip-clang's own stderr names the missing prereq when it can't find the
+/// compdb file, so we let that surface unmodified.
+fn run_scip_clang(repo_path: &Path) -> Result<Vec<u8>> {
+    run_indexer_binary(
+        "clang",
+        "scip-clang",
+        &["--compdb-path", "compile_commands.json"],
+        repo_path,
+    )
+    .map_err(|e| match e {
+        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
+            lang,
+            binary: "scip-clang (install: download release from https://github.com/sourcegraph/scip-clang/releases)"
+                .to_string(),
+        },
+        other => other,
+    })
+}
+
+/// Invoke `scip-dotnet index` against `repo_path`. Canonical .NET indexer
+/// from sourcegraph (`dotnet tool install -g sourcegraph.scip.dotnet`).
+/// scip-dotnet drives `dotnet build` internally; failure to find the
+/// .NET SDK surfaces in scip-dotnet's own stderr.
+fn run_scip_dotnet(repo_path: &Path) -> Result<Vec<u8>> {
+    run_indexer_binary("csharp", "scip-dotnet", &["index"], repo_path).map_err(|e| match e {
+        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
+            lang,
+            binary: "scip-dotnet (install: dotnet tool install -g sourcegraph.scip.dotnet)"
+                .to_string(),
+        },
+        other => other,
+    })
+}
+
+/// Invoke `scip-php` against `repo_path`. Sourcegraph PHP indexer
+/// (`composer global require sourcegraph/scip-php`). The least-canonical
+/// of the ecosystem indexers; if upstream is no longer maintained, the
+/// caller should close #430 with that observation rather than landing a
+/// half-working integration.
+fn run_scip_php(repo_path: &Path) -> Result<Vec<u8>> {
+    run_indexer_binary("php", "scip-php", &[], repo_path).map_err(|e| match e {
+        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
+            lang,
+            binary: "scip-php (install: composer global require sourcegraph/scip-php)".to_string(),
         },
         other => other,
     })
@@ -255,6 +394,66 @@ mod tests {
     }
 
     #[test]
+    fn detect_languages_java_for_each_build_marker() {
+        for marker in ["pom.xml", "build.gradle", "build.gradle.kts"] {
+            let dir = TempDir::new().unwrap();
+            fs::write(dir.path().join(marker), "").unwrap();
+            assert_eq!(
+                detect_languages(dir.path()),
+                vec!["java"],
+                "marker={marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_languages_ruby_for_gemfile() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("Gemfile"), "").unwrap();
+        assert_eq!(detect_languages(dir.path()), vec!["ruby"]);
+    }
+
+    #[test]
+    fn detect_languages_clang_for_either_marker() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("CMakeLists.txt"), "").unwrap();
+        assert_eq!(detect_languages(dir.path()), vec!["clang"]);
+
+        let dir2 = TempDir::new().unwrap();
+        fs::write(dir2.path().join("compile_commands.json"), "[]").unwrap();
+        assert_eq!(detect_languages(dir2.path()), vec!["clang"]);
+    }
+
+    #[test]
+    fn detect_languages_csharp_for_csproj_glob() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("MyApp.csproj"), "").unwrap();
+        assert_eq!(detect_languages(dir.path()), vec!["csharp"]);
+    }
+
+    #[test]
+    fn detect_languages_csharp_for_sln_glob() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("MyApp.sln"), "").unwrap();
+        assert_eq!(detect_languages(dir.path()), vec!["csharp"]);
+    }
+
+    #[test]
+    fn detect_languages_csharp_ignores_unrelated_extensions() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("notes.txt"), "").unwrap();
+        fs::write(dir.path().join("config.json"), "").unwrap();
+        assert!(detect_languages(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn detect_languages_php_for_composer_json() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("composer.json"), "{}").unwrap();
+        assert_eq!(detect_languages(dir.path()), vec!["php"]);
+    }
+
+    #[test]
     fn detect_languages_polyglot_returns_all() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
@@ -308,6 +507,36 @@ mod tests {
             ),
             ("python", run_scip_python(repo.path()), "scip-python", "pip"),
             ("go", run_scip_go(repo.path()), "scip-go", "go install"),
+            (
+                "java",
+                run_scip_java(repo.path()),
+                "scip-java",
+                "github.com/sourcegraph/scip-java",
+            ),
+            (
+                "ruby",
+                run_scip_ruby(repo.path()),
+                "scip-ruby",
+                "gem install",
+            ),
+            (
+                "clang",
+                run_scip_clang(repo.path()),
+                "scip-clang",
+                "github.com/sourcegraph/scip-clang/releases",
+            ),
+            (
+                "csharp",
+                run_scip_dotnet(repo.path()),
+                "scip-dotnet",
+                "dotnet tool install",
+            ),
+            (
+                "php",
+                run_scip_php(repo.path()),
+                "scip-php",
+                "composer global require",
+            ),
         ];
 
         unsafe {
