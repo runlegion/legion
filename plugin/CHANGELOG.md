@@ -1,5 +1,29 @@
 # Legion Changelog
 
+## 0.13.0
+
+SCIP precision and reach. Phase D of the SCIP completion plan -- the v0.10-0.12 chain shipped storage, dispatch, hooks, and consumption; this release sharpens the query layer and extends indexer coverage to every canonical sourcegraph language. Reviewer agents also gain an impact-radius signal sourced from the SCIP refs graph.
+
+### New
+
+- **Descriptor-aware symbol matching** (#431, closes #421): `legion sym def | refs | impl | hover` no longer falls through to substring match for queries with explicit SCIP descriptor suffixes. `Foo#` matches Type Foo anywhere in the descriptor path; `Foo#bar().` requires both descriptors in order; `mod/Foo#` anchors the namespace. Bare-name queries gain exact-name match against any descriptor (precision win over substring -- `Foo` no longer matches `MyFoo#` or `FooBar#`). Substring fallback only fires when the symbol string itself fails to parse (defensive path for unusual indexer output). Empty queries and whitespace queries short-circuit to false instead of leaking through `.contains("")` returning true.
+
+- **Five new ecosystem indexers** (#432, closes #426/#427/#428/#429/#430): `scip-java` (markers `pom.xml` / `build.gradle` / `build.gradle.kts`), `scip-ruby` (`Gemfile`), `scip-clang` for C/C++ (`CMakeLists.txt` or `compile_commands.json`), `scip-dotnet` for C# (any `*.csproj` / `*.sln` -- first language whose marker requires a glob scan, new `has_dotnet_project` helper), and `scip-php` (`composer.json`). Each helper mirrors the existing TypeScript/Python/Go shape: missing-binary errors carry an install hint, subprocess non-zero surfaces stderr, output validated against `index.scip` in the repo root. Ships `legion` with eight working indexers (counting Rust); zero runtime cost in repos that don't have the markers, warn-and-skip when the binary isn't installed.
+
+- **`legion sym impact --repo <R> --diff <path-or-stdin>`** (#435, closes #423): for every symbol whose definition the diff touches, reports the SCIP reference count across the repo's index. Sorted descending so wide-blast-radius diffs surface first. `--json` emits a stable shape for agent consumption. The `LEGION_IMPACT_HIGH_THRESHOLD` env var (default 50) controls the `HIGH` tag in text output. Reviewer agents (vault, smugglr) can call this against a PR diff to flag changes that touch heavily-referenced symbols. Diff parser handles git's `+++ b/path`, plain `diff -u`'s `+++ path<TAB>mtime`, `/dev/null` deletes, single-line hunks omitting `,count`, and per-blob plus cross-blob symbol dedup so polyglot repos never double-emit.
+
+- **`legion index --logs`** (#433, closes #424): surfaces background-indexer log content through the CLI instead of requiring users to know about the on-disk path. Filters: `--repo <name>` to scope to one repo, `--lines N` to override the default 50-line tail, `--follow` to tail-follow new output via 250ms polling. Migrates the log directory from `/tmp/legion-index-<repo>.log` (wiped on reboot) to `$XDG_STATE_HOME/legion/index-logs/<repo>.log` so logs survive long enough to debug an overnight indexer failure. `spawn_background_indexer` calls `migrate_legacy_index_logs()` on every spawn for one-shot idempotent migration. Stderr warning fires if neither `XDG_STATE_HOME` nor `HOME` is set (stripped-container edge case) so the silent regression to reboot-wipe behavior is loud.
+
+- **`legion index --status --banner` SessionStart injection** (#434, closes #425): renders a per-repo SCIP health line so agents see whether `legion sym` will succeed before they call it. Single-line confirmation when every detected language has a fresh index (`[Legion] Index status for legion: rust: fresh (2h ago)`); multi-line block when anything is stale (>7 days) or missing, naming each language and the command to refresh. Banner mode never errors -- a banner-mode failure prints `[Legion] Index status: unavailable` and returns Ok so SessionStart can never block on it. `plugin/hooks/session-start.sh` injects the banner between the snooze block and the kanban block.
+
+### Changed
+
+- PATH-mutating tests in `src/scip.rs` (`run_indexer_dispatches_each_language_to_its_helper`, `language_helpers_surface_install_hints_when_missing`, `run_scip_rust_fallback_chain`) now serialize via a static `Mutex<()>` in the test module. cargo's parallel runner gives no env isolation, and three concurrent PATH-mutating tests on Ubuntu CI consistently corrupted each others' subprocess invocations even though each restored PATH at exit. Linux scheduling exposed the race that macOS hid. Non-PATH tests still parallelize.
+
+### Pattern delivered
+
+**Precision over coverage.** v0.10-v0.12 prioritized "answer the question fast" with substring match and four-language coverage. v0.13.0 says: when the question is precise, the answer should be too. Descriptor-aware matching (`Foo#` no longer collides with `MyFoo`) plus impact-radius (`Foo` is fresh = nothing; `Foo` with refs=147 = HIGH) plus eight-language coverage means the SCIP layer answers correctly more often, which closes the loop on the cache_r reduction thesis from v0.12.
+
 ## 0.12.0
 
 SCIP consumption hooks. Phase C of the SCIP completion plan -- the cost-control payoff. Both surfaces are token-cheap legion CLI calls that prevent expensive tool calls. Ships standalone so the cache_r reduction is measurable in isolation: the 1B+ cache_r token explosion that prompted the SCIP completion push is the metric this release should move.
