@@ -1,33 +1,5 @@
 # Legion Changelog
 
-## 0.13.0
-
-SCIP completion plan complete. Phase D + E. Cross-repo symbol lookup, daemon background indexer on `legion watch add`, and the official position on SCIP-vs-LSP for agent code intelligence. Every issue from the master plan reflection 019daeb5 ships in this release.
-
-### New
-
-- **`legion consult --symbol <name>`** (#417, closes #285): walks every `(repo, lang)` pair in `scip_indexes`, finds matching definitions, counts references per match. Output: `<repo>/<lang>\t<file>:<line>:<col>\t(<n> ref(s))` per line, or JSON via `--json`. `--context` and `--symbol` are mutually exclusive; at least one is required at runtime. Consumed by `recall-first.sh`'s cheap chain (#413, shipped in v0.12.0) -- that hook silently absorbed `legion consult --symbol` failures before this release; now it returns real cross-repo data.
-- **Daemon background indexer on `legion watch add`** (#418, closes #284): when a new repo joins watch.toml, `spawn_background_indexer` kicks off `legion index <name>` as a detached subprocess. Both stdout and stderr go to `/tmp/legion-index-<name>.log`. The watch add itself is never blocked by indexer issues -- explicit failure logging at every step (current_exe, log open, try_clone, spawn) with no `unwrap()` and no silent failures. Operator gets a confirmation line with the log path.
-- **`legion index --status`** (#418, closes #284): lists every row in `scip_indexes` with bytes and `updated_at`. Empty DB exits 0 with the no-indexes info line. `--status` and `--file` are mutually exclusive.
-
-### Changed
-
-- **Cross-agent consultation flags** (#417): `--context` was required; now `--context` and `--symbol` are mutually exclusive optional flags with at-least-one-required runtime check. `--limit` applies to context mode only. `--json` formats the symbol mode output.
-
-### Docs
-
-- **Code intelligence section in getting-started.md** (#419, closes #286): documents `legion index` (full / `--file` / `--status`), `legion sym def|refs|impl|hover`, and `legion consult --symbol`. Adds an explicit "why SCIP, not an LSP plugin" subsection covering the agents-vs-humans distinction. Legion does not bundle or recommend rust-analyzer-lsp / typescript-lsp as Claude Code plugins -- for agent code intelligence, use `legion sym` and the SCIP path.
-
-### SCIP completion plan summary (v0.10.x → v0.13.0)
-
-- **v0.10.0**: SCIP query CLI (`legion sym`) shipped in passing as #282
-- **v0.10.1**: rust-analyzer fallback (#381) so most dev machines can populate the index
-- **v0.11.0**: Phases A + B -- multi-language dispatch (rust + typescript + python + go), `legion index --file`, PostToolUse re-index hook
-- **v0.12.0**: Phase C -- consumption hooks (pre-grep-scip + recall-first cheap-chain). The cost-control payoff
-- **v0.13.0**: Phases D + E -- cross-repo `consult --symbol`, daemon background indexer, code intelligence docs / LSP position
-
-The cache_r reduction thesis (cache_read = 98% of agent raw token burn, mostly grep + file reads on symbol questions) is now end-to-end addressed: SCIP indexes auto-populate on watch add and on every Edit, queries answer in microseconds via byte lookup + protobuf parse, and three PreToolUse hooks (pre-grep-recall, pre-grep-scip, recall-first) interdict the expensive paths before they fire.
-
 ## 0.12.0
 
 SCIP consumption hooks. Phase C of the SCIP completion plan -- the cost-control payoff. Both surfaces are token-cheap legion CLI calls that prevent expensive tool calls. Ships standalone so the cache_r reduction is measurable in isolation: the 1B+ cache_r token explosion that prompted the SCIP completion push is the metric this release should move.
