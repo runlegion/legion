@@ -471,6 +471,55 @@ mod tests {
         assert!(detect_languages(dir.path()).is_empty());
     }
 
+    /// Pin the dispatch table: each supported lang tag must route to a helper
+    /// whose missing-binary error names a binary specific to that language.
+    /// Prevents a future typo in `run_indexer`'s match arms (e.g. routing
+    /// "java" to scip-ruby) from going undetected.
+    #[cfg(unix)]
+    #[test]
+    fn run_indexer_dispatches_each_language_to_its_helper() {
+        let prior = std::env::var("PATH").unwrap_or_default();
+        let (empty_dir, empty_path) = isolate_path_with_shims(&[]);
+        let repo = TempDir::new().unwrap();
+        // Safety: see run_scip_rust_fallback_chain.
+        unsafe {
+            std::env::set_var("PATH", &empty_path);
+        }
+
+        let cases = [
+            ("typescript", "scip-typescript"),
+            ("python", "scip-python"),
+            ("go", "scip-go"),
+            ("java", "scip-java"),
+            ("ruby", "scip-ruby"),
+            ("clang", "scip-clang"),
+            ("csharp", "scip-dotnet"),
+            ("php", "scip-php"),
+        ];
+        let results: Vec<_> = cases
+            .iter()
+            .map(|(lang, _)| (*lang, run_indexer(lang, repo.path())))
+            .collect();
+
+        unsafe {
+            std::env::set_var("PATH", &prior);
+        }
+        drop(empty_dir);
+
+        for ((lang, result), (_, expected_binary)) in results.iter().zip(cases.iter()) {
+            match result.as_ref().unwrap_err() {
+                LegionError::IndexerNotFound { lang: l, binary } => {
+                    assert_eq!(l, lang, "lang field must echo the dispatched lang");
+                    assert!(
+                        binary.contains(expected_binary),
+                        "{lang} dispatched but error names wrong binary: {binary}"
+                    );
+                }
+                other => panic!("expected IndexerNotFound for {lang}, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn run_indexer_unsupported_language_errors() {
         let dir = TempDir::new().unwrap();
