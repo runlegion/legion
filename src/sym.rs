@@ -89,7 +89,7 @@ fn symbol_matches(scip_symbol: &str, query: &str) -> bool {
 /// Returns `None` for bare names (no trailing suffix character) so the caller
 /// can route those through the exact-name / substring tiers instead.
 fn parse_query_descriptors(query: &str) -> Option<Vec<Descriptor>> {
-    if query.is_empty() {
+    if query.is_empty() || query.chars().any(|c| c.is_whitespace()) {
         return None;
     }
     let synthetic = format!("q . . . {query}");
@@ -374,6 +374,17 @@ mod tests {
     fn empty_query_does_not_match_real_symbol() {
         let scip = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
         assert!(!symbol_matches(scip, ""));
+    }
+
+    #[test]
+    fn query_with_whitespace_rejects_descriptor_path_and_uses_substring() {
+        // Whitespace queries cannot be valid SCIP descriptors; the synthetic
+        // prefix would otherwise parse them in unexpected ways. We short-circuit
+        // descriptor parsing and route them through name/substring tiers.
+        let scip = "rust-analyzer cargo legion 0.9.10 src/sym.rs/Foo#";
+        assert!(!symbol_matches(scip, "Foo Bar"));
+        assert!(!symbol_matches(scip, " Foo"));
+        assert!(!symbol_matches(scip, "Foo "));
     }
 
     #[test]
