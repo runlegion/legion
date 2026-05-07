@@ -254,7 +254,7 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "{{not json").unwrap();
         writeln!(f, "{}", serde_json::to_string(&good).unwrap()).unwrap();
-        writeln!(f, "").unwrap();
+        writeln!(f).unwrap();
         drop(f);
         let rows = list_bypasses_from(&path, None, None).unwrap();
         assert_eq!(rows.len(), 1);
