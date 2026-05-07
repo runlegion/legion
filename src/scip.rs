@@ -474,7 +474,17 @@ pub fn read_index_logs(
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    /// Serializes every test in this module that mutates `$PATH`. Cargo's
+    /// default parallel runner gives no env isolation, and three separate
+    /// PATH-mutating tests racing on Ubuntu CI consistently corrupted each
+    /// others' subprocess invocations even though every test individually
+    /// restored PATH at exit. Each PATH-touching test must lock this mutex
+    /// at entry and hold it through the final restore. See
+    /// `run_scip_rust_fallback_chain` for the canonical pattern.
+    static PATH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn content_hash_is_deterministic_and_distinct() {
@@ -603,6 +613,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_indexer_dispatches_each_language_to_its_helper() {
+        let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prior = std::env::var("PATH").unwrap_or_default();
         let (empty_dir, empty_path) = isolate_path_with_shims(&[]);
         let repo = TempDir::new().unwrap();
@@ -715,6 +726,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn language_helpers_surface_install_hints_when_missing() {
+        let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prior = std::env::var("PATH").unwrap_or_default();
         let (empty_dir, empty_path) = isolate_path_with_shims(&[]);
         let repo = TempDir::new().unwrap();
@@ -815,6 +827,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_scip_rust_fallback_chain() {
+        let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prior = std::env::var("PATH").unwrap_or_default();
 
         // Phase 1: rust-analyzer shim available -> fallback succeeds.
