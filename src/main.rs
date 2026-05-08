@@ -1236,29 +1236,44 @@ enum KanbanAction {
         id: String,
     },
 
-    /// Reconcile kanban done/cancelled cards with their linked GitHub
-    /// issue state.
+    /// Reconcile kanban cards with their linked GitHub issue state.
     ///
-    /// Finds every card whose local state is `done` or `cancelled` but
-    /// whose linked GitHub issue is still `OPEN`, and reports the
-    /// mismatches. Used to backfill the stale-open drift that
-    /// accumulated before the `cancel`/`reopen` auto-propagation
-    /// shipped.
+    /// Detects two drift directions:
     ///
-    /// Default mode is read-only: the command scans and reports
-    /// without changing any GitHub state. Pass `--close-stale` to
-    /// actually close each mismatched issue via the work source
-    /// plugin with a canned reconciliation comment.
+    ///   1. **stale-open**: local state is `done` or `cancelled` but the
+    ///      linked GitHub issue is still `OPEN`. Pass `--close-stale` to
+    ///      close those issues via the work source plugin.
+    ///   2. **shipped-pending**: local state is `pending` (or any other
+    ///      active state) but the linked GitHub issue is `CLOSED` or
+    ///      `MERGED`. Pass `--cancel-shipped` to cancel those cards
+    ///      locally without touching GitHub (the issue is already closed).
+    ///
+    /// `--apply` is shorthand for both action flags.
+    ///
+    /// Default mode is read-only: the command scans and reports without
+    /// changing any state. Per-card failures are logged and counted but
+    /// do not abort the run.
     Reconcile {
         /// Optional repo filter -- only reconcile cards owned by this
         /// agent. Default is all cards across all repos.
         #[arg(long)]
         repo: Option<String>,
 
-        /// Actually close the stale GitHub issues. Without this flag,
-        /// the command is read-only and safe to run repeatedly.
+        /// Actually close the stale GitHub issues (direction 1).
+        /// Without any action flag, the command is read-only and safe
+        /// to run repeatedly.
         #[arg(long)]
         close_stale: bool,
+
+        /// Actually cancel the shipped-pending cards locally with
+        /// `--no-propagate` semantics (direction 2). The linked GitHub
+        /// issue is already closed, so propagating again is unnecessary.
+        #[arg(long)]
+        cancel_shipped: bool,
+
+        /// Convenience: apply both `--close-stale` and `--cancel-shipped`.
+        #[arg(long, conflicts_with_all = ["close_stale", "cancel_shipped"])]
+        apply: bool,
     },
 }
 
@@ -4210,22 +4225,33 @@ fn run() -> error::Result<()> {
                         outcome: "success",
                     });
                 }
-                KanbanAction::Reconcile { repo, close_stale } => {
-                    // Default mode is read-only. `--close-stale` is the
-                    // only flag that actually touches GitHub.
+                KanbanAction::Reconcile {
+                    repo,
+                    close_stale,
+                    cancel_shipped,
+                    apply,
+                } => {
+                    // `--apply` is shorthand for both action flags.
+                    let close_stale = close_stale || apply;
+                    let cancel_shipped = cancel_shipped || apply;
+
+                    // One pass over the board, partitioning by drift
+                    // direction. Each card with a `source_url` triggers
+                    // exactly one `view_issue` probe; the resulting state
+                    // determines which (if any) bucket it lands in.
                     let cards = kanban::board_cards(&database)?;
                     let mut stale: Vec<(kanban::Card, u64, String)> = Vec::new();
+                    let mut shipped_pending: Vec<(kanban::Card, u64, String)> = Vec::new();
 
                     for card in cards {
-                        // Only done/cancelled cards are candidates for
-                        // reconciliation. Active cards are expected to
-                        // have open issues.
-                        if !matches!(
+                        // Active vs. terminal: terminal cards (done /
+                        // cancelled) are direction-1 candidates;
+                        // anything else (pending, in-progress, blocked,
+                        // ...) is direction-2.
+                        let is_terminal = matches!(
                             card.status,
                             kanban::CardStatus::Done | kanban::CardStatus::Cancelled
-                        ) {
-                            continue;
-                        }
+                        );
 
                         if let Some(ref filter) = repo
                             && card.to_repo != *filter
@@ -4269,8 +4295,21 @@ fn run() -> error::Result<()> {
                             }
                         };
 
-                        if state == "OPEN" {
-                            stale.push((card.clone(), number, source_repo.clone()));
+                        // Direction 1: terminal-local + open-on-GH.
+                        // Direction 2: active-local + closed/merged-on-GH.
+                        // GitHub PR-merge events report state="CLOSED" with
+                        // a separate stateReason or pr metadata; treat
+                        // anything in the closed-family as "shipped" for
+                        // direction 2 purposes.
+                        let upper = state.to_uppercase();
+                        match (is_terminal, upper.as_str()) {
+                            (true, "OPEN") => {
+                                stale.push((card.clone(), number, source_repo.clone()));
+                            }
+                            (false, "CLOSED" | "MERGED") => {
+                                shipped_pending.push((card.clone(), number, source_repo.clone()));
+                            }
+                            _ => {}
                         }
                     }
 
@@ -4282,6 +4321,25 @@ fn run() -> error::Result<()> {
                             stale.len()
                         );
                         for (card, number, source_repo) in &stale {
+                            println!(
+                                "  card={} status={} source={}#{} to_repo={}",
+                                card.id,
+                                card.status.label(),
+                                source_repo,
+                                number,
+                                card.to_repo
+                            );
+                        }
+                    }
+
+                    if shipped_pending.is_empty() {
+                        println!("[legion] reconcile: no shipped-pending cards found");
+                    } else {
+                        println!(
+                            "[legion] reconcile: {} shipped-pending card(s) found",
+                            shipped_pending.len()
+                        );
+                        for (card, number, source_repo) in &shipped_pending {
                             println!(
                                 "  card={} status={} source={}#{} to_repo={}",
                                 card.id,
@@ -4376,6 +4434,96 @@ fn run() -> error::Result<()> {
                     } else if !stale.is_empty() {
                         println!(
                             "[legion] reconcile: dry-run -- pass --close-stale to actually close these issues"
+                        );
+                    }
+
+                    // Direction 2 action: cancel shipped-pending cards
+                    // locally with --no-propagate semantics. The linked
+                    // GitHub issue is already CLOSED/MERGED, so calling
+                    // worksource::close_issue would either no-op or
+                    // double-touch the audit log.
+                    if cancel_shipped && !shipped_pending.is_empty() {
+                        println!(
+                            "[legion] reconcile: cancelling {} shipped-pending card(s) locally",
+                            shipped_pending.len()
+                        );
+                        let mut cancelled = 0_u64;
+                        let mut failed = 0_u64;
+                        for (card, number, source_repo) in &shipped_pending {
+                            let note = format!(
+                                "reconcile: linked {}#{} already closed on GitHub",
+                                source_repo, number
+                            );
+                            match kanban::transition_card(
+                                &database,
+                                &card.id,
+                                kanban::Action::Cancel,
+                                Some(&note),
+                            ) {
+                                Ok(_) => {
+                                    cancelled += 1;
+                                    eprintln!(
+                                        "[legion] reconcile: cancelled card {} ({}#{})",
+                                        card.id, source_repo, number
+                                    );
+                                    let details = serde_json::json!({
+                                        "card_id": card.id,
+                                        "propagation": "reconcile-shipped",
+                                        "external_number": number,
+                                    });
+                                    let details_str = details.to_string();
+                                    audit(&db::AuditInput {
+                                        agent: &card.to_repo,
+                                        action: "cancel-card",
+                                        target_type: "card",
+                                        target_ref: &card.id,
+                                        task_id: Some(&card.id),
+                                        source_type: card
+                                            .source_type
+                                            .as_deref()
+                                            .unwrap_or("unknown"),
+                                        details: Some(&details_str),
+                                        outcome: "success",
+                                    });
+                                }
+                                Err(e) => {
+                                    failed += 1;
+                                    eprintln!(
+                                        "[legion] reconcile: failed to cancel card {}: {}",
+                                        card.id, e
+                                    );
+                                    let err_msg = e.to_string();
+                                    let details = serde_json::json!({
+                                        "card_id": card.id,
+                                        "propagation": "reconcile-shipped",
+                                        "error": err_msg,
+                                    });
+                                    let details_str = details.to_string();
+                                    audit(&db::AuditInput {
+                                        agent: &card.to_repo,
+                                        action: "cancel-card",
+                                        target_type: "card",
+                                        target_ref: &card.id,
+                                        task_id: Some(&card.id),
+                                        source_type: card
+                                            .source_type
+                                            .as_deref()
+                                            .unwrap_or("unknown"),
+                                        details: Some(&details_str),
+                                        outcome: "failure",
+                                    });
+                                }
+                            }
+                        }
+                        println!(
+                            "[legion] reconcile: {} cancelled, {} failed",
+                            cancelled, failed
+                        );
+                    } else if cancel_shipped {
+                        println!("[legion] reconcile: nothing to cancel");
+                    } else if !shipped_pending.is_empty() {
+                        println!(
+                            "[legion] reconcile: dry-run -- pass --cancel-shipped to actually cancel these cards"
                         );
                     }
                 }
