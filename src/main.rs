@@ -4450,6 +4450,13 @@ fn run() -> error::Result<()> {
                         let mut cancelled = 0_u64;
                         let mut failed = 0_u64;
                         for (card, number, source_repo) in &shipped_pending {
+                            // The partition above only enqueued cards
+                            // whose source_type was Some; defensively
+                            // re-check to avoid a misleading audit row
+                            // if a future refactor moves the guard.
+                            let Some(source_type) = card.source_type.as_deref() else {
+                                continue;
+                            };
                             let note = format!(
                                 "reconcile: linked {}#{} already closed on GitHub",
                                 source_repo, number
@@ -4478,10 +4485,7 @@ fn run() -> error::Result<()> {
                                         target_type: "card",
                                         target_ref: &card.id,
                                         task_id: Some(&card.id),
-                                        source_type: card
-                                            .source_type
-                                            .as_deref()
-                                            .unwrap_or("unknown"),
+                                        source_type,
                                         details: Some(&details_str),
                                         outcome: "success",
                                     });
@@ -4505,10 +4509,7 @@ fn run() -> error::Result<()> {
                                         target_type: "card",
                                         target_ref: &card.id,
                                         task_id: Some(&card.id),
-                                        source_type: card
-                                            .source_type
-                                            .as_deref()
-                                            .unwrap_or("unknown"),
+                                        source_type,
                                         details: Some(&details_str),
                                         outcome: "failure",
                                     });
