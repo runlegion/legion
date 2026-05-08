@@ -5075,3 +5075,162 @@ fn index_status_and_file_mutually_exclusive() {
         "index --status --file should fail at parse time"
     );
 }
+
+#[test]
+fn index_status_json_empty_db_returns_empty_array() {
+    // #437: --json output is the contract `_legion-indexed.sh` (and
+    // downstream #438/#439 hooks) read with `jq -e 'any(.[]; .repo == $r)'`.
+    // The empty case must be a valid JSON array, not "null", not empty
+    // stdout, not a wrapped object. Otherwise jq errors and every probe
+    // silently degrades to "not indexed", disabling block-state.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["index", "--status", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "index --status --json should succeed on empty DB: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON array, got '{stdout}': {e}"));
+    let arr = parsed
+        .as_array()
+        .unwrap_or_else(|| panic!("expected top-level array, got: {parsed}"));
+    assert!(
+        arr.is_empty(),
+        "expected empty array on empty DB, got: {parsed}"
+    );
+}
+
+#[test]
+fn index_status_json_conflicts_with_banner() {
+    // --json and --banner are mutually exclusive: banner is human-readable,
+    // json is machine-readable. Combining them makes no sense and must fail
+    // at parse time so an operator who tries the wrong combo gets a clear
+    // error instead of unexpected output.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["index", "--status", "--json", "--banner", "anything"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "index --status --json --banner should fail at parse time"
+    );
+}
+
+#[test]
+fn telemetry_record_and_list_roundtrip() {
+    // #437: end-to-end CLI round-trip. Hooks (#438/#439) shell out with
+    // long-form flags; if clap arg names or bool-flag semantics drift, the
+    // hooks break silently. This pins the surface.
+    let data_dir = tempfile::tempdir().unwrap();
+    let xdg_state = tempfile::tempdir().unwrap();
+
+    let output = legion_cmd(data_dir.path())
+        .env("XDG_STATE_HOME", xdg_state.path())
+        .args([
+            "telemetry",
+            "record-bypass",
+            "--repo",
+            "legion",
+            "--session-id",
+            "sess-int",
+            "--tool",
+            "Bash",
+            "--pattern",
+            "fn main",
+            "--bypass-reason",
+            "integration test",
+            "--had-sym-hits",
+            "--agent",
+            "legion-prime",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "record-bypass failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = legion_cmd(data_dir.path())
+        .env("XDG_STATE_HOME", xdg_state.path())
+        .args(["telemetry", "list-bypasses", "--since", "1h"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "list-bypasses failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON array, got '{stdout}': {e}"));
+    let arr = rows
+        .as_array()
+        .unwrap_or_else(|| panic!("expected array, got: {rows}"));
+    assert_eq!(arr.len(), 1, "expected one bypass row, got: {rows}");
+    let row = &arr[0];
+    assert_eq!(row["repo"], "legion");
+    assert_eq!(row["tool"], "Bash");
+    assert_eq!(row["pattern"], "fn main");
+    assert_eq!(row["had_sym_hits"], true);
+    assert_eq!(row["had_recall_hits"], false);
+    assert_eq!(row["agent"], "legion-prime");
+}
+
+#[test]
+fn telemetry_list_filters_by_repo_and_since() {
+    // Combined --since AND --repo filter: each is unit-tested alone in
+    // src/telemetry.rs, but the CLI dispatch path that threads both into
+    // list_bypasses is only exercised here.
+    let data_dir = tempfile::tempdir().unwrap();
+    let xdg_state = tempfile::tempdir().unwrap();
+
+    for repo in ["legion", "smugglr", "legion"] {
+        let out = legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", xdg_state.path())
+            .args([
+                "telemetry",
+                "record-bypass",
+                "--repo",
+                repo,
+                "--session-id",
+                "sess",
+                "--tool",
+                "Bash",
+                "--pattern",
+                "x",
+                "--bypass-reason",
+                "test",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    let output = legion_cmd(data_dir.path())
+        .env("XDG_STATE_HOME", xdg_state.path())
+        .args([
+            "telemetry",
+            "list-bypasses",
+            "--since",
+            "1h",
+            "--repo",
+            "legion",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let arr = rows.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "expected 2 legion rows, got: {rows}");
+    for row in arr {
+        assert_eq!(row["repo"], "legion");
+    }
+}
