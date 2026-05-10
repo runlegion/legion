@@ -72,7 +72,17 @@ append_block() {
   fi
 }
 
-# 1. Identity -- who am I. Front and center, banner-wrapped by the binary.
+# 0. Now -- weekday + local time + sunphase. One line, lands first so an
+# agent reads "today is Sunday afternoon" before identity primes voice.
+# claude-code's own systemPrompt ships `currentDate` but no weekday and
+# no hour, so agents pattern-match on conversation density and start
+# saying "tonight" or "wind down" when the operator has the rest of the
+# workday ahead. See #410.
+NOW=$("$LEGION" now --banner 2>>"$LOG")
+legion_check $? "now"
+append_block "$NOW"
+
+# 1. Identity -- who am I. Banner-wrapped by the binary.
 IDENTITY=$("$LEGION" whoami --repo "$REPO" --limit 5 2>>"$LOG")
 legion_check $? "whoami"
 append_block "$IDENTITY"
