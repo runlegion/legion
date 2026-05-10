@@ -5241,6 +5241,99 @@ fn kanban_reconcile_dry_run_on_empty_db_is_quiet_success() {
 }
 
 #[test]
+fn telemetry_summary_rolls_up_groups() {
+    // #440: summary groups by (tool, repo, pattern), sorts by count desc.
+    // Seed three rows for one (Bash, legion, fn_main) group + one row for a
+    // different (Read, legion, src/main.rs) group; assert top row is the
+    // first group with count=3.
+    let data_dir = tempfile::tempdir().unwrap();
+    let xdg_state = tempfile::tempdir().unwrap();
+
+    for _ in 0..3 {
+        let out = legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", xdg_state.path())
+            .args([
+                "telemetry",
+                "record-bypass",
+                "--repo",
+                "legion",
+                "--session-id",
+                "s",
+                "--tool",
+                "Bash",
+                "--pattern",
+                "fn_main",
+                "--bypass-reason",
+                "test",
+                "--had-sym-hits",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+    let out = legion_cmd(data_dir.path())
+        .env("XDG_STATE_HOME", xdg_state.path())
+        .args([
+            "telemetry",
+            "record-bypass",
+            "--repo",
+            "legion",
+            "--session-id",
+            "s",
+            "--tool",
+            "Read",
+            "--pattern",
+            "src/main.rs",
+            "--bypass-reason",
+            "test",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = legion_cmd(data_dir.path())
+        .env("XDG_STATE_HOME", xdg_state.path())
+        .args(["telemetry", "summary", "--since", "1h", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "summary failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let rows: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let arr = rows.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "two groups expected, got: {rows}");
+    assert_eq!(arr[0]["tool"], "Bash");
+    assert_eq!(arr[0]["count"], 3);
+    assert!((arr[0]["had_sym_hits_pct"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    assert_eq!(arr[1]["tool"], "Read");
+    assert_eq!(arr[1]["count"], 1);
+}
+
+#[test]
+fn telemetry_summary_empty_input_prints_no_bypasses_line() {
+    // Human-readable output on empty bypass log emits a clear no-data
+    // line so an operator running this on a fresh node sees the empty
+    // state rather than nothing.
+    let data_dir = tempfile::tempdir().unwrap();
+    let xdg_state = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(data_dir.path())
+        .env("XDG_STATE_HOME", xdg_state.path())
+        .args(["telemetry", "summary"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("no bypasses recorded"),
+        "expected no-bypasses line on empty log, got: {stdout}"
+    );
+}
+
+#[test]
 fn telemetry_list_filters_by_repo_and_since() {
     // Combined --since AND --repo filter: each is unit-tested alone in
     // src/telemetry.rs, but the CLI dispatch path that threads both into
