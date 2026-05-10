@@ -74,7 +74,7 @@ impl NowSnapshot {
     }
 
     /// One-line banner suitable for SessionStart additionalContext.
-    /// Format: `[Legion] Now: Sunday 2026-05-10, 14:32 PT (afternoon)`.
+    /// Format: `[Legion] Now: Sun 2026-05-10, 14:32 PT (afternoon)`.
     /// Timezone is omitted when chrono returns an empty `%Z` (some systems
     /// where `%Z` resolves to nothing rather than a name) so the line stays
     /// well-formed.
