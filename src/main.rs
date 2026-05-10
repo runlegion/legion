@@ -517,6 +517,20 @@ enum Commands {
     /// Compute embeddings for all reflections that are missing them
     Backfill,
 
+    /// Probe a fresh MCP subprocess for notifier health (#391). Spawns
+    /// `legion mcp` over stdio, sends `initialize` + `legion/notifier_health`
+    /// JSON-RPC requests, prints the health JSON. This spins up a NEW MCP
+    /// -- it does NOT probe the MCP attached to a running Claude Code
+    /// session (that one is owned by the parent CC process and is not
+    /// externally addressable). Use as a contract smoke test.
+    McpHealth {
+        /// Wait this many seconds for the notifier to tick at least once
+        /// before sampling its health. Default 3 (>= one full poll interval
+        /// at the default 1500ms tick rate).
+        #[arg(long, default_value_t = 3)]
+        wait: u64,
+    },
+
     /// Print the current local time, weekday, and sunphase (#410).
     ///
     /// Used by SessionStart to inject a one-line framing block so agents
@@ -3814,6 +3828,64 @@ fn run() -> error::Result<()> {
             let model = embed::EmbedModel::load()?;
             let count = backfill_embeddings(&database, &model)?;
             info!("[legion] embedded {} reflections", count);
+        }
+        Commands::McpHealth { wait } => {
+            // Spawn `legion mcp` as a subprocess. Send `initialize`, wait
+            // for the notifier to tick at least once, then send
+            // `legion/notifier_health`. Print the result JSON. Exit
+            // non-zero only on hard transport failure (binary missing,
+            // stdio closed); a `stale` or `unknown` health verdict is
+            // still a successful PROBE and prints to stdout for the
+            // operator to interpret.
+            let exe = std::env::current_exe()
+                .map_err(|e| error::LegionError::Server(format!("current_exe: {e}")))?;
+            let mut child = std::process::Command::new(exe)
+                .arg("mcp")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| error::LegionError::Server(format!("spawn legion mcp: {e}")))?;
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| error::LegionError::Server("mcp stdin missing".into()))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| error::LegionError::Server("mcp stdout missing".into()))?;
+            let mut reader = std::io::BufReader::new(stdout);
+
+            use std::io::{BufRead, Write};
+            let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"legion-mcp-health","version":"0"}}}"#;
+            writeln!(stdin, "{init}").ok();
+            // Drain the init response so subsequent reads land on the
+            // health response.
+            let mut buf = String::new();
+            reader.read_line(&mut buf).ok();
+
+            // Give the notifier time to tick at least once.
+            std::thread::sleep(std::time::Duration::from_secs(wait));
+
+            let health_req = r#"{"jsonrpc":"2.0","id":2,"method":"legion/notifier_health"}"#;
+            writeln!(stdin, "{health_req}").ok();
+            buf.clear();
+            reader
+                .read_line(&mut buf)
+                .map_err(|e| error::LegionError::Server(format!("read mcp response: {e}")))?;
+
+            let _ = child.kill();
+            let _ = child.wait();
+
+            // Parse and pretty-print the result field; fall back to raw
+            // line on parse failure so the operator sees the actual bytes.
+            match serde_json::from_str::<serde_json::Value>(buf.trim()) {
+                Ok(v) => {
+                    let result = v.get("result").cloned().unwrap_or(v);
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                Err(_) => print!("{buf}"),
+            }
         }
         Commands::Now { banner: _, json } => {
             // The default and `--banner` output are the same one-line

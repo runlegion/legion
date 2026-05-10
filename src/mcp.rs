@@ -9,6 +9,7 @@
 /// No Content-Length headers. Each message is a single JSON line.
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{Value, json};
@@ -483,6 +484,7 @@ pub fn dispatch(
     version: &str,
     tx: &broadcast::Sender<ChannelEvent>,
     client_repo_cell: Option<&Arc<OnceLock<String>>>,
+    heartbeat: Option<&Arc<NotifierHeartbeat>>,
 ) -> Option<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str());
@@ -553,6 +555,25 @@ pub fn dispatch(
         // MCP subprocess if we return an error or fail to respond, which
         // silently breaks channel delivery mid-session. See anthropics/claude-code#54544.
         "ping" => Some(success_response(&id, json!({}))),
+
+        // Legion-specific extension (#391): report the notifier thread's
+        // health so an external diagnostic can tell whether channel push is
+        // alive without round-tripping a real post. Returns `unknown` when
+        // the heartbeat Arc was not provided (test / unit-dispatch path).
+        "legion/notifier_health" => {
+            let health = match heartbeat {
+                Some(hb) => classify_notifier_health(
+                    chrono::Utc::now().timestamp(),
+                    hb,
+                    mcp_poll_interval(),
+                ),
+                None => NotifierHealth::Unknown,
+            };
+            Some(success_response(
+                &id,
+                serde_json::to_value(&health).unwrap_or(json!({"state": "unknown"})),
+            ))
+        }
 
         "tools/list" => Some(success_response(
             &id,
@@ -873,10 +894,91 @@ fn seed_notifier_cursor(db: &Database, client_repo: Option<&str>) -> Result<(Str
 /// continues -- the notifier is a best-effort push channel, not a strict
 /// delivery guarantee. The `last_seen_at` cursor advances only when a poll
 /// succeeds, so a transient failure does not lose events on recovery.
+/// Heartbeat sentinel for the notifier thread (#391). The notifier loop
+/// updates `last_poll_unix_secs` at the top of every iteration, regardless
+/// of whether new posts were emitted -- "still polling" is what the
+/// diagnostic needs, not "still emitting." `0` means "no tick yet"
+/// (initial state before the loop runs).
+///
+/// Why atomic, not Mutex<Instant>: this value is written from one thread
+/// (the notifier) and read from another (the dispatch handler for
+/// `legion/notifier_health`). An `AtomicI64` is lock-free and avoids any
+/// chance of the dispatch path blocking on a poisoned mutex held by a
+/// dying notifier -- which is exactly the failure mode this issue fixes.
+#[derive(Debug, Default)]
+pub struct NotifierHeartbeat {
+    last_poll_unix_secs: AtomicI64,
+}
+
+impl NotifierHeartbeat {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn touch(&self) {
+        let now = chrono::Utc::now().timestamp();
+        self.last_poll_unix_secs.store(now, Ordering::Relaxed);
+    }
+
+    fn last_poll(&self) -> i64 {
+        self.last_poll_unix_secs.load(Ordering::Relaxed)
+    }
+}
+
+/// Notifier liveness check result. Surfaced verbatim through the
+/// `legion/notifier_health` JSON-RPC method. The `state` field is the load-
+/// bearing summary; the numeric fields let an operator (or smarter watchdog)
+/// reason about how stale "stale" actually is.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum NotifierHealth {
+    /// Notifier has not yet ticked. Either the thread is still starting,
+    /// or it died before the first poll (rare but possible -- DB open
+    /// failure exits the thread before the loop is reached).
+    Unknown,
+    Alive {
+        last_tick_secs_ago: i64,
+    },
+    Stale {
+        last_tick_secs_ago: i64,
+        threshold_secs: i64,
+    },
+}
+
+/// Compute the current health by comparing the heartbeat against the
+/// configured poll interval. Threshold is 3x the poll interval -- one
+/// missed tick is fine under load, three in a row means the thread is
+/// gone. Pure-function over `(now, last_poll, poll_interval)` so the
+/// boundary behavior is unit-testable without a running notifier.
+pub fn classify_notifier_health(
+    now_unix_secs: i64,
+    hb: &NotifierHeartbeat,
+    poll_interval: std::time::Duration,
+) -> NotifierHealth {
+    let last = hb.last_poll();
+    if last == 0 {
+        return NotifierHealth::Unknown;
+    }
+    let last_tick_secs_ago = (now_unix_secs - last).max(0);
+    // Round up so a poll interval of 1500ms gives a 4-5s threshold (3x =
+    // 4.5s rounds to 5), keeping the stale-detection bias on the side of
+    // surfacing rather than hiding a slow notifier.
+    let threshold_secs = poll_interval.as_secs_f64() as i64 * 3 + 1;
+    if last_tick_secs_ago > threshold_secs {
+        NotifierHealth::Stale {
+            last_tick_secs_ago,
+            threshold_secs,
+        }
+    } else {
+        NotifierHealth::Alive { last_tick_secs_ago }
+    }
+}
+
 fn run_notifier_loop(
     data_dir: PathBuf,
     out: Arc<Mutex<std::io::BufWriter<std::io::Stdout>>>,
     client_repo_cell: Arc<OnceLock<String>>,
+    heartbeat: Arc<NotifierHeartbeat>,
 ) {
     let db = match Database::open(&data_dir.join("legion.db")) {
         Ok(db) => db,
@@ -932,6 +1034,11 @@ fn run_notifier_loop(
 
     loop {
         std::thread::sleep(poll_interval);
+
+        // Heartbeat for #391: mark the tick BEFORE any work so a stuck
+        // DB query or stdout write does not silently freeze the
+        // diagnostic in a stale state.
+        heartbeat.touch();
 
         let new_posts =
             match db.get_board_posts_since(&last_seen_at, &last_seen_id, NOTIFIER_BATCH_LIMIT) {
@@ -1206,13 +1313,23 @@ pub fn run_stdio_loop(
         mcp_trace("mcp.client_repo.resolved", &[("source", "unresolved")]);
     }
 
+    // Notifier heartbeat (#391): shared between the notifier thread (writer)
+    // and the dispatch handler for `legion/notifier_health` (reader).
+    let heartbeat: Arc<NotifierHeartbeat> = Arc::new(NotifierHeartbeat::new());
+
     // Spawn the notification emitter thread before entering the blocking read loop.
     let notif_out = Arc::clone(&out);
     let notif_data_dir = data_dir.clone();
     let notif_client_repo = Arc::clone(&client_repo_cell);
+    let notif_heartbeat = Arc::clone(&heartbeat);
 
     std::thread::spawn(move || {
-        run_notifier_loop(notif_data_dir, notif_out, notif_client_repo);
+        run_notifier_loop(
+            notif_data_dir,
+            notif_out,
+            notif_client_repo,
+            notif_heartbeat,
+        );
     });
 
     let stdin = std::io::stdin();
@@ -1268,9 +1385,14 @@ pub fn run_stdio_loop(
             }
         };
 
-        if let Some(response) =
-            dispatch(&request, &data_dir, &version, &tx, Some(&client_repo_cell))
-        {
+        if let Some(response) = dispatch(
+            &request,
+            &data_dir,
+            &version,
+            &tx,
+            Some(&client_repo_cell),
+            Some(&heartbeat),
+        ) {
             match serde_json::to_string(&response) {
                 Ok(s) => {
                     if let Ok(mut locked) = out.lock() {
@@ -1295,6 +1417,101 @@ mod tests {
     fn make_tx() -> broadcast::Sender<ChannelEvent> {
         let (tx, _rx) = broadcast::channel(16);
         tx
+    }
+
+    #[test]
+    fn notifier_health_unknown_before_first_tick() {
+        let hb = NotifierHeartbeat::new();
+        let health = classify_notifier_health(1000, &hb, std::time::Duration::from_secs(1));
+        assert!(matches!(health, NotifierHealth::Unknown));
+    }
+
+    #[test]
+    fn notifier_health_alive_within_threshold() {
+        let hb = NotifierHeartbeat::new();
+        hb.last_poll_unix_secs.store(1000, Ordering::Relaxed);
+        // 2s since last tick, threshold = 3*1 + 1 = 4s -> Alive.
+        let health = classify_notifier_health(1002, &hb, std::time::Duration::from_secs(1));
+        match health {
+            NotifierHealth::Alive { last_tick_secs_ago } => {
+                assert_eq!(last_tick_secs_ago, 2);
+            }
+            other => panic!("expected Alive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notifier_health_stale_past_threshold() {
+        let hb = NotifierHeartbeat::new();
+        hb.last_poll_unix_secs.store(1000, Ordering::Relaxed);
+        // 10s since last tick, threshold = 3*1 + 1 = 4s -> Stale.
+        let health = classify_notifier_health(1010, &hb, std::time::Duration::from_secs(1));
+        match health {
+            NotifierHealth::Stale {
+                last_tick_secs_ago,
+                threshold_secs,
+            } => {
+                assert_eq!(last_tick_secs_ago, 10);
+                assert_eq!(threshold_secs, 4);
+            }
+            other => panic!("expected Stale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notifier_health_clamps_negative_skew_to_zero() {
+        // Clock jumped backwards (NTP correction). last_tick_secs_ago must
+        // not underflow; report 0 and let the watchdog re-evaluate next call.
+        let hb = NotifierHeartbeat::new();
+        hb.last_poll_unix_secs.store(1010, Ordering::Relaxed);
+        let health = classify_notifier_health(1000, &hb, std::time::Duration::from_secs(1));
+        match health {
+            NotifierHealth::Alive { last_tick_secs_ago } => {
+                assert_eq!(last_tick_secs_ago, 0);
+            }
+            other => panic!("expected Alive (clamped), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notifier_health_touch_updates_timestamp() {
+        let hb = NotifierHeartbeat::new();
+        assert_eq!(hb.last_poll(), 0);
+        hb.touch();
+        let after = hb.last_poll();
+        assert!(after > 0);
+        // touch is monotonic via wall clock; two consecutive calls within
+        // the same second can produce the same value, so we don't assert
+        // strict-greater here.
+    }
+
+    #[test]
+    fn dispatch_notifier_health_returns_unknown_without_heartbeat() {
+        // #391: when the heartbeat is not threaded in (unit-test path), the
+        // method must still respond with a well-formed JSON-RPC success
+        // result so callers can't crash on shape drift.
+        let dir = tempfile::tempdir().expect("data dir");
+        let tx = make_tx();
+        let req = make_request("legion/notifier_health", None);
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let result = resp.get("result").expect("result field");
+        assert_eq!(
+            result.get("state").and_then(|v| v.as_str()),
+            Some("unknown")
+        );
+    }
+
+    #[test]
+    fn dispatch_notifier_health_returns_alive_with_fresh_heartbeat() {
+        let dir = tempfile::tempdir().expect("data dir");
+        let tx = make_tx();
+        let hb = Arc::new(NotifierHeartbeat::new());
+        hb.touch();
+        let req = make_request("legion/notifier_health", None);
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, Some(&hb)).expect("response");
+        let result = resp.get("result").expect("result field");
+        assert_eq!(result.get("state").and_then(|v| v.as_str()), Some("alive"));
+        assert!(result.get("last_tick_secs_ago").is_some());
     }
 
     #[test]
@@ -1512,7 +1729,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
 
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], 1);
@@ -1528,7 +1745,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let req = make_request("tools/list", None);
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
 
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), 4);
@@ -1571,7 +1788,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
 
         // Should succeed
         assert!(
@@ -1609,7 +1826,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
         assert!(
             resp.get("error").is_none(),
             "unexpected error: {:?}",
@@ -1641,7 +1858,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
         assert!(
             resp.get("error").is_none(),
             "unexpected error: {:?}",
@@ -1669,7 +1886,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
         // Per MCP spec: tool errors go in the success envelope with isError:true,
         // NOT as a JSON-RPC error response.
         assert!(
@@ -1693,7 +1910,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let req = make_request("ping", None);
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], 1);
         assert!(resp.get("error").is_none(), "ping must not return an error");
@@ -1706,7 +1923,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         for _ in 0..100 {
             let req = make_request("ping", None);
-            let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+            let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
             assert!(resp.get("error").is_none());
             assert_eq!(resp["result"], json!({}));
         }
@@ -1718,7 +1935,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let req = make_request("some/unknown/method", None);
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
         assert!(resp.get("error").is_some());
         assert_eq!(resp["error"]["code"], -32601);
     }
@@ -1733,7 +1950,7 @@ mod tests {
             "method": "notifications/initialized"
         });
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None);
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None);
         assert!(resp.is_none(), "notifications should return None");
     }
 
@@ -1753,7 +1970,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
         // Per MCP spec: McpInvalidArgument is a tool error, not a protocol error.
         // Must be in the success envelope with isError:true.
         assert!(
@@ -1791,7 +2008,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
         assert!(
             resp.get("error").is_none(),
             "McpInvalidArgument must not produce a JSON-RPC error envelope"
@@ -1845,7 +2062,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
 
         let instructions = resp["result"]["instructions"].as_str().unwrap_or("");
         assert!(
