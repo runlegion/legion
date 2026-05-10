@@ -9,6 +9,11 @@ node_modules/
 # Runtime artifacts written by bin/legion wrapper or setup-binary.sh
 plugin/.legion-binary-path
 
+# rust-analyzer scip drops its raw protobuf at the repo root after
+# `legion index`. We persist it in the DB; the on-disk file is a
+# transient artifact, not source.
+/index.scip
+
 # Agent worktrees created by the Task tool's worktree isolation mode.
 # These contain .git references back to the parent and must never be
 # committed -- a stray gitlink mode 160000 entry will break checkout@v5

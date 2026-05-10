@@ -5184,6 +5184,63 @@ fn telemetry_record_and_list_roundtrip() {
 }
 
 #[test]
+fn kanban_reconcile_apply_conflicts_with_close_stale() {
+    // #444: --apply is sugar for both action flags; combining it with
+    // either explicit flag is a parse error so the operator gets a
+    // clear "pick one" message instead of double-applying.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["kanban", "reconcile", "--apply", "--close-stale"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "--apply --close-stale should fail at parse time"
+    );
+}
+
+#[test]
+fn kanban_reconcile_apply_conflicts_with_cancel_shipped() {
+    // #444: see kanban_reconcile_apply_conflicts_with_close_stale.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["kanban", "reconcile", "--apply", "--cancel-shipped"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "--apply --cancel-shipped should fail at parse time"
+    );
+}
+
+#[test]
+fn kanban_reconcile_dry_run_on_empty_db_is_quiet_success() {
+    // #444: read-only mode on an empty DB exits 0 and emits both the
+    // stale-open and shipped-pending empty-state lines so an operator
+    // running this on a fresh node sees the empty-state report
+    // explicitly rather than wondering whether the command did anything.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["kanban", "reconcile"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "reconcile dry-run should succeed on empty DB: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("no stale-open issues found"),
+        "expected stale-open empty-state line, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("no shipped-pending cards found"),
+        "expected shipped-pending empty-state line, got: {stdout}"
+    );
+}
+
+#[test]
 fn telemetry_list_filters_by_repo_and_since() {
     // Combined --since AND --repo filter: each is unit-tested alone in
     // src/telemetry.rs, but the CLI dispatch path that threads both into
