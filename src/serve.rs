@@ -77,6 +77,7 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/schedules/create", post(api_create_schedule))
             .route("/api/schedules/{id}/toggle", post(api_toggle_schedule))
             .route("/api/kanban", get(api_kanban))
+            .route("/api/telemetry/bypasses", get(api_telemetry_bypasses))
             .route("/api/kanban/{id}/move", post(api_kanban_move))
             .route("/api/kanban/workloads", get(api_kanban_workloads))
             .route("/{*path}", get(static_handler))
@@ -1262,6 +1263,46 @@ async fn api_kanban_workloads(State(state): State<AppState>) -> Response {
         ),
     }
 }
+
+/// Query parameters for GET /api/telemetry/bypasses.
+#[derive(serde::Deserialize)]
+struct TelemetryQuery {
+    /// Duration string (e.g. `24h`, `7d`); rows older than this are dropped.
+    since: Option<String>,
+    /// Restrict to a single repo.
+    repo: Option<String>,
+    /// Top N rows by count. Default 20; 0 means all.
+    top: Option<usize>,
+}
+
+/// GET /api/telemetry/bypasses -- summary of bypass volume by
+/// (tool, repo, pattern). Feeds the dashboard surface and the
+/// uncertainty engine consumer (#354). Reads bypass.jsonl directly;
+/// the file is append-only, so even if the legion DB is unavailable
+/// this endpoint still works.
+async fn api_telemetry_bypasses(Query(params): Query<TelemetryQuery>) -> Response {
+    let since_dur = match params.since.as_deref() {
+        Some(s) => match crate::telemetry::parse_duration(s) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                return json_error(StatusCode::BAD_REQUEST, &format!("invalid since: {e}"));
+            }
+        },
+        None => None,
+    };
+    let rows = match crate::telemetry::list_bypasses(since_dur, params.repo.as_deref()) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("read bypass log: {e}"),
+            );
+        }
+    };
+    let summary = crate::telemetry::summarize(&rows, params.top.unwrap_or(20));
+    Json(summary).into_response()
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()

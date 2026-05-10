@@ -12,6 +12,7 @@ mod init;
 mod kanban;
 mod mcp;
 mod mesh;
+mod now;
 mod pr_view;
 mod recall;
 mod reflect;
@@ -516,6 +517,23 @@ enum Commands {
     /// Compute embeddings for all reflections that are missing them
     Backfill,
 
+    /// Print the current local time, weekday, and sunphase (#410).
+    ///
+    /// Used by SessionStart to inject a one-line framing block so agents
+    /// stop pattern-matching "tonight" / "wind down" when the operator
+    /// has the rest of the workday ahead. Day-of-week is included
+    /// because date alone does not tell an agent it's Sunday vs Monday.
+    Now {
+        /// Emit the SessionStart-friendly one-line banner. Default
+        /// without --json or --banner is the human-readable banner;
+        /// --json emits a structured snapshot for other consumers.
+        #[arg(long)]
+        banner: bool,
+        /// Emit a JSON snapshot {date, weekday, time, timezone, sunphase}.
+        #[arg(long, conflicts_with = "banner")]
+        json: bool,
+    },
+
     /// Bypass telemetry: log when an agent escapes a grep/Read enforcement
     /// hook (#438/#439), and read the log back. Append-only JSONL at
     /// `${XDG_STATE_HOME:-~/.local/state}/legion/bypass.jsonl`. Feeds the
@@ -885,6 +903,24 @@ enum TelemetryAction {
         /// Restrict to a single repo
         #[arg(long)]
         repo: Option<String>,
+    },
+
+    /// Summarize bypass volume by `(tool, repo, pattern)`. Top under-served
+    /// query shapes surface first. Feeds the dashboard surface in #440 and
+    /// the uncertainty engine in #354.
+    Summary {
+        /// Drop rows older than this duration before summarizing.
+        #[arg(long)]
+        since: Option<String>,
+        /// Restrict to a single repo
+        #[arg(long)]
+        repo: Option<String>,
+        /// Top N rows by count (default 20, 0 means all).
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -3779,6 +3815,17 @@ fn run() -> error::Result<()> {
             let count = backfill_embeddings(&database, &model)?;
             info!("[legion] embedded {} reflections", count);
         }
+        Commands::Now { banner: _, json } => {
+            // The default and `--banner` output are the same one-line
+            // string; `banner` is accepted for explicitness in scripts
+            // (matches `legion index --status --banner`'s convention).
+            let snap = now::NowSnapshot::from_local(chrono::Local::now());
+            if json {
+                println!("{}", serde_json::to_string(&snap)?);
+            } else {
+                println!("{}", snap.banner());
+            }
+        }
         Commands::Init { force } => {
             init::init(force)?;
         }
@@ -3847,6 +3894,54 @@ fn run() -> error::Result<()> {
                 };
                 let rows = telemetry::list_bypasses(since_dur, repo.as_deref())?;
                 println!("{}", serde_json::to_string(&rows)?);
+            }
+            TelemetryAction::Summary {
+                since,
+                repo,
+                top,
+                json,
+            } => {
+                let since_dur = match since {
+                    Some(s) => Some(telemetry::parse_duration(&s)?),
+                    None => None,
+                };
+                let rows = telemetry::list_bypasses(since_dur, repo.as_deref())?;
+                let summary = telemetry::summarize(&rows, top);
+                if json {
+                    println!("{}", serde_json::to_string(&summary)?);
+                } else if summary.is_empty() {
+                    println!("[legion] no bypasses recorded in scope");
+                } else {
+                    use std::io::Write;
+                    let stdout = std::io::stdout();
+                    let mut out = stdout.lock();
+                    writeln!(
+                        out,
+                        "{:<6} {:<14} {:<32} {:<6} {:<8} {:<8}",
+                        "tool", "repo", "pattern", "count", "sym%", "recall%"
+                    )?;
+                    for row in &summary {
+                        // chars().take is char-boundary-safe; row.pattern
+                        // may contain multi-byte unicode (file paths,
+                        // quoted strings) where byte slicing would panic.
+                        let pattern = if row.pattern.chars().count() > 32 {
+                            let head: String = row.pattern.chars().take(29).collect();
+                            format!("{head}...")
+                        } else {
+                            row.pattern.clone()
+                        };
+                        writeln!(
+                            out,
+                            "{:<6} {:<14} {:<32} {:<6} {:<8.1} {:<8.1}",
+                            row.tool,
+                            row.repo,
+                            pattern,
+                            row.count,
+                            row.had_sym_hits_pct * 100.0,
+                            row.had_recall_hits_pct * 100.0,
+                        )?;
+                    }
+                }
             }
         },
         Commands::Serve { port } => {
