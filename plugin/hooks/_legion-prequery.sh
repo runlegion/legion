@@ -68,12 +68,14 @@ legion_prequery_extract_pattern() {
   head="${head%%;*}"
   head="${head%%&&*}"
 
-  # Tokenize naively on whitespace. Caveat: this does not honor quoted
-  # strings with embedded spaces -- a pattern like `grep "foo bar" .` will
-  # extract just `"foo` (and the symbol-shape filter will reject it, which
-  # is fine; the inject path tolerates a miss).
-  # shellcheck disable=SC2206
-  local toks=( $head )
+  # Tokenize on whitespace via `read -ra` so glob characters in the
+  # command (`grep -r foo *.rs`) do NOT expand against the hook's CWD.
+  # Caveat: quoted strings with embedded spaces are not honored -- a
+  # pattern like `grep "foo bar" .` extracts just `"foo` (and the
+  # symbol-shape filter rejects it, which is the right outcome; the
+  # inject path tolerates a miss).
+  local toks=()
+  IFS=' ' read -ra toks <<< "$head"
 
   # Skip the binary token itself.
   local i=1
