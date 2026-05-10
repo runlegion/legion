@@ -127,10 +127,17 @@ fn extract_checklist(text: &str) -> Vec<String> {
 }
 
 /// Truncate a string to at most `max` characters, appending "..." if truncated.
-/// Safe for multi-byte UTF-8.
+/// Safe for multi-byte UTF-8. When `max < 3`, returns the leading `max`
+/// characters with no ellipsis -- there isn't room to keep both content and
+/// the marker, and the previous `max - 3` underflowed on `usize`. Callers
+/// asking for a preview shorter than the ellipsis are getting a hard
+/// truncation by design (#346).
 pub fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
+    }
+    if max < 3 {
+        return s.chars().take(max).collect();
     }
     let end: String = s.chars().take(max - 3).collect();
     format!("{end}...")
@@ -166,6 +173,38 @@ pub fn card_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_chars_handles_max_less_than_ellipsis() {
+        // #346: max < 3 used to underflow usize and panic. Now returns the
+        // leading max characters as a hard truncation -- no ellipsis room.
+        assert_eq!(truncate_chars("hello world", 0), "");
+        assert_eq!(truncate_chars("hello world", 1), "h");
+        assert_eq!(truncate_chars("hello world", 2), "he");
+        assert_eq!(truncate_chars("hello world", 3), "...");
+        assert_eq!(truncate_chars("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn truncate_chars_passes_through_short_strings() {
+        // No truncation when string fits.
+        assert_eq!(truncate_chars("", 0), "");
+        assert_eq!(truncate_chars("hi", 5), "hi");
+        assert_eq!(truncate_chars("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_is_unicode_safe() {
+        // Multi-byte codepoints don't trip the truncation. Each emoji is
+        // a single char, multiple bytes. With max=5 on a 6-char string,
+        // takes (5-3=2) chars + ellipsis: "<emoji> ..."
+        assert_eq!(truncate_chars("\u{1F4A1} idea", 5), "\u{1F4A1} ...");
+        // max < 3 hard-truncates: 4 emojis, max=2 -> first 2 emojis.
+        assert_eq!(
+            truncate_chars("\u{1F4A1}\u{1F4A1}\u{1F4A1}\u{1F4A1}", 2),
+            "\u{1F4A1}\u{1F4A1}"
+        );
+    }
 
     #[test]
     fn parse_template_issue() {
