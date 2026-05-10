@@ -39,6 +39,11 @@ rm -f "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
 # Warm the Tantivy index in the background
 ("$LEGION" recall --repo "$REPO" --context warmup --limit 1 >/dev/null 2>&1 &)
 
+# Dashboard daemon supervisor (#321): probe /health, (re)spawn as needed.
+# Backgrounded with stdin closed so SessionStart latency does not include
+# the curl probe or the legion serve spawn handshake.
+(bash "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-daemon-supervisor.sh" >/dev/null 2>&1 < /dev/null &)
+
 # Sync GitHub issues into kanban (5-second timeout, opt-out via LEGION_NO_SYNC=1)
 if [ "${LEGION_NO_SYNC:-}" != "1" ]; then
   if command -v gtimeout >/dev/null 2>&1; then

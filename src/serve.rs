@@ -46,6 +46,59 @@ fn json_error(status: StatusCode, message: &str) -> Response {
     (status, Json(body)).into_response()
 }
 
+/// Resolve the daemon pidfile path. Lives under XDG_STATE_HOME (same root
+/// as bypass.jsonl and index-logs/) so the daemon supervisor (#321)
+/// running from a SessionStart hook can find it without per-host config.
+pub fn daemon_pid_path() -> PathBuf {
+    if let Ok(state) = std::env::var("XDG_STATE_HOME")
+        && !state.is_empty()
+    {
+        return PathBuf::from(state).join("legion").join("daemon.pid");
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home).join(".local/state/legion/daemon.pid");
+    }
+    std::env::temp_dir().join("legion-daemon.pid")
+}
+
+/// Write `pid` to a specific path, creating parent dirs as needed. The
+/// path-injectable form is the test seam; the env-resolving caller is
+/// `write_daemon_pidfile` below.
+fn write_daemon_pidfile_at(path: &Path, pid: u32) {
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "[legion] WARNING: failed to create pidfile dir {}: {e}",
+            parent.display()
+        );
+        return;
+    }
+    if let Err(e) = std::fs::write(path, pid.to_string()) {
+        eprintln!(
+            "[legion] WARNING: failed to write pidfile {}: {e}",
+            path.display()
+        );
+    }
+}
+
+/// Write `pid` to the resolved daemon pidfile. Best-effort: a write
+/// failure is logged but the server still starts -- a missing pidfile
+/// means the supervisor falls back to "no pidfile -> probe /health
+/// instead," the same path it takes on a cold-boot fresh install.
+fn write_daemon_pidfile(pid: u32) {
+    write_daemon_pidfile_at(&daemon_pid_path(), pid);
+}
+
+/// Best-effort pidfile removal at shutdown. Quietly tolerates a missing
+/// file -- the daemon may have been started without write permissions to
+/// the XDG dir, or the file may have been cleaned up out-of-band.
+fn remove_daemon_pidfile() {
+    let _ = std::fs::remove_file(daemon_pid_path());
+}
+
 pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| error::LegionError::Server(format!("failed to create runtime: {e}")))?;
@@ -97,10 +150,19 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
 
         eprintln!("[legion] dashboard at http://localhost:{port}");
 
-        axum::serve(listener, app)
+        // Write the pidfile only after the port bind succeeded -- a
+        // bind-failure path that wrote the pidfile would leave a stale
+        // PID that the supervisor's "is this process alive" probe would
+        // then have to disambiguate.
+        write_daemon_pidfile(std::process::id());
+
+        let serve_result = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
             .await
-            .map_err(|e| error::LegionError::Server(format!("server error: {e}")))?;
+            .map_err(|e| error::LegionError::Server(format!("server error: {e}")));
+
+        remove_daemon_pidfile();
+        serve_result?;
 
         Ok(())
     })
@@ -1379,6 +1441,39 @@ mod tests {
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(body["started_at"], "2026-05-10T12:00:00+00:00");
         assert_eq!(body["uptime_secs"], 90);
+    }
+
+    #[test]
+    fn daemon_pid_path_honors_xdg_state_home() {
+        // SAFETY: test mutates process env. Other tests in this module
+        // do not read XDG_STATE_HOME, so isolation by `cargo test`
+        // default parallelism is fine.
+        let saved = std::env::var("XDG_STATE_HOME").ok();
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", "/tmp/legion-xdg-test");
+        }
+        let p = daemon_pid_path();
+        assert_eq!(p, PathBuf::from("/tmp/legion-xdg-test/legion/daemon.pid"));
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn pidfile_write_at_roundtrip() {
+        // Path-injectable form -- no env mutation, safe under parallel
+        // test execution.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested/legion/daemon.pid");
+        write_daemon_pidfile_at(&path, 12345);
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "12345");
+        // Idempotent overwrite.
+        write_daemon_pidfile_at(&path, 67890);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "67890");
     }
 
     #[test]
