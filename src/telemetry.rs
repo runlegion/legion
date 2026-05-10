@@ -134,6 +134,65 @@ fn list_bypasses_from(
     Ok(out)
 }
 
+/// One row of `legion telemetry summary` output. Aggregates bypass
+/// volume by `(tool, repo, pattern)` so an operator (and the uncertainty
+/// engine consumer in #354) can see where sym/recall is under-serving.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BypassSummaryRow {
+    pub tool: String,
+    pub repo: String,
+    pub pattern: String,
+    pub count: usize,
+    /// Fraction (0.0..=1.0) of bypasses where sym had hits the agent
+    /// ignored. High value -> agent escapes despite a good answer; the
+    /// reason list is the right place to look for the why.
+    pub had_sym_hits_pct: f64,
+    pub had_recall_hits_pct: f64,
+    pub last_bypass_ts: DateTime<Utc>,
+    /// Deduped list of bypass_reason strings observed for this group.
+    pub bypass_reasons: Vec<String>,
+}
+
+/// Group bypass rows by (tool, repo, pattern), sort by count desc, take
+/// the top `n`. Used by both the CLI summary and the HTTP endpoint.
+pub fn summarize(rows: &[BypassRecord], top: usize) -> Vec<BypassSummaryRow> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<(String, String, String), Vec<&BypassRecord>> = BTreeMap::new();
+    for r in rows {
+        groups
+            .entry((r.tool.clone(), r.repo.clone(), r.pattern.clone()))
+            .or_default()
+            .push(r);
+    }
+    let mut out: Vec<BypassSummaryRow> = groups
+        .into_iter()
+        .map(|((tool, repo, pattern), rs)| {
+            let count = rs.len();
+            let sym_hits = rs.iter().filter(|r| r.had_sym_hits).count();
+            let recall_hits = rs.iter().filter(|r| r.had_recall_hits).count();
+            let last = rs.iter().map(|r| r.ts).max().unwrap_or_else(Utc::now);
+            let mut reasons: Vec<String> = rs.iter().map(|r| r.bypass_reason.clone()).collect();
+            reasons.sort();
+            reasons.dedup();
+            BypassSummaryRow {
+                tool,
+                repo,
+                pattern,
+                count,
+                had_sym_hits_pct: sym_hits as f64 / count as f64,
+                had_recall_hits_pct: recall_hits as f64 / count as f64,
+                last_bypass_ts: last,
+                bypass_reasons: reasons,
+            }
+        })
+        .collect();
+    out.sort_by_key(|r| std::cmp::Reverse(r.count));
+    if top > 0 && out.len() > top {
+        out.truncate(top);
+    }
+    out
+}
+
 /// Parse a duration string like `24h`, `7d`, `30m`, `90s`. Used by
 /// `--since` on `list-bypasses`.
 pub fn parse_duration(s: &str) -> Result<Duration> {
@@ -258,6 +317,86 @@ mod tests {
         drop(f);
         let rows = list_bypasses_from(&path, None, None).unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn summarize_groups_by_tool_repo_pattern() {
+        let now = Utc::now();
+        let rows = vec![
+            sample("legion", now),
+            sample("legion", now - Duration::minutes(5)),
+            sample("smugglr", now - Duration::minutes(10)),
+        ];
+        let out = summarize(&rows, 0);
+        assert_eq!(
+            out.len(),
+            2,
+            "two groups (legion, smugglr) since pattern + tool match"
+        );
+        // Ordering: legion has count=2, smugglr count=1.
+        assert_eq!(out[0].repo, "legion");
+        assert_eq!(out[0].count, 2);
+        assert_eq!(out[1].repo, "smugglr");
+        assert_eq!(out[1].count, 1);
+    }
+
+    #[test]
+    fn summarize_top_truncates() {
+        let now = Utc::now();
+        let mut rows = Vec::new();
+        for i in 0..5 {
+            let mut r = sample("legion", now);
+            r.pattern = format!("pat-{i}");
+            // Repeat each pattern 5-i times so counts are 5,4,3,2,1
+            for _ in 0..(5 - i) {
+                rows.push(r.clone());
+            }
+        }
+        let out = summarize(&rows, 3);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].count, 5);
+        assert_eq!(out[1].count, 4);
+        assert_eq!(out[2].count, 3);
+    }
+
+    #[test]
+    fn summarize_pcts_and_reasons() {
+        let now = Utc::now();
+        let mut a = sample("legion", now);
+        a.bypass_reason = "env:LEGION_BYPASS_GREP=1".to_string();
+        a.had_sym_hits = true;
+        a.had_recall_hits = false;
+        let mut b = sample("legion", now);
+        b.bypass_reason = "searching literal".to_string();
+        b.had_sym_hits = false;
+        b.had_recall_hits = false;
+        let mut c = sample("legion", now);
+        c.bypass_reason = "env:LEGION_BYPASS_GREP=1".to_string();
+        c.had_sym_hits = true;
+        c.had_recall_hits = true;
+        let out = summarize(&[a, b, c], 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].count, 3);
+        assert!((out[0].had_sym_hits_pct - 2.0 / 3.0).abs() < 1e-9);
+        assert!((out[0].had_recall_hits_pct - 1.0 / 3.0).abs() < 1e-9);
+        // Reasons deduped.
+        assert_eq!(out[0].bypass_reasons.len(), 2);
+        assert!(
+            out[0]
+                .bypass_reasons
+                .contains(&"env:LEGION_BYPASS_GREP=1".to_string())
+        );
+        assert!(
+            out[0]
+                .bypass_reasons
+                .contains(&"searching literal".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_empty_input_is_empty_output() {
+        let out = summarize(&[], 10);
+        assert!(out.is_empty());
     }
 
     #[test]
