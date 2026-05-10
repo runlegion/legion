@@ -1,5 +1,39 @@
 # Legion Changelog
 
+## 0.13.1
+
+Grep enforcement chain, channel reliability, and operator-visible reliability hardening. v0.13.0 sharpened SCIP precision; v0.13.1 closes the loops: agents now get pushed off raw grep/Read onto sym/recall on indexed repos, the MCP notifier is observable and supervisable, and the dashboard daemon respawns itself when stale.
+
+### New
+
+- **Grep enforcement chain** (PRs #443/#447/#448/#449, closes #437/#438/#439/#440): three-state ladder (inject -> block -> bypass) pushes agents off raw search tools onto `legion sym` / `legion recall` on legion-indexed repos. `pre-bash-grep.sh` (new PreToolUse hook on Bash) intercepts `grep|rg|ag|ack|find|fd` invocations that slipped past the existing Grep/Glob hooks. `pre-read-sym.sh` (new PreToolUse hook on Read) blocks unbounded Reads of source files larger than 500 lines in indexed repos -- whole-file reads of `src/main.rs` (~6K lines) used to bill cache_read for every line; a bounded `Read limit=200` or a `legion sym hover Symbol` answers the typical question in bytes. Bypass via `LEGION_BYPASS_GREP=1` / `LEGION_BYPASS_READ=1` env or `# legion-bypass: <reason>` sentinel substring in Bash commands. Every bypass writes one row to `${XDG_STATE_HOME}/legion/bypass.jsonl` via the new `legion telemetry record-bypass` CLI. `legion telemetry summary [--since DURATION] [--repo R] [--top N] [--json]` rolls the log up by (tool, repo, pattern) so an operator can see where sym/recall is under-serving; same data also exposed at `GET /api/telemetry/bypasses`. `_legion-prequery.sh` factors the shared library (binary detection, pattern extraction with `-e PAT` and `--regexp=PAT`, symbol-shape filter, bypass detection, telemetry write).
+
+- **`legion now`** (PR #446, closes #410): one-line SessionStart block surfaces local weekday + time + sunphase before identity. `[Legion] Now: Sun 2026-05-10, 11:01 PT (midday)`. claude-code's systemPrompt ships `currentDate` but no weekday and no hour; agents pattern-match on density and start saying "tonight" / "wind down" when the operator has the rest of the workday ahead. Demonstrated mid-session: prime planned a Mon-Thu sprint on a Sunday because the weekday wasn't visible. Sunphase mapping is fixed-hour (`5-6 pre-dawn`, `7-10 morning`, `11-13 midday`, `14-17 afternoon`, `18-20 evening`, `21-23 night`, `0-4 late-night`). `--json` emits the structured snapshot for other consumers.
+
+- **`legion telemetry record-bypass` / `list-bypasses` / `summary`** (PR #443/#449, closes #437/#440): append-only JSONL telemetry log at `${XDG_STATE_HOME}/legion/bypass.jsonl`. Rows carry `(ts, repo, session_id, agent, tool, pattern, bypass_reason, had_sym_hits, had_recall_hits)`. The last two booleans are the load-bearing signal -- a bypass with `had_sym_hits=false` means the index missed an answer the agent expected; with `had_sym_hits=true` means the agent ignored a good answer and we should ask why. Feeds the uncertainty engine consumer in #354 downstream.
+
+- **`legion index --status --json`** (PR #443): single source of truth for the indexed-repo probe used by the new enforcement hooks. `_legion-indexed.sh` helper mirrors `_legion-covered.sh` shape with inverted fail-open posture (missing binary -> "not indexed" so block tier silently disables instead of firing on bad data). Does NOT cache the missing-binary verdict, avoiding session-stickiness when the binary becomes available mid-session.
+
+- **`legion kanban reconcile`** (PR #445, closes #444): adds the inverse direction. Pre-#444, reconcile only caught local-terminal-GH-open drift; the OPPOSITE direction (local-pending, GH-closed) accumulated faster because every shipped issue that auto-closed via PR keyword without an explicit kanban transition stayed pending forever. `--cancel-shipped` flips them locally with no-propagate semantics (GH already closed). `--apply` is sugar for both action flags. Single-pass partition over the board; per-card audit-logged with `propagation=reconcile-shipped`. Cleared 96 orphaned cards across the cluster as the smoke test.
+
+- **`legion mcp-health`** (PR #452, closes #391): spawns a fresh `legion mcp` subprocess over stdio, sends initialize + `legion/notifier_health`, prints the JSON. New `legion/notifier_health` MCP method returns `{state: alive | stale | unknown, last_tick_secs_ago, threshold_secs}`. The notifier thread now updates a heartbeat (lock-free `AtomicI64` of unix seconds) at the top of every poll iteration. Threshold is `ceil(poll_interval * 3) + 1` seconds -- one missed tick under load is fine, three in a row means the thread is gone. The bug that drove this: the notifier exited silently on a poisoned stdout mutex, EPIPE, or panicked DB call; the MCP kept responding to JSON-RPC, so the process LOOKED healthy, but no `notifications/claude/channel` frames reached the running CC session. Bit huttspawn + kessel 2026-05-04 -- full conversation through watch-wake, awake interactive agents on both sides saw none of it.
+
+- **`GET /health`** (PR #451, closes #319): dashboard daemon liveness probe. Returns `{status, version, started_at, uptime_secs}` with no DB hit so callers can poll aggressively. `version` baked in at compile time from `CARGO_PKG_VERSION` so clients can detect protocol drift after a plugin upgrade.
+
+- **Dashboard daemon supervisor** (PR #453, closes #321): `plugin/hooks/_legion-daemon-supervisor.sh` probes `/health` on SessionStart and respawns the daemon if unreachable or version-skewed. Detached spawn via `setsid` (Linux) / `nohup` (mac) with stdin closed, runs as a background fire-and-forget so SessionStart latency does not include the curl probe or spawn handshake. Kill-by-PID is defensive: verifies `ps -p $pid -o args=` contains `legion serve` before SIGTERM so a recycled PID owned by another process is never the target. `legion serve` now writes a pidfile to `${XDG_STATE_HOME}/legion/daemon.pid` after bind succeeds, removes it on graceful shutdown. `LEGION_SKIP_DAEMON_SUPERVISOR=1` opts out.
+
+### Fixed
+
+- **`truncate_chars` no longer panics on `max < 3`** (PR #450, closes #346): `max - 3` on `usize` underflowed when callers passed `--preview 1` or `--preview 2`, panicking the process. Now clamps to hard truncation at the requested length when there is no room for the ellipsis. `--preview 0` returns `""`, `--preview 1` returns the first char, `--preview 3` returns `"..."` (full ellipsis fits exactly).
+
+### Closed as obsolete
+
+- **#320 (MCP SSE reconnect)** and **#322 (channel version handshake)**: both filed against an MCP-daemon coupling that does not exist in current main. MCP reads channel state from the legion DB directly via the notifier loop; the dashboard daemon serves the dashboard on port 3131 independently. No SSE between them, no protocol to version. The real channel-reliability failure modes are addressed by #391 (notifier heartbeat) and #319 + #321 (dashboard liveness + respawn).
+
+### Pattern delivered
+
+**Enforcement over policy.** v0.12.0 shipped pre-grep hooks that injected sym results as `additionalContext` but never blocked. v0.13.1 says: when the doctrine is "no grep on indexed repos," the hook should ENFORCE it, not coach. Three-state ladder leaves the escape hatch (bypass env + sentinel comment) but logs every escape as telemetry so the next sprint can fix what sym is missing rather than rely on agents reading hook output and complying. Same pattern under the channel hardening: heartbeat + `/health` + supervisor turn "agents notice silent channel" into "supervisor respawns the daemon and notifier health is one CLI call away."
+
 ## 0.13.0
 
 SCIP precision and reach. Phase D of the SCIP completion plan -- the v0.10-0.12 chain shipped storage, dispatch, hooks, and consumption; this release sharpens the query layer and extends indexer coverage to every canonical sourcegraph language. Reviewer agents also gain an impact-radius signal sourced from the SCIP refs graph.
