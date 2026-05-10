@@ -28,6 +28,9 @@ struct StaticAssets;
 #[derive(Clone)]
 struct AppState {
     data_dir: PathBuf,
+    /// Wall-clock start of this server process. Captured once at boot so the
+    /// `/health` endpoint (#319) can report uptime without per-request work.
+    started_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Open a database connection from the data directory.
@@ -48,10 +51,14 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
         .map_err(|e| error::LegionError::Server(format!("failed to create runtime: {e}")))?;
 
     runtime.block_on(async {
-        let state = AppState { data_dir };
+        let state = AppState {
+            data_dir,
+            started_at: chrono::Utc::now(),
+        };
 
         let app = Router::new()
             .route("/", get(index_handler))
+            .route("/health", get(health_endpoint))
             .route("/sse", get(sse_handler))
             .route("/api/agents", get(api_agents))
             .route("/api/feed", get(api_feed))
@@ -97,6 +104,32 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
 
         Ok(())
     })
+}
+
+/// Pure builder for the `/health` JSON body. Separated from the axum
+/// handler so it's directly unit-testable without spinning up a server.
+fn build_health_body(
+    started_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    let uptime_secs = (now - started_at).num_seconds().max(0);
+    serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "started_at": started_at.to_rfc3339(),
+        "uptime_secs": uptime_secs,
+    })
+}
+
+/// GET /health -- cheap daemon liveness probe (#319).
+///
+/// Returns `{status, version, started_at, uptime_secs}` with NO database
+/// access so it can be polled aggressively by hooks, the MCP reconnect
+/// path (#320), and the SessionStart auto-spawn supervisor (#321). The
+/// `version` field is baked in at compile time from CARGO_PKG_VERSION so
+/// clients can detect protocol drift after a plugin upgrade.
+async fn health_endpoint(State(state): State<AppState>) -> Response {
+    Json(build_health_body(state.started_at, chrono::Utc::now())).into_response()
 }
 
 async fn index_handler() -> impl IntoResponse {
@@ -1327,4 +1360,38 @@ async fn shutdown_signal() {
     }
 
     eprintln!("[legion] shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_body_shape() {
+        let started = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:01:30Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let body = build_health_body(started, now);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["started_at"], "2026-05-10T12:00:00+00:00");
+        assert_eq!(body["uptime_secs"], 90);
+    }
+
+    #[test]
+    fn health_uptime_clamped_at_zero_for_clock_skew() {
+        // If `now` is somehow before `started_at` (clock jump, NTP
+        // correction, test fixture), uptime must not go negative.
+        let started = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T11:59:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let body = build_health_body(started, now);
+        assert_eq!(body["uptime_secs"], 0);
+    }
 }
