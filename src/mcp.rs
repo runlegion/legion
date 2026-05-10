@@ -960,10 +960,12 @@ pub fn classify_notifier_health(
         return NotifierHealth::Unknown;
     }
     let last_tick_secs_ago = (now_unix_secs - last).max(0);
-    // Round up so a poll interval of 1500ms gives a 4-5s threshold (3x =
-    // 4.5s rounds to 5), keeping the stale-detection bias on the side of
-    // surfacing rather than hiding a slow notifier.
-    let threshold_secs = poll_interval.as_secs_f64() as i64 * 3 + 1;
+    // ceil(poll_interval * 3) + 1 so a 1500ms poll yields ceil(4.5)+1 = 6s.
+    // The previous `as_secs_f64() as i64 * 3 + 1` truncated sub-second
+    // intervals to 0 before multiplying, collapsing the threshold to 1s
+    // and masking the real boundary. The +1 adds a whole-second slack so
+    // a notifier landing exactly at 3x interval registers Alive.
+    let threshold_secs = (poll_interval.as_secs_f64() * 3.0).ceil() as i64 + 1;
     if last_tick_secs_ago > threshold_secs {
         NotifierHealth::Stale {
             last_tick_secs_ago,
@@ -1437,6 +1439,26 @@ mod tests {
                 assert_eq!(last_tick_secs_ago, 2);
             }
             other => panic!("expected Alive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notifier_health_threshold_handles_sub_second_poll() {
+        // 500ms poll should yield threshold = ceil(1.5) + 1 = 3s, not the
+        // 1s the previous `as i64 * 3 + 1` would have produced after
+        // truncating 0.5 to 0.
+        let hb = NotifierHeartbeat::new();
+        hb.last_poll_unix_secs.store(1000, Ordering::Relaxed);
+        // 2s since last tick: under 3s threshold -> Alive.
+        let health = classify_notifier_health(1002, &hb, std::time::Duration::from_millis(500));
+        assert!(matches!(health, NotifierHealth::Alive { .. }));
+        // 4s since last tick: over 3s threshold -> Stale.
+        let health = classify_notifier_health(1004, &hb, std::time::Duration::from_millis(500));
+        match health {
+            NotifierHealth::Stale { threshold_secs, .. } => {
+                assert_eq!(threshold_secs, 3);
+            }
+            other => panic!("expected Stale, got {other:?}"),
         }
     }
 
