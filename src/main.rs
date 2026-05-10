@@ -12,6 +12,7 @@ mod init;
 mod kanban;
 mod mcp;
 mod mesh;
+mod now;
 mod pr_view;
 mod recall;
 mod reflect;
@@ -515,6 +516,23 @@ enum Commands {
 
     /// Compute embeddings for all reflections that are missing them
     Backfill,
+
+    /// Print the current local time, weekday, and sunphase (#410).
+    ///
+    /// Used by SessionStart to inject a one-line framing block so agents
+    /// stop pattern-matching "tonight" / "wind down" when the operator
+    /// has the rest of the workday ahead. Day-of-week is included
+    /// because date alone does not tell an agent it's Sunday vs Monday.
+    Now {
+        /// Emit the SessionStart-friendly one-line banner. Default
+        /// without --json or --banner is the human-readable banner;
+        /// --json emits a structured snapshot for other consumers.
+        #[arg(long)]
+        banner: bool,
+        /// Emit a JSON snapshot {date, weekday, time, timezone, sunphase}.
+        #[arg(long, conflicts_with = "banner")]
+        json: bool,
+    },
 
     /// Bypass telemetry: log when an agent escapes a grep/Read enforcement
     /// hook (#438/#439), and read the log back. Append-only JSONL at
@@ -3778,6 +3796,17 @@ fn run() -> error::Result<()> {
             let model = embed::EmbedModel::load()?;
             let count = backfill_embeddings(&database, &model)?;
             info!("[legion] embedded {} reflections", count);
+        }
+        Commands::Now { banner: _, json } => {
+            // The default and `--banner` output are the same one-line
+            // string; `banner` is accepted for explicitness in scripts
+            // (matches `legion index --status --banner`'s convention).
+            let snap = now::NowSnapshot::from_local(chrono::Local::now());
+            if json {
+                println!("{}", serde_json::to_string(&snap)?);
+            } else {
+                println!("{}", snap.banner());
+            }
         }
         Commands::Init { force } => {
             init::init(force)?;
