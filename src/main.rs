@@ -3892,8 +3892,12 @@ fn run() -> error::Result<()> {
                         "tool", "repo", "pattern", "count", "sym%", "recall%"
                     )?;
                     for row in &summary {
-                        let pattern = if row.pattern.len() > 32 {
-                            format!("{}...", &row.pattern[..29])
+                        // chars().take is char-boundary-safe; row.pattern
+                        // may contain multi-byte unicode (file paths,
+                        // quoted strings) where byte slicing would panic.
+                        let pattern = if row.pattern.chars().count() > 32 {
+                            let head: String = row.pattern.chars().take(29).collect();
+                            format!("{head}...")
                         } else {
                             row.pattern.clone()
                         };
