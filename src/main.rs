@@ -4,6 +4,7 @@ mod channel;
 mod cluster;
 mod daemon;
 mod db;
+mod documents;
 mod embed;
 mod error;
 mod health;
@@ -517,6 +518,14 @@ enum Commands {
     /// Compute embeddings for all reflections that are missing them
     Backfill,
 
+    /// Coordination substrate documents (#455/#456): specs, NFRs,
+    /// blueprints, personas, journeys, etc. Type-agnostic at the storage
+    /// layer; payload is a validated JSON blob.
+    Document {
+        #[command(subcommand)]
+        action: DocumentAction,
+    },
+
     /// Probe a fresh MCP subprocess for notifier health (#391). Spawns
     /// `legion mcp` over stdio, sends `initialize` + `legion/notifier_health`
     /// JSON-RPC requests, prints the health JSON. This spins up a NEW MCP
@@ -802,6 +811,65 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum DocumentAction {
+    /// Insert a new document. Payload is read from --from (file path)
+    /// or stdin when --from is omitted. Meta fields are passed
+    /// explicitly to keep the storage layer type-agnostic; the schema
+    /// registry (sibling child of #455) will validate payloads against
+    /// the meta.type's schema once it ships.
+    Create {
+        /// Document type (e.g. "requirement", "nfr", "persona").
+        #[arg(long, value_name = "TYPE")]
+        doc_type: String,
+        /// Owner agent id.
+        #[arg(long)]
+        owner: String,
+        /// Optional explicit id. Defaults to a UUIDv7 when omitted; for
+        /// canonical typed ids like FR-EMAIL-003, pass them here.
+        #[arg(long)]
+        id: Option<String>,
+        /// Functional surface (omit for cross-cutting / type=blueprint).
+        #[arg(long)]
+        surface: Option<String>,
+        /// Initial lifecycle status (default: "draft").
+        #[arg(long)]
+        status: Option<String>,
+        /// RFC 2119 conformance level (requirement only): SHALL|SHOULD|MAY.
+        #[arg(long)]
+        priority: Option<String>,
+        /// Read payload from this file. When omitted, reads from stdin.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+    /// View a document by id.
+    View {
+        id: String,
+        /// Emit full row as JSON (default: human-friendly summary).
+        #[arg(long)]
+        json: bool,
+    },
+    /// List documents, optionally filtered.
+    List {
+        #[arg(long, value_name = "TYPE")]
+        doc_type: Option<String>,
+        #[arg(long)]
+        surface: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        owner: Option<String>,
+        /// Include archived documents (default: hot only).
+        #[arg(long)]
+        archived: bool,
+        /// Emit full result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a document archived.
+    Archive { id: String },
 }
 
 #[derive(Subcommand)]
@@ -3828,6 +3896,124 @@ fn run() -> error::Result<()> {
             let model = embed::EmbedModel::load()?;
             let count = backfill_embeddings(&database, &model)?;
             info!("[legion] embedded {} reflections", count);
+        }
+        Commands::Document { action } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            match action {
+                DocumentAction::Create {
+                    doc_type,
+                    owner,
+                    id,
+                    surface,
+                    status,
+                    priority,
+                    from,
+                } => {
+                    // Payload from --from <path> or stdin.
+                    let payload = match from {
+                        Some(p) => std::fs::read_to_string(&p)?,
+                        None => {
+                            use std::io::Read;
+                            let mut buf = String::new();
+                            std::io::stdin().read_to_string(&mut buf)?;
+                            buf
+                        }
+                    };
+                    // Sanity-validate JSON shape so a typo doesn't land
+                    // in the table as a string blob. Schema-level
+                    // validation per type lives in a sibling child issue.
+                    serde_json::from_str::<serde_json::Value>(&payload).map_err(|e| {
+                        error::LegionError::WorkSource(format!("payload is not valid JSON: {e}"))
+                    })?;
+                    let meta = documents::DocumentMeta {
+                        id: id.as_deref(),
+                        doc_type: &doc_type,
+                        surface: surface.as_deref(),
+                        status: status.as_deref(),
+                        priority: priority.as_deref(),
+                        owner: &owner,
+                    };
+                    let doc = database.insert_document(&meta, &payload)?;
+                    println!("{}", doc.id);
+                }
+                DocumentAction::View { id, json } => {
+                    let doc = database.get_document(&id)?.ok_or_else(|| {
+                        error::LegionError::WorkSource(format!("document '{id}' not found"))
+                    })?;
+                    if json {
+                        println!("{}", serde_json::to_string(&doc)?);
+                    } else {
+                        println!("id:       {}", doc.id);
+                        println!("type:     {}", doc.doc_type);
+                        if let Some(s) = &doc.surface {
+                            println!("surface:  {s}");
+                        }
+                        println!("status:   {}", doc.status);
+                        if let Some(p) = &doc.priority {
+                            println!("priority: {p}");
+                        }
+                        println!("owner:    {}", doc.owner);
+                        if let Some(a) = &doc.archived_at {
+                            println!("archived: {a}");
+                        }
+                        println!("created:  {}", doc.created_at);
+                        println!("updated:  {}", doc.updated_at);
+                        println!("--- payload ---");
+                        println!("{}", doc.payload);
+                    }
+                }
+                DocumentAction::List {
+                    doc_type,
+                    surface,
+                    status,
+                    owner,
+                    archived,
+                    json,
+                } => {
+                    let filter = documents::DocumentFilter {
+                        doc_type: doc_type.as_deref(),
+                        surface: surface.as_deref(),
+                        status: status.as_deref(),
+                        owner: owner.as_deref(),
+                        archived: if archived { Some(true) } else { None },
+                    };
+                    let docs = database.list_documents(&filter)?;
+                    if json {
+                        println!("{}", serde_json::to_string(&docs)?);
+                    } else if docs.is_empty() {
+                        println!("[legion] no documents match filter");
+                    } else {
+                        use std::io::Write;
+                        let stdout = std::io::stdout();
+                        let mut out = stdout.lock();
+                        writeln!(
+                            out,
+                            "{:<24} {:<14} {:<14} {:<14} {:<10}",
+                            "id", "type", "surface", "owner", "status"
+                        )?;
+                        for d in &docs {
+                            writeln!(
+                                out,
+                                "{:<24} {:<14} {:<14} {:<14} {:<10}",
+                                d.id,
+                                d.doc_type,
+                                d.surface.as_deref().unwrap_or("-"),
+                                d.owner,
+                                d.status,
+                            )?;
+                        }
+                    }
+                }
+                DocumentAction::Archive { id } => {
+                    let doc = database.archive_document(&id)?;
+                    println!(
+                        "archived {} at {}",
+                        doc.id,
+                        doc.archived_at.as_deref().unwrap_or("?")
+                    );
+                }
+            }
         }
         Commands::McpHealth { wait } => {
             // Spawn `legion mcp` as a subprocess. Send `initialize`, wait

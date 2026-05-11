@@ -5384,3 +5384,147 @@ fn telemetry_list_filters_by_repo_and_since() {
         assert_eq!(row["repo"], "legion");
     }
 }
+
+#[test]
+fn document_create_view_list_archive_roundtrip() {
+    // #456: full lifecycle through the CLI. Verify a structured payload
+    // round-trips through insert -> view -> list -> archive, with
+    // archived rows excluded from default list and included with --archived.
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create a typed-id requirement document with full meta + JSON payload.
+    let payload = r#"{"meta":{"id":"FR-TEST-001","type":"requirement"},"title":"Integration test target","description":"Round-trip through the documents table CLI."}"#;
+    let mut create_cmd = legion_cmd(dir.path());
+    create_cmd
+        .args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "mail",
+            "--id",
+            "FR-TEST-001",
+            "--surface",
+            "email",
+            "--status",
+            "specified",
+            "--priority",
+            "SHALL",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = create_cmd.spawn().expect("spawn");
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let create_out = child.wait_with_output().expect("wait");
+    assert!(
+        create_out.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&create_out.stderr)
+    );
+    let stdout = String::from_utf8(create_out.stdout).unwrap();
+    assert!(
+        stdout.trim() == "FR-TEST-001",
+        "expected stdout to be the id, got: {stdout}"
+    );
+
+    // View as JSON; assert shape.
+    let view = legion_cmd(dir.path())
+        .args(["document", "view", "FR-TEST-001", "--json"])
+        .output()
+        .unwrap();
+    assert!(view.status.success());
+    let view_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8(view.stdout).unwrap().trim()).unwrap();
+    assert_eq!(view_json["id"], "FR-TEST-001");
+    assert_eq!(view_json["doc_type"], "requirement");
+    assert_eq!(view_json["surface"], "email");
+    assert_eq!(view_json["status"], "specified");
+    assert_eq!(view_json["priority"], "SHALL");
+    assert_eq!(view_json["owner"], "mail");
+
+    // List filters by type.
+    let list = legion_cmd(dir.path())
+        .args(["document", "list", "--doc-type", "requirement", "--json"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let docs: serde_json::Value =
+        serde_json::from_str(String::from_utf8(list.stdout).unwrap().trim()).unwrap();
+    let arr = docs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], "FR-TEST-001");
+
+    // Archive the row.
+    let archive = legion_cmd(dir.path())
+        .args(["document", "archive", "FR-TEST-001"])
+        .output()
+        .unwrap();
+    assert!(archive.status.success());
+
+    // Default list excludes archived.
+    let list_hot = legion_cmd(dir.path())
+        .args(["document", "list", "--json"])
+        .output()
+        .unwrap();
+    let hot_docs: serde_json::Value =
+        serde_json::from_str(String::from_utf8(list_hot.stdout).unwrap().trim()).unwrap();
+    assert!(hot_docs.as_array().unwrap().is_empty());
+
+    // --archived returns the archived row.
+    let list_cold = legion_cmd(dir.path())
+        .args(["document", "list", "--archived", "--json"])
+        .output()
+        .unwrap();
+    let cold_docs: serde_json::Value =
+        serde_json::from_str(String::from_utf8(list_cold.stdout).unwrap().trim()).unwrap();
+    let cold_arr = cold_docs.as_array().unwrap();
+    assert_eq!(cold_arr.len(), 1);
+    assert_eq!(cold_arr[0]["id"], "FR-TEST-001");
+    assert!(cold_arr[0]["archived_at"].is_string());
+}
+
+#[test]
+fn document_create_rejects_malformed_payload() {
+    // #456: payload must be valid JSON. Garbage payload should produce
+    // a clear error, not land in the table.
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = legion_cmd(dir.path());
+    cmd.args([
+        "document",
+        "create",
+        "--doc-type",
+        "requirement",
+        "--owner",
+        "mail",
+        "--id",
+        "FR-BAD-001",
+    ])
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn");
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"this is not json")
+        .expect("write");
+    drop(child.stdin.take());
+    let out = child.wait_with_output().expect("wait");
+    assert!(!out.status.success(), "malformed payload should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not valid JSON"),
+        "expected JSON error message, got: {stderr}"
+    );
+}
