@@ -206,6 +206,32 @@ legion_prequery_sym_def() {
   echo "$out"
 }
 
+# legion_prequery_filter_hits_local HITS_JSON REPO -- filter a sym hits
+# JSON array down to entries where .repo matches REPO. Echoes filtered
+# JSON (possibly "[]") on stdout. Used by the block-tier decision so
+# common dictionary words like `name`, `data`, `value` that happen to be
+# symbol-shaped do not trigger blocks when the search target is unrelated
+# to those hits' actual repo (#458).
+#
+# Why: legion sym def --json searches every stored SCIP index across the
+# cluster. A grep on the operator's local TOML config will return a block
+# decision tripped by `name` happening to be a symbol in huttspawn's
+# TypeScript -- those hits are not relevant to the search target. The
+# relevance gate filters cluster-wide hits down to the SAME repo as the
+# search context before deciding to block.
+legion_prequery_filter_hits_local() {
+  local hits="$1" repo="$2"
+  if [ -z "$hits" ] || [ "$hits" = "[]" ] || [ "$hits" = "null" ]; then
+    echo "[]"
+    return 0
+  fi
+  if [ -z "$repo" ]; then
+    echo "[]"
+    return 0
+  fi
+  echo "$hits" | jq --arg r "$repo" '[.[] | select(.repo == $r)]' 2>/dev/null || echo "[]"
+}
+
 # legion_prequery_emit_allow CTX -- emit the PreToolUse JSON shape that
 # allows the call and injects CTX as additionalContext.
 legion_prequery_emit_allow() {
