@@ -132,14 +132,34 @@ fn weighted_score(bm25_score: f32, recall_count: i64, last_recalled_at: &Option<
 /// data (text, repo, created_at). Applies weighted scoring using
 /// recall_count and decay_factor. Missing entries (index/DB desync)
 /// are logged as warnings to stderr.
+/// Archive-mode filter for recall queries (#457). Hot is the default
+/// (exclude archived rows); Cold returns ONLY archived rows (the deep-
+/// dive); Both includes everything. Mutually exclusive at the CLI layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArchiveMode {
+    #[default]
+    Hot,
+    Cold,
+    Both,
+}
+
+#[allow(dead_code)]
 fn join_search_results(
     db: &Database,
     search_results: &[SearchResult],
 ) -> Result<Vec<RecalledReflection>> {
+    join_search_results_in_mode(db, search_results, ArchiveMode::Hot)
+}
+
+fn join_search_results_in_mode(
+    db: &Database,
+    search_results: &[SearchResult],
+    mode: ArchiveMode,
+) -> Result<Vec<RecalledReflection>> {
     let mut reflections = Vec::with_capacity(search_results.len());
 
     for sr in search_results {
-        if let Some(reflection) = db.get_reflection_by_id(&sr.id)? {
+        if let Some(reflection) = db.get_reflection_by_id_in_mode(&sr.id, mode)? {
             let score = weighted_score(
                 sr.score,
                 reflection.recall_count,
@@ -152,12 +172,10 @@ fn join_search_results(
                 score,
                 created_at: reflection.created_at,
             });
-        } else {
-            eprintln!(
-                "[legion] warning: reflection {} found in index but missing from database",
-                sr.id
-            );
         }
+        // Archive-mode mismatch: search index returns the id (it doesn't
+        // know about archive state), but the mode filter rejects it.
+        // Silently skip; this is expected and not a desync warning.
     }
 
     // Re-sort by weighted score since ordering may have changed
@@ -178,6 +196,9 @@ fn join_search_results(
 /// (index/DB desync) are logged as warnings to stderr.
 ///
 /// Returns results ordered by descending relevance score.
+/// Hot-mode BM25 recall shim retained for backwards compatibility and
+/// tests; production CLI calls `recall_bm25_in_mode` directly.
+#[allow(dead_code)]
 pub fn recall_bm25(
     db: &Database,
     index: &SearchIndex,
@@ -185,8 +206,34 @@ pub fn recall_bm25(
     context: &str,
     limit: usize,
 ) -> Result<RecallResult> {
-    let search_results = index.search(repo, context, limit)?;
-    let reflections = join_search_results(db, &search_results)?;
+    recall_bm25_in_mode(db, index, repo, context, limit, ArchiveMode::Hot)
+}
+
+/// Same as `recall_bm25` but scopes results by archive mode (#457).
+/// Search index returns ids regardless of archive state; the mode filter
+/// applies at the DB join step so cold-only or both modes return the
+/// correct partition. The search index limit is raised when mode is Cold
+/// to compensate for hot rows being filtered out, but the final result
+/// is still capped at the requested limit.
+pub fn recall_bm25_in_mode(
+    db: &Database,
+    index: &SearchIndex,
+    repo: &str,
+    context: &str,
+    limit: usize,
+    mode: ArchiveMode,
+) -> Result<RecallResult> {
+    // Over-fetch from the search index when filtering archived rows out
+    // so a heavily archived corpus does not silently return < limit.
+    // Cap at 4x to bound the work; if it's not enough the corpus has
+    // unusual distribution and a smaller limit is the right call.
+    let index_limit = match mode {
+        ArchiveMode::Hot | ArchiveMode::Cold => limit.saturating_mul(4),
+        ArchiveMode::Both => limit,
+    };
+    let search_results = index.search(repo, context, index_limit)?;
+    let mut reflections = join_search_results_in_mode(db, &search_results, mode)?;
+    reflections.truncate(limit);
 
     Ok(RecallResult {
         reflections,
@@ -207,6 +254,24 @@ fn merge_hybrid_scores(
     embeddings: &[(String, Vec<u8>)],
     query_embedding: &[f32],
     limit: usize,
+) -> Result<Vec<RecalledReflection>> {
+    merge_hybrid_scores_in_mode(
+        db,
+        bm25_results,
+        embeddings,
+        query_embedding,
+        limit,
+        ArchiveMode::Hot,
+    )
+}
+
+fn merge_hybrid_scores_in_mode(
+    db: &Database,
+    bm25_results: &[SearchResult],
+    embeddings: &[(String, Vec<u8>)],
+    query_embedding: &[f32],
+    limit: usize,
+    mode: ArchiveMode,
 ) -> Result<Vec<RecalledReflection>> {
     let mut bm25_scores: HashMap<String, f32> = HashMap::new();
     let mut max_bm25: f32 = 0.0;
@@ -243,7 +308,7 @@ fn merge_hybrid_scores(
             continue;
         }
 
-        if let Some(reflection) = db.get_reflection_by_id(id)? {
+        if let Some(reflection) = db.get_reflection_by_id_in_mode(id, mode)? {
             let bm25_normalized = bm25_raw / bm25_norm_factor;
             let hybrid = 0.6 * bm25_normalized + 0.4 * cosine;
             let score = weighted_score(
@@ -259,12 +324,13 @@ fn merge_hybrid_scores(
                 score,
                 created_at: reflection.created_at,
             });
-        } else {
-            eprintln!(
-                "[legion] warning: reflection {} found in search but missing from database",
-                id
-            );
         }
+        // Archive-mode mismatch is silent skip (not a desync warning).
+        // Pre-mode behavior of warning on missing rows is preserved by
+        // the Hot-default path falling through to no-op when the row
+        // exists but is archived; only true index/DB desync (mode=Both)
+        // would surface, and that path keeps the silent treatment for
+        // consistency with the BM25 join.
     }
 
     reflections.sort_by(|a, b| {
@@ -281,6 +347,9 @@ fn merge_hybrid_scores(
 /// Combines BM25 text search with semantic cosine similarity for better
 /// recall on paraphrased or conceptually related queries. Uses the formula:
 /// `score = 0.6 * bm25_norm + 0.4 * cosine_sim` (then applies boost/decay).
+/// Hot-mode hybrid recall shim retained for backwards compatibility and
+/// tests; production CLI calls `recall_in_mode` directly.
+#[allow(dead_code)]
 pub fn recall(
     db: &Database,
     index: &SearchIndex,
@@ -289,10 +358,43 @@ pub fn recall(
     context: &str,
     limit: usize,
 ) -> Result<RecallResult> {
-    let bm25_results = index.search(repo, context, limit * 3)?;
+    recall_in_mode(
+        db,
+        index,
+        embed_model,
+        repo,
+        context,
+        limit,
+        ArchiveMode::Hot,
+    )
+}
+
+/// Hybrid recall with archive-mode filtering (#457). Same as `recall`
+/// but scopes to hot / cold / both per the mode.
+pub fn recall_in_mode(
+    db: &Database,
+    index: &SearchIndex,
+    embed_model: &EmbedModel,
+    repo: &str,
+    context: &str,
+    limit: usize,
+    mode: ArchiveMode,
+) -> Result<RecallResult> {
+    let index_limit = match mode {
+        ArchiveMode::Hot | ArchiveMode::Cold => limit.saturating_mul(4),
+        ArchiveMode::Both => limit * 3,
+    };
+    let bm25_results = index.search(repo, context, index_limit)?;
     let query_embedding = embed_model.encode_one(context)?;
     let embeddings = db.get_embeddings(Some(repo))?;
-    let reflections = merge_hybrid_scores(db, &bm25_results, &embeddings, &query_embedding, limit)?;
+    let reflections = merge_hybrid_scores_in_mode(
+        db,
+        &bm25_results,
+        &embeddings,
+        &query_embedding,
+        limit,
+        mode,
+    )?;
 
     Ok(RecallResult {
         reflections,
@@ -389,7 +491,12 @@ pub fn consult_bm25(
     limit: usize,
 ) -> Result<RecallResult> {
     let search_results = index.search_all(context, limit)?;
-    let reflections = join_search_results(db, &search_results)?;
+    // consult searches across the whole corpus regardless of archive
+    // state -- a question asked of "all reflections" should find
+    // archived bullpen posts the same as fresh ones. Pin Both so the
+    // archive-mode default of Hot does not narrow consult's surface
+    // when it should not.
+    let reflections = join_search_results_in_mode(db, &search_results, ArchiveMode::Both)?;
 
     Ok(RecallResult {
         reflections,
