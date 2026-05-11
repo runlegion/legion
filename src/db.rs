@@ -1341,6 +1341,35 @@ impl Database {
         }
     }
 
+    /// Read a reflection by id, applying an archive-mode filter (#457).
+    /// Hot: returns None if archived_at IS NOT NULL.
+    /// Cold: returns None if archived_at IS NULL.
+    /// Both: same behavior as `get_reflection_by_id` (no archive filter).
+    ///
+    /// The deleted_at filter applies in all modes (soft-deleted rows are
+    /// always hidden).
+    pub fn get_reflection_by_id_in_mode(
+        &self,
+        id: &str,
+        mode: crate::recall::ArchiveMode,
+    ) -> Result<Option<Reflection>> {
+        let where_clause = match mode {
+            crate::recall::ArchiveMode::Hot => "AND archived_at IS NULL",
+            crate::recall::ArchiveMode::Cold => "AND archived_at IS NOT NULL",
+            crate::recall::ArchiveMode::Both => "",
+        };
+        let sql = format!(
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE id = ?1 AND deleted_at IS NULL {where_clause}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query_map([id], map_reflection_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
     /// Permanently remove a reflection from the database by id.
     ///
     /// Returns the deleted reflection so the caller can confirm what was
