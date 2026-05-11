@@ -379,6 +379,35 @@ pub fn add_repo_to_config(
         )));
     }
 
+    // Recipient (signal-routing identity) collision check (#459). Two repos
+    // sharing one recipient creates silent multi-wake on directed signals --
+    // an @platform signal fires both /Volumes/.../platform and any other
+    // repo with agent=platform. The receiving agents have to flag mis-route
+    // every time, burning wake budget. Refuse the add up front; operator
+    // either picks a different agent or removes the conflicting entry.
+    //
+    // `recipient()` returns `agent` if set, else `name`. The proposed new
+    // recipient is `normalized_agent.as_deref().unwrap_or(name)`. Comparing
+    // both via recipient() handles all four cases:
+    //   1. new agent='X', existing name='X' (no agent override) -> conflict
+    //   2. new agent='X', existing agent='X' -> conflict
+    //   3. new name='X' (no agent), existing agent='X' -> conflict
+    //   4. new name='X' (no agent), existing name='X' -> earlier name-conflict path
+    let proposed_recipient = normalized_agent.as_deref().unwrap_or(name);
+    if let Some(existing) = config
+        .repos
+        .iter()
+        .find(|r| r.recipient() == proposed_recipient)
+    {
+        return Err(LegionError::WatchConfig(format!(
+            "recipient '{}' already in use by repo '{}' at {}. \
+             Each watched repo needs a unique signal-routing identity \
+             (its `agent` field, or its name when `agent` is unset). \
+             Pick a different agent for this repo or remove the existing entry.",
+            proposed_recipient, existing.name, existing.workdir
+        )));
+    }
+
     config.repos.push(WatchRepoConfig {
         name: name.to_string(),
         workdir: canonical_str,
@@ -2164,6 +2193,86 @@ workdir = "/nonexistent/path/that/does/not/exist"
             "expected 'already in use' error, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn add_repo_errors_on_agent_collision_with_existing_agent() {
+        // #459: two repos with the same `agent` value create silent
+        // multi-wake on directed signals. The add path refuses up front.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir_a = dir.path().join("a");
+        let workdir_b = dir.path().join("b");
+        std::fs::create_dir_all(&workdir_a).expect("create a");
+        std::fs::create_dir_all(&workdir_b).expect("create b");
+
+        add_repo_to_config(&config_path, "alpha", &workdir_a, Some("platform"))
+            .expect("add a with agent");
+        let err =
+            add_repo_to_config(&config_path, "beta", &workdir_b, Some("platform")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("recipient 'platform' already in use"),
+            "expected recipient-conflict error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn add_repo_errors_when_new_agent_collides_with_existing_name() {
+        // Case 1 from the recipient-conflict matrix: new agent='X' collides
+        // with existing name='X' (which has no agent override). Existing
+        // repo's recipient() returns its name, so the conflict is real.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir_a = dir.path().join("a");
+        let workdir_b = dir.path().join("b");
+        std::fs::create_dir_all(&workdir_a).expect("create a");
+        std::fs::create_dir_all(&workdir_b).expect("create b");
+
+        add_repo_to_config(&config_path, "platform", &workdir_a, None).expect("add platform");
+        let err =
+            add_repo_to_config(&config_path, "ledger", &workdir_b, Some("platform")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("recipient 'platform' already in use"),
+            "expected recipient-conflict error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn add_repo_errors_when_new_name_collides_with_existing_agent_override() {
+        // Case 3: new name='X' (no agent) collides with existing agent='X'.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir_a = dir.path().join("a");
+        let workdir_b = dir.path().join("b");
+        std::fs::create_dir_all(&workdir_a).expect("create a");
+        std::fs::create_dir_all(&workdir_b).expect("create b");
+
+        add_repo_to_config(&config_path, "ledger", &workdir_a, Some("platform"))
+            .expect("add ledger with platform agent");
+        let err = add_repo_to_config(&config_path, "platform", &workdir_b, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("recipient 'platform' already in use"),
+            "expected recipient-conflict error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn add_repo_allows_distinct_agents() {
+        // Two repos with different agents add cleanly.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let workdir_a = dir.path().join("a");
+        let workdir_b = dir.path().join("b");
+        std::fs::create_dir_all(&workdir_a).expect("create a");
+        std::fs::create_dir_all(&workdir_b).expect("create b");
+
+        add_repo_to_config(&config_path, "alpha", &workdir_a, Some("agent-a")).expect("a");
+        add_repo_to_config(&config_path, "beta", &workdir_b, Some("agent-b")).expect("b");
+        let repos = list_repos_in_config(&config_path).expect("list");
+        assert_eq!(repos.len(), 2);
     }
 
     #[test]

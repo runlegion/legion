@@ -4,6 +4,7 @@ mod channel;
 mod cluster;
 mod daemon;
 mod db;
+mod documents;
 mod embed;
 mod error;
 mod health;
@@ -178,6 +179,19 @@ enum Commands {
         /// Return latest reflections matching this domain (bypasses search)
         #[arg(long, conflicts_with_all = ["latest", "cosine_only", "context"])]
         domain: Option<String>,
+
+        /// Search ONLY archived reflections (the deep-dive). Default mode
+        /// is hot-only; this flag inverts. Mutually exclusive with
+        /// --include-archives. v1 only affects the BM25/hybrid path;
+        /// --latest, --domain, --cosine-only stay hot-mode regardless.
+        /// See #457.
+        #[arg(long)]
+        archives: bool,
+
+        /// Search BOTH hot and archived reflections. Mutually exclusive
+        /// with --archives. Same v1 scope caveat as --archives.
+        #[arg(long, conflicts_with = "archives")]
+        include_archives: bool,
     },
 
     /// Find reflections similar to a given reflection by cosine similarity
@@ -517,6 +531,14 @@ enum Commands {
     /// Compute embeddings for all reflections that are missing them
     Backfill,
 
+    /// Coordination substrate documents (#455/#456): specs, NFRs,
+    /// blueprints, personas, journeys, etc. Type-agnostic at the storage
+    /// layer; payload is a validated JSON blob.
+    Document {
+        #[command(subcommand)]
+        action: DocumentAction,
+    },
+
     /// Probe a fresh MCP subprocess for notifier health (#391). Spawns
     /// `legion mcp` over stdio, sends `initialize` + `legion/notifier_health`
     /// JSON-RPC requests, prints the health JSON. This spins up a NEW MCP
@@ -802,6 +824,65 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum DocumentAction {
+    /// Insert a new document. Payload is read from --from (file path)
+    /// or stdin when --from is omitted. Meta fields are passed
+    /// explicitly to keep the storage layer type-agnostic; the schema
+    /// registry (sibling child of #455) will validate payloads against
+    /// the meta.type's schema once it ships.
+    Create {
+        /// Document type (e.g. "requirement", "nfr", "persona").
+        #[arg(long, value_name = "TYPE")]
+        doc_type: String,
+        /// Owner agent id.
+        #[arg(long)]
+        owner: String,
+        /// Optional explicit id. Defaults to a UUIDv7 when omitted; for
+        /// canonical typed ids like FR-EMAIL-003, pass them here.
+        #[arg(long)]
+        id: Option<String>,
+        /// Functional surface (omit for cross-cutting / type=blueprint).
+        #[arg(long)]
+        surface: Option<String>,
+        /// Initial lifecycle status (default: "draft").
+        #[arg(long)]
+        status: Option<String>,
+        /// RFC 2119 conformance level (requirement only): SHALL|SHOULD|MAY.
+        #[arg(long)]
+        priority: Option<String>,
+        /// Read payload from this file. When omitted, reads from stdin.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+    /// View a document by id.
+    View {
+        id: String,
+        /// Emit full row as JSON (default: human-friendly summary).
+        #[arg(long)]
+        json: bool,
+    },
+    /// List documents, optionally filtered.
+    List {
+        #[arg(long, value_name = "TYPE")]
+        doc_type: Option<String>,
+        #[arg(long)]
+        surface: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        owner: Option<String>,
+        /// Include archived documents (default: hot only).
+        #[arg(long)]
+        archived: bool,
+        /// Emit full result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a document archived.
+    Archive { id: String },
 }
 
 #[derive(Subcommand)]
@@ -3221,9 +3302,31 @@ fn run() -> error::Result<()> {
             cosine_only,
             min_score,
             domain,
+            archives,
+            include_archives,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
+
+            // Resolve archive mode (#457). Mutually-exclusive flags
+            // enforced at the clap layer via conflicts_with.
+            let mode = if archives {
+                recall::ArchiveMode::Cold
+            } else if include_archives {
+                recall::ArchiveMode::Both
+            } else {
+                recall::ArchiveMode::Hot
+            };
+
+            // v1 scope: --archives / --include-archives only affect
+            // the BM25/hybrid path. Warn loudly when combined with the
+            // other variants so an operator does not silently get
+            // hot-only results from --latest --archives.
+            if (archives || include_archives) && (latest || cosine_only || domain.is_some()) {
+                eprintln!(
+                    "[legion] warning: --archives / --include-archives currently apply only to the BM25/hybrid recall path. Combined with --latest / --domain / --cosine-only, this run uses hot-only results. Extending coverage is tracked as a #457 follow-up."
+                );
+            }
 
             let mut result = if let Some(ref dom) = domain {
                 recall::recall_by_domain(&database, &repo, dom, limit)?
@@ -3241,10 +3344,12 @@ fn run() -> error::Result<()> {
                 let index = search::SearchIndex::open(&base.join("index"))?;
                 // Try hybrid (BM25 + cosine) recall, fall back to BM25-only
                 match try_load_embed_model() {
-                    Some(model) => {
-                        recall::recall(&database, &index, &model, &repo, &context, limit)?
-                    }
-                    None => recall::recall_bm25(&database, &index, &repo, &context, limit)?,
+                    Some(model) => recall::recall_in_mode(
+                        &database, &index, &model, &repo, &context, limit, mode,
+                    )?,
+                    None => recall::recall_bm25_in_mode(
+                        &database, &index, &repo, &context, limit, mode,
+                    )?,
                 }
             };
             // Apply min-score filter on hybrid/latest paths (cosine-only applies it inline).
@@ -3828,6 +3933,124 @@ fn run() -> error::Result<()> {
             let model = embed::EmbedModel::load()?;
             let count = backfill_embeddings(&database, &model)?;
             info!("[legion] embedded {} reflections", count);
+        }
+        Commands::Document { action } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            match action {
+                DocumentAction::Create {
+                    doc_type,
+                    owner,
+                    id,
+                    surface,
+                    status,
+                    priority,
+                    from,
+                } => {
+                    // Payload from --from <path> or stdin.
+                    let payload = match from {
+                        Some(p) => std::fs::read_to_string(&p)?,
+                        None => {
+                            use std::io::Read;
+                            let mut buf = String::new();
+                            std::io::stdin().read_to_string(&mut buf)?;
+                            buf
+                        }
+                    };
+                    // Sanity-validate JSON shape so a typo doesn't land
+                    // in the table as a string blob. Schema-level
+                    // validation per type lives in a sibling child issue.
+                    serde_json::from_str::<serde_json::Value>(&payload).map_err(|e| {
+                        error::LegionError::WorkSource(format!("payload is not valid JSON: {e}"))
+                    })?;
+                    let meta = documents::DocumentMeta {
+                        id: id.as_deref(),
+                        doc_type: &doc_type,
+                        surface: surface.as_deref(),
+                        status: status.as_deref(),
+                        priority: priority.as_deref(),
+                        owner: &owner,
+                    };
+                    let doc = database.insert_document(&meta, &payload)?;
+                    println!("{}", doc.id);
+                }
+                DocumentAction::View { id, json } => {
+                    let doc = database.get_document(&id)?.ok_or_else(|| {
+                        error::LegionError::WorkSource(format!("document '{id}' not found"))
+                    })?;
+                    if json {
+                        println!("{}", serde_json::to_string(&doc)?);
+                    } else {
+                        println!("id:       {}", doc.id);
+                        println!("type:     {}", doc.doc_type);
+                        if let Some(s) = &doc.surface {
+                            println!("surface:  {s}");
+                        }
+                        println!("status:   {}", doc.status);
+                        if let Some(p) = &doc.priority {
+                            println!("priority: {p}");
+                        }
+                        println!("owner:    {}", doc.owner);
+                        if let Some(a) = &doc.archived_at {
+                            println!("archived: {a}");
+                        }
+                        println!("created:  {}", doc.created_at);
+                        println!("updated:  {}", doc.updated_at);
+                        println!("--- payload ---");
+                        println!("{}", doc.payload);
+                    }
+                }
+                DocumentAction::List {
+                    doc_type,
+                    surface,
+                    status,
+                    owner,
+                    archived,
+                    json,
+                } => {
+                    let filter = documents::DocumentFilter {
+                        doc_type: doc_type.as_deref(),
+                        surface: surface.as_deref(),
+                        status: status.as_deref(),
+                        owner: owner.as_deref(),
+                        archived: if archived { Some(true) } else { None },
+                    };
+                    let docs = database.list_documents(&filter)?;
+                    if json {
+                        println!("{}", serde_json::to_string(&docs)?);
+                    } else if docs.is_empty() {
+                        println!("[legion] no documents match filter");
+                    } else {
+                        use std::io::Write;
+                        let stdout = std::io::stdout();
+                        let mut out = stdout.lock();
+                        writeln!(
+                            out,
+                            "{:<24} {:<14} {:<14} {:<14} {:<10}",
+                            "id", "type", "surface", "owner", "status"
+                        )?;
+                        for d in &docs {
+                            writeln!(
+                                out,
+                                "{:<24} {:<14} {:<14} {:<14} {:<10}",
+                                d.id,
+                                d.doc_type,
+                                d.surface.as_deref().unwrap_or("-"),
+                                d.owner,
+                                d.status,
+                            )?;
+                        }
+                    }
+                }
+                DocumentAction::Archive { id } => {
+                    let doc = database.archive_document(&id)?;
+                    println!(
+                        "archived {} at {}",
+                        doc.id,
+                        doc.archived_at.as_deref().unwrap_or("?")
+                    );
+                }
+            }
         }
         Commands::McpHealth { wait } => {
             // Spawn `legion mcp` as a subprocess. Send `initialize`, wait
@@ -5675,6 +5898,31 @@ fn run() -> error::Result<()> {
                     if repos.is_empty() {
                         println!("no repos in watch.toml");
                     } else {
+                        // Surface pre-existing recipient collisions (#459).
+                        // The `add` path rejects new duplicates, but a
+                        // manually edited watch.toml can still contain
+                        // collisions. Warn loud so the operator sees them.
+                        let mut recipient_counts: std::collections::HashMap<&str, Vec<&str>> =
+                            std::collections::HashMap::new();
+                        for r in &repos {
+                            recipient_counts
+                                .entry(r.recipient())
+                                .or_default()
+                                .push(&r.name);
+                        }
+                        for (recipient, names) in &recipient_counts {
+                            if names.len() > 1 {
+                                eprintln!(
+                                    "[WARNING] recipient '{}' shared by {} repos: {}. \
+                                     Directed @{} signals wake all of them silently. \
+                                     Fix by editing watch.toml to give each repo a unique agent.",
+                                    recipient,
+                                    names.len(),
+                                    names.join(", "),
+                                    recipient
+                                );
+                            }
+                        }
                         for repo in &repos {
                             let agent_note = repo
                                 .agent

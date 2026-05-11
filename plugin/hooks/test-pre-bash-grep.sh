@@ -81,7 +81,14 @@ case "$1" in
     if [ "$2" = "def" ] && [ "$3" = "--json" ]; then
       case "$4" in
         Symbol*|fn_main|main)
-          echo '[{"file":"src/main.rs","line":42,"symbol":"main"}]'
+          # Local-repo hit -- relevance gate (#458) keeps it.
+          echo '[{"file":"src/main.rs","line":42,"symbol":"main","repo":"legion","lang":"rust"}]'
+          ;;
+        commonword|dictword)
+          # Cluster-wide hit in an unrelated repo -- relevance gate
+          # filters this out so the block tier does NOT fire on a
+          # search in legion's own files.
+          echo '[{"file":"src/foo.ts","line":10,"symbol":"commonword","repo":"huttspawn","lang":"typescript"}]'
           ;;
         *)
           echo '[]'
@@ -160,13 +167,25 @@ echo "==> hook end-to-end: non-symbol pattern passes through"
 out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r foo|bar src/"},"session_id":"t"}' | bash "$HOOK")
 assert_empty "regex pattern -> pass through" "$out"
 
-echo "==> hook end-to-end: indexed repo + symbol-shape pattern -> BLOCK"
+echo "==> hook end-to-end: indexed repo + symbol-shape pattern with LOCAL-REPO hit -> BLOCK"
 out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"block-t"}' | bash "$HOOK")
 assert_contains "block decision present" "$out" '"decision": "block"'
 assert_contains "block reason mentions sym def" "$out" 'legion sym def'
 assert_contains "block reason names the pattern" "$out" 'Symbol'
 assert_contains "block reason offers env bypass" "$out" 'LEGION_BYPASS_GREP=1'
 assert_contains "block reason offers sentinel bypass" "$out" '# legion-bypass:'
+
+echo "==> #458 relevance gate: cluster-wide hit but NOT in this repo -> pass through (no block)"
+# Stub legion returns commonword hits in huttspawn, but the grep target is in /tmp/legion.
+# Pre-#458 behavior: would block on those cross-repo hits.
+# Post-#458 behavior: relevance gate filters to local hits (empty) and falls through.
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r commonword src/"},"session_id":"relevance-t"}' | bash "$HOOK")
+if echo "$out" | grep -q '"decision": "block"'; then
+  FAIL=$((FAIL + 1)); echo "  FAIL: cross-repo-only hits should NOT trigger block in target repo"
+  echo "    output: $out" >&2
+else
+  PASS=$((PASS + 1)); echo "  PASS: cross-repo-only hits do not trigger block"
+fi
 
 echo "==> hook end-to-end: bypass via env -> allow + telemetry"
 export LEGION_TEST_MARKER="$WORK/state/bypass-marker.log"

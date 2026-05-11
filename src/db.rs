@@ -35,7 +35,7 @@ pub enum CardTimestamp {
 
 /// Persistent storage for reflections backed by SQLite.
 pub struct Database {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 /// A single stored reflection tied to a repository.
@@ -859,6 +859,45 @@ impl Database {
                 ON agent_session_log(recipient, exit_at);",
         )?;
 
+        // Migration 21: Documents table for the coordination substrate
+        // (#456, child of #455).
+        //
+        // Stores spec / NFR / blueprint / persona / journey / etc as rows
+        // with structured meta columns hoisted from a JSON payload. Hot
+        // pool by default; archived_at populates when work referencing
+        // the doc completes (kanban-spec linkage in a later child issue).
+        //
+        // The payload column holds the validated JSON for the document
+        // type. Type-specific schema validation at INSERT happens in a
+        // sibling child issue under #455 once vault's schemas land. For
+        // #456 the foundation ships; validator is a stub that accepts
+        // any JSON.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS documents (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                surface TEXT,
+                status TEXT NOT NULL DEFAULT 'draft',
+                priority TEXT,
+                owner TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                archived_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_documents_type
+                ON documents(type) WHERE archived_at IS NULL AND deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_documents_surface
+                ON documents(surface) WHERE archived_at IS NULL AND deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_documents_owner
+                ON documents(owner) WHERE archived_at IS NULL AND deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_documents_status
+                ON documents(status) WHERE archived_at IS NULL AND deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_documents_archived
+                ON documents(archived_at, type) WHERE archived_at IS NOT NULL AND deleted_at IS NULL;",
+        )?;
+
         Ok(())
     }
 
@@ -1296,6 +1335,35 @@ impl Database {
 
         let mut rows = stmt.query_map([id], map_reflection_row)?;
 
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Read a reflection by id, applying an archive-mode filter (#457).
+    /// Hot: returns None if archived_at IS NOT NULL.
+    /// Cold: returns None if archived_at IS NULL.
+    /// Both: same behavior as `get_reflection_by_id` (no archive filter).
+    ///
+    /// The deleted_at filter applies in all modes (soft-deleted rows are
+    /// always hidden).
+    pub fn get_reflection_by_id_in_mode(
+        &self,
+        id: &str,
+        mode: crate::recall::ArchiveMode,
+    ) -> Result<Option<Reflection>> {
+        let where_clause = match mode {
+            crate::recall::ArchiveMode::Hot => "AND archived_at IS NULL",
+            crate::recall::ArchiveMode::Cold => "AND archived_at IS NOT NULL",
+            crate::recall::ArchiveMode::Both => "",
+        };
+        let sql = format!(
+            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+             FROM reflections WHERE id = ?1 AND deleted_at IS NULL {where_clause}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query_map([id], map_reflection_row)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
