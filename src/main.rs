@@ -5712,6 +5712,31 @@ fn run() -> error::Result<()> {
                     if repos.is_empty() {
                         println!("no repos in watch.toml");
                     } else {
+                        // Surface pre-existing recipient collisions (#459).
+                        // The `add` path rejects new duplicates, but a
+                        // manually edited watch.toml can still contain
+                        // collisions. Warn loud so the operator sees them.
+                        let mut recipient_counts: std::collections::HashMap<&str, Vec<&str>> =
+                            std::collections::HashMap::new();
+                        for r in &repos {
+                            recipient_counts
+                                .entry(r.recipient())
+                                .or_default()
+                                .push(&r.name);
+                        }
+                        for (recipient, names) in &recipient_counts {
+                            if names.len() > 1 {
+                                eprintln!(
+                                    "[WARNING] recipient '{}' shared by {} repos: {}. \
+                                     Directed @{} signals wake all of them silently. \
+                                     Fix by editing watch.toml to give each repo a unique agent.",
+                                    recipient,
+                                    names.len(),
+                                    names.join(", "),
+                                    recipient
+                                );
+                            }
+                        }
                         for repo in &repos {
                             let agent_note = repo
                                 .agent
