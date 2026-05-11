@@ -178,6 +178,19 @@ enum Commands {
         /// Return latest reflections matching this domain (bypasses search)
         #[arg(long, conflicts_with_all = ["latest", "cosine_only", "context"])]
         domain: Option<String>,
+
+        /// Search ONLY archived reflections (the deep-dive). Default mode
+        /// is hot-only; this flag inverts. Mutually exclusive with
+        /// --include-archives. v1 only affects the BM25/hybrid path;
+        /// --latest, --domain, --cosine-only stay hot-mode regardless.
+        /// See #457.
+        #[arg(long)]
+        archives: bool,
+
+        /// Search BOTH hot and archived reflections. Mutually exclusive
+        /// with --archives. Same v1 scope caveat as --archives.
+        #[arg(long, conflicts_with = "archives")]
+        include_archives: bool,
     },
 
     /// Find reflections similar to a given reflection by cosine similarity
@@ -3221,9 +3234,31 @@ fn run() -> error::Result<()> {
             cosine_only,
             min_score,
             domain,
+            archives,
+            include_archives,
         } => {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
+
+            // Resolve archive mode (#457). Mutually-exclusive flags
+            // enforced at the clap layer via conflicts_with.
+            let mode = if archives {
+                recall::ArchiveMode::Cold
+            } else if include_archives {
+                recall::ArchiveMode::Both
+            } else {
+                recall::ArchiveMode::Hot
+            };
+
+            // v1 scope: --archives / --include-archives only affect
+            // the BM25/hybrid path. Warn loudly when combined with the
+            // other variants so an operator does not silently get
+            // hot-only results from --latest --archives.
+            if (archives || include_archives) && (latest || cosine_only || domain.is_some()) {
+                eprintln!(
+                    "[legion] warning: --archives / --include-archives currently apply only to the BM25/hybrid recall path. Combined with --latest / --domain / --cosine-only, this run uses hot-only results. Extending coverage is tracked as a #457 follow-up."
+                );
+            }
 
             let mut result = if let Some(ref dom) = domain {
                 recall::recall_by_domain(&database, &repo, dom, limit)?
@@ -3241,10 +3276,12 @@ fn run() -> error::Result<()> {
                 let index = search::SearchIndex::open(&base.join("index"))?;
                 // Try hybrid (BM25 + cosine) recall, fall back to BM25-only
                 match try_load_embed_model() {
-                    Some(model) => {
-                        recall::recall(&database, &index, &model, &repo, &context, limit)?
-                    }
-                    None => recall::recall_bm25(&database, &index, &repo, &context, limit)?,
+                    Some(model) => recall::recall_in_mode(
+                        &database, &index, &model, &repo, &context, limit, mode,
+                    )?,
+                    None => recall::recall_bm25_in_mode(
+                        &database, &index, &repo, &context, limit, mode,
+                    )?,
                 }
             };
             // Apply min-score filter on hybrid/latest paths (cosine-only applies it inline).

@@ -5313,6 +5313,44 @@ fn telemetry_summary_rolls_up_groups() {
 }
 
 #[test]
+fn recall_archives_and_include_archives_are_mutually_exclusive() {
+    // #457: passing both flags must fail at clap parse time, not silently
+    // pick one or merge them.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args([
+            "recall",
+            "--repo",
+            "test",
+            "--context",
+            "x",
+            "--archives",
+            "--include-archives",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "--archives + --include-archives should be mutually exclusive"
+    );
+}
+
+#[test]
+fn recall_archives_flag_accepts_no_args_otherwise() {
+    // Sanity: --archives alone parses, runs against an empty DB, exits 0.
+    let dir = tempfile::tempdir().unwrap();
+    let output = legion_cmd(dir.path())
+        .args(["recall", "--repo", "test", "--context", "x", "--archives"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "recall --archives on empty DB should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn telemetry_summary_empty_input_prints_no_bypasses_line() {
     // Human-readable output on empty bypass log emits a clear no-data
     // line so an operator running this on a fresh node sees the empty
