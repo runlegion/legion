@@ -100,21 +100,36 @@ fi
 # In an unindexed repo, the agent has no sym alternative, so we keep the
 # softer State 1 (inject + nudge) shape.
 if legion_indexed "$SESSION_ID" "$REPO"; then
-  REASON="Use \`legion sym def ${PATTERN}\` -- it answered this in bytes from the SCIP index. Bash ${BINARY} on \`${PATTERN}\` would scan files and bill cache_read.
+  # Relevance gate (#458): cluster-wide sym hits in unrelated repos are
+  # not a useful redirect for a grep targeting THIS repo. Common
+  # dictionary words like `name`, `data`, `value`, `type`, `id` are
+  # symbol-shaped and exist as identifiers in every codebase, but a
+  # grep on the operator's TOML config in legion's repo should not be
+  # blocked because huttspawn has a variable named `name`. Filter
+  # cluster-wide hits down to hits IN THIS REPO before deciding.
+  LOCAL_HITS=$(legion_prequery_filter_hits_local "$HITS" "$REPO")
+  if [ "$LOCAL_HITS" = "[]" ]; then
+    # No relevant hits in this repo's index. Fall through to inject
+    # below -- the cluster-wide hits may still be useful context but
+    # don't justify blocking.
+    :
+  else
+    REASON="Use \`legion sym def ${PATTERN} --repo ${REPO}\` -- it answered this in bytes from the SCIP index. Bash ${BINARY} on \`${PATTERN}\` would scan files and bill cache_read.
 
-\`legion sym def ${PATTERN}\` returned:
+\`legion sym def ${PATTERN} --repo ${REPO}\` returned:
 
 \`\`\`json
-${HITS}
+${LOCAL_HITS}
 \`\`\`
 
-If you genuinely need ${BINARY} (e.g. searching for a literal that is not a symbol, or comparing line numbers across files), retry with one of:
+If you genuinely need ${BINARY} (e.g. searching for a literal that is not a symbol in this repo, or comparing line numbers across files), retry with one of:
 - \`LEGION_BYPASS_GREP=1 ${COMMAND}\`
 - \`${COMMAND} # legion-bypass: <one-line reason>\`
 
 Either path allows and writes one row to bypass.jsonl so we can see where sym is under-serving."
-  legion_prequery_emit_block "$REASON"
-  exit 0
+    legion_prequery_emit_block "$REASON"
+    exit 0
+  fi
 fi
 
 # State 1 INJECT: not indexed but we did find something via the cluster
