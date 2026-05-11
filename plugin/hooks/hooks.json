@@ -222,6 +222,26 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "TaskCreate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/post-task-state.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "TaskUpdate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/post-task-state.sh",
+            "timeout": 3
+          }
+        ]
       }
     ]
   }
