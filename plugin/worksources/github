@@ -154,6 +154,91 @@ case "${1:-}" in
     jq -n --arg url "$URL" --argjson number "${NUMBER:-0}" '{"url":$url,"number":$number}'
     ;;
 
+  create-sub-issue)
+    # Create a sub-issue linked to a parent issue (#462). Uses GitHub's
+    # native sub-issue relationship via GraphQL: create the child issue
+    # the normal way, look up both node ids, then call addSubIssue.
+    #
+    # Env: LEGION_WS_REPO, LEGION_WS_PARENT_NUMBER, LEGION_WS_TITLE,
+    #      LEGION_WS_BODY (optional)
+    # Output: {"url": "...", "number": N}
+    TITLE="${LEGION_WS_TITLE:-}"
+    BODY="${LEGION_WS_BODY:-}"
+    PARENT="${LEGION_WS_PARENT_NUMBER:-}"
+    if [ -z "$REPO" ] || [ -z "$TITLE" ] || [ -z "$PARENT" ]; then
+      echo '{"error":"LEGION_WS_REPO, LEGION_WS_TITLE, and LEGION_WS_PARENT_NUMBER required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    # Owner / name split for the graphql query.
+    OWNER="${REPO%/*}"
+    NAME="${REPO#*/}"
+    # Look up the parent issue's node id BEFORE creating the child, so
+    # a missing parent does not leave us with an orphan child.
+    PARENT_ID=$(gh api graphql -f query="query(\$o: String!, \$n: String!, \$num: Int!) { repository(owner: \$o, name: \$n) { issue(number: \$num) { id } } }" \
+      -F o="$OWNER" -F n="$NAME" -F num="$PARENT" --jq '.data.repository.issue.id' 2>/dev/null) \
+      || { echo "{\"error\":\"parent issue #$PARENT not found in $REPO\"}" >&2; exit 1; }
+    if [ -z "$PARENT_ID" ] || [ "$PARENT_ID" = "null" ]; then
+      echo "{\"error\":\"parent issue #$PARENT not found in $REPO\"}" >&2
+      exit 1
+    fi
+    # Create the child issue.
+    ARGS=(issue create --repo "$REPO" --title "$TITLE")
+    [ -n "$BODY" ] && ARGS+=(--body "$BODY")
+    URL=$(gh "${ARGS[@]}") || { echo '{"error":"gh issue create failed"}' >&2; exit 1; }
+    CHILD_NUMBER=$(echo "$URL" | grep -oE '[0-9]+$' || echo "0")
+    # Look up the child's node id.
+    CHILD_ID=$(gh api graphql -f query="query(\$o: String!, \$n: String!, \$num: Int!) { repository(owner: \$o, name: \$n) { issue(number: \$num) { id } } }" \
+      -F o="$OWNER" -F n="$NAME" -F num="$CHILD_NUMBER" --jq '.data.repository.issue.id' 2>/dev/null)
+    if [ -z "$CHILD_ID" ] || [ "$CHILD_ID" = "null" ]; then
+      echo "{\"error\":\"child issue #$CHILD_NUMBER created but node id lookup failed\"}" >&2
+      exit 1
+    fi
+    # Link as sub-issue. GraphQL addSubIssue mutation -- requires the
+    # sub-issues feature enabled on the repo. On failure we still return
+    # the child url+number so the caller has the issue reference; the
+    # missing link surfaces as a warning to stderr.
+    gh api graphql -f query="mutation(\$parent: ID!, \$child: ID!) { addSubIssue(input: { issueId: \$parent, subIssueId: \$child }) { issue { id } } }" \
+      -F parent="$PARENT_ID" -F child="$CHILD_ID" >/dev/null 2>&1 \
+      || echo "[github] WARNING: child issue #$CHILD_NUMBER created but addSubIssue mutation failed (sub-issues may not be enabled for $REPO)" >&2
+    jq -n --arg url "$URL" --argjson number "${CHILD_NUMBER:-0}" '{"url":$url,"number":$number}'
+    ;;
+
+  list-sub-issues)
+    # List sub-issues of a parent issue (#462).
+    #
+    # Env: LEGION_WS_REPO, LEGION_WS_PARENT_NUMBER, LEGION_WS_STATE
+    #      (open|closed|all, default: open)
+    # Output: JSON array of issues with {url, number, title, state}.
+    PARENT="${LEGION_WS_PARENT_NUMBER:-}"
+    STATE="${LEGION_WS_STATE:-open}"
+    if [ -z "$REPO" ] || [ -z "$PARENT" ]; then
+      echo "[]"
+      exit 0
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo "[]"
+      exit 0
+    fi
+    OWNER="${REPO%/*}"
+    NAME="${REPO#*/}"
+    # GraphQL: fetch the parent's subIssues connection. Filter by state
+    # in jq since the GraphQL connection doesn't support state filter
+    # directly without invoking the issueFilters argument.
+    RESULT=$(gh api graphql -f query="query(\$o: String!, \$n: String!, \$num: Int!) { repository(owner: \$o, name: \$n) { issue(number: \$num) { subIssues(first: 100) { nodes { number url title state body } } } } }" \
+      -F o="$OWNER" -F n="$NAME" -F num="$PARENT" 2>/dev/null) || { echo "[]"; exit 0; }
+    if [ "$STATE" = "all" ]; then
+      echo "$RESULT" | jq '[.data.repository.issue.subIssues.nodes[]]'
+    else
+      # GitHub returns state in uppercase (OPEN / CLOSED); normalize for the filter.
+      UPPER=$(echo "$STATE" | tr '[:lower:]' '[:upper:]')
+      echo "$RESULT" | jq --arg s "$UPPER" '[.data.repository.issue.subIssues.nodes[] | select(.state == $s)]'
+    fi
+    ;;
+
   create-pr)
     TITLE="${LEGION_WS_TITLE:-}"
     BODY="${LEGION_WS_BODY:-}"
