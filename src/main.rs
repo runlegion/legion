@@ -3336,7 +3336,18 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
                 "id": prediction.id,
                 "orphan_after": prediction.orphan_after,
             });
-            writeln!(out, "{}", serde_json::to_string(&out_json)?)?;
+            // Emit is non-blocking: a closed stdout pipe or serialize error
+            // must not propagate as a process error, otherwise an upstream
+            // hook could break the agent on a stdout-side problem unrelated
+            // to the prediction having landed in the DB.
+            match serde_json::to_string(&out_json) {
+                Ok(s) => {
+                    if let Err(e) = writeln!(out, "{s}") {
+                        eprintln!("[legion uncertainty emit] stdout write failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("[legion uncertainty emit] serialize failed: {e}"),
+            }
         }
 
         UncertaintyAction::Witness {
