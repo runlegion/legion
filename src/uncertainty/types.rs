@@ -379,6 +379,11 @@ fn confidence_bucket_label(c: Confidence) -> String {
 
 /// Deterministic cohort key string. Format mirrors platform:
 /// `<surface>:<model>:<model_version>:<bucket>`.
+///
+/// The colon separator is for lookup, not parsing -- callers should treat
+/// the result as an opaque key. If any input ever contains a `:`, the key
+/// stays deterministic (same input -> same output) but the string cannot
+/// be split back into its components without ambiguity.
 pub fn cohort_key(surface: &str, model: &str, model_version: &str, c: Confidence) -> String {
     format!(
         "{}:{}:{}:{}",
@@ -626,5 +631,105 @@ mod tests {
     fn outcome_label_from_str_rejects_unknown_label() {
         let err = OutcomeLabel::from_str("ghosted").unwrap_err();
         assert!(matches!(err, UncertaintyError::InvalidPayload(_)));
+    }
+
+    #[test]
+    fn witnessed_cannot_be_orphaned() {
+        // Race-prevention guarantee documented at the module level: the
+        // orphan-sweep cannot retroactively reclassify a witnessed row.
+        let mut p = Prediction::new(fresh_input());
+        p.witness(
+            OutcomeLabel::Shipped,
+            serde_json::json!({}),
+            Correctness::from_f64(0.9).unwrap(),
+            "2026-05-12T10:00:00+00:00",
+        )
+        .unwrap();
+        let err = p.orphan("2026-05-12T11:00:00+00:00").unwrap_err();
+        assert!(matches!(
+            err,
+            UncertaintyError::IllegalTransition {
+                from: PredictionState::Witnessed,
+                to: PredictionState::Orphaned,
+            }
+        ));
+    }
+
+    #[test]
+    fn cannot_double_calibrate() {
+        let mut p = Prediction::new(fresh_input());
+        p.witness(
+            OutcomeLabel::Shipped,
+            serde_json::json!({}),
+            Correctness::from_f64(1.0).unwrap(),
+            "2026-05-12T10:00:00+00:00",
+        )
+        .unwrap();
+        p.calibrate("2026-05-13T03:00:00+00:00").unwrap();
+        let err = p.calibrate("2026-05-13T04:00:00+00:00").unwrap_err();
+        assert!(matches!(
+            err,
+            UncertaintyError::IllegalTransition {
+                from: PredictionState::Calibrated,
+                to: PredictionState::Calibrated,
+            }
+        ));
+    }
+
+    #[test]
+    fn retired_is_terminal() {
+        // No transition out of Retired -- the four reachable terminal-attempts
+        // (witness, calibrate, orphan, retire-again) must all be rejected.
+        let mut base = Prediction::new(fresh_input());
+        base.orphan("2026-05-12T11:00:00+00:00").unwrap();
+        base.retire("2026-05-19T00:00:00+00:00").unwrap();
+        assert_eq!(base.state, PredictionState::Retired);
+
+        let mut p = base.clone();
+        let err = p
+            .witness(
+                OutcomeLabel::Shipped,
+                serde_json::json!({}),
+                Correctness::from_f64(1.0).unwrap(),
+                "2026-05-20T00:00:00+00:00",
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            UncertaintyError::IllegalTransition {
+                from: PredictionState::Retired,
+                to: PredictionState::Witnessed,
+            }
+        ));
+
+        let mut p = base.clone();
+        let err = p.calibrate("2026-05-20T00:00:00+00:00").unwrap_err();
+        assert!(matches!(
+            err,
+            UncertaintyError::IllegalTransition {
+                from: PredictionState::Retired,
+                to: PredictionState::Calibrated,
+            }
+        ));
+
+        let mut p = base.clone();
+        let err = p.orphan("2026-05-20T00:00:00+00:00").unwrap_err();
+        assert!(matches!(
+            err,
+            UncertaintyError::IllegalTransition {
+                from: PredictionState::Retired,
+                to: PredictionState::Orphaned,
+            }
+        ));
+
+        let mut p = base;
+        let err = p.retire("2026-05-20T00:00:00+00:00").unwrap_err();
+        assert!(matches!(
+            err,
+            UncertaintyError::IllegalTransition {
+                from: PredictionState::Retired,
+                to: PredictionState::Retired,
+            }
+        ));
     }
 }
