@@ -112,9 +112,12 @@ impl Database {
     /// model. Ordered by `bucket_lower` ASC so a reliability diagram can
     /// render top-to-bottom.
     ///
-    /// `surface` and `model` are matched as prefixes of the cohort_key
-    /// (`<surface>:<model>:<version>:<bucket>`), so a surface-only filter
-    /// returns rows for every model under that surface.
+    /// `surface` and `model` are matched as prefixes / interior segments of
+    /// the cohort_key (`<surface>:<model>:<version>:<bucket>`). The model
+    /// filter uses `%:<model>:%` which can over-match if a future surface
+    /// or version legitimately contains a colon-bounded substring equal to
+    /// a model name. Tighten by querying against normalized columns once
+    /// the calibration roller in #359 starts producing rows at scale.
     pub fn list_calibration_snapshots(
         &self,
         surface: Option<&str>,
@@ -282,17 +285,19 @@ mod tests {
         }
     }
 
-    fn test_db() -> Database {
+    /// Build a DB on a fresh tempdir. Returns both so the caller binds the
+    /// TempDir for the test body's lifetime -- letting the handle drop would
+    /// delete the directory before the DB is done with it.
+    fn test_db() -> (tempfile::TempDir, Database) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
-        // Leak the tempdir so the path remains valid for the test body.
-        std::mem::forget(dir);
-        Database::open(&path).unwrap()
+        let db = Database::open(&path).unwrap();
+        (dir, db)
     }
 
     #[test]
     fn insert_and_get_prediction_round_trips() {
-        let db = test_db();
+        let (_dir, db) = test_db();
         let p = Prediction::new(fresh_input());
         db.insert_prediction(&p).unwrap();
         let fetched = db.get_prediction(&p.id).unwrap().unwrap();
@@ -305,14 +310,14 @@ mod tests {
 
     #[test]
     fn get_prediction_missing_returns_none() {
-        let db = test_db();
+        let (_dir, db) = test_db();
         let none = db.get_prediction("nope").unwrap();
         assert!(none.is_none());
     }
 
     #[test]
     fn update_prediction_persists_state_transition() {
-        let db = test_db();
+        let (_dir, db) = test_db();
         let mut p = Prediction::new(fresh_input());
         db.insert_prediction(&p).unwrap();
         p.witness(
@@ -331,7 +336,7 @@ mod tests {
 
     #[test]
     fn update_prediction_missing_returns_not_found() {
-        let db = test_db();
+        let (_dir, db) = test_db();
         let p = Prediction::new(fresh_input());
         let err = db.update_prediction(&p).unwrap_err();
         assert!(matches!(err, UncertaintyError::PredictionNotFound(_)));
@@ -339,7 +344,7 @@ mod tests {
 
     #[test]
     fn insert_prediction_rejects_duplicate_id() {
-        let db = test_db();
+        let (_dir, db) = test_db();
         let p = Prediction::new(fresh_input());
         db.insert_prediction(&p).unwrap();
         let err = db.insert_prediction(&p).unwrap_err();
@@ -348,19 +353,19 @@ mod tests {
 
     #[test]
     fn count_orphans_groups_by_surface() {
-        let db = test_db();
+        let (_dir, db) = test_db();
+        // Each prediction is constructed Emitted, transitioned to Orphaned,
+        // then inserted: the row lands with state='orphaned' directly.
         for _ in 0..3 {
             let mut p = Prediction::new(fresh_input());
             p.orphan("2026-05-12T10:00:00+00:00").unwrap();
             db.insert_prediction(&p).unwrap();
-            db.update_prediction(&p).unwrap();
         }
         let mut other = fresh_input();
         other.surface = "legion.review".into();
         let mut p = Prediction::new(other);
         p.orphan("2026-05-12T10:00:00+00:00").unwrap();
         db.insert_prediction(&p).unwrap();
-        db.update_prediction(&p).unwrap();
 
         let all = db.count_orphans_by_surface(None).unwrap();
         let task_row = all.iter().find(|r| r.surface == "legion.task").unwrap();
@@ -388,7 +393,7 @@ mod tests {
 
     #[test]
     fn list_calibration_snapshots_empty_db_returns_empty() {
-        let db = test_db();
+        let (_dir, db) = test_db();
         let snaps = db.list_calibration_snapshots(None, None).unwrap();
         assert!(snaps.is_empty());
     }
