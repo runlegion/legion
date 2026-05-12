@@ -35,6 +35,10 @@ pub enum UncertaintyError {
     #[error("claimed_confidence must be in [0.0, 1.0], got {0}")]
     InvalidConfidence(f64),
 
+    /// A correctness value fell outside the [0.0, 1.0] interval.
+    #[error("outcome_correctness must be in [0.0, 1.0], got {0}")]
+    InvalidCorrectness(f64),
+
     /// A prediction payload failed JSON validation.
     #[error("prediction payload invalid: {0}")]
     InvalidPayload(String),

@@ -143,6 +143,10 @@ impl OutcomeLabel {
 /// Wrapped at the type boundary so callers cannot construct an out-of-range
 /// value silently. The constructor validates; serde uses
 /// [`Confidence::from_f64`] via try_into to keep round-trips honest.
+///
+/// `PartialEq` is safe to derive: the constructor rejects NaN, so no
+/// instance of `Confidence` can compare unequal to itself (the trait
+/// invariant `a == a`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "f64", into = "f64")]
 pub struct Confidence(f64);
@@ -170,6 +174,41 @@ impl TryFrom<f64> for Confidence {
 
 impl From<Confidence> for f64 {
     fn from(c: Confidence) -> f64 {
+        c.0
+    }
+}
+
+/// Witness-side companion to [`Confidence`]. Measures actual outcome
+/// closeness to the prediction, normalized to [0.0, 1.0].
+///
+/// The witness path needs the same [0, 1] guarantee `Confidence` gives
+/// the emit path. Same NaN-rejection, same `PartialEq` safety argument.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "f64", into = "f64")]
+pub struct Correctness(f64);
+
+impl Correctness {
+    pub fn from_f64(value: f64) -> Result<Self> {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(UncertaintyError::InvalidCorrectness(value));
+        }
+        Ok(Correctness(value))
+    }
+
+    pub fn value(&self) -> f64 {
+        self.0
+    }
+}
+
+impl TryFrom<f64> for Correctness {
+    type Error = UncertaintyError;
+    fn try_from(value: f64) -> Result<Self> {
+        Correctness::from_f64(value)
+    }
+}
+
+impl From<Correctness> for f64 {
+    fn from(c: Correctness) -> f64 {
         c.0
     }
 }
@@ -256,17 +295,21 @@ impl Prediction {
     }
 
     /// Apply witness data. Returns an error if the current state forbids it.
+    ///
+    /// `correctness` is wrapped in [`Correctness`] so the witness path
+    /// shares the same validated [0, 1] guarantee the emit path gets from
+    /// [`Confidence`].
     pub fn witness(
         &mut self,
         label: OutcomeLabel,
         payload: serde_json::Value,
-        correctness: f64,
+        correctness: Correctness,
         now: &str,
     ) -> Result<()> {
         self.state = self.state.transition(PredictionState::Witnessed)?;
         self.outcome_label = Some(label);
         self.outcome_payload = Some(payload);
-        self.outcome_correctness = Some(correctness);
+        self.outcome_correctness = Some(correctness.value());
         self.witnessed_at = Some(now.to_owned());
         self.updated_at = now.to_owned();
         Ok(())
@@ -393,7 +436,7 @@ mod tests {
         p.witness(
             OutcomeLabel::Shipped,
             serde_json::json!({ "actual_tokens": 1480 }),
-            0.98,
+            Correctness::from_f64(0.98).unwrap(),
             "2026-05-12T10:00:00+00:00",
         )
         .unwrap();
@@ -414,7 +457,7 @@ mod tests {
             .witness(
                 OutcomeLabel::Shipped,
                 serde_json::json!({}),
-                1.0,
+                Correctness::from_f64(1.0).unwrap(),
                 "2026-05-12T12:00:00+00:00",
             )
             .unwrap_err();
@@ -459,7 +502,7 @@ mod tests {
         p.witness(
             OutcomeLabel::Shipped,
             serde_json::json!({}),
-            1.0,
+            Correctness::from_f64(1.0).unwrap(),
             "2026-05-12T10:00:00+00:00",
         )
         .unwrap();
@@ -467,7 +510,7 @@ mod tests {
             .witness(
                 OutcomeLabel::Abandoned,
                 serde_json::json!({}),
-                0.0,
+                Correctness::from_f64(0.0).unwrap(),
                 "2026-05-12T11:00:00+00:00",
             )
             .unwrap_err();
