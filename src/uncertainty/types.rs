@@ -252,7 +252,7 @@ pub struct Prediction {
     pub state: PredictionState,
     pub outcome_label: Option<OutcomeLabel>,
     pub outcome_payload: Option<serde_json::Value>,
-    pub outcome_correctness: Option<f64>,
+    pub outcome_correctness: Option<Correctness>,
     pub cohort_key: String,
     pub created_at: String,
     pub updated_at: String,
@@ -309,7 +309,7 @@ impl Prediction {
         self.state = self.state.transition(PredictionState::Witnessed)?;
         self.outcome_label = Some(label);
         self.outcome_payload = Some(payload);
-        self.outcome_correctness = Some(correctness.value());
+        self.outcome_correctness = Some(correctness);
         self.witnessed_at = Some(now.to_owned());
         self.updated_at = now.to_owned();
         Ok(())
@@ -554,6 +554,10 @@ mod tests {
             "01"
         );
         assert_eq!(
+            confidence_bucket_label(Confidence::from_f64(0.5).unwrap()),
+            "05"
+        );
+        assert_eq!(
             confidence_bucket_label(Confidence::from_f64(0.999).unwrap()),
             "09"
         );
@@ -561,6 +565,14 @@ mod tests {
             confidence_bucket_label(Confidence::from_f64(1.0).unwrap()),
             "09"
         );
+    }
+
+    #[test]
+    fn cohort_key_distinguishes_by_surface() {
+        let c = Confidence::from_f64(0.5).unwrap();
+        let a = cohort_key("legion.task", "claude-opus-4-7", "4.7", c);
+        let b = cohort_key("legion.review", "claude-opus-4-7", "4.7", c);
+        assert_ne!(a, b);
     }
 
     #[test]
