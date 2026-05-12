@@ -579,4 +579,52 @@ mod tests {
         let parsed = uuid::Uuid::parse_str(&p.id).unwrap();
         assert_eq!(parsed.get_version_num(), 7);
     }
+
+    #[test]
+    fn witnessed_can_retire_without_calibrating() {
+        let mut p = Prediction::new(fresh_input());
+        p.witness(
+            OutcomeLabel::Shipped,
+            serde_json::json!({}),
+            Correctness::from_f64(0.9).unwrap(),
+            "2026-05-12T10:00:00+00:00",
+        )
+        .unwrap();
+        p.retire("2026-05-13T00:00:00+00:00").unwrap();
+        assert_eq!(p.state, PredictionState::Retired);
+    }
+
+    #[test]
+    fn confidence_serde_round_trip_via_json() {
+        let c = Confidence::from_f64(0.42).unwrap();
+        let encoded = serde_json::to_string(&c).unwrap();
+        assert_eq!(encoded, "0.42");
+        let decoded: Confidence = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, c);
+        let bad: serde_json::Result<Confidence> = serde_json::from_str("1.5");
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn correctness_serde_round_trip_via_json() {
+        let c = Correctness::from_f64(0.66).unwrap();
+        let encoded = serde_json::to_string(&c).unwrap();
+        assert_eq!(encoded, "0.66");
+        let decoded: Correctness = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, c);
+        let bad: serde_json::Result<Correctness> = serde_json::from_str("-0.1");
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn state_from_str_rejects_unknown_label() {
+        let err = PredictionState::from_str("emerging").unwrap_err();
+        assert!(matches!(err, UncertaintyError::InvalidPayload(_)));
+    }
+
+    #[test]
+    fn outcome_label_from_str_rejects_unknown_label() {
+        let err = OutcomeLabel::from_str("ghosted").unwrap_err();
+        assert!(matches!(err, UncertaintyError::InvalidPayload(_)));
+    }
 }
