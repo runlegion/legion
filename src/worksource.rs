@@ -455,6 +455,66 @@ pub struct CreatedIssue {
 }
 
 /// Create an issue via a work source plugin.
+/// Create a child issue linked to a parent issue as a native sub-issue
+/// via the GitHub GraphQL `addSubIssue` mutation (#462). Returns the
+/// child issue's `CreatedIssue` shape.
+///
+/// Plugin implementation looks up the parent's node id first, creates
+/// the child via `gh issue create`, looks up the child's node id, then
+/// calls the addSubIssue mutation. If the parent does not exist, the
+/// plugin errors out BEFORE creating the child so we don't leave an
+/// orphan. If addSubIssue fails (sub-issues disabled on the repo), the
+/// child issue still exists; the plugin warns to stderr but returns
+/// success so the caller has the issue reference.
+pub fn create_sub_issue(
+    plugin_name: &str,
+    github_repo: &str,
+    parent_number: u64,
+    title: &str,
+    body: Option<&str>,
+) -> Result<CreatedIssue> {
+    let plugin_path = find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
+    let parent_str = parent_number.to_string();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_PARENT_NUMBER", &parent_str),
+        ("LEGION_WS_TITLE", title),
+    ];
+    if let Some(b) = body {
+        env.push(("LEGION_WS_BODY", b));
+    }
+    let output = call_plugin(&plugin_path, &["create-sub-issue"], &env)?;
+    let created: CreatedIssue =
+        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
+    Ok(created)
+}
+
+/// List sub-issues of a parent issue (#462). State filter is one of
+/// `open` / `closed` / `all`; defaults to `open` when None.
+pub fn list_sub_issues(
+    plugin_name: &str,
+    github_repo: &str,
+    parent_number: u64,
+    state: Option<&str>,
+) -> Result<Vec<ExternalIssue>> {
+    let plugin_path = match find_plugin(plugin_name) {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+    let parent_str = parent_number.to_string();
+    let state_str = state.unwrap_or("open");
+    let env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_PARENT_NUMBER", &parent_str),
+        ("LEGION_WS_STATE", state_str),
+    ];
+    let output = call_plugin(&plugin_path, &["list-sub-issues"], &env)?;
+    let issues: Vec<ExternalIssue> =
+        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
+    Ok(issues)
+}
+
 pub fn create_issue(
     plugin_name: &str,
     github_repo: &str,

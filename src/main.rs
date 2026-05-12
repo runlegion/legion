@@ -539,6 +539,15 @@ enum Commands {
         action: DocumentAction,
     },
 
+    /// Sub-issue verbs over the work source plugin (#462). Operator-
+    /// facing surface for creating a child issue linked to a parent
+    /// via GitHub's native sub-issue relationship, and listing the
+    /// children of a parent.
+    SubIssue {
+        #[command(subcommand)]
+        action: SubIssueAction,
+    },
+
     /// Probe a fresh MCP subprocess for notifier health (#391). Spawns
     /// `legion mcp` over stdio, sends `initialize` + `legion/notifier_health`
     /// JSON-RPC requests, prints the health JSON. This spins up a NEW MCP
@@ -883,6 +892,43 @@ enum DocumentAction {
     },
     /// Mark a document archived.
     Archive { id: String },
+}
+
+#[derive(Subcommand)]
+enum SubIssueAction {
+    /// Create a child issue linked to a parent via GitHub's native
+    /// sub-issue relationship (#462). The plugin looks up the parent
+    /// node id first, errors if the parent does not exist, then
+    /// creates the child and links via the addSubIssue mutation.
+    Create {
+        /// Repo containing the parent issue (used to resolve the work
+        /// source plugin).
+        #[arg(long)]
+        repo: String,
+        /// Parent issue number.
+        #[arg(long)]
+        parent: u64,
+        /// Title of the new child issue.
+        #[arg(long)]
+        title: String,
+        /// Optional body for the child issue. Reads from stdin when
+        /// --body is omitted AND stdin is not a TTY.
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// List sub-issues of a parent (#462).
+    List {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        parent: u64,
+        /// State filter: open (default) | closed | all.
+        #[arg(long, default_value = "open")]
+        state: String,
+        /// Emit as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4052,6 +4098,53 @@ fn run() -> error::Result<()> {
                 }
             }
         }
+        Commands::SubIssue { action } => match action {
+            SubIssueAction::Create {
+                repo,
+                parent,
+                title,
+                body,
+            } => {
+                let (plugin, github_repo, _) =
+                    worksource::resolve_config(&repo).ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{repo}'"
+                        ))
+                    })?;
+                let created = worksource::create_sub_issue(
+                    &plugin,
+                    &github_repo,
+                    parent,
+                    &title,
+                    body.as_deref(),
+                )?;
+                println!("{}", created.url);
+            }
+            SubIssueAction::List {
+                repo,
+                parent,
+                state,
+                json,
+            } => {
+                let (plugin, github_repo, _) =
+                    worksource::resolve_config(&repo).ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{repo}'"
+                        ))
+                    })?;
+                let issues =
+                    worksource::list_sub_issues(&plugin, &github_repo, parent, Some(&state))?;
+                if json {
+                    println!("{}", serde_json::to_string(&issues)?);
+                } else if issues.is_empty() {
+                    println!("[legion] no sub-issues of #{parent} in {github_repo}");
+                } else {
+                    for i in &issues {
+                        println!("#{}\t{}\t{}", i.number, i.state, i.title);
+                    }
+                }
+            }
+        },
         Commands::McpHealth { wait } => {
             // Spawn `legion mcp` as a subprocess. Send `initialize`, wait
             // for the notifier to tick at least once, then send
