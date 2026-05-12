@@ -5,7 +5,10 @@ use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::error::{LegionError, Result};
-use crate::sync::{CardDelta, ReflectionDelta, ScheduleDelta};
+use crate::sync::{
+    CardDelta, ReflectionDelta, ScheduleDelta, UncertaintyCalibrationSnapshotDelta,
+    UncertaintyPredictionDelta,
+};
 
 /// Format an ISO 8601 timestamp to a date-only string (YYYY-MM-DD).
 ///
@@ -898,6 +901,80 @@ impl Database {
                 ON documents(archived_at, type) WHERE archived_at IS NOT NULL AND deleted_at IS NULL;",
         )?;
 
+        // Migration 22: Uncertainty engine tables (#355, child of #354).
+        //
+        // Pillar 2 turns features from SCIP + task descriptions into a
+        // calibrated prediction with a confidence bucket, witnesses the
+        // outcome from usage + PR merges, and rolls calibration snapshots
+        // nightly. Lifecycle: emitted -> witnessed -> calibrated -> orphaned
+        // -> retired. The orphan state is load-bearing -- silence is its own
+        // state, counted under the Brier uncertainty term (not reliability),
+        // so unwitnessed predictions do not poison the reliability score.
+        //
+        // Post-correction notes from platform (Whatsonyourmind review on
+        // legion#354, ack 019de0ac):
+        //
+        //  - bucket_lower / bucket_upper are quantile-derived (equal-frequency,
+        //    10 per cohort) -- schema unchanged, but the calibration roller
+        //    writes quantile bounds rather than fixed 0.1 widths.
+        //  - actual_correctness stores the Empirical-Bayes Beta-posterior
+        //    shrunk value used for visible calibration; actual_correctness_raw
+        //    stores the unshrunk cell average for audit and back-out.
+        //  - Reference: Brocker (2009), reliability/sufficiency decomposition.
+        //
+        // updated_at + deleted_at columns exist for smugglr LWW sync
+        // (mirrors reflections / tasks / schedules).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS uncertainty_prediction (
+                id TEXT PRIMARY KEY,
+                surface TEXT NOT NULL,
+                feature_key TEXT NOT NULL,
+                input_fingerprint TEXT NOT NULL,
+                model TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                claimed_confidence REAL NOT NULL,
+                prediction_payload TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'emitted',
+                outcome_label TEXT,
+                outcome_payload TEXT,
+                outcome_correctness REAL,
+                cohort_key TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                witnessed_at TEXT,
+                orphan_after TEXT,
+                deleted_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_uncertainty_prediction_cohort
+                ON uncertainty_prediction(cohort_key) WHERE deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_uncertainty_prediction_surface
+                ON uncertainty_prediction(surface) WHERE deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_uncertainty_prediction_state
+                ON uncertainty_prediction(state) WHERE deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_uncertainty_prediction_orphan_sweep
+                ON uncertainty_prediction(state, orphan_after) WHERE deleted_at IS NULL;
+
+            CREATE TABLE IF NOT EXISTS uncertainty_calibration_snapshot (
+                id TEXT PRIMARY KEY,
+                cohort_key TEXT NOT NULL,
+                bucket_lower REAL NOT NULL,
+                bucket_upper REAL NOT NULL,
+                claimed_confidence REAL NOT NULL,
+                actual_correctness REAL NOT NULL,
+                actual_correctness_raw REAL NOT NULL,
+                prediction_count INTEGER NOT NULL,
+                orphan_count INTEGER NOT NULL,
+                brier_score REAL NOT NULL,
+                computed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_uncertainty_calibration_cohort
+                ON uncertainty_calibration_snapshot(cohort_key) WHERE deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_uncertainty_calibration_computed
+                ON uncertainty_calibration_snapshot(computed_at) WHERE deleted_at IS NULL;",
+        )?;
+
         Ok(())
     }
 
@@ -1545,6 +1622,95 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Get uncertainty prediction deltas for multi-node sync.
+    ///
+    /// Returns all uncertainty_prediction rows modified or soft-deleted since
+    /// the given timestamp. Predictions transition through emitted -> witnessed
+    /// -> calibrated -> orphaned -> retired, so updated_at advances on every
+    /// state change.
+    #[allow(dead_code)] // Wired into sync broadcast once #358 hooks land.
+    pub fn get_uncertainty_prediction_deltas_since(
+        &self,
+        since: &str,
+    ) -> Result<Vec<UncertaintyPredictionDelta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
+             claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
+             outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
+             orphan_after, deleted_at \
+             FROM uncertainty_prediction \
+             WHERE updated_at > ?1 OR deleted_at > ?1 \
+             ORDER BY COALESCE(updated_at, deleted_at) ASC",
+        )?;
+
+        let rows = stmt.query_map([since], |row| {
+            Ok(UncertaintyPredictionDelta {
+                id: row.get(0)?,
+                surface: row.get(1)?,
+                feature_key: row.get(2)?,
+                input_fingerprint: row.get(3)?,
+                model: row.get(4)?,
+                model_version: row.get(5)?,
+                claimed_confidence: row.get(6)?,
+                prediction_payload: row.get(7)?,
+                state: row.get(8)?,
+                outcome_label: row.get(9)?,
+                outcome_payload: row.get(10)?,
+                outcome_correctness: row.get(11)?,
+                cohort_key: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+                witnessed_at: row.get(15)?,
+                orphan_after: row.get(16)?,
+                deleted_at: row.get(17)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get uncertainty calibration snapshot deltas for multi-node sync.
+    ///
+    /// Each node computes its own snapshots from synced predictions; sync
+    /// propagates rows so peers can compare drift across the cluster without
+    /// re-running the roller. LWW keyed by id with updated_at as tiebreaker.
+    #[allow(dead_code)] // Wired into sync broadcast once #359 daemon roller lands.
+    pub fn get_uncertainty_calibration_snapshot_deltas_since(
+        &self,
+        since: &str,
+    ) -> Result<Vec<UncertaintyCalibrationSnapshotDelta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, cohort_key, bucket_lower, bucket_upper, claimed_confidence, \
+             actual_correctness, actual_correctness_raw, prediction_count, orphan_count, \
+             brier_score, computed_at, updated_at, deleted_at \
+             FROM uncertainty_calibration_snapshot \
+             WHERE updated_at > ?1 OR deleted_at > ?1 \
+             ORDER BY COALESCE(updated_at, deleted_at) ASC",
+        )?;
+
+        let rows = stmt.query_map([since], |row| {
+            Ok(UncertaintyCalibrationSnapshotDelta {
+                id: row.get(0)?,
+                cohort_key: row.get(1)?,
+                bucket_lower: row.get(2)?,
+                bucket_upper: row.get(3)?,
+                claimed_confidence: row.get(4)?,
+                actual_correctness: row.get(5)?,
+                actual_correctness_raw: row.get(6)?,
+                prediction_count: row.get(7)?,
+                orphan_count: row.get(8)?,
+                brier_score: row.get(9)?,
+                computed_at: row.get(10)?,
+                updated_at: row.get(11)?,
+                deleted_at: row.get(12)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     /// Hard-delete tombstones older than the given number of days.
     ///
     /// Removes soft-deleted rows (where deleted_at IS NOT NULL) that are older
@@ -1571,10 +1737,23 @@ impl Database {
             [&cutoff],
         )? as u64;
 
+        let uncertainty_predictions = self.conn.execute(
+            "DELETE FROM uncertainty_prediction WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            [&cutoff],
+        )? as u64;
+
+        let uncertainty_calibration_snapshots = self.conn.execute(
+            "DELETE FROM uncertainty_calibration_snapshot \
+             WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            [&cutoff],
+        )? as u64;
+
         Ok(TombstoneCleanupResult {
             reflections,
             tasks,
             schedules,
+            uncertainty_predictions,
+            uncertainty_calibration_snapshots,
         })
     }
 
@@ -3807,11 +3986,17 @@ pub struct TombstoneCleanupResult {
     pub reflections: u64,
     pub tasks: u64,
     pub schedules: u64,
+    pub uncertainty_predictions: u64,
+    pub uncertainty_calibration_snapshots: u64,
 }
 
 impl TombstoneCleanupResult {
     pub fn total(&self) -> u64 {
-        self.reflections + self.tasks + self.schedules
+        self.reflections
+            + self.tasks
+            + self.schedules
+            + self.uncertainty_predictions
+            + self.uncertainty_calibration_snapshots
     }
 
     pub fn is_empty(&self) -> bool {
@@ -6883,5 +7068,141 @@ mod tests {
         assert_eq!(row.2, 1, "productive = 1");
         assert_eq!(row.3, 1, "unproductive = 1");
         assert_eq!(row.4, 1, "errored = 1");
+    }
+
+    fn insert_prediction_row(db: &Database, id: &str, updated_at: &str) {
+        db.conn
+            .execute(
+                "INSERT INTO uncertainty_prediction \
+                 (id, surface, feature_key, input_fingerprint, model, model_version, \
+                  claimed_confidence, prediction_payload, state, cohort_key, \
+                  created_at, updated_at) \
+                 VALUES (?1, 'legion.task', 'scip.refactor', 'fp-1', 'claude-opus-4-7', \
+                         '4.7', 0.7, '{\"predicted_tokens\":1000}', 'emitted', \
+                         'legion:claude-opus-4-7:scip.refactor:0.7', ?2, ?3)",
+                rusqlite::params![id, updated_at, updated_at],
+            )
+            .unwrap();
+    }
+
+    fn insert_snapshot_row(db: &Database, id: &str, updated_at: &str) {
+        db.conn
+            .execute(
+                "INSERT INTO uncertainty_calibration_snapshot \
+                 (id, cohort_key, bucket_lower, bucket_upper, claimed_confidence, \
+                  actual_correctness, actual_correctness_raw, prediction_count, \
+                  orphan_count, brier_score, computed_at, updated_at) \
+                 VALUES (?1, 'legion:claude-opus-4-7:scip.refactor:0.7', 0.6, 0.8, 0.7, \
+                         0.68, 0.65, 42, 3, 0.09, ?2, ?2)",
+                rusqlite::params![id, updated_at],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn uncertainty_migration_creates_both_tables() {
+        let db = test_db();
+        let table_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' \
+                 AND name IN ('uncertainty_prediction', 'uncertainty_calibration_snapshot')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 2);
+    }
+
+    #[test]
+    fn uncertainty_migration_creates_orphan_sweep_index() {
+        let db = test_db();
+        let index_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name='idx_uncertainty_prediction_orphan_sweep'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 1);
+    }
+
+    #[test]
+    fn get_uncertainty_prediction_deltas_returns_modified_rows() {
+        let db = test_db();
+        insert_prediction_row(&db, "p-1", "2026-05-12T00:00:00+00:00");
+        insert_prediction_row(&db, "p-2", "2026-05-12T01:00:00+00:00");
+
+        let deltas = db
+            .get_uncertainty_prediction_deltas_since("2026-05-12T00:30:00+00:00")
+            .unwrap();
+        assert_eq!(deltas.len(), 1, "only p-2 is newer than the cutoff");
+        assert_eq!(deltas[0].id, "p-2");
+        assert_eq!(deltas[0].surface, "legion.task");
+        assert_eq!(deltas[0].claimed_confidence, 0.7);
+        assert_eq!(deltas[0].state, "emitted");
+    }
+
+    #[test]
+    fn get_uncertainty_prediction_deltas_includes_soft_deleted() {
+        let db = test_db();
+        insert_prediction_row(&db, "p-1", "2026-05-12T00:00:00+00:00");
+        db.conn
+            .execute(
+                "UPDATE uncertainty_prediction SET deleted_at = ?1 WHERE id = 'p-1'",
+                ["2026-05-12T02:00:00+00:00"],
+            )
+            .unwrap();
+        let deltas = db
+            .get_uncertainty_prediction_deltas_since("2026-05-12T01:00:00+00:00")
+            .unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(
+            deltas[0].deleted_at.as_deref(),
+            Some("2026-05-12T02:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn get_uncertainty_calibration_snapshot_deltas_round_trip() {
+        let db = test_db();
+        insert_snapshot_row(&db, "s-1", "2026-05-12T00:00:00+00:00");
+        insert_snapshot_row(&db, "s-2", "2026-05-12T01:00:00+00:00");
+
+        let deltas = db
+            .get_uncertainty_calibration_snapshot_deltas_since("2026-05-12T00:30:00+00:00")
+            .unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].id, "s-2");
+        assert_eq!(deltas[0].prediction_count, 42);
+        assert_eq!(deltas[0].orphan_count, 3);
+        assert!((deltas[0].actual_correctness - 0.68).abs() < 1e-9);
+        assert!((deltas[0].actual_correctness_raw - 0.65).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cleanup_tombstones_includes_uncertainty_tables() {
+        let db = test_db();
+        let old = (Utc::now() - chrono::Duration::days(100)).to_rfc3339();
+        insert_prediction_row(&db, "p-old", &old);
+        db.conn
+            .execute(
+                "UPDATE uncertainty_prediction SET deleted_at = ?1 WHERE id = 'p-old'",
+                [&old],
+            )
+            .unwrap();
+        insert_snapshot_row(&db, "s-old", &old);
+        db.conn
+            .execute(
+                "UPDATE uncertainty_calibration_snapshot SET deleted_at = ?1 WHERE id = 's-old'",
+                [&old],
+            )
+            .unwrap();
+
+        let result = db.cleanup_tombstones(30).unwrap();
+        assert_eq!(result.uncertainty_predictions, 1);
+        assert_eq!(result.uncertainty_calibration_snapshots, 1);
     }
 }
