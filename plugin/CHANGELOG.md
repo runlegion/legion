@@ -1,5 +1,37 @@
 # Legion Changelog
 
+## 0.14.0
+
+Coordination substrate. v0.13.x was "agents have memory" -- reflections, recall, sym, bullpen, signals. v0.14.0 makes it "agents coordinate around work-genesis." The substrate is a documents table that holds spec/NFR/blueprint/persona/journey JSON rows with hot/cold tiering; recall gains an archive tier; the stop hook refuses to let agents abandon mid-plan; the work source plugin layer learns native GitHub sub-issues. Vault is elevated to chief-of-staff orchestrating spec workflows on top of the substrate.
+
+### New
+
+- **Coordination substrate -- documents table** (PR #467, closes #456): SQLite migration 21 adds a `documents` table that holds spec/NFR/blueprint/persona/journey rows. Type-agnostic at the storage layer; meta columns (type, surface, status, priority, owner) are hoisted from `payload.meta` and indexed via partial indexes scoped to the hot pool (`archived_at IS NULL AND deleted_at IS NULL`). New `src/documents.rs` module ships `Document` / `DocumentMeta<'a>` / `DocumentFilter<'a>` types + `impl Database` with `insert_document` / `get_document` / `list_documents` / `archive_document`. CLI: `legion document {create,view,list,archive}` -- create reads payload from `--from <path>` or stdin and validates JSON shape before INSERT (typo doesn't land as string blob); list excludes archived by default, `--archived` flips to the cold partition. `archive_document` uses COALESCE so re-archiving preserves the original timestamp (idempotent). Schema-level validation per type lives in a sibling child issue under #455 once vault ships the schemas; the foundation accepts any well-formed JSON today.
+
+- **`legion recall --archives` / `--include-archives`** (PR #466, closes #457): three-mode recall over reflections. Hot (default, exclude archived), Cold (`--archives`, only archived rows -- the deep-dive), Both (`--include-archives`, broad search). Threaded through the BM25 + hybrid recall paths via new `ArchiveMode` enum; index over-fetches at 4x when filtering archived rows out so a heavily archived corpus does not return less than the requested limit. `consult_bm25` pinned to Both -- consult searches the whole corpus regardless of archive state (existing semantics preserved). v1 scope: `--latest` / `--domain` / `--cosine-only` warn and stay hot-only when combined with the new flags; extending coverage is a #457 follow-up.
+
+- **Sub-issue worksource verbs** (PR #469, closes #462): native GitHub sub-issue support via the work source plugin layer. New Rust verbs `worksource::create_sub_issue` / `list_sub_issues`. github plugin gains `create-sub-issue` (looks up parent's GraphQL node id FIRST, errors before creating child if parent missing -- no orphans, then `gh issue create` + `addSubIssue` mutation) and `list-sub-issues` (GraphQL query on `subIssues` connection with client-side state filtering). CLI: `legion sub-issue {create,list}`. Auto-mirror PostToolUse hook deferred to follow-up; foundation ships first.
+
+- **Stop hook blocks on incomplete TaskList items** (PR #468, closes #461): CC's training disposition is "act once, check in" -- agents abandon mid-plan. Stop hook now reads a per-session task-state log written by a new PostToolUse hook on `TaskCreate` / `TaskUpdate`, reduces to current status per task_id, and blocks Stop when any task ends in `pending` or `in_progress`. Block reason names each open task by id + subject, lists explicit terminal-state options (TaskUpdate(completed) / TaskUpdate(deleted) / post needs_input card), and includes the "the plan is the permission. Keep going." reminder. Bypass via `LEGION_SKIP_STOP_BLOCK=1` writes one row to bypass.jsonl. Two-layer enforcement: gate runs first, reflection prompt fires only after.
+
+### Fixed
+
+- **pre-bash-grep relevance gate** (PR #464, closes #458): the grep enforcement hook from v0.13.1 was blocking when ANY cluster-wide sym hit existed for a symbol-shaped pattern. Common dictionary words (`name`, `data`, `value`, `type`, `id`, `plugin`) are symbol-shaped AND exist as identifiers in every codebase. Caught the hook author blocking on its own author multiple times -- once grepping watch.toml for `name = "ledger"`, once probing the plugin directory. New helper `legion_prequery_filter_hits_local` filters cluster-wide sym hits down to the target repo before the block-tier decision; cross-repo-only hits pass through. Block reason updated to include `--repo $REPO` in the suggested sym command so the agent's redirect targets the same repo.
+
+- **watch.toml duplicate-agent disambiguation** (PR #465, closes #459): two repos sharing one recipient (the `agent` field, or `name` when agent unset) created silent multi-wake on directed signals. Ledger had `agent = "platform"`; @platform signals woke both the platform CWD and the ledger CWD. Six "mis-routed" flags on a single bullpen thread before operator manually removed. Two-layer fix: `legion watch add` refuses the conflict up front (covers four cases: agent-agent, new-agent-vs-existing-name, new-name-vs-existing-agent, distinct-agents-allowed). `legion watch list` walks repos at print time and emits `[WARNING]` to stderr for any recipient shared by N>1 repos -- catches pre-existing duplicates the add gate can't prevent retroactively. Sibling to #226.
+
+### Changed
+
+- **`Database::conn` visibility** bumped to `pub(crate)` so `impl Database` blocks in other modules (`src/documents.rs` in v0.14.0) can use the connection without moving every method into `src/db.rs`. Alternative was ~200 LOC of file motion per new domain module; visibility change is the smaller move.
+
+### Identity reflection
+
+- **Completion discipline doctrine** added to the legion-prime whoami (reflection `019e1894`): when tasked with a plan, complete the whole plan before stopping. Intermediate stops are abandonment unless explicit blocked / needs_input / cancelled. The Stop hook (#461) enforces this mechanically; the identity reflection ensures agents know the doctrine before tripping the hook.
+
+### Pattern delivered
+
+**Memory layer to coordination substrate.** v0.13.x said "agents have memory" -- reflections + recall + sym + bullpen + signals. v0.14.0 says "agents coordinate around work-genesis." Specs, NFRs, blueprints land as queryable structured documents alongside the reflection pool. Plans (via TaskList) have mechanical completion enforcement. Sub-issues link work across the team via the native issue tracker primitive. The substrate carries the spec genesis event; vault as COS uses it to drive the work cascade (draft -> consensus -> issue -> work -> review -> archive-on-done) on top.
+
 ## 0.13.1
 
 Grep enforcement chain, channel reliability, and operator-visible reliability hardening. v0.13.0 sharpened SCIP precision; v0.13.1 closes the loops: agents now get pushed off raw grep/Read onto sym/recall on indexed repos, the MCP notifier is observable and supervisable, and the dashboard daemon respawns itself when stale.
