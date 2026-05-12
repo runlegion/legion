@@ -5864,12 +5864,15 @@ fn uncertainty_emit_witness_end_to_end_via_hook_against_real_binary() {
         .unwrap();
     drop(witness.stdin.take());
     let witness_out = witness.wait_with_output().unwrap();
-    assert!(witness_out.status.success(), "witness hook should exit 0");
+    assert!(
+        witness_out.status.success(),
+        "witness hook should exit 0; stderr: {}",
+        String::from_utf8_lossy(&witness_out.stderr)
+    );
 
-    // Verify the row is now in the witnessed state via `legion uncertainty
-    // calibration --json` (empty until the roller runs) plus a direct
-    // query: emit a follow-up witness call manually and assert it errors
-    // because the prediction is already past the witness state.
+    // Verify the row truly advanced past Emitted by attempting a second
+    // witness through the CLI -- the state machine rejects Witnessed ->
+    // Witnessed, so success here means the first witness landed.
     let conflict = Command::new(legion_bin)
         .args([
             "uncertainty",
