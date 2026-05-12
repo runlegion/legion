@@ -199,6 +199,58 @@ pub struct ScheduleDelta {
     pub active_end: Option<String>,
 }
 
+/// An uncertainty prediction row serialized for sync transmission.
+///
+/// Mirrors the uncertainty_prediction table. The prediction_payload and
+/// outcome_payload columns hold JSON blobs that are opaque to sync -- LWW
+/// merges happen on the whole row keyed by id with updated_at as the
+/// tiebreaker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UncertaintyPredictionDelta {
+    pub id: String,
+    pub surface: String,
+    pub feature_key: String,
+    pub input_fingerprint: String,
+    pub model: String,
+    pub model_version: String,
+    pub claimed_confidence: f64,
+    pub prediction_payload: String,
+    pub state: String,
+    pub outcome_label: Option<String>,
+    pub outcome_payload: Option<String>,
+    pub outcome_correctness: Option<f64>,
+    pub cohort_key: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub witnessed_at: Option<String>,
+    pub orphan_after: Option<String>,
+    pub deleted_at: Option<String>,
+}
+
+/// An uncertainty calibration snapshot row serialized for sync transmission.
+///
+/// Snapshots are computed independently per node from synced prediction rows,
+/// so cross-node merge is rare -- but sync still propagates rows so nodes
+/// can compare calibration drift across the cluster without re-running the
+/// roller. actual_correctness is the EB-shrunk value; actual_correctness_raw
+/// is the unshrunk cell average kept for audit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UncertaintyCalibrationSnapshotDelta {
+    pub id: String,
+    pub cohort_key: String,
+    pub bucket_lower: f64,
+    pub bucket_upper: f64,
+    pub claimed_confidence: f64,
+    pub actual_correctness: f64,
+    pub actual_correctness_raw: f64,
+    pub prediction_count: i64,
+    pub orphan_count: i64,
+    pub brier_score: f64,
+    pub computed_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+}
+
 /// A persona wake lease row serialized for sync transmission.
 ///
 /// Leases prevent two nodes from waking the same persona for the same signal.
