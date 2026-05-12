@@ -32,6 +32,7 @@ mod task;
 mod telemetry;
 #[cfg(test)]
 mod testutil;
+mod uncertainty;
 mod usage;
 mod watch;
 mod worksource;
