@@ -230,6 +230,11 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/post-task-state.sh",
             "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/uncertainty-emit-on-task.sh",
+            "timeout": 5
           }
         ]
       },
@@ -240,6 +245,11 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/post-task-state.sh",
             "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/uncertainty-witness-on-completion.sh",
+            "timeout": 5
           }
         ]
       }
