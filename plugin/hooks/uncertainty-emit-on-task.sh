@@ -50,6 +50,12 @@ if [ -z "$TASK_ID" ] || [ -z "$SUBJECT" ]; then
   exit 0
 fi
 
+# Cap subject at 1024 chars so a pathological agent prompt does not
+# balloon the DB row. Task subjects are typically 1-3 sentences -- a
+# 1KB ceiling is far above real usage and well below "bloat the table"
+# scale.
+SUBJECT=$(printf '%s' "$SUBJECT" | cut -c 1-1024)
+
 # Resolve legion binary. Prefer the plugin-bundled copy if present.
 LEGION_BIN="${LEGION_BIN:-legion}"
 if ! command -v "$LEGION_BIN" >/dev/null 2>&1; then
