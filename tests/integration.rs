@@ -5566,3 +5566,218 @@ fn document_create_rejects_malformed_payload() {
         "expected JSON error message, got: {stderr}"
     );
 }
+
+#[test]
+fn uncertainty_emit_writes_prediction() {
+    // #357: emit happy path. CLI returns {id, orphan_after} JSON;
+    // a follow-up calibration query against the cohort is empty (no
+    // snapshots until #359 daemon runs) but does not error.
+    let dir = tempfile::tempdir().unwrap();
+    let out = legion_cmd(dir.path())
+        .args([
+            "uncertainty",
+            "emit",
+            "--surface",
+            "legion.task",
+            "--feature-key",
+            "scip.refactor",
+            "--input-fingerprint",
+            "fp-test-1",
+            "--model",
+            "claude-opus-4-7",
+            "--model-version",
+            "4.7",
+            "--claimed-confidence",
+            "0.7",
+            "--payload",
+            r#"{"predicted_tokens":1500}"#,
+            "--orphan-ttl-days",
+            "30",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "emit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(parsed["id"].is_string());
+    assert!(parsed["orphan_after"].is_string());
+}
+
+#[test]
+fn uncertainty_emit_zero_ttl_means_no_orphan_window() {
+    // --orphan-ttl-days 0 disables orphan sweep for that row.
+    let dir = tempfile::tempdir().unwrap();
+    let out = legion_cmd(dir.path())
+        .args([
+            "uncertainty",
+            "emit",
+            "--surface",
+            "legion.task",
+            "--feature-key",
+            "scip.refactor",
+            "--input-fingerprint",
+            "fp-test-2",
+            "--model",
+            "claude-opus-4-7",
+            "--model-version",
+            "4.7",
+            "--claimed-confidence",
+            "0.7",
+            "--payload",
+            r#"{}"#,
+            "--orphan-ttl-days",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(parsed["orphan_after"].is_null());
+}
+
+#[test]
+fn uncertainty_emit_invalid_confidence_is_nonblocking() {
+    // Emit is non-blocking by design: caller errors surface on stderr
+    // but exit 0 so an upstream hook can never break the agent.
+    let dir = tempfile::tempdir().unwrap();
+    let out = legion_cmd(dir.path())
+        .args([
+            "uncertainty",
+            "emit",
+            "--surface",
+            "legion.task",
+            "--feature-key",
+            "scip.refactor",
+            "--input-fingerprint",
+            "fp-test-3",
+            "--model",
+            "claude-opus-4-7",
+            "--model-version",
+            "4.7",
+            "--claimed-confidence",
+            "1.5",
+            "--payload",
+            r#"{}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "emit must exit 0 even on validation error"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("claimed_confidence"),
+        "expected error on stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn uncertainty_witness_advances_state() {
+    // Emit a prediction, witness it, then verify the row state advanced.
+    let dir = tempfile::tempdir().unwrap();
+    let emit = legion_cmd(dir.path())
+        .args([
+            "uncertainty",
+            "emit",
+            "--surface",
+            "legion.task",
+            "--feature-key",
+            "scip.refactor",
+            "--input-fingerprint",
+            "fp-w-1",
+            "--model",
+            "claude-opus-4-7",
+            "--model-version",
+            "4.7",
+            "--claimed-confidence",
+            "0.7",
+            "--payload",
+            r#"{"predicted_tokens":1000}"#,
+        ])
+        .output()
+        .unwrap();
+    let emit_out: serde_json::Value =
+        serde_json::from_str(String::from_utf8(emit.stdout).unwrap().trim()).unwrap();
+    let id = emit_out["id"].as_str().unwrap();
+
+    let witness = legion_cmd(dir.path())
+        .args([
+            "uncertainty",
+            "witness",
+            id,
+            "--outcome-label",
+            "shipped",
+            "--outcome-correctness",
+            "0.95",
+            "--payload",
+            r#"{"actual_tokens":950}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        witness.status.success(),
+        "witness failed: {}",
+        String::from_utf8_lossy(&witness.stderr)
+    );
+    let stdout = String::from_utf8(witness.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["state"], "witnessed");
+    assert!(parsed["witnessed_at"].is_string());
+}
+
+#[test]
+fn uncertainty_witness_missing_id_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = legion_cmd(dir.path())
+        .args([
+            "uncertainty",
+            "witness",
+            "does-not-exist",
+            "--outcome-label",
+            "shipped",
+            "--outcome-correctness",
+            "0.9",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "missing id must error");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("prediction not found") || stderr.contains("does-not-exist"),
+        "expected not-found error, got: {stderr}"
+    );
+}
+
+#[test]
+fn uncertainty_orphans_empty_initially() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = legion_cmd(dir.path())
+        .args(["uncertainty", "orphans", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert!(arr.is_empty());
+}
+
+#[test]
+fn uncertainty_calibration_empty_initially() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = legion_cmd(dir.path())
+        .args(["uncertainty", "calibration", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert!(arr.is_empty());
+}

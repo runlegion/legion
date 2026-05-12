@@ -590,6 +590,12 @@ enum Commands {
         action: TelemetryAction,
     },
 
+    /// Pillar 2: emit / witness predictions, read calibration + orphan metrics
+    Uncertainty {
+        #[command(subcommand)]
+        action: UncertaintyAction,
+    },
+
     /// Show reflection statistics
     Stats {
         /// Repository name (omit for all repos)
@@ -1060,6 +1066,90 @@ enum TelemetryAction {
         /// Top N rows by count (default 20, 0 means all).
         #[arg(long, default_value_t = 20)]
         top: usize,
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum UncertaintyAction {
+    /// Record a fresh prediction. Mirrors platform's
+    /// POST /api/uncertainty/predictions. Returns JSON `{id, orphan_after}`
+    /// on stdout. Non-blocking: failures log to stderr and exit 0 so a
+    /// downstream emit hook can never break the agent.
+    Emit {
+        /// Logical surface for the prediction (e.g. `legion.task`,
+        /// `legion.review`, `legion.scip-query`).
+        #[arg(long)]
+        surface: String,
+        /// Feature key from SCIP / task classifier
+        /// (e.g. `scip.high-connectivity-refactor`, `schema.new-table`).
+        #[arg(long)]
+        feature_key: String,
+        /// Stable hash of `(features + task description)`. Lets the
+        /// witness path look up the matching prediction without an id.
+        #[arg(long)]
+        input_fingerprint: String,
+        /// Model that produced the prediction (e.g. `claude-opus-4-7`).
+        #[arg(long)]
+        model: String,
+        /// Model version string. Free-form; calibration cohorts include it
+        /// to detect regressions across releases.
+        #[arg(long)]
+        model_version: String,
+        /// Claimed probability of shipping without iteration. [0.0, 1.0].
+        #[arg(long)]
+        claimed_confidence: f64,
+        /// Prediction payload (JSON). Free-form per-surface schema, e.g.
+        /// `{"predicted_tokens": 5000000, "predicted_wallclock_seconds": 7200}`.
+        #[arg(long)]
+        payload: String,
+        /// Days until the prediction transitions to orphan if not witnessed.
+        /// Default 30. Setting 0 disables the orphan sweep for this row.
+        #[arg(long, default_value_t = 30)]
+        orphan_ttl_days: u32,
+    },
+
+    /// Record an outcome for a prediction. Mirrors platform's
+    /// PUT /api/uncertainty/predictions/:id/witness. Idempotent failure:
+    /// re-witnessing an already-witnessed prediction is an error.
+    Witness {
+        /// Prediction id to witness against.
+        prediction_id: String,
+        /// Outcome category: `shipped`, `scoped-down`, `escalated`, `abandoned`.
+        #[arg(long)]
+        outcome_label: String,
+        /// Normalized correctness in [0.0, 1.0]. 1.0 = predicted exactly,
+        /// 0.0 = totally wrong. Calibration math uses this.
+        #[arg(long)]
+        outcome_correctness: f64,
+        /// Optional outcome payload (JSON) -- typically
+        /// `{"actual_tokens": ..., "actual_wallclock_seconds": ...}`.
+        #[arg(long)]
+        payload: Option<String>,
+    },
+
+    /// Read calibration snapshots for a cohort. Output is one row per
+    /// reliability bucket with claimed vs actual, counts, Brier score.
+    Calibration {
+        /// Filter to one surface.
+        #[arg(long)]
+        surface: Option<String>,
+        /// Filter to one model.
+        #[arg(long)]
+        model: Option<String>,
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Count predictions currently in the orphan state. Surface-grouped.
+    /// For the dashboard + nightly Slack digest in #360.
+    Orphans {
+        /// Filter to one surface.
+        #[arg(long)]
+        surface: Option<String>,
         /// Emit JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -3191,6 +3281,156 @@ fn main() -> error::Result<()> {
     })
 }
 
+/// Dispatch `legion uncertainty ...`. Non-blocking emit posture: emit
+/// failures log to stderr and return Ok so an upstream hook can never
+/// abort the agent on a telemetry-shaped problem. Witness / calibration /
+/// orphans surface errors normally -- those are explicit user actions.
+fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
+    use std::io::Write;
+    let base = data_dir()?;
+    let database = db::Database::open(&base.join("legion.db"))?;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    match action {
+        UncertaintyAction::Emit {
+            surface,
+            feature_key,
+            input_fingerprint,
+            model,
+            model_version,
+            claimed_confidence,
+            payload,
+            orphan_ttl_days,
+        } => {
+            let confidence = match uncertainty::types::Confidence::from_f64(claimed_confidence) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[legion uncertainty emit] {e}");
+                    return Ok(());
+                }
+            };
+            let payload_value: serde_json::Value = match serde_json::from_str(&payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[legion uncertainty emit] payload not valid JSON: {e}");
+                    return Ok(());
+                }
+            };
+            let input = uncertainty::types::PredictionInput {
+                surface,
+                feature_key,
+                input_fingerprint,
+                model,
+                model_version,
+                claimed_confidence: confidence,
+                prediction_payload: payload_value,
+                orphan_after: uncertainty::storage::orphan_after_from_ttl(orphan_ttl_days),
+            };
+            let prediction = uncertainty::types::Prediction::new(input);
+            if let Err(e) = database.insert_prediction(&prediction) {
+                eprintln!("[legion uncertainty emit] insert failed: {e}");
+                return Ok(());
+            }
+            let out_json = serde_json::json!({
+                "id": prediction.id,
+                "orphan_after": prediction.orphan_after,
+            });
+            writeln!(out, "{}", serde_json::to_string(&out_json)?)?;
+        }
+
+        UncertaintyAction::Witness {
+            prediction_id,
+            outcome_label,
+            outcome_correctness,
+            payload,
+        } => {
+            let label = uncertainty::types::OutcomeLabel::from_str(&outcome_label)
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            let correctness = uncertainty::types::Correctness::from_f64(outcome_correctness)
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            let payload_value: serde_json::Value = match payload {
+                Some(s) => serde_json::from_str(&s)
+                    .map_err(|e| error::LegionError::WorkSource(format!("payload JSON: {e}")))?,
+                None => serde_json::json!({}),
+            };
+            let mut prediction = database
+                .get_prediction(&prediction_id)
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?
+                .ok_or_else(|| {
+                    error::LegionError::WorkSource(format!("prediction not found: {prediction_id}"))
+                })?;
+            let now = chrono::Utc::now().to_rfc3339();
+            prediction
+                .witness(label, payload_value, correctness, &now)
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            database
+                .update_prediction(&prediction)
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            let out_json = serde_json::json!({
+                "id": prediction.id,
+                "state": prediction.state.as_str(),
+                "witnessed_at": prediction.witnessed_at,
+            });
+            writeln!(out, "{}", serde_json::to_string(&out_json)?)?;
+        }
+
+        UncertaintyAction::Calibration {
+            surface,
+            model,
+            json,
+        } => {
+            let snaps = database
+                .list_calibration_snapshots(surface.as_deref(), model.as_deref())
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            if json {
+                writeln!(out, "{}", serde_json::to_string(&snaps)?)?;
+            } else if snaps.is_empty() {
+                writeln!(
+                    out,
+                    "[legion uncertainty] no calibration snapshots in scope"
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "{:<48} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8}",
+                    "cohort", "lower", "upper", "claimed", "actual", "n", "brier"
+                )?;
+                for s in &snaps {
+                    writeln!(
+                        out,
+                        "{:<48} {:<8.2} {:<8.2} {:<8.2} {:<8.2} {:<8} {:<8.4}",
+                        s.cohort_key,
+                        s.bucket_lower,
+                        s.bucket_upper,
+                        s.claimed_confidence,
+                        s.actual_correctness,
+                        s.prediction_count,
+                        s.brier_score,
+                    )?;
+                }
+            }
+        }
+
+        UncertaintyAction::Orphans { surface, json } => {
+            let rows = database
+                .count_orphans_by_surface(surface.as_deref())
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            if json {
+                writeln!(out, "{}", serde_json::to_string(&rows)?)?;
+            } else if rows.is_empty() {
+                writeln!(out, "[legion uncertainty] no orphans in scope")?;
+            } else {
+                writeln!(out, "{:<32} {:<8}", "surface", "count")?;
+                for r in &rows {
+                    writeln!(out, "{:<32} {:<8}", r.surface, r.count)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run() -> error::Result<()> {
     raise_fd_limit();
     let cli = Cli::parse();
@@ -4333,6 +4573,9 @@ fn run() -> error::Result<()> {
                 }
             }
         },
+        Commands::Uncertainty { action } => {
+            run_uncertainty(action)?;
+        }
         Commands::Serve { port } => {
             let base = data_dir()?;
             let watch_path = base.join("watch.toml");
