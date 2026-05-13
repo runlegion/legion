@@ -5,21 +5,18 @@
 //! witnesses the outcome when work completes, and rolls reliability
 //! snapshots so vault's COS routing has live cost estimates.
 //!
-//! This module owns the domain types and lifecycle math. Database CRUD
-//! lands in `db.rs` alongside the rest of the storage layer; the hookable
-//! CLI surface (`legion uncertainty ...`) wires the two together in
-//! `main.rs` (see issue #357).
+//! This module owns the domain types, lifecycle math, and storage CRUD
+//! for predictions and calibration snapshots. The CLI surface
+//! (`legion uncertainty ...`) wires the pieces together in `main.rs`.
 //!
 //! Module layout:
 //!
 //! - [`types`] -- Prediction, CalibrationSnapshot, PredictionState,
-//!   OutcomeLabel, Confidence, PredictionInput, cohort_key helper.
+//!   OutcomeLabel, Confidence, Correctness, PredictionInput, cohort_key helper.
 //! - [`error`] -- UncertaintyError via thiserror.
+//! - [`storage`] -- impl Database for insert/get/update/list + the
+//!   `orphan_after_from_ttl` helper used at the CLI emit boundary.
 
 pub mod error;
+pub mod storage;
 pub mod types;
-
-// Re-exports land here once #357 (CLI) and #358 (hooks) start consuming
-// the types. Keeping them un-re-exported now keeps `cargo clippy -D warnings`
-// quiet without sprinkling per-item allow attributes that would have to be
-// reverted later.
