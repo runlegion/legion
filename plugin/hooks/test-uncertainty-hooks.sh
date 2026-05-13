@@ -96,7 +96,7 @@ MAP_LOG="$WORK/state/legion/uncertainty-tasks-${SESSION}.jsonl"
 WITNESS_LOG="$WORK/state/legion/witness-calls.log"
 
 echo "==> emit hook writes mapping on TaskCreate"
-OUT=$(echo "{\"session_id\":\"${SESSION}\",\"tool_name\":\"TaskCreate\",\"tool_input\":{\"subject\":\"Port uncertainty engine\"},\"tool_response\":{\"id\":\"task-001\"}}" | bash "$EMIT_HOOK" 2>&1)
+echo "{\"session_id\":\"${SESSION}\",\"tool_name\":\"TaskCreate\",\"tool_input\":{\"subject\":\"Port uncertainty engine\"},\"tool_response\":{\"id\":\"task-001\"}}" | bash "$EMIT_HOOK" >/dev/null 2>&1
 assert_eq "emit hook exit code is 0 on happy path" "$?" "0"
 assert_file_contains "mapping file has task-001 -> pred-fixed-1" "$MAP_LOG" '"task_id":"task-001"'
 assert_file_contains "mapping file has prediction_id" "$MAP_LOG" '"prediction_id":"pred-fixed-1"'
