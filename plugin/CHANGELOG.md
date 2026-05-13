@@ -1,5 +1,25 @@
 # Legion Changelog
 
+## 0.15.0
+
+Pillar 2 ships -- the uncertainty engine. v0.14.0 made agents coordinate around work-genesis (documents, plans, sub-issues); v0.15.0 makes them predict cost and learn from outcomes. Every task the agent takes on emits a calibrated prediction; the witness path closes the loop when work completes. Vault-COS routing gains live cost estimates instead of static lookups.
+
+### New
+
+- **Uncertainty engine schema -- `uncertainty_prediction` + `uncertainty_calibration_snapshot`** (PR #471, closes #355): SQLite migration 22 adds the two pillar-2 tables. Lifecycle states (emitted / witnessed / calibrated / orphaned / retired) plus indexed columns for the orphan sweep and cohort lookup. `actual_correctness_raw` stored alongside `actual_correctness` for the EB-shrinkage audit trail; `bucket_lower` / `bucket_upper` carry quantile-derived bounds. Smugglr sync delta types + getters added for both tables following the reflections / cards / schedules pattern; tombstone cleanup extended.
+
+- **Uncertainty engine domain types** (PR #472, closes #356): `src/uncertainty/` ships `Prediction`, `CalibrationSnapshot`, `PredictionState` (with `can_transition_to` + `transition` enforcing the five-state lifecycle), `OutcomeLabel`, `Confidence` and `Correctness` newtypes (NaN-rejecting, range-validated, `PartialEq`-safe), `PredictionInput`, and the deterministic `cohort_key` derivation. `UncertaintyError` via thiserror with `IllegalTransition`, `InvalidConfidence`, `InvalidCorrectness`, `InvalidPayload`, `PredictionNotFound`. 22 unit tests pin every legal + illegal transition including the race-prevention guarantee (witnessed cannot be orphaned, retired is terminal across all four exits).
+
+- **`legion uncertainty` CLI surface** (PR #473, closes #357): four verbs mirroring platform's HTTP API. `emit` is non-blocking by design -- validation, serialize, insert, and stdout failures all log to stderr but exit 0 so an upstream hook can never break the agent. `witness` advances state machine-safely, returning `PredictionNotFound` when the id is missing. `calibration` reads reliability buckets with surface + model filters (LIKE-fuzzy until the #359 roller produces real data). `orphans` groups orphan-state predictions by surface. `--json` flag where applicable. 9 storage unit tests + 7 CLI integration tests; 36 uncertainty tests total.
+
+- **Uncertainty auto-emit + auto-witness hooks** (PR #474, closes #358): PostToolUse hook on TaskCreate fires `legion uncertainty emit` with task-shape defaults (surface=`legion.task`, feature_key=`task.generic`, claimed_confidence=0.5, payload={task_id, subject}) and stores the task_id -> prediction_id mapping in `${XDG_STATE_HOME}/legion/uncertainty-tasks-<session>.jsonl`. PostToolUse hook on TaskUpdate where status=completed reads the mapping back and fires witness with placeholder correctness 1.0 + outcome_label=shipped until #283 wires real measurement (token-actual vs token-predicted from `legion usage`). Both hooks fail-open: missing jq, missing session_id, malformed input, or CLI failure all exit 0 silently. `LEGION_SKIP_UNCERTAINTY=1` disables both. 20 hook integration tests + 1 end-to-end test against the real binary.
+
+### Pattern delivered
+
+**Memory + coordination + calibration.** v0.13.x said agents have memory. v0.14.0 said agents coordinate. v0.15.0 says agents learn -- every task emits a prediction, every completion witnesses the outcome, the calibration loop tightens the per-(surface, model, version) reliability curve over volume. Vault-COS routing reads live cost estimates instead of guessing; the orphan term in the Brier decomposition keeps the reliability score honest under silent failure.
+
+Deferred to v0.16: #359 daemon cron (orphan-sweep + calibration-roll + Brier SQL), #360 dashboard view at `/uncertainty`, #361 v2 drift detection (waits for v1 data), real correctness measurement on witness (waits for #283 SCIP features).
+
 ## 0.14.0
 
 Coordination substrate. v0.13.x was "agents have memory" -- reflections, recall, sym, bullpen, signals. v0.14.0 makes it "agents coordinate around work-genesis." The substrate is a documents table that holds spec/NFR/blueprint/persona/journey JSON rows with hot/cold tiering; recall gains an archive tier; the stop hook refuses to let agents abandon mid-plan; the work source plugin layer learns native GitHub sub-issues. Vault is elevated to chief-of-staff orchestrating spec workflows on top of the substrate.
