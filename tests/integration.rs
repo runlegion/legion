@@ -5781,3 +5781,119 @@ fn uncertainty_calibration_empty_initially() {
     let arr = parsed.as_array().unwrap();
     assert!(arr.is_empty());
 }
+
+// Gated on #[cfg(unix)] because the test spawns bash to run the hook
+// scripts directly. Same gate pattern other shell-script-bearing tests
+// in this file use. Windows CI still runs every cargo-only test in the
+// uncertainty suite; the hook scripts themselves are exercised on
+// ubuntu / macos runners by both this test and plugin/hooks/test-*.sh.
+#[cfg(unix)]
+#[test]
+fn uncertainty_emit_witness_end_to_end_via_hook_against_real_binary() {
+    // End-to-end: run the auto-emit shell hook against the real legion
+    // binary, then run the witness hook against the same DB. Verifies the
+    // hook -> CLI -> DB path round-trips without stubs, so any shape drift
+    // between the hook scripts and the CLI parser surfaces here.
+    use std::io::Write as IoWrite;
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path();
+    let state_dir = data_dir.join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+
+    let emit_hook = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("plugin/hooks/uncertainty-emit-on-task.sh");
+    let witness_hook = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("plugin/hooks/uncertainty-witness-on-completion.sh");
+    let legion_bin = env!("CARGO_BIN_EXE_legion");
+
+    // Drive emit-on-task via the actual hook script.
+    let mut emit = Command::new("bash")
+        .arg(&emit_hook)
+        .env("LEGION_DATA_DIR", data_dir)
+        .env("LEGION_BIN", legion_bin)
+        .env("XDG_STATE_HOME", &state_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn emit hook");
+    emit.stdin
+        .as_mut()
+        .unwrap()
+        .write_all(
+            br#"{"session_id":"e2e","tool_name":"TaskCreate","tool_input":{"subject":"e2e probe task"},"tool_response":{"id":"task-e2e-001"}}"#,
+        )
+        .unwrap();
+    drop(emit.stdin.take());
+    let emit_out = emit.wait_with_output().unwrap();
+    assert!(
+        emit_out.status.success(),
+        "emit hook should always exit 0; stderr: {}",
+        String::from_utf8_lossy(&emit_out.stderr)
+    );
+
+    // The mapping file should now have one row with a real UUIDv7
+    // prediction id produced by the live emit verb.
+    let map_path = state_dir.join("legion").join("uncertainty-tasks-e2e.jsonl");
+    let map_contents = std::fs::read_to_string(&map_path).expect("mapping file written");
+    let row: serde_json::Value =
+        serde_json::from_str(map_contents.lines().next().unwrap()).unwrap();
+    assert_eq!(row["task_id"], "task-e2e-001");
+    let prediction_id = row["prediction_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        uuid::Uuid::parse_str(&prediction_id)
+            .unwrap()
+            .get_version_num(),
+        7
+    );
+
+    // Witness via the hook against the same DB.
+    let mut witness = Command::new("bash")
+        .arg(&witness_hook)
+        .env("LEGION_DATA_DIR", data_dir)
+        .env("LEGION_BIN", legion_bin)
+        .env("XDG_STATE_HOME", &state_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn witness hook");
+    witness
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(
+            br#"{"session_id":"e2e","tool_name":"TaskUpdate","tool_input":{"task_id":"task-e2e-001","status":"completed"}}"#,
+        )
+        .unwrap();
+    drop(witness.stdin.take());
+    let witness_out = witness.wait_with_output().unwrap();
+    assert!(
+        witness_out.status.success(),
+        "witness hook should exit 0; stderr: {}",
+        String::from_utf8_lossy(&witness_out.stderr)
+    );
+
+    // Verify the row truly advanced past Emitted by attempting a second
+    // witness through the CLI -- the state machine rejects Witnessed ->
+    // Witnessed, so success here means the first witness landed.
+    let conflict = Command::new(legion_bin)
+        .args([
+            "uncertainty",
+            "witness",
+            &prediction_id,
+            "--outcome-label",
+            "shipped",
+            "--outcome-correctness",
+            "0.5",
+        ])
+        .env("LEGION_DATA_DIR", data_dir)
+        .output()
+        .unwrap();
+    assert!(
+        !conflict.status.success(),
+        "re-witnessing should fail (already witnessed)"
+    );
+}
