@@ -5782,6 +5782,12 @@ fn uncertainty_calibration_empty_initially() {
     assert!(arr.is_empty());
 }
 
+// Gated on #[cfg(unix)] because the test spawns bash to run the hook
+// scripts directly. Same gate pattern other shell-script-bearing tests
+// in this file use. Windows CI still runs every cargo-only test in the
+// uncertainty suite; the hook scripts themselves are exercised on
+// ubuntu / macos runners by both this test and plugin/hooks/test-*.sh.
+#[cfg(unix)]
 #[test]
 fn uncertainty_emit_witness_end_to_end_via_hook_against_real_binary() {
     // End-to-end: run the auto-emit shell hook against the real legion
