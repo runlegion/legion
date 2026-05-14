@@ -20,11 +20,16 @@ if [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh" ]; then
   fi
 fi
 
-# Check if the command starts with gh (ignoring leading whitespace)
+# Check if the command invokes gh -- including by absolute path. Naive
+# prefix matching on `gh ` leaves /opt/homebrew/bin/gh, /usr/bin/gh,
+# ~/bin/gh as silent escape hatches. Take the basename of the first
+# whitespace-separated token, then compare to `gh`.
 TRIMMED="${COMMAND#"${COMMAND%%[![:space:]]*}"}"
-case "$TRIMMED" in
-  gh\ *|gh)
-    jq -n --arg reason "Do not use gh directly. Use legion commands instead:
+FIRST_TOKEN="${TRIMMED%%[[:space:]]*}"
+FIRST_BIN="${FIRST_TOKEN##*/}"
+
+if [ "$FIRST_BIN" = "gh" ]; then
+  jq -n --arg reason "Do not use gh directly. Use legion commands instead:
 - legion issue create --repo <name> --title '...' --body '...'
 - legion pr create --repo <name> --title '...'
 - legion pr list --repo <name>
@@ -33,9 +38,8 @@ case "$TRIMMED" in
 - legion comment --repo <name> --number <n> --body '...'
 - legion audit
 
-These commands go through the work source plugin and are tracked in the audit log." '{
-      "decision": "block",
-      "reason": $reason
-    }'
-    ;;
-esac
+These commands go through the work source plugin and are tracked in the audit log. Absolute-path invocations (e.g. /opt/homebrew/bin/gh) are also blocked -- legion sees through the path." '{
+    "decision": "block",
+    "reason": $reason
+  }'
+fi
