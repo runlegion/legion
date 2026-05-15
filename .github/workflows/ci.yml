@@ -57,12 +57,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      # On Windows the runner image sometimes leaves rustup-init.exe in
-      # PATH ahead of cargo, so `cargo test` parses as `rustup-init test`
-      # and fails before the suite runs. Forcing the default toolchain
-      # ensures cargo resolves regardless of PATH order. Idempotent on
-      # ubuntu / macos.
-      - run: rustup default stable
+      # Windows runner image sometimes leaves rustup-init.exe in PATH
+      # ahead of cargo, so `cargo test` parses as `rustup-init test` and
+      # fails before the suite runs. Forcing the default toolchain on
+      # Windows only -- the dtolnay action may install rustc without
+      # rustup on macOS, where this step would fail with command-not-found.
+      - if: runner.os == 'Windows'
+        run: rustup default stable
         shell: bash
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
