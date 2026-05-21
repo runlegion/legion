@@ -20,6 +20,10 @@ Pillar 2 ships -- the uncertainty engine. v0.14.0 made agents coordinate around 
 
 - **whoami rewrite guard** (PR #479, closes #478): agents were treating `legion reflect --whoami` like a CLAUDE.md edit -- stuffing architecture rules, file paths, and build commands into the identity domain, inflating the SessionStart banner past its 2K budget. New PreToolUse Bash hook intercepts the rewrite when an identity already exists AND the command lacks `--force` / `--follows`, blocking with the current identity inline. Forces the agent to read who they are before replacing it; redirects to chain via `--follows`, full-rewrite via `--force`, or drop `--whoami` if it's project knowledge. Catches absolute-path invocations via the same basename match. 12-case test runner.
 
+### Changed
+
+- **Stop-hook reflection prompt reframed around teammate findings**: the prior "what would you tell another agent who hits this same problem tomorrow?" was reading as future-self and producing journal-style status recaps. New phrasing names a teammate walking in cold and asks for the finding ("a gotcha, a hidden invariant, how something actually works"), not the activity. Behavior identical -- block decision, same skip rule, same `legion reflect` redirect -- only the prompt copy changes.
+
 ### Pattern delivered
 
 **Memory + coordination + calibration.** v0.13.x said agents have memory. v0.14.0 said agents coordinate. v0.15.0 says agents learn -- every task emits a prediction, every completion witnesses the outcome, the calibration loop tightens the per-(surface, model, version) reliability curve over volume. Vault-COS routing reads live cost estimates instead of guessing; the orphan term in the Brier decomposition keeps the reliability score honest under silent failure.
