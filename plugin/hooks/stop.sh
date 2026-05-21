@@ -104,7 +104,7 @@ fi
 
 touch "$MARKER"
 
-jq -n --arg reason "What would you tell another agent who hits this same problem tomorrow? Store it: legion reflect --repo $REPO --text '<your reflection>'. Skip if nothing surprising happened." '{
+jq -n --arg reason "Drop one thing a teammate would not have known walking in cold -- a gotcha, a hidden invariant, how something actually works. Not what you did; the finding itself. Store it: legion reflect --repo $REPO --text '<finding>'. Skip if nothing surprising came up." '{
   "decision": "block",
   "reason": $reason
 }'
