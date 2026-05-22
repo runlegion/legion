@@ -1,5 +1,35 @@
 # Legion Changelog
 
+## 0.15.0
+
+Pillar 2 ships -- the uncertainty engine. v0.14.0 made agents coordinate around work-genesis (documents, plans, sub-issues); v0.15.0 makes them predict cost and learn from outcomes. Every task the agent takes on emits a calibrated prediction; the witness path closes the loop when work completes. Vault-COS routing gains live cost estimates instead of static lookups. Two enforcement-hardening fixes ride along.
+
+### New
+
+- **Uncertainty engine schema -- `uncertainty_prediction` + `uncertainty_calibration_snapshot`** (PR #471, closes #355): SQLite migration 22 adds the two pillar-2 tables. Lifecycle states (emitted / witnessed / calibrated / orphaned / retired) plus indexed columns for the orphan sweep and cohort lookup. `actual_correctness_raw` stored alongside `actual_correctness` for the EB-shrinkage audit trail; `bucket_lower` / `bucket_upper` carry quantile-derived bounds. Smugglr sync delta types + getters added for both tables; tombstone cleanup extended.
+
+- **Uncertainty engine domain types** (PR #472, closes #356): `src/uncertainty/` ships `Prediction`, `CalibrationSnapshot`, `PredictionState` (with `can_transition_to` + `transition` enforcing the five-state lifecycle), `OutcomeLabel`, `Confidence` and `Correctness` newtypes (NaN-rejecting, range-validated, `PartialEq`-safe), `PredictionInput`, and the deterministic `cohort_key` derivation. `UncertaintyError` via thiserror with `IllegalTransition`, `InvalidConfidence`, `InvalidCorrectness`, `InvalidPayload`, `PredictionNotFound`. 22 unit tests pin every legal + illegal transition including the race-prevention guarantee (witnessed cannot be orphaned, retired is terminal across all four exits).
+
+- **`legion uncertainty` CLI surface** (PR #473, closes #357): four verbs mirroring platform's HTTP API. `emit` is non-blocking by design -- validation, serialize, insert, and stdout failures all log to stderr but exit 0 so an upstream hook can never break the agent. `witness` advances state machine-safely, returning `PredictionNotFound` when the id is missing. `calibration` reads reliability buckets with surface + model filters (LIKE-fuzzy until the #359 roller produces real data). `orphans` groups orphan-state predictions by surface. `--json` flag where applicable. 9 storage unit tests + 7 CLI integration tests.
+
+- **Uncertainty auto-emit + auto-witness hooks** (PR #474, closes #358): PostToolUse hook on TaskCreate fires `legion uncertainty emit` with task-shape defaults and stores the task_id -> prediction_id mapping in `${XDG_STATE_HOME}/legion/uncertainty-tasks-<session>.jsonl`. PostToolUse hook on TaskUpdate where status=completed reads the mapping back and fires witness with placeholder correctness 1.0 + outcome_label=shipped until #283 wires real measurement. Both hooks fail-open. `LEGION_SKIP_UNCERTAINTY=1` disables both. 20 hook integration tests + 1 end-to-end test against the real binary.
+
+### Fixed
+
+- **no-gh hook bypassed by absolute-path invocations** (PR #477, closes #476): the PreToolUse hook matched `gh ` or bare `gh` as a literal prefix, so `/opt/homebrew/bin/gh pr merge ...` slipped past unblocked. Fix takes the basename of the first whitespace-separated token before matching: catches absolute paths and tilde-paths while still allowing commands that merely mention `gh` (ghostscript, `echo gh`, `grep gh /log`). 13-case test runner.
+
+- **whoami rewrite guard** (PR #479, closes #478): agents were treating `legion reflect --whoami` like a CLAUDE.md edit -- stuffing architecture rules, file paths, and build commands into the identity domain, inflating the SessionStart banner past its 2K budget. New PreToolUse Bash hook intercepts the rewrite when an identity already exists AND the command lacks `--force` / `--follows`, blocking with the current identity inline. Forces the agent to read who they are before replacing it; redirects to chain via `--follows`, full-rewrite via `--force`, or drop `--whoami` if it's project knowledge. Catches absolute-path invocations via the same basename match. 12-case test runner.
+
+### Changed
+
+- **Stop-hook reflection prompt reframed around teammate findings**: the prior "what would you tell another agent who hits this same problem tomorrow?" was reading as future-self and producing journal-style status recaps. New phrasing names a teammate walking in cold and asks for the finding ("a gotcha, a hidden invariant, how something actually works"), not the activity. Behavior identical -- block decision, same skip rule, same `legion reflect` redirect -- only the prompt copy changes.
+
+### Pattern delivered
+
+**Memory + coordination + calibration.** v0.13.x said agents have memory. v0.14.0 said agents coordinate. v0.15.0 says agents learn -- every task emits a prediction, every completion witnesses the outcome, the calibration loop tightens the per-(surface, model, version) reliability curve over volume. Vault-COS routing reads live cost estimates instead of guessing; the orphan term in the Brier decomposition keeps the reliability score honest under silent failure.
+
+Deferred to v0.16: #359 daemon cron (orphan-sweep + calibration-roll + Brier SQL), #360 dashboard view at `/uncertainty`, #361 v2 drift detection (waits for v1 data), real correctness measurement on witness (waits for #283 SCIP features).
+
 ## 0.14.0
 
 Coordination substrate. v0.13.x was "agents have memory" -- reflections, recall, sym, bullpen, signals. v0.14.0 makes it "agents coordinate around work-genesis." The substrate is a documents table that holds spec/NFR/blueprint/persona/journey JSON rows with hot/cold tiering; recall gains an archive tier; the stop hook refuses to let agents abandon mid-plan; the work source plugin layer learns native GitHub sub-issues. Vault is elevated to chief-of-staff orchestrating spec workflows on top of the substrate.
