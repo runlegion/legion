@@ -35,6 +35,7 @@ mod telemetry;
 mod testutil;
 mod uncertainty;
 mod usage;
+mod wake_attempts;
 mod watch;
 mod worksource;
 

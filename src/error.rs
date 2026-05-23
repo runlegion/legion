@@ -127,6 +127,22 @@ pub enum LegionError {
 
     #[error("pty wait failed: {0}")]
     PtyWaitFailed(String),
+
+    #[error(
+        "illegal wake attempt transition for {attempt_id}: {from} -> {to} (current state: {current})"
+    )]
+    IllegalWakeAttemptTransition {
+        attempt_id: String,
+        from: String,
+        to: String,
+        current: String,
+    },
+
+    #[error("wake attempt not found: {0}")]
+    WakeAttemptNotFound(String),
+
+    #[error("wake attempt state decode error: {0}")]
+    WakeAttemptStateDecodeError(String),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;

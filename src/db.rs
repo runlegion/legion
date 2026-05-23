@@ -995,6 +995,55 @@ impl Database {
                 ON uncertainty_calibration_snapshot(computed_at) WHERE deleted_at IS NULL;",
         )?;
 
+        // Migration 23: wake_attempts -- ACID substrate for the watch PTY
+        // migration (#487, part of #495).
+        //
+        // Each row represents one wake spawn from queue through terminal
+        // classification. The FSM enforced in Rust
+        // (`wake_attempts::WakeAttemptState::can_transition_to`) and
+        // mirrored in every UPDATE here keeps `state = from` in the WHERE
+        // clause so a sync-resolved late-loser cannot regress a peer's
+        // already-terminal row.
+        //
+        // persona_wake_leases (Migration 17) keeps its TTL-based mutual
+        // exclusion role; wake_attempts records what actually happened
+        // on each individual spawn so the reaper has a persistent,
+        // cluster-visible work item to operate on.
+        //
+        // signal_ids stored as a JSON array TEXT column to avoid a
+        // wake_attempt_signals join table -- N is small (a wake batches
+        // a handful of signals at most) and the column is opaque to the
+        // SQL layer.
+        //
+        // Indices target the two hot read paths: crash recovery scans
+        // by (acquired_by_host, state) on startup, and operator history
+        // queries scan by (persona_id, spawned_at DESC).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS wake_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                persona_id TEXT NOT NULL,
+                repo_name TEXT NOT NULL,
+                signal_ids TEXT NOT NULL,
+                state TEXT NOT NULL,
+                acquired_by_host TEXT,
+                acquired_at TEXT,
+                spawned_pid INTEGER,
+                spawned_at TEXT,
+                exit_observed_at TEXT,
+                exited_at TEXT,
+                exit_status TEXT,
+                outcome TEXT,
+                deleted_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_wake_attempts_host_state
+                ON wake_attempts(acquired_by_host, state)
+                WHERE deleted_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_wake_attempts_persona_recent
+                ON wake_attempts(persona_id, spawned_at DESC)
+                WHERE deleted_at IS NULL;",
+        )?;
+
         Ok(())
     }
 
@@ -3848,6 +3897,291 @@ impl Database {
 
         tx.commit()?;
         Ok(late_loser)
+    }
+}
+
+// -- wake_attempts (#487, part of #495) --------------------------------------
+//
+// Until #488 (sync delta) and #489/#490 (consumer wiring) land, these
+// items are reachable only from tests. The wake_attempts module carries
+// its own `#![allow(dead_code)]`; here we only need the allow on
+// `map_wake_attempt_row` and the new `impl Database` block since the
+// surrounding db.rs is mostly live.
+
+#[allow(dead_code)]
+fn map_wake_attempt_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::wake_attempts::WakeAttempt> {
+    let state_str: String = row.get(4)?;
+    let state = crate::wake_attempts::WakeAttemptState::parse_state(&state_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(format!("state decode: {}", e))),
+        )
+    })?;
+    let signal_ids_json: String = row.get(3)?;
+    let signal_ids: Vec<String> = serde_json::from_str(&signal_ids_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let spawned_pid_i64: Option<i64> = row.get(7)?;
+    Ok(crate::wake_attempts::WakeAttempt {
+        attempt_id: row.get(0)?,
+        persona_id: row.get(1)?,
+        repo_name: row.get(2)?,
+        signal_ids,
+        state,
+        acquired_by_host: row.get(5)?,
+        acquired_at: row.get(6)?,
+        spawned_pid: spawned_pid_i64.map(|v| v as u32),
+        spawned_at: row.get(8)?,
+        exit_observed_at: row.get(9)?,
+        exited_at: row.get(10)?,
+        exit_status: row.get(11)?,
+        outcome: row.get(12)?,
+        deleted_at: row.get(13)?,
+        updated_at: row.get(14)?,
+    })
+}
+
+#[allow(dead_code)] // wired by #488 / #489 / #490
+impl Database {
+    /// Insert a new wake_attempts row in the `queued` state. The caller
+    /// is expected to mint a fresh UUIDv7 for `attempt_id`; reusing an
+    /// existing id is a programming error and the PK constraint will
+    /// surface as `LegionError::Database`.
+    pub fn enqueue_wake_attempt(
+        &self,
+        attempt_id: &str,
+        persona_id: &str,
+        repo_name: &str,
+        signal_ids: &[String],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let signal_ids_json = serde_json::to_string(signal_ids)?;
+        self.conn.execute(
+            "INSERT INTO wake_attempts \
+             (attempt_id, persona_id, repo_name, signal_ids, state, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, 'queued', ?5)",
+            rusqlite::params![attempt_id, persona_id, repo_name, &signal_ids_json, &now],
+        )?;
+        Ok(())
+    }
+
+    /// Atomic claim. Returns `Ok(true)` when this host won the claim,
+    /// `Ok(false)` when the row is either gone, already claimed by
+    /// another host, or in a non-`queued` state. Mirrors
+    /// `try_acquire_persona_lease`'s atomic UPDATE...WHERE pattern.
+    pub fn try_claim_wake_attempt(&self, attempt_id: &str, host: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE wake_attempts \
+             SET state = 'claimed', acquired_by_host = ?1, acquired_at = ?2, updated_at = ?2 \
+             WHERE attempt_id = ?3 \
+               AND state = 'queued' \
+               AND acquired_by_host IS NULL \
+               AND deleted_at IS NULL",
+            rusqlite::params![host, &now, attempt_id],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// FSM-enforced state transition. Two-layer safety: the Rust-side
+    /// `can_transition_to` rejects illegal pairs before SQL, and the
+    /// `state = from` predicate in the UPDATE rejects races where the
+    /// row has already moved.
+    ///
+    /// Returns `Ok(())` on a successful transition;
+    /// `IllegalWakeAttemptTransition` when the row's current state does
+    /// not match `from` or the table forbids `from -> to`;
+    /// `WakeAttemptNotFound` when the row is absent or soft-deleted.
+    pub fn transition_wake_attempt(
+        &self,
+        attempt_id: &str,
+        from: crate::wake_attempts::WakeAttemptState,
+        to: crate::wake_attempts::WakeAttemptState,
+    ) -> Result<()> {
+        if !from.can_transition_to(to) {
+            return self.illegal_transition(attempt_id, from, to);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE wake_attempts \
+             SET state = ?1, updated_at = ?2 \
+             WHERE attempt_id = ?3 AND state = ?4 AND deleted_at IS NULL",
+            rusqlite::params![to.as_str(), &now, attempt_id, from.as_str()],
+        )?;
+        if updated == 1 {
+            return Ok(());
+        }
+        // Distinguish "no such row" from "row exists in a different
+        // state". One get_wake_attempt lookup either way -- the FSM
+        // pre-check above already filtered out callable-but-illegal pairs.
+        match self.get_wake_attempt(attempt_id)? {
+            None => Err(LegionError::WakeAttemptNotFound(attempt_id.to_string())),
+            Some(row) => Err(LegionError::IllegalWakeAttemptTransition {
+                attempt_id: attempt_id.to_string(),
+                from: from.as_str().to_string(),
+                to: to.as_str().to_string(),
+                current: row.state.as_str().to_string(),
+            }),
+        }
+    }
+
+    fn illegal_transition(
+        &self,
+        attempt_id: &str,
+        from: crate::wake_attempts::WakeAttemptState,
+        to: crate::wake_attempts::WakeAttemptState,
+    ) -> Result<()> {
+        let current = self
+            .get_wake_attempt(attempt_id)?
+            .map(|r| r.state.as_str().to_string())
+            .unwrap_or_else(|| "<missing>".to_string());
+        Err(LegionError::IllegalWakeAttemptTransition {
+            attempt_id: attempt_id.to_string(),
+            from: from.as_str().to_string(),
+            to: to.as_str().to_string(),
+            current,
+        })
+    }
+
+    /// Record the PID of a spawned PTY child. Called after the child
+    /// reaches `Spawning`; the value is a hint for `kill -0` style
+    /// liveness probes, not the authority on completion (the PTY fd is).
+    pub fn set_wake_attempt_pid(&self, attempt_id: &str, pid: u32) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE wake_attempts \
+             SET spawned_pid = ?1, spawned_at = ?2, updated_at = ?2 \
+             WHERE attempt_id = ?3 AND deleted_at IS NULL",
+            rusqlite::params![pid as i64, &now, attempt_id],
+        )?;
+        if updated == 1 {
+            Ok(())
+        } else {
+            Err(LegionError::WakeAttemptNotFound(attempt_id.to_string()))
+        }
+    }
+
+    /// Stop-hook expediter: mark `exit_observed_at` so the reaper can
+    /// short-circuit its next poll cycle. NOT authoritative -- the
+    /// reaper still confirms via PTY EOF + PID-poll before writing a
+    /// terminal state. The hook may legitimately never fire (8-block
+    /// stop-hook cap in Claude Code 2.1.143).
+    pub fn mark_wake_attempt_exit_observed(&self, attempt_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE wake_attempts \
+             SET exit_observed_at = ?1, updated_at = ?1 \
+             WHERE attempt_id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![&now, attempt_id],
+        )?;
+        if updated == 1 {
+            Ok(())
+        } else {
+            Err(LegionError::WakeAttemptNotFound(attempt_id.to_string()))
+        }
+    }
+
+    /// Terminal classification + outcome stamp. Sets `exited_at`,
+    /// `exit_status`, `outcome`, and transitions the row to a terminal
+    /// FSM state based on `exit_status` (ok -> Done, error -> Failed,
+    /// killed -> Failed). The reaper may short-circuit from any
+    /// in-flight state when a stop hook + PID-dead race collapses the
+    /// lifecycle, so we accept any of claimed/spawning/running/exiting
+    /// as the source. Terminal-is-sticky stays load-bearing: the
+    /// WHERE clause excludes already-terminal rows so a late hook
+    /// cannot rewrite a settled outcome (the call surfaces as
+    /// `WakeAttemptNotFound` so the caller notices).
+    pub fn record_wake_attempt_outcome(
+        &self,
+        attempt_id: &str,
+        exit_status: &str,
+        outcome: &str,
+    ) -> Result<()> {
+        let terminal = match exit_status {
+            "ok" => "done",
+            "error" | "killed" => "failed",
+            other => {
+                return Err(LegionError::IllegalWakeAttemptTransition {
+                    attempt_id: attempt_id.to_string(),
+                    from: "<reaper>".to_string(),
+                    to: other.to_string(),
+                    current: "<unknown exit_status>".to_string(),
+                });
+            }
+        };
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE wake_attempts \
+             SET state = ?1, exited_at = ?2, exit_status = ?3, outcome = ?4, updated_at = ?2 \
+             WHERE attempt_id = ?5 \
+               AND state IN ('claimed', 'spawning', 'running', 'exiting') \
+               AND deleted_at IS NULL",
+            rusqlite::params![terminal, &now, exit_status, outcome, attempt_id],
+        )?;
+        if updated == 1 {
+            return Ok(());
+        }
+        // Distinguish "no such row" from "row exists but is already
+        // terminal (or queued)". Same diagnostic shape as
+        // transition_wake_attempt -- callers can branch on the variant
+        // without retrying a corruption case as if it were absence.
+        match self.get_wake_attempt(attempt_id)? {
+            None => Err(LegionError::WakeAttemptNotFound(attempt_id.to_string())),
+            Some(row) => Err(LegionError::IllegalWakeAttemptTransition {
+                attempt_id: attempt_id.to_string(),
+                from: "<reaper>".to_string(),
+                to: terminal.to_string(),
+                current: row.state.as_str().to_string(),
+            }),
+        }
+    }
+
+    /// Strictly host-scoped orphan scan: rows owned by `self_host` that
+    /// are in any pre-terminal in-flight state. The host filter is
+    /// load-bearing -- a two-node sweep race could reap a peer's still-
+    /// running attempt and stick its persona lease until TTL.
+    pub fn list_local_orphans(
+        &self,
+        self_host: &str,
+    ) -> Result<Vec<crate::wake_attempts::WakeAttempt>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT attempt_id, persona_id, repo_name, signal_ids, state, \
+                    acquired_by_host, acquired_at, spawned_pid, spawned_at, \
+                    exit_observed_at, exited_at, exit_status, outcome, \
+                    deleted_at, updated_at \
+             FROM wake_attempts \
+             WHERE acquired_by_host = ?1 \
+               AND state IN ('claimed', 'spawning', 'running', 'exiting') \
+               AND deleted_at IS NULL \
+             ORDER BY acquired_at ASC",
+        )?;
+        Ok(stmt
+            .query_map(rusqlite::params![self_host], map_wake_attempt_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Fetch a single row by id (including soft-deleted ones, for sync
+    /// reconciliation). Returns `Ok(None)` when no row exists.
+    pub fn get_wake_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<crate::wake_attempts::WakeAttempt>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT attempt_id, persona_id, repo_name, signal_ids, state, \
+                    acquired_by_host, acquired_at, spawned_pid, spawned_at, \
+                    exit_observed_at, exited_at, exit_status, outcome, \
+                    deleted_at, updated_at \
+             FROM wake_attempts \
+             WHERE attempt_id = ?1",
+        )?;
+        let row = stmt
+            .query_row(rusqlite::params![attempt_id], map_wake_attempt_row)
+            .optional()?;
+        Ok(row)
     }
 }
 
@@ -7222,5 +7556,329 @@ mod tests {
         let result = db.cleanup_tombstones(30).unwrap();
         assert_eq!(result.uncertainty_predictions, 1);
         assert_eq!(result.uncertainty_calibration_snapshots, 1);
+    }
+
+    // -- wake_attempts (#487) ------------------------------------------------
+
+    fn wake_id(tag: &str) -> String {
+        format!("attempt-{}-{}", tag, uuid::Uuid::now_v7())
+    }
+
+    #[test]
+    fn wake_attempts_migration_creates_table() {
+        let db = test_db();
+        // sqlite_master lookup is a stable way to assert the table
+        // and indices applied without rebinding to private types.
+        let exists: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='wake_attempts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
+        let indices: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name IN ('idx_wake_attempts_host_state', 'idx_wake_attempts_persona_recent')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indices, 2);
+    }
+
+    #[test]
+    fn enqueue_wake_attempt_inserts_queued_row() {
+        use crate::wake_attempts::WakeAttemptState;
+        let db = test_db();
+        let id = wake_id("enqueue");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &["sig-1".to_string()])
+            .unwrap();
+        let row = db.get_wake_attempt(&id).unwrap().expect("row exists");
+        assert_eq!(row.state, WakeAttemptState::Queued);
+        assert_eq!(row.persona_id, "legion");
+        assert_eq!(row.repo_name, "legion");
+        assert_eq!(row.signal_ids, vec!["sig-1".to_string()]);
+        assert!(row.acquired_by_host.is_none());
+    }
+
+    #[test]
+    fn try_claim_wake_attempt_is_atomic_one_winner() {
+        let db = test_db();
+        let id = wake_id("claim");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+
+        let host_a_won = db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        let host_b_won = db.try_claim_wake_attempt(&id, "host-b").unwrap();
+        // First claimer wins; second sees state != queued and returns false.
+        assert!(host_a_won, "first host must win the claim");
+        assert!(!host_b_won, "second claim must return false");
+
+        let row = db.get_wake_attempt(&id).unwrap().expect("row");
+        assert_eq!(row.acquired_by_host.as_deref(), Some("host-a"));
+        assert_eq!(row.state, crate::wake_attempts::WakeAttemptState::Claimed);
+    }
+
+    #[test]
+    fn try_claim_wake_attempt_rejects_already_claimed() {
+        let db = test_db();
+        let id = wake_id("re-claim");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        assert!(db.try_claim_wake_attempt(&id, "host-a").unwrap());
+        // Same host trying twice still loses -- claim is one-shot.
+        assert!(!db.try_claim_wake_attempt(&id, "host-a").unwrap());
+    }
+
+    #[test]
+    fn try_claim_wake_attempt_returns_false_for_unknown_row() {
+        let db = test_db();
+        assert!(!db.try_claim_wake_attempt("no-such-id", "host-a").unwrap());
+    }
+
+    #[test]
+    fn transition_wake_attempt_walks_happy_path() {
+        use crate::wake_attempts::WakeAttemptState::*;
+        let db = test_db();
+        let id = wake_id("happy");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        assert!(db.try_claim_wake_attempt(&id, "host-a").unwrap());
+
+        db.transition_wake_attempt(&id, Claimed, Spawning).unwrap();
+        db.transition_wake_attempt(&id, Spawning, Running).unwrap();
+        db.transition_wake_attempt(&id, Running, Exiting).unwrap();
+        db.transition_wake_attempt(&id, Exiting, Done).unwrap();
+
+        let row = db.get_wake_attempt(&id).unwrap().expect("row");
+        assert_eq!(row.state, Done);
+    }
+
+    #[test]
+    fn transition_wake_attempt_rejects_illegal_pair() {
+        use crate::wake_attempts::WakeAttemptState::*;
+        let db = test_db();
+        let id = wake_id("illegal");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        assert!(db.try_claim_wake_attempt(&id, "host-a").unwrap());
+
+        // Claimed -> Done is not in the table.
+        let err = db
+            .transition_wake_attempt(&id, Claimed, Done)
+            .expect_err("illegal transition must error");
+        match err {
+            LegionError::IllegalWakeAttemptTransition {
+                attempt_id,
+                from,
+                to,
+                ..
+            } => {
+                assert_eq!(attempt_id, id);
+                assert_eq!(from, "claimed");
+                assert_eq!(to, "done");
+            }
+            other => panic!("expected IllegalWakeAttemptTransition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transition_wake_attempt_rejects_stale_from() {
+        use crate::wake_attempts::WakeAttemptState::*;
+        let db = test_db();
+        let id = wake_id("stale");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        assert!(db.try_claim_wake_attempt(&id, "host-a").unwrap());
+        db.transition_wake_attempt(&id, Claimed, Spawning).unwrap();
+        // Caller still thinks the row is `Claimed` but the DB has moved on.
+        let err = db
+            .transition_wake_attempt(&id, Claimed, Spawning)
+            .expect_err("stale `from` must error");
+        match err {
+            LegionError::IllegalWakeAttemptTransition { current, .. } => {
+                assert_eq!(current, "spawning");
+            }
+            other => panic!("expected IllegalWakeAttemptTransition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transition_wake_attempt_errors_on_missing_row() {
+        use crate::wake_attempts::WakeAttemptState::*;
+        let db = test_db();
+        let err = db
+            .transition_wake_attempt("no-such", Queued, Claimed)
+            .expect_err("missing row");
+        assert!(matches!(err, LegionError::WakeAttemptNotFound(_)));
+    }
+
+    #[test]
+    fn record_wake_attempt_outcome_sets_terminal_and_status() {
+        use crate::wake_attempts::WakeAttemptState::*;
+        let db = test_db();
+        let id = wake_id("outcome-ok");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        db.transition_wake_attempt(&id, Claimed, Spawning).unwrap();
+        db.transition_wake_attempt(&id, Spawning, Running).unwrap();
+
+        db.record_wake_attempt_outcome(&id, "ok", "productive")
+            .unwrap();
+        let row = db.get_wake_attempt(&id).unwrap().expect("row");
+        assert_eq!(row.state, Done);
+        assert_eq!(row.exit_status.as_deref(), Some("ok"));
+        assert_eq!(row.outcome.as_deref(), Some("productive"));
+        assert!(row.exited_at.is_some());
+    }
+
+    #[test]
+    fn record_wake_attempt_outcome_maps_error_to_failed() {
+        use crate::wake_attempts::WakeAttemptState::*;
+        let db = test_db();
+        let id = wake_id("outcome-fail");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        db.record_wake_attempt_outcome(&id, "killed", "errored")
+            .unwrap();
+        let row = db.get_wake_attempt(&id).unwrap().expect("row");
+        assert_eq!(row.state, Failed);
+    }
+
+    #[test]
+    fn record_wake_attempt_outcome_leaves_terminal_rows_alone() {
+        // Late stop hook + already-settled row must not rewrite the
+        // outcome. Terminal-is-sticky is the FSM invariant the
+        // transition table protects; record_outcome must respect it
+        // and surface the rejection as IllegalWakeAttemptTransition
+        // with the actual current state, not WakeAttemptNotFound
+        // (which would invite a retry loop on a real corruption).
+        let db = test_db();
+        let id = wake_id("sticky");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        db.record_wake_attempt_outcome(&id, "ok", "productive")
+            .unwrap();
+        let err = db
+            .record_wake_attempt_outcome(&id, "killed", "errored")
+            .expect_err("terminal row must reject re-stamp");
+        match err {
+            LegionError::IllegalWakeAttemptTransition { current, .. } => {
+                assert_eq!(current, "done");
+            }
+            other => {
+                panic!("expected IllegalWakeAttemptTransition with current=done, got {other:?}")
+            }
+        }
+        let row = db.get_wake_attempt(&id).unwrap().expect("row");
+        assert_eq!(row.exit_status.as_deref(), Some("ok"));
+        assert_eq!(row.outcome.as_deref(), Some("productive"));
+    }
+
+    #[test]
+    fn list_local_orphans_is_strictly_host_scoped() {
+        use crate::wake_attempts::WakeAttemptState::*;
+        let db = test_db();
+
+        // This host: one in-flight + one terminal (terminal must NOT appear).
+        let local_inflight = wake_id("local-inflight");
+        db.enqueue_wake_attempt(&local_inflight, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&local_inflight, "this-host")
+            .unwrap();
+        db.transition_wake_attempt(&local_inflight, Claimed, Spawning)
+            .unwrap();
+
+        let local_done = wake_id("local-done");
+        db.enqueue_wake_attempt(&local_done, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&local_done, "this-host").unwrap();
+        db.record_wake_attempt_outcome(&local_done, "ok", "productive")
+            .unwrap();
+
+        // Peer host: in-flight on a DIFFERENT host must NOT appear here.
+        let peer_inflight = wake_id("peer-inflight");
+        db.enqueue_wake_attempt(&peer_inflight, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&peer_inflight, "other-host")
+            .unwrap();
+
+        let orphans = db.list_local_orphans("this-host").unwrap();
+        let ids: Vec<&str> = orphans.iter().map(|r| r.attempt_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![local_inflight.as_str()],
+            "only this-host's in-flight row should be returned"
+        );
+    }
+
+    #[test]
+    fn set_wake_attempt_pid_records_pid_and_spawned_at() {
+        let db = test_db();
+        let id = wake_id("pid");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.set_wake_attempt_pid(&id, 12345).unwrap();
+        let row = db.get_wake_attempt(&id).unwrap().expect("row");
+        assert_eq!(row.spawned_pid, Some(12345));
+        assert!(row.spawned_at.is_some());
+    }
+
+    #[test]
+    fn mark_wake_attempt_exit_observed_writes_timestamp() {
+        let db = test_db();
+        let id = wake_id("exit-obs");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.mark_wake_attempt_exit_observed(&id).unwrap();
+        let row = db.get_wake_attempt(&id).unwrap().expect("row");
+        assert!(row.exit_observed_at.is_some());
+    }
+
+    #[test]
+    fn get_wake_attempt_returns_none_for_missing() {
+        let db = test_db();
+        assert!(db.get_wake_attempt("no-such").unwrap().is_none());
+    }
+
+    #[test]
+    fn record_wake_attempt_outcome_rejects_unknown_exit_status() {
+        let db = test_db();
+        let id = wake_id("bad-status");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        let err = db
+            .record_wake_attempt_outcome(&id, "purple", "productive")
+            .expect_err("unknown exit_status must error");
+        assert!(matches!(
+            err,
+            LegionError::IllegalWakeAttemptTransition { .. }
+        ));
+    }
+
+    #[test]
+    fn set_wake_attempt_pid_errors_on_missing_row() {
+        let db = test_db();
+        let err = db
+            .set_wake_attempt_pid("no-such", 1234)
+            .expect_err("missing row must error");
+        assert!(matches!(err, LegionError::WakeAttemptNotFound(_)));
+    }
+
+    #[test]
+    fn mark_wake_attempt_exit_observed_errors_on_missing_row() {
+        let db = test_db();
+        let err = db
+            .mark_wake_attempt_exit_observed("no-such")
+            .expect_err("missing row must error");
+        assert!(matches!(err, LegionError::WakeAttemptNotFound(_)));
     }
 }
