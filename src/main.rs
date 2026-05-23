@@ -1970,6 +1970,17 @@ enum WatchAction {
         #[command(subcommand)]
         action: LeaseAction,
     },
+
+    /// Optimistic stop-hook handoff for the watch reaper (#493). Writes
+    /// `exit_observed_at` on the wake_attempts row so the reaper can
+    /// skip a poll cycle. PTY EOF + PID-poll remain authoritative; this
+    /// is a speed-up only. Idempotent; exits 0 on a missing row so a
+    /// hook failure cannot block Claude Code's Stop.
+    SessionEnd {
+        /// UUIDv7 attempt id, sourced from $LEGION_WAKE_ATTEMPT_ID.
+        #[arg(long)]
+        attempt_id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -6318,6 +6329,11 @@ fn run() -> error::Result<()> {
                             }
                         }
                     }
+                }
+                Some(WatchAction::SessionEnd { attempt_id }) => {
+                    let db_path = base.join("legion.db");
+                    let db = db::Database::open(&db_path)?;
+                    watch::record_session_end(&db, &attempt_id)?;
                 }
             }
         }

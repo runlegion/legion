@@ -858,6 +858,21 @@ impl SpawnMode {
 /// `LegionError::NotImplemented` -- callers must surface the error and
 /// release any holds (the existing `poll_cycle` spawn-failure path does
 /// this already).
+///
+/// Optimistic stop-hook handoff (#493). Writes `exit_observed_at` on
+/// the wake_attempts row so the reaper can short-circuit a poll cycle.
+/// PTY EOF + PID-poll remain the authoritative completion signal --
+/// this is a speed-up only. Idempotent: missing rows return `Ok(())`
+/// because the hook may fire for operator-attended sessions that watch
+/// never spawned.
+pub fn record_session_end(db: &Database, attempt_id: &str) -> Result<()> {
+    match db.mark_wake_attempt_exit_observed(attempt_id) {
+        Ok(()) => Ok(()),
+        Err(LegionError::WakeAttemptNotFound(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn spawn_agent(workdir: &str, prompt: &str, mode: SpawnMode) -> Result<Child> {
     match mode {
         SpawnMode::Print => {
