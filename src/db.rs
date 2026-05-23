@@ -4183,6 +4183,204 @@ impl Database {
             .optional()?;
         Ok(row)
     }
+
+    /// Apply an incoming sync delta with state-aware conflict resolution
+    /// (#488). Returns `Ok(true)` when the delta was applied or inserted,
+    /// `Ok(false)` when rejected (no-op / regression / forward-incompat).
+    ///
+    /// Conflict rule (in priority order):
+    ///
+    /// 1. Unknown state literal -> log + reject (forward-incompat from a
+    ///    newer peer; do not panic).
+    /// 2. No local row -> insert.
+    /// 3. Tombstone involved (either side has `deleted_at`) -> plain LWW
+    ///    on `updated_at`.
+    /// 4. Local terminal + incoming non-terminal -> REJECT. Terminal is
+    ///    sticky; a peer observing an earlier state must not regress us.
+    /// 5. Both terminal but disagree on state -> keep the row with the
+    ///    later `exited_at`; on tie, deterministic tiebreak on
+    ///    `acquired_by_host` (lexicographic, lower wins).
+    /// 6. Otherwise -> LWW on `updated_at`.
+    pub fn apply_wake_attempt_delta(&self, delta: &crate::sync::WakeAttemptDelta) -> Result<bool> {
+        // Forward-incompat guard: unknown state literal does not panic.
+        let delta_state = match crate::wake_attempts::WakeAttemptState::parse_state(&delta.state) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "[legion sync] wake_attempt_delta rejected: unknown state {:?} \
+                         (attempt_id={}, err={})",
+                    delta.state, delta.attempt_id, e
+                );
+                return Ok(false);
+            }
+        };
+
+        let tx = self.conn.unchecked_transaction()?;
+        let local = tx
+            .query_row(
+                "SELECT state, exited_at, updated_at, deleted_at, acquired_by_host \
+                 FROM wake_attempts WHERE attempt_id = ?1",
+                rusqlite::params![&delta.attempt_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let signal_ids_json = serde_json::to_string(&delta.signal_ids)?;
+
+        let applied = match local {
+            None => {
+                tx.execute(
+                    "INSERT INTO wake_attempts \
+                     (attempt_id, persona_id, repo_name, signal_ids, state, \
+                      acquired_by_host, acquired_at, spawned_pid, spawned_at, \
+                      exit_observed_at, exited_at, exit_status, outcome, \
+                      deleted_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    rusqlite::params![
+                        &delta.attempt_id,
+                        &delta.persona_id,
+                        &delta.repo_name,
+                        &signal_ids_json,
+                        &delta.state,
+                        &delta.acquired_by_host,
+                        &delta.acquired_at,
+                        delta.spawned_pid.map(|v| v as i64),
+                        &delta.spawned_at,
+                        &delta.exit_observed_at,
+                        &delta.exited_at,
+                        &delta.exit_status,
+                        &delta.outcome,
+                        &delta.deleted_at,
+                        &delta.updated_at,
+                    ],
+                )?;
+                true
+            }
+            Some((local_state_str, local_exited, local_updated, local_deleted, local_host)) => {
+                let local_state =
+                    match crate::wake_attempts::WakeAttemptState::parse_state(&local_state_str) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            // Local row is corrupt -- treat any incoming
+                            // well-formed delta as the truth (forward-only
+                            // schema recovery). LWW still applies.
+                            if delta.updated_at <= local_updated {
+                                tx.commit()?;
+                                return Ok(false);
+                            }
+                            self.upsert_wake_attempt_overwrite(&tx, delta, &signal_ids_json)?;
+                            tx.commit()?;
+                            return Ok(true);
+                        }
+                    };
+
+                let tombstone_involved = local_deleted.is_some() || delta.deleted_at.is_some();
+                let local_terminal = local_state.is_terminal();
+                let delta_terminal = delta_state.is_terminal();
+
+                if tombstone_involved {
+                    // Plain LWW on updated_at for tombstones.
+                    if delta.updated_at > local_updated {
+                        self.upsert_wake_attempt_overwrite(&tx, delta, &signal_ids_json)?;
+                        true
+                    } else {
+                        false
+                    }
+                } else if local_terminal && !delta_terminal {
+                    // Terminal-is-sticky: reject the regression. The
+                    // local row keeps its terminal state regardless of
+                    // updated_at -- a newer non-terminal write is a
+                    // happens-before violation by definition.
+                    false
+                } else if local_terminal && delta_terminal {
+                    if local_state == delta_state {
+                        // Both same terminal -- LWW on updated_at to
+                        // accept fresher metadata (outcome label, etc).
+                        if delta.updated_at > local_updated {
+                            self.upsert_wake_attempt_overwrite(&tx, delta, &signal_ids_json)?;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        // Both terminal but disagree -- keep the later
+                        // exited_at; on tie, deterministic tiebreak on
+                        // acquired_by_host (lower lexicographic wins).
+                        let delta_wins = match (&delta.exited_at, &local_exited) {
+                            (Some(d), Some(l)) if d != l => d > l,
+                            (Some(_), None) => true,
+                            (None, Some(_)) => false,
+                            _ => {
+                                // exited_at tie -- break on host id.
+                                match (&delta.acquired_by_host, &local_host) {
+                                    (Some(d), Some(l)) => d < l,
+                                    (Some(_), None) => true,
+                                    _ => false,
+                                }
+                            }
+                        };
+                        if delta_wins {
+                            self.upsert_wake_attempt_overwrite(&tx, delta, &signal_ids_json)?;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                } else if delta.updated_at > local_updated {
+                    // Live row, neither terminal -- plain LWW.
+                    self.upsert_wake_attempt_overwrite(&tx, delta, &signal_ids_json)?;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+
+        tx.commit()?;
+        Ok(applied)
+    }
+
+    fn upsert_wake_attempt_overwrite(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        delta: &crate::sync::WakeAttemptDelta,
+        signal_ids_json: &str,
+    ) -> Result<()> {
+        tx.execute(
+            "UPDATE wake_attempts \
+             SET persona_id = ?1, repo_name = ?2, signal_ids = ?3, state = ?4, \
+                 acquired_by_host = ?5, acquired_at = ?6, spawned_pid = ?7, \
+                 spawned_at = ?8, exit_observed_at = ?9, exited_at = ?10, \
+                 exit_status = ?11, outcome = ?12, deleted_at = ?13, updated_at = ?14 \
+             WHERE attempt_id = ?15",
+            rusqlite::params![
+                &delta.persona_id,
+                &delta.repo_name,
+                signal_ids_json,
+                &delta.state,
+                &delta.acquired_by_host,
+                &delta.acquired_at,
+                delta.spawned_pid.map(|v| v as i64),
+                &delta.spawned_at,
+                &delta.exit_observed_at,
+                &delta.exited_at,
+                &delta.exit_status,
+                &delta.outcome,
+                &delta.deleted_at,
+                &delta.updated_at,
+                &delta.attempt_id,
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 /// Map a database row to a HealthSample struct.
@@ -7880,5 +8078,184 @@ mod tests {
             .mark_wake_attempt_exit_observed("no-such")
             .expect_err("missing row must error");
         assert!(matches!(err, LegionError::WakeAttemptNotFound(_)));
+    }
+
+    // -- WakeAttemptDelta + apply_wake_attempt_delta (#488) ------------------
+
+    fn delta_for(attempt_id: &str, state: &str, updated_at: &str) -> crate::sync::WakeAttemptDelta {
+        crate::sync::WakeAttemptDelta {
+            attempt_id: attempt_id.to_string(),
+            persona_id: "legion".to_string(),
+            repo_name: "legion".to_string(),
+            signal_ids: vec!["sig-1".to_string()],
+            state: state.to_string(),
+            acquired_by_host: Some("peer-host".to_string()),
+            acquired_at: Some("2026-05-23T10:00:00Z".to_string()),
+            spawned_pid: None,
+            spawned_at: None,
+            exit_observed_at: None,
+            exited_at: None,
+            exit_status: None,
+            outcome: None,
+            deleted_at: None,
+            updated_at: updated_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn delta_from_attempt_roundtrips() {
+        use crate::wake_attempts::WakeAttemptState;
+        let db = test_db();
+        let id = wake_id("delta-rt");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &["a".into(), "b".into()])
+            .unwrap();
+        let attempt = db.get_wake_attempt(&id).unwrap().expect("row");
+        let delta = crate::sync::WakeAttemptDelta::from_attempt(&attempt);
+
+        assert_eq!(delta.attempt_id, id);
+        assert_eq!(delta.state, "queued");
+        assert_eq!(delta.signal_ids, vec!["a".to_string(), "b".to_string()]);
+        // Round-trip back through serde to confirm the state literal
+        // parses on the other side.
+        let json = serde_json::to_string(&delta).unwrap();
+        let back: crate::sync::WakeAttemptDelta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.state, "queued");
+        assert!(matches!(
+            WakeAttemptState::parse_state(&back.state).unwrap(),
+            WakeAttemptState::Queued
+        ));
+    }
+
+    #[test]
+    fn apply_delta_inserts_when_no_local_row() {
+        let db = test_db();
+        let delta = delta_for("new-id", "queued", "2026-05-23T10:00:00Z");
+        let applied = db.apply_wake_attempt_delta(&delta).unwrap();
+        assert!(applied);
+        let row = db.get_wake_attempt("new-id").unwrap().expect("row");
+        assert_eq!(row.state.as_str(), "queued");
+    }
+
+    #[test]
+    fn apply_delta_lww_older_is_noop() {
+        let db = test_db();
+        // Local row is newer.
+        let new_delta = delta_for("lww-id", "claimed", "2026-05-23T12:00:00Z");
+        assert!(db.apply_wake_attempt_delta(&new_delta).unwrap());
+        // Older incoming -> rejected.
+        let old_delta = delta_for("lww-id", "queued", "2026-05-23T10:00:00Z");
+        assert!(!db.apply_wake_attempt_delta(&old_delta).unwrap());
+        let row = db.get_wake_attempt("lww-id").unwrap().expect("row");
+        assert_eq!(
+            row.state.as_str(),
+            "claimed",
+            "older delta must not regress"
+        );
+    }
+
+    #[test]
+    fn apply_delta_lww_newer_overwrites() {
+        let db = test_db();
+        let old = delta_for("over-id", "queued", "2026-05-23T10:00:00Z");
+        assert!(db.apply_wake_attempt_delta(&old).unwrap());
+        let new = delta_for("over-id", "claimed", "2026-05-23T11:00:00Z");
+        assert!(db.apply_wake_attempt_delta(&new).unwrap());
+        let row = db.get_wake_attempt("over-id").unwrap().expect("row");
+        assert_eq!(row.state.as_str(), "claimed");
+    }
+
+    #[test]
+    fn apply_delta_terminal_is_sticky_against_non_terminal() {
+        // Local row has reached Done; peer's non-terminal delta with a
+        // later updated_at must NOT regress us. This is the load-bearing
+        // happens-before guard that distinguishes wake_attempts from
+        // plain LWW rows.
+        let db = test_db();
+        let mut done = delta_for("sticky-id", "done", "2026-05-23T11:00:00Z");
+        done.exited_at = Some("2026-05-23T11:00:00Z".to_string());
+        done.exit_status = Some("ok".to_string());
+        done.outcome = Some("productive".to_string());
+        assert!(db.apply_wake_attempt_delta(&done).unwrap());
+
+        // Newer updated_at, but state regression: rejected.
+        let regress = delta_for("sticky-id", "running", "2026-05-23T12:00:00Z");
+        assert!(!db.apply_wake_attempt_delta(&regress).unwrap());
+
+        let row = db.get_wake_attempt("sticky-id").unwrap().expect("row");
+        assert_eq!(
+            row.state.as_str(),
+            "done",
+            "terminal must survive a newer non-terminal delta"
+        );
+    }
+
+    #[test]
+    fn apply_delta_both_terminal_disagree_keeps_later_exited_at() {
+        let db = test_db();
+        let mut early = delta_for("term-id", "done", "2026-05-23T11:00:00Z");
+        early.exited_at = Some("2026-05-23T11:00:00Z".to_string());
+        early.exit_status = Some("ok".to_string());
+        assert!(db.apply_wake_attempt_delta(&early).unwrap());
+
+        // Peer's terminal disagrees but exited later -> wins.
+        let mut later_failed = delta_for("term-id", "failed", "2026-05-23T11:30:00Z");
+        later_failed.exited_at = Some("2026-05-23T12:00:00Z".to_string());
+        later_failed.exit_status = Some("error".to_string());
+        assert!(db.apply_wake_attempt_delta(&later_failed).unwrap());
+
+        let row = db.get_wake_attempt("term-id").unwrap().expect("row");
+        assert_eq!(row.state.as_str(), "failed");
+    }
+
+    #[test]
+    fn apply_delta_both_terminal_tie_breaks_on_host() {
+        // Local "done" on host-b vs incoming "failed" on host-a. Equal
+        // exited_at; deterministic tiebreak picks lower lexicographic
+        // host (host-a < host-b).
+        let db = test_db();
+        let mut local = delta_for("tie-id", "done", "2026-05-23T11:00:00Z");
+        local.exited_at = Some("2026-05-23T12:00:00Z".to_string());
+        local.exit_status = Some("ok".to_string());
+        local.acquired_by_host = Some("host-b".to_string());
+        assert!(db.apply_wake_attempt_delta(&local).unwrap());
+
+        let mut peer = delta_for("tie-id", "failed", "2026-05-23T11:00:00Z");
+        peer.exited_at = Some("2026-05-23T12:00:00Z".to_string());
+        peer.exit_status = Some("error".to_string());
+        peer.acquired_by_host = Some("host-a".to_string());
+        assert!(db.apply_wake_attempt_delta(&peer).unwrap());
+
+        let row = db.get_wake_attempt("tie-id").unwrap().expect("row");
+        assert_eq!(
+            row.state.as_str(),
+            "failed",
+            "host-a wins the lexicographic tiebreak"
+        );
+    }
+
+    #[test]
+    fn apply_delta_unknown_state_is_rejected_no_panic() {
+        let db = test_db();
+        let delta = delta_for("unknown-id", "frobnicated", "2026-05-23T10:00:00Z");
+        let applied = db.apply_wake_attempt_delta(&delta).unwrap();
+        assert!(!applied, "forward-incompat state must be rejected");
+        assert!(
+            db.get_wake_attempt("unknown-id").unwrap().is_none(),
+            "rejected delta must not insert"
+        );
+    }
+
+    #[test]
+    fn apply_delta_tombstone_lww() {
+        let db = test_db();
+        // Local live row.
+        let live = delta_for("tomb-id", "running", "2026-05-23T10:00:00Z");
+        assert!(db.apply_wake_attempt_delta(&live).unwrap());
+        // Incoming tombstone with newer updated_at wins.
+        let mut tomb = delta_for("tomb-id", "running", "2026-05-23T11:00:00Z");
+        tomb.deleted_at = Some("2026-05-23T11:00:00Z".to_string());
+        assert!(db.apply_wake_attempt_delta(&tomb).unwrap());
+        let row = db.get_wake_attempt("tomb-id").unwrap().expect("row");
+        assert!(row.deleted_at.is_some());
     }
 }

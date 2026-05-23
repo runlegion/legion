@@ -268,6 +268,59 @@ pub struct PersonaWakeLeaseDelta {
     pub deleted_at: Option<String>,
 }
 
+/// A wake-attempt row serialized for sync transmission (#488, part of #495).
+///
+/// Unlike leases (which only need LWW), wake-attempt rows have
+/// happens-before lifecycle semantics: a peer observing `state=running`
+/// after this node wrote `state=done` must NOT regress the terminal
+/// state. `db::apply_wake_attempt_delta` enforces the state-aware
+/// conflict rule; this struct is the wire shape.
+///
+/// `state` carries the lowercase string form of `WakeAttemptState`. An
+/// unknown literal from a forward-incompatible peer is rejected at
+/// apply time without panicking -- see the apply method's docstring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeAttemptDelta {
+    pub attempt_id: String,
+    pub persona_id: String,
+    pub repo_name: String,
+    pub signal_ids: Vec<String>,
+    pub state: String,
+    pub acquired_by_host: Option<String>,
+    pub acquired_at: Option<String>,
+    pub spawned_pid: Option<u32>,
+    pub spawned_at: Option<String>,
+    pub exit_observed_at: Option<String>,
+    pub exited_at: Option<String>,
+    pub exit_status: Option<String>,
+    pub outcome: Option<String>,
+    pub deleted_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[allow(dead_code)] // wired by #489 / #490 consumers
+impl WakeAttemptDelta {
+    pub fn from_attempt(a: &crate::wake_attempts::WakeAttempt) -> Self {
+        Self {
+            attempt_id: a.attempt_id.clone(),
+            persona_id: a.persona_id.clone(),
+            repo_name: a.repo_name.clone(),
+            signal_ids: a.signal_ids.clone(),
+            state: a.state.as_str().to_string(),
+            acquired_by_host: a.acquired_by_host.clone(),
+            acquired_at: a.acquired_at.clone(),
+            spawned_pid: a.spawned_pid,
+            spawned_at: a.spawned_at.clone(),
+            exit_observed_at: a.exit_observed_at.clone(),
+            exited_at: a.exited_at.clone(),
+            exit_status: a.exit_status.clone(),
+            outcome: a.outcome.clone(),
+            deleted_at: a.deleted_at.clone(),
+            updated_at: a.updated_at.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
