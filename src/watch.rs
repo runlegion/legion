@@ -816,29 +816,32 @@ pub enum SpawnMode {
 
 impl SpawnMode {
     /// Resolve from `WATCH_SPAWN_MODE`. Accepts `"print"` or `"pty"`
-    /// (case-insensitive). Empty / unset / any other value falls back to
-    /// `Print`, logging a warning on unknown values so a typo is visible.
+    /// (case-insensitive). Empty / unset / any other value falls back
+    /// to `Pty` (the v0.16.0 default after #494 -- subscription
+    /// billing for `claude --print -p` ended 2026-06-15). Operators
+    /// who explicitly want the legacy path set `WATCH_SPAWN_MODE=print`.
+    /// Unknown values log a warning so a typo is visible.
     pub fn from_env() -> Self {
         match std::env::var("WATCH_SPAWN_MODE") {
             Ok(raw) => Self::parse(&raw),
-            Err(_) => Self::Print,
+            Err(_) => Self::Pty,
         }
     }
 
     fn parse(raw: &str) -> Self {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Self::Print;
+            return Self::Pty;
         }
         match trimmed.to_ascii_lowercase().as_str() {
             "print" => Self::Print,
             "pty" => Self::Pty,
             other => {
                 eprintln!(
-                    "[legion watch] unknown WATCH_SPAWN_MODE={:?} -- falling back to print",
+                    "[legion watch] unknown WATCH_SPAWN_MODE={:?} -- falling back to pty",
                     other
                 );
-                Self::Print
+                Self::Pty
             }
         }
     }
@@ -3307,12 +3310,14 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
     }
 
     #[test]
-    fn spawn_mode_parse_unknown_falls_back_to_print() {
-        // Empty, whitespace, and unrecognized strings must default to
-        // Print so a typo cannot silently engage the PTY stub.
-        assert_eq!(SpawnMode::parse(""), SpawnMode::Print);
-        assert_eq!(SpawnMode::parse("   "), SpawnMode::Print);
-        assert_eq!(SpawnMode::parse("nope"), SpawnMode::Print);
+    fn spawn_mode_parse_unknown_falls_back_to_pty() {
+        // Default flipped to Pty in #494 (post-2026-06-15 billing
+        // shift). Empty, whitespace, and unrecognized strings now
+        // engage the PTY path; operators who want the legacy
+        // print path set WATCH_SPAWN_MODE=print explicitly.
+        assert_eq!(SpawnMode::parse(""), SpawnMode::Pty);
+        assert_eq!(SpawnMode::parse("   "), SpawnMode::Pty);
+        assert_eq!(SpawnMode::parse("nope"), SpawnMode::Pty);
     }
 
     // The stub-verifying `spawn_agent_pty_returns_not_implemented`
