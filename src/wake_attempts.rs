@@ -205,7 +205,8 @@ mod tests {
             assert!(s.is_terminal(), "{s:?} should be terminal");
             assert!(!s.is_in_flight(), "{s:?} should not be in flight");
         }
-        for s in [Queued] {
+        {
+            let s = Queued;
             assert!(!s.is_terminal());
             assert!(!s.is_in_flight());
         }
