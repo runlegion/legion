@@ -873,28 +873,119 @@ pub fn record_session_end(db: &Database, attempt_id: &str) -> Result<()> {
     }
 }
 
-pub fn spawn_agent(workdir: &str, prompt: &str, mode: SpawnMode) -> Result<Child> {
+/// Polymorphic child handle returned by `spawn_agent`. The Print
+/// branch wraps `std::process::Child` (unchanged from the `claude -p`
+/// era); the Pty branch wraps `pty::PtySession` so the interactive
+/// REPL retains subscription billing under the post-2026-06-15 cutoff.
+///
+/// Implements the minimal subset of operations the watch reaper +
+/// lease release path actually need: `pid` for liveness + log lines,
+/// `try_wait` for non-blocking exit detection, `kill` for shutdown.
+/// Direct stdin/stdout streams are NOT exposed -- the PTY ring buffer
+/// is for diagnostics, not control flow.
+pub enum SpawnedChild {
+    Print(Child),
+    Pty(crate::pty::PtySession),
+}
+
+impl SpawnedChild {
+    pub fn id(&self) -> u32 {
+        match self {
+            SpawnedChild::Print(c) => c.id(),
+            SpawnedChild::Pty(s) => s.pid(),
+        }
+    }
+
+    /// Non-blocking exit check. `Ok(Some(_))` once the child has
+    /// exited (the inner value is the OS-reported success bit;
+    /// callers that need exit code distinguishing use Print's Child
+    /// directly or the PtySession's ExitStatus). `Ok(None)` while
+    /// still running.
+    pub fn try_wait(&mut self) -> Result<Option<bool>> {
+        match self {
+            SpawnedChild::Print(c) => match c.try_wait().map_err(LegionError::Io)? {
+                Some(status) => Ok(Some(status.success())),
+                None => Ok(None),
+            },
+            SpawnedChild::Pty(s) => match s.try_wait()? {
+                Some(status) => Ok(Some(status.success)),
+                None => Ok(None),
+            },
+        }
+    }
+
+    #[allow(dead_code)] // consumed by #490 reap-on-shutdown path
+    pub fn kill(&mut self) -> Result<()> {
+        match self {
+            SpawnedChild::Print(c) => c.kill().map_err(LegionError::Io),
+            SpawnedChild::Pty(s) => s.kill(),
+        }
+    }
+}
+
+pub fn spawn_agent(
+    workdir: &str,
+    prompt: &str,
+    mode: SpawnMode,
+    attempt_id: Option<&str>,
+) -> Result<SpawnedChild> {
     match mode {
         SpawnMode::Print => {
-            let child = std::process::Command::new("claude")
-                .args(["--print", "-p", prompt])
+            let mut cmd = std::process::Command::new("claude");
+            cmd.args(["--print", "-p", prompt])
                 .current_dir(workdir)
                 .env("LEGION_AUTO_WAKE", "1")
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-
-            match child {
-                Ok(c) => Ok(c),
+                .stderr(std::process::Stdio::null());
+            if let Some(id) = attempt_id {
+                cmd.env("LEGION_WAKE_ATTEMPT_ID", id);
+            }
+            match cmd.spawn() {
+                Ok(c) => Ok(SpawnedChild::Print(c)),
                 Err(e) => {
                     eprintln!("[legion watch] failed to spawn agent: {}", e);
                     Err(LegionError::Io(e))
                 }
             }
         }
-        SpawnMode::Pty => Err(LegionError::NotImplemented {
-            feature: "WATCH_SPAWN_MODE=pty".to_string(),
-        }),
+        SpawnMode::Pty => {
+            // PTY-spawned interactive `claude` REPL (#489). Subscription
+            // billing applies because the REPL sees a TTY. Prompt is
+            // injected via keystrokes through the master fd; the legion
+            // plugin remains loaded inside the spawned session so the
+            // stop hook can fire `legion watch session-end` (#493) as
+            // an optimistic completion signal.
+            let env: Vec<(&str, &str)> = {
+                let mut e = vec![
+                    ("LEGION_AUTO_WAKE", "1"),
+                    ("LEGION_SPAWN_SOURCE", "watch-pty"),
+                ];
+                if let Some(id) = attempt_id {
+                    e.push(("LEGION_WAKE_ATTEMPT_ID", id));
+                }
+                e
+            };
+            let cwd = std::path::Path::new(workdir);
+            let mut opts = crate::pty::PtySpawnOptions::new("claude", &[], cwd);
+            opts.env = &env;
+            let mut session = crate::pty::PtySession::spawn(opts)?;
+            // Inject the prompt as keystrokes. The trailing carriage
+            // return submits the prompt; \n alone is not interpreted as
+            // submit by every Claude Code interactive surface, but \r
+            // works on every shipped version.
+            let mut keystrokes = Vec::with_capacity(prompt.len() + 1);
+            keystrokes.extend_from_slice(prompt.as_bytes());
+            keystrokes.push(b'\r');
+            if let Err(e) = session.write(&keystrokes) {
+                eprintln!("[legion watch] PTY prompt write failed: {}", e);
+                // Best-effort kill so we do not leak a half-started
+                // child; the spawn-failure path in poll_cycle releases
+                // any leases we acquired.
+                let _ = session.kill();
+                return Err(e);
+            }
+            Ok(SpawnedChild::Pty(session))
+        }
     }
 }
 
@@ -906,7 +997,7 @@ pub fn spawn_agent(workdir: &str, prompt: &str, mode: SpawnMode) -> Result<Child
 /// when the child exits.
 pub struct TrackedChild {
     pub repo: String,
-    pub child: Child,
+    pub child: SpawnedChild,
     /// `(persona_id, signal_id)` pairs this child acquired at spawn.
     pub held_leases: Vec<(String, String)>,
     /// Host identity the leases were acquired under. Required for the
@@ -940,7 +1031,7 @@ impl AgentTracker {
     pub fn track(
         &mut self,
         repo: String,
-        child: Child,
+        child: SpawnedChild,
         held_leases: Vec<(String, String)>,
         host: String,
         session_id: String,
@@ -966,11 +1057,11 @@ impl AgentTracker {
     pub fn reap_finished(&mut self, db: Option<&Database>) {
         self.children
             .retain_mut(|tracked| match tracked.child.try_wait() {
-                Ok(Some(status)) => {
+                Ok(Some(success)) => {
                     eprintln!(
                         "[legion watch] agent for {} exited ({})",
                         tracked.repo,
-                        if status.success() { "ok" } else { "error" }
+                        if success { "ok" } else { "error" }
                     );
                     if let Some(db) = db {
                         for (persona, signal_id) in &tracked.held_leases {
@@ -989,8 +1080,8 @@ impl AgentTracker {
                         // the reap loop -- a missed log row is recoverable, a
                         // panic in the watch thread is not.
                         let exit_at = chrono::Utc::now().to_rfc3339();
-                        let exit_status = if status.success() { "ok" } else { "error" };
-                        let outcome = if !status.success() {
+                        let exit_status = if success { "ok" } else { "error" };
+                        let outcome = if !success {
                             Database::OUTCOME_ERRORED
                         } else {
                             match db.classify_session(
@@ -1243,7 +1334,7 @@ pub fn poll_cycle(
             std::thread::sleep(Duration::from_secs(config.stagger_secs));
         }
 
-        match spawn_agent(&repo.workdir, &prompt, spawn_mode) {
+        match spawn_agent(&repo.workdir, &prompt, spawn_mode, None) {
             Ok(child) => {
                 let child_pid = child.id();
                 // Mark ALL signals as handled for THIS repo (per-repo tracking).
@@ -3140,25 +3231,12 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         assert_eq!(SpawnMode::parse("nope"), SpawnMode::Print);
     }
 
-    #[test]
-    fn spawn_agent_pty_returns_not_implemented() {
-        // The Pty branch is stubbed at this stage of the arc. Subsequent
-        // issues fill it in; until then callers must surface the error.
-        // The workdir and prompt arguments are not used because dispatch
-        // checks the mode before touching the filesystem.
-        let err = spawn_agent("/nonexistent", "hi", SpawnMode::Pty)
-            .expect_err("Pty branch must error until #489 lands");
-        match err {
-            LegionError::NotImplemented { feature } => {
-                assert!(
-                    feature.contains("WATCH_SPAWN_MODE=pty"),
-                    "feature name should identify the unimplemented surface: {}",
-                    feature
-                );
-            }
-            other => panic!("expected NotImplemented, got {other:?}"),
-        }
-    }
+    // The stub-verifying `spawn_agent_pty_returns_not_implemented`
+    // test from #485 is intentionally removed in #489 -- the Pty
+    // branch now spawns a PTY-backed REPL instead of returning
+    // NotImplemented. Behavior is exercised by the integration tests
+    // in pty::tests; a full end-to-end spawn here would require a
+    // real `claude` binary on PATH, which CI does not have.
 
     #[test]
     fn spawn_mode_as_str_matches_env_values() {
