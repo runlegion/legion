@@ -15,6 +15,7 @@ mod mcp;
 mod mesh;
 mod now;
 mod pr_view;
+mod pty;
 mod recall;
 mod reflect;
 mod scip;
