@@ -42,6 +42,29 @@ if [ "${LEGION_SKIP_STOP_BLOCK:-}" = "1" ]; then
   exit 0
 fi
 
+# Watch-pty wakes (#492): the two gates below are calibrated for
+# operator-attended sessions. Watch-spawned PTY wakes are atomic units
+# that exit through this hook on every wake; running the gates risks
+# the 8-block stop-hook cap in CC 2.1.143 and adds noise without
+# proportionate signal. Reaper observes EOF and continues regardless.
+# Rationale + per-gate decisions in docs/decisions/2026-05-watch-pty-env-audit.md.
+#
+# Forward-compatible: LEGION_SPAWN_SOURCE is not set by anything in the
+# legion code today; #489 introduces the PTY spawn branch that stamps
+# it. Until then this block is dead code that proves out the wire-up.
+if [ "${LEGION_SPAWN_SOURCE:-}" = "watch-pty" ]; then
+  if [ -x "$LEGION_BIN" ] && [ -n "$SESSION_ID" ]; then
+    "$LEGION_BIN" telemetry record-bypass \
+      --repo "$REPO" \
+      --session-id "$SESSION_ID" \
+      --tool Stop \
+      --pattern "watch-pty-skip" \
+      --bypass-reason "env:LEGION_SPAWN_SOURCE=watch-pty" \
+      2>/dev/null || true
+  fi
+  exit 0
+fi
+
 # ---------- (1) Incomplete-work gate ----------
 #
 # Reduce over the session task-state log written by post-task-state.sh

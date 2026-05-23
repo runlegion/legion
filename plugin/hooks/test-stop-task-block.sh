@@ -98,7 +98,7 @@ out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" | bash "$STOP_HO
 # With completed tasks but unfired reflection marker, the reflection
 # prompt should fire (since /tmp/legion-work marker exists from the
 # trap setup).
-assert_contains "reflection prompt fires" "$out" 'What would you tell another agent'
+assert_contains "reflection prompt fires" "$out" 'Drop one thing a teammate would not have known walking in cold'
 
 # Clean up reflection marker for next test
 rm -f "/tmp/legion-reflected-${CWD_HASH}"
@@ -108,6 +108,18 @@ echo "==> bypass via LEGION_SKIP_STOP_BLOCK=1 exits 0"
 echo "{\"session_id\":\"${SESSION}\",\"tool_name\":\"TaskUpdate\",\"tool_input\":{\"task_id\":\"1\",\"status\":\"in_progress\"}}" | bash "$POST_HOOK"
 out=$(LEGION_SKIP_STOP_BLOCK=1 echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" | LEGION_SKIP_STOP_BLOCK=1 bash "$STOP_HOOK")
 assert_empty "bypass produces no output" "$out"
+
+echo "==> watch-pty (#492) skips both gates"
+# Same in_progress task in the log; LEGION_SPAWN_SOURCE=watch-pty must
+# take precedence and exit 0 silently, just like LEGION_SKIP_STOP_BLOCK.
+out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" | LEGION_SPAWN_SOURCE=watch-pty bash "$STOP_HOOK")
+assert_empty "watch-pty bypass produces no output" "$out"
+
+echo "==> watch-pty branch ignores non-matching values"
+# Any value other than "watch-pty" must NOT trip the bypass -- the
+# block gate should still fire on the in_progress task.
+out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" | LEGION_SPAWN_SOURCE=manual-test bash "$STOP_HOOK")
+assert_contains "manual-test does not trigger watch-pty bypass" "$out" '"decision": "block"'
 
 echo "==> no session_id: hook passes through"
 out=$(echo "{\"cwd\":\"${CWD}\"}" | bash "$STOP_HOOK")
@@ -128,7 +140,7 @@ SESSION2="no-tasks-session"
 out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION2}\"}" | bash "$STOP_HOOK")
 # No task log for SESSION2 -> task-block path skipped -> reflection fires
 # (work marker present).
-assert_contains "no task log falls through to reflection" "$out" 'What would you tell another agent'
+assert_contains "no task log falls through to reflection" "$out" 'Drop one thing a teammate would not have known walking in cold'
 
 echo
 echo "==> $PASS passed, $FAIL failed"
