@@ -114,5 +114,18 @@ The `LEGION_SKIP_STOP_BLOCK=1` bypass is kept as an orthogonal escape for diagno
 ## Out of scope for #492
 
 - The PTY spawn branch itself (#489).
-- The `legion watch session-end` CLI (#493) -- lands after this audit's gate decisions so the wire-up uses the env var settled on here.
 - Forward-compatibility for `LEGION_AUTO_WAKE=0` -- the env var has never been read by legion code; no callers to migrate.
+
+## Bundled work: #493 stop.sh handoff
+
+Per kessel's bundle doctrine, the `stop.sh` half of #493 (the session-end CLI handoff) lands on the same branch as this audit -- both edit `plugin/hooks/stop.sh`. The CLI subcommand itself (`legion watch session-end --attempt-id <id>`) requires the `mark_wake_attempt_exit_observed` method from #487 and lands in the watch.rs bundle PR alongside #489/#490/#491.
+
+The handoff is forward-compatible: the call is gated on `$LEGION_WAKE_ATTEMPT_ID` being set, the binary call is `|| true`-suppressed, and the CLI subcommand does not exist yet -- the hook is dead code until the consumer lands. The shell-test stub records every CLI invocation so we can assert call shape without a running binary.
+
+Hook firing rules (which paths invoke `session_end_handoff`):
+- `LEGION_SKIP_STOP_BLOCK=1` bypass: yes (explicit operator session-end).
+- `LEGION_SPAWN_SOURCE=watch-pty` bypass: yes (every watch-pty wake records its exit).
+- Reflect-prompt fired previously (marker exists): yes (clean exit path).
+- No work marker (session had no real work): yes (clean exit path).
+- Incomplete-task gate blocks: no (agent staying alive; would mis-mark exit).
+- Reflect-prompt block fires: no (agent staying alive).

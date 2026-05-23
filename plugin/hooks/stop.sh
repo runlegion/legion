@@ -28,6 +28,26 @@ CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null 
 
 LEGION_BIN="${CLAUDE_PLUGIN_ROOT}/bin/legion"
 
+# Session-end handoff (#493): optimistic expediter for the watch
+# reaper. Lets the reaper skip a poll cycle when the agent has cleanly
+# exited and CC fires this hook. PTY EOF + PID-poll remain the
+# authoritative completion signal; this is a speed-up only, so the
+# `|| true` swallows any failure -- the reaper still converges via EOF
+# even if the CLI errors or does not exist yet (forward-compatible).
+#
+# The CLI subcommand `legion watch session-end --attempt-id <id>` lands
+# in the watch.rs bundle PR alongside #489/#490/#491. Until then this
+# call is a no-op that proves out the wire-up. Function must be defined
+# before any caller; placed up here so all subsequent bypass paths can
+# invoke it cleanly.
+session_end_handoff() {
+  if [ -n "${LEGION_WAKE_ATTEMPT_ID:-}" ] && [ -x "$LEGION_BIN" ]; then
+    "$LEGION_BIN" watch session-end \
+      --attempt-id "$LEGION_WAKE_ATTEMPT_ID" \
+      >/dev/null 2>&1 || true
+  fi
+}
+
 # Bypass: skip both gates, log the escape if telemetry is available.
 if [ "${LEGION_SKIP_STOP_BLOCK:-}" = "1" ]; then
   if [ -x "$LEGION_BIN" ] && [ -n "$SESSION_ID" ]; then
@@ -39,6 +59,10 @@ if [ "${LEGION_SKIP_STOP_BLOCK:-}" = "1" ]; then
       --bypass-reason "env:LEGION_SKIP_STOP_BLOCK=1" \
       2>/dev/null || true
   fi
+  # Explicit operator session-end: still fire the #493 handoff so a
+  # watch-spawned session that exits via this bypass records its
+  # exit_observed_at timestamp for the reaper.
+  session_end_handoff
   exit 0
 fi
 
@@ -62,6 +86,7 @@ if [ "${LEGION_SPAWN_SOURCE:-}" = "watch-pty" ]; then
       --bypass-reason "env:LEGION_SPAWN_SOURCE=watch-pty" \
       2>/dev/null || true
   fi
+  session_end_handoff
   exit 0
 fi
 
@@ -116,12 +141,17 @@ fi
 # Prevent re-fires: one reflect prompt per session
 MARKER="/tmp/legion-reflected-${CWD_HASH}"
 if [ -f "$MARKER" ]; then
+  # Agent is exiting (no block fired); fire the #493 handoff so the
+  # reaper can skip a poll cycle.
+  session_end_handoff
   exit 0
 fi
 
 # Skip if session had no real work
 WORK_MARKER="/tmp/legion-work-${CWD_HASH}"
 if [ ! -f "$WORK_MARKER" ]; then
+  # Same as above -- clean exit path, fire the handoff.
+  session_end_handoff
   exit 0
 fi
 

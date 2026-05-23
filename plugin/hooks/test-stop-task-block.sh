@@ -45,9 +45,13 @@ mkdir -p "$WORK/plugin/bin" "$WORK/plugin/hooks" "$WORK/state/legion"
 cp plugin/hooks/post-task-state.sh "$WORK/plugin/hooks/"
 cp plugin/hooks/stop.sh "$WORK/plugin/hooks/"
 
-# Stub legion binary that no-ops on telemetry record-bypass.
+# Stub legion binary that logs every invocation to $LEGION_STUB_LOG
+# (when set) so #493 handoff tests can assert call shape, then no-ops.
 cat > "$WORK/plugin/bin/legion" <<'EOF'
 #!/bin/bash
+if [ -n "${LEGION_STUB_LOG:-}" ]; then
+  echo "$@" >> "$LEGION_STUB_LOG"
+fi
 exit 0
 EOF
 chmod +x "$WORK/plugin/bin/legion"
@@ -120,6 +124,40 @@ echo "==> watch-pty branch ignores non-matching values"
 # block gate should still fire on the in_progress task.
 out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" | LEGION_SPAWN_SOURCE=manual-test bash "$STOP_HOOK")
 assert_contains "manual-test does not trigger watch-pty bypass" "$out" '"decision": "block"'
+
+echo "==> session-end handoff (#493) fires under watch-pty when wake-attempt set"
+# LEGION_WAKE_ATTEMPT_ID set + LEGION_SPAWN_SOURCE=watch-pty: hook
+# must invoke `legion watch session-end --attempt-id <id>` via the
+# stub. Assert via the recorded call log.
+HANDOFF_LOG="$WORK/handoff.log"
+: > "$HANDOFF_LOG"
+out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" \
+  | LEGION_SPAWN_SOURCE=watch-pty \
+    LEGION_WAKE_ATTEMPT_ID="attempt-test-id" \
+    LEGION_STUB_LOG="$HANDOFF_LOG" \
+    bash "$STOP_HOOK")
+assert_empty "handoff path still produces no output" "$out"
+if grep -q "watch session-end --attempt-id attempt-test-id" "$HANDOFF_LOG"; then
+  PASS=$((PASS + 1)); echo "  PASS: watch session-end CLI invoked with attempt-id"
+else
+  FAIL=$((FAIL + 1)); echo "  FAIL: watch session-end CLI not invoked"
+  echo "    log contents:" >&2; cat "$HANDOFF_LOG" >&2
+fi
+
+echo "==> session-end handoff is gated on LEGION_WAKE_ATTEMPT_ID"
+# Without the env var, handoff must NOT fire (avoids polluting
+# non-watch sessions with spurious watch CLI calls).
+: > "$HANDOFF_LOG"
+out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" \
+  | LEGION_SPAWN_SOURCE=watch-pty \
+    LEGION_STUB_LOG="$HANDOFF_LOG" \
+    bash "$STOP_HOOK")
+if grep -q "watch session-end" "$HANDOFF_LOG"; then
+  FAIL=$((FAIL + 1)); echo "  FAIL: handoff fired without LEGION_WAKE_ATTEMPT_ID"
+  cat "$HANDOFF_LOG" >&2
+else
+  PASS=$((PASS + 1)); echo "  PASS: missing LEGION_WAKE_ATTEMPT_ID suppresses handoff"
+fi
 
 echo "==> no session_id: hook passes through"
 out=$(echo "{\"cwd\":\"${CWD}\"}" | bash "$STOP_HOOK")
