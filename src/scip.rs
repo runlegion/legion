@@ -173,21 +173,73 @@ fn rust_install_hint(e: LegionError) -> LegionError {
     }
 }
 
+/// TypeScript workspace flavor detected at the repo root. Drives the
+/// `--pnpm-workspaces` / `--yarn-workspaces` flag that scip-typescript
+/// needs to walk a monorepo instead of honoring only the root tsconfig's
+/// narrow `include`.
+#[derive(Debug, PartialEq, Eq)]
+enum TsWorkspaceFlavor {
+    Pnpm,
+    Yarn,
+    None,
+}
+
+/// Inspect `repo_path` root for a workspace marker.
+///
+/// Precedence:
+/// - `pnpm-workspace.yaml` present -> Pnpm (matches pnpm's own resolution
+///   order: if the file exists, pnpm treats the repo as a pnpm workspace
+///   regardless of what `package.json` says)
+/// - `package.json` parses and contains a `workspaces` field (array or
+///   object form, both yarn and npm shape) -> Yarn
+/// - otherwise -> None
+///
+/// Without one of the workspace flags, scip-typescript honors only the
+/// root tsconfig's `include` set. On a typical monorepo with a narrow
+/// root tsconfig that produces an effectively empty index (rafters root
+/// `include: ["test/**/*"]` -> 51KB blob with no `packages/*` symbols;
+/// `scip-typescript index --pnpm-workspaces` from the same root -> 18MB
+/// covering 13 workspaces). See #441.
+fn detect_ts_workspace_flavor(repo_path: &Path) -> TsWorkspaceFlavor {
+    if repo_path.join("pnpm-workspace.yaml").is_file() {
+        return TsWorkspaceFlavor::Pnpm;
+    }
+    let pkg_json = repo_path.join("package.json");
+    if let Ok(bytes) = std::fs::read(&pkg_json)
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && value.get("workspaces").is_some()
+    {
+        return TsWorkspaceFlavor::Yarn;
+    }
+    TsWorkspaceFlavor::None
+}
+
+/// Map a workspace flavor to the scip-typescript argv. Split out so a unit
+/// test can pin the flag names: a silent rename in scip-typescript (or a
+/// typo introduced here) would otherwise only surface as another empty
+/// index in production. The flags are part of scip-typescript's public CLI
+/// contract (`scip-typescript index --help`).
+fn scip_typescript_args(flavor: TsWorkspaceFlavor) -> &'static [&'static str] {
+    match flavor {
+        TsWorkspaceFlavor::Pnpm => &["index", "--pnpm-workspaces"],
+        TsWorkspaceFlavor::Yarn => &["index", "--yarn-workspaces"],
+        TsWorkspaceFlavor::None => &["index"],
+    }
+}
+
 /// Invoke `scip-typescript index` against `repo_path`. Canonical TS/JS
 /// indexer from sourcegraph (`npm i -g @sourcegraph/scip-typescript`).
 /// No fallback exists; tsserver is too slow and shape-incompatible to
 /// substitute.
 fn run_scip_typescript(repo_path: &Path) -> Result<Vec<u8>> {
-    run_indexer_binary("typescript", "scip-typescript", &["index"], repo_path).map_err(
-        |e| match e {
-            LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
-                lang,
-                binary: "scip-typescript (install: npm i -g @sourcegraph/scip-typescript)"
-                    .to_string(),
-            },
-            other => other,
+    let args = scip_typescript_args(detect_ts_workspace_flavor(repo_path));
+    run_indexer_binary("typescript", "scip-typescript", args, repo_path).map_err(|e| match e {
+        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
+            lang,
+            binary: "scip-typescript (install: npm i -g @sourcegraph/scip-typescript)".to_string(),
         },
-    )
+        other => other,
+    })
 }
 
 /// Invoke `scip-python index .` against `repo_path`. Canonical Python
@@ -604,6 +656,124 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("README.md"), "hi").unwrap();
         assert!(detect_languages(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn detect_ts_workspace_flavor_pnpm_for_yaml_marker() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - 'packages/*'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            detect_ts_workspace_flavor(dir.path()),
+            TsWorkspaceFlavor::Pnpm
+        );
+    }
+
+    #[test]
+    fn detect_ts_workspace_flavor_yarn_for_workspaces_array() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","workspaces":["packages/*","apps/*"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_ts_workspace_flavor(dir.path()),
+            TsWorkspaceFlavor::Yarn
+        );
+    }
+
+    #[test]
+    fn detect_ts_workspace_flavor_yarn_for_workspaces_object() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","workspaces":{"packages":["packages/*"],"nohoist":["**/react-native"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_ts_workspace_flavor(dir.path()),
+            TsWorkspaceFlavor::Yarn
+        );
+    }
+
+    #[test]
+    fn detect_ts_workspace_flavor_none_for_package_json_without_workspaces() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_ts_workspace_flavor(dir.path()),
+            TsWorkspaceFlavor::None
+        );
+    }
+
+    #[test]
+    fn detect_ts_workspace_flavor_none_when_no_markers() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            detect_ts_workspace_flavor(dir.path()),
+            TsWorkspaceFlavor::None
+        );
+    }
+
+    /// Pnpm marker wins when both files exist. Matches pnpm's own resolution:
+    /// `pnpm-workspace.yaml` makes the repo a pnpm workspace regardless of
+    /// what package.json declares.
+    #[test]
+    fn detect_ts_workspace_flavor_pnpm_wins_over_package_json_workspaces() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - 'packages/*'\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_ts_workspace_flavor(dir.path()),
+            TsWorkspaceFlavor::Pnpm
+        );
+    }
+
+    /// Malformed package.json must not panic or fail indexing -- fall through
+    /// to None so scip-typescript still runs (it'll surface its own JSON
+    /// parse error if the file is actually broken for tsc too).
+    #[test]
+    fn detect_ts_workspace_flavor_none_for_malformed_package_json() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("package.json"), "not json at all {{{").unwrap();
+        assert_eq!(
+            detect_ts_workspace_flavor(dir.path()),
+            TsWorkspaceFlavor::None
+        );
+    }
+
+    /// Pin the scip-typescript flag names. The fix for #441 is one strcmp
+    /// away from silently regressing if a future refactor renames one of
+    /// these flags or drops the `--` prefix -- the production symptom is
+    /// the same empty-index gap we're closing here, with no test failure
+    /// to catch it. Lock the contract in one place.
+    #[test]
+    fn scip_typescript_args_pins_flag_names_per_flavor() {
+        assert_eq!(
+            scip_typescript_args(TsWorkspaceFlavor::Pnpm),
+            ["index", "--pnpm-workspaces"]
+        );
+        assert_eq!(
+            scip_typescript_args(TsWorkspaceFlavor::Yarn),
+            ["index", "--yarn-workspaces"]
+        );
+        assert_eq!(scip_typescript_args(TsWorkspaceFlavor::None), ["index"]);
     }
 
     /// Pin the dispatch table: each supported lang tag must route to a helper

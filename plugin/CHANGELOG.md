@@ -1,5 +1,13 @@
 # Legion Changelog
 
+## 0.15.1
+
+Patch release. Closes a long-standing silent failure in the TypeScript SCIP indexer that returned `[]` for any symbol defined in a pnpm/yarn workspace package, masking real symbols as nonexistent and degrading every `legion sym def/refs` query on monorepos.
+
+### Fixed
+
+- **scip-typescript skips workspace packages on monorepos** (PR #483, closes #441 / #482): `run_scip_typescript` invoked `scip-typescript index` without `--pnpm-workspaces` / `--yarn-workspaces`, so the indexer honored only the root tsconfig's `include` set. On a typical monorepo with a narrow root tsconfig that produced an effectively empty index -- rafters' root had `include: ["test/**/*"]` and got a 51KB blob with zero symbols in `packages/*`; the same repo with the flag indexed 18MB across 13 workspaces. `legion sym def TokenRegistry` and friends silently returned `[]`, and agents concluded the symbol did not exist rather than recognizing an indexer gap. Fix: new `detect_ts_workspace_flavor` inspects `repo_path` for a workspace marker -- `pnpm-workspace.yaml` -> `--pnpm-workspaces`, `package.json` with a `workspaces` field (array or object) -> `--yarn-workspaces`, otherwise no extra flag. pnpm wins precedence when both files exist, matching pnpm's own resolution; malformed `package.json` falls through to the no-flag path so the indexer still runs. Argv selection is split into `scip_typescript_args` and pinned by a unit test so a silent rename of the scip-typescript CLI flag would not reproduce the same gap with no test failure. 8 new unit tests cover every detection branch.
+
 ## 0.15.0
 
 Pillar 2 ships -- the uncertainty engine. v0.14.0 made agents coordinate around work-genesis (documents, plans, sub-issues); v0.15.0 makes them predict cost and learn from outcomes. Every task the agent takes on emits a calibrated prediction; the witness path closes the loop when work completes. Vault-COS routing gains live cost estimates instead of static lookups. Two enforcement-hardening fixes ride along.
