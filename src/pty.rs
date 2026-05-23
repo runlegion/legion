@@ -302,7 +302,14 @@ fn into_exit_status(status: portable_pty::ExitStatus) -> ExitStatus {
     }
 }
 
-#[cfg(test)]
+// Tests exercise `bash -c "..."` plus Unix PTY semantics (master fd
+// EIO on slave exit, signal-based kill, /bin/kill -0 for liveness).
+// The wrapper itself is cross-platform via portable-pty's ConPTY
+// backing, but the test harness leans on Unix-only behavior; Windows
+// CI was running Git Bash under ConPTY and hanging in `sleep 30` /
+// kill paths (over 25 min run before timeout). Issue #486 follow-up
+// tracks restoring Windows coverage with PowerShell-shimmed children.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
