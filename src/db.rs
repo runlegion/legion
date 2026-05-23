@@ -98,6 +98,26 @@ fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
     })
 }
 
+/// Map a database row to a RateLimitSample struct. Shared by every query
+/// that selects the canonical column order
+/// (id, hostname, session_id, sampled_at, five_hour_pct, five_hour_resets_at,
+///  seven_day_pct, seven_day_resets_at, model).
+fn map_rate_limit_sample_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::statusline::RateLimitSample> {
+    Ok(crate::statusline::RateLimitSample {
+        id: row.get(0)?,
+        hostname: row.get(1)?,
+        session_id: row.get(2)?,
+        sampled_at: row.get(3)?,
+        five_hour_pct: row.get(4)?,
+        five_hour_resets_at: row.get(5)?,
+        seven_day_pct: row.get(6)?,
+        seven_day_resets_at: row.get(7)?,
+        model: row.get(8)?,
+    })
+}
+
 /// Map a database row to a Schedule struct.
 fn map_schedule_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
     let enabled_int: i32 = row.get(5)?;
@@ -3305,17 +3325,27 @@ impl Database {
         )?;
         let mut rows = stmt.query([])?;
         match rows.next().map_err(LegionError::Database)? {
-            Some(row) => Ok(Some(crate::statusline::RateLimitSample {
-                id: row.get(0)?,
-                hostname: row.get(1)?,
-                session_id: row.get(2)?,
-                sampled_at: row.get(3)?,
-                five_hour_pct: row.get(4)?,
-                five_hour_resets_at: row.get(5)?,
-                seven_day_pct: row.get(6)?,
-                seven_day_resets_at: row.get(7)?,
-                model: row.get(8)?,
-            })),
+            Some(row) => Ok(Some(map_rate_limit_sample_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Most recent rate-limit sample for a single host. Used by the watch
+    /// quota-panic gate, which only cares about THIS node's headroom --
+    /// a peer node hitting its cap should not gate this node's spawns.
+    pub fn latest_rate_limit_sample_for_host(
+        &self,
+        hostname: &str,
+    ) -> Result<Option<crate::statusline::RateLimitSample>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, hostname, session_id, sampled_at, five_hour_pct, \
+             five_hour_resets_at, seven_day_pct, seven_day_resets_at, model \
+             FROM rate_limit_samples WHERE deleted_at IS NULL AND hostname = ?1 \
+             ORDER BY sampled_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![hostname])?;
+        match rows.next().map_err(LegionError::Database)? {
+            Some(row) => Ok(Some(map_rate_limit_sample_row(row)?)),
             None => Ok(None),
         }
     }
@@ -3354,19 +3384,7 @@ impl Database {
              WHERE rn = 1 \
              ORDER BY hostname",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(crate::statusline::RateLimitSample {
-                id: row.get(0)?,
-                hostname: row.get(1)?,
-                session_id: row.get(2)?,
-                sampled_at: row.get(3)?,
-                five_hour_pct: row.get(4)?,
-                five_hour_resets_at: row.get(5)?,
-                seven_day_pct: row.get(6)?,
-                seven_day_resets_at: row.get(7)?,
-                model: row.get(8)?,
-            })
-        })?;
+        let rows = stmt.query_map([], map_rate_limit_sample_row)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
