@@ -1012,6 +1012,10 @@ pub struct TrackedChild {
     /// All signal ids bundled into this wake. Used to look up
     /// reflection-parent_id matches at reap time.
     pub signal_ids: Vec<String>,
+    /// UUIDv7 of the wake_attempts row (#490, #491). `None` when the
+    /// spawn predates the wake_attempts substrate or the enqueue
+    /// failed; reap then skips the outcome recording.
+    pub attempt_id: Option<String>,
 }
 
 pub struct AgentTracker {
@@ -1037,6 +1041,7 @@ impl AgentTracker {
         session_id: String,
         spawn_at: String,
         signal_ids: Vec<String>,
+        attempt_id: Option<String>,
     ) {
         self.children.push(TrackedChild {
             repo,
@@ -1046,6 +1051,7 @@ impl AgentTracker {
             session_id,
             spawn_at,
             signal_ids,
+            attempt_id,
         });
     }
 
@@ -1115,6 +1121,20 @@ impl AgentTracker {
                             eprintln!(
                                 "[legion watch] failed to record session outcome for {} ({}): {}",
                                 tracked.repo, tracked.session_id, e
+                            );
+                        }
+
+                        // #490: stamp the wake_attempt's terminal state.
+                        // Idempotent at the DB layer; errors logged but
+                        // not propagated (the lease release + outcome
+                        // record above are the load-bearing writes).
+                        if let Some(ref attempt_id) = tracked.attempt_id
+                            && let Err(e) =
+                                db.record_wake_attempt_outcome(attempt_id, exit_status, outcome)
+                        {
+                            eprintln!(
+                                "[legion watch] failed to record wake attempt outcome {}: {}",
+                                attempt_id, e
                             );
                         }
                     }
@@ -1334,7 +1354,44 @@ pub fn poll_cycle(
             std::thread::sleep(Duration::from_secs(config.stagger_secs));
         }
 
-        match spawn_agent(&repo.workdir, &prompt, spawn_mode, None) {
+        // #491: enqueue + claim a wake_attempts row before spawning so
+        // peer nodes have a cluster-visible work item. Enqueue or
+        // claim failure does not block the spawn (the lease layer is
+        // still the authoritative mutex this session); the attempt
+        // row becomes None and the reaper skips outcome recording.
+        let signal_ids_vec: Vec<String> = signals.iter().map(|(id, _, _)| id.clone()).collect();
+        let track_host_pre = lease_gate.map(|g| g.host.to_string()).unwrap_or_default();
+        let attempt_id: Option<String> = {
+            let candidate = uuid::Uuid::now_v7().to_string();
+            match db.enqueue_wake_attempt(&candidate, recipient, &repo.name, &signal_ids_vec) {
+                Ok(()) => match db.try_claim_wake_attempt(&candidate, &track_host_pre) {
+                    Ok(true) => Some(candidate),
+                    Ok(false) => {
+                        eprintln!(
+                            "[legion watch] wake_attempt {} not claimed (peer race?); proceeding anyway",
+                            candidate
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[legion watch] wake_attempt claim error: {} -- proceeding",
+                            e
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "[legion watch] wake_attempt enqueue error: {} -- proceeding",
+                        e
+                    );
+                    None
+                }
+            }
+        };
+
+        match spawn_agent(&repo.workdir, &prompt, spawn_mode, attempt_id.as_deref()) {
             Ok(child) => {
                 let child_pid = child.id();
                 // Mark ALL signals as handled for THIS repo (per-repo tracking).
@@ -1357,10 +1414,25 @@ pub fn poll_cycle(
                         repo.name, e
                     );
                 }
-                let track_host = lease_gate.map(|g| g.host.to_string()).unwrap_or_default();
+                // #490: advance the wake_attempt FSM through the spawn
+                // path. Errors logged + not propagated (terminal state
+                // recording in reap is the load-bearing write).
+                if let Some(ref aid) = attempt_id {
+                    use crate::wake_attempts::WakeAttemptState::{Claimed, Running, Spawning};
+                    if let Err(e) = db.set_wake_attempt_pid(aid, child_pid) {
+                        eprintln!("[legion watch] set_wake_attempt_pid {}: {}", aid, e);
+                    }
+                    if let Err(e) = db.transition_wake_attempt(aid, Claimed, Spawning) {
+                        eprintln!("[legion watch] transition Claimed->Spawning {}: {}", aid, e);
+                    }
+                    if let Err(e) = db.transition_wake_attempt(aid, Spawning, Running) {
+                        eprintln!("[legion watch] transition Spawning->Running {}: {}", aid, e);
+                    }
+                }
+                let track_host = track_host_pre;
                 let session_id = uuid::Uuid::now_v7().to_string();
                 let spawn_at = chrono::Utc::now().to_rfc3339();
-                let signal_ids: Vec<String> = signals.iter().map(|(id, _, _)| id.clone()).collect();
+                let signal_ids = signal_ids_vec;
                 tracker.track(
                     repo.name.clone(),
                     child,
@@ -1369,6 +1441,7 @@ pub fn poll_cycle(
                     session_id,
                     spawn_at,
                     signal_ids,
+                    attempt_id,
                 );
                 cooldown.record_wake(&repo.name);
                 spawned += 1;
@@ -1386,6 +1459,17 @@ pub fn poll_cycle(
                                 persona, sig_id, re
                             );
                         }
+                    }
+                }
+                // #490: mark the claimed wake_attempt as abandoned so the
+                // FSM does not show a leaked Claimed row. Best-effort.
+                if let Some(ref aid) = attempt_id {
+                    use crate::wake_attempts::WakeAttemptState::{Abandoned, Claimed};
+                    if let Err(re) = db.transition_wake_attempt(aid, Claimed, Abandoned) {
+                        eprintln!(
+                            "[legion watch] failed to abandon wake_attempt {} after spawn failure: {}",
+                            aid, re
+                        );
                     }
                 }
                 eprintln!("[legion watch] spawn failed for {}: {}", repo.name, e);
