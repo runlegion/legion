@@ -1286,6 +1286,12 @@ impl QuotaPanicGate {
     /// Evaluate the gate, emit a single bullpen post on each state edge,
     /// and return the current panic state. Callers skip the spawn cycle
     /// when this returns `true`.
+    ///
+    /// Edge state (`in_panic`) only advances after the bullpen post lands.
+    /// On post failure the flag stays stale so the next poll retries the
+    /// same edge -- otherwise a single dropped post would leave peers
+    /// believing this node is still down (or still up) until the inverse
+    /// transition forces a re-announce.
     pub fn check_and_post(&mut self, db: &Database) -> bool {
         let active = self.quota_panic_active(db);
         if active != self.in_panic {
@@ -1303,15 +1309,23 @@ impl QuotaPanicGate {
                     self.host, self.threshold_pct,
                 )
             };
-            if let Err(e) = db.insert_reflection_with_meta(
+            match db.insert_reflection_with_meta(
                 &self.post_repo,
                 &post,
                 "team",
                 &crate::db::ReflectionMeta::default(),
             ) {
-                eprintln!("[legion watch] quota panic bullpen post failed: {}", e);
+                Ok(_) => {
+                    self.in_panic = active;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[legion watch] quota panic bullpen post failed (edge {} -> {}): {} \
+                         -- will retry on next poll; mesh state may be stale",
+                        self.in_panic, active, e
+                    );
+                }
             }
-            self.in_panic = active;
         }
         active
     }
@@ -2864,6 +2878,34 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
     }
 
     #[test]
+    fn panic_five_hour_window_independently_trips_gate() {
+        // Symmetric to the 7d test: a single high 5h reading with a quiet
+        // 7d window must still trip the gate. Guards against a refactor that
+        // drops the 5h disjunct or swaps `||` for `&&` in the predicate.
+        let (db, _idx, _tmp) = test_storage();
+        db.insert_rate_limit_sample(&rate_sample(
+            "s1",
+            "this-host",
+            "2026-05-23T10:00:00Z",
+            Some(99.5),
+            Some(10.0),
+        ))
+        .unwrap();
+        let gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+        assert!(gate.quota_panic_active(&db));
+    }
+
+    #[test]
+    fn panic_at_exactly_threshold_is_active() {
+        // The contract is "at or above" -- pin the >= boundary so a future
+        // refactor to `>` cannot silently let the last 1% slip.
+        let s = rate_sample("s1", "this-host", "t", Some(99.0), Some(40.0));
+        assert!(sample_crosses_threshold(&s, 99.0));
+        let s_below = rate_sample("s2", "this-host", "t", Some(98.999), Some(40.0));
+        assert!(!sample_crosses_threshold(&s_below, 99.0));
+    }
+
+    #[test]
     fn edge_flip_emits_exactly_one_post_per_transition() {
         let (db, _idx, _tmp) = test_storage();
         let mut gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
@@ -2932,6 +2974,41 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
             .expect("drop table");
         let gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
         assert!(!gate.quota_panic_active(&db));
+    }
+
+    #[test]
+    fn post_failure_does_not_advance_edge() {
+        // If the bullpen post fails on an edge, the gate must NOT flip
+        // `in_panic`. Otherwise the next tick sees no edge and the mesh
+        // is left believing the prior state. Simulate the failure by
+        // dropping the reflections table while leaving rate_limit_samples
+        // intact: the gate read succeeds, the post write fails.
+        let (db, _idx, _tmp) = test_storage();
+        let mut gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+
+        db.insert_rate_limit_sample(&rate_sample(
+            "s1",
+            "this-host",
+            "2026-05-23T10:00:00Z",
+            Some(99.5),
+            Some(40.0),
+        ))
+        .unwrap();
+        db.conn
+            .execute("DROP TABLE reflections", [])
+            .expect("drop reflections");
+
+        // active=true is observed (the gate read still succeeds), but the
+        // post insert fails. The contract is: in_panic stays false so the
+        // next poll sees the same edge and retries.
+        assert!(gate.check_and_post(&db), "active state still observed");
+        assert!(!gate.in_panic, "post failure must not advance in_panic");
+
+        // Second call mirrors the next poll cycle with the same broken
+        // write path. The edge must still re-fire (active != in_panic),
+        // not silently no-op.
+        assert!(gate.check_and_post(&db), "still active");
+        assert!(!gate.in_panic, "edge still pending after second failure");
     }
 
     #[test]
