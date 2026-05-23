@@ -214,16 +214,25 @@ fn detect_ts_workspace_flavor(repo_path: &Path) -> TsWorkspaceFlavor {
     TsWorkspaceFlavor::None
 }
 
+/// Map a workspace flavor to the scip-typescript argv. Split out so a unit
+/// test can pin the flag names: a silent rename in scip-typescript (or a
+/// typo introduced here) would otherwise only surface as another empty
+/// index in production. The flags are part of scip-typescript's public CLI
+/// contract (`scip-typescript index --help`).
+fn scip_typescript_args(flavor: TsWorkspaceFlavor) -> &'static [&'static str] {
+    match flavor {
+        TsWorkspaceFlavor::Pnpm => &["index", "--pnpm-workspaces"],
+        TsWorkspaceFlavor::Yarn => &["index", "--yarn-workspaces"],
+        TsWorkspaceFlavor::None => &["index"],
+    }
+}
+
 /// Invoke `scip-typescript index` against `repo_path`. Canonical TS/JS
 /// indexer from sourcegraph (`npm i -g @sourcegraph/scip-typescript`).
 /// No fallback exists; tsserver is too slow and shape-incompatible to
 /// substitute.
 fn run_scip_typescript(repo_path: &Path) -> Result<Vec<u8>> {
-    let args: &[&str] = match detect_ts_workspace_flavor(repo_path) {
-        TsWorkspaceFlavor::Pnpm => &["index", "--pnpm-workspaces"],
-        TsWorkspaceFlavor::Yarn => &["index", "--yarn-workspaces"],
-        TsWorkspaceFlavor::None => &["index"],
-    };
+    let args = scip_typescript_args(detect_ts_workspace_flavor(repo_path));
     run_indexer_binary("typescript", "scip-typescript", args, repo_path).map_err(|e| match e {
         LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
             lang,
@@ -747,6 +756,24 @@ mod tests {
             detect_ts_workspace_flavor(dir.path()),
             TsWorkspaceFlavor::None
         );
+    }
+
+    /// Pin the scip-typescript flag names. The fix for #441 is one strcmp
+    /// away from silently regressing if a future refactor renames one of
+    /// these flags or drops the `--` prefix -- the production symptom is
+    /// the same empty-index gap we're closing here, with no test failure
+    /// to catch it. Lock the contract in one place.
+    #[test]
+    fn scip_typescript_args_pins_flag_names_per_flavor() {
+        assert_eq!(
+            scip_typescript_args(TsWorkspaceFlavor::Pnpm),
+            ["index", "--pnpm-workspaces"]
+        );
+        assert_eq!(
+            scip_typescript_args(TsWorkspaceFlavor::Yarn),
+            ["index", "--yarn-workspaces"]
+        );
+        assert_eq!(scip_typescript_args(TsWorkspaceFlavor::None), ["index"]);
     }
 
     /// Pin the dispatch table: each supported lang tag must route to a helper
