@@ -200,6 +200,16 @@ pub struct WatchConfig {
     #[serde(default = "default_persona_lease_ttl_secs")]
     pub persona_lease_ttl_secs: u64,
 
+    /// Subscription-quota threshold (0-100). When this host's most recent
+    /// rate-limit sample shows either the 5-hour or 7-day window at or above
+    /// this percentage, watch enters panic mode: poll cycles are skipped and
+    /// a single bullpen post announces the halt. A second post announces
+    /// recovery once the sample drops back below the threshold. Default
+    /// 99.0 -- aggressive but leaves a single-percent buffer for the sample
+    /// race so we do not burn the last sliver of quota on auto-wake spawns.
+    #[serde(default = "default_quota_panic_threshold_pct")]
+    pub quota_panic_threshold_pct: f64,
+
     /// Whether this node serves the web dashboard.
     /// Only one node per network should have this set to true.
     #[serde(default)]
@@ -250,6 +260,10 @@ fn default_persona_lease_ttl_secs() -> u64 {
     600
 }
 
+fn default_quota_panic_threshold_pct() -> f64 {
+    99.0
+}
+
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
@@ -264,6 +278,7 @@ impl Default for WatchConfig {
             retention_days: default_retention_days(),
             session_lock_ttl_secs: default_session_lock_ttl_secs(),
             persona_lease_ttl_secs: default_persona_lease_ttl_secs(),
+            quota_panic_threshold_pct: default_quota_panic_threshold_pct(),
             serve: false,
             cluster: None,
             repos: Vec::new(),
@@ -786,24 +801,85 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
     prompt
 }
 
-/// Spawn a `claude --print` session for the given repo.
+/// Selects which spawn implementation `spawn_agent` dispatches to.
 ///
-/// Returns the child process handle on success.
-pub fn spawn_agent(workdir: &str, prompt: &str) -> Result<Child> {
-    let child = std::process::Command::new("claude")
-        .args(["--print", "-p", prompt])
-        .current_dir(workdir)
-        .env("LEGION_AUTO_WAKE", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+/// `Print` is the current `claude --print -p <prompt>` path. `Pty` is the
+/// in-progress migration to a PTY-spawned interactive REPL (see #495);
+/// the branch is stubbed at this stage so subsequent issues can fill it
+/// in without risking the production path. Resolved once at watch
+/// startup from `WATCH_SPAWN_MODE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnMode {
+    Print,
+    Pty,
+}
 
-    match child {
-        Ok(c) => Ok(c),
-        Err(e) => {
-            eprintln!("[legion watch] failed to spawn agent: {}", e);
-            Err(LegionError::Io(e))
+impl SpawnMode {
+    /// Resolve from `WATCH_SPAWN_MODE`. Accepts `"print"` or `"pty"`
+    /// (case-insensitive). Empty / unset / any other value falls back to
+    /// `Print`, logging a warning on unknown values so a typo is visible.
+    pub fn from_env() -> Self {
+        match std::env::var("WATCH_SPAWN_MODE") {
+            Ok(raw) => Self::parse(&raw),
+            Err(_) => Self::Print,
         }
+    }
+
+    fn parse(raw: &str) -> Self {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Self::Print;
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "print" => Self::Print,
+            "pty" => Self::Pty,
+            other => {
+                eprintln!(
+                    "[legion watch] unknown WATCH_SPAWN_MODE={:?} -- falling back to print",
+                    other
+                );
+                Self::Print
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Print => "print",
+            Self::Pty => "pty",
+        }
+    }
+}
+
+/// Spawn a `claude` session for the given repo under the resolved mode.
+///
+/// `Print` runs `claude --print -p <prompt>` exactly as before. `Pty`
+/// is reserved for the PTY migration (#489) and currently returns
+/// `LegionError::NotImplemented` -- callers must surface the error and
+/// release any holds (the existing `poll_cycle` spawn-failure path does
+/// this already).
+pub fn spawn_agent(workdir: &str, prompt: &str, mode: SpawnMode) -> Result<Child> {
+    match mode {
+        SpawnMode::Print => {
+            let child = std::process::Command::new("claude")
+                .args(["--print", "-p", prompt])
+                .current_dir(workdir)
+                .env("LEGION_AUTO_WAKE", "1")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+
+            match child {
+                Ok(c) => Ok(c),
+                Err(e) => {
+                    eprintln!("[legion watch] failed to spawn agent: {}", e);
+                    Err(LegionError::Io(e))
+                }
+            }
+        }
+        SpawnMode::Pty => Err(LegionError::NotImplemented {
+            feature: "WATCH_SPAWN_MODE=pty".to_string(),
+        }),
     }
 }
 
@@ -1033,6 +1109,7 @@ pub fn resolve_host_id() -> String {
     sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_owned())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn poll_cycle(
     db: &Database,
     config: &WatchConfig,
@@ -1041,6 +1118,7 @@ pub fn poll_cycle(
     session_locks: Option<&SessionLockTracker>,
     lease_gate: Option<&PersonaLeaseGate<'_>>,
     since: Option<&str>,
+    spawn_mode: SpawnMode,
 ) -> Result<u32> {
     let mut spawned: u32 = 0;
 
@@ -1150,7 +1228,7 @@ pub fn poll_cycle(
             std::thread::sleep(Duration::from_secs(config.stagger_secs));
         }
 
-        match spawn_agent(&repo.workdir, &prompt) {
+        match spawn_agent(&repo.workdir, &prompt, spawn_mode) {
             Ok(child) => {
                 let child_pid = child.id();
                 // Mark ALL signals as handled for THIS repo (per-repo tracking).
@@ -1212,6 +1290,110 @@ pub fn poll_cycle(
     Ok(spawned)
 }
 
+/// Pure predicate: does this sample cross the panic threshold? Missing
+/// pct values are treated as below-threshold so a partially-populated
+/// sample (e.g. one window not yet known) cannot fire panic on its own.
+fn sample_crosses_threshold(
+    sample: &crate::statusline::RateLimitSample,
+    threshold_pct: f64,
+) -> bool {
+    sample.five_hour_pct.is_some_and(|p| p >= threshold_pct)
+        || sample.seven_day_pct.is_some_and(|p| p >= threshold_pct)
+}
+
+/// Gate for subscription-quota panic-stop. When the most recent rate-limit
+/// sample for this host shows either the 5-hour or 7-day window at or above
+/// the configured threshold, watch enters panic mode and skips spawn
+/// cycles. A single bullpen post fires on the healthy -> panic edge; a
+/// matching post fires on the panic -> healthy edge.
+///
+/// Per-host (not cluster-wide): a peer node burning its cap should not
+/// gate this node's spawns. Each watch instance reads its own samples.
+///
+/// DB read failures return `false` (do not halt watch). A transient query
+/// error is not a reason to enter panic, and a stuck panic state would
+/// itself be a denial-of-service against the operator's mesh.
+pub struct QuotaPanicGate {
+    threshold_pct: f64,
+    host: String,
+    post_repo: String,
+    in_panic: bool,
+}
+
+impl QuotaPanicGate {
+    pub fn new(threshold_pct: f64, host: String, post_repo: String) -> Self {
+        Self {
+            threshold_pct,
+            host,
+            post_repo,
+            in_panic: false,
+        }
+    }
+
+    /// True when the most recent sample for this host crosses the
+    /// threshold. DB errors and absent samples both return `false`.
+    pub fn quota_panic_active(&self, db: &Database) -> bool {
+        match db.latest_rate_limit_sample_for_host(&self.host) {
+            Ok(Some(sample)) => sample_crosses_threshold(&sample, self.threshold_pct),
+            Ok(None) => false,
+            Err(e) => {
+                eprintln!(
+                    "[legion watch] quota panic check error: {} -- treating as healthy",
+                    e
+                );
+                false
+            }
+        }
+    }
+
+    /// Evaluate the gate, emit a single bullpen post on each state edge,
+    /// and return the current panic state. Callers skip the spawn cycle
+    /// when this returns `true`.
+    ///
+    /// Edge state (`in_panic`) only advances after the bullpen post lands.
+    /// On post failure the flag stays stale so the next poll retries the
+    /// same edge -- otherwise a single dropped post would leave peers
+    /// believing this node is still down (or still up) until the inverse
+    /// transition forces a re-announce.
+    pub fn check_and_post(&mut self, db: &Database) -> bool {
+        let active = self.quota_panic_active(db);
+        if active != self.in_panic {
+            let post = if active {
+                format!(
+                    "QUOTA PANIC on {}: rate-limit sample crossed {:.1}% threshold. \
+                     `legion watch` is halting spawn cycles on this host until usage \
+                     drops back below the threshold.",
+                    self.host, self.threshold_pct,
+                )
+            } else {
+                format!(
+                    "QUOTA RECOVERED on {}: rate-limit sample fell below the {:.1}% \
+                     threshold. `legion watch` is resuming spawn cycles.",
+                    self.host, self.threshold_pct,
+                )
+            };
+            match db.insert_reflection_with_meta(
+                &self.post_repo,
+                &post,
+                "team",
+                &crate::db::ReflectionMeta::default(),
+            ) {
+                Ok(_) => {
+                    self.in_panic = active;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[legion watch] quota panic bullpen post failed (edge {} -> {}): {} \
+                         -- will retry on next poll; mesh state may be stale",
+                        self.in_panic, active, e
+                    );
+                }
+            }
+        }
+        active
+    }
+}
+
 /// Run the watch daemon main loop.
 ///
 /// Uses a dual-interval loop: health sampling every `health_poll_secs`
@@ -1224,15 +1406,17 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let db_path: PathBuf = data_dir.join("legion.db");
 
     let config = load_config(&config_path)?;
+    let spawn_mode = SpawnMode::from_env();
 
     eprintln!(
         "[legion watch] config loaded: {} repo(s), poll every {}s, cooldown {}s, stagger {}s, \
-         health threshold {}%",
+         health threshold {}%, spawn_mode={}",
         config.repos.len(),
         config.poll_interval_secs,
         config.cooldown_secs,
         config.stagger_secs,
-        config.health_threshold_pct
+        config.health_threshold_pct,
+        spawn_mode.as_str(),
     );
 
     acquire_pid_lock(&lock_path)?;
@@ -1261,6 +1445,19 @@ pub fn run(data_dir: &Path) -> Result<()> {
         host: &host,
         ttl: lease_ttl,
     };
+    // Pick a repo to attribute quota-panic bullpen posts to. The first watched
+    // repo's name reads naturally on the bullpen; absent any, fall back to
+    // "legion" so the alert still lands.
+    let quota_post_repo = config
+        .repos
+        .first()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "legion".to_string());
+    let mut quota_gate = QuotaPanicGate::new(
+        config.quota_panic_threshold_pct,
+        host.clone(),
+        quota_post_repo,
+    );
     // On startup, only look back 24 hours for unhandled signals.
     // Prevents historical flood when watch restarts after downtime.
     // The watch_handled table prevents re-processing, but without a
@@ -1326,7 +1523,12 @@ pub fn run(data_dir: &Path) -> Result<()> {
 
         // Spawn check on the poll interval
         if poll_timer.elapsed() >= poll_interval {
-            if sampler.can_spawn(config.health_threshold_pct) {
+            if quota_gate.check_and_post(&db) {
+                eprintln!(
+                    "[legion watch] quota panic active (>= {:.1}%) -- skipping spawn cycle",
+                    config.quota_panic_threshold_pct
+                );
+            } else if sampler.can_spawn(config.health_threshold_pct) {
                 match poll_cycle(
                     &db,
                     &config,
@@ -1335,6 +1537,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
                     Some(&session_locks),
                     Some(&lease_gate),
                     Some(&lookback),
+                    spawn_mode,
                 ) {
                     Ok(n) if n > 0 => {
                         eprintln!("[legion watch] cycle complete: {} agent(s) spawned", n);
@@ -1924,6 +2127,7 @@ workdir = "/tmp"
             Some(&locks),
             None,
             None,
+            SpawnMode::Print,
         )
         .expect("poll");
         assert_eq!(
@@ -1974,6 +2178,7 @@ workdir = "/tmp"
             None,
             Some(&gate),
             None,
+            SpawnMode::Print,
         )
         .expect("poll");
         assert_eq!(
@@ -2011,8 +2216,17 @@ workdir = "/tmp"
         cooldown.record_wake("legion");
 
         let mut tracker = AgentTracker::new();
-        let spawned =
-            poll_cycle(&db, &config, &mut cooldown, &mut tracker, None, None, None).expect("poll");
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            None,
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll");
         assert_eq!(spawned, 0, "cooling repo should be skipped");
     }
 
@@ -2640,5 +2854,300 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         assert_eq!(cluster.interval_secs, 30, "default interval");
         assert!(cluster.instance_id.is_none());
         assert!(cluster.secret.is_none());
+    }
+
+    // -- Quota panic gate (#484) ---------------------------------------------
+
+    fn rate_sample(
+        id: &str,
+        host: &str,
+        sampled_at: &str,
+        five_hour_pct: Option<f64>,
+        seven_day_pct: Option<f64>,
+    ) -> crate::statusline::RateLimitSample {
+        crate::statusline::RateLimitSample {
+            id: id.to_string(),
+            hostname: host.to_string(),
+            session_id: "sess".to_string(),
+            sampled_at: sampled_at.to_string(),
+            five_hour_pct,
+            five_hour_resets_at: None,
+            seven_day_pct,
+            seven_day_resets_at: None,
+            model: None,
+        }
+    }
+
+    fn bullpen_panic_post_count(db: &Database) -> usize {
+        let posts = crate::board::bullpen(db, "legion").expect("read bullpen");
+        posts
+            .iter()
+            .filter(|p| p.text.contains("QUOTA PANIC") || p.text.contains("QUOTA RECOVERED"))
+            .count()
+    }
+
+    #[test]
+    fn panic_active_when_sample_crosses_threshold() {
+        let (db, _idx, _tmp) = test_storage();
+        db.insert_rate_limit_sample(&rate_sample(
+            "s1",
+            "this-host",
+            "2026-05-23T10:00:00Z",
+            Some(99.5),
+            Some(40.0),
+        ))
+        .unwrap();
+        let gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+        assert!(gate.quota_panic_active(&db));
+    }
+
+    #[test]
+    fn panic_inactive_when_sample_below_threshold() {
+        let (db, _idx, _tmp) = test_storage();
+        db.insert_rate_limit_sample(&rate_sample(
+            "s1",
+            "this-host",
+            "2026-05-23T10:00:00Z",
+            Some(50.0),
+            Some(60.0),
+        ))
+        .unwrap();
+        let gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+        assert!(!gate.quota_panic_active(&db));
+    }
+
+    #[test]
+    fn panic_inactive_when_no_sample_yet() {
+        let (db, _idx, _tmp) = test_storage();
+        let gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+        assert!(!gate.quota_panic_active(&db));
+    }
+
+    #[test]
+    fn panic_inactive_for_other_hosts_sample() {
+        // A peer node burning its cap must not gate this host.
+        let (db, _idx, _tmp) = test_storage();
+        db.insert_rate_limit_sample(&rate_sample(
+            "s1",
+            "other-host",
+            "2026-05-23T10:00:00Z",
+            Some(99.9),
+            Some(99.9),
+        ))
+        .unwrap();
+        let gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+        assert!(!gate.quota_panic_active(&db));
+    }
+
+    #[test]
+    fn panic_seven_day_window_independently_trips_gate() {
+        let (db, _idx, _tmp) = test_storage();
+        db.insert_rate_limit_sample(&rate_sample(
+            "s1",
+            "this-host",
+            "2026-05-23T10:00:00Z",
+            Some(10.0),
+            Some(99.5),
+        ))
+        .unwrap();
+        let gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+        assert!(gate.quota_panic_active(&db));
+    }
+
+    #[test]
+    fn panic_five_hour_window_independently_trips_gate() {
+        // Symmetric to the 7d test: a single high 5h reading with a quiet
+        // 7d window must still trip the gate. Guards against a refactor that
+        // drops the 5h disjunct or swaps `||` for `&&` in the predicate.
+        let (db, _idx, _tmp) = test_storage();
+        db.insert_rate_limit_sample(&rate_sample(
+            "s1",
+            "this-host",
+            "2026-05-23T10:00:00Z",
+            Some(99.5),
+            Some(10.0),
+        ))
+        .unwrap();
+        let gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+        assert!(gate.quota_panic_active(&db));
+    }
+
+    #[test]
+    fn panic_at_exactly_threshold_is_active() {
+        // The contract is "at or above" -- pin the >= boundary so a future
+        // refactor to `>` cannot silently let the last 1% slip.
+        let s = rate_sample("s1", "this-host", "t", Some(99.0), Some(40.0));
+        assert!(sample_crosses_threshold(&s, 99.0));
+        let s_below = rate_sample("s2", "this-host", "t", Some(98.999), Some(40.0));
+        assert!(!sample_crosses_threshold(&s_below, 99.0));
+    }
+
+    #[test]
+    fn edge_flip_emits_exactly_one_post_per_transition() {
+        let (db, _idx, _tmp) = test_storage();
+        let mut gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+
+        // Healthy at start, no post.
+        db.insert_rate_limit_sample(&rate_sample(
+            "s1",
+            "this-host",
+            "2026-05-23T10:00:00Z",
+            Some(50.0),
+            Some(50.0),
+        ))
+        .unwrap();
+        assert!(!gate.check_and_post(&db));
+        assert_eq!(bullpen_panic_post_count(&db), 0);
+
+        // Cross into panic -- one post.
+        db.insert_rate_limit_sample(&rate_sample(
+            "s2",
+            "this-host",
+            "2026-05-23T11:00:00Z",
+            Some(99.5),
+            Some(60.0),
+        ))
+        .unwrap();
+        assert!(gate.check_and_post(&db));
+        assert_eq!(bullpen_panic_post_count(&db), 1);
+
+        // Still in panic -- no additional post (no spam).
+        db.insert_rate_limit_sample(&rate_sample(
+            "s3",
+            "this-host",
+            "2026-05-23T12:00:00Z",
+            Some(99.8),
+            Some(70.0),
+        ))
+        .unwrap();
+        assert!(gate.check_and_post(&db));
+        assert_eq!(bullpen_panic_post_count(&db), 1);
+
+        // Recover -- one more post.
+        db.insert_rate_limit_sample(&rate_sample(
+            "s4",
+            "this-host",
+            "2026-05-23T13:00:00Z",
+            Some(50.0),
+            Some(50.0),
+        ))
+        .unwrap();
+        assert!(!gate.check_and_post(&db));
+        assert_eq!(bullpen_panic_post_count(&db), 2);
+
+        // Still healthy -- no additional post.
+        assert!(!gate.check_and_post(&db));
+        assert_eq!(bullpen_panic_post_count(&db), 2);
+    }
+
+    #[test]
+    fn db_error_returns_false_does_not_halt_watch() {
+        // Dropping the table makes latest_rate_limit_sample_for_host return
+        // Err. The gate must treat that as healthy (false) so a transient
+        // query failure cannot DoS the mesh by sticking watch in panic.
+        let (db, _idx, _tmp) = test_storage();
+        db.conn
+            .execute("DROP TABLE rate_limit_samples", [])
+            .expect("drop table");
+        let gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+        assert!(!gate.quota_panic_active(&db));
+    }
+
+    #[test]
+    fn post_failure_does_not_advance_edge() {
+        // If the bullpen post fails on an edge, the gate must NOT flip
+        // `in_panic`. Otherwise the next tick sees no edge and the mesh
+        // is left believing the prior state. Simulate the failure by
+        // dropping the reflections table while leaving rate_limit_samples
+        // intact: the gate read succeeds, the post write fails.
+        let (db, _idx, _tmp) = test_storage();
+        let mut gate = QuotaPanicGate::new(99.0, "this-host".to_string(), "legion".to_string());
+
+        db.insert_rate_limit_sample(&rate_sample(
+            "s1",
+            "this-host",
+            "2026-05-23T10:00:00Z",
+            Some(99.5),
+            Some(40.0),
+        ))
+        .unwrap();
+        db.conn
+            .execute("DROP TABLE reflections", [])
+            .expect("drop reflections");
+
+        // active=true is observed (the gate read still succeeds), but the
+        // post insert fails. The contract is: in_panic stays false so the
+        // next poll sees the same edge and retries.
+        assert!(gate.check_and_post(&db), "active state still observed");
+        assert!(!gate.in_panic, "post failure must not advance in_panic");
+
+        // Second call mirrors the next poll cycle with the same broken
+        // write path. The edge must still re-fire (active != in_panic),
+        // not silently no-op.
+        assert!(gate.check_and_post(&db), "still active");
+        assert!(!gate.in_panic, "edge still pending after second failure");
+    }
+
+    #[test]
+    fn default_threshold_is_ninety_nine_percent() {
+        let cfg = WatchConfig::default();
+        assert!((cfg.quota_panic_threshold_pct - 99.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn missing_pct_does_not_trip_gate() {
+        // A sample with both windows None should not be treated as panic.
+        let s = rate_sample("s1", "this-host", "2026-05-23T10:00:00Z", None, None);
+        assert!(!sample_crosses_threshold(&s, 99.0));
+    }
+
+    // -- SpawnMode (#485) ---------------------------------------------------
+
+    #[test]
+    fn spawn_mode_parse_print() {
+        assert_eq!(SpawnMode::parse("print"), SpawnMode::Print);
+        assert_eq!(SpawnMode::parse("PRINT"), SpawnMode::Print);
+        assert_eq!(SpawnMode::parse("  print  "), SpawnMode::Print);
+    }
+
+    #[test]
+    fn spawn_mode_parse_pty() {
+        assert_eq!(SpawnMode::parse("pty"), SpawnMode::Pty);
+        assert_eq!(SpawnMode::parse("PTY"), SpawnMode::Pty);
+    }
+
+    #[test]
+    fn spawn_mode_parse_unknown_falls_back_to_print() {
+        // Empty, whitespace, and unrecognized strings must default to
+        // Print so a typo cannot silently engage the PTY stub.
+        assert_eq!(SpawnMode::parse(""), SpawnMode::Print);
+        assert_eq!(SpawnMode::parse("   "), SpawnMode::Print);
+        assert_eq!(SpawnMode::parse("nope"), SpawnMode::Print);
+    }
+
+    #[test]
+    fn spawn_agent_pty_returns_not_implemented() {
+        // The Pty branch is stubbed at this stage of the arc. Subsequent
+        // issues fill it in; until then callers must surface the error.
+        // The workdir and prompt arguments are not used because dispatch
+        // checks the mode before touching the filesystem.
+        let err = spawn_agent("/nonexistent", "hi", SpawnMode::Pty)
+            .expect_err("Pty branch must error until #489 lands");
+        match err {
+            LegionError::NotImplemented { feature } => {
+                assert!(
+                    feature.contains("WATCH_SPAWN_MODE=pty"),
+                    "feature name should identify the unimplemented surface: {}",
+                    feature
+                );
+            }
+            other => panic!("expected NotImplemented, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_mode_as_str_matches_env_values() {
+        assert_eq!(SpawnMode::Print.as_str(), "print");
+        assert_eq!(SpawnMode::Pty.as_str(), "pty");
     }
 }
