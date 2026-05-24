@@ -39,6 +39,11 @@ rand = "0.9"
 hex = "0.4"
 hostname = "0.4"
 
+# PTY spawning for watch auto-wake (#486+). Subscription billing requires
+# an interactive TTY -- portable-pty wraps native PTY on unix and ConPTY
+# on Windows.
+portable-pty = "0.9"
+
 # libc pulls in only on unix for killpg in call_plugin_inner's timeout arm.
 # Must stay AFTER all platform-independent deps -- TOML tables consume
 # every key until the next header, so listing it mid-file would leak the

@@ -111,6 +111,22 @@ pub enum LegionError {
 
     #[error("not implemented: {feature}")]
     NotImplemented { feature: String },
+
+    #[error("pty spawn failed for {bin:?}: {source}")]
+    PtySpawnFailed {
+        bin: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[error("pty allocation failed: {0}")]
+    PtyAllocFailed(String),
+
+    #[error("pty write failed: {0}")]
+    PtyWriteFailed(String),
+
+    #[error("pty wait failed: {0}")]
+    PtyWaitFailed(String),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
