@@ -1,5 +1,17 @@
 # Legion Changelog
 
+## 0.16.1
+
+Hardening on the pre-bash-grep hook bypass mechanism. Patch release; no schema or wire-format changes.
+
+### Changed
+
+- **Soft sym-bypass refused for symbol-shaped patterns with local SCIP hits** (PR #506): `plugin/hooks/pre-bash-grep.sh` previously accepted `# legion-bypass: <reason>` or `LEGION_BYPASS_GREP=1` as a universal escape from the State 2 BLOCK tier. Agents (including the one that built the enforcement) routinely used the sentinel for queries that were definitionally symbol lookups -- `pub fn` names, `impl` blocks, struct/enum identifiers -- routing around `legion sym def`. The sentinel was too cheap: the friction of typing `grep -n Foo # legion-bypass: ...` matched `legion sym def Foo` closely enough that muscle memory won.
+  - **Soft bypass** is now refused when the pattern resolves to a real symbol in THIS repo's SCIP index (the relevance-gate filter from #458). The refusal emits a block decision pointing at `legion sym def` and names the hard escape. Free-text patterns and patterns that resolve only in unrelated repos still pass the bypass (the legitimate cross-cutting case is unaffected).
+  - **Hard bypass** added via `LEGION_BYPASS_GREP_HARD=1`. Always allows, but writes a row to `bypass.jsonl` with the `hard:` prefix on the reason field so `/telemetry summary` (#440) can show how often the hard escape fires -- loud signal that sym is under-serving.
+  - Test coverage extended to 41 cases: soft env refusal on local symbol, soft sentinel refusal on local symbol, soft bypass still allowed for free-text / non-local patterns, hard escape always allows + writes `hard:` row.
+  - Reflection trail: `019e578c` (root-cause analysis: why agents ignore sym even after enforcement landed), `019e5795` (hook-enforcement upgrade trick: reuse signals the hook already computes for other reasons).
+
 ## 0.16.0
 
 Watch PTY migration ships. Before 2026-06-15, `claude --print -p` was the subscription-billed path; after that date the same invocation moves to billed API. Legion's auto-wake daemon was the only active site using `-p`, so every wake-worthy signal across every watched repo would have become a billed call. v0.16.0 migrates auto-wake to a PTY-spawned interactive `claude` REPL that retains subscription billing, with a `wake_attempts` ACID substrate that makes per-wake lifecycle cluster-visible and crash-recoverable. Epic #495.
