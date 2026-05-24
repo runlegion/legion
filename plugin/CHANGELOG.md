@@ -1,5 +1,31 @@
 # Legion Changelog
 
+## 0.16.0
+
+Watch PTY migration ships. Before 2026-06-15, `claude --print -p` was the subscription-billed path; after that date the same invocation moves to billed API. Legion's auto-wake daemon was the only active site using `-p`, so every wake-worthy signal across every watched repo would have become a billed call. v0.16.0 migrates auto-wake to a PTY-spawned interactive `claude` REPL that retains subscription billing, with a `wake_attempts` ACID substrate that makes per-wake lifecycle cluster-visible and crash-recoverable. Epic #495.
+
+### New
+
+- **Subscription-quota panic-stop in watch** (PR #496, closes #484): defense-in-depth gate that halts spawn cycles when the most recent `rate_limit_samples` row for the host shows either the 5h or 7d window at >= 99%. Per-host (not cluster-wide) so a peer burning its cap cannot DoS this node. Edge-triggered single-shot bullpen posts on healthy <-> panic transitions; no spam mid-state. DB read failures fail-open (treated as healthy) so a transient query error cannot stick watch in panic.
+
+- **`WATCH_SPAWN_MODE` env scaffolding** (closes #485): `SpawnMode { Print, Pty }` with `from_env()` resolver. Default flipped to `Pty` in this release (#494) since the print path is post-cutoff billed; operators who explicitly want the legacy path set `WATCH_SPAWN_MODE=print`. Unknown values warn + fall back to `Pty` so a typo cannot silently engage the wrong billing plane. Startup banner logs the resolved mode.
+
+- **`src/pty.rs` portable-pty wrapper** (closes #486): `PtySession` over `portable-pty 0.9` (WezTerm's canonical crate; includes Windows ConPTY). Ring-buffered reader thread drains the master fd so a chatty child cannot block on a full pipe; bounded cap drops oldest bytes (harness needs EOF + diagnostic snapshots, not the full transcript). API: `spawn`/`write`/`pid`/`try_wait`/`kill`/`output_tail`/`eof_observed`. `Drop` reaps any non-terminal child including the `try_wait` Err case. Four new `LegionError` variants: `PtySpawnFailed`, `PtyAllocFailed`, `PtyWriteFailed`, `PtyWaitFailed`.
+
+- **`wake_attempts` table + FSM-enforced DB methods** (closes #487): Migration 23 adds the per-attempt lifecycle row keyed by UUIDv7 attempt_id. `WakeAttemptState` enum (queued / claimed / spawning / running / exiting / done / failed / timeout / abandoned) with `can_transition_to` mirroring the `PredictionState` precedent. Two-layer FSM enforcement (Rust `can_transition_to` + SQL `state = from` predicate) means a sync-resolved `done -> running` regression is silently rejected. Eight DB methods: enqueue / try_claim (atomic) / transition / set_pid / mark_exit_observed / record_outcome / list_local_orphans (host-scoped) / get. Terminal-is-sticky: re-stamps of a settled outcome surface as `IllegalWakeAttemptTransition` with the actual current state.
+
+- **`WakeAttemptDelta` + state-aware sync conflict rules** (closes #488): sync delta with happens-before-aware conflict resolution. Tombstone involved → LWW. Local terminal + incoming non-terminal → reject (regression guard). Both terminal disagreeing → keep later `exited_at` with deterministic host-id tiebreak. Unknown state literal from a forward-incompatible peer → log + reject, no panic.
+
+- **PTY spawn branch via `PtySession`** (closes #489): `spawn_agent(SpawnMode::Pty, ...)` now launches an interactive `claude` REPL through the master fd. `SpawnedChild` enum unifies print + pty under one tracker handle. `LEGION_SPAWN_SOURCE=watch-pty` + `LEGION_WAKE_ATTEMPT_ID=<id>` env stamps land on the spawned process so `plugin/hooks/stop.sh` can fire the session-end handoff (#493). Prompt is injected as keystrokes + carriage return; write failure best-effort-kills the half-started PTY.
+
+- **`AgentTracker` + `poll_cycle` write to `wake_attempts`** (closes #491; partial #490): poll_cycle mints a UUIDv7 attempt_id, enqueues a `queued` row, and atomically claims it before spawning. On success, FSM advances through Claimed → Spawning → Running with the PID stamped; on failure, transitions to Abandoned so the row does not leak. `reap_finished` records terminal outcome via `record_wake_attempt_outcome`. (Crash recovery -- the orphan-scan pass on watch startup -- is a follow-up.)
+
+- **`legion watch session-end` CLI + stop-hook handoff** (closes #493): new CLI subcommand stamps `exit_observed_at` on the wake_attempts row so the watch reaper can short-circuit a poll cycle. PTY EOF + PID-poll remain authoritative; this is a speed-up only. `plugin/hooks/stop.sh` calls the CLI gated on `$LEGION_WAKE_ATTEMPT_ID` being set. Idempotent + missing-row-tolerant so a hook fire from an operator-attended session never blocks Claude Code's Stop.
+
+- **`LEGION_AUTO_WAKE` audit + stop.sh gate suppression under watch-pty** (closes #492): `plugin/hooks/stop.sh` now early-exits both the incomplete-task gate and the reflect-prompt gate when `LEGION_SPAWN_SOURCE=watch-pty` is set. Watch-pty wakes are atomic units that exit through Stop on every wake; running operator-session gates risks the 8-block stop-hook cap in Claude Code 2.1.143 hard-killing the agent. Audit + per-gate decisions in `docs/decisions/2026-05-watch-pty-env-audit.md`.
+
+- **Default flip to PTY** (closes #494): `SpawnMode::from_env()` defaults to `Pty` (was `Print`). Empty / unset / unknown env values now engage the PTY path. Operators upgrading from v0.15.x should set `WATCH_SPAWN_MODE=print` explicitly if they need the legacy billing plane during the soak window.
+
 ## 0.15.1
 
 Patch release. Closes a long-standing silent failure in the TypeScript SCIP indexer that returned `[]` for any symbol defined in a pnpm/yarn workspace package, masking real symbols as nonexistent and degrading every `legion sym def/refs` query on monorepos.

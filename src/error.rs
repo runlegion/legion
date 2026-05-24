@@ -110,6 +110,7 @@ pub enum LegionError {
     Telemetry(String),
 
     #[error("not implemented: {feature}")]
+    #[allow(dead_code)] // general-purpose stub variant; constructors come and go
     NotImplemented { feature: String },
 
     #[error("pty spawn failed for {bin:?}: {source}")]

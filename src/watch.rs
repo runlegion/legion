@@ -816,29 +816,32 @@ pub enum SpawnMode {
 
 impl SpawnMode {
     /// Resolve from `WATCH_SPAWN_MODE`. Accepts `"print"` or `"pty"`
-    /// (case-insensitive). Empty / unset / any other value falls back to
-    /// `Print`, logging a warning on unknown values so a typo is visible.
+    /// (case-insensitive). Empty / unset / any other value falls back
+    /// to `Pty` (the v0.16.0 default after #494 -- subscription
+    /// billing for `claude --print -p` ended 2026-06-15). Operators
+    /// who explicitly want the legacy path set `WATCH_SPAWN_MODE=print`.
+    /// Unknown values log a warning so a typo is visible.
     pub fn from_env() -> Self {
         match std::env::var("WATCH_SPAWN_MODE") {
             Ok(raw) => Self::parse(&raw),
-            Err(_) => Self::Print,
+            Err(_) => Self::Pty,
         }
     }
 
     fn parse(raw: &str) -> Self {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Self::Print;
+            return Self::Pty;
         }
         match trimmed.to_ascii_lowercase().as_str() {
             "print" => Self::Print,
             "pty" => Self::Pty,
             other => {
                 eprintln!(
-                    "[legion watch] unknown WATCH_SPAWN_MODE={:?} -- falling back to print",
+                    "[legion watch] unknown WATCH_SPAWN_MODE={:?} -- falling back to pty",
                     other
                 );
-                Self::Print
+                Self::Pty
             }
         }
     }
@@ -858,28 +861,134 @@ impl SpawnMode {
 /// `LegionError::NotImplemented` -- callers must surface the error and
 /// release any holds (the existing `poll_cycle` spawn-failure path does
 /// this already).
-pub fn spawn_agent(workdir: &str, prompt: &str, mode: SpawnMode) -> Result<Child> {
+///
+/// Optimistic stop-hook handoff (#493). Writes `exit_observed_at` on
+/// the wake_attempts row so the reaper can short-circuit a poll cycle.
+/// PTY EOF + PID-poll remain the authoritative completion signal --
+/// this is a speed-up only. Idempotent: missing rows return `Ok(())`
+/// because the hook may fire for operator-attended sessions that watch
+/// never spawned.
+pub fn record_session_end(db: &Database, attempt_id: &str) -> Result<()> {
+    match db.mark_wake_attempt_exit_observed(attempt_id) {
+        Ok(()) => Ok(()),
+        Err(LegionError::WakeAttemptNotFound(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Polymorphic child handle returned by `spawn_agent`. The Print
+/// branch wraps `std::process::Child` (unchanged from the `claude -p`
+/// era); the Pty branch wraps `pty::PtySession` so the interactive
+/// REPL retains subscription billing under the post-2026-06-15 cutoff.
+///
+/// Implements the minimal subset of operations the watch reaper +
+/// lease release path actually need: `pid` for liveness + log lines,
+/// `try_wait` for non-blocking exit detection, `kill` for shutdown.
+/// Direct stdin/stdout streams are NOT exposed -- the PTY ring buffer
+/// is for diagnostics, not control flow.
+pub enum SpawnedChild {
+    Print(Child),
+    Pty(crate::pty::PtySession),
+}
+
+impl SpawnedChild {
+    pub fn id(&self) -> u32 {
+        match self {
+            SpawnedChild::Print(c) => c.id(),
+            SpawnedChild::Pty(s) => s.pid(),
+        }
+    }
+
+    /// Non-blocking exit check. `Ok(Some(_))` once the child has
+    /// exited (the inner value is the OS-reported success bit;
+    /// callers that need exit code distinguishing use Print's Child
+    /// directly or the PtySession's ExitStatus). `Ok(None)` while
+    /// still running.
+    pub fn try_wait(&mut self) -> Result<Option<bool>> {
+        match self {
+            SpawnedChild::Print(c) => match c.try_wait().map_err(LegionError::Io)? {
+                Some(status) => Ok(Some(status.success())),
+                None => Ok(None),
+            },
+            SpawnedChild::Pty(s) => match s.try_wait()? {
+                Some(status) => Ok(Some(status.success)),
+                None => Ok(None),
+            },
+        }
+    }
+
+    #[allow(dead_code)] // consumed by #490 reap-on-shutdown path
+    pub fn kill(&mut self) -> Result<()> {
+        match self {
+            SpawnedChild::Print(c) => c.kill().map_err(LegionError::Io),
+            SpawnedChild::Pty(s) => s.kill(),
+        }
+    }
+}
+
+pub fn spawn_agent(
+    workdir: &str,
+    prompt: &str,
+    mode: SpawnMode,
+    attempt_id: Option<&str>,
+) -> Result<SpawnedChild> {
     match mode {
         SpawnMode::Print => {
-            let child = std::process::Command::new("claude")
-                .args(["--print", "-p", prompt])
+            let mut cmd = std::process::Command::new("claude");
+            cmd.args(["--print", "-p", prompt])
                 .current_dir(workdir)
                 .env("LEGION_AUTO_WAKE", "1")
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-
-            match child {
-                Ok(c) => Ok(c),
+                .stderr(std::process::Stdio::null());
+            if let Some(id) = attempt_id {
+                cmd.env("LEGION_WAKE_ATTEMPT_ID", id);
+            }
+            match cmd.spawn() {
+                Ok(c) => Ok(SpawnedChild::Print(c)),
                 Err(e) => {
                     eprintln!("[legion watch] failed to spawn agent: {}", e);
                     Err(LegionError::Io(e))
                 }
             }
         }
-        SpawnMode::Pty => Err(LegionError::NotImplemented {
-            feature: "WATCH_SPAWN_MODE=pty".to_string(),
-        }),
+        SpawnMode::Pty => {
+            // PTY-spawned interactive `claude` REPL (#489). Subscription
+            // billing applies because the REPL sees a TTY. Prompt is
+            // injected via keystrokes through the master fd; the legion
+            // plugin remains loaded inside the spawned session so the
+            // stop hook can fire `legion watch session-end` (#493) as
+            // an optimistic completion signal.
+            let env: Vec<(&str, &str)> = {
+                let mut e = vec![
+                    ("LEGION_AUTO_WAKE", "1"),
+                    ("LEGION_SPAWN_SOURCE", "watch-pty"),
+                ];
+                if let Some(id) = attempt_id {
+                    e.push(("LEGION_WAKE_ATTEMPT_ID", id));
+                }
+                e
+            };
+            let cwd = std::path::Path::new(workdir);
+            let mut opts = crate::pty::PtySpawnOptions::new("claude", &[], cwd);
+            opts.env = &env;
+            let mut session = crate::pty::PtySession::spawn(opts)?;
+            // Inject the prompt as keystrokes. The trailing carriage
+            // return submits the prompt; \n alone is not interpreted as
+            // submit by every Claude Code interactive surface, but \r
+            // works on every shipped version.
+            let mut keystrokes = Vec::with_capacity(prompt.len() + 1);
+            keystrokes.extend_from_slice(prompt.as_bytes());
+            keystrokes.push(b'\r');
+            if let Err(e) = session.write(&keystrokes) {
+                eprintln!("[legion watch] PTY prompt write failed: {}", e);
+                // Best-effort kill so we do not leak a half-started
+                // child; the spawn-failure path in poll_cycle releases
+                // any leases we acquired.
+                let _ = session.kill();
+                return Err(e);
+            }
+            Ok(SpawnedChild::Pty(session))
+        }
     }
 }
 
@@ -891,7 +1000,7 @@ pub fn spawn_agent(workdir: &str, prompt: &str, mode: SpawnMode) -> Result<Child
 /// when the child exits.
 pub struct TrackedChild {
     pub repo: String,
-    pub child: Child,
+    pub child: SpawnedChild,
     /// `(persona_id, signal_id)` pairs this child acquired at spawn.
     pub held_leases: Vec<(String, String)>,
     /// Host identity the leases were acquired under. Required for the
@@ -906,6 +1015,10 @@ pub struct TrackedChild {
     /// All signal ids bundled into this wake. Used to look up
     /// reflection-parent_id matches at reap time.
     pub signal_ids: Vec<String>,
+    /// UUIDv7 of the wake_attempts row (#490, #491). `None` when the
+    /// spawn predates the wake_attempts substrate or the enqueue
+    /// failed; reap then skips the outcome recording.
+    pub attempt_id: Option<String>,
 }
 
 pub struct AgentTracker {
@@ -925,12 +1038,13 @@ impl AgentTracker {
     pub fn track(
         &mut self,
         repo: String,
-        child: Child,
+        child: SpawnedChild,
         held_leases: Vec<(String, String)>,
         host: String,
         session_id: String,
         spawn_at: String,
         signal_ids: Vec<String>,
+        attempt_id: Option<String>,
     ) {
         self.children.push(TrackedChild {
             repo,
@@ -940,6 +1054,7 @@ impl AgentTracker {
             session_id,
             spawn_at,
             signal_ids,
+            attempt_id,
         });
     }
 
@@ -951,11 +1066,11 @@ impl AgentTracker {
     pub fn reap_finished(&mut self, db: Option<&Database>) {
         self.children
             .retain_mut(|tracked| match tracked.child.try_wait() {
-                Ok(Some(status)) => {
+                Ok(Some(success)) => {
                     eprintln!(
                         "[legion watch] agent for {} exited ({})",
                         tracked.repo,
-                        if status.success() { "ok" } else { "error" }
+                        if success { "ok" } else { "error" }
                     );
                     if let Some(db) = db {
                         for (persona, signal_id) in &tracked.held_leases {
@@ -974,8 +1089,8 @@ impl AgentTracker {
                         // the reap loop -- a missed log row is recoverable, a
                         // panic in the watch thread is not.
                         let exit_at = chrono::Utc::now().to_rfc3339();
-                        let exit_status = if status.success() { "ok" } else { "error" };
-                        let outcome = if !status.success() {
+                        let exit_status = if success { "ok" } else { "error" };
+                        let outcome = if !success {
                             Database::OUTCOME_ERRORED
                         } else {
                             match db.classify_session(
@@ -1009,6 +1124,20 @@ impl AgentTracker {
                             eprintln!(
                                 "[legion watch] failed to record session outcome for {} ({}): {}",
                                 tracked.repo, tracked.session_id, e
+                            );
+                        }
+
+                        // #490: stamp the wake_attempt's terminal state.
+                        // Idempotent at the DB layer; errors logged but
+                        // not propagated (the lease release + outcome
+                        // record above are the load-bearing writes).
+                        if let Some(ref attempt_id) = tracked.attempt_id
+                            && let Err(e) =
+                                db.record_wake_attempt_outcome(attempt_id, exit_status, outcome)
+                        {
+                            eprintln!(
+                                "[legion watch] failed to record wake attempt outcome {}: {}",
+                                attempt_id, e
                             );
                         }
                     }
@@ -1228,7 +1357,44 @@ pub fn poll_cycle(
             std::thread::sleep(Duration::from_secs(config.stagger_secs));
         }
 
-        match spawn_agent(&repo.workdir, &prompt, spawn_mode) {
+        // #491: enqueue + claim a wake_attempts row before spawning so
+        // peer nodes have a cluster-visible work item. Enqueue or
+        // claim failure does not block the spawn (the lease layer is
+        // still the authoritative mutex this session); the attempt
+        // row becomes None and the reaper skips outcome recording.
+        let signal_ids_vec: Vec<String> = signals.iter().map(|(id, _, _)| id.clone()).collect();
+        let track_host_pre = lease_gate.map(|g| g.host.to_string()).unwrap_or_default();
+        let attempt_id: Option<String> = {
+            let candidate = uuid::Uuid::now_v7().to_string();
+            match db.enqueue_wake_attempt(&candidate, recipient, &repo.name, &signal_ids_vec) {
+                Ok(()) => match db.try_claim_wake_attempt(&candidate, &track_host_pre) {
+                    Ok(true) => Some(candidate),
+                    Ok(false) => {
+                        eprintln!(
+                            "[legion watch] wake_attempt {} not claimed (peer race?); proceeding anyway",
+                            candidate
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[legion watch] wake_attempt claim error: {} -- proceeding",
+                            e
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "[legion watch] wake_attempt enqueue error: {} -- proceeding",
+                        e
+                    );
+                    None
+                }
+            }
+        };
+
+        match spawn_agent(&repo.workdir, &prompt, spawn_mode, attempt_id.as_deref()) {
             Ok(child) => {
                 let child_pid = child.id();
                 // Mark ALL signals as handled for THIS repo (per-repo tracking).
@@ -1251,10 +1417,25 @@ pub fn poll_cycle(
                         repo.name, e
                     );
                 }
-                let track_host = lease_gate.map(|g| g.host.to_string()).unwrap_or_default();
+                // #490: advance the wake_attempt FSM through the spawn
+                // path. Errors logged + not propagated (terminal state
+                // recording in reap is the load-bearing write).
+                if let Some(ref aid) = attempt_id {
+                    use crate::wake_attempts::WakeAttemptState::{Claimed, Running, Spawning};
+                    if let Err(e) = db.set_wake_attempt_pid(aid, child_pid) {
+                        eprintln!("[legion watch] set_wake_attempt_pid {}: {}", aid, e);
+                    }
+                    if let Err(e) = db.transition_wake_attempt(aid, Claimed, Spawning) {
+                        eprintln!("[legion watch] transition Claimed->Spawning {}: {}", aid, e);
+                    }
+                    if let Err(e) = db.transition_wake_attempt(aid, Spawning, Running) {
+                        eprintln!("[legion watch] transition Spawning->Running {}: {}", aid, e);
+                    }
+                }
+                let track_host = track_host_pre;
                 let session_id = uuid::Uuid::now_v7().to_string();
                 let spawn_at = chrono::Utc::now().to_rfc3339();
-                let signal_ids: Vec<String> = signals.iter().map(|(id, _, _)| id.clone()).collect();
+                let signal_ids = signal_ids_vec;
                 tracker.track(
                     repo.name.clone(),
                     child,
@@ -1263,6 +1444,7 @@ pub fn poll_cycle(
                     session_id,
                     spawn_at,
                     signal_ids,
+                    attempt_id,
                 );
                 cooldown.record_wake(&repo.name);
                 spawned += 1;
@@ -1280,6 +1462,17 @@ pub fn poll_cycle(
                                 persona, sig_id, re
                             );
                         }
+                    }
+                }
+                // #490: mark the claimed wake_attempt as abandoned so the
+                // FSM does not show a leaked Claimed row. Best-effort.
+                if let Some(ref aid) = attempt_id {
+                    use crate::wake_attempts::WakeAttemptState::{Abandoned, Claimed};
+                    if let Err(re) = db.transition_wake_attempt(aid, Claimed, Abandoned) {
+                        eprintln!(
+                            "[legion watch] failed to abandon wake_attempt {} after spawn failure: {}",
+                            aid, re
+                        );
                     }
                 }
                 eprintln!("[legion watch] spawn failed for {}: {}", repo.name, e);
@@ -3117,33 +3310,22 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
     }
 
     #[test]
-    fn spawn_mode_parse_unknown_falls_back_to_print() {
-        // Empty, whitespace, and unrecognized strings must default to
-        // Print so a typo cannot silently engage the PTY stub.
-        assert_eq!(SpawnMode::parse(""), SpawnMode::Print);
-        assert_eq!(SpawnMode::parse("   "), SpawnMode::Print);
-        assert_eq!(SpawnMode::parse("nope"), SpawnMode::Print);
+    fn spawn_mode_parse_unknown_falls_back_to_pty() {
+        // Default flipped to Pty in #494 (post-2026-06-15 billing
+        // shift). Empty, whitespace, and unrecognized strings now
+        // engage the PTY path; operators who want the legacy
+        // print path set WATCH_SPAWN_MODE=print explicitly.
+        assert_eq!(SpawnMode::parse(""), SpawnMode::Pty);
+        assert_eq!(SpawnMode::parse("   "), SpawnMode::Pty);
+        assert_eq!(SpawnMode::parse("nope"), SpawnMode::Pty);
     }
 
-    #[test]
-    fn spawn_agent_pty_returns_not_implemented() {
-        // The Pty branch is stubbed at this stage of the arc. Subsequent
-        // issues fill it in; until then callers must surface the error.
-        // The workdir and prompt arguments are not used because dispatch
-        // checks the mode before touching the filesystem.
-        let err = spawn_agent("/nonexistent", "hi", SpawnMode::Pty)
-            .expect_err("Pty branch must error until #489 lands");
-        match err {
-            LegionError::NotImplemented { feature } => {
-                assert!(
-                    feature.contains("WATCH_SPAWN_MODE=pty"),
-                    "feature name should identify the unimplemented surface: {}",
-                    feature
-                );
-            }
-            other => panic!("expected NotImplemented, got {other:?}"),
-        }
-    }
+    // The stub-verifying `spawn_agent_pty_returns_not_implemented`
+    // test from #485 is intentionally removed in #489 -- the Pty
+    // branch now spawns a PTY-backed REPL instead of returning
+    // NotImplemented. Behavior is exercised by the integration tests
+    // in pty::tests; a full end-to-end spawn here would require a
+    // real `claude` binary on PATH, which CI does not have.
 
     #[test]
     fn spawn_mode_as_str_matches_env_values() {
