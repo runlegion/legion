@@ -80,9 +80,53 @@ if [ -n "$HITS" ]; then
   HAD_SYM="true"
 fi
 
-# State 3: bypass wins. Record telemetry, allow.
+# Pre-compute LOCAL_HITS so both the bypass refusal path and the
+# State 2 BLOCK path can use them.
+LOCAL_HITS=""
+if [ "$HAD_SYM" = "true" ] && legion_indexed "$SESSION_ID" "$REPO"; then
+  LOCAL_HITS=$(legion_prequery_filter_hits_local "$HITS" "$REPO")
+fi
+
+# State 3: bypass. Two tiers.
+#
+# Soft bypass (`# legion-bypass: <reason>` or LEGION_BYPASS_GREP=1) is
+# REFUSED when the pattern resolves to a real symbol in THIS repo's
+# SCIP index. The bypass sentinel exists for free-text searches; it
+# cannot route around sym for symbol queries dressed up as text. The
+# refusal points the agent at sym + names the LEGION_BYPASS_GREP_HARD
+# hard escape for the rare case where the agent really does need a
+# grep-style file scan over symbol-shaped text (e.g. counting call
+# sites of a deprecated API across files outside the SCIP index).
+#
+# Hard bypass (LEGION_BYPASS_GREP_HARD=1) always allows but writes a
+# row with bypass_class=hard so /telemetry summary can show how often
+# the hard escape fires (loud signal that sym is under-serving).
 BYPASS_REASON=$(legion_prequery_bypass_reason "$COMMAND")
+HARD_BYPASS="${LEGION_BYPASS_GREP_HARD:-}"
+
+if [ "$HARD_BYPASS" = "1" ]; then
+  legion_prequery_record_bypass \
+    "$REPO" "$SESSION_ID" "Bash" "$PATTERN" "hard:${BYPASS_REASON:-no-reason}" \
+    "$HAD_SYM" "false"
+  exit 0
+fi
+
 if [ -n "$BYPASS_REASON" ]; then
+  # Refuse the soft bypass if the pattern matches a real local symbol.
+  if [ -n "$LOCAL_HITS" ] && [ "$LOCAL_HITS" != "[]" ]; then
+    REASON="Soft bypass refused: \`${PATTERN}\` resolves to a symbol in this repo's SCIP index. Use \`legion sym def ${PATTERN} --repo ${REPO}\` (or \`sym refs\` / \`sym hover\`) instead. The \`# legion-bypass:\` sentinel exists for free-text searches; it cannot route around sym for symbol queries.
+
+\`legion sym def ${PATTERN} --repo ${REPO}\` returned:
+
+\`\`\`json
+${LOCAL_HITS}
+\`\`\`
+
+If you genuinely need ${BINARY} against a symbol-shaped pattern (counting call sites in files outside the SCIP index, comparing line-by-line content for a refactor diff), use the hard escape: \`LEGION_BYPASS_GREP_HARD=1 ${COMMAND}\`. The hard bypass writes a row to bypass.jsonl with \`bypass_class=hard\` so /telemetry summary can see how often it fires."
+    legion_prequery_emit_block "$REASON"
+    exit 0
+  fi
+  # Soft bypass allowed: pattern is free-text or has no local symbol hits.
   legion_prequery_record_bypass \
     "$REPO" "$SESSION_ID" "Bash" "$PATTERN" "$BYPASS_REASON" \
     "$HAD_SYM" "false"
@@ -100,15 +144,16 @@ fi
 # In an unindexed repo, the agent has no sym alternative, so we keep the
 # softer State 1 (inject + nudge) shape.
 if legion_indexed "$SESSION_ID" "$REPO"; then
+  # LOCAL_HITS was pre-computed above for the bypass refusal path; reuse
+  # the value here rather than calling the relevance gate twice.
   # Relevance gate (#458): cluster-wide sym hits in unrelated repos are
   # not a useful redirect for a grep targeting THIS repo. Common
   # dictionary words like `name`, `data`, `value`, `type`, `id` are
   # symbol-shaped and exist as identifiers in every codebase, but a
   # grep on the operator's TOML config in legion's repo should not be
-  # blocked because huttspawn has a variable named `name`. Filter
-  # cluster-wide hits down to hits IN THIS REPO before deciding.
-  LOCAL_HITS=$(legion_prequery_filter_hits_local "$HITS" "$REPO")
-  if [ "$LOCAL_HITS" = "[]" ]; then
+  # blocked because huttspawn has a variable named `name`. The
+  # pre-computed LOCAL_HITS reflects that filter.
+  if [ -z "$LOCAL_HITS" ] || [ "$LOCAL_HITS" = "[]" ]; then
     # No relevant hits in this repo's index. Fall through to inject
     # below -- the cluster-wide hits may still be useful context but
     # don't justify blocking.
@@ -122,11 +167,11 @@ if legion_indexed "$SESSION_ID" "$REPO"; then
 ${LOCAL_HITS}
 \`\`\`
 
-If you genuinely need ${BINARY} (e.g. searching for a literal that is not a symbol in this repo, or comparing line numbers across files), retry with one of:
-- \`LEGION_BYPASS_GREP=1 ${COMMAND}\`
-- \`${COMMAND} # legion-bypass: <one-line reason>\`
+The soft bypass (\`# legion-bypass: <reason>\` or LEGION_BYPASS_GREP=1) is REFUSED for symbol-shaped patterns that resolve in this repo's SCIP index -- the sentinel exists for free-text searches, not for symbol queries dressed up as text. If you genuinely need ${BINARY} against this symbol-shaped pattern (counting call sites in files outside the SCIP index, comparing line-by-line content for a refactor diff), use the hard escape:
 
-Either path allows and writes one row to bypass.jsonl so we can see where sym is under-serving."
+\`LEGION_BYPASS_GREP_HARD=1 ${COMMAND}\`
+
+The hard bypass writes a row to bypass.jsonl with \`bypass_class=hard\` so /telemetry summary can see how often sym is under-serving."
     legion_prequery_emit_block "$REASON"
     exit 0
   fi
