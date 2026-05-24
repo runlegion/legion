@@ -801,24 +801,85 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
     prompt
 }
 
-/// Spawn a `claude --print` session for the given repo.
+/// Selects which spawn implementation `spawn_agent` dispatches to.
 ///
-/// Returns the child process handle on success.
-pub fn spawn_agent(workdir: &str, prompt: &str) -> Result<Child> {
-    let child = std::process::Command::new("claude")
-        .args(["--print", "-p", prompt])
-        .current_dir(workdir)
-        .env("LEGION_AUTO_WAKE", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+/// `Print` is the current `claude --print -p <prompt>` path. `Pty` is the
+/// in-progress migration to a PTY-spawned interactive REPL (see #495);
+/// the branch is stubbed at this stage so subsequent issues can fill it
+/// in without risking the production path. Resolved once at watch
+/// startup from `WATCH_SPAWN_MODE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnMode {
+    Print,
+    Pty,
+}
 
-    match child {
-        Ok(c) => Ok(c),
-        Err(e) => {
-            eprintln!("[legion watch] failed to spawn agent: {}", e);
-            Err(LegionError::Io(e))
+impl SpawnMode {
+    /// Resolve from `WATCH_SPAWN_MODE`. Accepts `"print"` or `"pty"`
+    /// (case-insensitive). Empty / unset / any other value falls back to
+    /// `Print`, logging a warning on unknown values so a typo is visible.
+    pub fn from_env() -> Self {
+        match std::env::var("WATCH_SPAWN_MODE") {
+            Ok(raw) => Self::parse(&raw),
+            Err(_) => Self::Print,
         }
+    }
+
+    fn parse(raw: &str) -> Self {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Self::Print;
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "print" => Self::Print,
+            "pty" => Self::Pty,
+            other => {
+                eprintln!(
+                    "[legion watch] unknown WATCH_SPAWN_MODE={:?} -- falling back to print",
+                    other
+                );
+                Self::Print
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Print => "print",
+            Self::Pty => "pty",
+        }
+    }
+}
+
+/// Spawn a `claude` session for the given repo under the resolved mode.
+///
+/// `Print` runs `claude --print -p <prompt>` exactly as before. `Pty`
+/// is reserved for the PTY migration (#489) and currently returns
+/// `LegionError::NotImplemented` -- callers must surface the error and
+/// release any holds (the existing `poll_cycle` spawn-failure path does
+/// this already).
+pub fn spawn_agent(workdir: &str, prompt: &str, mode: SpawnMode) -> Result<Child> {
+    match mode {
+        SpawnMode::Print => {
+            let child = std::process::Command::new("claude")
+                .args(["--print", "-p", prompt])
+                .current_dir(workdir)
+                .env("LEGION_AUTO_WAKE", "1")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+
+            match child {
+                Ok(c) => Ok(c),
+                Err(e) => {
+                    eprintln!("[legion watch] failed to spawn agent: {}", e);
+                    Err(LegionError::Io(e))
+                }
+            }
+        }
+        SpawnMode::Pty => Err(LegionError::NotImplemented {
+            feature: "WATCH_SPAWN_MODE=pty".to_string(),
+        }),
     }
 }
 
@@ -1048,6 +1109,7 @@ pub fn resolve_host_id() -> String {
     sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_owned())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn poll_cycle(
     db: &Database,
     config: &WatchConfig,
@@ -1056,6 +1118,7 @@ pub fn poll_cycle(
     session_locks: Option<&SessionLockTracker>,
     lease_gate: Option<&PersonaLeaseGate<'_>>,
     since: Option<&str>,
+    spawn_mode: SpawnMode,
 ) -> Result<u32> {
     let mut spawned: u32 = 0;
 
@@ -1165,7 +1228,7 @@ pub fn poll_cycle(
             std::thread::sleep(Duration::from_secs(config.stagger_secs));
         }
 
-        match spawn_agent(&repo.workdir, &prompt) {
+        match spawn_agent(&repo.workdir, &prompt, spawn_mode) {
             Ok(child) => {
                 let child_pid = child.id();
                 // Mark ALL signals as handled for THIS repo (per-repo tracking).
@@ -1343,15 +1406,17 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let db_path: PathBuf = data_dir.join("legion.db");
 
     let config = load_config(&config_path)?;
+    let spawn_mode = SpawnMode::from_env();
 
     eprintln!(
         "[legion watch] config loaded: {} repo(s), poll every {}s, cooldown {}s, stagger {}s, \
-         health threshold {}%",
+         health threshold {}%, spawn_mode={}",
         config.repos.len(),
         config.poll_interval_secs,
         config.cooldown_secs,
         config.stagger_secs,
-        config.health_threshold_pct
+        config.health_threshold_pct,
+        spawn_mode.as_str(),
     );
 
     acquire_pid_lock(&lock_path)?;
@@ -1472,6 +1537,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
                     Some(&session_locks),
                     Some(&lease_gate),
                     Some(&lookback),
+                    spawn_mode,
                 ) {
                     Ok(n) if n > 0 => {
                         eprintln!("[legion watch] cycle complete: {} agent(s) spawned", n);
@@ -2061,6 +2127,7 @@ workdir = "/tmp"
             Some(&locks),
             None,
             None,
+            SpawnMode::Print,
         )
         .expect("poll");
         assert_eq!(
@@ -2111,6 +2178,7 @@ workdir = "/tmp"
             None,
             Some(&gate),
             None,
+            SpawnMode::Print,
         )
         .expect("poll");
         assert_eq!(
@@ -2148,8 +2216,17 @@ workdir = "/tmp"
         cooldown.record_wake("legion");
 
         let mut tracker = AgentTracker::new();
-        let spawned =
-            poll_cycle(&db, &config, &mut cooldown, &mut tracker, None, None, None).expect("poll");
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            None,
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll");
         assert_eq!(spawned, 0, "cooling repo should be skipped");
     }
 
@@ -3022,5 +3099,55 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         // A sample with both windows None should not be treated as panic.
         let s = rate_sample("s1", "this-host", "2026-05-23T10:00:00Z", None, None);
         assert!(!sample_crosses_threshold(&s, 99.0));
+    }
+
+    // -- SpawnMode (#485) ---------------------------------------------------
+
+    #[test]
+    fn spawn_mode_parse_print() {
+        assert_eq!(SpawnMode::parse("print"), SpawnMode::Print);
+        assert_eq!(SpawnMode::parse("PRINT"), SpawnMode::Print);
+        assert_eq!(SpawnMode::parse("  print  "), SpawnMode::Print);
+    }
+
+    #[test]
+    fn spawn_mode_parse_pty() {
+        assert_eq!(SpawnMode::parse("pty"), SpawnMode::Pty);
+        assert_eq!(SpawnMode::parse("PTY"), SpawnMode::Pty);
+    }
+
+    #[test]
+    fn spawn_mode_parse_unknown_falls_back_to_print() {
+        // Empty, whitespace, and unrecognized strings must default to
+        // Print so a typo cannot silently engage the PTY stub.
+        assert_eq!(SpawnMode::parse(""), SpawnMode::Print);
+        assert_eq!(SpawnMode::parse("   "), SpawnMode::Print);
+        assert_eq!(SpawnMode::parse("nope"), SpawnMode::Print);
+    }
+
+    #[test]
+    fn spawn_agent_pty_returns_not_implemented() {
+        // The Pty branch is stubbed at this stage of the arc. Subsequent
+        // issues fill it in; until then callers must surface the error.
+        // The workdir and prompt arguments are not used because dispatch
+        // checks the mode before touching the filesystem.
+        let err = spawn_agent("/nonexistent", "hi", SpawnMode::Pty)
+            .expect_err("Pty branch must error until #489 lands");
+        match err {
+            LegionError::NotImplemented { feature } => {
+                assert!(
+                    feature.contains("WATCH_SPAWN_MODE=pty"),
+                    "feature name should identify the unimplemented surface: {}",
+                    feature
+                );
+            }
+            other => panic!("expected NotImplemented, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_mode_as_str_matches_env_values() {
+        assert_eq!(SpawnMode::Print.as_str(), "print");
+        assert_eq!(SpawnMode::Pty.as_str(), "pty");
     }
 }
