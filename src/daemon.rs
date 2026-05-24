@@ -292,6 +292,8 @@ async fn run_watch_task(data_dir: &Path) {
             return;
         }
     };
+    let spawn_mode = watch::SpawnMode::from_env();
+    eprintln!("[legion daemon] watch spawn_mode={}", spawn_mode.as_str());
 
     // Acquire PID lock -- if another watcher is running, skip gracefully.
     if let Err(e) = watch::acquire_pid_lock(&lock_path) {
@@ -379,6 +381,7 @@ async fn run_watch_task(data_dir: &Path) {
                     Some(&session_locks),
                     Some(&lease_gate),
                     Some(&lookback),
+                    spawn_mode,
                 ) {
                     Ok(n) if n > 0 => {
                         eprintln!("[legion daemon] watch: {} agent(s) spawned", n);

@@ -712,5 +712,6 @@ All commands accept `-v` / `--verbose` to show informational messages on stderr.
 |----------|-------------|
 | `LEGION_DATA_DIR` | Override the default data directory |
 | `LEGION_AUTO_WAKE` | Set to `1` by the watch daemon when spawning agents |
+| `LEGION_SPAWN_SOURCE` | Set to `watch-pty` by the watch daemon on PTY-spawned wakes (#495). `plugin/hooks/stop.sh` early-exits when this is set so the two operator-session gates do not fire on every auto-wake. |
 | `LEGION_REPO` | Override repo name detection in the MCP channel |
 | `LEGION_PORT` | Override web dashboard port for the MCP channel (default: 3131) |

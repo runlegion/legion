@@ -108,6 +108,9 @@ pub enum LegionError {
 
     #[error("telemetry error: {0}")]
     Telemetry(String),
+
+    #[error("not implemented: {feature}")]
+    NotImplemented { feature: String },
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
