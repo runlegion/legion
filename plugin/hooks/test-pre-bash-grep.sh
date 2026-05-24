@@ -187,31 +187,53 @@ else
   PASS=$((PASS + 1)); echo "  PASS: cross-repo-only hits do not trigger block"
 fi
 
-echo "==> hook end-to-end: bypass via env -> allow + telemetry"
+echo "==> harder bypass (#495 follow-up): soft env bypass REFUSED for symbol with local hit"
 export LEGION_TEST_MARKER="$WORK/state/bypass-marker.log"
+rm -f "$LEGION_TEST_MARKER"
+# Symbol resolves to a local-repo SCIP hit, so LEGION_BYPASS_GREP=1
+# is refused. The hook emits a block decision pointing at sym and
+# names the hard escape; no telemetry row is written for the refusal.
 out=$(LEGION_BYPASS_GREP=1 echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"bypass-env-t"}' | LEGION_BYPASS_GREP=1 bash "$HOOK")
-assert_empty "env bypass exits 0 with no decision JSON" "$out"
+assert_contains "soft env bypass refused on local symbol" "$out" '"decision": "block"'
+assert_contains "refusal names hard escape" "$out" 'LEGION_BYPASS_GREP_HARD=1'
 if [ -f "$LEGION_TEST_MARKER" ] && grep -q "record-bypass" "$LEGION_TEST_MARKER"; then
-  PASS=$((PASS + 1)); echo "  PASS: env bypass writes telemetry row"
+  FAIL=$((FAIL + 1)); echo "  FAIL: refused soft bypass should NOT write telemetry row"
 else
-  FAIL=$((FAIL + 1)); echo "  FAIL: env bypass did not write telemetry row" >&2
+  PASS=$((PASS + 1)); echo "  PASS: refused soft bypass writes no telemetry row"
 fi
 unset LEGION_BYPASS_GREP
 
-echo "==> hook end-to-end: bypass via comment sentinel -> allow + telemetry"
+echo "==> harder bypass: soft sentinel bypass REFUSED for symbol with local hit"
 rm -f "$LEGION_TEST_MARKER"
 out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/ # legion-bypass: testing"},"session_id":"bypass-sentinel-t"}' | bash "$HOOK")
-assert_empty "sentinel bypass exits 0 with no decision JSON" "$out"
+assert_contains "soft sentinel bypass refused on local symbol" "$out" '"decision": "block"'
+assert_contains "refusal explains the sentinel is for free text" "$out" 'free-text searches'
+
+echo "==> harder bypass: soft bypass STILL allowed for non-symbol pattern"
+# commonword stub returns hits ONLY in unrelated repos; the local
+# relevance filter empties LOCAL_HITS, so the soft bypass goes
+# through. This is the cross-cutting legitimate case (free-text
+# search that happens to look symbol-shaped to the static regex).
+rm -f "$LEGION_TEST_MARKER"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r commonword src/ # legion-bypass: free-text counter"},"session_id":"bypass-allow-t"}' | bash "$HOOK")
+assert_empty "soft bypass on non-local symbol exits 0" "$out"
 if [ -f "$LEGION_TEST_MARKER" ] && grep -q "record-bypass" "$LEGION_TEST_MARKER"; then
-  PASS=$((PASS + 1)); echo "  PASS: sentinel bypass writes telemetry row"
-  if grep -q "testing" "$LEGION_TEST_MARKER"; then
-    PASS=$((PASS + 1)); echo "  PASS: bypass reason captured"
-  else
-    FAIL=$((FAIL + 1)); echo "  FAIL: bypass reason not captured in telemetry args" >&2
-  fi
+  PASS=$((PASS + 1)); echo "  PASS: soft bypass allowed for free-text / non-local pattern"
 else
-  FAIL=$((FAIL + 1)); echo "  FAIL: sentinel bypass did not write telemetry row" >&2
+  FAIL=$((FAIL + 1)); echo "  FAIL: soft bypass should still allow free-text patterns" >&2
 fi
+
+echo "==> harder bypass: hard escape (LEGION_BYPASS_GREP_HARD=1) ALWAYS allows"
+rm -f "$LEGION_TEST_MARKER"
+out=$(LEGION_BYPASS_GREP_HARD=1 echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"bypass-hard-t"}' | LEGION_BYPASS_GREP_HARD=1 bash "$HOOK")
+assert_empty "hard escape exits 0 with no decision JSON" "$out"
+if [ -f "$LEGION_TEST_MARKER" ] && grep -q "record-bypass" "$LEGION_TEST_MARKER" && grep -q "hard:" "$LEGION_TEST_MARKER"; then
+  PASS=$((PASS + 1)); echo "  PASS: hard escape writes telemetry row with bypass_class=hard prefix"
+else
+  FAIL=$((FAIL + 1)); echo "  FAIL: hard escape did not write expected telemetry row" >&2
+  [ -f "$LEGION_TEST_MARKER" ] && cat "$LEGION_TEST_MARKER" >&2
+fi
+unset LEGION_BYPASS_GREP_HARD
 
 echo "==> hook end-to-end: skip via LEGION_SKIP_PRE_BASH_GREP=1"
 out=$(LEGION_SKIP_PRE_BASH_GREP=1 echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"skip-t"}' | LEGION_SKIP_PRE_BASH_GREP=1 bash "$HOOK")
