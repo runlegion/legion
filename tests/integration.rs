@@ -2134,6 +2134,11 @@ fn kanban_create_and_list() {
         stdout.contains("[high]"),
         "expected priority, got: {stdout}"
     );
+    // born-Backlog: a newly created card lands in Backlog (AC #1 at the CLI boundary).
+    assert!(
+        stdout.contains("[backlog]"),
+        "expected backlog status on a freshly created card, got: {stdout}"
+    );
     // Labels are no longer shown inline -- they're stored but not displayed in list output
 }
 
@@ -2142,7 +2147,7 @@ fn kanban_work_picks_up_card() {
     let dir = tempfile::tempdir().unwrap();
 
     // Create two cards with different priorities
-    legion_cmd(dir.path())
+    let low = legion_cmd(dir.path())
         .args([
             "kanban",
             "create",
@@ -2157,7 +2162,8 @@ fn kanban_work_picks_up_card() {
         ])
         .output()
         .unwrap();
-    legion_cmd(dir.path())
+    let low_id = String::from_utf8_lossy(&low.stdout).trim().to_string();
+    let high = legion_cmd(dir.path())
         .args([
             "kanban",
             "create",
@@ -2172,6 +2178,15 @@ fn kanban_work_picks_up_card() {
         ])
         .output()
         .unwrap();
+    let high_id = String::from_utf8_lossy(&high.stdout).trim().to_string();
+
+    // born-Backlog: promote both to Pending before work can pick them up.
+    for id in [&low_id, &high_id] {
+        legion_cmd(dir.path())
+            .args(["kanban", "assign", "--id", id, "--to", "kelex"])
+            .output()
+            .unwrap();
+    }
 
     // Work should pick up the high priority card
     let out = legion_cmd(dir.path())
@@ -2216,7 +2231,7 @@ fn kanban_work_empty_queue() {
 fn kanban_work_peek_does_not_accept() {
     let dir = tempfile::tempdir().unwrap();
 
-    legion_cmd(dir.path())
+    let out = legion_cmd(dir.path())
         .args([
             "kanban",
             "create",
@@ -2229,6 +2244,12 @@ fn kanban_work_peek_does_not_accept() {
             "--priority",
             "med",
         ])
+        .output()
+        .unwrap();
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // born-Backlog: promote to Pending so work/peek can see it.
+    legion_cmd(dir.path())
+        .args(["kanban", "assign", "--id", &id, "--to", "kelex"])
         .output()
         .unwrap();
 
@@ -2274,6 +2295,12 @@ fn kanban_full_lifecycle() {
         .unwrap();
     assert!(out.status.success());
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    // born-Backlog: promote to Pending before accept.
+    legion_cmd(dir.path())
+        .args(["kanban", "assign", "--id", &id, "--to", "kelex"])
+        .output()
+        .unwrap();
 
     // Accept
     let out = legion_cmd(dir.path())
@@ -2327,6 +2354,12 @@ fn kanban_block_unblock() {
         .output()
         .unwrap();
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    // born-Backlog: promote to Pending before accept.
+    legion_cmd(dir.path())
+        .args(["kanban", "assign", "--id", &id, "--to", "kelex"])
+        .output()
+        .unwrap();
 
     legion_cmd(dir.path())
         .args(["kanban", "accept", "--id", &id])

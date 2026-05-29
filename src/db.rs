@@ -2616,10 +2616,12 @@ impl Database {
         source_url: Option<&str>,
         source_type: Option<&str>,
         created_at_override: Option<&str>,
+        status: crate::kanban::CardStatus,
     ) -> Result<String> {
         let id = uuid::Uuid::now_v7().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let created_at = created_at_override.unwrap_or(&now);
+        let status_str = status.to_string();
 
         let parsed = context.map(crate::card_parse::parse_issue_body);
         let problem = parsed.as_ref().and_then(|p| p.problem.as_deref());
@@ -2630,11 +2632,16 @@ impl Database {
             .filter(|a| !a.is_empty())
             .map(|a| a.join("\n"));
 
+        // NOTE: placeholder numbers are NOT sequential. `status` was added late and
+        // binds `?16` (the last param) in the 7th column slot to keep the original
+        // ?1..?15 mapping untouched. When adding a new column, append its param to the
+        // list and give it the next free number (?17, ...) in the correct column slot
+        // -- do not reuse ?16 or assume position == placeholder number.
         self.conn.execute(
             "INSERT INTO tasks (id, from_repo, to_repo, text, context, priority, status, \
              labels, parent_card_id, source_url, source_type, created_at, updated_at, \
              problem, solution, acceptance) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?16, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             rusqlite::params![
                 id,
                 from_repo,
@@ -2651,6 +2658,7 @@ impl Database {
                 problem,
                 solution,
                 acceptance,
+                status_str,
             ],
         )?;
         Ok(id)
@@ -6086,6 +6094,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::kanban::CardStatus::Backlog,
             )
             .unwrap();
         assert!(db.get_card_by_id(&id).unwrap().is_some());
@@ -6149,6 +6158,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::kanban::CardStatus::Backlog,
             )
             .unwrap();
         assert!(db.get_card_by_id(&id).unwrap().is_some());
@@ -6291,12 +6301,32 @@ mod tests {
         // Insert two cards.
         let id1 = db
             .insert_card(
-                "kelex", "legion", "task 1", None, "med", None, None, None, None, None,
+                "kelex",
+                "legion",
+                "task 1",
+                None,
+                "med",
+                None,
+                None,
+                None,
+                None,
+                None,
+                crate::kanban::CardStatus::Pending,
             )
             .unwrap();
         let _id2 = db
             .insert_card(
-                "kelex", "legion", "task 2", None, "high", None, None, None, None, None,
+                "kelex",
+                "legion",
+                "task 2",
+                None,
+                "high",
+                None,
+                None,
+                None,
+                None,
+                None,
+                crate::kanban::CardStatus::Pending,
             )
             .unwrap();
 
@@ -6331,6 +6361,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::kanban::CardStatus::Backlog,
             )
             .unwrap();
 
@@ -6446,6 +6477,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::kanban::CardStatus::Backlog,
             )
             .unwrap();
         db.soft_delete_card(&card_id).unwrap();
