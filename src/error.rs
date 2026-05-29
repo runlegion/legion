@@ -24,9 +24,6 @@ pub enum LegionError {
     #[error("one or more repos failed during compound reflect")]
     ReflectPartialFailure,
 
-    #[error("malformed settings.json: {0}")]
-    MalformedSettings(String),
-
     #[error("home directory not available")]
     NoHomeDir,
 
