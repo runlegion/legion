@@ -2134,6 +2134,11 @@ fn kanban_create_and_list() {
         stdout.contains("[high]"),
         "expected priority, got: {stdout}"
     );
+    // born-Backlog: a newly created card lands in Backlog (AC #1 at the CLI boundary).
+    assert!(
+        stdout.contains("[backlog]"),
+        "expected backlog status on a freshly created card, got: {stdout}"
+    );
     // Labels are no longer shown inline -- they're stored but not displayed in list output
 }
 

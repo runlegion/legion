@@ -891,6 +891,10 @@ pub fn sync_issues(
             "med"
         };
 
+        // born-Backlog: synced issues are created in Backlog via create_card's
+        // default. Do NOT introduce a status here -- promotion to Pending is an
+        // explicit Assign (operator consensus / planfile), never a side effect of
+        // import. Routing imports through create_card is what keeps AC #2 true.
         kanban::create_card(
             db,
             legion_repo,
