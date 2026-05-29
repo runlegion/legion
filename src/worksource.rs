@@ -862,6 +862,12 @@ pub fn sync_issues(
 
     let mut created = 0u64;
     for issue in &issues {
+        // Skip issues that already have a card. This skip is load-bearing for
+        // born-Backlog: an already-imported card may have been promoted past
+        // Backlog (Assign -> Pending -> ...) by operator consensus. Re-importing
+        // it -- or turning this skip into an upsert -- would silently reset that
+        // status back to Backlog and discard the consent. Do not change to an
+        // upsert without preserving the existing card's status.
         if issue.url.is_empty() || existing_urls.contains(&issue.url) {
             continue;
         }
