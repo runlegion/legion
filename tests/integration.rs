@@ -2120,8 +2120,10 @@ fn kanban_create_and_list() {
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert_eq!(id.len(), 36, "expected UUID, got: {id}");
 
+    // --all so the freshly created (Backlog) card is visible; bare list is the
+    // working set, which excludes Backlog (see kanban_list_scopes).
     let out = legion_cmd(dir.path())
-        .args(["kanban", "list", "--repo", "kelex"])
+        .args(["kanban", "list", "--repo", "kelex", "--all"])
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -2140,6 +2142,87 @@ fn kanban_create_and_list() {
         "expected backlog status on a freshly created card, got: {stdout}"
     );
     // Labels are no longer shown inline -- they're stored but not displayed in list output
+}
+
+#[test]
+fn kanban_list_scopes() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // A raw Backlog card (created, never promoted).
+    legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "raw inbox card",
+        ])
+        .output()
+        .unwrap();
+
+    // A second card promoted to Pending via assign.
+    let promoted = legion_cmd(dir.path())
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "sean",
+            "--to",
+            "kelex",
+            "--text",
+            "promoted card",
+        ])
+        .output()
+        .unwrap();
+    let promoted_id = String::from_utf8_lossy(&promoted.stdout).trim().to_string();
+    legion_cmd(dir.path())
+        .args(["kanban", "assign", "--id", &promoted_id, "--to", "kelex"])
+        .output()
+        .unwrap();
+
+    // Bare list = working set: shows the promoted card, hides the raw Backlog one.
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "list", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("promoted card"),
+        "working set should show the promoted card, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("raw inbox card"),
+        "working set must hide Backlog cards, got: {stdout}"
+    );
+
+    // --backlog = only the raw inbox.
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "list", "--repo", "kelex", "--backlog"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("raw inbox card"),
+        "--backlog should show the Backlog card, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("promoted card"),
+        "--backlog must hide non-Backlog cards, got: {stdout}"
+    );
+
+    // --all = everything regardless of status.
+    let out = legion_cmd(dir.path())
+        .args(["kanban", "list", "--repo", "kelex", "--all"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("raw inbox card") && stdout.contains("promoted card"),
+        "--all should show both cards, got: {stdout}"
+    );
 }
 
 #[test]
@@ -2452,7 +2535,7 @@ fn kanban_with_source_url() {
     assert_eq!(id.len(), 36);
 
     let out = legion_cmd(dir.path())
-        .args(["kanban", "list", "--repo", "kelex"])
+        .args(["kanban", "list", "--repo", "kelex", "--all"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -2795,7 +2878,7 @@ fn kanban_list_json_emits_jsonl() {
         .unwrap();
 
     let out = legion_cmd(dir.path())
-        .args(["kanban", "list", "--repo", "kelex", "--json"])
+        .args(["kanban", "list", "--repo", "kelex", "--all", "--json"])
         .output()
         .unwrap();
     assert!(
@@ -2848,7 +2931,7 @@ fn kanban_list_json_labels_are_array() {
         .unwrap();
 
     let out = legion_cmd(dir.path())
-        .args(["kanban", "list", "--repo", "kelex", "--json"])
+        .args(["kanban", "list", "--repo", "kelex", "--all", "--json"])
         .output()
         .unwrap();
     assert!(out.status.success());

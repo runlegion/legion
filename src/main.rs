@@ -1383,6 +1383,14 @@ enum KanbanAction {
         /// Emit JSONL (one summary object per line) instead of human-readable text
         #[arg(long)]
         json: bool,
+
+        /// Show all cards, including Backlog and terminal (Done/Cancelled)
+        #[arg(long, conflicts_with = "backlog")]
+        all: bool,
+
+        /// Show only the raw Backlog (the unconsented inbox)
+        #[arg(long)]
+        backlog: bool,
     },
 
     /// Accept a pending card (move to in-progress)
@@ -4828,13 +4836,27 @@ fn run() -> error::Result<()> {
                         outcome: "success",
                     });
                 }
-                KanbanAction::List { repo, from, json } => {
+                KanbanAction::List {
+                    repo,
+                    from,
+                    json,
+                    all,
+                    backlog,
+                } => {
                     let direction = if from {
                         kanban::Direction::Outbound
                     } else {
                         kanban::Direction::Inbound
                     };
-                    let cards = kanban::list_cards(&database, &repo, direction)?;
+                    // Default to the working set; --all and --backlog widen/redirect.
+                    let scope = if all {
+                        kanban::CardScope::All
+                    } else if backlog {
+                        kanban::CardScope::Backlog
+                    } else {
+                        kanban::CardScope::WorkingSet
+                    };
+                    let cards = kanban::list_cards(&database, &repo, direction, scope)?;
                     if json {
                         let output = kanban::format_card_list_json(&cards)?;
                         print!("{output}");

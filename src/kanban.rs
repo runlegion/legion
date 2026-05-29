@@ -197,6 +197,19 @@ pub enum Direction {
     Outbound,
 }
 
+/// Which slice of the board to return when listing cards.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CardScope {
+    /// Active work only: Pending, Accepted, NeedsInput, InReview, Blocked.
+    /// Excludes Backlog (pre-consensus) and terminal (Done, Cancelled). This is
+    /// the default for `kanban list` and the SessionStart "Current work" banner.
+    WorkingSet,
+    /// The raw, unconsented inbox: Backlog cards only.
+    Backlog,
+    /// Everything non-deleted, regardless of status.
+    All,
+}
+
 /// Get the next pending card for a repo (the scheduler).
 ///
 /// Selects the highest-priority unblocked card assigned to the repo
@@ -286,8 +299,13 @@ pub fn create_card(
 }
 
 /// List cards for a repo filtered by direction.
-pub fn list_cards(db: &Database, repo: &str, direction: Direction) -> Result<Vec<Card>> {
-    db.get_cards(repo, direction)
+pub fn list_cards(
+    db: &Database,
+    repo: &str,
+    direction: Direction,
+    scope: CardScope,
+) -> Result<Vec<Card>> {
+    db.get_cards(repo, direction, scope)
 }
 
 /// Get all cards for the kanban board view.
@@ -855,7 +873,7 @@ mod tests {
         .expect("create");
         assert_eq!(id.len(), 36);
 
-        let cards = list_cards(&db, "legion", Direction::Inbound).expect("list");
+        let cards = list_cards(&db, "legion", Direction::Inbound, CardScope::All).expect("list");
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].text, "implement search");
         // born-Backlog: a freshly created card lands in Backlog, not Pending.
@@ -894,6 +912,58 @@ mod tests {
             peek_work(&db, "kelex").expect("peek").is_some(),
             "an assigned (Pending) card is ready work"
         );
+    }
+
+    #[test]
+    fn list_cards_scopes_filter_by_status() {
+        let (db, _index, _dir) = test_storage();
+
+        // One card per relevant status. create_card yields Backlog; promote/transition
+        // the rest. WorkingSet = Pending + Accepted here; Backlog and terminal excluded.
+        let backlog_id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "raw inbox",
+            None,
+            "med",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create backlog");
+        create_and_assign(&db, "sean", "kelex", "ready", "med"); // -> Pending
+        let accepted = create_and_assign(&db, "sean", "kelex", "in progress", "med");
+        transition_card(&db, &accepted, Action::Accept, None).expect("accept");
+        let done = create_and_assign(&db, "sean", "kelex", "shipped", "med");
+        transition_card(&db, &done, Action::Accept, None).expect("accept");
+        transition_card(&db, &done, Action::Done, None).expect("done");
+        let cancelled = create_card(
+            &db, "sean", "kelex", "scrapped", None, "med", None, None, None, None, None,
+        )
+        .expect("create cancelled");
+        transition_card(&db, &cancelled, Action::Cancel, None).expect("cancel");
+
+        // WorkingSet: only Pending + Accepted (Backlog, Done, Cancelled excluded).
+        let ws = list_cards(&db, "kelex", Direction::Inbound, CardScope::WorkingSet).expect("ws");
+        assert_eq!(ws.len(), 2, "working set should be Pending + Accepted only");
+        assert!(
+            ws.iter()
+                .all(|c| matches!(c.status, CardStatus::Pending | CardStatus::Accepted)),
+            "working set must exclude Backlog/Done/Cancelled"
+        );
+
+        // Backlog scope: only the raw inbox card.
+        let bl = list_cards(&db, "kelex", Direction::Inbound, CardScope::Backlog).expect("bl");
+        assert_eq!(bl.len(), 1);
+        assert_eq!(bl[0].id, backlog_id);
+        assert_eq!(bl[0].status, CardStatus::Backlog);
+
+        // All: every non-deleted card regardless of status.
+        let all = list_cards(&db, "kelex", Direction::Inbound, CardScope::All).expect("all");
+        assert_eq!(all.len(), 5, "All should return every non-deleted card");
     }
 
     #[test]
@@ -1083,7 +1153,7 @@ mod tests {
         )
         .expect("create");
 
-        let cards = list_cards(&db, "legion", Direction::Inbound).expect("list");
+        let cards = list_cards(&db, "legion", Direction::Inbound, CardScope::All).expect("list");
         let output = format_card_list(&cards, "legion", Direction::Inbound);
         assert!(output.contains("[Legion] Cards for legion"));
         assert!(output.contains("test card"));
@@ -1779,7 +1849,7 @@ mod tests {
         )
         .expect("create 2");
 
-        let cards = list_cards(&db, "kelex", Direction::Inbound).expect("list");
+        let cards = list_cards(&db, "kelex", Direction::Inbound, CardScope::All).expect("list");
         let output = format_card_list_json(&cards).expect("json");
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 2, "two lines for two cards");
@@ -1821,7 +1891,7 @@ mod tests {
         )
         .expect("create");
 
-        let cards = list_cards(&db, "kelex", Direction::Inbound).expect("list");
+        let cards = list_cards(&db, "kelex", Direction::Inbound, CardScope::All).expect("list");
         let output = format_card_list_json(&cards).expect("json");
         let line = output.lines().next().expect("has output");
         let parsed: serde_json::Value = serde_json::from_str(line).expect("parse");
