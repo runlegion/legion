@@ -2632,6 +2632,11 @@ impl Database {
             .filter(|a| !a.is_empty())
             .map(|a| a.join("\n"));
 
+        // NOTE: placeholder numbers are NOT sequential. `status` was added late and
+        // binds `?16` (the last param) in the 7th column slot to keep the original
+        // ?1..?15 mapping untouched. When adding a new column, append its param to the
+        // list and give it the next free number (?17, ...) in the correct column slot
+        // -- do not reuse ?16 or assume position == placeholder number.
         self.conn.execute(
             "INSERT INTO tasks (id, from_repo, to_repo, text, context, priority, status, \
              labels, parent_card_id, source_url, source_type, created_at, updated_at, \
