@@ -268,6 +268,8 @@ pub fn create_card(
     source_type: Option<&str>,
     created_at: Option<&str>,
 ) -> Result<String> {
+    // born-Backlog: every card is created in Backlog. Promotion to Pending is an
+    // explicit transition (Action::Assign), never a side effect of creation.
     db.insert_card(
         from_repo,
         to_repo,
@@ -279,6 +281,7 @@ pub fn create_card(
         source_url,
         source_type,
         created_at,
+        CardStatus::Backlog,
     )
 }
 
@@ -815,6 +818,23 @@ mod tests {
 
     // --- DB integration tests ---
 
+    /// Create a card and Assign it to Pending -- the real born-Backlog -> consented
+    /// flow. Returns the card id. Flow tests start from a ready (Pending) card.
+    fn create_and_assign(
+        db: &Database,
+        from: &str,
+        to: &str,
+        text: &str,
+        priority: &str,
+    ) -> String {
+        let id = create_card(
+            db, from, to, text, None, priority, None, None, None, None, None,
+        )
+        .expect("create");
+        transition_card(db, &id, Action::Assign, None).expect("assign");
+        id
+    }
+
     #[test]
     fn create_and_list_cards() {
         let (db, _index, _dir) = test_storage();
@@ -838,7 +858,8 @@ mod tests {
         let cards = list_cards(&db, "legion", Direction::Inbound).expect("list");
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].text, "implement search");
-        assert_eq!(cards[0].status, CardStatus::Pending);
+        // born-Backlog: a freshly created card lands in Backlog, not Pending.
+        assert_eq!(cards[0].status, CardStatus::Backlog);
     }
 
     #[test]
@@ -875,20 +896,7 @@ mod tests {
     fn full_lifecycle() {
         let (db, _index, _dir) = test_storage();
 
-        let id = create_card(
-            &db,
-            "kelex",
-            "legion",
-            "do the thing",
-            None,
-            "med",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("create");
+        let id = create_and_assign(&db, "kelex", "legion", "do the thing", "med");
 
         let card = transition_card(&db, &id, Action::Accept, None).expect("accept");
         assert_eq!(card.status, CardStatus::Accepted);
@@ -904,20 +912,7 @@ mod tests {
     fn block_unblock_flow() {
         let (db, _index, _dir) = test_storage();
 
-        let id = create_card(
-            &db,
-            "kelex",
-            "legion",
-            "blocked task",
-            None,
-            "med",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("create");
+        let id = create_and_assign(&db, "kelex", "legion", "blocked task", "med");
 
         transition_card(&db, &id, Action::Accept, None).expect("accept");
         let card =
@@ -932,48 +927,9 @@ mod tests {
     fn next_work_picks_highest_priority() {
         let (db, _index, _dir) = test_storage();
 
-        create_card(
-            &db,
-            "sean",
-            "kelex",
-            "low priority",
-            None,
-            "low",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("create low");
-        create_card(
-            &db,
-            "sean",
-            "kelex",
-            "high priority",
-            None,
-            "high",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("create high");
-        create_card(
-            &db,
-            "sean",
-            "kelex",
-            "med priority",
-            None,
-            "med",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("create med");
+        create_and_assign(&db, "sean", "kelex", "low priority", "low");
+        create_and_assign(&db, "sean", "kelex", "high priority", "high");
+        create_and_assign(&db, "sean", "kelex", "med priority", "med");
 
         let card = next_work(&db, "kelex").expect("work").expect("has work");
         assert_eq!(card.text, "high priority");
@@ -991,20 +947,7 @@ mod tests {
     fn peek_does_not_accept() {
         let (db, _index, _dir) = test_storage();
 
-        create_card(
-            &db,
-            "sean",
-            "kelex",
-            "peek test",
-            None,
-            "med",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("create");
+        create_and_assign(&db, "sean", "kelex", "peek test", "med");
 
         let card = peek_work(&db, "kelex").expect("peek").expect("has work");
         assert_eq!(card.status, CardStatus::Pending);
@@ -1150,18 +1093,9 @@ mod tests {
     fn agent_workloads_summary() {
         let (db, _index, _dir) = test_storage();
 
-        create_card(
-            &db, "sean", "kelex", "task 1", None, "med", None, None, None, None, None,
-        )
-        .expect("create");
-        create_card(
-            &db, "sean", "kelex", "task 2", None, "high", None, None, None, None, None,
-        )
-        .expect("create");
-        create_card(
-            &db, "sean", "rafters", "task 3", None, "med", None, None, None, None, None,
-        )
-        .expect("create");
+        create_and_assign(&db, "sean", "kelex", "task 1", "med");
+        create_and_assign(&db, "sean", "kelex", "task 2", "high");
+        create_and_assign(&db, "sean", "rafters", "task 3", "med");
 
         let workloads = agent_workloads(&db).expect("workloads");
         assert!(workloads.len() >= 2);
@@ -1203,20 +1137,7 @@ mod tests {
     #[test]
     fn cancel_sets_completed_at() {
         let (db, _index, _dir) = test_storage();
-        let id = create_card(
-            &db,
-            "sean",
-            "kelex",
-            "cancel test",
-            None,
-            "med",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("create");
+        let id = create_and_assign(&db, "sean", "kelex", "cancel test", "med");
         transition_card(&db, &id, Action::Accept, None).expect("accept");
         let card = transition_card(&db, &id, Action::Cancel, None).expect("cancel");
         assert_eq!(card.status, CardStatus::Cancelled);
@@ -1229,20 +1150,7 @@ mod tests {
     #[test]
     fn block_unblock_does_not_clobber_started_at() {
         let (db, _index, _dir) = test_storage();
-        let id = create_card(
-            &db,
-            "sean",
-            "kelex",
-            "block test",
-            None,
-            "med",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("create");
+        let id = create_and_assign(&db, "sean", "kelex", "block test", "med");
         let card = transition_card(&db, &id, Action::Accept, None).expect("accept");
         let started = card.started_at.clone();
         assert!(started.is_some());
@@ -1283,7 +1191,7 @@ mod tests {
         let (db, _index, _dir) = test_storage();
 
         // Create a "new" issue first (inserted first, but newer date)
-        create_card(
+        let new_id = create_card(
             &db,
             "sean",
             "kelex",
@@ -1297,9 +1205,10 @@ mod tests {
             Some("2026-04-07T00:00:00Z"),
         )
         .expect("create new");
+        transition_card(&db, &new_id, Action::Assign, None).expect("assign new");
 
         // Create an "old" issue second (inserted second, but older date)
-        create_card(
+        let old_id = create_card(
             &db,
             "sean",
             "kelex",
@@ -1313,6 +1222,7 @@ mod tests {
             Some("2026-04-03T00:00:00Z"),
         )
         .expect("create old");
+        transition_card(&db, &old_id, Action::Assign, None).expect("assign old");
 
         // Scheduler should pick the older issue first
         let card = peek_work(&db, "kelex").expect("peek").expect("has work");
@@ -1324,7 +1234,7 @@ mod tests {
         let (db, _index, _dir) = test_storage();
 
         // Manual card created now (no override, gets Utc::now())
-        create_card(
+        let manual_id = create_card(
             &db,
             "sean",
             "kelex",
@@ -1338,9 +1248,10 @@ mod tests {
             None,
         )
         .expect("create manual");
+        transition_card(&db, &manual_id, Action::Assign, None).expect("assign manual");
 
         // Synced card with an older GitHub creation date
-        create_card(
+        let synced_id = create_card(
             &db,
             "sean",
             "kelex",
@@ -1354,6 +1265,7 @@ mod tests {
             Some("2026-03-01T00:00:00Z"),
         )
         .expect("create synced");
+        transition_card(&db, &synced_id, Action::Assign, None).expect("assign synced");
 
         // Synced card's older date should win over manual card's recent date
         let card = peek_work(&db, "kelex").expect("peek").expect("has work");
