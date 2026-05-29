@@ -863,6 +863,40 @@ mod tests {
     }
 
     #[test]
+    fn backlog_card_is_not_worked_until_assigned() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "unconsented",
+            None,
+            "high",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+
+        // The born-Backlog safety property: an unconsented (Backlog) card must NOT
+        // be handed to the agent as ready work. pick/peek filter on status=pending.
+        assert!(
+            peek_work(&db, "kelex").expect("peek").is_none(),
+            "a Backlog card must not be picked up as ready work"
+        );
+
+        // An explicit Assign (operator consensus / planfile) promotes it to ready.
+        transition_card(&db, &id, Action::Assign, None).expect("assign");
+        assert!(
+            peek_work(&db, "kelex").expect("peek").is_some(),
+            "an assigned (Pending) card is ready work"
+        );
+    }
+
+    #[test]
     fn create_with_all_fields() {
         let (db, _index, _dir) = test_storage();
 
