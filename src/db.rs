@@ -2683,19 +2683,32 @@ impl Database {
         &self,
         repo: &str,
         direction: crate::kanban::Direction,
+        scope: crate::kanban::CardScope,
     ) -> Result<Vec<crate::kanban::Card>> {
+        // Status predicate for the requested slice of the board. WorkingSet is the
+        // default consumer view (active work); Backlog is the raw inbox; All keeps
+        // every non-deleted row. Status literals match CardStatus::Display.
+        let status_filter = match scope {
+            crate::kanban::CardScope::WorkingSet => {
+                " AND status NOT IN ('backlog', 'done', 'cancelled')"
+            }
+            crate::kanban::CardScope::Backlog => " AND status = 'backlog'",
+            crate::kanban::CardScope::All => "",
+        };
         let sql = match direction {
             crate::kanban::Direction::Inbound => {
                 format!(
-                    "SELECT {} FROM tasks WHERE to_repo = ?1 AND deleted_at IS NULL ORDER BY {}, sort_order ASC, created_at DESC",
+                    "SELECT {} FROM tasks WHERE to_repo = ?1 AND deleted_at IS NULL{} ORDER BY {}, sort_order ASC, created_at DESC",
                     Self::CARD_COLUMNS,
+                    status_filter,
                     Self::PRIORITY_ORDER
                 )
             }
             crate::kanban::Direction::Outbound => {
                 format!(
-                    "SELECT {} FROM tasks WHERE from_repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
-                    Self::CARD_COLUMNS
+                    "SELECT {} FROM tasks WHERE from_repo = ?1 AND deleted_at IS NULL{} ORDER BY created_at DESC",
+                    Self::CARD_COLUMNS,
+                    status_filter
                 )
             }
         };
