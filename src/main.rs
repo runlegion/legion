@@ -15,6 +15,7 @@ mod mcp;
 mod mesh;
 mod now;
 mod pr_view;
+mod pr_write;
 mod pty;
 mod recall;
 mod reflect;
@@ -1840,6 +1841,26 @@ enum PrAction {
         json: bool,
     },
 
+    /// Validate a drafted PR body against an issue's acceptance criteria
+    /// (#519 PR-write forcing function). Reads the body from --body-file (or
+    /// stdin), loads the issue's acceptance criteria, and refuses an empty or
+    /// boilerplate criterion-to-work mapping. On success it records a clean
+    /// `legion-pr-write` quality gate for HEAD so `legion pr create` can gate
+    /// on it; on failure it records issues and exits non-zero with the gaps.
+    WriteCheck {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// Issue number whose acceptance criteria the body must map.
+        #[arg(long)]
+        issue: u64,
+
+        /// Path to the drafted PR body (markdown). Reads stdin when omitted.
+        #[arg(long)]
+        body_file: Option<String>,
+    },
+
     /// List comments on a pull request (top-level + inline review comments)
     /// in chronological order.
     Comments {
@@ -2622,6 +2643,37 @@ fn resolve_stale_cutoff() -> std::time::Duration {
 fn round_f64(v: f64, digits: i32) -> f64 {
     let factor = 10f64.powi(digits);
     (v * factor).round() / factor
+}
+
+/// Read the current HEAD commit hash and branch name. Errors if `git
+/// rev-parse HEAD` fails (not a git repo / no commits); the branch falls back
+/// to "unknown" when its lookup fails, since a detached HEAD still has a valid
+/// commit to key a quality gate on. Shared by the quality-gate recorder and
+/// the `pr create` / `pr write-check` gate checks.
+fn git_head_commit_and_branch() -> Result<(String, String), error::LegionError> {
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| error::LegionError::WorkSource(format!("failed to read git HEAD: {e}")))?;
+    if !head.status.success() {
+        return Err(error::LegionError::WorkSource(
+            "git rev-parse HEAD failed -- is this a git repo?".to_owned(),
+        ));
+    }
+    let commit_hash = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+
+    let branch_out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .map_err(|e| error::LegionError::WorkSource(format!("failed to read git branch: {e}")))?;
+    let branch = if branch_out.status.success() {
+        String::from_utf8_lossy(&branch_out.stdout)
+            .trim()
+            .to_owned()
+    } else {
+        "unknown".to_owned()
+    };
+    Ok((commit_hash, branch))
 }
 
 fn fmt_pct(v: Option<f64>) -> String {
@@ -5705,12 +5757,12 @@ fn run() -> error::Result<()> {
                 task,
                 skip_gates,
             } => {
-                // Quality gate: verify legion-simplify ran clean on HEAD before
-                // calling the work source. This runs before worksource::resolve_config
-                // so the gate error is always surfaced, even if the worksource is not
-                // configured. --skip-gates is a bootstrap escape hatch for the branch
-                // that ships the skill itself; it writes an audit entry so it cannot
-                // be done silently.
+                // Quality gates: verify legion-simplify AND legion-pr-write ran
+                // clean on HEAD before calling the work source. This runs before
+                // worksource::resolve_config so the gate error is always surfaced,
+                // even if the worksource is not configured. --skip-gates is a
+                // bootstrap escape hatch for the branch that ships the skills
+                // themselves; it writes an audit entry so it cannot be done silently.
                 if skip_gates {
                     audit(&db::AuditInput {
                         agent: &repo,
@@ -5719,46 +5771,46 @@ fn run() -> error::Result<()> {
                         target_ref: "pending",
                         task_id: task.as_deref(),
                         source_type: "unknown",
-                        details: Some(r#"{"skill":"legion-simplify","reason":"bootstrap"}"#),
+                        details: Some(
+                            r#"{"skills":["legion-simplify","legion-pr-write"],"reason":"bootstrap"}"#,
+                        ),
                         outcome: "skipped",
                     });
                     eprintln!("[legion] warning: quality gate skipped (--skip-gates bootstrap)");
                 } else {
-                    let head_hash = std::process::Command::new("git")
-                        .args(["rev-parse", "HEAD"])
-                        .output()
-                        .map_err(|e| {
-                            error::LegionError::WorkSource(format!("failed to read git HEAD: {e}"))
-                        })?;
-                    if !head_hash.status.success() {
-                        return Err(error::LegionError::WorkSource(
-                            "git rev-parse HEAD failed -- is this a git repo?".to_owned(),
-                        ));
-                    }
-                    let commit_hash: String =
-                        String::from_utf8_lossy(&head_hash.stdout).trim().to_owned();
+                    let (commit_hash, _branch) = git_head_commit_and_branch()?;
                     let short_hash: &str = &commit_hash[..commit_hash.len().min(8)];
 
                     let db_base = data_dir()?;
                     let gate_db = db::Database::open(&db_base.join("legion.db"))?;
-                    match gate_db.get_quality_gate(&commit_hash, "legion-simplify")? {
-                        None => {
-                            eprintln!(
-                                "[legion] error: no clean legion-simplify gate on HEAD ({short_hash}). \
-                                 Run /legion-simplify before creating the PR."
-                            );
-                            std::process::exit(1);
-                        }
-                        Some(gate) if gate.result != "clean" => {
-                            eprintln!(
-                                "[legion] error: legion-simplify recorded issues on HEAD ({short_hash}), \
-                                 {} findings. Fix them and re-run the skill before creating the PR.",
-                                gate.findings_count
-                            );
-                            std::process::exit(1);
-                        }
-                        Some(_) => {
-                            // Gate is clean -- proceed.
+                    // Both forcing-function gates must be clean on HEAD before the
+                    // PR opens: simplify (structural quality) and pr-write (the
+                    // articulated criterion-to-work mapping the verify gate later
+                    // audits). Each is recorded by its own skill on the current
+                    // commit, so a post-gate commit invalidates them (re-run).
+                    for (skill, run_hint) in [
+                        ("legion-simplify", "/legion-simplify"),
+                        ("legion-pr-write", "/legion-pr-write"),
+                    ] {
+                        match gate_db.get_quality_gate(&commit_hash, skill)? {
+                            None => {
+                                eprintln!(
+                                    "[legion] error: no clean {skill} gate on HEAD ({short_hash}). \
+                                     Run {run_hint} before creating the PR."
+                                );
+                                std::process::exit(1);
+                            }
+                            Some(gate) if gate.result != "clean" => {
+                                eprintln!(
+                                    "[legion] error: {skill} recorded issues on HEAD ({short_hash}), \
+                                     {} findings. Fix them and re-run the skill before creating the PR.",
+                                    gate.findings_count
+                                );
+                                std::process::exit(1);
+                            }
+                            Some(_) => {
+                                // Gate is clean -- continue to the next.
+                            }
                         }
                     }
                 }
@@ -5969,6 +6021,89 @@ fn run() -> error::Result<()> {
                     );
                 } else {
                     pr_view::render_pr(&pr);
+                }
+            }
+            PrAction::WriteCheck {
+                repo,
+                issue,
+                body_file,
+            } => {
+                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
+                    .ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "no work source configured for repo '{}' in watch.toml",
+                            repo
+                        ))
+                    })?;
+
+                // Load the issue's acceptance criteria -- the claim set the body
+                // must map. Parsed from the same template card_parse reads for
+                // `issue view`, so the criteria match what the agent saw.
+                let ext = worksource::view_issue(&plugin_name, &source_repo, issue)?;
+                let parsed = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or(""));
+
+                // Read the drafted body from --body-file, or stdin when omitted.
+                let body = match body_file {
+                    Some(path) => std::fs::read_to_string(&path).map_err(|e| {
+                        error::LegionError::WorkSource(format!(
+                            "failed to read --body-file {path}: {e}"
+                        ))
+                    })?,
+                    None => {
+                        use std::io::Read as _;
+                        let mut buf = String::new();
+                        std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                            error::LegionError::WorkSource(format!("failed to read stdin: {e}"))
+                        })?;
+                        buf
+                    }
+                };
+
+                let report = pr_write::validate_pr_body(&parsed.acceptance, &body);
+
+                // Record the gate on HEAD so `legion pr create` can gate on it,
+                // exactly as it does for legion-simplify.
+                let (commit_hash, branch) = git_head_commit_and_branch()?;
+                let result = if report.ok { "clean" } else { "issues" };
+                let details = serde_json::json!({
+                    "skill": "legion-pr-write",
+                    "issue": issue,
+                    "mapping_entries": report.mapping_entries,
+                    "findings": report.findings,
+                })
+                .to_string();
+
+                let base = data_dir()?;
+                let database = db::Database::open(&base.join("legion.db"))?;
+                database.record_quality_gate(
+                    &branch,
+                    &commit_hash,
+                    "legion-pr-write",
+                    result,
+                    report.findings.len() as u64,
+                    Some(&details),
+                )?;
+
+                if report.ok {
+                    println!(
+                        "[legion] pr-write gate clean for issue #{issue} ({} mapping entries). \
+                         Open the PR with this body.",
+                        report.mapping_entries
+                    );
+                } else {
+                    eprintln!(
+                        "[legion] pr-write gate FAILED for issue #{issue} -- {} gap(s):",
+                        report.findings.len()
+                    );
+                    for f in &report.findings {
+                        eprintln!("  - {f}");
+                    }
+                    eprintln!(
+                        "\nThe mapping must be composed prose -- one entry per acceptance \
+                         criterion, each citing evidence (a test, a file:line, an observable \
+                         behavior) -- plus a 'Not done' section. Fix the body and re-run."
+                    );
+                    std::process::exit(1);
                 }
             }
             PrAction::Comments { repo, number, json } => {
@@ -6471,34 +6606,7 @@ fn run() -> error::Result<()> {
                 findings_count,
                 details_json,
             } => {
-                let head_output = std::process::Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .output()
-                    .map_err(|e| {
-                        error::LegionError::WorkSource(format!("failed to read git HEAD: {e}"))
-                    })?;
-                if !head_output.status.success() {
-                    return Err(error::LegionError::WorkSource(
-                        "git rev-parse HEAD failed -- is this a git repo?".to_owned(),
-                    ));
-                }
-                let commit_hash: String = String::from_utf8_lossy(&head_output.stdout)
-                    .trim()
-                    .to_owned();
-
-                let branch_output = std::process::Command::new("git")
-                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                    .output()
-                    .map_err(|e| {
-                        error::LegionError::WorkSource(format!("failed to read git branch: {e}"))
-                    })?;
-                let branch: String = if branch_output.status.success() {
-                    String::from_utf8_lossy(&branch_output.stdout)
-                        .trim()
-                        .to_owned()
-                } else {
-                    "unknown".to_owned()
-                };
+                let (commit_hash, branch) = git_head_commit_and_branch()?;
 
                 let base = data_dir()?;
                 let database = db::Database::open(&base.join("legion.db"))?;
