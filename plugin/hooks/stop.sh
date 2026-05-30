@@ -101,6 +101,16 @@ fi
 # substrate), NOT the ephemeral per-session TaskList log. Gate on Accepted
 # only: Pending is the unconsented backlog (gating on it would never let the
 # agent stop), and a declared blocker moves a card to Blocked, excluded here.
+#
+# Repo-scoped, not session-scoped: this blocks on ANY Accepted card for $REPO,
+# not just this session's. Correct under legion's one-agent-per-repo board
+# model; revisit if multiple agents ever share a repo board.
+#
+# Fail-open by design: the legion call and jq both redirect 2>/dev/null, so if
+# the binary errors (DB lock, migration, panic) or jq is missing, ACCEPTED is
+# empty and the Stop is ALLOWED. A hook that governs stopping must never trap
+# the agent on an infra hiccup -- LEGION_SKIP_STOP_BLOCK is the deliberate
+# escape, but failing open is the safe direction when the check itself breaks.
 
 if command -v jq >/dev/null 2>&1 && [ -x "$LEGION_BIN" ]; then
   ACCEPTED=$("$LEGION_BIN" kanban list --repo "$REPO" --json 2>/dev/null \
