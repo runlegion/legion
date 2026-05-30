@@ -6141,3 +6141,170 @@ fn parse_allowed_tools_handles_inline_and_block_forms() {
     // Absent key.
     assert_eq!(parse_allowed_tools("---\nname: x\n---\n"), None);
 }
+
+// #520 verify gate, end-to-end at the CLI boundary: a card with acceptance
+// criteria cannot reach Done until `legion verify` records a clean verdict.
+#[test]
+fn verify_gate_blocks_done_until_clean_then_allows() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    // Create a card carrying two acceptance criteria (parsed from --context).
+    let create = legion_cmd(data)
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "kelex",
+            "--to",
+            "kelex",
+            "--text",
+            "ship the thing",
+            "--context",
+            "## Acceptance criteria\n- crit one\n- crit two\n",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let card = String::from_utf8_lossy(&create.stdout).trim().to_string();
+
+    // Promote to a Done-eligible state: Backlog -> Pending -> Accepted.
+    assert!(
+        legion_cmd(data)
+            .args(["kanban", "assign", "--id", &card, "--to", "kelex"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        legion_cmd(data)
+            .args(["kanban", "accept", "--id", &card])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+
+    // Done must be refused: the card has criteria but no verify verdict.
+    let blocked = legion_cmd(data)
+        .args(["done", "--repo", "kelex", "--text", "done", "--id", &card])
+        .output()
+        .unwrap();
+    assert!(
+        !blocked.status.success(),
+        "Done should be blocked before verify ran"
+    );
+    assert!(
+        String::from_utf8_lossy(&blocked.stderr).contains("verify verdict"),
+        "expected a verify-gate error, got: {}",
+        String::from_utf8_lossy(&blocked.stderr)
+    );
+
+    // Record a clean verify verdict (both criteria pass with evidence).
+    let verdicts = data.join("verdicts.json");
+    std::fs::write(
+        &verdicts,
+        r#"[
+          {"criterion":"crit one","verdict":"pass","evidence":"tests::crit_one"},
+          {"criterion":"crit two","verdict":"pass","evidence":"src/x.rs:10 behavior"}
+        ]"#,
+    )
+    .unwrap();
+    let verified = legion_cmd(data)
+        .args([
+            "verify",
+            "--repo",
+            "kelex",
+            "--card",
+            &card,
+            "--verdicts-file",
+            verdicts.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "verify should pass with all-pass verdicts: {}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+
+    // Done now succeeds.
+    let allowed = legion_cmd(data)
+        .args(["done", "--repo", "kelex", "--text", "done", "--id", &card])
+        .output()
+        .unwrap();
+    assert!(
+        allowed.status.success(),
+        "Done should be allowed after a clean verify: {}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+}
+
+// #520: a Fail verdict keeps the card blocked from Done.
+#[test]
+fn verify_gate_fail_keeps_done_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    let create = legion_cmd(data)
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "kelex",
+            "--to",
+            "kelex",
+            "--text",
+            "wip",
+            "--context",
+            "## Acceptance criteria\n- only crit\n",
+        ])
+        .output()
+        .unwrap();
+    let card = String::from_utf8_lossy(&create.stdout).trim().to_string();
+    legion_cmd(data)
+        .args(["kanban", "assign", "--id", &card, "--to", "kelex"])
+        .output()
+        .unwrap();
+    legion_cmd(data)
+        .args(["kanban", "accept", "--id", &card])
+        .output()
+        .unwrap();
+
+    let verdicts = data.join("v.json");
+    std::fs::write(
+        &verdicts,
+        r#"[{"criterion":"only crit","verdict":"fail","evidence":"not implemented"}]"#,
+    )
+    .unwrap();
+    let verified = legion_cmd(data)
+        .args([
+            "verify",
+            "--repo",
+            "kelex",
+            "--card",
+            &card,
+            "--verdicts-file",
+            verdicts.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !verified.status.success(),
+        "verify with a Fail should exit non-zero"
+    );
+
+    let blocked = legion_cmd(data)
+        .args(["done", "--repo", "kelex", "--text", "done", "--id", &card])
+        .output()
+        .unwrap();
+    assert!(
+        !blocked.status.success(),
+        "Done stays blocked after a Fail verdict"
+    );
+}

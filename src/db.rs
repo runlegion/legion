@@ -4535,6 +4535,42 @@ impl Database {
             None => Ok(None),
         }
     }
+
+    /// Return the most recent gate row for `skill` across all commits, if any.
+    ///
+    /// Unlike `get_quality_gate`, this ignores the commit hash. Used by the
+    /// verify gate (#520): a verify verdict is keyed on the card
+    /// (`legion-verify:<card_id>`) and must still satisfy the ->Done check even
+    /// when `legion done` runs on a different commit than verify did (e.g.
+    /// after the branch merged). Staleness is the caller's concern -- re-verify
+    /// after material changes.
+    pub fn get_latest_quality_gate_by_skill(&self, skill: &str) -> Result<Option<QualityGateRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at \
+             FROM quality_gates \
+             WHERE skill = ?1 \
+             ORDER BY created_at DESC \
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![skill], |row| {
+            let findings_count_i64: i64 = row.get(5)?;
+            Ok(QualityGateRow {
+                id: row.get(0)?,
+                branch: row.get(1)?,
+                commit_hash: row.get(2)?,
+                skill: row.get(3)?,
+                result: row.get(4)?,
+                findings_count: findings_count_i64.unsigned_abs(),
+                details: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(LegionError::Database(e)),
+            None => Ok(None),
+        }
+    }
 }
 
 /// An entry in the audit log tracking work source actions.
@@ -6069,6 +6105,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fetched.details.as_deref(), Some(details));
+    }
+
+    #[test]
+    fn latest_quality_gate_by_skill_ignores_commit() {
+        // #520: the verify gate is card-keyed (legion-verify:<card>) and must
+        // resolve regardless of the commit it was recorded on, since `legion
+        // done` may run on a different commit than verify did.
+        let db = test_db();
+        let skill = "legion-verify:card-7";
+        db.record_quality_gate("feat/x", "commit-old", skill, "issues", 1, None)
+            .unwrap();
+        db.record_quality_gate("main", "commit-new", skill, "clean", 0, None)
+            .unwrap();
+
+        let latest = db
+            .get_latest_quality_gate_by_skill(skill)
+            .unwrap()
+            .expect("a verify gate should exist for the card");
+        assert_eq!(
+            latest.result, "clean",
+            "most recent row wins across commits"
+        );
+        assert_eq!(latest.commit_hash, "commit-new");
+
+        // A different card's skill key does not match.
+        assert!(
+            db.get_latest_quality_gate_by_skill("legion-verify:card-99")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
