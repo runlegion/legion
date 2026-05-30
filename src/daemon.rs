@@ -222,7 +222,7 @@ pub fn stop_detached(data_dir: &Path) -> Result<bool> {
         // process -- and do NOT claim success. Fail loud so restart_detached's `?`
         // short-circuits instead of spawning a duplicate into the still-bound port.
         return Err(LegionError::DaemonStopFailed(format!(
-            "daemon {pid} did not stop (survived SIGKILL); pidfile left in place"
+            "pid {pid} survived SIGKILL; pidfile left in place"
         )));
     }
 
