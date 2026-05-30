@@ -199,16 +199,31 @@ pub fn stop_detached(data_dir: &Path) -> Result<bool> {
         return Ok(false);
     }
 
-    send_signal(pid, "TERM");
-    if !wait_for_exit(pid, GRACEFUL_STOP_TIMEOUT) {
+    if !send_signal(pid, "TERM") {
+        eprintln!("[legion] warning: failed to send SIGTERM to daemon {pid}");
+    }
+    let mut exited = wait_for_exit(pid, GRACEFUL_STOP_TIMEOUT);
+    if !exited {
         eprintln!(
             "[legion] daemon {pid} did not exit within {}s; sending SIGKILL",
             GRACEFUL_STOP_TIMEOUT.as_secs()
         );
-        send_signal(pid, "KILL");
+        if !send_signal(pid, "KILL") {
+            eprintln!("[legion] warning: failed to send SIGKILL to daemon {pid}");
+        }
         // SIGKILL is uncatchable; a short wait lets the kernel reap it and free
         // the bound port before the caller respawns.
-        let _ = wait_for_exit(pid, SIGKILL_REAP_TIMEOUT);
+        exited = wait_for_exit(pid, SIGKILL_REAP_TIMEOUT);
+    }
+
+    if !exited {
+        // Still alive after SIGKILL (D-state, EPERM, a failed signal send, or a slow
+        // reap). Do NOT remove the pidfile -- it is the only handle to re-target this
+        // process -- and do NOT claim success. Fail loud so restart_detached's `?`
+        // short-circuits instead of spawning a duplicate into the still-bound port.
+        return Err(LegionError::DaemonStopFailed(format!(
+            "daemon {pid} did not stop (survived SIGKILL); pidfile left in place"
+        )));
     }
 
     let _ = std::fs::remove_file(&pid_path);
