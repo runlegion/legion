@@ -1900,15 +1900,28 @@ impl Database {
     /// because their content is reachable via `legion chain --id <root>`
     /// and including them would bloat the whoami banner past the inline
     /// context budget. Ordered newest first.
-    pub fn get_identity_roots(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
+    /// Fetch the root reflections (no parent) for a repo in a given domain,
+    /// newest first. Backs the SessionStart boot banners: `whoami`
+    /// (domain=identity, who I am) and `whatami` (domain=workflow, how I operate).
+    pub fn get_domain_roots(
+        &self,
+        repo: &str,
+        domain: &str,
+        limit: usize,
+    ) -> Result<Vec<Reflection>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE repo = ?1 AND domain = 'identity' AND parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?2",
+             FROM reflections WHERE repo = ?1 AND domain = ?2 AND parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3",
         )?;
 
-        let rows = stmt.query_map(rusqlite::params![repo, limit], map_reflection_row)?;
+        let rows = stmt.query_map(rusqlite::params![repo, domain, limit], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
+    }
+
+    /// Identity roots (domain=identity). Thin wrapper over [`get_domain_roots`].
+    pub fn get_identity_roots(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
+        self.get_domain_roots(repo, "identity", limit)
     }
 
     /// Retrieve active (non-archived) bullpen posts, ordered newest first.
