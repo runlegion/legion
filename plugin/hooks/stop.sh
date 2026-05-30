@@ -3,10 +3,14 @@
 #
 # Two-layer enforcement on every Stop event:
 #
-# 1. INCOMPLETE-WORK GATE (#461). If the harness has pending/in_progress
-#    TaskList items in this session, block the Stop with a directive that
-#    forces the agent to either complete, mark blocked, mark needs_input,
-#    or cancel each one. No silent abandonment of multi-step plans.
+# 1. IN-PROGRESS GATE (#461 -> #523). If the agent has an Accepted
+#    (in-progress) kanban card for this repo, block the Stop until it
+#    reaches a real state. Reads the BOARD -- the persistent work substrate
+#    that `work`/`accept` actually move -- not the ephemeral per-session
+#    harness TaskList. Gates on Accepted, NOT Pending: Pending is the
+#    unconsented backlog, which would never let the agent stop; a declared
+#    blocker moves a card to Blocked, excluded here by construction. No
+#    silent abandonment of picked-up work.
 #
 # 2. REFLECTION PROMPT. If work happened this session and the reflection
 #    hasn't fired yet, prompt for one. Skip when nothing was learned.
@@ -90,44 +94,30 @@ if [ "${LEGION_SPAWN_SOURCE:-}" = "watch-pty" ]; then
   exit 0
 fi
 
-# ---------- (1) Incomplete-work gate ----------
+# ---------- (1) In-progress work gate ----------
 #
-# Reduce over the session task-state log written by post-task-state.sh
-# (#461 PostToolUse hook). Last-status-wins per task_id; block if any
-# task ends in pending or in_progress.
+# Block the stop if the agent has an Accepted (in-progress) kanban card for
+# this repo. Reads the board via `kanban list --json` (the persistent work
+# substrate), NOT the ephemeral per-session TaskList log. Gate on Accepted
+# only: Pending is the unconsented backlog (gating on it would never let the
+# agent stop), and a declared blocker moves a card to Blocked, excluded here.
 
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/legion"
-TASK_LOG="${STATE_DIR}/tasks-${SESSION_ID}.jsonl"
+if command -v jq >/dev/null 2>&1 && [ -x "$LEGION_BIN" ]; then
+  ACCEPTED=$("$LEGION_BIN" kanban list --repo "$REPO" --json 2>/dev/null \
+    | jq -r 'select(.status == "accepted") | "- " + (.title // .text // .id)' 2>/dev/null)
 
-if [ -n "$SESSION_ID" ] && [ -f "$TASK_LOG" ] && command -v jq >/dev/null 2>&1; then
-  # Walk the event log, folding each event into a per-task accumulator
-  # that preserves the original subject (from the create event) while
-  # tracking the latest status. Output lines for tasks still in pending
-  # or in_progress.
-  INCOMPLETE=$(jq -s -r '
-    reduce .[] as $e ({};
-      .[$e.task_id] = (
-        (.[$e.task_id] // {}) +
-        {status: $e.status, subject: ($e.subject // (.[$e.task_id].subject // ""))}
-      )
-    )
-    | to_entries
-    | map(select(.value.status == "pending" or .value.status == "in_progress"))
-    | map("- " + .key + " [" + .value.status + "]: " + (.value.subject // "<no subject>"))
-    | .[]
-  ' "$TASK_LOG" 2>/dev/null)
+  if [ -n "$ACCEPTED" ]; then
+    REASON="You have in-progress (Accepted) work on the board and cannot stop yet:
 
-  if [ -n "$INCOMPLETE" ]; then
-    REASON="You have incomplete tasks in this session and cannot stop yet. Open items:
+${ACCEPTED}
 
-${INCOMPLETE}
+Move each card to a real state before stopping:
+- finished: let its PR merge / mark it done
+- technical blocker: legion kanban block --id <id> --reason '...'
+- needs a human decision: legion kanban need-input --id <id>
+- not yours to do now: hand it back to pending
 
-Each one needs an explicit terminal state before you stop:
-- complete the work and run TaskUpdate(status=completed)
-- mark deleted with a reason if it is no longer relevant
-- if you are stuck, EXPLICITLY say so -- either post a blocked-note to legion or open a kanban needs_input card so the human-side queue picks it up
-
-\"Should I keep going?\" is not a question to ask the operator after every step. The plan is the permission. Keep going.
+The board is the plan, and the plan is the permission -- \"should I keep going?\" is not a question to ask the operator after every step. Keep going until the card is in a real state.
 
 To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_STOP_BLOCK=1. The bypass writes one row to bypass.jsonl."
 
