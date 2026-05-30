@@ -23,8 +23,20 @@ pub const WHOAMI_BANNER_CLOSE: &str = "=== END IDENTITY ===";
 /// the whole banner under this budget guarantees nothing is dropped.
 pub const WHOAMI_BYTE_CAP: usize = 2048;
 
-/// A single entry passed to `format_whoami`. The flag indicates whether
-/// the reflection has chain context worth pointing the reader at.
+/// Banner that wraps `legion whatami` output -- the operating contract (how I
+/// operate), distinct from whoami (who I am). Lands right after identity at
+/// SessionStart: WHO YOU ARE, then HOW YOU OPERATE.
+pub const WHATAMI_BANNER_OPEN: &str = "=== HOW YOU OPERATE -- READ THIS ===";
+pub const WHATAMI_BANNER_CLOSE: &str = "=== END OPERATING CONTRACT ===";
+
+/// Soft byte budget for `legion whatami` output. Same rationale and size as
+/// `WHOAMI_BYTE_CAP`: keep the SessionStart block under the harness's 2KB
+/// inline-context cutoff so nothing is silently dropped.
+pub const WHATAMI_BYTE_CAP: usize = 2048;
+
+/// A single entry passed to the banner formatters. The flag indicates whether
+/// the reflection has chain context worth pointing the reader at. Shared by
+/// `format_whoami` (identity roots) and `format_whatami` (workflow roots).
 pub struct WhoamiEntry {
     pub id: String,
     pub text: String,
@@ -37,12 +49,27 @@ pub struct WhoamiEntry {
 /// cap. The first entry is always emitted regardless of size to avoid an
 /// empty banner -- a single oversized root is preferable to silent absence.
 /// Remaining entries are summarized with a recall pointer.
-pub fn format_whoami(repo: &str, entries: &[WhoamiEntry]) -> String {
+/// Render a byte-capped boot banner from root reflections. Shared by
+/// `format_whoami` and `format_whatami`. Emits each entry in full while it fits
+/// under `cap`; the first entry always emits even if oversized (a single large
+/// root beats an empty banner), and the remainder is summarized with a recall
+/// pointer to `--domain {recall_domain}`.
+#[allow(clippy::too_many_arguments)]
+fn format_capped_banner(
+    open: &str,
+    close: &str,
+    header_line: &str,
+    truncation_noun: &str,
+    recall_domain: &str,
+    repo: &str,
+    cap: usize,
+    entries: &[WhoamiEntry],
+) -> String {
     if entries.is_empty() {
         return String::new();
     }
-    let header = format!("{WHOAMI_BANNER_OPEN}\n[Legion] Identity for {repo}:\n");
-    let footer = format!("{WHOAMI_BANNER_CLOSE}\n");
+    let header = format!("{open}\n{header_line}\n");
+    let footer = format!("{close}\n");
     let mut buf = header;
     let mut emitted = 0usize;
     for entry in entries {
@@ -52,7 +79,7 @@ pub fn format_whoami(repo: &str, entries: &[WhoamiEntry]) -> String {
             String::new()
         };
         let body = format!("- {} (id: {})\n{}", entry.text, entry.id, chain_line);
-        if buf.len() + body.len() + footer.len() > WHOAMI_BYTE_CAP && emitted > 0 {
+        if buf.len() + body.len() + footer.len() > cap && emitted > 0 {
             break;
         }
         buf.push_str(&body);
@@ -61,11 +88,40 @@ pub fn format_whoami(repo: &str, entries: &[WhoamiEntry]) -> String {
     let remaining = entries.len().saturating_sub(emitted);
     if remaining > 0 {
         buf.push_str(&format!(
-            "- ({remaining} more identity reflections truncated; recall via `legion recall --repo {repo} --domain identity`)\n"
+            "- ({remaining} more {truncation_noun} truncated; recall via `legion recall --repo {repo} --domain {recall_domain}`)\n"
         ));
     }
     buf.push_str(&footer);
     buf
+}
+
+/// Render the whoami banner (identity roots), capped at `WHOAMI_BYTE_CAP`.
+pub fn format_whoami(repo: &str, entries: &[WhoamiEntry]) -> String {
+    format_capped_banner(
+        WHOAMI_BANNER_OPEN,
+        WHOAMI_BANNER_CLOSE,
+        &format!("[Legion] Identity for {repo}:"),
+        "identity reflections",
+        "identity",
+        repo,
+        WHOAMI_BYTE_CAP,
+        entries,
+    )
+}
+
+/// Render the whatami banner (operating-contract / workflow roots), capped at
+/// `WHATAMI_BYTE_CAP`. This is HOW the agent operates, distinct from whoami.
+pub fn format_whatami(repo: &str, entries: &[WhoamiEntry]) -> String {
+    format_capped_banner(
+        WHATAMI_BANNER_OPEN,
+        WHATAMI_BANNER_CLOSE,
+        &format!("[Legion] How {repo} operates:"),
+        "operating-contract reflections",
+        "workflow",
+        repo,
+        WHATAMI_BYTE_CAP,
+        entries,
+    )
 }
 
 /// A set of recalled reflections matching a query, optionally scoped to a single repo.
@@ -1321,6 +1377,31 @@ mod tests {
             .collect();
         let out = format_whoami("kelex", &entries);
         assert!(out.contains("legion recall --repo kelex --domain identity"));
+    }
+
+    #[test]
+    fn format_whatami_empty_returns_empty() {
+        assert_eq!(format_whatami("legion", &[]), "");
+    }
+
+    #[test]
+    fn format_whatami_wraps_operating_banner() {
+        let out = format_whatami("legion", &[entry("w1", "work the board", false)]);
+        assert!(out.starts_with(WHATAMI_BANNER_OPEN));
+        assert!(out.contains("[Legion] How legion operates:"));
+        assert!(out.contains("- work the board (id: w1)"));
+        assert!(out.trim_end().ends_with(WHATAMI_BANNER_CLOSE));
+    }
+
+    #[test]
+    fn format_whatami_truncation_pointer_uses_workflow_domain() {
+        let big = "x".repeat(800);
+        let entries: Vec<WhoamiEntry> = (0..5)
+            .map(|i| entry(&format!("w{i}"), &big, false))
+            .collect();
+        let out = format_whatami("kelex", &entries);
+        assert!(out.contains("more operating-contract reflections truncated"));
+        assert!(out.contains("legion recall --repo kelex --domain workflow"));
     }
 
     #[test]
