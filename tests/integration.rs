@@ -6013,3 +6013,131 @@ fn uncertainty_emit_witness_end_to_end_via_hook_against_real_binary() {
         "re-witnessing should fail (already witnessed)"
     );
 }
+
+// #530: grep-enforcement parity lock.
+//
+// legion's own command/skill surfaces must never grant Grep or Glob. The
+// recall/sym-before-grep doctrine is enforced for the main session by the
+// PreToolUse hooks (pre-grep-recall, pre-grep-scip, pre-bash-grep,
+// pre-read-sym), but those hooks do NOT fire while a slash command's or
+// skill's own tool allowlist is active, and they do NOT fire on subagents.
+// The allowlist (`allowed-tools`) is the only enforcement on those surfaces
+// and is strictly stronger than `disallowed-tools` (whitelist vs blacklist).
+//
+// This test fails if anyone re-grants Grep/Glob to a legion surface, so a
+// future "let me just grep here" edit has to be deliberate -- it can't slip
+// in silently and weaken the doctrine. See #530 and
+// docs/decisions/2026-05-grep-enforcement-stays-in-hooks.md.
+#[test]
+fn legion_command_and_skill_surfaces_never_grant_grep() {
+    let plugin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin");
+
+    // Collect every frontmatter-bearing surface: commands/*.md + skills/*/SKILL.md.
+    let mut surfaces: Vec<std::path::PathBuf> = Vec::new();
+    let commands = plugin.join("commands");
+    for entry in std::fs::read_dir(&commands).expect("plugin/commands must exist") {
+        let path = entry.expect("readable commands entry").path();
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            surfaces.push(path);
+        }
+    }
+    let skills = plugin.join("skills");
+    for entry in std::fs::read_dir(&skills).expect("plugin/skills must exist") {
+        let skill_md = entry
+            .expect("readable skills entry")
+            .path()
+            .join("SKILL.md");
+        if skill_md.is_file() {
+            surfaces.push(skill_md);
+        }
+    }
+    assert!(
+        !surfaces.is_empty(),
+        "expected to find legion command/skill surfaces under plugin/"
+    );
+
+    for path in surfaces {
+        let body = std::fs::read_to_string(&path).expect("readable surface");
+        let tools = parse_allowed_tools(&body);
+        let Some(tools) = tools else {
+            // A surface with no allowlist inherits the full toolset and is
+            // governed by the main-session hooks instead -- not this test's
+            // concern. (All legion surfaces currently declare one.)
+            continue;
+        };
+        for forbidden in ["Grep", "Glob"] {
+            assert!(
+                !tools.iter().any(|t| t == forbidden),
+                "{} grants {} in its allowed-tools -- legion surfaces must use sym/recall, \
+                 not grep (see #530). If a scan is genuinely needed, route it through Bash \
+                 where pre-bash-grep applies the sym ladder.",
+                path.display(),
+                forbidden
+            );
+        }
+    }
+}
+
+// Extract the tool identifiers granted by an `allowed-tools:` frontmatter
+// key, handling both forms legion surfaces use:
+//   - inline:     `allowed-tools: Bash, Read`  or  `allowed-tools: ["Bash"]`
+//   - block list: `allowed-tools:` then indented `  - Bash` lines
+// Returns None when the key is absent (no allowlist declared). Tokens are
+// split on the structural delimiters so a coincidental substring cannot
+// match -- only a standalone tool identifier does.
+fn parse_allowed_tools(body: &str) -> Option<Vec<String>> {
+    let lines: Vec<&str> = body.lines().collect();
+    let idx = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("allowed-tools:"))?;
+
+    let split_tokens = |s: &str| -> Vec<String> {
+        s.split([',', '[', ']', '"', '\'', '-'])
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect()
+    };
+
+    // Inline value after the colon (empty for the block-list form).
+    let inline = lines[idx].split_once(':').map(|(_, v)| v).unwrap_or("");
+    let mut tools = split_tokens(inline);
+
+    // Block-list form: indented `- Tool` continuation lines follow the key
+    // until the next frontmatter key or the closing `---`.
+    if tools.is_empty() {
+        for line in &lines[idx + 1..] {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("- ") {
+                tools.extend(split_tokens(trimmed));
+            } else if line.starts_with(|c: char| !c.is_whitespace()) {
+                break; // dedent to a new key (or `---`) ends the list
+            }
+        }
+    }
+
+    Some(tools)
+}
+
+#[test]
+fn parse_allowed_tools_handles_inline_and_block_forms() {
+    // Inline comma form (skills).
+    assert_eq!(
+        parse_allowed_tools("---\nallowed-tools: Bash, Read\n---\n"),
+        Some(vec!["Bash".to_string(), "Read".to_string()])
+    );
+    // Inline JSON-array form (commands).
+    assert_eq!(
+        parse_allowed_tools("---\nallowed-tools: [\"Bash\"]\n---\n"),
+        Some(vec!["Bash".to_string()])
+    );
+    // Block-list form -- the blind spot the inline-only parser would miss.
+    let block = "---\nname: x\nallowed-tools:\n  - Bash\n  - Grep\nversion: 1\n---\n";
+    let tools = parse_allowed_tools(block).expect("block form parsed");
+    assert!(
+        tools.iter().any(|t| t == "Grep"),
+        "block-list Grep must be detected, got {tools:?}"
+    );
+    // Absent key.
+    assert_eq!(parse_allowed_tools("---\nname: x\n---\n"), None);
+}

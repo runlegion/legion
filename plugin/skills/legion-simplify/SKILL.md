@@ -8,7 +8,7 @@ description: |
   creating a PR.
 version: 1.0.0
 user-invocable: true
-allowed-tools: Bash, Read, Glob, Grep
+allowed-tools: Bash, Read
 ---
 
 # Legion Simplify
