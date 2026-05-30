@@ -27,6 +27,9 @@ pub enum LegionError {
     #[error("home directory not available")]
     NoHomeDir,
 
+    #[error("daemon did not stop: {0}")]
+    DaemonStopFailed(String),
+
     #[error("embedding error: {0}")]
     Embedding(String),
 

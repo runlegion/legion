@@ -137,6 +137,112 @@ fn is_process_alive(pid: u32) -> bool {
     }
 }
 
+/// How long to wait for a SIGTERM'd daemon to exit before escalating to SIGKILL.
+const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long to wait for a SIGKILL'd process to be reaped (and release its port).
+const SIGKILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Read the daemon PID from the pidfile, if present and parseable.
+fn read_daemon_pid(pid_path: &Path) -> Option<u32> {
+    let contents = std::fs::read_to_string(pid_path).ok()?;
+    contents.trim().parse::<u32>().ok()
+}
+
+/// Send a signal (e.g. "TERM", "KILL") to a process. Unix-only; returns false on
+/// other platforms. Uses `kill` to avoid a libc dependency, matching
+/// `is_process_alive`.
+fn send_signal(pid: u32, signal: &str) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args([format!("-{signal}"), pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, signal);
+        false
+    }
+}
+
+/// Poll until the process exits or `timeout` elapses. Returns true if it exited.
+fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if !is_process_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    !is_process_alive(pid)
+}
+
+/// Stop a running daemon and wait for it to release its port.
+///
+/// Sends SIGTERM, then polls for up to `GRACEFUL_STOP_TIMEOUT`. If the process has
+/// not exited by then -- e.g. axum's graceful HTTP shutdown is draining a long-lived
+/// SSE connection and will not release the port promptly -- it escalates to SIGKILL,
+/// so a restart never blocks on the drain. Removes the pidfile and returns `true` if
+/// a running daemon was stopped, `false` if none was running.
+pub fn stop_detached(data_dir: &Path) -> Result<bool> {
+    let pid_path = data_dir.join(DAEMON_PID_FILE);
+    let Some(pid) = read_daemon_pid(&pid_path) else {
+        return Ok(false);
+    };
+    if !is_process_alive(pid) {
+        // Stale pidfile -- nothing to stop, clean it up.
+        let _ = std::fs::remove_file(&pid_path);
+        return Ok(false);
+    }
+
+    if !send_signal(pid, "TERM") {
+        eprintln!("[legion] warning: failed to send SIGTERM to daemon {pid}");
+    }
+    let mut exited = wait_for_exit(pid, GRACEFUL_STOP_TIMEOUT);
+    if !exited {
+        eprintln!(
+            "[legion] daemon {pid} did not exit within {}s; sending SIGKILL",
+            GRACEFUL_STOP_TIMEOUT.as_secs()
+        );
+        if !send_signal(pid, "KILL") {
+            eprintln!("[legion] warning: failed to send SIGKILL to daemon {pid}");
+        }
+        // SIGKILL is uncatchable; a short wait lets the kernel reap it and free
+        // the bound port before the caller respawns.
+        exited = wait_for_exit(pid, SIGKILL_REAP_TIMEOUT);
+    }
+
+    if !exited {
+        // Still alive after SIGKILL (D-state, EPERM, a failed signal send, or a slow
+        // reap). Do NOT remove the pidfile -- it is the only handle to re-target this
+        // process -- and do NOT claim success. Fail loud so restart_detached's `?`
+        // short-circuits instead of spawning a duplicate into the still-bound port.
+        return Err(LegionError::DaemonStopFailed(format!(
+            "pid {pid} survived SIGKILL; pidfile left in place"
+        )));
+    }
+
+    let _ = std::fs::remove_file(&pid_path);
+    Ok(true)
+}
+
+/// Restart the background daemon: stop the running one (bounded), then spawn fresh.
+///
+/// This is the supported way to bounce the daemon. A bare `daemon-spawn` after a
+/// manual kill can race the dying daemon's graceful-shutdown drain (port still
+/// bound -> "Address already in use", or "already running" while it exits); restart
+/// removes that wait by stopping deterministically before spawning.
+pub fn restart_detached(data_dir: &Path, port: u16) -> Result<()> {
+    if stop_detached(data_dir)? {
+        eprintln!("[legion] stopped running daemon");
+    }
+    spawn_detached(data_dir, port)
+}
+
 /// Configuration for the daemon.
 pub struct DaemonConfig {
     /// Directory that holds legion.db, watch.toml, etc.
@@ -454,6 +560,45 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_daemon_pid_parses_valid_pidfile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join(DAEMON_PID_FILE);
+        std::fs::write(&pid_path, "12345\n").expect("write");
+        assert_eq!(read_daemon_pid(&pid_path), Some(12345));
+    }
+
+    #[test]
+    fn read_daemon_pid_none_for_missing_or_garbage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join(DAEMON_PID_FILE);
+        assert_eq!(read_daemon_pid(&pid_path), None, "missing file -> None");
+        std::fs::write(&pid_path, "not-a-pid").expect("write");
+        assert_eq!(read_daemon_pid(&pid_path), None, "garbage -> None");
+    }
+
+    #[test]
+    fn stop_detached_no_pidfile_is_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            !stop_detached(dir.path()).expect("stop"),
+            "no pidfile -> nothing stopped"
+        );
+    }
+
+    #[test]
+    fn stop_detached_removes_stale_pidfile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join(DAEMON_PID_FILE);
+        // A PID far above any real process on this host -- not alive.
+        std::fs::write(&pid_path, "2147483646").expect("write");
+        assert!(
+            !stop_detached(dir.path()).expect("stop"),
+            "stale (dead) pid -> nothing stopped"
+        );
+        assert!(!pid_path.exists(), "stale pidfile should be removed");
+    }
 
     #[tokio::test]
     async fn daemon_starts_channel_and_responds_to_feed() {

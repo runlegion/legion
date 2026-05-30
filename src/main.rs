@@ -777,6 +777,16 @@ enum Commands {
         port: u16,
     },
 
+    /// Stop the running background daemon (SIGTERM, then SIGKILL if it does not exit)
+    DaemonStop,
+
+    /// Restart the background daemon: stop the running one, then spawn a fresh one
+    DaemonRestart {
+        /// HTTP port for the channel server
+        #[arg(long, default_value = "3131")]
+        port: u16,
+    },
+
     /// Record a quality gate result for a skill run
     QualityGate {
         #[command(subcommand)]
@@ -6410,6 +6420,18 @@ fn run() -> error::Result<()> {
         Commands::DaemonSpawn { port } => {
             let base = data_dir()?;
             daemon::spawn_detached(&base, port)?;
+        }
+        Commands::DaemonStop => {
+            let base = data_dir()?;
+            if daemon::stop_detached(&base)? {
+                eprintln!("[legion] daemon stopped");
+            } else {
+                eprintln!("[legion] no running daemon to stop");
+            }
+        }
+        Commands::DaemonRestart { port } => {
+            let base = data_dir()?;
+            daemon::restart_detached(&base, port)?;
         }
         Commands::QualityGate { action } => match action {
             QualityGateAction::Record {
