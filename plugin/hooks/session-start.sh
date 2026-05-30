@@ -128,6 +128,14 @@ if [ -n "$KANBAN" ]; then
 ${KANBAN}"
 fi
 
+# 6. Autonomy budget (#524) -- remind the agent it has sanctioned units to
+# spend on self-directed work, so it acts on the board instead of waiting to
+# be told. Lands after the work list: first "here is your work," then "and you
+# are cleared to pick it up yourself."
+BUDGET=$("$LEGION" autonomy status --repo "$REPO" --banner 2>>"$LOG")
+legion_check $? "autonomy status"
+append_block "$BUDGET"
+
 # Prepend warning block if any legion call failed
 WARN=$(legion_warnings_block)
 if [ -n "$WARN" ]; then

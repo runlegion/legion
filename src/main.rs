@@ -2039,6 +2039,12 @@ enum AutonomyAction {
         /// Repository name (the agent whose budget to show).
         #[arg(long)]
         repo: String,
+
+        /// Emit a concise SessionStart/Stop reminder framing instead of the
+        /// status line: tells the agent it has sanctioned units to spend on
+        /// self-directed work (or that the week's budget is spent).
+        #[arg(long)]
+        banner: bool,
     },
     /// Ask whether one unit of autonomous work fits the budget. Records the
     /// spend and exits 0 when allowed; exits non-zero (cleanly) when the
@@ -6879,16 +6885,34 @@ fn run() -> error::Result<()> {
             };
 
             match action {
-                AutonomyAction::Status { repo } => {
+                AutonomyAction::Status { repo, banner } => {
                     let budget = load(&repo)?;
-                    println!(
-                        "[legion] autonomy budget for {repo}: {}/{} units spent, {} remaining. \
-                         Window resets {}.",
-                        budget.spent,
-                        budget.ceiling,
-                        budget.remaining(),
-                        budget.resets_at().format("%Y-%m-%d")
-                    );
+                    let resets = budget.resets_at().format("%Y-%m-%d");
+                    if !banner {
+                        println!(
+                            "[legion] autonomy budget for {repo}: {}/{} units spent, {} remaining. \
+                             Window resets {resets}.",
+                            budget.spent,
+                            budget.ceiling,
+                            budget.remaining(),
+                        );
+                    } else if budget.remaining() > 0 {
+                        // The reminder that turns the primitive into behavior:
+                        // the agent self-directs because it knows the budget is
+                        // there, instead of waiting to be told.
+                        println!(
+                            "[Legion] Autonomy budget: {} of {} units this week (resets {resets}). \
+                             Self-directed work is sanctioned -- self-accept a Pending card or take \
+                             free-time without asking. Operator-requested work never draws on this.",
+                            budget.remaining(),
+                            budget.ceiling,
+                        );
+                    } else {
+                        println!(
+                            "[Legion] Autonomy budget spent for this week (resets {resets}). \
+                             Pause self-directed initiative; operator-requested work still proceeds."
+                        );
+                    }
                 }
                 AutonomyAction::Gate {
                     repo,

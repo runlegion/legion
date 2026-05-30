@@ -6409,3 +6409,46 @@ fn autonomy_budget_gates_self_directed_work_not_operator_work() {
         "operator work must proceed even when the budget is spent"
     );
 }
+
+// #524/#546: the --banner reminder. Available budget tells the agent
+// self-directed work is sanctioned; a spent budget tells it to pause.
+#[test]
+fn autonomy_status_banner_reminds_to_spend_or_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    let banner = || {
+        let out = legion_cmd(data)
+            .args(["autonomy", "status", "--repo", "kelex", "--banner"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // Fresh budget -> sanctioned-to-spend framing.
+    let fresh = banner();
+    assert!(fresh.contains("sanctioned"), "got: {fresh}");
+    assert!(fresh.contains("without asking"), "got: {fresh}");
+
+    // Spend the ceiling, then the banner flips to the paused framing.
+    legion_cmd(data)
+        .args([
+            "autonomy",
+            "gate",
+            "--repo",
+            "kelex",
+            "--kind",
+            "self-accept",
+            "--cost",
+            "15",
+        ])
+        .output()
+        .unwrap();
+    let spent = banner();
+    assert!(spent.contains("spent for this week"), "got: {spent}");
+    assert!(
+        spent.contains("operator-requested work still proceeds"),
+        "got: {spent}"
+    );
+}
