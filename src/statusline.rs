@@ -577,7 +577,7 @@ fn write_cache(path: &Path, content: &str) {
 // Misc helpers
 // ---------------------------------------------------------------------------
 
-fn resolve_hostname() -> String {
+pub fn resolve_hostname() -> String {
     sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_owned())
 }
 
