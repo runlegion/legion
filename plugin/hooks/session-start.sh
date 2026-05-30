@@ -92,6 +92,13 @@ IDENTITY=$("$LEGION" whoami --repo "$REPO" --limit 5 2>>"$LOG")
 legion_check $? "whoami"
 append_block "$IDENTITY"
 
+# 1b. Operating contract -- how I operate (domain: workflow). Lands right after
+# identity so the agent reads WHO YOU ARE, then HOW YOU OPERATE. Banner-wrapped
+# by the binary; silent when the repo has no workflow roots yet.
+WHATAMI=$("$LEGION" whatami --repo "$REPO" --limit 5 2>>"$LOG")
+legion_check $? "whatami"
+append_block "$WHATAMI"
+
 # 2. Pending request-shaped signals -- directed asks waiting on a reply.
 # Strong "REQUIRES A REPLY" framing prevents the system-reminder wrapper
 # from causing the agent to no-op (the platform smugglr-fence RFC review

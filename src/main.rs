@@ -447,6 +447,18 @@ enum Commands {
         limit: usize,
     },
 
+    /// Print the operating contract for a repo -- how I operate, distinct from
+    /// whoami (who I am). Alias for recall --domain workflow.
+    Whatami {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// Maximum number of operating-contract reflections to return
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+
     /// Build or refresh the SCIP code-intelligence index for a repo (#278).
     ///
     /// Resolves the repo path from `watch.toml`, detects every recognized
@@ -4527,6 +4539,25 @@ fn run() -> error::Result<()> {
                 });
             }
             let output = recall::format_whoami(&repo, &entries);
+            print!("{output}");
+        }
+        Commands::Whatami { repo, limit } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let roots = database.get_domain_roots(&repo, "workflow", limit)?;
+            if roots.is_empty() {
+                return Ok(());
+            }
+            let mut entries = Vec::with_capacity(roots.len());
+            for r in roots {
+                let in_chain = database.is_in_chain(&r.id)?;
+                entries.push(recall::WhoamiEntry {
+                    id: r.id,
+                    text: r.text,
+                    in_chain,
+                });
+            }
+            let output = recall::format_whatami(&repo, &entries);
             print!("{output}");
         }
         Commands::Stats { repo } => {
