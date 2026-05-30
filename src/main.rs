@@ -36,6 +36,7 @@ mod telemetry;
 mod testutil;
 mod uncertainty;
 mod usage;
+mod verify;
 mod wake_attempts;
 mod watch;
 mod worksource;
@@ -804,6 +805,29 @@ enum Commands {
     QualityGate {
         #[command(subcommand)]
         action: QualityGateAction,
+    },
+
+    /// Verify a card's acceptance criteria before it can reach Done (#520).
+    /// Reads per-criterion verdicts (pass/fail/uncertain + evidence) as JSON
+    /// from --verdicts-file or stdin, loads the card's acceptance criteria,
+    /// and decides the card's fate: every criterion Pass with evidence allows
+    /// ->Done (records a clean legion-verify:<card> gate); any Fail hard-blocks;
+    /// any Uncertain (or a Pass with no evidence) routes the card to NeedsInput
+    /// for a human. A card with no acceptance criteria is blocked outright.
+    Verify {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// Kanban card ID whose acceptance criteria are being verified.
+        #[arg(long)]
+        card: String,
+
+        /// Path to a JSON file with the per-criterion verdicts. Reads stdin
+        /// when omitted. Shape: `[{"criterion": "...", "verdict":
+        /// "pass|fail|uncertain", "evidence": "..."}, ...]`.
+        #[arg(long)]
+        verdicts_file: Option<String>,
     },
 
     /// Show current system health and recent trend
@@ -2674,6 +2698,25 @@ fn git_head_commit_and_branch() -> Result<(String, String), error::LegionError> 
         "unknown".to_owned()
     };
     Ok((commit_hash, branch))
+}
+
+/// Read input from `path` (the value of a `--*-file` flag) or, when it is
+/// `None`, from stdin. `flag` names the originating flag for the error
+/// message. Shared by the pr-write and verify gates, which both accept their
+/// payload as either a file or a stdin pipe.
+fn read_file_or_stdin(path: Option<&str>, flag: &str) -> Result<String, error::LegionError> {
+    match path {
+        Some(p) => std::fs::read_to_string(p)
+            .map_err(|e| error::LegionError::WorkSource(format!("failed to read {flag} {p}: {e}"))),
+        None => {
+            use std::io::Read as _;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                error::LegionError::WorkSource(format!("failed to read stdin: {e}"))
+            })?;
+            Ok(buf)
+        }
+    }
 }
 
 fn fmt_pct(v: Option<f64>) -> String {
@@ -4749,6 +4792,37 @@ fn run() -> error::Result<()> {
 
             // Validate card transition BEFORE posting announcements
             if let Some(ref card_id) = id {
+                // Verify gate (#520): a card with acceptance criteria cannot
+                // reach Done until `legion verify` recorded a clean verdict for
+                // it. The gate is card-keyed (legion-verify:<card_id>), so it
+                // holds regardless of the commit `legion done` runs on. Cards
+                // with no criteria (chores) are not gated. Done is the terminal
+                // QA gate for a solo team, so there is no --skip here.
+                if let Some(card) = database.get_card_by_id(card_id)? {
+                    let acceptance = verify::acceptance_items(card.acceptance.as_deref());
+                    if !acceptance.is_empty() {
+                        let skill = format!("legion-verify:{card_id}");
+                        match database.get_latest_quality_gate_by_skill(&skill)? {
+                            Some(gate) if gate.result == "clean" => {}
+                            Some(_) => {
+                                eprintln!(
+                                    "[legion] error: verify gate is not clean for card {card_id}. \
+                                     Resolve the failing/uncertain criteria and re-run verify \
+                                     before Done."
+                                );
+                                std::process::exit(1);
+                            }
+                            None => {
+                                eprintln!(
+                                    "[legion] error: card {card_id} has acceptance criteria but no \
+                                     verify verdict. Run the verify skill before Done."
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+
                 let card =
                     kanban::transition_card(&database, card_id, kanban::Action::Done, Some(&text))?;
                 println!("{card_id}");
@@ -6043,21 +6117,7 @@ fn run() -> error::Result<()> {
                 let parsed = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or(""));
 
                 // Read the drafted body from --body-file, or stdin when omitted.
-                let body = match body_file {
-                    Some(path) => std::fs::read_to_string(&path).map_err(|e| {
-                        error::LegionError::WorkSource(format!(
-                            "failed to read --body-file {path}: {e}"
-                        ))
-                    })?,
-                    None => {
-                        use std::io::Read as _;
-                        let mut buf = String::new();
-                        std::io::stdin().read_to_string(&mut buf).map_err(|e| {
-                            error::LegionError::WorkSource(format!("failed to read stdin: {e}"))
-                        })?;
-                        buf
-                    }
-                };
+                let body = read_file_or_stdin(body_file.as_deref(), "--body-file")?;
 
                 let report = pr_write::validate_pr_body(&parsed.acceptance, &body);
 
@@ -6621,6 +6681,124 @@ fn run() -> error::Result<()> {
                 println!("{}", row.id);
             }
         },
+        Commands::Verify {
+            repo: _repo,
+            card,
+            verdicts_file,
+        } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+
+            let card_row = database
+                .get_card_by_id(&card)?
+                .ok_or_else(|| error::LegionError::CardNotFound(card.clone()))?;
+            let acceptance = verify::acceptance_items(card_row.acceptance.as_deref());
+
+            // Read the agent's per-criterion verdicts (file or stdin).
+            let raw = read_file_or_stdin(verdicts_file.as_deref(), "--verdicts-file")?;
+            let results: Vec<verify::AcResult> = serde_json::from_str(&raw).map_err(|e| {
+                error::LegionError::WorkSource(format!(
+                    "failed to parse verdicts JSON (expected a list of \
+                     {{criterion, verdict, evidence}}): {e}"
+                ))
+            })?;
+
+            let decision = verify::decide(&acceptance, &results);
+
+            // Record the verdict as a card-keyed gate so `legion done` can gate
+            // on it regardless of which commit it runs on (e.g. post-merge).
+            let skill = format!("legion-verify:{card}");
+            let (commit_hash, branch) = git_head_commit_and_branch()?;
+            let details = serde_json::json!({
+                "skill": "legion-verify",
+                "card": card,
+                "decision": format!("{decision:?}"),
+                "results": results,
+            })
+            .to_string();
+            let findings = match &decision {
+                verify::VerifyDecision::Block { failed } => failed.len() as u64,
+                verify::VerifyDecision::NeedsInput { uncertain } => uncertain.len() as u64,
+                verify::VerifyDecision::Incomplete { unaddressed } => *unaddressed as u64,
+                verify::VerifyDecision::NoCheckableAc => 1,
+                verify::VerifyDecision::Proceed => 0,
+            };
+            database.record_quality_gate(
+                &branch,
+                &commit_hash,
+                &skill,
+                if decision.allows_done() {
+                    "clean"
+                } else {
+                    "issues"
+                },
+                findings,
+                Some(&details),
+            )?;
+
+            match decision {
+                verify::VerifyDecision::Proceed => {
+                    println!(
+                        "[legion] verify PASS for card {card} ({} criteria). ->Done is unblocked.",
+                        acceptance.len()
+                    );
+                }
+                verify::VerifyDecision::NoCheckableAc => {
+                    eprintln!(
+                        "[legion] verify BLOCKED for card {card}: no acceptance criteria to check. \
+                         A card cannot reach Done without checkable criteria -- add them upstream."
+                    );
+                    std::process::exit(1);
+                }
+                verify::VerifyDecision::Incomplete { unaddressed } => {
+                    eprintln!(
+                        "[legion] verify BLOCKED for card {card}: {unaddressed} of {} criteria have \
+                         no verdict. Emit one verdict per criterion.",
+                        acceptance.len()
+                    );
+                    std::process::exit(1);
+                }
+                verify::VerifyDecision::Block { failed } => {
+                    eprintln!(
+                        "[legion] verify FAIL for card {card} -- {} criterion(s) not satisfied:",
+                        failed.len()
+                    );
+                    for c in &failed {
+                        eprintln!("  - {c}");
+                    }
+                    eprintln!("\n->Done is blocked. Finish the work and re-verify.");
+                    std::process::exit(1);
+                }
+                verify::VerifyDecision::NeedsInput { uncertain } => {
+                    eprintln!(
+                        "[legion] verify UNCERTAIN for card {card} -- {} criterion(s) cannot be \
+                         mechanically confirmed:",
+                        uncertain.len()
+                    );
+                    for c in &uncertain {
+                        eprintln!("  - {c}");
+                    }
+                    // Route to a human rather than rubber-stamp ->Done. The gate
+                    // is already recorded non-clean, so ->Done stays blocked even
+                    // if the card is not in a state this transition accepts.
+                    match kanban::transition_card(
+                        &database,
+                        &card,
+                        kanban::Action::NeedInput,
+                        Some("verify: unprovable acceptance criteria, needs human adjudication"),
+                    ) {
+                        Ok(_) => eprintln!(
+                            "\nCard routed to NeedsInput. ->Done stays blocked until resolved."
+                        ),
+                        Err(e) => eprintln!(
+                            "\n->Done stays blocked. (Could not auto-move card to NeedsInput: \
+                             {e}; move it manually.)"
+                        ),
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Statusline { json } => {
             // Never surface an error to the Claude Code UI: statusline::run
             // already swallows internal failures and logs them, and its

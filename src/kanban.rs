@@ -106,6 +106,10 @@ pub fn transition(current: CardStatus, action: Action) -> Result<CardStatus> {
         (CardStatus::Accepted, Action::Done) => CardStatus::Done,
         (CardStatus::Blocked, Action::Unblock) => CardStatus::Accepted,
         (CardStatus::NeedsInput, Action::Resume) => CardStatus::Accepted,
+        // Verify (#520) runs after review and can find an unprovable criterion;
+        // routing the card from InReview to NeedsInput lets a human adjudicate
+        // rather than rubber-stamping ->Done.
+        (CardStatus::InReview, Action::NeedInput) => CardStatus::NeedsInput,
         (CardStatus::InReview, Action::Resume) => CardStatus::Accepted,
         (CardStatus::InReview, Action::Done) => CardStatus::Done,
         (CardStatus::Done, Action::Reopen) => CardStatus::Backlog,
@@ -1396,6 +1400,16 @@ mod tests {
     fn cannot_assign_from_accepted() {
         let result = transition(CardStatus::Accepted, Action::Assign);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn verify_routes_inreview_to_needs_input() {
+        // #520: verify runs after review and can find an unprovable criterion.
+        let result = transition(CardStatus::InReview, Action::NeedInput);
+        assert_eq!(
+            result.expect("InReview->NeedInput is valid"),
+            CardStatus::NeedsInput
+        );
     }
 
     #[test]
