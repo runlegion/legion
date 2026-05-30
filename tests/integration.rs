@@ -6308,3 +6308,147 @@ fn verify_gate_fail_keeps_done_blocked() {
         "Done stays blocked after a Fail verdict"
     );
 }
+
+// #524 autonomy budget, end-to-end at the CLI: operator work bypasses, a spend
+// accumulates, and exhaustion stops self-directed work cleanly (non-zero exit,
+// no error). A fresh DB has no rate sample, so the ceiling is the conservative
+// default (15 units).
+#[test]
+fn autonomy_budget_gates_self_directed_work_not_operator_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    let status = |label: &str| {
+        let out = legion_cmd(data)
+            .args(["autonomy", "status", "--repo", "kelex"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "status failed at {label}");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // Fresh: nothing spent against the default ceiling.
+    assert!(status("fresh").contains("0/15"), "got: {}", status("fresh"));
+
+    // Operator-requested work bypasses and spends nothing.
+    let op = legion_cmd(data)
+        .args([
+            "autonomy",
+            "gate",
+            "--repo",
+            "kelex",
+            "--kind",
+            "self-accept",
+            "--operator",
+        ])
+        .output()
+        .unwrap();
+    assert!(op.status.success(), "operator gate should succeed");
+    assert!(
+        String::from_utf8_lossy(&op.stdout).contains("not budget-gated"),
+        "got: {}",
+        String::from_utf8_lossy(&op.stdout)
+    );
+    assert!(
+        status("after-operator").contains("0/15"),
+        "operator work must not spend"
+    );
+
+    // A self-directed spend of the whole ceiling is allowed and accumulates.
+    let spend = legion_cmd(data)
+        .args([
+            "autonomy",
+            "gate",
+            "--repo",
+            "kelex",
+            "--kind",
+            "self-accept",
+            "--cost",
+            "15",
+        ])
+        .output()
+        .unwrap();
+    assert!(spend.status.success(), "in-budget spend should succeed");
+    assert!(
+        status("after-spend").contains("15/15"),
+        "got: {}",
+        status("after-spend")
+    );
+
+    // The next self-directed spend is refused -- cleanly (non-zero, no panic).
+    let exhausted = legion_cmd(data)
+        .args(["autonomy", "gate", "--repo", "kelex", "--kind", "free-time"])
+        .output()
+        .unwrap();
+    assert!(
+        !exhausted.status.success(),
+        "exhausted budget must refuse self-directed work"
+    );
+    assert!(
+        String::from_utf8_lossy(&exhausted.stdout).contains("exhausted"),
+        "got stdout: {} stderr: {}",
+        String::from_utf8_lossy(&exhausted.stdout),
+        String::from_utf8_lossy(&exhausted.stderr)
+    );
+
+    // ...but operator work still proceeds even when exhausted.
+    let op2 = legion_cmd(data)
+        .args([
+            "autonomy",
+            "gate",
+            "--repo",
+            "kelex",
+            "--kind",
+            "self-accept",
+            "--operator",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        op2.status.success(),
+        "operator work must proceed even when the budget is spent"
+    );
+}
+
+// #524/#546: the --banner reminder. Available budget tells the agent
+// self-directed work is sanctioned; a spent budget tells it to pause.
+#[test]
+fn autonomy_status_banner_reminds_to_spend_or_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    let banner = || {
+        let out = legion_cmd(data)
+            .args(["autonomy", "status", "--repo", "kelex", "--banner"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // Fresh budget -> sanctioned-to-spend framing.
+    let fresh = banner();
+    assert!(fresh.contains("sanctioned"), "got: {fresh}");
+    assert!(fresh.contains("without asking"), "got: {fresh}");
+
+    // Spend the ceiling, then the banner flips to the paused framing.
+    legion_cmd(data)
+        .args([
+            "autonomy",
+            "gate",
+            "--repo",
+            "kelex",
+            "--kind",
+            "self-accept",
+            "--cost",
+            "15",
+        ])
+        .output()
+        .unwrap();
+    let spent = banner();
+    assert!(spent.contains("spent for this week"), "got: {spent}");
+    assert!(
+        spent.contains("operator-requested work still proceeds"),
+        "got: {spent}"
+    );
+}

@@ -157,7 +157,20 @@ fi
 
 touch "$MARKER"
 
-jq -n --arg reason "Drop one thing a teammate would not have known walking in cold -- a gotcha, a hidden invariant, how something actually works. Not what you did; the finding itself. Store it: legion reflect --repo $REPO --text '<finding>'. Skip if nothing surprising came up." '{
+REASON="Drop one thing a teammate would not have known walking in cold -- a gotcha, a hidden invariant, how something actually works. Not what you did; the finding itself. Store it: legion reflect --repo $REPO --text '<finding>'. Skip if nothing surprising came up."
+
+# Budget reminder (#524) -- the "on stop" half of surfacing the autonomy
+# budget. Tells the agent, as it wraps up, that it has sanctioned units left
+# to self-direct more work, so stopping is a choice, not a default. Fail-open:
+# any error leaves BUDGET empty and the reflection prompt fires unchanged.
+BUDGET=$("$LEGION_BIN" autonomy status --repo "$REPO" --banner 2>/dev/null)
+if [ -n "$BUDGET" ]; then
+  REASON="${REASON}
+
+${BUDGET}"
+fi
+
+jq -n --arg reason "$REASON" '{
   "decision": "block",
   "reason": $reason
 }'

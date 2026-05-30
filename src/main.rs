@@ -1,3 +1,4 @@
+mod autonomy;
 mod board;
 mod card_parse;
 mod channel;
@@ -828,6 +829,15 @@ enum Commands {
         /// "pass|fail|uncertain", "evidence": "..."}, ...]`.
         #[arg(long)]
         verdicts_file: Option<String>,
+    },
+
+    /// Weekly autonomy budget (#524): the governor on self-directed work.
+    /// `status` shows the window; `gate` asks whether a unit of autonomous
+    /// work (self-acceptance or free-time) fits, recording the spend when it
+    /// does. Operator-requested work bypasses with --operator.
+    Autonomy {
+        #[command(subcommand)]
+        action: AutonomyAction,
     },
 
     /// Show current system health and recent trend
@@ -2013,6 +2023,51 @@ enum QualityGateAction {
     },
 }
 
+/// The kind of self-directed work a gate spend covers.
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum AutonomyKind {
+    /// The agent accepting its own Pending card (Pending -> Accepted).
+    SelfAccept,
+    /// Sanctioned exploration when the board is dry; output feeds reflections.
+    FreeTime,
+}
+
+#[derive(Subcommand, Debug)]
+enum AutonomyAction {
+    /// Show the current window: spent / ceiling, remaining, and reset date.
+    Status {
+        /// Repository name (the agent whose budget to show).
+        #[arg(long)]
+        repo: String,
+
+        /// Emit a concise SessionStart/Stop reminder framing instead of the
+        /// status line: tells the agent it has sanctioned units to spend on
+        /// self-directed work (or that the week's budget is spent).
+        #[arg(long)]
+        banner: bool,
+    },
+    /// Ask whether one unit of autonomous work fits the budget. Records the
+    /// spend and exits 0 when allowed; exits non-zero (cleanly) when the
+    /// weekly budget is exhausted. --operator bypasses entirely.
+    Gate {
+        /// Repository name (the agent spending).
+        #[arg(long)]
+        repo: String,
+
+        /// What the spend is for.
+        #[arg(long, value_enum)]
+        kind: AutonomyKind,
+
+        /// Operator-requested work: never budget-bound, nothing is spent.
+        #[arg(long)]
+        operator: bool,
+
+        /// Units to spend (default 1).
+        #[arg(long, default_value = "1")]
+        cost: u64,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 enum WatchAction {
     /// Add a working directory to watch.toml (idempotent by canonicalized path)
@@ -2717,6 +2772,18 @@ fn read_file_or_stdin(path: Option<&str>, flag: &str) -> Result<String, error::L
             Ok(buf)
         }
     }
+}
+
+/// This host's remaining WEEKLY rate-limit headroom as a percentage
+/// (100 - the seven-day used-%), or `None` when there is no rate sample for
+/// this host. `None` makes the autonomy ceiling fall back to a conservative
+/// default rather than running unbounded while blind to its own quota.
+fn local_weekly_headroom(db: &db::Database) -> Option<f64> {
+    let host = statusline::resolve_hostname();
+    let sample = db.latest_rate_limit_sample_for_host(&host).ok()??;
+    sample
+        .seven_day_pct
+        .map(|used| (100.0 - used).clamp(0.0, 100.0))
 }
 
 fn fmt_pct(v: Option<f64>) -> String {
@@ -6796,6 +6863,105 @@ fn run() -> error::Result<()> {
                         ),
                     }
                     std::process::exit(1);
+                }
+            }
+        }
+        Commands::Autonomy { action } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let now = chrono::Utc::now();
+
+            // Recompute the ceiling from this host's remaining weekly headroom
+            // on every read; a stale window then rolls over against it.
+            let fresh_ceiling = autonomy::ceiling_from_headroom(local_weekly_headroom(&database));
+
+            // Load-or-init, then roll the window over if it expired.
+            let load = |repo: &str| -> error::Result<autonomy::AutonomyBudget> {
+                let current = match database.get_autonomy_budget(repo)? {
+                    Some(b) => autonomy::rolled_over(b, now, fresh_ceiling),
+                    None => autonomy::AutonomyBudget::fresh(now, fresh_ceiling),
+                };
+                Ok(current)
+            };
+
+            match action {
+                AutonomyAction::Status { repo, banner } => {
+                    let budget = load(&repo)?;
+                    let resets = budget.resets_at().format("%Y-%m-%d");
+                    if !banner {
+                        println!(
+                            "[legion] autonomy budget for {repo}: {}/{} units spent, {} remaining. \
+                             Window resets {resets}.",
+                            budget.spent,
+                            budget.ceiling,
+                            budget.remaining(),
+                        );
+                    } else if budget.remaining() > 0 {
+                        // The reminder that turns the primitive into behavior:
+                        // the agent self-directs because it knows the budget is
+                        // there, instead of waiting to be told.
+                        println!(
+                            "[Legion] Autonomy budget: {} of {} units this week (resets {resets}). \
+                             Self-directed work is sanctioned -- self-accept a Pending card or take \
+                             free-time without asking. Operator-requested work never draws on this.",
+                            budget.remaining(),
+                            budget.ceiling,
+                        );
+                    } else {
+                        println!(
+                            "[Legion] Autonomy budget spent for this week (resets {resets}). \
+                             Pause self-directed initiative; operator-requested work still proceeds."
+                        );
+                    }
+                }
+                AutonomyAction::Gate {
+                    repo,
+                    kind,
+                    operator,
+                    cost,
+                } => {
+                    let budget = load(&repo)?;
+                    match autonomy::decide_spend(&budget, cost, operator) {
+                        autonomy::SpendOutcome::OperatorBypass => {
+                            println!("[legion] operator-requested work -- not budget-gated.");
+                        }
+                        autonomy::SpendOutcome::Allowed {
+                            new_spent,
+                            remaining_after,
+                        } => {
+                            let updated = autonomy::AutonomyBudget {
+                                spent: new_spent,
+                                ..budget
+                            };
+                            database.upsert_autonomy_budget(&repo, &updated)?;
+                            let label = match kind {
+                                AutonomyKind::SelfAccept => "self-accept",
+                                AutonomyKind::FreeTime => "free-time",
+                            };
+                            println!(
+                                "[legion] {label} allowed -- {remaining_after} of {} autonomy \
+                                 units left this week.",
+                                updated.ceiling
+                            );
+                            if matches!(kind, AutonomyKind::FreeTime) {
+                                println!(
+                                    "[legion] free-time is idleation: spend it on a reflection \
+                                     (legion reflect) so the output compounds."
+                                );
+                            }
+                        }
+                        autonomy::SpendOutcome::Exhausted => {
+                            // No write: an exhausted check changes nothing. The
+                            // stored window_start is unchanged, so the reset date
+                            // stays stable across repeated exhausted polls.
+                            println!(
+                                "[legion] autonomy budget exhausted for this week (resets {}). \
+                                 Operator-requested work still proceeds; self-directed work waits.",
+                                budget.resets_at().format("%Y-%m-%d")
+                            );
+                            std::process::exit(1);
+                        }
+                    }
                 }
             }
         }
