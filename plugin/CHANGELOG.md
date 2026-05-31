@@ -1,5 +1,27 @@
 # Legion Changelog
 
+## 0.16.2
+
+The SOLID-issue workflow lands. A review pipeline keeps agents on a ratified spec instead of improvising (PR-write forcing function + verify gate); an autonomy loop lets the board drive self-directed work within a weekly budget; `whatami` gives the operating contract its own memory surface; and the kanban substrate fixes make the board mean "what is being worked on." Patch release: additive features plus workflow behavior changes. One additive table (`autonomy_budget`), `CREATE TABLE IF NOT EXISTS`, no migration of existing data; no wire-format change.
+
+### New
+
+- **`legion whatami` -- operating-contract surface** (PR #541, #517): a recall surface parallel to `whoami`, sourced from `domain=workflow` reflections and injected at SessionStart after identity ("who you are, then how you operate"). 2KB-capped like `whoami`; silent when a repo has no workflow roots.
+- **PR-write forcing function** (PR #544, #519): `legion pr write-check --repo <r> --issue <n> [--body-file|stdin]` validates a drafted PR body against the issue's acceptance criteria -- one prose entry per criterion, each citing evidence, plus a "Not done" section -- and refuses an empty or boilerplate mapping. Articulation is verification: writing the diff-to-AC mapping makes the agent re-read its own work. Records a `legion-pr-write` quality gate.
+- **verify gate** (PR #545, #520): `legion verify --repo <r> --card <id> [--verdicts-file|stdin]` reads a card's acceptance criteria and the agent's per-criterion verdicts (pass/fail/uncertain + evidence) and decides the card's fate -- all pass allows Done, any fail hard-blocks, any uncertain (or a Pass with no evidence) routes the card to NeedsInput. A card with no criteria is blocked outright. Card-keyed gate (`legion-verify:<card>`), so it holds across the commit `legion done` runs on. New FSM transition `InReview -> NeedsInput`.
+- **weekly autonomy budget** (PR #546, #524): `legion autonomy status|gate` -- a rolling weekly governor on self-directed work (self-acceptance + free-time), keyed on this host's weekly rate-limit headroom (conservative default when no sample). Operator-requested work bypasses (`--operator`); exhaustion stops self-directed work cleanly while operator work proceeds. Surfaced at SessionStart and on Stop so the agent knows it has sanctioned units to spend. New `autonomy_budget` table.
+- **`legion daemon-stop` / `daemon-restart`** (PR #540, #539): bounded daemon restart (SIGTERM -> 3s -> SIGKILL -> verify death) that does not wait on graceful-shutdown drain.
+
+### Changed
+
+- **Cards are born Backlog** (PR #534, #515): every card -- created or GitHub-synced -- now lands in `Backlog`, not `Pending`. Only an explicit assign (consensus/planfile) promotes to `Pending`. Behavior change: stops GitHub sync from flooding `Pending` with unconsented issues.
+- **`kanban list` returns the working set** (PR #535, #516): the default list (and the SessionStart "Current work" banner) now excludes `Backlog` and terminal cards; `--all` and `--backlog` reach the rest. Fixes the bloated SessionStart banner.
+- **`legion pr create` gates on simplify AND pr-write** (PR #544, #519): both forcing-function gates must be clean on HEAD before a PR opens; `--skip-gates` bootstrap skips both with an audit row. Behavior change.
+- **`legion done` is verify-gated** (PR #545, #520): a card with acceptance criteria cannot reach Done until a clean `legion verify` verdict exists for it. Cards with no criteria are not gated. Behavior change.
+- **Stop hook gates on the kanban board, not the harness TaskList** (PR #542, #523): blocks stopping while an `Accepted` card exists for the repo (reads the persistent board, not the ephemeral per-session task log). `LEGION_SKIP_STOP_BLOCK=1` bypasses.
+- **`legion init` writes nothing** (PR #538, #537): the pre-plugin hook installer no longer writes stale hooks; it points operators to `legion watch add`. Hooks ship with the plugin.
+- **grep-enforcement audited; allowlists guard command/skill surfaces** (PR #543, #530): the four PreToolUse grep hooks stay (they inject sym/recall context or apply the dynamic symbol-block ladder -- neither expressible as static `disallowed-tools`); `legion-simplify`'s skill allowlist tightened to drop Grep/Glob. New CI parity-lock test refuses any legion command/skill that re-grants Grep/Glob.
+
 ## 0.16.1
 
 Hardening on the pre-bash-grep hook bypass mechanism. Patch release; no schema or wire-format changes.
