@@ -840,6 +840,16 @@ enum Commands {
         action: AutonomyAction,
     },
 
+    /// Board-derived goal (#525): print the active Accepted card's acceptance
+    /// criteria framed as the agent's completion condition, to carry across
+    /// turns. Native `/goal` cannot be set programmatically, so SessionStart
+    /// emits this each session; it is empty when nothing is in progress.
+    Goal {
+        /// Repository name (the agent whose active card to read).
+        #[arg(long)]
+        repo: String,
+    },
+
     /// Show current system health and recent trend
     Health {
         /// Show history for the last N duration (e.g., "1h", "30m", "24h")
@@ -5104,8 +5114,15 @@ fn run() -> error::Result<()> {
                     }
                 }
                 KanbanAction::Accept { id } => {
-                    kanban::transition_card(&database, &id, kanban::Action::Accept, None)?;
+                    let card =
+                        kanban::transition_card(&database, &id, kanban::Action::Accept, None)?;
                     println!("{id}");
+                    // #525: accepting a card sets the board-derived goal -- echo
+                    // the just-accepted card's acceptance criteria as the
+                    // completion condition the agent now carries.
+                    if let Some(goal) = kanban::format_active_goal(std::slice::from_ref(&card)) {
+                        eprintln!("{goal}");
+                    }
                 }
                 KanbanAction::Block { id, reason } => {
                     kanban::transition_card(
@@ -6963,6 +6980,21 @@ fn run() -> error::Result<()> {
                         }
                     }
                 }
+            }
+        }
+        Commands::Goal { repo } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let cards = kanban::list_cards(
+                &database,
+                &repo,
+                kanban::Direction::Inbound,
+                kanban::CardScope::WorkingSet,
+            )?;
+            // Prints nothing when no card is Accepted -- the goal is "cleared"
+            // by board state alone (AC: clears on terminal/blocked).
+            if let Some(goal) = kanban::format_active_goal(&cards) {
+                println!("{goal}");
             }
         }
         Commands::Statusline { json } => {
