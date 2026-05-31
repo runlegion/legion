@@ -332,6 +332,43 @@ pub fn agent_workloads(db: &Database) -> Result<Vec<AgentWorkload>> {
     db.get_agent_workloads()
 }
 
+/// Build the board-derived goal banner (#525): the active Accepted card(s)
+/// framed as the agent's completion condition, to carry across turns.
+///
+/// The native `/goal` cannot be set programmatically (no hook/flag/settings
+/// surface as of CC v2.1.154), so this is the supported equivalent: the goal
+/// is re-derived from the board on every SessionStart and printed on accept.
+/// It "clears" with no separate state -- once nothing is Accepted (the card
+/// reached a terminal or blocked status), this returns `None` and no goal is
+/// shown. Returns `None` when no card is in progress.
+pub fn format_active_goal(cards: &[Card]) -> Option<String> {
+    let accepted: Vec<&Card> = cards
+        .iter()
+        .filter(|c| c.status == CardStatus::Accepted)
+        .collect();
+    if accepted.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from(
+        "[Legion] Your goal -- the board's completion condition, carried across turns \
+         (legion sets this from the card you accepted; you do not type /goal):",
+    );
+    for card in accepted {
+        out.push_str(&format!("\n\n- {}  [card {}]", card.text.trim(), card.id));
+        if let Some(ac) = card.acceptance.as_deref() {
+            for item in ac.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                out.push_str(&format!("\n    - [ ] {item}"));
+            }
+        }
+    }
+    out.push_str(
+        "\n\nKeep working until these acceptance criteria are met, then run verify. \
+         The Stop gate holds you to it; \"should I keep going?\" is already answered -- yes.",
+    );
+    Some(out)
+}
+
 /// Format a priority tag for display.
 fn priority_tag(priority: &str) -> String {
     if priority != "med" {
@@ -1474,6 +1511,53 @@ mod tests {
         assert!(!output.contains("Context:"));
         assert!(!output.contains("Labels:"));
         assert!(!output.contains("Source:"));
+    }
+
+    #[test]
+    fn active_goal_derives_from_the_accepted_card() {
+        let mk = |status: CardStatus, text: &str, ac: Option<&str>| Card {
+            id: "card-1".to_string(),
+            from_repo: "kelex".to_string(),
+            to_repo: "kelex".to_string(),
+            text: text.to_string(),
+            context: None,
+            priority: "med".to_string(),
+            status,
+            note: None,
+            labels: None,
+            parent_card_id: None,
+            source_url: None,
+            source_type: None,
+            sort_order: 0,
+            created_at: "2026-04-03T00:00:00Z".to_string(),
+            updated_at: "2026-04-03T00:00:00Z".to_string(),
+            assigned_at: None,
+            started_at: None,
+            completed_at: None,
+            problem: None,
+            solution: None,
+            acceptance: ac.map(str::to_string),
+        };
+
+        // An Accepted card with AC becomes the goal, listing its criteria.
+        let goal = format_active_goal(&[mk(
+            CardStatus::Accepted,
+            "ship the gate",
+            Some("crit one\ncrit two"),
+        )])
+        .expect("an accepted card yields a goal");
+        assert!(goal.contains("ship the gate"));
+        assert!(goal.contains("crit one") && goal.contains("crit two"));
+        assert!(goal.contains("card card-1"));
+
+        // Nothing Accepted -> no goal (cleared by board state alone, AC #2).
+        assert!(format_active_goal(&[mk(CardStatus::Pending, "not yet", Some("x"))]).is_none());
+        assert!(format_active_goal(&[]).is_none());
+
+        // Accepted but no AC -> still a goal, titled by the card text.
+        let goal2 =
+            format_active_goal(&[mk(CardStatus::Accepted, "chore card", None)]).expect("goal");
+        assert!(goal2.contains("chore card"));
     }
 
     // --- view_card tests ---

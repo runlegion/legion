@@ -6452,3 +6452,77 @@ fn autonomy_status_banner_reminds_to_spend_or_pause() {
         "got: {spent}"
     );
 }
+
+// #525 board-derived goal: set from the Accepted card's AC, cleared once the
+// card leaves Accepted (terminal/blocked). No separate goal state -- the board
+// is the source of truth, re-derived on each `legion goal` call.
+#[test]
+fn board_goal_sets_on_accept_and_clears_off_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    let goal = || {
+        let out = legion_cmd(data)
+            .args(["goal", "--repo", "kelex"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let create = legion_cmd(data)
+        .args([
+            "kanban",
+            "create",
+            "--from",
+            "kelex",
+            "--to",
+            "kelex",
+            "--text",
+            "ship the goal",
+            "--context",
+            "## Acceptance criteria\n- crit alpha\n- crit beta\n",
+        ])
+        .output()
+        .unwrap();
+    let card = String::from_utf8_lossy(&create.stdout).trim().to_string();
+
+    // Pending (assigned, not accepted) -> no goal yet.
+    legion_cmd(data)
+        .args(["kanban", "assign", "--id", &card, "--to", "kelex"])
+        .output()
+        .unwrap();
+    assert!(
+        goal().trim().is_empty(),
+        "no goal before the card is accepted"
+    );
+
+    // Accepted -> the card's AC becomes the goal.
+    legion_cmd(data)
+        .args(["kanban", "accept", "--id", &card])
+        .output()
+        .unwrap();
+    let active = goal();
+    assert!(active.contains("ship the goal"), "got: {active}");
+    assert!(
+        active.contains("crit alpha") && active.contains("crit beta"),
+        "got: {active}"
+    );
+
+    // Blocked (off Accepted) -> goal clears, by board state alone.
+    legion_cmd(data)
+        .args([
+            "kanban",
+            "block",
+            "--id",
+            &card,
+            "--reason",
+            "waiting on upstream",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        goal().trim().is_empty(),
+        "goal clears once the card leaves Accepted"
+    );
+}
