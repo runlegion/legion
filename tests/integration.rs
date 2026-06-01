@@ -6526,3 +6526,158 @@ fn board_goal_sets_on_accept_and_clears_off_accepted() {
         "goal clears once the card leaves Accepted"
     );
 }
+
+// #551 burn-rate gate: self-directed work is paused when the latest rate-limit
+// sample exceeds the threshold. The gate fires on the 5h OR 7d window.
+
+// Missing sample (fresh DB) does not fire: fail-open so the work-unit budget
+// remains the sole governor when no rate data exists.
+#[test]
+fn burn_rate_gate_no_sample_is_fail_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    // No statusline seed -> no rate_limit_samples row for this host.
+    let out = legion_cmd(data)
+        .args([
+            "autonomy",
+            "gate",
+            "--repo",
+            "kelex",
+            "--kind",
+            "self-accept",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "gate must succeed when no rate sample exists (fail-open): stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// Seeded sample above threshold -> gate denies self-directed work (non-zero exit,
+// calm message, no panic).
+#[test]
+fn burn_rate_gate_throttled_when_sample_exceeds_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    // Seed a sample with 5h at 95% (above the default 90% threshold).
+    seed_rate_limit_sample(data, 95.0, 50.0);
+
+    let out = legion_cmd(data)
+        .args([
+            "autonomy",
+            "gate",
+            "--repo",
+            "kelex",
+            "--kind",
+            "self-accept",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "gate must deny self-directed work when rate headroom is low"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("paused"),
+        "throttled message must say paused, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("5h"),
+        "throttled message must name the triggering window, got: {stdout}"
+    );
+    // No panic, no Rust backtrace in stderr.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("thread 'main' panicked"),
+        "gate must not panic, got stderr: {stderr}"
+    );
+}
+
+// --operator bypasses the burn-rate gate even when the sample is above threshold.
+#[test]
+fn burn_rate_gate_operator_bypasses_throttle() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    // Seed a sample that would throttle self-directed work.
+    seed_rate_limit_sample(data, 95.0, 95.0);
+
+    let out = legion_cmd(data)
+        .args([
+            "autonomy",
+            "gate",
+            "--repo",
+            "kelex",
+            "--kind",
+            "self-accept",
+            "--operator",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "operator work must proceed even when rate headroom is low: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// The 7d window alone triggers the gate.
+#[test]
+fn burn_rate_gate_fires_on_seven_day_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    // 5h is fine, 7d is above threshold.
+    seed_rate_limit_sample(data, 40.0, 92.0);
+
+    let out = legion_cmd(data)
+        .args([
+            "autonomy",
+            "gate",
+            "--repo",
+            "kelex",
+            "--kind",
+            "self-accept",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "gate must deny when 7d window exceeds threshold"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("7d"),
+        "throttled message must name the 7d window, got: {stdout}"
+    );
+}
+
+// autonomy status includes burn-rate line when a sample exists.
+#[test]
+fn autonomy_status_includes_burn_rate_line_when_sample_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    seed_rate_limit_sample(data, 40.0, 55.0);
+
+    let out = legion_cmd(data)
+        .args(["autonomy", "status", "--repo", "kelex"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Should have a rate headroom line.
+    assert!(
+        stdout.contains("Rate headroom:") || stdout.contains("Rate limit warning:"),
+        "status must include burn-rate line when a sample exists, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("remaining"),
+        "burn-rate line must describe remaining headroom, got: {stdout}"
+    );
+}
