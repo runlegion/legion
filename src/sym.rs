@@ -8,8 +8,11 @@
 use crate::error::{LegionError, Result};
 use protobuf::Message;
 use scip::symbol::parse_symbol as scip_parse_symbol;
+use scip::types::descriptor::Suffix;
+use scip::types::symbol_information::Kind;
 use scip::types::{Descriptor, Index, SymbolRole};
 use serde::Serialize;
+use std::collections::HashMap;
 
 /// A resolved symbol location returned by def and refs queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -28,6 +31,19 @@ pub struct ImpactRadius {
     pub symbol: String,
     pub refs_count: u32,
     pub def_location: Option<SymbolLocation>,
+}
+
+/// One enumerated definition for `sym list` (#558): the answer to the
+/// "what functions/enums/etc. are defined here" query that grep was serving
+/// because point-lookups (def/refs/hover) could not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SymbolEntry {
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub repo: String,
+    pub lang: String,
 }
 
 /// Hover information: signature + docstring extracted from a SCIP document.
@@ -172,6 +188,168 @@ pub fn query_definitions(
         }
     }
     sort_locations(&mut out);
+    Ok(out)
+}
+
+/// Map a SCIP `SymbolInformation.kind` to a short display token, or `None`
+/// for kinds that are not top-level definitions worth enumerating (fields,
+/// enum members, parameters, locals). Preferred over the descriptor suffix
+/// because it distinguishes struct / enum / trait, which the suffix cannot.
+fn kind_to_token(kind: Kind) -> Option<&'static str> {
+    match kind {
+        Kind::Function | Kind::Method | Kind::StaticMethod => Some("fn"),
+        Kind::Struct => Some("struct"),
+        Kind::Enum => Some("enum"),
+        Kind::Trait => Some("trait"),
+        Kind::Class => Some("class"),
+        Kind::Interface => Some("interface"),
+        Kind::Module | Kind::Namespace => Some("mod"),
+        Kind::Constant => Some("const"),
+        Kind::Macro => Some("macro"),
+        Kind::Type | Kind::TypeAlias => Some("type"),
+        _ => None,
+    }
+}
+
+/// Fallback kind token derived from the symbol's trailing descriptor suffix,
+/// used when the indexer left `SymbolInformation.kind` unspecified. Coarser:
+/// `Type` covers struct / enum / trait / class (they collapse to "type").
+fn suffix_to_token(suffix: Suffix) -> Option<&'static str> {
+    match suffix {
+        Suffix::Namespace | Suffix::Package => Some("mod"),
+        Suffix::Type => Some("type"),
+        Suffix::Term => Some("const"),
+        Suffix::Method => Some("fn"),
+        Suffix::Macro => Some("macro"),
+        _ => None,
+    }
+}
+
+/// Resolve a definition's kind token: prefer the indexer's
+/// `SymbolInformation.kind`, fall back to the descriptor suffix. `None` means
+/// "not a top-level definition" (skip it).
+fn resolve_kind_token(symbol: &str, info_kind: Option<Kind>) -> Option<String> {
+    if let Some(tok) = info_kind.and_then(kind_to_token) {
+        return Some(tok.to_string());
+    }
+    let parsed = scip_parse_symbol(symbol).ok()?;
+    let last = parsed.descriptors.last()?;
+    suffix_to_token(last.suffix.enum_value_or_default()).map(str::to_string)
+}
+
+/// The leaf (display) name of a symbol: its last descriptor's name, or the raw
+/// symbol string when it does not parse or has no descriptors.
+fn symbol_leaf_name(symbol: &str) -> String {
+    scip_parse_symbol(symbol)
+        .ok()
+        .and_then(|p| p.descriptors.last().map(|d| d.name.clone()))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| symbol.to_string())
+}
+
+/// Normalize a user-supplied `--kind` token to the canonical set, accepting
+/// common aliases. `None` => unrecognized (the caller reports the supported
+/// set). The canonical tokens are: fn, struct, enum, trait, class, interface,
+/// mod, const, macro, type.
+pub fn normalize_kind_filter(k: &str) -> Option<&'static str> {
+    match k.to_lowercase().as_str() {
+        "fn" | "function" | "func" | "method" => Some("fn"),
+        "struct" => Some("struct"),
+        "enum" => Some("enum"),
+        "trait" => Some("trait"),
+        "class" => Some("class"),
+        "interface" | "iface" => Some("interface"),
+        "mod" | "module" | "namespace" | "ns" => Some("mod"),
+        "const" | "constant" => Some("const"),
+        "macro" => Some("macro"),
+        "type" | "typealias" => Some("type"),
+        _ => None,
+    }
+}
+
+/// True when a resolved kind token satisfies a normalized filter. `type` is a
+/// superset matching all type-like definitions (type/struct/enum/trait/class),
+/// so it still finds them when the indexer only gave suffix granularity; every
+/// other filter is an exact token match.
+fn kind_token_matches(tok: &str, filter: &str) -> bool {
+    if filter == "type" {
+        matches!(tok, "type" | "struct" | "enum" | "trait" | "class")
+    } else {
+        tok == filter
+    }
+}
+
+/// Enumerate DEFINITION symbols from a SCIP blob (#558), optionally filtered
+/// by normalized kind token and by file (exact or suffix path match). Returns
+/// byte-cheap entries (name, kind, file:line) -- never source bodies. This is
+/// the definition-enumeration query agents were grepping for (`grep "fn "`)
+/// because def/refs/hover only do point lookups.
+///
+/// `kind_filter` must already be normalized via [`normalize_kind_filter`];
+/// an unrecognized kind is the caller's error to report, not a silent empty.
+pub fn query_symbols(
+    blob: &[u8],
+    kind_filter: Option<&str>,
+    file_filter: Option<&str>,
+    repo: &str,
+    lang: &str,
+) -> Result<Vec<SymbolEntry>> {
+    if blob.is_empty() {
+        return Ok(Vec::new());
+    }
+    let index = parse_blob(blob)?;
+    let mut out = Vec::new();
+    for doc in &index.documents {
+        if let Some(f) = file_filter
+            && doc.relative_path != f
+            && !doc.relative_path.ends_with(f)
+        {
+            continue;
+        }
+        // Indexer-provided kinds for this document's symbols, where populated.
+        let kinds: HashMap<&str, Kind> = doc
+            .symbols
+            .iter()
+            .filter_map(|si| {
+                let k = si.kind.enum_value_or_default();
+                (k != Kind::UnspecifiedKind).then_some((si.symbol.as_str(), k))
+            })
+            .collect();
+
+        for occ in &doc.occurrences {
+            if !is_definition(occ.symbol_roles) {
+                continue;
+            }
+            let Some(kind_tok) =
+                resolve_kind_token(&occ.symbol, kinds.get(occ.symbol.as_str()).copied())
+            else {
+                continue;
+            };
+            if let Some(filter) = kind_filter
+                && !kind_token_matches(&kind_tok, filter)
+            {
+                continue;
+            }
+            let Some((line, _col)) = range_start_1indexed(&occ.range) else {
+                continue;
+            };
+            out.push(SymbolEntry {
+                name: symbol_leaf_name(&occ.symbol),
+                kind: kind_tok,
+                file: doc.relative_path.clone(),
+                line,
+                repo: repo.to_string(),
+                lang: lang.to_string(),
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then(a.line.cmp(&b.line))
+            .then(a.name.cmp(&b.name))
+    });
+    out.dedup();
     Ok(out)
 }
 
@@ -822,5 +1000,141 @@ diff --git a/old.rs b/old.rs
         let json = serde_json::to_string(&loc).unwrap();
         assert!(json.contains("\"file\":\"src/lib.rs\""));
         assert!(json.contains("\"line\":10"));
+    }
+
+    // --- sym list (#558) ---
+
+    fn sym_info(symbol: &str, kind: Kind) -> SymbolInformation {
+        let mut si = SymbolInformation::new();
+        si.symbol = symbol.to_string();
+        si.kind = kind.into();
+        si
+    }
+
+    fn doc_with_symbols(
+        path: &str,
+        occurrences: Vec<Occurrence>,
+        symbols: Vec<SymbolInformation>,
+    ) -> Document {
+        let mut d = doc(path, occurrences);
+        d.symbols = symbols;
+        d
+    }
+
+    #[test]
+    fn list_enumerates_defs_and_filters_by_suffix_kind() {
+        // No SymbolInformation -> kind falls back to the descriptor suffix.
+        let blob = build_index(vec![doc(
+            "src/a.rs",
+            vec![
+                occ("q . . . alpha().", vec![0, 0, 0, 5], true), // Method -> fn
+                occ("q . . . Beta#", vec![1, 0, 1, 4], true),    // Type -> type
+                occ("q . . . gamma_mod/", vec![2, 0, 2, 9], true), // Namespace -> mod
+                occ("q . . . refonly().", vec![3, 0, 3, 7], false), // reference, excluded
+            ],
+        )]);
+
+        let all = query_symbols(&blob, None, None, "r", "rust").unwrap();
+        let names: Vec<_> = all.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "Beta", "gamma_mod"]); // def-only, line-sorted
+
+        let fns = query_symbols(&blob, Some("fn"), None, "r", "rust").unwrap();
+        assert_eq!(fns.len(), 1);
+        assert_eq!(
+            (fns[0].name.as_str(), fns[0].kind.as_str()),
+            ("alpha", "fn")
+        );
+
+        // "type" is the superset filter -> matches the Type-suffix Beta.
+        let types = query_symbols(&blob, Some("type"), None, "r", "rust").unwrap();
+        assert_eq!(
+            types.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["Beta"]
+        );
+    }
+
+    #[test]
+    fn list_prefers_symbol_information_kind_over_suffix() {
+        // Beta# carries a Type suffix, but the indexer's kind says Enum.
+        let occs = vec![
+            occ("q . . . alpha().", vec![0, 0, 0, 5], true),
+            occ("q . . . Beta#", vec![1, 0, 1, 4], true),
+        ];
+        let syms = vec![
+            sym_info("q . . . alpha().", Kind::Function),
+            sym_info("q . . . Beta#", Kind::Enum),
+        ];
+        let blob = build_index(vec![doc_with_symbols("src/a.rs", occs, syms)]);
+
+        let enums = query_symbols(&blob, Some("enum"), None, "r", "rust").unwrap();
+        assert_eq!(enums.len(), 1);
+        assert_eq!(
+            (enums[0].name.as_str(), enums[0].kind.as_str()),
+            ("Beta", "enum")
+        );
+        // The "type" superset still finds the enum.
+        assert_eq!(
+            query_symbols(&blob, Some("type"), None, "r", "rust")
+                .unwrap()
+                .len(),
+            1
+        );
+        // ...but --kind struct does NOT (precise once kind is populated).
+        assert!(
+            query_symbols(&blob, Some("struct"), None, "r", "rust")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn list_scopes_by_file() {
+        let blob = build_index(vec![
+            doc(
+                "src/a.rs",
+                vec![occ("q . . . a_fn().", vec![0, 0, 0, 4], true)],
+            ),
+            doc(
+                "src/b.rs",
+                vec![occ("q . . . b_fn().", vec![0, 0, 0, 4], true)],
+            ),
+        ]);
+        let only_b = query_symbols(&blob, None, Some("src/b.rs"), "r", "rust").unwrap();
+        assert_eq!(only_b.len(), 1);
+        assert_eq!(only_b[0].name, "b_fn");
+        // A path suffix also scopes.
+        assert_eq!(
+            query_symbols(&blob, None, Some("b.rs"), "r", "rust")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn list_empty_blob_and_no_matches_are_empty_not_error() {
+        assert!(
+            query_symbols(b"", None, None, "r", "rust")
+                .unwrap()
+                .is_empty()
+        );
+        let blob = build_index(vec![doc(
+            "src/a.rs",
+            vec![occ("q . . . a_fn().", vec![0, 0, 0, 4], true)],
+        )]);
+        assert!(
+            query_symbols(&blob, Some("enum"), None, "r", "rust")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn normalize_kind_filter_accepts_aliases_and_rejects_unknown() {
+        assert_eq!(normalize_kind_filter("function"), Some("fn"));
+        assert_eq!(normalize_kind_filter("Fn"), Some("fn"));
+        assert_eq!(normalize_kind_filter("module"), Some("mod"));
+        assert_eq!(normalize_kind_filter("interface"), Some("interface"));
+        assert_eq!(normalize_kind_filter("bogus"), None);
     }
 }

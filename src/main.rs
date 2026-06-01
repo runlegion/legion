@@ -1072,6 +1072,28 @@ enum SymAction {
         #[arg(long)]
         json: bool,
     },
+
+    /// Enumerate the definitions in the index -- the "what functions/enums/etc.
+    /// are defined here" query. Byte-cheap: names + locations, never source
+    /// bodies. This is the shape `grep "fn "` was serving; use it instead.
+    List {
+        /// Restrict to a single repo (default: every repo with a stored index)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Restrict to a single language
+        #[arg(long)]
+        lang: Option<String>,
+        /// Filter by kind: fn, struct, enum, trait, class, interface, mod,
+        /// const, macro, type ("type" matches all type-like definitions).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Scope to one file (exact relative path or a path suffix)
+        #[arg(long)]
+        file: Option<String>,
+        /// Emit results as a JSON array of SymbolEntry objects
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2868,7 +2890,84 @@ fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<(
             json,
         } => run_hover_query(database, &name, repo, lang, json),
         SymAction::Impact { repo, diff, json } => run_sym_impact(database, &repo, &diff, json),
+        SymAction::List {
+            repo,
+            lang,
+            kind,
+            file,
+            json,
+        } => run_sym_list(database, repo, lang, kind, file, json),
     }
+}
+
+/// Enumerate definitions across the matching SCIP indexes (#558). Validates
+/// the `--kind` filter up front (unknown kind = loud error, not silent empty),
+/// runs `sym::query_symbols` per blob, and prints byte-cheap entries. A repo
+/// with no index, or no matching definitions, is a clean exit 0 (enumeration
+/// of nothing is informational, not a lookup failure).
+fn run_sym_list(
+    database: &db::Database,
+    repo: Option<String>,
+    lang: Option<String>,
+    kind: Option<String>,
+    file: Option<String>,
+    json: bool,
+) -> error::Result<()> {
+    use std::io::Write;
+
+    let norm_kind = match kind.as_deref() {
+        Some(k) => match sym::normalize_kind_filter(k) {
+            Some(n) => Some(n),
+            None => {
+                eprintln!(
+                    "[legion] unknown --kind '{k}'. Supported: fn, struct, enum, trait, \
+                     class, interface, mod, const, macro, type"
+                );
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+
+    let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
+    if indexes.is_empty() {
+        no_index_found(repo.as_deref(), lang.as_deref());
+        return Ok(());
+    }
+
+    let mut all = Vec::new();
+    for idx in &indexes {
+        let mut hits =
+            sym::query_symbols(&idx.blob, norm_kind, file.as_deref(), &idx.repo, &idx.lang)?;
+        all.append(&mut hits);
+    }
+    all.sort_by(|a, b| {
+        a.repo
+            .cmp(&b.repo)
+            .then(a.lang.cmp(&b.lang))
+            .then(a.file.cmp(&b.file))
+            .then(a.line.cmp(&b.line))
+            .then(a.name.cmp(&b.name))
+    });
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        serde_json::to_writer(&mut out, &all)?;
+        writeln!(out)?;
+    } else {
+        for e in &all {
+            writeln!(
+                out,
+                "{}\t{}:{}\t[{}] {}/{}",
+                e.name, e.file, e.line, e.kind, e.repo, e.lang
+            )?;
+        }
+        if all.is_empty() {
+            eprintln!("[legion] no matching definitions");
+        }
+    }
+    Ok(())
 }
 
 /// Read the diff source -- file path or "-" for stdin -- and run impact
