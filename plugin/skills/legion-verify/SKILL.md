@@ -45,6 +45,22 @@ never `pass` -- verify never asserts an unprovable claim.
    - `uncertain` -- you cannot mechanically confirm it (e.g. a performance or UX claim with no
      test). Do not round up to pass.
 
+   **Vacuous evidence is not evidence.** The gate mechanically rejects two patterns as vacuous
+   (demoting `pass` to `uncertain` automatically), and you must reject them in your judgment too
+   when the heuristic cannot decide:
+
+   - *Restatement*: the evidence text is a copy or near-copy of the criterion. Example: criterion
+     "returns error on empty input", evidence "returns error on empty input" -- that is not proof,
+     it is repetition. Cite the test that confirmed it instead.
+   - *No assertion marker*: the evidence describes only what the code does, not what was confirmed.
+     Example: "added match arm for empty case" names an implementation detail, not a verification.
+     Instead, cite a test name (`tests::empty_input_returns_error`), a file:line (`src/lib.rs:42`),
+     or an observed outcome ("running `legion verify` with no AC exits 1 and prints NoCheckableAc").
+
+   The mechanical heuristic is a floor, not a ceiling. Where it cannot decide, you judge. When in
+   doubt, mark the criterion `uncertain` and let a human adjudicate -- that is the gate working
+   correctly, not a failure.
+
 4. **Write the verdicts** to a JSON file (e.g. `/tmp/verdicts-<card>.json`) -- a list, one
    object per criterion:
 
@@ -55,7 +71,8 @@ never `pass` -- verify never asserts an unprovable claim.
    ]
    ```
 
-   Provide one entry per criterion. A `pass` with empty evidence is treated as `uncertain`.
+   Provide one entry per criterion. A `pass` with empty or vacuous evidence is treated as
+   `uncertain` (see "Judge each criterion" above for what counts as vacuous).
 
 5. **Record the verdict:**
 
