@@ -128,10 +128,20 @@ if [ -n "$KANBAN" ]; then
 ${KANBAN}"
 fi
 
-# 6. Autonomy budget (#524) -- remind the agent it has sanctioned units to
+# 6. Board-derived goal (#525) -- the active Accepted card's acceptance
+# criteria, framed as the completion condition the agent carries this session.
+# Native /goal cannot be set programmatically, so legion re-derives it from the
+# board here. Empty when nothing is in progress (the goal is cleared by board
+# state alone). Lands right after the work list: "here is your work, and here
+# is the one you committed to finishing."
+GOAL=$("$LEGION" goal --repo "$REPO" 2>>"$LOG")
+legion_check $? "goal"
+append_block "$GOAL"
+
+# 7. Autonomy budget (#524) -- remind the agent it has sanctioned units to
 # spend on self-directed work, so it acts on the board instead of waiting to
-# be told. Lands after the work list: first "here is your work," then "and you
-# are cleared to pick it up yourself."
+# be told. Lands after the goal: first "finish this," then "and you are
+# cleared to pick up more yourself."
 BUDGET=$("$LEGION" autonomy status --repo "$REPO" --banner 2>>"$LOG")
 legion_check $? "autonomy status"
 append_block "$BUDGET"
