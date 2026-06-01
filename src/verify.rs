@@ -13,7 +13,8 @@
 //   - refuses an issue with no checkable criteria (forces SOLID issues),
 //   - refuses to proceed unless every criterion has a verdict,
 //   - never lets an unprovable criterion pass -- a Pass with no cited evidence
-//     is downgraded to Uncertain ("never assert an unprovable criterion"),
+//     or with only vacuous evidence is downgraded to Uncertain ("never assert
+//     an unprovable criterion"),
 //   - maps the verdict set to one routing decision: any Fail hard-blocks
 //     ->Done; any Uncertain (no Fail) routes the card to NeedsInput; all Pass
 //     proceeds.
@@ -33,7 +34,8 @@ pub struct AcResult {
     pub criterion: String,
     pub verdict: AcVerdict,
     /// A test name, a file:line, or an observable behavior. Required for a
-    /// Pass to stand; a Pass with empty evidence is treated as Uncertain.
+    /// Pass to stand; a Pass with empty or vacuous evidence is treated as
+    /// Uncertain.
     pub evidence: String,
 }
 
@@ -63,6 +65,77 @@ impl VerifyDecision {
     }
 }
 
+/// Returns true when the evidence string is vacuous: it carries no real proof
+/// that the criterion was exercised.
+///
+/// Two conditions count as vacuous:
+///
+/// 1. **Restatement** -- the evidence is a substring of the criterion
+///    (case-insensitive), meaning the agent copied the criterion text rather
+///    than citing proof. Example: criterion "returns error on empty input",
+///    evidence "returns error on empty input" -- vacuous.
+///
+/// 2. **No assertion marker** -- the evidence contains none of the tokens that
+///    a real test or observable behavior would carry:
+///    - a test path token ("::" or "fn " or a source path containing "/")
+///    - "assert" (as in an assertion that ran)
+///    - a file:line reference (a digit immediately after ":")
+///    - observable-behavior language ("returns", "panics", "output", "exits",
+///      "prints", "emits", "displays")
+///
+/// The heuristic is intentionally narrow and conservative: false-negatives
+/// (letting a weak-but-real citation through) are acceptable. False-positives
+/// (flagging real evidence as vacuous) are not. Where the heuristic cannot
+/// decide, the verify SKILL instructs the agent to apply human judgment.
+///
+/// This function is a pure predicate: it never panics, and handles empty
+/// strings and unicode safely.
+fn is_vacuous_evidence(criterion: &str, evidence: &str) -> bool {
+    let ev = evidence.trim();
+    if ev.is_empty() {
+        // Also handled by the empty-evidence check in effective(); treat as
+        // vacuous so both checks compose cleanly.
+        return true;
+    }
+
+    let ev_lower: String = ev.to_lowercase();
+    let crit_lower: String = criterion.trim().to_lowercase();
+
+    // Condition 1: evidence is a substring of the criterion (restatement).
+    if !crit_lower.is_empty() && crit_lower.contains(ev_lower.as_str()) {
+        return true;
+    }
+
+    // Condition 2: no assertion marker present.
+    let has_marker = ev_lower.contains("::")
+        || ev_lower.contains("fn ")
+        || ev_lower.contains('/')
+        || ev_lower.contains("assert")
+        || ev_lower.contains("returns")
+        || ev_lower.contains("panics")
+        || ev_lower.contains("output")
+        || ev_lower.contains("exits")
+        || ev_lower.contains("prints")
+        || ev_lower.contains("emits")
+        || ev_lower.contains("displays")
+        // file:line: a ":" followed immediately by one or more ASCII digits
+        || has_file_line_ref(ev);
+
+    !has_marker
+}
+
+/// True when the string contains a colon followed immediately by at least one
+/// ASCII digit, which is the typical file:line pattern (e.g. "src/verify.rs:84").
+fn has_file_line_ref(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len().saturating_sub(1) {
+        if bytes[i] == b':' && bytes[i + 1].is_ascii_digit() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Decide a card's fate from its acceptance criteria and the agent's verdicts.
 ///
 /// `acceptance` is the criterion list (one per item). `results` is one verdict
@@ -78,10 +151,14 @@ pub fn decide(acceptance: &[String], results: &[AcResult]) -> VerifyDecision {
         };
     }
 
-    // A Pass with no cited evidence is not a provable pass -- demote it to
-    // Uncertain so it routes to a human instead of rubber-stamping ->Done.
+    // A Pass with no cited evidence, or with only vacuous evidence (a
+    // restatement of the criterion or text with no assertion marker), is not a
+    // provable pass -- demote it to Uncertain so it routes to a human instead
+    // of rubber-stamping ->Done.
     let effective = |r: &AcResult| -> AcVerdict {
-        if r.verdict == AcVerdict::Pass && r.evidence.trim().is_empty() {
+        if r.verdict == AcVerdict::Pass
+            && (r.evidence.trim().is_empty() || is_vacuous_evidence(&r.criterion, &r.evidence))
+        {
             AcVerdict::Uncertain
         } else {
             r.verdict
@@ -232,5 +309,138 @@ mod tests {
         );
         assert!(acceptance_items(None).is_empty());
         assert!(acceptance_items(Some("\n  \n")).is_empty());
+    }
+
+    // --- vacuous evidence tests (added by #549) ---
+
+    #[test]
+    fn vacuous_evidence_restatement_is_uncertain() {
+        // Evidence that exactly restates the criterion is not proof.
+        let ac = vec!["returns error on empty input".to_owned()];
+        let results = vec![res(
+            "returns error on empty input",
+            AcVerdict::Pass,
+            "returns error on empty input",
+        )];
+        assert_eq!(
+            decide(&ac, &results),
+            VerifyDecision::NeedsInput {
+                uncertain: vec!["returns error on empty input".to_owned()]
+            }
+        );
+    }
+
+    #[test]
+    fn vacuous_evidence_echo_is_uncertain() {
+        // Evidence that describes only what the code does (no test path, no
+        // assertion, no observable behavior) is vacuous.
+        let ac = vec!["handles the empty case".to_owned()];
+        let results = vec![res(
+            "handles the empty case",
+            AcVerdict::Pass,
+            "added match arm for empty case",
+        )];
+        assert_eq!(
+            decide(&ac, &results),
+            VerifyDecision::NeedsInput {
+                uncertain: vec!["handles the empty case".to_owned()]
+            }
+        );
+    }
+
+    #[test]
+    fn real_evidence_passes() {
+        // A test path with "::" is real evidence.
+        let ac = vec!["returns error on empty input".to_owned()];
+        let results = vec![res(
+            "returns error on empty input",
+            AcVerdict::Pass,
+            "tests::empty_input_returns_error",
+        )];
+        assert_eq!(decide(&ac, &results), VerifyDecision::Proceed);
+    }
+
+    #[test]
+    fn file_line_evidence_passes() {
+        // A file:line reference is real evidence.
+        let ac = vec!["is_vacuous_evidence demotes restatements".to_owned()];
+        let results = vec![res(
+            "is_vacuous_evidence demotes restatements",
+            AcVerdict::Pass,
+            "src/verify.rs:84",
+        )];
+        assert_eq!(decide(&ac, &results), VerifyDecision::Proceed);
+    }
+
+    #[test]
+    fn observable_behavior_passes() {
+        // Observable-behavior language is real evidence.
+        let ac = vec!["exits non-zero on no AC".to_owned()];
+        let results = vec![res(
+            "exits non-zero on no AC",
+            AcVerdict::Pass,
+            "running legion verify --card X on a card with no AC exits 1 and prints NoCheckableAc",
+        )];
+        assert_eq!(decide(&ac, &results), VerifyDecision::Proceed);
+    }
+
+    // --- is_vacuous_evidence unit tests ---
+
+    #[test]
+    fn is_vacuous_empty_evidence() {
+        assert!(is_vacuous_evidence("some criterion", ""));
+        assert!(is_vacuous_evidence("some criterion", "   "));
+    }
+
+    #[test]
+    fn is_vacuous_restatement_case_insensitive() {
+        assert!(is_vacuous_evidence(
+            "Returns Error On Empty Input",
+            "returns error on empty input"
+        ));
+    }
+
+    #[test]
+    fn is_vacuous_partial_restatement_substring() {
+        // Evidence is a substring of the criterion -- still vacuous.
+        assert!(is_vacuous_evidence(
+            "returns error on empty input and logs",
+            "returns error on empty input"
+        ));
+    }
+
+    #[test]
+    fn is_not_vacuous_test_path() {
+        assert!(!is_vacuous_evidence(
+            "some criterion",
+            "tests::my_function_works"
+        ));
+    }
+
+    #[test]
+    fn is_not_vacuous_file_line() {
+        assert!(!is_vacuous_evidence("some criterion", "src/lib.rs:42"));
+    }
+
+    #[test]
+    fn is_not_vacuous_assert_language() {
+        assert!(!is_vacuous_evidence(
+            "some criterion",
+            "assert_eq! confirms the value is zero"
+        ));
+    }
+
+    #[test]
+    fn is_not_vacuous_observable_behavior() {
+        assert!(!is_vacuous_evidence(
+            "some criterion",
+            "the command exits with code 1"
+        ));
+    }
+
+    #[test]
+    fn is_vacuous_unicode_safe() {
+        // Unicode text with no assertion markers is vacuous; must not panic.
+        assert!(is_vacuous_evidence("critere", "\u{00e9}l\u{00e8}ve"));
     }
 }
