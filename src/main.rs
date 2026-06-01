@@ -840,6 +840,16 @@ enum Commands {
         action: AutonomyAction,
     },
 
+    /// Board-derived goal (#525): print the active Accepted card's acceptance
+    /// criteria framed as the agent's completion condition, to carry across
+    /// turns. Native `/goal` cannot be set programmatically, so SessionStart
+    /// emits this each session; it is empty when nothing is in progress.
+    Goal {
+        /// Repository name (the agent whose active card to read).
+        #[arg(long)]
+        repo: String,
+    },
+
     /// Show current system health and recent trend
     Health {
         /// Show history for the last N duration (e.g., "1h", "30m", "24h")
@@ -2065,6 +2075,11 @@ enum AutonomyAction {
         /// Units to spend (default 1).
         #[arg(long, default_value = "1")]
         cost: u64,
+
+        /// Deny self-directed work when rate-limit used-% reaches this value
+        /// (0-100). Default 90 means 10% headroom remaining triggers the gate.
+        #[arg(long, default_value = "90.0")]
+        burn_rate_threshold: f64,
     },
 }
 
@@ -5104,8 +5119,15 @@ fn run() -> error::Result<()> {
                     }
                 }
                 KanbanAction::Accept { id } => {
-                    kanban::transition_card(&database, &id, kanban::Action::Accept, None)?;
+                    let card =
+                        kanban::transition_card(&database, &id, kanban::Action::Accept, None)?;
                     println!("{id}");
+                    // #525: accepting a card sets the board-derived goal -- echo
+                    // the just-accepted card's acceptance criteria as the
+                    // completion condition the agent now carries.
+                    if let Some(goal) = kanban::format_active_goal(std::slice::from_ref(&card)) {
+                        eprintln!("{goal}");
+                    }
                 }
                 KanbanAction::Block { id, reason } => {
                     kanban::transition_card(
@@ -6888,6 +6910,14 @@ fn run() -> error::Result<()> {
                 AutonomyAction::Status { repo, banner } => {
                     let budget = load(&repo)?;
                     let resets = budget.resets_at().format("%Y-%m-%d");
+
+                    // Fetch the latest rate-limit sample for the burn-rate status line.
+                    // Fail-open: a DB error here is not fatal to the status display.
+                    let host = statusline::resolve_hostname();
+                    let rate_sample: Option<crate::statusline::RateLimitSample> = database
+                        .latest_rate_limit_sample_for_host(&host)
+                        .unwrap_or(None);
+
                     if !banner {
                         println!(
                             "[legion] autonomy budget for {repo}: {}/{} units spent, {} remaining. \
@@ -6896,6 +6926,12 @@ fn run() -> error::Result<()> {
                             budget.ceiling,
                             budget.remaining(),
                         );
+                        if let Some(line) = autonomy::burn_rate_status_line(
+                            rate_sample.as_ref(),
+                            autonomy::DEFAULT_BURN_RATE_THRESHOLD_PCT,
+                        ) {
+                            println!("[legion] {line}");
+                        }
                     } else if budget.remaining() > 0 {
                         // The reminder that turns the primitive into behavior:
                         // the agent self-directs because it knows the budget is
@@ -6907,11 +6943,34 @@ fn run() -> error::Result<()> {
                             budget.remaining(),
                             budget.ceiling,
                         );
+                        // Include burn-rate line in banner only when headroom is
+                        // approaching threshold (remaining < 2x threshold means
+                        // used > 100 - 2*(100 - threshold) = 2*threshold - 100).
+                        let threshold = autonomy::DEFAULT_BURN_RATE_THRESHOLD_PCT;
+                        let approaching_cutoff = 2.0 * threshold - 100.0;
+                        let near = rate_sample.as_ref().is_some_and(|s| {
+                            s.five_hour_pct.is_some_and(|p| p > approaching_cutoff)
+                                || s.seven_day_pct.is_some_and(|p| p > approaching_cutoff)
+                        });
+                        if near
+                            && let Some(line) =
+                                autonomy::burn_rate_status_line(rate_sample.as_ref(), threshold)
+                        {
+                            println!("[Legion] {line}");
+                        }
                     } else {
                         println!(
                             "[Legion] Autonomy budget spent for this week (resets {resets}). \
                              Pause self-directed initiative; operator-requested work still proceeds."
                         );
+                        // Always include burn-rate in exhausted banner so the
+                        // agent has full picture.
+                        if let Some(line) = autonomy::burn_rate_status_line(
+                            rate_sample.as_ref(),
+                            autonomy::DEFAULT_BURN_RATE_THRESHOLD_PCT,
+                        ) {
+                            println!("[Legion] {line}");
+                        }
                     }
                 }
                 AutonomyAction::Gate {
@@ -6919,7 +6978,48 @@ fn run() -> error::Result<()> {
                     kind,
                     operator,
                     cost,
+                    burn_rate_threshold,
                 } => {
+                    // Burn-rate check runs first, before the work-unit budget.
+                    // Fail-open on DB error: log to stderr, proceed to work-unit gate.
+                    let host = statusline::resolve_hostname();
+                    let rate_sample: Option<crate::statusline::RateLimitSample> = database
+                        .latest_rate_limit_sample_for_host(&host)
+                        .map_err(|e| {
+                            eprintln!(
+                                "[legion] warning: could not read rate-limit sample: {e}. \
+                                 Proceeding with work-unit budget only."
+                            );
+                        })
+                        .unwrap_or(None);
+
+                    match autonomy::decide_burn_rate(
+                        rate_sample.as_ref(),
+                        operator,
+                        burn_rate_threshold,
+                    ) {
+                        autonomy::BurnRateOutcome::OperatorBypass => {
+                            // Operator bypass from burn-rate gate -- proceed directly
+                            // to work-unit budget check, which also has operator bypass.
+                        }
+                        autonomy::BurnRateOutcome::Throttled {
+                            window,
+                            used_pct,
+                            threshold_pct,
+                        } => {
+                            // Self-directed work paused. No write needed (read-only gate).
+                            println!(
+                                "[legion] rate-limit headroom low: {window} window at {used_pct:.0}% \
+                                 used (threshold {threshold_pct:.0}%). Self-directed work paused; \
+                                 operator-requested work still proceeds."
+                            );
+                            std::process::exit(1);
+                        }
+                        autonomy::BurnRateOutcome::Allowed { .. } => {
+                            // Headroom is fine; fall through to work-unit budget check.
+                        }
+                    }
+
                     let budget = load(&repo)?;
                     match autonomy::decide_spend(&budget, cost, operator) {
                         autonomy::SpendOutcome::OperatorBypass => {
@@ -6963,6 +7063,21 @@ fn run() -> error::Result<()> {
                         }
                     }
                 }
+            }
+        }
+        Commands::Goal { repo } => {
+            let base = data_dir()?;
+            let database = db::Database::open(&base.join("legion.db"))?;
+            let cards = kanban::list_cards(
+                &database,
+                &repo,
+                kanban::Direction::Inbound,
+                kanban::CardScope::WorkingSet,
+            )?;
+            // Prints nothing when no card is Accepted -- the goal is "cleared"
+            // by board state alone (AC: clears on terminal/blocked).
+            if let Some(goal) = kanban::format_active_goal(&cards) {
+                println!("{goal}");
             }
         }
         Commands::Statusline { json } => {
