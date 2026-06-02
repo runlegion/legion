@@ -195,7 +195,7 @@ rm -f "$LEGION_TEST_MARKER"
 # names the hard escape; no telemetry row is written for the refusal.
 out=$(LEGION_BYPASS_GREP=1 echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"bypass-env-t"}' | LEGION_BYPASS_GREP=1 bash "$HOOK")
 assert_contains "soft env bypass refused on local symbol" "$out" '"decision": "block"'
-assert_contains "refusal names hard escape" "$out" 'LEGION_BYPASS_GREP_HARD=1'
+assert_contains "refusal points to sym list, not a hard escape" "$out" 'sym list'
 if [ -f "$LEGION_TEST_MARKER" ] && grep -q "record-bypass" "$LEGION_TEST_MARKER"; then
   FAIL=$((FAIL + 1)); echo "  FAIL: refused soft bypass should NOT write telemetry row"
 else
@@ -223,17 +223,12 @@ else
   FAIL=$((FAIL + 1)); echo "  FAIL: soft bypass should still allow free-text patterns" >&2
 fi
 
-echo "==> harder bypass: hard escape (LEGION_BYPASS_GREP_HARD=1) ALWAYS allows"
-rm -f "$LEGION_TEST_MARKER"
-out=$(LEGION_BYPASS_GREP_HARD=1 echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"bypass-hard-t"}' | LEGION_BYPASS_GREP_HARD=1 bash "$HOOK")
-assert_empty "hard escape exits 0 with no decision JSON" "$out"
-if [ -f "$LEGION_TEST_MARKER" ] && grep -q "record-bypass" "$LEGION_TEST_MARKER" && grep -q "hard:" "$LEGION_TEST_MARKER"; then
-  PASS=$((PASS + 1)); echo "  PASS: hard escape writes telemetry row with bypass_class=hard prefix"
-else
-  FAIL=$((FAIL + 1)); echo "  FAIL: hard escape did not write expected telemetry row" >&2
-  [ -f "$LEGION_TEST_MARKER" ] && cat "$LEGION_TEST_MARKER" >&2
-fi
-unset LEGION_BYPASS_GREP_HARD
+echo "==> #560: LEGION_BYPASS_GREP_HARD is RETIRED -- it no longer escapes the block"
+# The frictionless hard escape is gone; mandatory shell-grep blocking is the
+# operator's permissions.deny. Setting the old env var must NOT bypass: a
+# symbol with a local hit still blocks.
+out=$(LEGION_BYPASS_GREP_HARD=1 echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"hard-gone-t"}' | LEGION_BYPASS_GREP_HARD=1 bash "$HOOK")
+assert_contains "retired hard-bypass env no longer escapes -- still blocks" "$out" '"decision": "block"'
 
 echo "==> hook end-to-end: skip via LEGION_SKIP_PRE_BASH_GREP=1"
 out=$(LEGION_SKIP_PRE_BASH_GREP=1 echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"skip-t"}' | LEGION_SKIP_PRE_BASH_GREP=1 bash "$HOOK")
