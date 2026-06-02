@@ -6,13 +6,20 @@
 #                 Emit additionalContext with whatever sym found.
 #   2. BLOCK   -- repo indexed AND `legion sym def` returned >=1 result.
 #                 Block the Bash call; the agent should call sym instead.
-#   3. BYPASS  -- LEGION_BYPASS_GREP=1 env or `# legion-bypass:` sentinel
-#                 substring in the command. Always allows; logs telemetry.
+#   3. SOFT BYPASS -- LEGION_BYPASS_GREP=1 env or `# legion-bypass:`
+#                 sentinel, for free-text searches. REFUSED for
+#                 symbol-shaped patterns with a local hit. There is NO
+#                 hard escape (#560): mandatory shell-grep blocking is the
+#                 operator's permissions.deny, not this hook.
 #
 # Sibling of pre-grep-scip.sh and pre-grep-recall.sh which cover the
-# Grep and Glob tools. This hook closes the Bash escape gap demonstrated
-# in #438: agents typing `grep -r ...` via Bash slipped past the existing
-# tool-matched hooks entirely.
+# Grep and Glob tools. This hook is now SOFT FALLBACK GUIDANCE: the
+# mandatory shell-grep block is the operator's settings.json
+# permissions.deny (Bash(grep:*)/Bash(rg:*)/...), which is evaluated
+# before this hook runs and inherits to subagents. See
+# docs/decisions/2026-06-02-grep-blocking-is-operator-permissions.md.
+# This hook still injects sym context and refuses the soft bypass on a
+# local symbol hit, for repos/operators that have not set the deny rule.
 #
 # Skip discipline:
 # - LEGION_SKIP_PRE_BASH_GREP=1: skip this hook specifically.
@@ -93,23 +100,12 @@ fi
 # REFUSED when the pattern resolves to a real symbol in THIS repo's
 # SCIP index. The bypass sentinel exists for free-text searches; it
 # cannot route around sym for symbol queries dressed up as text. The
-# refusal points the agent at sym + names the LEGION_BYPASS_GREP_HARD
-# hard escape for the rare case where the agent really does need a
-# grep-style file scan over symbol-shaped text (e.g. counting call
-# sites of a deprecated API across files outside the SCIP index).
-#
-# Hard bypass (LEGION_BYPASS_GREP_HARD=1) always allows but writes a
-# row with bypass_class=hard so /telemetry summary can show how often
-# the hard escape fires (loud signal that sym is under-serving).
+# refusal points the agent at sym. There is NO env-var hard escape: a
+# frictionless LEGION_BYPASS_GREP_HARD only made enforcement optional
+# (#560). Mandatory shell-grep blocking is the operator's permissions.deny
+# (docs/decisions/2026-06-02-grep-blocking-is-operator-permissions.md); this
+# hook is soft fallback guidance for operators who have not set the deny rule.
 BYPASS_REASON=$(legion_prequery_bypass_reason "$COMMAND")
-HARD_BYPASS="${LEGION_BYPASS_GREP_HARD:-}"
-
-if [ "$HARD_BYPASS" = "1" ]; then
-  legion_prequery_record_bypass \
-    "$REPO" "$SESSION_ID" "Bash" "$PATTERN" "hard:${BYPASS_REASON:-no-reason}" \
-    "$HAD_SYM" "false"
-  exit 0
-fi
 
 if [ -n "$BYPASS_REASON" ]; then
   # Refuse the soft bypass if the pattern matches a real local symbol.
@@ -122,7 +118,7 @@ if [ -n "$BYPASS_REASON" ]; then
 ${LOCAL_HITS}
 \`\`\`
 
-If you genuinely need ${BINARY} against a symbol-shaped pattern (counting call sites in files outside the SCIP index, comparing line-by-line content for a refactor diff), use the hard escape: \`LEGION_BYPASS_GREP_HARD=1 ${COMMAND}\`. The hard bypass writes a row to bypass.jsonl with \`bypass_class=hard\` so /telemetry summary can see how often it fires."
+For symbols, \`legion sym def ${PATTERN}\` / \`sym refs\` / \`sym list\` answer in bytes. For genuinely non-symbol, non-indexed content (e.g. an .astro file), use the Grep tool -- not shell ${BINARY}. Your operator may block shell ${BINARY} outright via permissions.deny; that is the intended mandatory gate, and there is no env-var escape from it."
     legion_prequery_emit_block "$REASON"
     exit 0
   fi
@@ -167,11 +163,7 @@ if legion_indexed "$SESSION_ID" "$REPO"; then
 ${LOCAL_HITS}
 \`\`\`
 
-The soft bypass (\`# legion-bypass: <reason>\` or LEGION_BYPASS_GREP=1) is REFUSED for symbol-shaped patterns that resolve in this repo's SCIP index -- the sentinel exists for free-text searches, not for symbol queries dressed up as text. If you genuinely need ${BINARY} against this symbol-shaped pattern (counting call sites in files outside the SCIP index, comparing line-by-line content for a refactor diff), use the hard escape:
-
-\`LEGION_BYPASS_GREP_HARD=1 ${COMMAND}\`
-
-The hard bypass writes a row to bypass.jsonl with \`bypass_class=hard\` so /telemetry summary can see how often sym is under-serving."
+The soft bypass (\`# legion-bypass: <reason>\` or LEGION_BYPASS_GREP=1) is REFUSED for symbol-shaped patterns that resolve in this repo's SCIP index -- the sentinel exists for free-text searches, not for symbol queries dressed up as text. For symbols use \`legion sym def ${PATTERN}\` / \`sym refs\` / \`sym list\`; for genuinely non-symbol, non-indexed content use the Grep tool, not shell ${BINARY}. There is no env-var hard escape -- the mandatory shell-grep block is the operator's permissions.deny."
     legion_prequery_emit_block "$REASON"
     exit 0
   fi
