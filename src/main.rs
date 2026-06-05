@@ -6779,7 +6779,7 @@ fn run() -> error::Result<()> {
                 Some(WatchAction::SessionEnd { attempt_id }) => {
                     let db_path = base.join("legion.db");
                     let db = db::Database::open(&db_path)?;
-                    watch::record_session_end(&db, &attempt_id)?;
+                    watch::record_session_end(&db, &attempt_id, &base)?;
                 }
             }
         }

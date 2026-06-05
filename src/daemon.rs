@@ -453,7 +453,7 @@ async fn run_watch_task(data_dir: &Path) {
 
         if health_timer.elapsed() >= health_interval {
             sampler.sample();
-            tracker.reap_finished(Some(&db));
+            tracker.reap_finished(Some(&db), Some(&session_locks));
             if let Err(e) = db.heartbeat_persona_leases(&host, lease_ttl) {
                 eprintln!("[legion daemon] lease heartbeat error: {e}");
             }
