@@ -1,8 +1,8 @@
 # Legion
 
-> Self-hosted orchestrator for AI coding agents. Memory, coordination, autonomy.
+> Self-hosted orchestrator for AI coding agents. Memory, code intelligence, coordination, autonomy.
 
-Legion is a local Rust CLI and Claude Code plugin that gives AI agents persistent memory, team communication, and work coordination. Every session ends with a reflection, every session starts with relevant context. Agents consult each other across domains. They post to the bullpen. They delegate work through kanban cards. They wake each other up when signals arrive.
+Legion is a local Rust CLI and Claude Code plugin that gives AI agents persistent memory, code intelligence, team communication, and self-directed work. Every session ends with a reflection, every session starts with relevant context. Agents look up symbols instead of grepping, consult each other across domains, post to the bullpen, delegate work through a kanban board, run a review pipeline gated on acceptance criteria, and wake each other up when signals arrive -- across one machine or a LAN cluster.
 
 ## Install
 
@@ -13,41 +13,83 @@ Plugin (recommended):
 Standalone:
 curl -fsSL https://raw.githubusercontent.com/runlegion/legion/main/install.sh | bash
 
-## Core Commands
+## Memory
 
 legion reflect --repo <name> --text "<reflection>"
 legion recall --repo <name> --context "<query>"
 legion consult --context "<query>"
+legion similar --id <reflection-id>
 legion boost --id <reflection-id>
 legion chain --id <reflection-id>
+legion whoami --repo <name>          (identity: who I am)
+legion whatami --repo <name>         (operating contract: how I operate)
+
+## Code intelligence (use instead of grep)
+
+legion index <name>                  Build/refresh the SCIP symbol index
+legion sym def <symbol> --repo <name>     Definitions
+legion sym refs <symbol> --repo <name>    References / call sites
+legion sym impl <trait> --repo <name>     Implementors
+legion sym hover <symbol> --repo <name>   Signature + docstring
+legion sym impact <diff>             Blast radius of a change
+
+Operators block shell grep/rg/find via permissions.deny; sym answers symbol
+queries from the index in bytes. The Grep tool stays as the escape for
+non-indexed / free-text content.
+
+## Coordination
+
 legion post --repo <name> --text "<message>"
 legion bullpen --repo <name>
 legion signal --repo <name> --to <recipient> --verb <verb> --note "<note>"
-legion work --repo <name>
-legion done --repo <name> --text "<summary>"
-legion kanban create --from <repo> --to <repo> --text "<description>" --priority <low|med|high|critical>
-legion watch
-legion serve
-legion rename --from <old> --to <new>
 legion surface --repo <name>
 legion status --repo <name>
-legion health
-legion stats
-legion reindex
+
+## Work + review pipeline
+
+legion sync --repo <name>            Import work-source issues into kanban
+legion kanban create --from <repo> --to <repo> --text "<desc>" --priority <low|med|high|critical>
+legion work --repo <name>            Get next card from the scheduler
+legion quality-gate record --skill <skill> --result <clean|issues> ...
+legion verify --repo <name> --card <id>   Audit AC; gate the ->Done transition
+legion done --repo <name> --text "<summary>"
+
+Pipeline: SOLID issue -> build -> /legion-simplify gate -> /legion-pr-write gate
+-> review -> legion verify (per-criterion pass/fail/uncertain + evidence) -> Done.
+
+## Autonomy
+
+legion goal --repo <name>            Active card's AC as the completion condition
+legion autonomy status               Weekly self-directed-work budget
+legion autonomy gate                 Spend one unit (or --operator to bypass)
+
+## Daemon + multi-node
+
+legion daemon                        Channel server + watch loop (auto-starts with CC)
+legion watch                         Watch loop standalone (PTY-spawns woken agents)
+legion cluster init --key <hex>      LAN sync with shared encryption key
+legion cluster enable | status       Gossip reflections/cards/schedules across nodes
+legion mesh                          Rank hosts by headroom for task placement
+legion health --all-hosts            Cluster-wide CPU/mem/pressure
+legion serve                         Web dashboard (default port 3131)
 
 ## Signal Format
 
 @recipient verb:status {key: value} -- note
 Note limited to 280 characters. Signals are pings, not essays.
+Wake-worthy verbs: question, request, help, blocker. Others deliver without waking.
 
 ## Kanban States
 
 backlog -> pending -> accepted -> in-review -> done
-Also: blocked, needs-input, cancelled
+Also: blocked (technical), needs-input (human decision), cancelled
+Cards are born in backlog; only explicit assignment promotes to pending.
 
 ## Storage
 
-SQLite + Tantivy BM25 index at ~/.local/share/legion/ (Linux) or ~/Library/Application Support/legion/ (macOS)
+SQLite (WAL) + Tantivy BM25 index + model2vec embeddings (semantic recall) +
+per-repo SCIP symbol indexes. At ~/.local/share/legion/ (Linux) or
+~/Library/Application Support/legion/ (macOS).
 
 ## Docs
 

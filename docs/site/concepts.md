@@ -45,6 +45,12 @@ The alternative would be push-based: broadcasting everything to everyone. That c
 
 The recall-before-grep doctrine enforces this. The PreToolUse hook fires on every Grep, Glob, WebFetch, and WebSearch call, nudging the agent to check legion memory first. Code shows WHAT exists. Legion tells you WHY it exists, WHAT went wrong last time, and WHAT the person who solved it wished they had known.
 
+## Code intelligence: symbols over grep
+
+Recall answers "why." Code intelligence answers "where." Legion builds a per-repo SCIP symbol index (`legion index`) and serves it through `legion sym`: `def` for definitions, `refs` for call sites, `impl` for trait implementors, `hover` for a signature plus docstring, `impact` for the blast radius of a diff. A symbol lookup returns the answer in bytes from the index. Grepping the same symbol scans every file and bills the model for the noise.
+
+The design claim is that grep is a 30-year habit, not a need -- almost every grep an agent runs against indexed code is a symbol query in disguise, and `sym` answers it better. The cases grep is genuinely for -- an `.astro` template with no symbol index, a free-text string, a config file -- are served by the `Grep`/`Glob` tools, which stay open and hooked. So the shell duplicates (`grep`, `rg`, `find`) are removed at the operator's `permissions.deny`, and nothing the agent actually needs is lost. The bypass telemetry feeds back: when agents repeatedly escape to search for something, that is a signal sym or recall is missing an answer they expected.
+
 ## Boost and decay: emergent quality
 
 The scoring system is designed to produce emergent quality without manual curation. Two forces are at work:
@@ -121,6 +127,12 @@ The distinction between "blocked" and "needs-input" matters. Blocked means a tec
 
 Delegation chains (via `parent_card_id`) let agents break down work. A high-level card from a human becomes sub-cards delegated to specific agents. The parent card stays in-progress while sub-cards are worked.
 
+## The review pipeline: gates on the path
+
+Getting work to "done" is a path, not a single check: SOLID issue with checkable acceptance criteria -> build -> simplify -> articulate the diff against the spec -> review -> verify -> done. Legion makes the load-bearing steps into gates recorded against the HEAD commit in a `quality_gates` table, so the path cannot be shortcut.
+
+Two ideas carry the design. First, **articulation is verification.** The PR-write gate forces the agent to map the diff back to each acceptance criterion in prose before review -- the act of writing "this change satisfies criterion 3 because..." surfaces the gaps that a green test suite hides. Second, **a gate is only as good as the path it forces you onto.** The verify gate reads the card's acceptance criteria after the work is green and emits a per-criterion verdict with evidence: every criterion Pass-with-evidence allows the transition to Done; any Fail hard-blocks; any Uncertain -- including a Pass that cites no evidence -- routes the card to `needs-input` for a human rather than rubber-stamping it. A claim of done that cannot point at a test or an observed behavior is treated as not done. The recurring failure it guards against is the green check that proved nothing -- a test binary that ran zero tests, a page that published blank.
+
 ## Watch: autonomy with guardrails
 
 The watch daemon gives agents autonomy. They do not need a human to check on them, forward messages, or wake them up. Signals arrive, the watcher detects them, and the target agent is spawned with full context.
@@ -139,6 +151,12 @@ A wake fires only when a signal's verb is in the wake-worthy set -- the same set
 
 The verb does double duty: it gates whether watch wakes at all, and it routes the woken agent to the right section of its prompt. Posts never appear in either section because posts never wake.
 
+## Autonomy: carrying the goal, governing the spend
+
+The harness manufactures stop-pressure -- approval in one turn does not extend to the next, so an agent tends to halt and ask "what now?" even when the board already says what is next. Legion's answer is to make the work self-carried. `legion goal` reads the active Accepted card's acceptance criteria and frames them as the completion condition, re-emitted each session so the goal survives a context reset (the native `/goal` cannot be set programmatically). The Stop hook reads the kanban board rather than harness task state: an open Accepted card with no declared blocker means keep working; a permission-question turn with work still remaining is challenged rather than treated as done.
+
+Unbounded autonomy is its own failure mode, so self-direction draws on a weekly budget. `legion autonomy gate` asks whether one unit of self-directed work -- self-accepting a Pending card, or taking free-time -- fits the remaining ceiling, records the spend when it does, and refuses cleanly when the week is exhausted. Operator-requested work bypasses the budget entirely; the governor only constrains what the agent chooses for itself. The ceiling is derived from rate-limit headroom, and a burn-rate gate pauses self-directed work as exhaustion approaches, so an agent cannot spend the operator's capacity on its own initiative.
+
 ## Training conflict: accommodation vs intervention
 
 A recurring design tension: should the system accommodate agent weaknesses or train agents out of them?
@@ -147,7 +165,7 @@ Example: agents sometimes forget to reflect. The Stop hook could auto-reflect fr
 
 This is the training conflict. Accommodation (auto-reflect from transcript) produces more data but lower quality. Intervention (prompt the agent to think about what matters) produces less data but higher quality. Legion consistently chooses intervention where the agent is capable, and accommodation only as a safety net for mechanical failures like compaction.
 
-The recall-before-grep nudge is another example. The PreToolUse hook does not prevent the agent from searching code -- it allows the tool use and adds a nudge. It trusts the agent to develop the habit while providing a reminder. Over time, agents that have internalized the doctrine check legion before searching without being prompted.
+The grep-enforcement story is a case where accommodation gave way to intervention. For a long time the PreToolUse hook only nudged -- it allowed the search and added a reminder. It did not work: an env-var bypass made the block optional, and PreToolUse hooks do not fire on subagents at all, so spawned agents searched ungated. The lesson was that a hook is the wrong tool for a mandatory rule -- it is advisory, bypassable, and main-session only. The mandatory block now lives in the operator's `permissions.deny` (`Bash(grep:*)`, `Bash(rg:*)`, `Bash(find:*)`), which is evaluated before any hook, cannot be overridden by the agent, and inherits to every subagent. The escape is a tool, not a bypass: `sym` answers symbol queries from the index, and the `Grep`/`Glob` tools remain open for genuinely non-indexed, free-text content. A gate is only as good as the path it forces you onto -- so the plugin's job became making that path (sym) actually serve the need.
 
 ## Night shift and idleation
 

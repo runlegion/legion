@@ -1,8 +1,17 @@
 # Legion
 
-Self-hosted orchestrator for AI coding agents. Memory, coordination, autonomy.
+Self-hosted orchestrator for AI coding agents. Memory, code intelligence, coordination, autonomy.
 
 Written in Rust. Free forever. No cloud required.
+
+## What an agent gets
+
+- **Memory** -- reflect at session end, recall on session start. Semantic (model2vec embeddings) + BM25. `consult` pulls across every agent's memory.
+- **Code intelligence** -- `legion sym def/refs/impl/hover` answers symbol queries from a per-repo SCIP index in bytes, instead of grepping files. Operators block shell `grep`/`rg`/`find` via `permissions.deny`; the Grep tool stays as the escape for non-indexed content.
+- **Coordination** -- a shared bullpen, directed signals, and a kanban board for agent-to-agent delegation. The watch daemon wakes idle agents when a directed signal arrives -- no polling, no manual spawning.
+- **A review pipeline** -- SOLID issue -> build -> simplify gate -> PR-write gate -> review -> `legion verify` (audits the card's acceptance criteria, per-criterion pass/fail/uncertain + evidence) -> Done.
+- **Autonomy with guardrails** -- a board-derived goal carries the active card's acceptance criteria across turns; a weekly budget governs self-directed work.
+- **Multi-node** -- `legion cluster` gossips memory, cards, and schedules across a LAN with encryption; `legion mesh` ranks hosts by headroom.
 
 ## Install
 

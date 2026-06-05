@@ -1,11 +1,15 @@
 LEGION -- FULL REFERENCE
-Self-hosted orchestrator for AI coding agents. Memory, coordination, autonomy.
-Version: current as of 2026-04-03
+Self-hosted orchestrator for AI coding agents. Memory, code intelligence, coordination, autonomy.
+Version: current as of 2026-06-05
 
 Legion is a local Rust CLI and Claude Code plugin that gives AI agents persistent
-memory, team communication, and work coordination. Agents store reflections,
-recall them by context, consult across domains, post to a shared bullpen,
-delegate work through kanban cards, and auto-wake each other via signals.
+memory, code intelligence, team communication, and self-directed work. Agents store
+reflections, recall them by context (BM25 + model2vec embeddings), consult across
+domains, look up symbols from a per-repo SCIP index instead of grepping, post to a
+shared bullpen, delegate work through a kanban board, run a review pipeline gated on
+acceptance criteria, and auto-wake each other via signals -- on one machine or across
+a LAN cluster. This reference covers the major subsystems; `legion <command> --help`
+is authoritative for exact flags.
 
 ================================================================================
 INSTALLATION
@@ -297,9 +301,12 @@ WATCH
 
     legion watch
 
-    Long-lived daemon. Monitors bullpen for signals directed at idle agents,
-    auto-wakes them by spawning claude --print sessions. Only one watcher at
-    a time (PID lock). See WATCH DAEMON section below.
+    Long-lived watch loop. Monitors the bullpen for signals directed at idle
+    agents and auto-wakes them by spawning an interactive `claude` session in a
+    PTY (not `--print`; see AGENT SPAWNING below). Only one watcher at a time
+    (PID lock). Normally run inside `legion daemon`, which also serves the
+    channel; `legion watch` is the standalone watch-only path. See WATCH DAEMON
+    section below.
 
 --------------------------------------------------------------------------------
 SERVE
@@ -404,6 +411,181 @@ INIT
 
     Generates hook scripts and writes entries into settings.json. Plugin
     handles this automatically. --force skips confirmation prompts.
+
+--------------------------------------------------------------------------------
+MEMORY -- ADDITIONS
+--------------------------------------------------------------------------------
+
+    legion similar --id <reflection-id>
+        Find reflections nearest the given one by model2vec cosine similarity.
+
+    legion forget --id <reflection-id>
+        Permanently delete a reflection (hard delete, not a tombstone).
+
+    legion whoami --repo <name>
+        Identity reflections -- WHO the agent is. Alias for
+        recall --domain identity. Surfaced in the SessionStart banner.
+
+    legion whatami --repo <name>
+        Operating contract -- HOW the agent operates (the loop, stop conditions,
+        standing authorizations). Alias for recall --domain workflow. Distinct
+        from whoami: identity is unenforceable, the contract is enforceable.
+
+    legion resolve --id <post-or-signal-id>
+        Mark a bullpen post or signal as resolved.
+
+--------------------------------------------------------------------------------
+CODE INTELLIGENCE -- index + sym
+--------------------------------------------------------------------------------
+
+    legion index <repo>
+        Build or refresh the per-repo SCIP code-intelligence index (positional
+        REPO; resolves the path from watch.toml). Symbol lookups read from it.
+        --file <path> re-indexes the owning repo (used by the post-edit hook).
+
+    legion sym def   <symbol> --repo <name>     Definitions.
+    legion sym refs  <symbol> --repo <name>     References / call sites.
+    legion sym impl  <trait>  --repo <name>     Types implementing a trait/interface.
+    legion sym hover <symbol> --repo <name>     Signature + docstring.
+    legion sym list  --repo <name> [--kind <k>] [--file <f>]
+        Enumerate definitions by kind (struct, fn, trait, ...) and/or file.
+    legion sym impact <diff>
+        Impact radius: for each symbol the diff touches, report its SCIP
+        reference count across the index. Used to flag wide-blast-radius PRs.
+
+    sym answers symbol queries from the index in bytes. It is the sanctioned
+    replacement for shell grep/rg/find, which operators block via
+    permissions.deny. The Grep/Glob tools remain for non-indexed / free-text
+    content (e.g. .astro templates with no symbol index).
+
+--------------------------------------------------------------------------------
+REVIEW PIPELINE -- quality-gate + verify
+--------------------------------------------------------------------------------
+
+    The path to Done: SOLID issue (checkable acceptance criteria) -> build ->
+    simplify gate -> PR-write gate -> review -> verify gate -> Done. Gates are
+    recorded against the HEAD commit in a quality_gates table.
+
+    legion quality-gate record --skill <skill> --result <clean|issues> \
+        --findings-count <n> --details-json '<json>'
+        Records a gate result for the current HEAD commit + branch (read
+        automatically). The /legion-simplify and /legion-pr-write skills call
+        this; `legion pr create` refuses to open a PR unless a clean gate row
+        exists for HEAD. Namespace the skill (e.g. legion-verify:<card_id>) to
+        key a gate on a card instead of a bare commit.
+
+    legion verify --repo <name> --card <card-id> [--verdicts-file <path>]
+        Audits a card's acceptance criteria before it can reach Done. Reads
+        per-criterion verdicts as JSON ([{criterion, verdict, evidence}, ...])
+        from --verdicts-file or stdin (verdict = pass|fail|uncertain). Decision:
+          - every criterion Pass WITH evidence  -> allow ->Done (clean gate)
+          - any Fail                            -> hard block
+          - any Uncertain, or a Pass with no evidence -> route to needs-input
+          - a card with no acceptance criteria  -> blocked outright
+        A claim of done that cannot cite a test or observed behavior is not done.
+
+--------------------------------------------------------------------------------
+AUTONOMY -- budget + board-derived goal
+--------------------------------------------------------------------------------
+
+    legion goal --repo <name>
+        Print the active Accepted card's acceptance criteria framed as the
+        completion condition, to carry across turns. Empty when nothing is in
+        progress. SessionStart emits this each session because the native
+        /goal cannot be set programmatically.
+
+    legion autonomy status
+        Show the weekly self-directed-work window: spent / ceiling, remaining,
+        reset date. The ceiling derives from rate-limit headroom.
+
+    legion autonomy gate [--operator]
+        Ask whether one unit of autonomous work (self-acceptance or free-time)
+        fits the budget. Records the spend and exits 0 when allowed; exits
+        non-zero (cleanly) when exhausted. --operator bypasses entirely --
+        operator-requested work never draws on the budget.
+
+--------------------------------------------------------------------------------
+WORK SOURCE -- sync, issue, pr, comment, sub-issue, audit
+--------------------------------------------------------------------------------
+
+    legion sync --repo <name>
+        Import issues from the configured work source (e.g. GitHub) into the
+        kanban board. Imported cards land in backlog (born-Backlog), not the
+        working set, so sync does not flood the queue.
+
+    legion issue create|view|close|reopen|edit --repo <name> ...
+        Manage issues via the work-source plugin (direct gh is intentionally
+        not used). `issue view` shows local card data + live GitHub state.
+    legion pr create|view|review|merge --repo <name> ...
+        Manage pull requests. `pr create` enforces a clean simplify gate on HEAD.
+    legion comment --repo <name> ...        Comment on an issue or PR.
+    legion sub-issue create|list --repo <name> ...
+        Create a child issue linked to a parent via GitHub's native sub-issue
+        relationship, or list a parent's children.
+    legion audit --repo <name>
+        View the audit log of work-source actions.
+
+--------------------------------------------------------------------------------
+DOCUMENTS -- coordination substrate
+--------------------------------------------------------------------------------
+
+    legion document <verb> --repo <name> ...
+        Type-agnostic document store for specs, NFRs, blueprints, personas,
+        journeys, etc. The storage layer is type-agnostic; each payload is a
+        validated JSON blob. Backs the spec<->card binding work.
+
+--------------------------------------------------------------------------------
+CLUSTER + MESH -- multi-node
+--------------------------------------------------------------------------------
+
+    legion cluster init --key <64-hex>      Initialize sync with a shared key.
+    legion cluster key                      Print the key (to share with peers).
+    legion cluster enable | disable         Start / stop broadcasting.
+    legion cluster status                   Peers, sync state, last sync time.
+
+    Cluster sync gossips reflections, cards, schedules, and leases between nodes
+    over an encrypted LAN broadcast (smugglr-core multicast). LAN-only by design;
+    no cross-subnet / WAN discovery. Runs inside `legion daemon`.
+
+    legion mesh
+        Rank cluster hosts by headroom (from statusline rate-limit samples +
+        health) for task placement.
+    legion health --all-hosts
+        Cluster-wide CPU / memory / pressure across every gossiping node.
+
+--------------------------------------------------------------------------------
+DAEMON LIFECYCLE
+--------------------------------------------------------------------------------
+
+    legion daemon [--port 3131]
+        Start the legion daemon: the channel server (HTTP/SSE) plus the watch
+        loop, in one process. This is the supported run path; cluster sync and
+        wake both run here.
+    legion daemon-spawn
+        Spawn the daemon in the background, idempotent. Used by the plugin's
+        SessionStart auto-start; will not duplicate a running daemon.
+    legion daemon-stop
+        SIGTERM the running daemon, SIGKILL if it does not exit.
+    legion daemon-restart
+        Stop the running daemon, then spawn a fresh one.
+
+    Opt out of auto-start with LEGION_NO_DAEMON=1.
+
+--------------------------------------------------------------------------------
+OBSERVABILITY -- usage, statusline, uncertainty, telemetry, now
+--------------------------------------------------------------------------------
+
+    legion usage                    Claude Code session token usage + cost.
+    legion statusline               statusLine subcommand: ingest rate-limit +
+                                    usage, render the chip (also feeds mesh/autonomy).
+    legion uncertainty <verb>       Emit/witness predictions; read calibration +
+                                    orphan metrics (the learning pillar).
+    legion telemetry <verb>         Read/append the grep/Read bypass log
+                                    (append-only JSONL); feeds the uncertainty engine.
+    legion now                      Current local time, weekday, sunphase.
+    legion mcp-health               Probe a fresh MCP subprocess for notifier health.
+    legion mcp-logs                 Show/tail the most recent MCP process log.
+    legion cleanup                  Remove old tombstones (soft-deleted rows).
 
 ================================================================================
 KANBAN STATE MACHINE
@@ -617,18 +799,55 @@ TABLE: health_samples
         idx_health_hostname ON health_samples(hostname)
         idx_health_sampled ON health_samples(sampled_at)
 
-MIGRATIONS (10 total, applied incrementally via has_column checks):
-    0: Create reflections (id, repo, text, created_at, embedding)
-    1: Add audience column + board_reads table
-    2: Add Synapse metadata (domain, tags, recall_count, last_recalled_at, parent_id)
-    3: Create tasks table
-    4: Create schedules table
-    5: Add active_start, active_end to schedules
-    6: Add handled_at to reflections (legacy)
-    7: Create watch_handled table
-    8: Create health_samples table
-    9: Kanban upgrade (labels, parent_card_id, source_url, source_type,
-       sort_order, assigned_at, started_at, completed_at on tasks)
+TABLE: quality_gates
+    id                  TEXT PRIMARY KEY    UUIDv7
+    branch              TEXT NOT NULL       Branch the gate ran on
+    commit_hash         TEXT NOT NULL       HEAD commit the gate keys on
+    skill               TEXT NOT NULL       Gate identity (e.g. legion-simplify,
+                                            legion-pr-write, legion-verify:<card>)
+    result              TEXT NOT NULL       clean | issues (or pass/fail/uncertain)
+    findings_count      INTEGER NOT NULL    Default 0
+    details             TEXT                Full findings JSON (nullable)
+    created_at          TEXT NOT NULL       ISO 8601
+
+    The review pipeline's substrate. `legion pr create` gates on a clean row for
+    HEAD; `legion verify` records a legion-verify:<card> row to gate ->Done.
+
+TABLE: wake_attempts
+    attempt_id          TEXT PRIMARY KEY    UUIDv7
+    persona_id          TEXT NOT NULL       Agent being woken
+    repo_name           TEXT NOT NULL
+    signal_ids          TEXT NOT NULL       Signals that triggered the wake
+    state               TEXT NOT NULL       FSM state (enqueued/claimed/spawned/...)
+    acquired_by_host    TEXT                Host that claimed it (nullable)
+    acquired_at         TEXT                (nullable)
+    spawned_pid         INTEGER             PTY child PID (nullable)
+    spawned_at          TEXT                (nullable)
+    exit_observed_at    TEXT                (nullable)
+    exited_at           TEXT                (nullable)
+    exit_status         TEXT                (nullable)
+    outcome             TEXT                (nullable)
+    deleted_at          TEXT                Tombstone (nullable)
+    updated_at          TEXT NOT NULL       ISO 8601
+
+    FSM-enforced so each wake is enqueued, claimed, spawned, and reaped exactly
+    once. Backs the watch-pty wake path.
+
+OTHER TABLES (see `legion <area> --help` / src/db.rs for current shape):
+    documents           Coordination-substrate docs (specs, NFRs, blueprints,
+                        personas, journeys); type-agnostic, validated JSON payload.
+    cluster / sync      Cluster config + sync watermarks for the gossip layer.
+    SCIP index storage  Per-repo symbol indexes backing `legion sym`.
+
+MIGRATIONS:
+    Schema is built incrementally via has_column / CREATE TABLE IF NOT EXISTS
+    checks at open, well beyond the original 10. The early sequence was:
+    0: reflections  1: audience + board_reads  2: Synapse metadata
+    3: tasks  4: schedules  5: schedule active windows  6: reflections.handled_at
+    7: watch_handled  8: health_samples  9: kanban upgrade.
+    Later additions include quality_gates, wake_attempts, documents, cluster/sync
+    state, and SCIP index storage. The binary applies whatever is missing on open;
+    treat the live DB (or src/db.rs) as authoritative rather than this list.
 
 ================================================================================
 TANTIVY SEARCH INDEX
@@ -702,9 +921,15 @@ SIGNAL DETECTION:
     - Were created after since (if provided)
 
 AGENT SPAWNING:
-    claude --print -p "<wake prompt>"
-    In the repo workdir, with LEGION_AUTO_WAKE=1 in environment.
-    Stdout and stderr redirected to /dev/null.
+    Woken agents run as an interactive `claude` session inside a pseudo-terminal
+    (portable-pty), NOT `claude --print -p`. The watch-pty migration replaced the
+    one-shot `--print` invocation because `--print` is billed as API usage; the
+    PTY path drives the normal interactive REPL (subscription billing) and the
+    daemon ring-buffers its output to detect completion (EOF) and crashes. The
+    agent is spawned in the repo workdir with LEGION_AUTO_WAKE=1 in the
+    environment; the wake prompt is delivered to the session. Wake attempts are
+    tracked in a wake_attempts table with an FSM-enforced lifecycle so a wake is
+    enqueued, claimed, spawned, and reaped exactly once.
 
     Wake fires only for signals whose --verb is in the wake-worthy set:
     question, request, help, blocker. Other verbs (announce, ack, info,
@@ -804,20 +1029,44 @@ STOP:
        - Reflected marker: /tmp/legion-reflected-<cwd-hash> (fires once per session)
        - Work marker: /tmp/legion-work-<cwd-hash> (skips if no real work)
 
-       If both guards pass:
-       - Creates reflected marker
-       - Checks unread bullpen posts
-       - Checks active kanban cards
-       - Outputs decision: block with structured prompt:
-         team first, reflect, boost, signal unresolved, read bullpen, complete cards
+       The Stop hook reads the agent's KANBAN BOARD, not harness task state, to
+       decide whether the session is really done:
+       - An open Accepted card with no declared blocker -> keep working.
+       - A turn that ends with an operator question while work remains -> the
+         question-stop detector challenges it rather than treating it as done.
+       - Conversation-mode turns (no real work) are not board-gated.
 
-PRETOOLUSE:
+       When the session is winding down it emits a structured prompt to close out:
+       reflect on transferable learnings (not a changelog), boost what helped,
+       signal anything unresolved, read the bullpen, and complete or update cards.
+       It also surfaces the weekly autonomy budget so self-directed work is
+       sanctioned without asking. The board-derived goal (legion goal) carries the
+       active card's acceptance criteria across the stop so the next turn resumes
+       against the same completion condition.
 
-    recall-first.sh (timeout 5s):
-       Matches: Grep, Glob, WebFetch, WebSearch
-       - Sets work marker /tmp/legion-work-<cwd-hash>
-       - Injects nudge: check legion memory before searching code
-       - Permission decision: always allow (never blocks tool use)
+PRETOOLUSE (search enforcement -- sym over grep):
+
+    The mandatory block on shell search is NOT a hook -- it is the operator's
+    settings.json permissions.deny (Bash(grep:*), Bash(rg:*), Bash(find:*),
+    Bash(fd:*), Bash(ag:*), Bash(ack:*)). permissions.deny is evaluated before any
+    hook, cannot be overridden by the agent, and inherits to subagents -- the three
+    properties a hook lacks. Plugins cannot ship permissions, so the recommended
+    deny ruleset is documented for operators to apply
+    (docs/decisions/2026-06-02-grep-blocking-is-operator-permissions.md).
+
+    The plugin hooks are soft guidance layered on top, matched on the tool:
+       recall-first / pre-grep-recall:  inject relevant recall/consult context.
+       pre-grep-scip / pre-bash-grep:   resolve the pattern against the SCIP index;
+                                        if it is a real symbol in this repo, redirect
+                                        to `legion sym def/refs/list`; otherwise allow.
+       All set the work marker /tmp/legion-work-<cwd-hash>.
+
+    The escape is a tool, not a bypass: the Grep and Glob TOOLS are deliberately
+    NOT denied -- they are the supervised path for non-indexed / free-text content
+    (e.g. an .astro file has no SCIP index, so sym has nothing; the Grep tool
+    searches its content). Bypass escapes are logged via `legion telemetry`, feeding
+    the uncertainty engine: high bypass volume on a (repo, pattern) means sym/recall
+    is missing an answer agents expected.
 
 ================================================================================
 PLUGIN SLASH COMMANDS
@@ -874,8 +1123,30 @@ PLUGIN SKILLS
 
     legion-memory   Auto-triggered (not user-invocable).
         Fires when agent is about to search codebase. Enforces recall-before-grep
-        doctrine. Order: recall -> consult -> then grep/glob/read.
+        doctrine. Order: recall -> consult -> then sym/grep/glob/read.
         Allowed tools: Bash, Read.
+
+    legion-simplify Invoked as /legion-simplify.
+        Reviews the branch diff for structural quality (duplicate logic,
+        unnecessary abstraction, stringly-typed state, error swallowing) and
+        records the result via `legion quality-gate record --skill legion-simplify`.
+        `legion pr create` gates on a clean row for HEAD.
+
+    legion-pr-write Invoked as /legion-pr-write.
+        The PR-write forcing function: requires an explicit, written mapping of
+        the diff to each acceptance criterion before review (articulation is
+        verification). Records a legion-pr-write gate.
+
+    legion-verify   Invoked as /legion-verify.
+        Drives `legion verify` for a card: collects per-criterion verdicts with
+        evidence and gates the ->Done transition (pass+evidence allows; fail
+        blocks; uncertain or evidence-free pass routes to needs-input).
+
+Additional plugin hooks beyond those documented above include the grep/sym
+enforcement family (pre-bash-grep, pre-grep-scip, pre-grep-recall, pre-read-sym),
+guardrails (no-direct-db, no-gh, no-local-memory), the daemon supervisor, the
+post-edit SCIP reindex (post-edit-index), identity-chain-load / pre-whoami-rewrite,
+and the uncertainty emit/witness pair. See plugin/hooks/ for the full set.
 
 ================================================================================
 MCP CHANNEL
