@@ -566,10 +566,9 @@ fn process_alive(pid: u32) -> bool {
 /// - The file's mtime is within `ttl` of now.
 ///
 /// Either condition failing (dead PID, or mtime older than TTL) causes the
-/// lock to be treated as abandoned; the next spawn overwrites it. No explicit
-/// release happens on clean exit -- the dead-PID branch of the check handles
-/// that on the next poll. An explicit release hook is out of scope for this
-/// issue (tracked separately).
+/// lock to be treated as abandoned; the next spawn overwrites it. Explicit
+/// release is available via `release` and is called both on clean exit
+/// (reaper path) and on the stop-hook fast path (`record_session_end`).
 pub struct SessionLockTracker {
     lock_dir: PathBuf,
     ttl: Duration,
@@ -612,6 +611,24 @@ impl SessionLockTracker {
         std::fs::create_dir_all(&self.lock_dir)?;
         std::fs::write(self.lock_path(repo), pid.to_string())?;
         Ok(())
+    }
+
+    /// Delete the lockfile for `repo`, freeing the per-repo wake gate so
+    /// the next poll cycle can spawn a new agent session immediately rather
+    /// than waiting for the TTL to expire.
+    ///
+    /// Idempotent: a missing lockfile is not an error. Called from two sites:
+    /// - `reap_finished` when the tracked child has exited or its
+    ///   `exit_observed_at` is set (stop-hook fired) -- authoritative path.
+    /// - `record_session_end` immediately on the stop-hook fast path so the
+    ///   gate clears before the next poll cycle.
+    pub fn release(&self, repo: &str) -> Result<()> {
+        let path = self.lock_path(repo);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(LegionError::Io(e)),
+        }
     }
 }
 
@@ -863,17 +880,58 @@ impl SpawnMode {
 /// this already).
 ///
 /// Optimistic stop-hook handoff (#493). Writes `exit_observed_at` on
-/// the wake_attempts row so the reaper can short-circuit a poll cycle.
-/// PTY EOF + PID-poll remain the authoritative completion signal --
-/// this is a speed-up only. Idempotent: missing rows return `Ok(())`
-/// because the hook may fire for operator-attended sessions that watch
-/// never spawned.
-pub fn record_session_end(db: &Database, attempt_id: &str) -> Result<()> {
+/// the wake_attempts row so the reaper can short-circuit a poll cycle,
+/// AND releases the session lock so the wake gate clears immediately
+/// rather than waiting for the TTL. PTY EOF + PID-poll remain the
+/// authoritative completion signal -- this is a speed-up only.
+/// Idempotent: missing rows return `Ok(())` because the hook may fire
+/// for operator-attended sessions that watch never spawned (no wake row
+/// -> still Ok; no lock -> release is a no-op).
+pub fn record_session_end(db: &Database, attempt_id: &str, data_dir: &Path) -> Result<()> {
     match db.mark_wake_attempt_exit_observed(attempt_id) {
-        Ok(()) => Ok(()),
-        Err(LegionError::WakeAttemptNotFound(_)) => Ok(()),
-        Err(e) => Err(e),
+        Ok(()) => {}
+        Err(LegionError::WakeAttemptNotFound(_)) => {
+            // No wake row for this attempt_id -- operator-attended session
+            // or a hook firing before the daemon wrote the row. Nothing to
+            // release; return Ok so the stop hook never blocks Claude Code.
+            return Ok(());
+        }
+        Err(e) => return Err(e),
     }
+
+    // Resolve the repo from the wake_attempts row so we know which lockfile
+    // to delete. The TTL is irrelevant here -- `release` deletes the lockfile
+    // by path and never consults `ttl` -- so use the default rather than
+    // reading watch.toml. A failure to release is non-fatal: the reaper's
+    // authoritative path releases the lock on the next poll cycle.
+    let session_locks = SessionLockTracker::new(data_dir, default_session_lock_ttl_secs());
+
+    match db.get_wake_attempt(attempt_id) {
+        Ok(Some(attempt)) => {
+            if let Err(e) = session_locks.release(&attempt.repo_name) {
+                eprintln!(
+                    "[legion watch] session-end: failed to release lock for {}: {}",
+                    attempt.repo_name, e
+                );
+            }
+        }
+        Ok(None) => {
+            // Row was just written by mark_wake_attempt_exit_observed so
+            // this branch should be unreachable in practice. Log and continue.
+            eprintln!(
+                "[legion watch] session-end: wake attempt {} not found after update (race?)",
+                attempt_id
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "[legion watch] session-end: could not look up attempt {} for lock release: {}",
+                attempt_id, e
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Polymorphic child handle returned by `spawn_agent`. The Print
@@ -917,7 +975,8 @@ impl SpawnedChild {
         }
     }
 
-    #[allow(dead_code)] // consumed by #490 reap-on-shutdown path
+    /// Terminate the child. Used by `reap_finished` to tear down an idle PTY
+    /// REPL whose turn is complete, and by the spawn-failure cleanup path.
     pub fn kill(&mut self) -> Result<()> {
         match self {
             SpawnedChild::Print(c) => c.kill().map_err(LegionError::Io),
@@ -1063,95 +1122,197 @@ impl AgentTracker {
     /// a late-loser whose lease was overwritten by sync conflict resolution
     /// cannot accidentally drop the peer winner's row. Release errors are
     /// logged but not propagated -- a missed release ages out via TTL.
-    pub fn reap_finished(&mut self, db: Option<&Database>) {
-        self.children
-            .retain_mut(|tracked| match tracked.child.try_wait() {
+    ///
+    /// In addition to reaping children that have actually exited (`try_wait`
+    /// returns `Some`), this method also handles idle PTY REPLs: a PTY-spawned
+    /// `claude` session sits alive after its turn (a REPL does not EOF), so
+    /// `try_wait` returns `None` forever. When the child's `exit_observed_at`
+    /// is set in the DB (its stop hook fired `legion watch session-end`), the
+    /// turn is considered complete: the child is killed best-effort and the full
+    /// reap path runs. The session lock is released in both cases so the per-repo
+    /// wake gate opens immediately rather than waiting for the TTL.
+    pub fn reap_finished(
+        &mut self,
+        db: Option<&Database>,
+        session_locks: Option<&SessionLockTracker>,
+    ) {
+        self.children.retain_mut(|tracked| {
+            // Determine whether this child should be reaped.
+            // Two paths:
+            //   A. Child already exited: try_wait returns Ok(Some(success)).
+            //   B. Child is still alive (try_wait returns Ok(None)) but its
+            //      stop hook has set exit_observed_at -- the turn is done and
+            //      the REPL is sitting idle. Kill it and run the reap path.
+            let reap_result: Option<bool> = match tracked.child.try_wait() {
                 Ok(Some(success)) => {
+                    // Path A: child exited naturally.
                     eprintln!(
                         "[legion watch] agent for {} exited ({})",
                         tracked.repo,
                         if success { "ok" } else { "error" }
                     );
-                    if let Some(db) = db {
-                        for (persona, signal_id) in &tracked.held_leases {
-                            if let Err(e) =
-                                db.release_persona_lease_if_owner(persona, signal_id, &tracked.host)
-                            {
-                                eprintln!(
-                                    "[legion watch] failed to release lease {}/{}: {}",
-                                    persona, signal_id, e
-                                );
-                            }
-                        }
-
-                        // #389: classify and persist the session outcome.
-                        // Defensive: errors here log to stderr but never break
-                        // the reap loop -- a missed log row is recoverable, a
-                        // panic in the watch thread is not.
-                        let exit_at = chrono::Utc::now().to_rfc3339();
-                        let exit_status = if success { "ok" } else { "error" };
-                        let outcome = if !success {
-                            Database::OUTCOME_ERRORED
-                        } else {
-                            match db.classify_session(
-                                &tracked.repo,
-                                &tracked.signal_ids,
-                                &tracked.spawn_at,
-                                &exit_at,
-                            ) {
-                                Ok(true) => Database::OUTCOME_PRODUCTIVE,
-                                Ok(false) => Database::OUTCOME_UNPRODUCTIVE,
+                    Some(success)
+                }
+                Ok(None) => {
+                    // Path B: child is still alive. Check exit_observed_at to
+                    // detect a lingering idle PTY REPL whose turn is complete.
+                    // Only consult the DB when we have an attempt_id and a DB
+                    // handle; without those we cannot make the determination.
+                    let turn_done = match (&tracked.attempt_id, db) {
+                        (Some(aid), Some(db)) => {
+                            match db.get_wake_attempt(aid) {
+                                Ok(Some(ref attempt)) => attempt.exit_observed_at.is_some(),
+                                Ok(None) => {
+                                    // Row vanished (e.g. retention-pruned) while the
+                                    // child is still alive. Log -- otherwise this is a
+                                    // no-trace path: the child can no longer be reaped
+                                    // via the stop-hook signal and falls back to the
+                                    // TTL/exit backstop with no record of why.
+                                    eprintln!(
+                                        "[legion watch] wake row {} missing while child for {} still alive -- cannot confirm turn completion",
+                                        aid, tracked.repo
+                                    );
+                                    false
+                                }
                                 Err(e) => {
                                     eprintln!(
-                                        "[legion watch] classify failed for {} ({}): {}",
-                                        tracked.repo, tracked.session_id, e
+                                        "[legion watch] could not check exit_observed_at for {}: {}",
+                                        aid, e
                                     );
-                                    // Conservative: do not record an unknown
-                                    // outcome as productive. Skip the row.
-                                    return false;
+                                    false
                                 }
                             }
-                        };
-                        if let Err(e) = db.record_session_outcome(
-                            &tracked.session_id,
-                            &tracked.repo,
-                            &tracked.signal_ids,
-                            &tracked.spawn_at,
-                            &exit_at,
-                            exit_status,
-                            outcome,
-                        ) {
-                            eprintln!(
-                                "[legion watch] failed to record session outcome for {} ({}): {}",
-                                tracked.repo, tracked.session_id, e
-                            );
                         }
+                        _ => false,
+                    };
 
-                        // #490: stamp the wake_attempt's terminal state.
-                        // Idempotent at the DB layer; errors logged but
-                        // not propagated (the lease release + outcome
-                        // record above are the load-bearing writes).
-                        if let Some(ref attempt_id) = tracked.attempt_id
-                            && let Err(e) =
-                                db.record_wake_attempt_outcome(attempt_id, exit_status, outcome)
-                        {
-                            eprintln!(
-                                "[legion watch] failed to record wake attempt outcome {}: {}",
-                                attempt_id, e
-                            );
+                    if turn_done {
+                        // Stop-hook fired: turn complete, child is an idle REPL.
+                        eprintln!(
+                            "[legion watch] agent for {} turn complete (stop-hook) -- terminating idle REPL",
+                            tracked.repo
+                        );
+                        match tracked.child.kill() {
+                            Ok(()) => {
+                                // Killed cleanly. Classify as ok: the turn completed
+                                // normally (the stop hook firing is the agent's
+                                // success signal); the kill is cleanup, not an error.
+                                Some(true)
+                            }
+                            Err(e) => {
+                                // Kill failed, so the REPL is STILL ALIVE. Keep it
+                                // tracked and retry next poll rather than dropping
+                                // it: a dropped-but-alive child leaks the process
+                                // AND releases the lock, opening the gate for a
+                                // colliding spawn -- the inverse of this fix. The
+                                // TTL remains the ultimate backstop.
+                                eprintln!(
+                                    "[legion watch] kill of idle REPL for {} failed -- keeping tracked for retry: {}",
+                                    tracked.repo, e
+                                );
+                                return true; // keep tracking; do not leak or open the gate
+                            }
                         }
+                    } else {
+                        // Still genuinely running and no completion signal yet.
+                        return true; // keep tracking
                     }
-                    false // remove from list
                 }
-                Ok(None) => true, // still running
                 Err(e) => {
                     eprintln!(
                         "[legion watch] error checking agent for {}: {}",
                         tracked.repo, e
                     );
-                    true // keep tracking -- process may still be running
+                    return true; // keep tracking -- process may still be running
                 }
-            });
+            };
+
+            let success: bool = reap_result.unwrap_or(false);
+
+            // Release the session lock so the per-repo wake gate clears
+            // immediately. A missing lock is Ok (already released by the
+            // stop-hook fast path). Errors are logged but never panic the
+            // watch thread.
+            if let Some(locks) = session_locks
+                && let Err(e) = locks.release(&tracked.repo)
+            {
+                eprintln!(
+                    "[legion watch] failed to release session lock for {}: {}",
+                    tracked.repo, e
+                );
+            }
+
+            if let Some(db) = db {
+                for (persona, signal_id) in &tracked.held_leases {
+                    if let Err(e) =
+                        db.release_persona_lease_if_owner(persona, signal_id, &tracked.host)
+                    {
+                        eprintln!(
+                            "[legion watch] failed to release lease {}/{}: {}",
+                            persona, signal_id, e
+                        );
+                    }
+                }
+
+                // #389: classify and persist the session outcome.
+                // Defensive: errors here log to stderr but never break
+                // the reap loop -- a missed log row is recoverable, a
+                // panic in the watch thread is not.
+                let exit_at = chrono::Utc::now().to_rfc3339();
+                let exit_status = if success { "ok" } else { "error" };
+                let outcome = if !success {
+                    Database::OUTCOME_ERRORED
+                } else {
+                    match db.classify_session(
+                        &tracked.repo,
+                        &tracked.signal_ids,
+                        &tracked.spawn_at,
+                        &exit_at,
+                    ) {
+                        Ok(true) => Database::OUTCOME_PRODUCTIVE,
+                        Ok(false) => Database::OUTCOME_UNPRODUCTIVE,
+                        Err(e) => {
+                            eprintln!(
+                                "[legion watch] classify failed for {} ({}): {}",
+                                tracked.repo, tracked.session_id, e
+                            );
+                            // Conservative: do not record an unknown
+                            // outcome as productive. Skip the row.
+                            return false;
+                        }
+                    }
+                };
+                if let Err(e) = db.record_session_outcome(
+                    &tracked.session_id,
+                    &tracked.repo,
+                    &tracked.signal_ids,
+                    &tracked.spawn_at,
+                    &exit_at,
+                    exit_status,
+                    outcome,
+                ) {
+                    eprintln!(
+                        "[legion watch] failed to record session outcome for {} ({}): {}",
+                        tracked.repo, tracked.session_id, e
+                    );
+                }
+
+                // #490: stamp the wake_attempt's terminal state.
+                // Idempotent at the DB layer; errors logged but
+                // not propagated (the lease release + outcome
+                // record above are the load-bearing writes).
+                if let Some(ref attempt_id) = tracked.attempt_id
+                    && let Err(e) =
+                        db.record_wake_attempt_outcome(attempt_id, exit_status, outcome)
+                {
+                    eprintln!(
+                        "[legion watch] failed to record wake attempt outcome {}: {}",
+                        attempt_id, e
+                    );
+                }
+            }
+            false // remove from tracking list
+        });
     }
 
     /// Number of currently active agents.
@@ -1694,7 +1855,7 @@ pub fn run(data_dir: &Path) -> Result<()> {
         // Health sample on its own interval
         if health_timer.elapsed() >= health_interval {
             sampler.sample();
-            tracker.reap_finished(Some(&db));
+            tracker.reap_finished(Some(&db), Some(&session_locks));
             if let Err(e) = db.heartbeat_persona_leases(&host, lease_ttl) {
                 eprintln!("[legion watch] lease heartbeat error: {}", e);
             }
@@ -2283,6 +2444,191 @@ workdir = "/tmp"
             locks.active_pid("legion").is_none(),
             "missing lockfile should read as inactive"
         );
+    }
+
+    // -- SessionLockTracker::release tests ------------------------------------
+
+    #[test]
+    fn session_lock_release_clears_active_pid() {
+        // After record_spawn, active_pid returns Some. After release it returns
+        // None -- the gate is open again for the next spawn.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        locks
+            .record_spawn("legion", std::process::id())
+            .expect("record spawn");
+        // Pre-condition: lock is active (our own live PID).
+        #[cfg(unix)]
+        assert!(
+            locks.active_pid("legion").is_some(),
+            "precondition: lock must be active after record_spawn"
+        );
+        locks.release("legion").expect("release");
+        assert!(
+            locks.active_pid("legion").is_none(),
+            "active_pid must return None after release"
+        );
+    }
+
+    #[test]
+    fn session_lock_release_of_missing_lock_is_ok() {
+        // release on a repo that was never locked (or already released) is idempotent.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        // No record_spawn called -- lockfile does not exist.
+        let result = locks.release("nonexistent-repo");
+        assert!(
+            result.is_ok(),
+            "release of a missing lockfile must return Ok, got {:?}",
+            result
+        );
+    }
+
+    // -- reap_finished: exit_observed_at path ---------------------------------
+
+    // Spawn a long-lived child (sleep) and record its state in the tracker so
+    // the exit_observed_at branch of reap_finished can be exercised without
+    // waiting for the process to exit naturally.
+    #[cfg(unix)]
+    #[test]
+    fn reap_finished_kills_idle_pty_repl_when_exit_observed() {
+        // A live child process (sleep) that will not exit on its own stands in
+        // for the idle PTY REPL. Once exit_observed_at is set on the DB row,
+        // reap_finished must kill the child and remove it from tracking.
+        let (db, _index, data_dir) = test_storage();
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+
+        // Spawn a long-lived child -- sleep 9999 simulates an idle REPL.
+        let child_proc = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep");
+        let child_pid = child_proc.id();
+
+        // Set up the wake_attempts row with a known attempt_id.
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let signal_id = db
+            .insert_reflection("kelex", "@legion question:test-reap", "team")
+            .expect("insert signal")
+            .id;
+        db.enqueue_wake_attempt(&attempt_id, "legion", "legion", &[signal_id])
+            .expect("enqueue");
+
+        // Record the session lock so we can verify it is released.
+        locks
+            .record_spawn("legion", child_pid)
+            .expect("record spawn");
+        assert!(
+            locks.active_pid("legion").is_some(),
+            "precondition: lock must be active after record_spawn"
+        );
+
+        // Mark exit_observed_at to simulate the stop hook firing.
+        db.mark_wake_attempt_exit_observed(&attempt_id)
+            .expect("mark exit observed");
+
+        // Build the tracked child entry (Print branch wraps std::process::Child).
+        let spawned = SpawnedChild::Print(child_proc);
+        let session_id = uuid::Uuid::now_v7().to_string();
+        let spawn_at = chrono::Utc::now().to_rfc3339();
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "legion".to_string(),
+            spawned,
+            Vec::new(),
+            "test-host".to_string(),
+            session_id,
+            spawn_at,
+            Vec::new(),
+            Some(attempt_id.clone()),
+        );
+
+        assert_eq!(tracker.active_count(), 1, "precondition: child is tracked");
+
+        // Run the reaper with session_locks provided.
+        tracker.reap_finished(Some(&db), Some(&locks));
+
+        // The child must have been reaped (removed from tracking).
+        assert_eq!(
+            tracker.active_count(),
+            0,
+            "child must be reaped when exit_observed_at is set"
+        );
+
+        // The session lock must have been released.
+        assert!(
+            locks.active_pid("legion").is_none(),
+            "session lock must be released after reap"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_finished_keeps_running_child_without_exit_observed() {
+        // A live child with no exit_observed_at must NOT be reaped -- it is
+        // genuinely mid-turn and we must not interrupt it.
+        let (db, _index, data_dir) = test_storage();
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+
+        let child_proc = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep");
+
+        // Enqueue a wake attempt but do NOT mark exit_observed_at.
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let sig = db
+            .insert_reflection("kelex", "@legion question:active-turn", "team")
+            .expect("signal")
+            .id;
+        db.enqueue_wake_attempt(&attempt_id, "legion", "legion", &[sig])
+            .expect("enqueue");
+
+        locks
+            .record_spawn("legion", child_proc.id())
+            .expect("record spawn");
+        assert!(
+            locks.active_pid("legion").is_some(),
+            "precondition: lock is active"
+        );
+
+        let spawned = SpawnedChild::Print(child_proc);
+        let session_id = uuid::Uuid::now_v7().to_string();
+        let spawn_at = chrono::Utc::now().to_rfc3339();
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "legion".to_string(),
+            spawned,
+            Vec::new(),
+            "test-host".to_string(),
+            session_id,
+            spawn_at,
+            Vec::new(),
+            Some(attempt_id),
+        );
+
+        assert_eq!(tracker.active_count(), 1, "precondition: child tracked");
+
+        // Reaper: child is live and exit_observed_at is NOT set.
+        tracker.reap_finished(Some(&db), Some(&locks));
+
+        // Child must still be tracked -- the turn is genuinely in progress.
+        assert_eq!(
+            tracker.active_count(),
+            1,
+            "active child with no exit_observed_at must stay tracked"
+        );
+
+        // Session lock must still be held.
+        assert!(
+            locks.active_pid("legion").is_some(),
+            "session lock must remain active for an in-progress turn"
+        );
+
+        // Clean up the long-running child so we don't leak it in the test suite.
+        tracker.children.iter_mut().for_each(|t| {
+            let _ = t.child.kill();
+        });
     }
 
     #[test]
