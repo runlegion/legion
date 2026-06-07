@@ -3,7 +3,7 @@
 #
 # Injects exactly three things:
 #   1. Identity  -- who am I (domain: identity)
-#   2. Last snooze -- what was I doing (domain: snooze)
+#   2. Last checkpoint -- where was I (domain: checkpoint)
 #   3. Work source -- what's on my plate (kanban list)
 #
 # Everything else (bulk recall, surface, bullpen) is pulled on demand
@@ -107,10 +107,19 @@ PENDING=$("$LEGION" pending-replies --repo "$REPO" 2>>"$LOG")
 legion_check $? "pending-replies"
 append_block "$PENDING"
 
-# 3. Last snooze -- what was I doing
-SNOOZE=$("$LEGION" recall --repo "$REPO" --domain snooze --limit 1 --preview 500 2>>"$LOG")
-legion_check $? "recall (snooze)"
-append_block "$SNOOZE"
+# 3. Last checkpoint -- where was I. The /checkpoint command and the
+# precompact safety-net both write domain=checkpoint; freshest wins.
+CHECKPOINT=$("$LEGION" recall --repo "$REPO" --domain checkpoint --limit 1 --preview 500 2>>"$LOG")
+legion_check $? "recall (checkpoint)"
+# Transitional fallback: before the snooze->checkpoint rename (#568), the
+# deliberate session summary lived in domain=snooze. Surface a legacy snooze
+# reflection only when no checkpoint exists yet, so the first session after
+# upgrade does not lose its anchor. Remove once domain=snooze has aged out.
+if [ -z "$CHECKPOINT" ]; then
+  CHECKPOINT=$("$LEGION" recall --repo "$REPO" --domain snooze --limit 1 --preview 500 2>>"$LOG")
+  legion_check $? "recall (snooze legacy)"
+fi
+append_block "$CHECKPOINT"
 
 # 4. Index status -- one line if every detected language has a fresh
 # index, multi-line block if anything is stale or missing. Silent when

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Legion PreCompact hook: block auto-compaction and surface a message to the
-# user telling them to run /snooze then /clear. Per Claude Code's hook spec,
+# user telling them to run /checkpoint then /clear. Per Claude Code's hook spec,
 # PreCompact's `reason` is shown to the USER, not the model -- so the text
 # below addresses the human operator, who decides what to do next.
 # See: https://code.claude.com/docs/en/hooks.md (Decision control table)
@@ -57,5 +57,5 @@ fi
 # model, so this is a static heredoc -- no jq dependency, no failure path
 # that would silently let compaction proceed.
 cat <<'EOF'
-{"decision":"block","reason":"Auto-compaction would lose everything not in the transcript tail. Blocked. Run /snooze to consolidate this session into legion memory (boost reflections that helped, write a domain=snooze summary the next session will recall, cross-pollinate to the bullpen), then /clear to start fresh. A checkpoint reflection has been written as a fallback."}
+{"decision":"block","reason":"Auto-compaction would lose everything not in the transcript tail. Blocked. Run /checkpoint to consolidate this session into legion memory (boost reflections that helped, write a domain=checkpoint resume-anchor the next session will recall, cross-pollinate to the bullpen), then /clear to start fresh. A safety-net checkpoint reflection has been written as a fallback."}
 EOF

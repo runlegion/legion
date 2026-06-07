@@ -65,7 +65,7 @@ fi
 # Recall: checkpoint reflection from PreCompact hook + branch context
 OUTPUT="$OUTPUT"$'\n\n'"--- LEGION CHECKPOINT (stored before compaction) ---"
 
-CHECKPOINT=$("$LEGION" recall --repo "$REPO" --context "compact checkpoint" --limit 1 2>>"$LOG")
+CHECKPOINT=$("$LEGION" recall --repo "$REPO" --domain checkpoint --limit 1 2>>"$LOG")
 legion_check $? "recall (checkpoint)"
 if [ -n "$CHECKPOINT" ]; then
   OUTPUT="$OUTPUT"$'\n'"$CHECKPOINT"
