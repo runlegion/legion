@@ -5,15 +5,20 @@
 #
 # 1. IN-PROGRESS GATE (#461 -> #523). If the agent has an Accepted
 #    (in-progress) kanban card for this repo, block the Stop until it
-#    reaches a real state. Reads the BOARD -- the persistent work substrate
-#    that `work`/`accept` actually move -- not the ephemeral per-session
-#    harness TaskList. Gates on Accepted, NOT Pending: Pending is the
-#    unconsented backlog, which would never let the agent stop; a declared
-#    blocker moves a card to Blocked, excluded here by construction. No
-#    silent abandonment of picked-up work.
+#    reaches a real state, via decision:block (a HARD refusal -- the agent
+#    cannot stop with picked-up work). Reads the BOARD -- the persistent work
+#    substrate that `work`/`accept` actually move -- not the ephemeral
+#    per-session harness TaskList. Gates on Accepted, NOT Pending: Pending is
+#    the unconsented backlog, which would never let the agent stop; a declared
+#    blocker moves a card to Blocked, excluded here by construction. No silent
+#    abandonment of picked-up work. The board-derived goal (#525) rides along.
 #
 # 2. REFLECTION PROMPT. If work happened this session and the reflection
-#    hasn't fired yet, prompt for one. Skip when nothing was learned.
+#    hasn't fired yet, nudge for one via hookSpecificOutput.additionalContext
+#    (#569) -- non-error feedback that continues the turn so the agent acts on
+#    it, WITHOUT the hook-error labeling and 8-block cap that decision:block
+#    incurs. One-shot per session ($MARKER) + stop_hook_active guarded. Skip
+#    when nothing was learned.
 #
 # Bypass: LEGION_SKIP_STOP_BLOCK=1 env skips both gates. Writes a
 # telemetry row via `legion telemetry record-bypass` so the escape is
@@ -22,6 +27,13 @@
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+# stop_hook_active is true when this Stop was itself triggered by a prior hook
+# continuation. The reflection nudge (which now continues the turn via
+# additionalContext, #569) honors it as a loop guard so a continuation we
+# caused does not re-nudge. The in-progress block deliberately ignores it --
+# that gate must keep firing while Accepted work exists (the 8-block cap is its
+# own backstop).
+STOP_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false')
 
 if [ -z "$CWD" ]; then
   exit 0
@@ -131,6 +143,16 @@ The board is the plan, and the plan is the permission -- \"should I keep going?\
 
 To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_STOP_BLOCK=1. The bypass writes one row to bypass.jsonl."
 
+    # Surface the board-derived goal (#525) so the completion condition the
+    # agent must drive the Accepted card to is in front of it, not just "keep
+    # going." Fail-open: any error leaves GOAL empty and the block fires plain.
+    GOAL=$("$LEGION_BIN" goal --repo "$REPO" 2>/dev/null)
+    if [ -n "$GOAL" ]; then
+      REASON="${REASON}
+
+${GOAL}"
+    fi
+
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0
   fi
@@ -155,9 +177,27 @@ if [ ! -f "$WORK_MARKER" ]; then
   exit 0
 fi
 
+# Loop guard: if this Stop is itself a hook-induced continuation, the nudge
+# already fired -- do not re-emit. The on-disk $MARKER is the primary guard
+# (the next Stop hits the marker check above and exits 0); this is the
+# belt-and-suspenders for additionalContext's continue-the-turn behavior.
+if [ "$STOP_ACTIVE" = "true" ]; then
+  session_end_handoff
+  exit 0
+fi
+
 touch "$MARKER"
 
 REASON="Drop one thing a teammate would not have known walking in cold -- a gotcha, a hidden invariant, how something actually works. Not what you did; the finding itself. Store it: legion reflect --repo $REPO --text '<finding>'. Skip if nothing surprising came up."
+
+# Surface the board-derived goal (#525) with the nudge so the completion
+# condition carries across the turn. Fail-open: empty GOAL leaves it off.
+GOAL=$("$LEGION_BIN" goal --repo "$REPO" 2>/dev/null)
+if [ -n "$GOAL" ]; then
+  REASON="${REASON}
+
+${GOAL}"
+fi
 
 # Budget reminder (#524) -- the "on stop" half of surfacing the autonomy
 # budget. Tells the agent, as it wraps up, that it has sanctioned units left
@@ -170,7 +210,17 @@ if [ -n "$BUDGET" ]; then
 ${BUDGET}"
 fi
 
-jq -n --arg reason "$REASON" '{
-  "decision": "block",
-  "reason": $reason
+# #569: the reflection nudge continues the turn via additionalContext, NOT
+# decision:block. Verified against CC 2.1.168: Stop additionalContext is
+# "non-error feedback that continues the conversation" -- the agent receives
+# the nudge and acts on it, but without the hook-error labeling and the
+# 8-consecutive-block cap that decision:block incurs. The in-progress gate
+# above stays a hard decision:block on purpose (it must be able to refuse the
+# stop, and wants the cap as a safety valve); this softer nudge is the right
+# tool for a once-per-session prompt the agent should act on.
+jq -n --arg ctx "$REASON" '{
+  "hookSpecificOutput": {
+    "hookEventName": "Stop",
+    "additionalContext": $ctx
+  }
 }'
