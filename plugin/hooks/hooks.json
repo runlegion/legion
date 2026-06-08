@@ -1,5 +1,5 @@
 {
-  "description": "Legion hooks: recall on start, reflect on stop, checkpoint on compact, bullpen awareness on tool use",
+  "description": "Legion hooks: recall on start, reflect on stop, checkpoint on compact and on subagent stop, bullpen awareness on tool use",
   "hooks": {
     "SessionStart": [
       {
@@ -34,6 +34,18 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/subagent-stop.sh",
             "timeout": 10
           }
         ]
