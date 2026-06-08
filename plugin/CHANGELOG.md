@@ -1,5 +1,31 @@
 # Legion Changelog
 
+## 0.16.3
+
+The checkpoint resume-anchor and harness-primitive adoption. `/snooze` becomes `/checkpoint` -- the name primed agents to go dormant -- and the split resume-anchor unifies onto one `domain=checkpoint` read path. The Stop and SubagentStop hooks adopt CC 2.1.163's `hookSpecificOutput.additionalContext`. The watch loop stops mistaking an idle PTY REPL for a live session. Grep-blocking is codified as the operator's `permissions.deny`. Patch release: behavior changes plus additive features; no schema migration (the `checkpoint` domain already existed) and no wire-format change.
+
+### New
+
+- **`legion sym list`** (PR #559, #558): enumerate a repo's symbol definitions by kind (`--kind struct|fn|trait|...`) and/or file (`--file`), from the SCIP index. Fills the "what symbols exist here" gap between `sym def` and a grep.
+- **SubagentStop hook -- persist subagent work** (PR #575, #570): when a spawned subagent ends, its transcript tail is persisted as a `domain=checkpoint` reflection (tagged `subagent,auto`) so delegated work reaches legion memory instead of vanishing with the parent's context, and a one-line pointer is injected to the parent via `additionalContext`. New `SubagentStop` hook registration (matcher `*`). Fail-open: never blocks the parent.
+
+### Changed
+
+- **`/snooze` -> `/checkpoint`; unified resume-anchor** (PR #573, #568): the command is renamed (the word "snooze" primed agents to go dormant and get lazy after running it; a checkpoint is a waypoint you cross and keep moving). Its Phase 3 now writes a structured `[CHECKPOINT]` resume-anchor (`--domain checkpoint --tags manual,session`). `session-start.sh` and `post-compact.sh` both read the freshest `--domain checkpoint` (post-compact dropped a fragile BM25 keyword search for a deterministic query); the deliberate anchor and the precompact safety-net no longer live in separate domains. Transitional `--domain snooze` fallback in SessionStart for one release so existing anchors survive.
+- **Stop reflection nudge via `additionalContext`** (PR #574, #569): the end-of-work reflection prompt moves from `decision:block` to `hookSpecificOutput.additionalContext` -- non-error feedback that continues the turn so the agent acts on it, without the hook-error labeling and 8-block cap. The in-progress gate stays a hard `decision:block` (it must be able to refuse the stop and wants the cap as a safety valve) and now surfaces the board-derived goal. `stop_hook_active` loop guard added. (Verified against CC 2.1.168: Stop `additionalContext` continues the conversation, it does not let it stop -- the behavior is wired to that.)
+- **grep-blocking is operator `permissions.deny`** (PR #561, #560): the mandatory shell-grep block moves out of the bypassable PreToolUse hook and into the operator's `permissions.deny` (evaluated before any hook, agent-unoverridable, subagent-inheriting). The hook stays as soft sym/recall guidance; the env-var hard-bypass is retired. Recommended deny ruleset documented for operators.
+- **verify demotes vacuous evidence** (PR #552, #549): a `Pass` verdict with no real evidence is demoted to `Uncertain` (routes to NeedsInput) rather than allowing Done -- a claim of done that cannot cite a test or observed behavior is not done.
+- **burn-rate gate on self-directed work** (PR #553): the autonomy budget pauses self-directed work as weekly rate-limit exhaustion approaches, so an agent cannot spend the operator's capacity on its own initiative.
+
+### Fixed
+
+- **watch no longer treats an idle PTY REPL as a live session** (PR #572, #571): a woken PTY `claude` REPL does not EOF after its turn -- it sat idle, holding the per-repo session lock for the full TTL (suppressing all further wakes) and leaking the process. The reaper now tears down a completed-but-idle REPL (on its `exit_observed_at` signal), and the session lock is released on completion via both the reaper and the stop-hook fast path, instead of waiting out the TTL. Closes the "an agent went quiet and never came back" class.
+
+### Internal
+
+- **smugglr-core from crates.io 0.4.0** (PR #557, #556): off the unpinned git dependency onto the published, checksummed registry release.
+- **RFC: spec-revision protocol** (PR #555, #550): documents legitimate re-plan vs improvisation.
+
 ## 0.16.2
 
 The SOLID-issue workflow lands. A review pipeline keeps agents on a ratified spec instead of improvising (PR-write forcing function + verify gate); an autonomy loop lets the board drive self-directed work within a weekly budget; `whatami` gives the operating contract its own memory surface; and the kanban substrate fixes make the board mean "what is being worked on." Patch release: additive features plus workflow behavior changes. One additive table (`autonomy_budget`), `CREATE TABLE IF NOT EXISTS`, no migration of existing data; no wire-format change.
