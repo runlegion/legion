@@ -11,7 +11,7 @@
     {
       "name": "legion",
       "description": "Agent memory layer with recall, reflect, consult, bullpen, and cross-agent coordination. Includes health monitoring and auto-wake. Hooks wire legion into every session automatically.",
-      "version": "0.16.2",
+      "version": "0.16.3",
       "author": {
         "name": "Sean Silvius",
         "email": "sean@silvius.me"
