@@ -207,6 +207,14 @@ impl HealthSampler {
     pub fn hostname(&self) -> &str {
         &self.hostname
     }
+
+    /// Test-only: push a synthetic pressure reading into the rolling window so
+    /// `can_spawn` / `pressure` can be driven deterministically from other
+    /// modules' tests (e.g. `watch::evaluate_spawn_gate`).
+    #[cfg(test)]
+    pub(crate) fn push_pressure_for_test(&mut self, pressure: f64) {
+        self.window.push_back(pressure);
+    }
 }
 
 /// Compute instantaneous pressure from a single snapshot.

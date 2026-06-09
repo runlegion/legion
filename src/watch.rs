@@ -1748,6 +1748,41 @@ impl QuotaPanicGate {
     }
 }
 
+/// Outcome of evaluating the per-poll spawn gates. Shared by `watch::run` and
+/// the daemon's `run_watch_task` so the two loops cannot drift on which gates
+/// guard a spawn cycle (#578 -- the daemon copy had silently dropped the quota
+/// panic-stop gate after the Bun->Rust port).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpawnGate {
+    /// Every gate is clear; run the spawn cycle.
+    Proceed,
+    /// Subscription-quota panic is active; skip the cycle.
+    QuotaPanic,
+    /// System pressure is at or over the health threshold; skip the cycle.
+    /// Carries the measured pressure for the skip log.
+    Pressure(f64),
+}
+
+/// Evaluate the gates guarding a spawn cycle, in priority order: the
+/// subscription-quota panic-stop first (it protects the operator's rate-limit
+/// cap and must never be skipped), then system-health pressure.
+/// `quota_gate.check_and_post` advances the panic edge and emits the
+/// healthy<->panic bullpen transition post as a side effect.
+pub fn evaluate_spawn_gate(
+    quota_gate: &mut QuotaPanicGate,
+    sampler: &crate::health::HealthSampler,
+    db: &Database,
+    health_threshold_pct: f64,
+) -> SpawnGate {
+    if quota_gate.check_and_post(db) {
+        SpawnGate::QuotaPanic
+    } else if sampler.can_spawn(health_threshold_pct) {
+        SpawnGate::Proceed
+    } else {
+        SpawnGate::Pressure(sampler.pressure())
+    }
+}
+
 /// Run the watch daemon main loop.
 ///
 /// Uses a dual-interval loop: health sampling every `health_poll_secs`
@@ -1877,13 +1912,8 @@ pub fn run(data_dir: &Path) -> Result<()> {
 
         // Spawn check on the poll interval
         if poll_timer.elapsed() >= poll_interval {
-            if quota_gate.check_and_post(&db) {
-                eprintln!(
-                    "[legion watch] quota panic active (>= {:.1}%) -- skipping spawn cycle",
-                    config.quota_panic_threshold_pct
-                );
-            } else if sampler.can_spawn(config.health_threshold_pct) {
-                match poll_cycle(
+            match evaluate_spawn_gate(&mut quota_gate, &sampler, &db, config.health_threshold_pct) {
+                SpawnGate::Proceed => match poll_cycle(
                     &db,
                     &config,
                     &mut cooldown,
@@ -1900,13 +1930,19 @@ pub fn run(data_dir: &Path) -> Result<()> {
                     Err(e) => {
                         eprintln!("[legion watch] poll error: {}", e);
                     }
+                },
+                SpawnGate::QuotaPanic => {
+                    eprintln!(
+                        "[legion watch] quota panic active (>= {:.1}%) -- skipping spawn cycle",
+                        config.quota_panic_threshold_pct
+                    );
                 }
-            } else {
-                let pressure: f64 = sampler.pressure();
-                eprintln!(
-                    "[legion watch] pressure {:.1}% >= threshold {:.0}% -- skipping spawn cycle",
-                    pressure, config.health_threshold_pct
-                );
+                SpawnGate::Pressure(pressure) => {
+                    eprintln!(
+                        "[legion watch] pressure {:.1}% >= threshold {:.0}% -- skipping spawn cycle",
+                        pressure, config.health_threshold_pct
+                    );
+                }
             }
 
             // Prune old health samples and stale watch_handled records (non-fatal)
@@ -1929,6 +1965,64 @@ pub fn run(data_dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testutil::test_storage;
+
+    fn rate_limit_sample(
+        hostname: &str,
+        five_hour_pct: Option<f64>,
+    ) -> crate::statusline::RateLimitSample {
+        crate::statusline::RateLimitSample {
+            id: "test-id".to_string(),
+            hostname: hostname.to_string(),
+            session_id: "test-session".to_string(),
+            sampled_at: "2026-06-09T00:00:00Z".to_string(),
+            five_hour_pct,
+            five_hour_resets_at: None,
+            seven_day_pct: None,
+            seven_day_resets_at: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn evaluate_spawn_gate_proceeds_when_all_clear() {
+        let (db, _index, _dir) = test_storage();
+        let mut quota = QuotaPanicGate::new(90.0, "host-a".to_string(), "legion".to_string());
+        // Empty window -> can_spawn true; no rate-limit sample -> no panic.
+        let sampler = crate::health::HealthSampler::new(6);
+        assert_eq!(
+            evaluate_spawn_gate(&mut quota, &sampler, &db, 80.0),
+            SpawnGate::Proceed
+        );
+    }
+
+    #[test]
+    fn evaluate_spawn_gate_quota_panic_takes_priority_over_healthy_system() {
+        let (db, _index, _dir) = test_storage();
+        // A sample for this host crosses the 90% panic threshold.
+        db.insert_rate_limit_sample(&rate_limit_sample("host-a", Some(99.0)))
+            .expect("insert rate-limit sample");
+        let mut quota = QuotaPanicGate::new(90.0, "host-a".to_string(), "legion".to_string());
+        // Fresh sampler would otherwise allow spawning -- proves the quota gate
+        // wins. This is the regression #578 fixes: the daemon loop never even
+        // consulted this gate.
+        let sampler = crate::health::HealthSampler::new(6);
+        assert_eq!(
+            evaluate_spawn_gate(&mut quota, &sampler, &db, 80.0),
+            SpawnGate::QuotaPanic
+        );
+    }
+
+    #[test]
+    fn evaluate_spawn_gate_reports_pressure_when_over_threshold() {
+        let (db, _index, _dir) = test_storage();
+        let mut quota = QuotaPanicGate::new(90.0, "host-a".to_string(), "legion".to_string());
+        let mut sampler = crate::health::HealthSampler::new(6);
+        sampler.push_pressure_for_test(95.0); // over the 80.0 threshold
+        match evaluate_spawn_gate(&mut quota, &sampler, &db, 80.0) {
+            SpawnGate::Pressure(p) => assert!(p >= 80.0, "pressure {p} should exceed threshold"),
+            other => panic!("expected Pressure, got {other:?}"),
+        }
+    }
 
     #[test]
     fn parse_config_basic() {
