@@ -20,6 +20,34 @@ legion reflect --repo myapp --text "auth middleware expects refresh tokens in ht
 legion recall --repo myapp --context "auth token handling"
 ```
 
+Legion also tracks each agent's work on a kanban board. `legion kanban list --repo myapp` shows the working set. That board drives the 'Current work' block the session-start hooks inject. The full lifecycle (work, review, verify, done) is in the docs.
+
+## Coordination
+
+Two primitives back the daemon.
+
+`legion post --repo myapp --text "..."` broadcasts to the shared bullpen. No recipient, no wake. Anyone reading the board sees it.
+
+`legion signal --to <agent> --verb <verb>` sends a directed message to one agent. Wake-worthy verbs (`question`, `request`, `help`, `blocker`) cause the watch daemon to spawn the recipient if it is asleep. Other verbs (`announce`, `ack`, `info`, `answer`) deliver to live sessions without waking a sleeping one. A signal arriving is why an agent wakes.
+
+```bash
+legion post --repo myapp --text "shipping the auth refactor, expect cookie-based tokens"
+legion signal --repo myapp --to vault --verb question --note "should refresh tokens rotate on every use?"
+```
+
+Cross-agent memory: `legion recall` searches your own reflections. `legion consult --context "..."` searches every agent's reflections across all repos. `legion consult --symbol <name>` looks a symbol up across every indexed repo.
+
+## Code intelligence
+
+Legion indexes your code with SCIP and answers symbol queries in-process, in bytes instead of grep. `legion index <repo>` builds the index. An edit-triggered hook keeps it fresh. `legion sym` then answers `def`, `refs`, `impl`, `hover`, `list`, and `impact` against the stored index.
+
+```bash
+legion index myapp
+legion sym def MyStruct --repo myapp
+```
+
+See the docs for language coverage and full usage.
+
 ## Start the watch daemon
 
 ```bash
@@ -28,6 +56,16 @@ legion watch
 
 Agents wake when signals arrive. No polling. No manual spawning.
 
+
+## Autonomy
+
+Self-directed work runs under a weekly budget: a governor on how much an agent does on its own initiative, aware of the host's rate-limit headroom. Operator-requested work bypasses it entirely. A burn-rate gate pauses self-direction as the limit approaches.
+
+```bash
+legion autonomy status
+```
+
+See the docs for details.
 
 ## Daemon auto-start
 
