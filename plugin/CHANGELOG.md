@@ -1,5 +1,13 @@
 # Legion Changelog
 
+## 0.16.4
+
+Watch reliability fix. The auto-wake daemon now honors the subscription-quota panic-stop gate it had been bypassing. Patch release: one fix, no schema migration, no wire-format change.
+
+### Fixed
+
+- **daemon watch loop evaluates the quota panic-stop gate** (PR #579, #578): the Bun->Rust port forked the watch poll loop into `watch::run` (standalone `legion watch`) and `daemon::run_watch_task` (the copy that actually runs under `legion daemon`, auto-started every session). The daemon copy silently dropped the subscription-quota panic-stop gate (#496) and the pressure-skip log -- so the daemon could spawn wake agents with this host's 5h/7d rate-limit window already at the panic threshold, and went completely silent when health-gated, making a live loop look dead. The per-poll gate decision is now extracted into one shared `watch::evaluate_spawn_gate` returning `SpawnGate { Proceed, QuotaPanic, Pressure(f64) }`, called by both loops so the gate set cannot diverge again; both loops log the skip reason. Three new tests cover the branches, including quota panic taking priority over a healthy system. A `#[cfg(test)]` `HealthSampler::push_pressure_for_test` seam makes the pressure branch deterministic.
+
 ## 0.16.3
 
 The checkpoint resume-anchor and harness-primitive adoption. `/snooze` becomes `/checkpoint` -- the name primed agents to go dormant -- and the split resume-anchor unifies onto one `domain=checkpoint` read path. The Stop and SubagentStop hooks adopt CC 2.1.163's `hookSpecificOutput.additionalContext`. The watch loop stops mistaking an idle PTY REPL for a live session. Grep-blocking is codified as the operator's `permissions.deny`. Patch release: behavior changes plus additive features; no schema migration (the `checkpoint` domain already existed) and no wire-format change.
