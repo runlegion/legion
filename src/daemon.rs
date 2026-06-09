@@ -435,6 +435,22 @@ async fn run_watch_task(data_dir: &Path) {
     let lease_ttl = std::time::Duration::from_secs(config.persona_lease_ttl_secs);
     let mut sampler = crate::health::HealthSampler::new(config.health_window_size);
 
+    // Subscription-quota panic-stop gate (#496). The standalone `watch::run`
+    // loop has always had this; the daemon copy dropped it in the Bun->Rust
+    // port (#578), so the daemon could wake agents with the rate-limit cap
+    // already exhausted. Attribute the healthy<->panic bullpen edge posts to
+    // the first watched repo, falling back to "legion".
+    let quota_post_repo = config
+        .repos
+        .first()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "legion".to_string());
+    let mut quota_gate = watch::QuotaPanicGate::new(
+        config.quota_panic_threshold_pct,
+        host.clone(),
+        quota_post_repo,
+    );
+
     let poll_interval = std::time::Duration::from_secs(config.poll_interval_secs);
     let health_interval = std::time::Duration::from_secs(config.health_poll_secs);
     let retention_cutoff = chrono::Duration::days(config.retention_days as i64);
@@ -473,29 +489,48 @@ async fn run_watch_task(data_dir: &Path) {
         }
 
         if poll_timer.elapsed() >= poll_interval {
-            if sampler.can_spawn(config.health_threshold_pct) {
-                let lease_gate = watch::PersonaLeaseGate {
-                    db: &db,
-                    host: &host,
-                    ttl: lease_ttl,
-                };
-                match watch::poll_cycle(
-                    &db,
-                    &config,
-                    &mut cooldown,
-                    &mut tracker,
-                    Some(&session_locks),
-                    Some(&lease_gate),
-                    Some(&lookback),
-                    spawn_mode,
-                ) {
-                    Ok(n) if n > 0 => {
-                        eprintln!("[legion daemon] watch: {} agent(s) spawned", n);
+            match watch::evaluate_spawn_gate(
+                &mut quota_gate,
+                &sampler,
+                &db,
+                config.health_threshold_pct,
+            ) {
+                watch::SpawnGate::Proceed => {
+                    let lease_gate = watch::PersonaLeaseGate {
+                        db: &db,
+                        host: &host,
+                        ttl: lease_ttl,
+                    };
+                    match watch::poll_cycle(
+                        &db,
+                        &config,
+                        &mut cooldown,
+                        &mut tracker,
+                        Some(&session_locks),
+                        Some(&lease_gate),
+                        Some(&lookback),
+                        spawn_mode,
+                    ) {
+                        Ok(n) if n > 0 => {
+                            eprintln!("[legion daemon] watch: {} agent(s) spawned", n);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("[legion daemon] watch poll error: {e}");
+                        }
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("[legion daemon] watch poll error: {e}");
-                    }
+                }
+                watch::SpawnGate::QuotaPanic => {
+                    eprintln!(
+                        "[legion daemon] quota panic active (>= {:.1}%) -- skipping spawn cycle",
+                        config.quota_panic_threshold_pct
+                    );
+                }
+                watch::SpawnGate::Pressure(pressure) => {
+                    eprintln!(
+                        "[legion daemon] pressure {:.1}% >= threshold {:.0}% -- skipping spawn cycle",
+                        pressure, config.health_threshold_pct
+                    );
                 }
             }
 
