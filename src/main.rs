@@ -2148,6 +2148,28 @@ enum WatchAction {
         #[arg(long)]
         attempt_id: String,
     },
+
+    /// Show whether the watch daemon is alive, stale, or absent (#581).
+    ///
+    /// Reads the heartbeat row the daemon writes on each health tick and
+    /// prints one of:
+    ///   alive  -- beat is newer than two poll intervals
+    ///   stale  -- beat exists but is older than that threshold
+    ///   absent -- no heartbeat has ever been written
+    ///
+    /// Also prints the daemon version, watched repo count, and the most
+    /// recent wake attempts so the operator can verify the daemon is not
+    /// just alive but also doing work.
+    Status {
+        /// Number of recent wake attempts to show (default 5).
+        #[arg(long, default_value = "5")]
+        recent: u32,
+
+        /// Staleness threshold in seconds. A beat older than this is
+        /// reported as stale. Defaults to twice the poll interval (120s).
+        #[arg(long, default_value = "120")]
+        stale_after_secs: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3585,6 +3607,99 @@ fn no_index_found(repo: Option<&str>, lang: Option<&str>) {
         (None, None) => "(any repo)".to_string(),
     };
     eprintln!("[legion] no index found for {scope}; run `legion index <repo>` first");
+}
+
+/// Render the `legion watch status` output.
+///
+/// Classifies the watch daemon as alive, stale, or absent by comparing
+/// the heartbeat's `updated_at` against `now - stale_after_secs`. Also
+/// prints the daemon version, repo count, and recent wake attempts so
+/// the operator can confirm that the daemon is not just alive but working.
+fn run_watch_status(db: &db::Database, recent: u32, stale_after_secs: u64) -> error::Result<()> {
+    use std::io::Write;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    let beat = db.get_watch_heartbeat(None)?;
+
+    match beat {
+        None => {
+            writeln!(out, "status:  absent")?;
+            writeln!(
+                out,
+                "         no heartbeat row found -- daemon has never run or DB is fresh"
+            )?;
+        }
+        Some(ref hb) => {
+            let now = chrono::Utc::now();
+            let threshold = std::time::Duration::from_secs(stale_after_secs);
+
+            // Parse updated_at to compute age. If the timestamp is
+            // unparseable (should not happen in practice), treat it as
+            // stale so we fail safely visible.
+            let age_secs: i64 = chrono::DateTime::parse_from_rfc3339(&hb.updated_at)
+                .ok()
+                .map(|ts| (now - ts.with_timezone(&chrono::Utc)).num_seconds())
+                .unwrap_or(i64::MAX);
+
+            let is_alive = age_secs >= 0 && (age_secs as u64) < threshold.as_secs();
+
+            if is_alive {
+                writeln!(out, "status:  alive")?;
+            } else {
+                let age_display = if age_secs < 0 {
+                    "clock skew (future timestamp)".to_string()
+                } else if age_secs < 60 {
+                    format!("{age_secs}s ago")
+                } else if age_secs < 3600 {
+                    format!("{}m ago", age_secs / 60)
+                } else {
+                    format!("{}h ago", age_secs / 3600)
+                };
+                writeln!(out, "status:  stale  (last beat: {age_display})")?;
+            }
+
+            writeln!(out, "host:    {}", hb.host)?;
+            writeln!(out, "pid:     {}", hb.pid)?;
+            writeln!(out, "version: {}", hb.version)?;
+            writeln!(out, "repos:   {}", hb.repo_count)?;
+            writeln!(out, "beat:    {}", hb.updated_at)?;
+
+            if let Some(ref summary) = hb.last_spawn_summary {
+                writeln!(out, "last:    {summary}")?;
+            }
+        }
+    }
+
+    // Recent wake attempts.
+    let attempts = db.recent_wake_attempts(recent)?;
+    if attempts.is_empty() {
+        writeln!(out, "\nwake attempts: none recorded")?;
+    } else {
+        writeln!(out, "\nrecent wake attempts ({}):", attempts.len())?;
+        writeln!(
+            out,
+            "  {:<38} {:<12} {:<12} updated_at",
+            "attempt_id", "persona", "state"
+        )?;
+        for a in &attempts {
+            // Truncate attempt_id to first 8 chars of the UUID for brevity.
+            let id_short: String = a.attempt_id.chars().take(8).collect();
+            let persona_short: String = a.persona_id.chars().take(12).collect();
+            writeln!(
+                out,
+                "  {:<38} {:<12} {:<12} {}",
+                id_short,
+                persona_short,
+                a.state.as_str(),
+                db::format_date(&a.updated_at),
+            )?;
+        }
+    }
+
+    out.flush()?;
+    Ok(())
 }
 
 fn main() -> error::Result<()> {
@@ -6780,6 +6895,14 @@ fn run() -> error::Result<()> {
                     let db_path = base.join("legion.db");
                     let db = db::Database::open(&db_path)?;
                     watch::record_session_end(&db, &attempt_id, &base)?;
+                }
+                Some(WatchAction::Status {
+                    recent,
+                    stale_after_secs,
+                }) => {
+                    let db_path = base.join("legion.db");
+                    let db = db::Database::open(&db_path)?;
+                    run_watch_status(&db, recent, stale_after_secs)?;
                 }
             }
         }

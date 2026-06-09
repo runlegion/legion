@@ -463,6 +463,16 @@ async fn run_watch_task(data_dir: &Path) {
         .checked_sub(health_interval)
         .unwrap_or_else(tokio::time::Instant::now);
 
+    // How many health ticks have elapsed. Used to throttle the INFO heartbeat
+    // log line -- we write it once every HEARTBEAT_LOG_CADENCE ticks so an
+    // idle daemon is silent most of the time but still proves liveness in the
+    // log file without spamming it.
+    let mut health_tick_count: u64 = 0;
+    const HEARTBEAT_LOG_CADENCE: u64 = 10;
+
+    let daemon_pid: u32 = std::process::id();
+    let daemon_version: &str = env!("CARGO_PKG_VERSION");
+
     loop {
         // Yield to tokio scheduler each iteration.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -483,6 +493,25 @@ async fn run_watch_task(data_dir: &Path) {
                 Err(e) => {
                     eprintln!("[legion daemon] health sample error: {e}");
                 }
+            }
+
+            // Persist the liveness heartbeat so `legion watch status` can
+            // report alive/stale/absent without requiring ps or log inspection.
+            let repo_count: u32 = config.repos.len() as u32;
+            if let Err(e) =
+                db.upsert_watch_heartbeat(&host, daemon_pid, daemon_version, repo_count, None)
+            {
+                eprintln!("[legion daemon] heartbeat persist error: {e}");
+            }
+
+            // Emit a heartbeat INFO line on a longer cadence so the log file
+            // proves liveness without being flooded on a quiet daemon.
+            health_tick_count += 1;
+            if health_tick_count % HEARTBEAT_LOG_CADENCE == 1 {
+                eprintln!(
+                    "[legion daemon] heartbeat tick={} repos={} pid={}",
+                    health_tick_count, repo_count, daemon_pid
+                );
             }
 
             health_timer = tokio::time::Instant::now();
