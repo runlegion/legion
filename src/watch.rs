@@ -26,6 +26,17 @@ pub struct WatchRepoConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 
+    /// Group tags this repo subscribes to. A signal addressed to `@<tag>` wakes
+    /// every repo that lists `<tag>` in `broadcast_tags`. Tags complement the
+    /// reserved `@all` / `@everyone` broadcasts: they let an operator fan out
+    /// to a named subset of repos without waking the entire mesh. An empty vec
+    /// (the default) means this repo subscribes to no tags.
+    ///
+    /// No tag may equal any repo's `recipient()` value -- `load_config` rejects
+    /// that collision so the match layer never confuses a tag with a direct address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub broadcast_tags: Vec<String>,
+
     /// Any additional per-repo fields the struct does not model explicitly
     /// (e.g., `github`, `worksource`, `review`). These survive a read-modify-write
     /// cycle so CRUD on one entry never strips integration config on another.
@@ -44,6 +55,54 @@ impl WatchRepoConfig {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or(&self.name)
+    }
+}
+
+/// A signal recipient parsed from a raw address string.
+///
+/// The reserved names `all` and `everyone` (case-insensitive, with or without
+/// a leading `@`) map to `Broadcast(All)`. Everything else is treated as a
+/// direct `Agent` address. Tag resolution is NOT done here -- the caller must
+/// compare the address against each repo's `broadcast_tags` at match time.
+///
+/// This type is part of the public API for #585. Production call sites that
+/// consume `Recipient` are in #586 (wake-verb canon) and the future
+/// signal-routing layer; it is defined here as a stable contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // public API foundation for #585/#586; callers ship in follow-on issues
+pub enum Recipient {
+    /// Directly addressed to a named agent or repo.
+    Agent(String),
+    /// Addressed to a broadcast group.
+    Broadcast(BroadcastTarget),
+}
+
+/// The target of a broadcast signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // public API foundation for #585; Tag variant consumed by routing layer in #586
+pub enum BroadcastTarget {
+    /// The reserved `@all` / `@everyone` group -- wakes every watcher.
+    All,
+    /// A named tag group -- wakes only repos whose `broadcast_tags` include
+    /// this name.
+    Tag(String),
+}
+
+impl Recipient {
+    /// Parse a raw signal address into a typed `Recipient`.
+    ///
+    /// Strips a leading `@` if present before comparing. The reserved set
+    /// {`all`, `everyone`} (case-insensitive) maps to `Broadcast(All)`;
+    /// all other values become `Agent(name)`. Tag-vs-agent disambiguation
+    /// is NOT done here -- the caller resolves tags against each repo's
+    /// `broadcast_tags` at match time.
+    #[allow(dead_code)] // public API foundation for #585/#586; callers ship in follow-on issues
+    pub fn parse(raw: &str) -> Self {
+        let stripped = raw.strip_prefix('@').unwrap_or(raw);
+        match stripped.to_ascii_lowercase().as_str() {
+            "all" | "everyone" => Self::Broadcast(BroadcastTarget::All),
+            _ => Self::Agent(stripped.to_string()),
+        }
     }
 }
 
@@ -432,6 +491,7 @@ pub fn add_repo_to_config(
         name: name.to_string(),
         workdir: canonical_str,
         agent: normalized_agent,
+        broadcast_tags: Vec::new(),
         extra: toml::Table::new(),
     });
 
@@ -491,6 +551,56 @@ pub fn load_config(path: &Path) -> Result<WatchConfig> {
                 "workdir does not exist for repo '{}': {}",
                 repo.name, repo.workdir
             )));
+        }
+    }
+
+    // Collision guard: two repos sharing the same recipient causes silent
+    // multi-wake on directed signals. Refuse startup so the operator
+    // fixes the config rather than chasing mystery double-wakes.
+    //
+    // This supersedes the soft WARNING that `legion watch list` emits for
+    // manually-edited configs. The list command warning is LEFT in place so
+    // operators who load the file with a read-only tool still see it, but
+    // `load_config` is now the hard gate.
+    {
+        let mut recipient_map: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for repo in &config.repos {
+            recipient_map
+                .entry(repo.recipient())
+                .or_default()
+                .push(&repo.name);
+        }
+        for (recipient, names) in &recipient_map {
+            if names.len() > 1 {
+                return Err(LegionError::WatchConfigCollision(format!(
+                    "recipient '{}' is shared by {} repos: {}. \
+                     Each watched repo requires a unique signal-routing identity \
+                     (its `agent` field, or its `name` when `agent` is unset). \
+                     Give each repo a distinct `agent` value, or model the shared \
+                     grouping as a `broadcast_tags` entry.",
+                    recipient,
+                    names.len(),
+                    names.join(", ")
+                )));
+            }
+        }
+
+        // Tag/recipient collision: a tag name that equals any repo's recipient()
+        // makes direct-address vs. tag-address indistinguishable at match time.
+        for repo in &config.repos {
+            for tag in &repo.broadcast_tags {
+                if let Some(names) = recipient_map.get(tag.as_str()) {
+                    return Err(LegionError::WatchConfigCollision(format!(
+                        "broadcast tag '{}' in repo '{}' collides with the recipient of repo(s): {}. \
+                         Tag names must not equal any repo's recipient() value -- \
+                         rename the tag or change the agent override on the conflicting repo.",
+                        tag,
+                        repo.name,
+                        names.join(", ")
+                    )));
+                }
+            }
         }
     }
 
@@ -770,15 +880,21 @@ impl CooldownTracker {
 
 /// Find unhandled signals targeting a specific repo.
 ///
+/// `names` is the full addressable name set for this repo: the repo's
+/// `recipient()` value plus any `broadcast_tags`. Signals addressed to any
+/// name in this set are returned, along with reserved `@all` / `@everyone`
+/// broadcasts. The DB handles per-repo dedup via `watch_handled` so each
+/// broadcast wakes a repo exactly once regardless of which names it carries.
+///
 /// Returns signal reflection IDs and their text, filtered to only actual
 /// signals (text starts with @).
 pub fn find_pending_signals(
     db: &Database,
     repo_name: &str,
-    recipient: &str,
+    names: &[String],
     since: Option<&str>,
 ) -> Result<Vec<(String, String, String)>> {
-    let reflections = db.get_unhandled_signals_for_repo(repo_name, recipient, since)?;
+    let reflections = db.get_unhandled_signals_for_repo(repo_name, names, since)?;
 
     let mut signals: Vec<(String, String, String)> = Vec::new();
     for r in reflections {
@@ -1524,7 +1640,10 @@ pub fn poll_cycle(
 
     // Check for auto-unblock opportunities from recent signals
     for repo in &config.repos {
-        match find_pending_signals(db, &repo.name, repo.recipient(), since) {
+        let mut names: Vec<String> = Vec::with_capacity(1 + repo.broadcast_tags.len());
+        names.push(repo.recipient().to_string());
+        names.extend(repo.broadcast_tags.iter().cloned());
+        match find_pending_signals(db, &repo.name, &names, since) {
             Ok(signals) => {
                 check_auto_unblock(db, &signals);
             }
@@ -1551,7 +1670,10 @@ pub fn poll_cycle(
         }
 
         let recipient = repo.recipient();
-        let signals = find_pending_signals(db, &repo.name, recipient, since)?;
+        let mut names: Vec<String> = Vec::with_capacity(1 + repo.broadcast_tags.len());
+        names.push(recipient.to_string());
+        names.extend(repo.broadcast_tags.iter().cloned());
+        let signals = find_pending_signals(db, &repo.name, &names, since)?;
         if signals.is_empty() {
             continue;
         }
@@ -2339,7 +2461,8 @@ workdir = "/tmp"
         db.insert_reflection("rafters", "@all announce: shipped", "team")
             .expect("insert broadcast");
 
-        let signals = find_pending_signals(&db, "legion", "legion", None).expect("find signals");
+        let signals = find_pending_signals(&db, "legion", &["legion".to_string()], None)
+            .expect("find signals");
         assert_eq!(signals.len(), 2);
 
         // Verify the targeted signal is found
@@ -2369,9 +2492,10 @@ workdir = "/tmp"
         .expect("insert multi-recipient");
 
         // Both shingle and huttspawn should see it
-        let shingle = find_pending_signals(&db, "shingle", "shingle", None).expect("shingle");
-        let huttspawn =
-            find_pending_signals(&db, "huttspawn", "huttspawn", None).expect("huttspawn");
+        let shingle =
+            find_pending_signals(&db, "shingle", &["shingle".to_string()], None).expect("shingle");
+        let huttspawn = find_pending_signals(&db, "huttspawn", &["huttspawn".to_string()], None)
+            .expect("huttspawn");
         assert_eq!(
             shingle.len(),
             1,
@@ -2384,11 +2508,13 @@ workdir = "/tmp"
         );
 
         // legion (sender) should NOT see it
-        let legion = find_pending_signals(&db, "legion", "legion", None).expect("legion");
+        let legion =
+            find_pending_signals(&db, "legion", &["legion".to_string()], None).expect("legion");
         assert!(legion.is_empty(), "sender should not see own signal");
 
         // unrelated repo should NOT see it
-        let kelex = find_pending_signals(&db, "kelex", "kelex", None).expect("kelex");
+        let kelex =
+            find_pending_signals(&db, "kelex", &["kelex".to_string()], None).expect("kelex");
         assert!(kelex.is_empty(), "unmentioned repo should not see signal");
     }
 
@@ -2400,7 +2526,8 @@ workdir = "/tmp"
         db.insert_reflection("legion", "@legion review:approved", "team")
             .expect("insert self-signal");
 
-        let signals = find_pending_signals(&db, "legion", "legion", None).expect("find signals");
+        let signals = find_pending_signals(&db, "legion", &["legion".to_string()], None)
+            .expect("find signals");
         assert!(signals.is_empty(), "self-signals should be excluded");
     }
 
@@ -2415,7 +2542,8 @@ workdir = "/tmp"
         db.insert_reflection("ledger", "@platform review:approved", "team")
             .expect("insert self-signal");
 
-        let signals = find_pending_signals(&db, "ledger", "platform", None).expect("find signals");
+        let signals = find_pending_signals(&db, "ledger", &["platform".to_string()], None)
+            .expect("find signals");
         assert!(
             signals.is_empty(),
             "self-signals must be excluded by repo_name, not by recipient"
@@ -2429,7 +2557,8 @@ workdir = "/tmp"
         db.insert_reflection("kelex", "@platform review:approved", "team")
             .expect("insert external signal");
 
-        let signals = find_pending_signals(&db, "ledger", "platform", None).expect("find signals");
+        let signals = find_pending_signals(&db, "ledger", &["platform".to_string()], None)
+            .expect("find signals");
         assert_eq!(signals.len(), 1, "external signal to agent should be found");
     }
 
@@ -2440,7 +2569,8 @@ workdir = "/tmp"
         db.insert_reflection("kelex", "@legion review:approved", "team")
             .expect("insert signal");
 
-        let signals = find_pending_signals(&db, "legion", "legion", None).expect("first poll");
+        let signals =
+            find_pending_signals(&db, "legion", &["legion".to_string()], None).expect("first poll");
         assert_eq!(signals.len(), 1);
 
         // Mark as handled for legion
@@ -2449,7 +2579,8 @@ workdir = "/tmp"
             .expect("mark handled");
 
         // Should not appear again for legion
-        let signals = find_pending_signals(&db, "legion", "legion", None).expect("second poll");
+        let signals = find_pending_signals(&db, "legion", &["legion".to_string()], None)
+            .expect("second poll");
         assert!(signals.is_empty());
     }
 
@@ -3152,6 +3283,7 @@ workdir = "/tmp"
                 name: "legion".to_string(),
                 workdir: "/tmp".to_string(),
                 agent: None,
+                broadcast_tags: Vec::new(),
                 extra: toml::Table::new(),
             }],
             ..WatchConfig::default()
@@ -3196,6 +3328,7 @@ workdir = "/tmp"
                 name: "legion".to_string(),
                 workdir: "/tmp".to_string(),
                 agent: None,
+                broadcast_tags: Vec::new(),
                 extra: toml::Table::new(),
             }],
             ..WatchConfig::default()
@@ -3250,6 +3383,7 @@ workdir = "/tmp"
                 name: "legion".to_string(),
                 workdir: "/tmp".to_string(),
                 agent: None,
+                broadcast_tags: Vec::new(),
                 extra: toml::Table::new(),
             }],
             ..WatchConfig::default()
@@ -3287,9 +3421,10 @@ workdir = "/tmp"
             .expect("insert broadcast");
 
         // Both legion and rafters should see it
-        let legion_signals = find_pending_signals(&db, "legion", "legion", None).expect("legion");
+        let legion_signals =
+            find_pending_signals(&db, "legion", &["legion".to_string()], None).expect("legion");
         let rafters_signals =
-            find_pending_signals(&db, "rafters", "rafters", None).expect("rafters");
+            find_pending_signals(&db, "rafters", &["rafters".to_string()], None).expect("rafters");
         assert_eq!(legion_signals.len(), 1);
         assert_eq!(rafters_signals.len(), 1);
 
@@ -3300,16 +3435,16 @@ workdir = "/tmp"
         }
 
         // legion should NOT see it anymore
-        let legion_after =
-            find_pending_signals(&db, "legion", "legion", None).expect("legion after");
+        let legion_after = find_pending_signals(&db, "legion", &["legion".to_string()], None)
+            .expect("legion after");
         assert!(
             legion_after.is_empty(),
             "legion should not see broadcast after handling"
         );
 
         // rafters should STILL see the broadcast
-        let rafters_after =
-            find_pending_signals(&db, "rafters", "rafters", None).expect("rafters after");
+        let rafters_after = find_pending_signals(&db, "rafters", &["rafters".to_string()], None)
+            .expect("rafters after");
         assert_eq!(
             rafters_after.len(),
             1,
@@ -3323,8 +3458,8 @@ workdir = "/tmp"
         }
 
         // Now rafters should not see it either
-        let rafters_final =
-            find_pending_signals(&db, "rafters", "rafters", None).expect("rafters final");
+        let rafters_final = find_pending_signals(&db, "rafters", &["rafters".to_string()], None)
+            .expect("rafters final");
         assert!(
             rafters_final.is_empty(),
             "rafters should not see broadcast after handling"
@@ -3543,6 +3678,7 @@ workdir = "/nonexistent/path/that/does/not/exist"
             name: "ledger".to_string(),
             workdir: "/tmp".to_string(),
             agent: Some("platform".to_string()),
+            broadcast_tags: Vec::new(),
             extra: toml::Table::new(),
         };
         assert_eq!(repo_with_agent.recipient(), "platform");
@@ -3551,6 +3687,7 @@ workdir = "/nonexistent/path/that/does/not/exist"
             name: "legion".to_string(),
             workdir: "/tmp".to_string(),
             agent: None,
+            broadcast_tags: Vec::new(),
             extra: toml::Table::new(),
         };
         assert_eq!(repo_without_agent.recipient(), "legion");
@@ -3564,6 +3701,7 @@ workdir = "/nonexistent/path/that/does/not/exist"
             name: "fallback".to_string(),
             workdir: "/tmp".to_string(),
             agent: Some("".to_string()),
+            broadcast_tags: Vec::new(),
             extra: toml::Table::new(),
         };
         assert_eq!(empty.recipient(), "fallback");
@@ -3572,6 +3710,7 @@ workdir = "/nonexistent/path/that/does/not/exist"
             name: "fallback".to_string(),
             workdir: "/tmp".to_string(),
             agent: Some("   ".to_string()),
+            broadcast_tags: Vec::new(),
             extra: toml::Table::new(),
         };
         assert_eq!(whitespace.recipient(), "fallback");
@@ -4199,6 +4338,7 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
                 name: "test-repo".to_string(),
                 workdir: "/tmp".to_string(),
                 agent: None,
+                broadcast_tags: Vec::new(),
                 extra: toml::Table::new(),
             }],
             ..WatchConfig::default()
@@ -4252,15 +4392,15 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         let mut state = test_watch_loop(db, "[legion test]");
 
         // Before the tick: signal should be pending.
-        let before =
-            find_pending_signals(&state.db, "test-repo", "test-repo", None).expect("find pending");
+        let before = find_pending_signals(&state.db, "test-repo", &["test-repo".to_string()], None)
+            .expect("find pending");
         assert!(!before.is_empty(), "signal should be pending before tick");
 
         state.tick_poll();
 
         // After the tick: poll_cycle ran (Proceed gate), marked the
         // non-wake-worthy signal as handled, so the pending list is empty.
-        let after = find_pending_signals(&state.db, "test-repo", "test-repo", None)
+        let after = find_pending_signals(&state.db, "test-repo", &["test-repo".to_string()], None)
             .expect("find pending after");
         assert!(
             after.is_empty(),
@@ -4294,8 +4434,9 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         state.tick_poll();
 
         // Signal must still be pending: poll_cycle was skipped due to QuotaPanic.
-        let pending = find_pending_signals(&state.db, "test-repo", "test-repo", None)
-            .expect("find pending after quota panic tick");
+        let pending =
+            find_pending_signals(&state.db, "test-repo", &["test-repo".to_string()], None)
+                .expect("find pending after quota panic tick");
         assert!(
             !pending.is_empty(),
             "signal must remain pending when quota panic gate fires (poll_cycle must not run)"
@@ -4325,11 +4466,268 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         state.tick_poll();
 
         // Signal must still be pending: poll_cycle was skipped due to Pressure.
-        let pending = find_pending_signals(&state.db, "test-repo", "test-repo", None)
-            .expect("find pending after pressure gate tick");
+        let pending =
+            find_pending_signals(&state.db, "test-repo", &["test-repo".to_string()], None)
+                .expect("find pending after pressure gate tick");
         assert!(
             !pending.is_empty(),
             "signal must remain pending when pressure gate fires (poll_cycle must not run)"
         );
+    }
+
+    // -- Broadcast tags + Recipient enum (#585) ----------------------------------
+
+    #[test]
+    fn recipient_parse_all_variants_map_to_broadcast_all() {
+        // Case-insensitive reserved words "all" and "everyone" must parse as
+        // Broadcast(All) whether or not they carry a leading @.
+        assert_eq!(
+            Recipient::parse("all"),
+            Recipient::Broadcast(BroadcastTarget::All)
+        );
+        assert_eq!(
+            Recipient::parse("ALL"),
+            Recipient::Broadcast(BroadcastTarget::All)
+        );
+        assert_eq!(
+            Recipient::parse("@all"),
+            Recipient::Broadcast(BroadcastTarget::All)
+        );
+        assert_eq!(
+            Recipient::parse("everyone"),
+            Recipient::Broadcast(BroadcastTarget::All)
+        );
+        assert_eq!(
+            Recipient::parse("Everyone"),
+            Recipient::Broadcast(BroadcastTarget::All)
+        );
+        assert_eq!(
+            Recipient::parse("@everyone"),
+            Recipient::Broadcast(BroadcastTarget::All)
+        );
+    }
+
+    #[test]
+    fn recipient_parse_named_becomes_agent() {
+        // Anything that is not a reserved broadcast maps to Agent, with the
+        // leading @ stripped.
+        assert_eq!(
+            Recipient::parse("platform"),
+            Recipient::Agent("platform".to_string())
+        );
+        assert_eq!(
+            Recipient::parse("@platform"),
+            Recipient::Agent("platform".to_string())
+        );
+        assert_eq!(
+            Recipient::parse("legion"),
+            Recipient::Agent("legion".to_string())
+        );
+    }
+
+    #[test]
+    fn at_everyone_wakes_repo_same_as_at_all() {
+        // @everyone must behave identically to @all: both repos should see the
+        // broadcast, each exactly once. This is the regression guard for the
+        // new reserved word.
+        let (db, _index, _dir) = test_storage();
+
+        db.insert_reflection("kelex", "@everyone RFC:help -- discover proposal", "team")
+            .expect("insert @everyone broadcast");
+
+        let legion_signals =
+            find_pending_signals(&db, "legion", &["legion".to_string()], None).expect("legion");
+        let rafters_signals =
+            find_pending_signals(&db, "rafters", &["rafters".to_string()], None).expect("rafters");
+
+        assert_eq!(
+            legion_signals.len(),
+            1,
+            "@everyone must wake legion just like @all"
+        );
+        assert_eq!(
+            rafters_signals.len(),
+            1,
+            "@everyone must wake rafters just like @all"
+        );
+
+        // Mark handled for legion; rafters must still see it.
+        for (id, _, _) in &legion_signals {
+            db.mark_signal_handled_for_repo(id, "legion")
+                .expect("mark legion handled");
+        }
+
+        let rafters_after = find_pending_signals(&db, "rafters", &["rafters".to_string()], None)
+            .expect("rafters after legion handled");
+        assert_eq!(
+            rafters_after.len(),
+            1,
+            "@everyone dedup must be per-repo: rafters must still see the signal"
+        );
+    }
+
+    #[test]
+    fn broadcast_tag_signal_wakes_only_tagged_repos() {
+        // A signal addressed @eng-team should wake repos whose broadcast_tags
+        // includes "eng-team", but NOT repos that do not carry that tag.
+        let (db, _index, _dir) = test_storage();
+
+        // tagged: subscribes to "eng-team"
+        let tagged_names: Vec<String> = vec!["tagged".to_string(), "eng-team".to_string()];
+        // untagged: no broadcast_tags
+        let untagged_names: Vec<String> = vec!["untagged".to_string()];
+
+        db.insert_reflection("other", "@eng-team question:help -- need input", "team")
+            .expect("insert tag signal");
+
+        let tagged_sigs = find_pending_signals(&db, "tagged", &tagged_names, None).expect("tagged");
+        let untagged_sigs =
+            find_pending_signals(&db, "untagged", &untagged_names, None).expect("untagged");
+
+        assert_eq!(
+            tagged_sigs.len(),
+            1,
+            "repo with matching broadcast_tag must see the @eng-team signal"
+        );
+        assert!(
+            untagged_sigs.is_empty(),
+            "repo without the tag must NOT see the @eng-team signal"
+        );
+    }
+
+    #[test]
+    fn directed_signal_wakes_only_target_repo() {
+        // A @<name> signal wakes only the repo whose recipient() equals name,
+        // not repos that happen to share a tag.
+        let (db, _index, _dir) = test_storage();
+
+        db.insert_reflection("other", "@direct question:help -- for you only", "team")
+            .expect("insert directed signal");
+
+        let direct_sigs =
+            find_pending_signals(&db, "direct", &["direct".to_string()], None).expect("direct");
+        let bystander_sigs =
+            find_pending_signals(&db, "bystander", &["bystander".to_string()], None)
+                .expect("bystander");
+
+        assert_eq!(direct_sigs.len(), 1, "target repo must see directed signal");
+        assert!(
+            bystander_sigs.is_empty(),
+            "unaddressed repo must not see directed signal"
+        );
+    }
+
+    #[test]
+    fn broadcast_tags_deserialize_from_toml() {
+        // Backward-compat: a config without broadcast_tags parses cleanly;
+        // a config with broadcast_tags round-trips.
+        let without = r#"
+[[repos]]
+name = "legion"
+workdir = "/tmp"
+"#;
+        let cfg: WatchConfig = toml::from_str(without).expect("parse without tags");
+        assert!(
+            cfg.repos[0].broadcast_tags.is_empty(),
+            "missing broadcast_tags field must default to empty vec"
+        );
+
+        let with_tags = r#"
+[[repos]]
+name = "legion"
+workdir = "/tmp"
+broadcast_tags = ["eng-team", "backend"]
+"#;
+        let cfg2: WatchConfig = toml::from_str(with_tags).expect("parse with tags");
+        assert_eq!(
+            cfg2.repos[0].broadcast_tags,
+            vec!["eng-team", "backend"],
+            "broadcast_tags must round-trip through TOML"
+        );
+    }
+
+    #[test]
+    fn load_config_rejects_duplicate_recipients() {
+        // Two repos sharing a recipient must cause load_config to return an
+        // error -- the hard gate supersedes the soft `watch list` warning.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        // workdir must be a real directory on every platform (the workdir-exists
+        // check runs before the collision check), and a TOML literal string
+        // ('...') avoids escaping Windows backslashes.
+        let wd = dir.path().display().to_string();
+        std::fs::write(
+            &config_path,
+            format!(
+                "[[repos]]\nname = \"alpha\"\nworkdir = '{wd}'\nagent = \"platform\"\n\n\
+                 [[repos]]\nname = \"beta\"\nworkdir = '{wd}'\nagent = \"platform\"\n"
+            ),
+        )
+        .expect("write");
+
+        let err = load_config(&config_path).unwrap_err();
+        assert!(
+            matches!(err, crate::error::LegionError::WatchConfigCollision(_)),
+            "expected WatchConfigCollision, got: {:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("platform"),
+            "error must name the offending recipient"
+        );
+        assert!(
+            msg.contains("alpha") && msg.contains("beta"),
+            "error must list the offending repos"
+        );
+    }
+
+    #[test]
+    fn load_config_rejects_agent_name_equal_to_broadcast_tag() {
+        // A tag that equals any repo's recipient() must be refused.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let wd = dir.path().display().to_string();
+        std::fs::write(
+            &config_path,
+            format!(
+                "[[repos]]\nname = \"alpha\"\nworkdir = '{wd}'\nagent = \"platform\"\n\n\
+                 [[repos]]\nname = \"beta\"\nworkdir = '{wd}'\nbroadcast_tags = [\"platform\"]\n"
+            ),
+        )
+        .expect("write");
+
+        let err = load_config(&config_path).unwrap_err();
+        assert!(
+            matches!(err, crate::error::LegionError::WatchConfigCollision(_)),
+            "expected WatchConfigCollision for tag/recipient collision, got: {:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("platform"),
+            "error must name the offending tag/recipient"
+        );
+    }
+
+    #[test]
+    fn load_config_accepts_valid_config_with_unique_recipients_and_tags() {
+        // A valid config with unique recipients and non-colliding tags must load cleanly.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("watch.toml");
+        let wd = dir.path().display().to_string();
+        std::fs::write(
+            &config_path,
+            format!(
+                "[[repos]]\nname = \"alpha\"\nworkdir = '{wd}'\nagent = \"agent-a\"\n\
+                 broadcast_tags = [\"eng-team\"]\n\n\
+                 [[repos]]\nname = \"beta\"\nworkdir = '{wd}'\nagent = \"agent-b\"\n\
+                 broadcast_tags = [\"eng-team\", \"backend\"]\n"
+            ),
+        )
+        .expect("write");
+
+        let cfg = load_config(&config_path).expect("valid config must load cleanly");
+        assert_eq!(cfg.repos.len(), 2);
     }
 }
