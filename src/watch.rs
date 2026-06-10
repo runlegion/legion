@@ -908,17 +908,49 @@ pub fn find_pending_signals(
 
 // -- Agent Spawning ----------------------------------------------------------
 
-/// Verbs whose presence in a directed signal triggers a watch wake (#404).
+/// Verbs whose presence in a directed signal triggers a watch wake (#404, #586).
 ///
 /// `--verb` was designed to express intent; this set is the subsection of
 /// intents that warrant spawning an asleep recipient. Other verbs
 /// (`announce`, `ack`, `info`, `answer`, bare `review`) deliver to live
 /// sessions via the channel push but do not page an asleep agent.
 ///
+/// The canon (#586) is the set of verbs that actually mean "I need you to act":
+/// `question`, `request`, `handoff`, `correction`, `proposal`, `decision`,
+/// `rfc`, `routing`. The original #404 set carried `help` and `blocker`, but
+/// those are *statuses* (`request:help`, `review:blocker`), not bare verbs --
+/// they decorated the status slot, never the verb slot, so they never matched a
+/// real signal's verb and only crowded the wake set. The verbs added here are
+/// the ones bullpen mining shows the team actually uses to page each other.
+///
 /// Posts (text without a leading `@recipient`) never wake -- posts are
 /// broadcasts; the `legion signal --to <agent> --verb <wake-worthy>`
 /// primitive is the agent equivalent of a tweet at someone.
-pub const WAKE_WORTHY_VERBS: &[&str] = &["question", "request", "help", "blocker"];
+pub const WAKE_WORTHY_VERBS: &[&str] = &[
+    "question",
+    "request",
+    "handoff",
+    "correction",
+    "proposal",
+    "decision",
+    "rfc",
+    "routing",
+];
+
+/// Whether a directed `legion signal --to <to> --verb <verb>` will fail to wake
+/// its recipient, so the sender can be warned at send time (#586).
+///
+/// True when the target is a specific agent (not the `@all`/`@everyone`
+/// broadcast, which is never a directed page) AND the verb is outside
+/// [`WAKE_WORTHY_VERBS`]. Such a signal still delivers to a live session via the
+/// channel push, but it does not page an asleep agent -- surfacing that avoids
+/// the silent "I signaled but nobody woke" trap. Reserved broadcast names are
+/// matched case-insensitively.
+pub fn directed_verb_will_not_wake(to: &str, verb: &str) -> bool {
+    let to_normalized = to.trim().to_ascii_lowercase();
+    let is_broadcast = matches!(to_normalized.as_str(), "all" | "everyone");
+    !is_broadcast && !WAKE_WORTHY_VERBS.contains(&verb)
+}
 
 /// Whether a signal text triggers a wake under the verb-driven gate.
 ///
@@ -2634,8 +2666,9 @@ workdir = "/tmp"
         // The pre-#404 fallback that treated `status=request` or `status=help`
         // on any verb as reply-required was a workaround for the broken
         // text-prefix wake gate. Senders who want a reply now use a
-        // wake-worthy verb directly: `--verb request`, `--verb help`,
-        // `--verb question`, `--verb blocker`.
+        // wake-worthy verb directly: `--verb request`, `--verb handoff`,
+        // `--verb question`, `--verb decision` (#586 canon -- `help` and
+        // `blocker` are statuses, not wake verbs).
         let signals = vec![
             (
                 "id-rev-req".to_string(),
@@ -2643,8 +2676,8 @@ workdir = "/tmp"
                 "smugglr".to_string(),
             ),
             (
-                "id-help-verb".to_string(),
-                "@platform help -- need a hand on the rfc".to_string(),
+                "id-handoff-verb".to_string(),
+                "@platform handoff -- taking the rfc over to you".to_string(),
                 "kelex".to_string(),
             ),
             (
@@ -2667,8 +2700,8 @@ workdir = "/tmp"
             [prompt.find("REQUIRES A REPLY").unwrap()..prompt.find("INFORMATIONAL").unwrap()];
 
         assert!(
-            reply_section.contains("id-help-verb"),
-            "verb=help must require reply"
+            reply_section.contains("id-handoff-verb"),
+            "verb=handoff must require reply"
         );
         assert!(
             reply_section.contains("id-request-verb"),
@@ -2697,7 +2730,12 @@ workdir = "/tmp"
 
     #[test]
     fn is_wake_worthy_rejects_informational_verbs() {
-        for verb in ["announce", "ack", "info", "answer", "review"] {
+        // `help` and `blocker` are included here deliberately (#586): they are
+        // statuses (`request:help`, `review:blocker`), not bare wake verbs, and
+        // must not wake when used in the verb slot.
+        for verb in [
+            "announce", "ack", "info", "answer", "review", "help", "blocker",
+        ] {
             let text = format!("@kessel {verb} -- fyi");
             assert!(
                 !is_wake_worthy(&text),
@@ -2724,6 +2762,34 @@ workdir = "/tmp"
             is_wake_worthy("@platform request:help -- pls"),
             "verb=request stays wake-worthy regardless of status"
         );
+    }
+
+    #[test]
+    fn directed_non_wake_verb_warns() {
+        // A directed signal with an informational verb should warn.
+        assert!(directed_verb_will_not_wake("kessel", "announce"));
+        assert!(directed_verb_will_not_wake("kessel", "ack"));
+        // `help`/`blocker` are statuses, not wake verbs (#586) -- they warn too.
+        assert!(directed_verb_will_not_wake("kessel", "help"));
+        assert!(directed_verb_will_not_wake("kessel", "blocker"));
+    }
+
+    #[test]
+    fn directed_wake_verb_does_not_warn() {
+        for verb in WAKE_WORTHY_VERBS {
+            assert!(
+                !directed_verb_will_not_wake("kessel", verb),
+                "wake-worthy verb `{verb}` must not warn"
+            );
+        }
+    }
+
+    #[test]
+    fn broadcast_target_never_warns() {
+        // @all / @everyone are not directed pages, so no warning regardless of verb.
+        assert!(!directed_verb_will_not_wake("all", "announce"));
+        assert!(!directed_verb_will_not_wake("everyone", "announce"));
+        assert!(!directed_verb_will_not_wake("All", "ack")); // case-insensitive
     }
 
     #[test]

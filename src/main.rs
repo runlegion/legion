@@ -4349,6 +4349,19 @@ fn run() -> error::Result<()> {
                     info!("[legion] embedded {} signals", n);
                 }
             }
+
+            // #586: tell the sender when a directed signal will not wake its
+            // recipient -- a non-wake-worthy verb delivers to a live session but
+            // never pages an asleep agent, so surface it at send time.
+            if watch::directed_verb_will_not_wake(&to, &verb) {
+                eprintln!(
+                    "[legion] note: verb '{}' will not wake {} -- it delivers to a live \
+                     session but does not page an asleep agent. Wake-worthy verbs: {}.",
+                    verb,
+                    to,
+                    watch::WAKE_WORTHY_VERBS.join(", ")
+                );
+            }
         }
         Commands::PendingReplies { repo } => {
             let base = data_dir()?;
