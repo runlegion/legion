@@ -424,37 +424,27 @@ async fn run_watch_task(data_dir: &Path) {
         }
     };
 
-    let mut cooldown = watch::CooldownTracker::new(
-        config.cooldown_secs,
-        config.work_hours_start,
-        config.work_hours_end,
-    );
-    let mut tracker = watch::AgentTracker::new();
-    let session_locks = watch::SessionLockTracker::new(data_dir, config.session_lock_ttl_secs);
     let host = watch::resolve_host_id();
-    let lease_ttl = std::time::Duration::from_secs(config.persona_lease_ttl_secs);
-    let mut sampler = crate::health::HealthSampler::new(config.health_window_size);
-
-    // Subscription-quota panic-stop gate (#496). The standalone `watch::run`
-    // loop has always had this; the daemon copy dropped it in the Bun->Rust
-    // port (#578), so the daemon could wake agents with the rate-limit cap
-    // already exhausted. Attribute the healthy<->panic bullpen edge posts to
-    // the first watched repo, falling back to "legion".
-    let quota_post_repo = config
+    // Attribute the healthy<->panic bullpen edge posts to the first watched
+    // repo, falling back to "legion" so the alert still lands.
+    let quota_post_repo: String = config
         .repos
         .first()
         .map(|r| r.name.clone())
         .unwrap_or_else(|| "legion".to_string());
-    let mut quota_gate = watch::QuotaPanicGate::new(
-        config.quota_panic_threshold_pct,
-        host.clone(),
-        quota_post_repo,
-    );
+    let lookback: String = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
 
     let poll_interval = std::time::Duration::from_secs(config.poll_interval_secs);
     let health_interval = std::time::Duration::from_secs(config.health_poll_secs);
-    let retention_cutoff = chrono::Duration::days(config.retention_days as i64);
-    let lookback = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    // Extract fields needed before config is moved into WatchLoop.
+    let cooldown_secs: u64 = config.cooldown_secs;
+    let work_hours_start: Option<u8> = config.work_hours_start;
+    let work_hours_end: Option<u8> = config.work_hours_end;
+    let session_lock_ttl_secs: u64 = config.session_lock_ttl_secs;
+    let health_window_size: usize = config.health_window_size;
+    let quota_panic_threshold_pct: f64 = config.quota_panic_threshold_pct;
+    let retention_days: u64 = config.retention_days;
+    let lease_ttl = std::time::Duration::from_secs(config.persona_lease_ttl_secs);
 
     let mut poll_timer = tokio::time::Instant::now()
         .checked_sub(poll_interval)
@@ -463,114 +453,42 @@ async fn run_watch_task(data_dir: &Path) {
         .checked_sub(health_interval)
         .unwrap_or_else(tokio::time::Instant::now);
 
-    // How many health ticks have elapsed. Used to throttle the INFO heartbeat
-    // log line -- we write it once every HEARTBEAT_LOG_CADENCE ticks so an
-    // idle daemon is silent most of the time but still proves liveness in the
-    // log file without spamming it.
-    let mut health_tick_count: u64 = 0;
-    const HEARTBEAT_LOG_CADENCE: u64 = 10;
-
-    let daemon_pid: u32 = std::process::id();
-    let daemon_version: &str = env!("CARGO_PKG_VERSION");
+    // Move config and db into the shared loop state. Both are owned so the
+    // WatchLoop struct is Send (needed by tokio::spawn).
+    let mut state = watch::WatchLoop {
+        cooldown: watch::CooldownTracker::new(cooldown_secs, work_hours_start, work_hours_end),
+        tracker: watch::AgentTracker::new(),
+        session_locks: watch::SessionLockTracker::new(data_dir, session_lock_ttl_secs),
+        sampler: crate::health::HealthSampler::new(health_window_size),
+        quota_gate: watch::QuotaPanicGate::new(
+            quota_panic_threshold_pct,
+            host.clone(),
+            quota_post_repo,
+        ),
+        host,
+        lease_ttl,
+        lookback,
+        spawn_mode,
+        retention_cutoff: chrono::Duration::days(retention_days as i64),
+        health_tick_count: 0,
+        pid: std::process::id(),
+        version: env!("CARGO_PKG_VERSION"),
+        log_prefix: "[legion daemon]",
+        config,
+        db,
+    };
 
     loop {
         // Yield to tokio scheduler each iteration.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         if health_timer.elapsed() >= health_interval {
-            sampler.sample();
-            tracker.reap_finished(Some(&db), Some(&session_locks));
-            if let Err(e) = db.heartbeat_persona_leases(&host, lease_ttl) {
-                eprintln!("[legion daemon] lease heartbeat error: {e}");
-            }
-
-            match sampler.to_health_sample(tracker.active_count()) {
-                Ok(sample) => {
-                    if let Err(e) = db.insert_health_sample(&sample) {
-                        eprintln!("[legion daemon] health persist error: {e}");
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[legion daemon] health sample error: {e}");
-                }
-            }
-
-            // Persist the liveness heartbeat so `legion watch status` can
-            // report alive/stale/absent without requiring ps or log inspection.
-            let repo_count: u32 = config.repos.len() as u32;
-            if let Err(e) =
-                db.upsert_watch_heartbeat(&host, daemon_pid, daemon_version, repo_count, None)
-            {
-                eprintln!("[legion daemon] heartbeat persist error: {e}");
-            }
-
-            // Emit a heartbeat INFO line on a longer cadence so the log file
-            // proves liveness without being flooded on a quiet daemon.
-            health_tick_count += 1;
-            if health_tick_count % HEARTBEAT_LOG_CADENCE == 1 {
-                eprintln!(
-                    "[legion daemon] heartbeat tick={} repos={} pid={}",
-                    health_tick_count, repo_count, daemon_pid
-                );
-            }
-
+            state.tick_health();
             health_timer = tokio::time::Instant::now();
         }
 
         if poll_timer.elapsed() >= poll_interval {
-            match watch::evaluate_spawn_gate(
-                &mut quota_gate,
-                &sampler,
-                &db,
-                config.health_threshold_pct,
-            ) {
-                watch::SpawnGate::Proceed => {
-                    let lease_gate = watch::PersonaLeaseGate {
-                        db: &db,
-                        host: &host,
-                        ttl: lease_ttl,
-                    };
-                    match watch::poll_cycle(
-                        &db,
-                        &config,
-                        &mut cooldown,
-                        &mut tracker,
-                        Some(&session_locks),
-                        Some(&lease_gate),
-                        Some(&lookback),
-                        spawn_mode,
-                    ) {
-                        Ok(n) if n > 0 => {
-                            eprintln!("[legion daemon] watch: {} agent(s) spawned", n);
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("[legion daemon] watch poll error: {e}");
-                        }
-                    }
-                }
-                watch::SpawnGate::QuotaPanic => {
-                    eprintln!(
-                        "[legion daemon] quota panic active (>= {:.1}%) -- skipping spawn cycle",
-                        config.quota_panic_threshold_pct
-                    );
-                }
-                watch::SpawnGate::Pressure(pressure) => {
-                    eprintln!(
-                        "[legion daemon] pressure {:.1}% >= threshold {:.0}% -- skipping spawn cycle",
-                        pressure, config.health_threshold_pct
-                    );
-                }
-            }
-
-            let cutoff = (chrono::Utc::now() - retention_cutoff).to_rfc3339();
-            if let Err(e) = db.prune_health_samples(&cutoff) {
-                eprintln!("[legion daemon] health prune error: {e}");
-            }
-            if let Err(e) = db.prune_watch_handled(&cutoff) {
-                eprintln!("[legion daemon] watch_handled prune error: {e}");
-            }
-
+            state.tick_poll();
             poll_timer = tokio::time::Instant::now();
         }
     }
