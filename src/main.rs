@@ -2138,6 +2138,25 @@ enum WatchAction {
         action: LeaseAction,
     },
 
+    /// Record an interactive (human-started) session lock for a repo (#583).
+    ///
+    /// Called from the SessionStart hook with the Claude session PID so watch
+    /// does not spawn a duplicate agent while an interactive session is open.
+    /// Uses a separate `.session` lock file; the gate is PID-liveness alone
+    /// (no TTL) because an idle interactive session must still hold the gate.
+    /// Non-fatal and fast -- hook failure never blocks Claude Code startup.
+    SessionStart {
+        /// Repo name to lock (basename of the working directory).
+        #[arg(long)]
+        repo: String,
+
+        /// PID of the interactive session process to track. When omitted,
+        /// falls back to the current process id -- prefer supplying $PPID
+        /// from the hook so the tracked pid is the long-lived session process.
+        #[arg(long)]
+        pid: Option<u32>,
+    },
+
     /// Optimistic stop-hook handoff for the watch reaper (#493). Writes
     /// `exit_observed_at` on the wake_attempts row so the reaper can
     /// skip a poll cycle. PTY EOF + PID-poll remain authoritative; this
@@ -6932,6 +6951,22 @@ fn run() -> error::Result<()> {
                                 );
                             }
                         }
+                    }
+                }
+                Some(WatchAction::SessionStart { repo, pid }) => {
+                    let effective_pid: u32 = pid.unwrap_or_else(std::process::id);
+                    // TTL only affects the `.lock` gate; the `.session` file is
+                    // PID-liveness only. Using the default avoids reading watch.toml
+                    // on every SessionStart hook call (matches record_session_end).
+                    let locks = watch::SessionLockTracker::new(
+                        &base,
+                        watch::default_session_lock_ttl_secs(),
+                    );
+                    if let Err(e) = locks.record_interactive(&repo, effective_pid) {
+                        eprintln!(
+                            "[legion watch] session-start: failed to write interactive lock for {}: {}",
+                            repo, e
+                        );
                     }
                 }
                 Some(WatchAction::SessionEnd { attempt_id }) => {

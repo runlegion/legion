@@ -44,6 +44,12 @@ rm -f "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
 # the curl probe or the legion serve spawn handshake.
 (bash "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-daemon-supervisor.sh" >/dev/null 2>&1 < /dev/null &)
 
+# Write an interactive-session lock so watch does not spawn a duplicate
+# agent while this session is open (#583). $PPID is the Claude session
+# process -- the long-lived pid the lock must track. Non-blocking; never
+# allowed to add latency or fail the hook.
+("$LEGION" watch session-start --repo "$REPO" --pid "$PPID" >/dev/null 2>&1 &)
+
 # Sync GitHub issues into kanban (5-second timeout, opt-out via LEGION_NO_SYNC=1)
 if [ "${LEGION_NO_SYNC:-}" != "1" ]; then
   if command -v gtimeout >/dev/null 2>&1; then
