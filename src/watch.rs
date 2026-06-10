@@ -1802,6 +1802,61 @@ pub struct WatchLoop {
 }
 
 impl WatchLoop {
+    /// Build the shared loop state from a loaded config and an open db.
+    ///
+    /// Both `daemon::run_watch_task` and `watch::run` construct the loop this
+    /// way, so the field wiring (cooldown, session locks, quota gate, lookback
+    /// window, heartbeat identity) lives in exactly one place -- the same
+    /// anti-fork principle that motivated unifying the loop body itself. The
+    /// caller passes its own `log_prefix` (`"[legion daemon]"` vs
+    /// `"[legion watch]"`) and `spawn_mode`.
+    pub fn new(
+        config: WatchConfig,
+        db: Database,
+        data_dir: &Path,
+        host: String,
+        spawn_mode: SpawnMode,
+        log_prefix: &'static str,
+    ) -> Self {
+        // Attribute the healthy<->panic bullpen edge posts to the first watched
+        // repo, falling back to "legion" so the alert still lands.
+        let quota_post_repo: String = config
+            .repos
+            .first()
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| "legion".to_string());
+        // On startup, only look back 24 hours for unhandled signals, so a watch
+        // that restarts after downtime does not flood agents with stale ones.
+        let lookback: String = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+
+        WatchLoop {
+            cooldown: CooldownTracker::new(
+                config.cooldown_secs,
+                config.work_hours_start,
+                config.work_hours_end,
+            ),
+            tracker: AgentTracker::new(),
+            session_locks: SessionLockTracker::new(data_dir, config.session_lock_ttl_secs),
+            sampler: HealthSampler::new(config.health_window_size),
+            quota_gate: QuotaPanicGate::new(
+                config.quota_panic_threshold_pct,
+                host.clone(),
+                quota_post_repo,
+            ),
+            host,
+            lease_ttl: Duration::from_secs(config.persona_lease_ttl_secs),
+            lookback,
+            spawn_mode,
+            retention_cutoff: chrono::Duration::days(config.retention_days as i64),
+            health_tick_count: 0,
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION"),
+            log_prefix,
+            config,
+            db,
+        }
+    }
+
     /// Run one health-tick iteration.
     ///
     /// Samples system pressure, reaps finished children, heartbeats persona
@@ -1986,32 +2041,10 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let db = Database::open(&db_path)?;
 
     let host = resolve_host_id();
-    // Pick a repo to attribute quota-panic bullpen posts to. The first watched
-    // repo's name reads naturally on the bullpen; absent any, fall back to
-    // "legion" so the alert still lands.
-    let quota_post_repo: String = config
-        .repos
-        .first()
-        .map(|r| r.name.clone())
-        .unwrap_or_else(|| "legion".to_string());
-    // On startup, only look back 24 hours for unhandled signals.
-    // Prevents historical flood when watch restarts after downtime.
-    // The watch_handled table prevents re-processing, but without a
-    // lookback window, the first poll returns every unhandled signal
-    // ever created, overwhelming agents with stale notifications.
-    let lookback: String = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
 
+    // Timer intervals are read before `config` moves into the WatchLoop.
     let poll_interval: Duration = Duration::from_secs(config.poll_interval_secs);
     let health_interval: Duration = Duration::from_secs(config.health_poll_secs);
-    // Extract fields needed before config is moved into WatchLoop.
-    let cooldown_secs: u64 = config.cooldown_secs;
-    let work_hours_start: Option<u8> = config.work_hours_start;
-    let work_hours_end: Option<u8> = config.work_hours_end;
-    let session_lock_ttl_secs: u64 = config.session_lock_ttl_secs;
-    let health_window_size: usize = config.health_window_size;
-    let quota_panic_threshold_pct: f64 = config.quota_panic_threshold_pct;
-    let retention_days: u64 = config.retention_days;
-    let lease_ttl: Duration = Duration::from_secs(config.persona_lease_ttl_secs);
 
     // Use checked_sub so a near-zero system clock cannot overflow and panic.
     let mut poll_timer: Instant = Instant::now()
@@ -2052,26 +2085,9 @@ pub fn run(data_dir: &Path) -> Result<()> {
         _ => None,
     };
 
-    // Move config and db into the shared loop state. Both are owned so the
-    // WatchLoop struct is Send (needed by tokio::spawn in the daemon).
-    let mut state = WatchLoop {
-        cooldown: CooldownTracker::new(cooldown_secs, work_hours_start, work_hours_end),
-        tracker: AgentTracker::new(),
-        session_locks: SessionLockTracker::new(data_dir, session_lock_ttl_secs),
-        sampler: HealthSampler::new(health_window_size),
-        quota_gate: QuotaPanicGate::new(quota_panic_threshold_pct, host.clone(), quota_post_repo),
-        host,
-        lease_ttl,
-        lookback,
-        spawn_mode,
-        retention_cutoff: chrono::Duration::days(retention_days as i64),
-        health_tick_count: 0,
-        pid: std::process::id(),
-        version: env!("CARGO_PKG_VERSION"),
-        log_prefix: "[legion watch]",
-        config,
-        db,
-    };
+    // Move config and db into the shared loop state via the same constructor
+    // the daemon uses, so the field wiring lives in exactly one place.
+    let mut state = WatchLoop::new(config, db, data_dir, host, spawn_mode, "[legion watch]");
 
     loop {
         // Health sample on its own interval.

@@ -425,26 +425,10 @@ async fn run_watch_task(data_dir: &Path) {
     };
 
     let host = watch::resolve_host_id();
-    // Attribute the healthy<->panic bullpen edge posts to the first watched
-    // repo, falling back to "legion" so the alert still lands.
-    let quota_post_repo: String = config
-        .repos
-        .first()
-        .map(|r| r.name.clone())
-        .unwrap_or_else(|| "legion".to_string());
-    let lookback: String = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
 
+    // Timer intervals are read before `config` moves into the WatchLoop.
     let poll_interval = std::time::Duration::from_secs(config.poll_interval_secs);
     let health_interval = std::time::Duration::from_secs(config.health_poll_secs);
-    // Extract fields needed before config is moved into WatchLoop.
-    let cooldown_secs: u64 = config.cooldown_secs;
-    let work_hours_start: Option<u8> = config.work_hours_start;
-    let work_hours_end: Option<u8> = config.work_hours_end;
-    let session_lock_ttl_secs: u64 = config.session_lock_ttl_secs;
-    let health_window_size: usize = config.health_window_size;
-    let quota_panic_threshold_pct: f64 = config.quota_panic_threshold_pct;
-    let retention_days: u64 = config.retention_days;
-    let lease_ttl = std::time::Duration::from_secs(config.persona_lease_ttl_secs);
 
     let mut poll_timer = tokio::time::Instant::now()
         .checked_sub(poll_interval)
@@ -455,28 +439,8 @@ async fn run_watch_task(data_dir: &Path) {
 
     // Move config and db into the shared loop state. Both are owned so the
     // WatchLoop struct is Send (needed by tokio::spawn).
-    let mut state = watch::WatchLoop {
-        cooldown: watch::CooldownTracker::new(cooldown_secs, work_hours_start, work_hours_end),
-        tracker: watch::AgentTracker::new(),
-        session_locks: watch::SessionLockTracker::new(data_dir, session_lock_ttl_secs),
-        sampler: crate::health::HealthSampler::new(health_window_size),
-        quota_gate: watch::QuotaPanicGate::new(
-            quota_panic_threshold_pct,
-            host.clone(),
-            quota_post_repo,
-        ),
-        host,
-        lease_ttl,
-        lookback,
-        spawn_mode,
-        retention_cutoff: chrono::Duration::days(retention_days as i64),
-        health_tick_count: 0,
-        pid: std::process::id(),
-        version: env!("CARGO_PKG_VERSION"),
-        log_prefix: "[legion daemon]",
-        config,
-        db,
-    };
+    let mut state =
+        watch::WatchLoop::new(config, db, data_dir, host, spawn_mode, "[legion daemon]");
 
     loop {
         // Yield to tokio scheduler each iteration.
