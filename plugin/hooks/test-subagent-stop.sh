@@ -48,6 +48,10 @@ assert_empty() {
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# Route the hook's dedup markers (#584) into $WORK so they are cleaned on EXIT
+# and cannot leak across test runs in the real /tmp.
+export TMPDIR="$WORK"
+
 mkdir -p "$WORK/plugin/bin" "$WORK/plugin/hooks"
 cp plugin/hooks/subagent-stop.sh "$WORK/plugin/hooks/"
 
@@ -99,6 +103,29 @@ echo "==> missing legion binary: exit 0, no output"
 out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${TRANSCRIPT}\"}" \
   | CLAUDE_PLUGIN_ROOT="/no/such/plugin" bash "$HOOK")
 assert_empty "missing binary produces no output" "$out"
+
+echo "==> re-delivered SubagentStop is deduped: second fire silent, no double reflect (#584)"
+DEDUP_TRANSCRIPT="$WORK/dedup-transcript.jsonl"
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Deduped subagent run summary."}]}}' > "$DEDUP_TRANSCRIPT"
+: > "$STUB_LOG"
+dedup_in="{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${DEDUP_TRANSCRIPT}\",\"session_id\":\"sess-1\"}"
+out1=$(echo "$dedup_in" | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
+out2=$(echo "$dedup_in" | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
+assert_contains "first fire informs the parent" "$out1" '"hookEventName": "SubagentStop"'
+assert_empty "second (re-delivered) fire is silent" "$out2"
+reflect_count=$(grep -c 'reflect' "$STUB_LOG" 2>/dev/null || echo 0)
+if [ "$reflect_count" = "1" ]; then
+  PASS=$((PASS + 1)); echo "  PASS: reflect called exactly once across two fires"
+else
+  FAIL=$((FAIL + 1)); echo "  FAIL: reflect called $reflect_count times, expected 1" >&2
+fi
+
+echo "==> stop_hook_active=true short-circuits (loop guard, #584)"
+: > "$STUB_LOG"
+out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${WORK}/guard.jsonl\",\"stop_hook_active\":true}" \
+  | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
+assert_empty "stop_hook_active produces no output" "$out"
+assert_not_contains "no reflect when stop_hook_active" "$(cat "$STUB_LOG")" 'reflect'
 
 echo
 echo "==> $PASS passed, $FAIL failed"
