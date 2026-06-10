@@ -2264,74 +2264,138 @@ impl Database {
 
     /// Find unhandled signals directed at a specific repo.
     ///
-    /// Returns team posts that mention `@<repo_name>` (at start or mid-text)
-    /// or `@all` that have not been handled by this specific repo yet.
-    /// Uses the `watch_handled` table for per-repo tracking, so @all
-    /// broadcasts wake each repo exactly once.
+    /// `names` is the full addressable name set for this repo: the repo's
+    /// `recipient()` value plus any `broadcast_tags`. A signal is returned
+    /// when its text starts with (or contains mid-string) `@<name>` for any
+    /// name in `names`, OR when it starts with `@all` / `@everyone`.
+    ///
+    /// Uses the `watch_handled` table for per-repo dedup keyed on `repo_name`
+    /// (not on recipient or tags), so `@all` / `@everyone` broadcasts wake
+    /// each repo exactly once, and a tag-addressed signal wakes each tagged
+    /// repo exactly once. `repo_name` is also the self-signal exclusion key.
+    ///
+    /// When `names` is empty the function returns an empty vec (nothing to
+    /// match). When `names` has one entry it matches only that name plus the
+    /// reserved broadcasts, preserving backward-compatible behavior.
     pub fn get_unhandled_signals_for_repo(
         &self,
         repo_name: &str,
-        recipient: &str,
+        names: &[String],
         since: Option<&str>,
     ) -> Result<Vec<Reflection>> {
-        // `recipient` drives the @mention pattern matching (this is the agent name
-        // when configured, otherwise the repo name). `repo_name` is the stable key
-        // for the watch_handled table and for self-signal exclusion -- signals are
-        // stored by their source repo, not by any agent override.
-        let pattern_start = format!("@{} %", recipient);
-        let pattern_mid = format!("%@{} %", recipient);
-        let pattern_all_start = "@all %";
-        let pattern_all_mid = "%@all %";
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let now = Utc::now().to_rfc3339();
-        // Decay (#376): wake-loop must never deliver a stale signal. Without
-        // this filter, a multi-day-dormant agent wakes to month-old @<me>
-        // mentions and posts replies into long-dead threads.
+
+        // Build LIKE patterns for every addressable name plus the reserved
+        // broadcast aliases. Parameters are bound positionally, so we
+        // pre-compute the full set before building the SQL.
+        //
+        // Reserved pattern slots (always present, param-indexed from 1):
+        //   1: "@all %"
+        //   2: "%@all %"
+        //   3: "@everyone %"
+        //   4: "%@everyone %"
+        //
+        // Per-name slots (two per name, starting at param 5):
+        //   5k-4: "@<name> %"
+        //   5k-3: "%@<name> %"
+        //   ...
+        //
+        // Fixed trailing params:
+        //   repo_name (for watch_handled join + self-exclusion)
+        //   now       (for expires_at > now)
+        //   since_ts  (optional, last)
+
+        // Build the dynamic name OR clauses. Each name contributes two LIKE
+        // patterns: one anchored at the start ("@name ...") and one mid-text
+        // ("%@name ..."). The param indices start at 5 (1-4 are the reserved
+        // @all / @everyone patterns).
+        let mut name_clauses: Vec<String> = Vec::with_capacity(names.len() * 2);
+        for (i, _) in names.iter().enumerate() {
+            // Each name occupies two consecutive parameter slots: 2*(i+2)+1 and 2*(i+2)+2.
+            // With 4 reserved slots (params 1-4), name[0] uses params 5,6;
+            // name[1] uses 7,8; etc.
+            let p_start = 5 + i * 2;
+            let p_mid = 6 + i * 2;
+            name_clauses.push(format!(
+                "r.text LIKE ?{} OR r.text LIKE ?{}",
+                p_start, p_mid
+            ));
+        }
+
+        // The last two fixed params follow all name params.
+        let n_name_params = names.len() * 2;
+        let p_repo = 5 + n_name_params; // repo_name
+        let p_now = 6 + n_name_params; // now (expires_at check)
+        let p_since = 7 + n_name_params; // since_ts (optional)
+
         let since_clause = if since.is_some() {
-            " AND r.created_at > ?7"
+            format!(" AND r.created_at > ?{}", p_since)
         } else {
-            ""
+            String::new()
         };
+
+        // Assemble the WHERE text fragment: reserved broadcasts + per-name.
+        let text_filter = {
+            let mut parts: Vec<String> = vec![
+                "r.text LIKE ?1".to_string(),
+                "r.text LIKE ?2".to_string(),
+                "r.text LIKE ?3".to_string(),
+                "r.text LIKE ?4".to_string(),
+            ];
+            parts.extend(name_clauses);
+            parts.join(" OR ")
+        };
+
         let query = format!(
             "SELECT r.id, r.repo, r.text, r.created_at, r.updated_at, r.audience, r.domain, r.tags, \
              r.recall_count, r.last_recalled_at, r.parent_id \
              FROM reflections r \
-             LEFT JOIN watch_handled wh ON wh.signal_id = r.id AND wh.repo_name = ?5 \
+             LEFT JOIN watch_handled wh ON wh.signal_id = r.id AND wh.repo_name = ?{repo_param} \
              WHERE r.audience = 'team' AND r.deleted_at IS NULL \
-               AND (r.evergreen = 1 OR r.expires_at > ?6) \
+               AND (r.evergreen = 1 OR r.expires_at > ?{now_param}) \
                AND r.resolved_at IS NULL \
                AND wh.signal_id IS NULL \
-               AND (r.text LIKE ?1 OR r.text LIKE ?2 OR r.text LIKE ?3 OR r.text LIKE ?4) \
-               AND r.repo != ?5{} \
+               AND ({text_filter}) \
+               AND r.repo != ?{repo_param}{since_clause} \
              ORDER BY r.created_at ASC",
-            since_clause
+            repo_param = p_repo,
+            now_param = p_now,
+            text_filter = text_filter,
+            since_clause = since_clause,
         );
+
         let mut stmt = self.conn.prepare(&query)?;
-        let rows = if let Some(since_ts) = since {
-            stmt.query_map(
-                rusqlite::params![
-                    &pattern_start,
-                    &pattern_mid,
-                    pattern_all_start,
-                    pattern_all_mid,
-                    repo_name,
-                    &now,
-                    since_ts
-                ],
-                map_reflection_row,
-            )?
-        } else {
-            stmt.query_map(
-                rusqlite::params![
-                    &pattern_start,
-                    &pattern_mid,
-                    pattern_all_start,
-                    pattern_all_mid,
-                    repo_name,
-                    &now
-                ],
-                map_reflection_row,
-            )?
-        };
+
+        // Bind params in slot order: reserved broadcasts, then per-name pairs,
+        // then repo_name, now, and optionally since_ts.
+        use rusqlite::types::ToSql;
+        // Slots 1-4: reserved broadcasts. Per-name slots follow (two per name),
+        // then repo_name and now as fixed trailing params.
+        let mut params: Vec<Box<dyn ToSql>> = vec![
+            Box::new("@all %".to_string()),
+            Box::new("%@all %".to_string()),
+            Box::new("@everyone %".to_string()),
+            Box::new("%@everyone %".to_string()),
+        ];
+        for name in names {
+            params.push(Box::new(format!("@{} %", name)));
+            params.push(Box::new(format!("%@{} %", name)));
+        }
+        params.push(Box::new(repo_name.to_string()));
+        params.push(Box::new(now));
+
+        // Optional since_ts.
+        let since_owned: Option<String> = since.map(str::to_string);
+        if let Some(ref ts) = since_owned {
+            params.push(Box::new(ts.clone()));
+        }
+
+        let param_refs: Vec<&dyn ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }
@@ -7674,7 +7738,7 @@ mod tests {
             )
             .unwrap();
         let signals = db
-            .get_unhandled_signals_for_repo("kessel", "kessel", None)
+            .get_unhandled_signals_for_repo("kessel", &["kessel".to_string()], None)
             .unwrap();
         assert!(
             signals.is_empty(),
@@ -7803,7 +7867,7 @@ mod tests {
             .unwrap();
         db.resolve_post(&r.id, None).unwrap();
         let signals = db
-            .get_unhandled_signals_for_repo("kessel", "kessel", None)
+            .get_unhandled_signals_for_repo("kessel", &["kessel".to_string()], None)
             .unwrap();
         assert!(
             signals.is_empty(),

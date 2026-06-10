@@ -80,6 +80,14 @@ pub enum LegionError {
     #[error("watch config error: {0}")]
     WatchConfig(String),
 
+    /// A watch.toml repo name set violates the signal-routing uniqueness
+    /// invariants. Either multiple repos share a recipient (which causes
+    /// silent multi-wake on directed signals), or an agent name equals a
+    /// `broadcast_tags` entry (which makes tag vs. direct-address
+    /// indistinguishable at match time).
+    #[error("watch config collision: {0}")]
+    WatchConfigCollision(String),
+
     #[error("watch already running (pid {0})")]
     WatchAlreadyRunning(u32),
 
