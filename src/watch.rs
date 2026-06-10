@@ -4586,19 +4586,16 @@ broadcast_tags = ["eng-team", "backend"]
         // error -- the hard gate supersedes the soft `watch list` warning.
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("watch.toml");
+        // workdir must be a real directory on every platform (the workdir-exists
+        // check runs before the collision check), and a TOML literal string
+        // ('...') avoids escaping Windows backslashes.
+        let wd = dir.path().display().to_string();
         std::fs::write(
             &config_path,
-            r#"
-[[repos]]
-name = "alpha"
-workdir = "/tmp"
-agent = "platform"
-
-[[repos]]
-name = "beta"
-workdir = "/tmp"
-agent = "platform"
-"#,
+            format!(
+                "[[repos]]\nname = \"alpha\"\nworkdir = '{wd}'\nagent = \"platform\"\n\n\
+                 [[repos]]\nname = \"beta\"\nworkdir = '{wd}'\nagent = \"platform\"\n"
+            ),
         )
         .expect("write");
 
@@ -4624,19 +4621,13 @@ agent = "platform"
         // A tag that equals any repo's recipient() must be refused.
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("watch.toml");
+        let wd = dir.path().display().to_string();
         std::fs::write(
             &config_path,
-            r#"
-[[repos]]
-name = "alpha"
-workdir = "/tmp"
-agent = "platform"
-
-[[repos]]
-name = "beta"
-workdir = "/tmp"
-broadcast_tags = ["platform"]
-"#,
+            format!(
+                "[[repos]]\nname = \"alpha\"\nworkdir = '{wd}'\nagent = \"platform\"\n\n\
+                 [[repos]]\nname = \"beta\"\nworkdir = '{wd}'\nbroadcast_tags = [\"platform\"]\n"
+            ),
         )
         .expect("write");
 
@@ -4658,21 +4649,15 @@ broadcast_tags = ["platform"]
         // A valid config with unique recipients and non-colliding tags must load cleanly.
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("watch.toml");
+        let wd = dir.path().display().to_string();
         std::fs::write(
             &config_path,
-            r#"
-[[repos]]
-name = "alpha"
-workdir = "/tmp"
-agent = "agent-a"
-broadcast_tags = ["eng-team"]
-
-[[repos]]
-name = "beta"
-workdir = "/tmp"
-agent = "agent-b"
-broadcast_tags = ["eng-team", "backend"]
-"#,
+            format!(
+                "[[repos]]\nname = \"alpha\"\nworkdir = '{wd}'\nagent = \"agent-a\"\n\
+                 broadcast_tags = [\"eng-team\"]\n\n\
+                 [[repos]]\nname = \"beta\"\nworkdir = '{wd}'\nagent = \"agent-b\"\n\
+                 broadcast_tags = [\"eng-team\", \"backend\"]\n"
+            ),
         )
         .expect("write");
 
