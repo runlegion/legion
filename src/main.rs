@@ -4354,19 +4354,22 @@ fn run() -> error::Result<()> {
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
 
-            // Recipient is the agent name when configured via watch.toml,
-            // else the repo name. Fall back to repo for un-watched callers.
-            let recipient = watch::load_config(&base.join("watch.toml"))
+            // Build the full addressable name set for this repo: the repo's
+            // recipient() plus any broadcast_tags. Fall back to [repo] for
+            // un-watched callers (no watch.toml, or repo not in it).
+            let names: Vec<String> = watch::load_config(&base.join("watch.toml"))
                 .ok()
                 .and_then(|cfg| {
-                    cfg.repos
-                        .iter()
-                        .find(|r| r.name == repo)
-                        .map(|r| r.recipient().to_string())
+                    cfg.repos.into_iter().find(|r| r.name == repo).map(|r| {
+                        let mut ns: Vec<String> = Vec::with_capacity(1 + r.broadcast_tags.len());
+                        ns.push(r.recipient().to_string());
+                        ns.extend(r.broadcast_tags);
+                        ns
+                    })
                 })
-                .unwrap_or_else(|| repo.clone());
+                .unwrap_or_else(|| vec![repo.clone()]);
 
-            let signals = watch::find_pending_signals(&database, &repo, &recipient, None)?;
+            let signals = watch::find_pending_signals(&database, &repo, &names, None)?;
             let reply_required: Vec<(String, String, String)> = signals
                 .into_iter()
                 .filter(|(_, text, _)| watch::signal_requires_reply(text))
