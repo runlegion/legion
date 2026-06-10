@@ -1653,14 +1653,17 @@ pub fn poll_cycle(
         // every watched repo in one cycle. Once in-flight wakes reach the cap,
         // stop spawning and let later polls drain the rest as running agents
         // finish. We `break` rather than `continue` because every remaining
-        // repo would hit the same ceiling; their signals stay pending (no
-        // lease acquired, not marked handled) and re-poll next cycle.
+        // wake-worthy repo would hit the same ceiling. Informational-only repos
+        // that appear later in the list are left pending one extra poll cycle --
+        // acceptable at the default 30s interval. Deferred wake-worthy repos
+        // acquire no lease and are not marked handled, so they re-poll next
+        // cycle.
         let active_wakes = tracker.active_count();
-        if wake_cap_reached(active_wakes, spawned, config.max_concurrent_wakes) {
+        if wake_cap_reached(active_wakes, config.max_concurrent_wakes) {
             eprintln!(
-                "[legion watch] concurrent-wake cap reached ({} in flight + {} this cycle >= {}); \
+                "[legion watch] concurrent-wake cap reached ({} in flight >= {}); \
                  deferring remaining wakes to next poll",
-                active_wakes, spawned, config.max_concurrent_wakes
+                active_wakes, config.max_concurrent_wakes
             );
             break;
         }
@@ -2191,15 +2194,19 @@ pub enum SpawnGate {
 /// Decide whether the concurrent-wake cap has been reached and `poll_cycle`
 /// should stop spawning for the rest of this cycle (#598).
 ///
-/// `active` is the number of auto-wake agents already in flight (from the
-/// `AgentTracker`), `spawned` is how many this cycle has launched so far, and
-/// `cap` is `WatchConfig::max_concurrent_wakes`. A `cap` of 0 disables the
-/// gate. Negative `active` (the tracker counter is an `i32`) clamps to 0.
+/// `active` is the total number of auto-wake agents in flight, read straight
+/// from `AgentTracker::active_count()`. That counter is the single source of
+/// truth: `track()` runs synchronously at each spawn site BEFORE the cycle's
+/// own `spawned` tally is bumped, so `active_count()` already includes every
+/// child launched earlier in this same cycle. Adding the cycle's `spawned`
+/// count on top would double-count those children and halve the effective cap.
+/// `cap` is `WatchConfig::max_concurrent_wakes`; 0 disables the gate. Negative
+/// `active` (the tracker counter is an `i32`) clamps to 0.
 ///
 /// Pulled out of `poll_cycle` so the decision is unit-testable without
 /// spawning real agents, mirroring the `evaluate_spawn_gate` pattern.
-fn wake_cap_reached(active: i32, spawned: u32, cap: u32) -> bool {
-    cap > 0 && (active.max(0) as u32).saturating_add(spawned) >= cap
+fn wake_cap_reached(active: i32, cap: u32) -> bool {
+    cap > 0 && (active.max(0) as u32) >= cap
 }
 
 /// Evaluate the gates guarding a spawn cycle, in priority order: the
@@ -2387,29 +2394,28 @@ mod tests {
     #[test]
     fn wake_cap_reached_disabled_when_cap_zero() {
         // cap 0 disables the gate regardless of in-flight count.
-        assert!(!wake_cap_reached(100, 100, 0));
+        assert!(!wake_cap_reached(100, 0));
     }
 
     #[test]
     fn wake_cap_reached_true_at_and_over_cap() {
-        // active + spawned == cap -> reached.
-        assert!(wake_cap_reached(2, 2, 4));
-        // active + spawned > cap -> reached.
-        assert!(wake_cap_reached(5, 0, 4));
-        assert!(wake_cap_reached(0, 5, 4));
+        // active == cap -> reached.
+        assert!(wake_cap_reached(4, 4));
+        // active > cap -> reached.
+        assert!(wake_cap_reached(5, 4));
     }
 
     #[test]
     fn wake_cap_reached_false_under_cap() {
-        assert!(!wake_cap_reached(1, 2, 4));
-        assert!(!wake_cap_reached(0, 0, 4));
+        assert!(!wake_cap_reached(3, 4));
+        assert!(!wake_cap_reached(0, 4));
     }
 
     #[test]
     fn wake_cap_reached_clamps_negative_active() {
         // A negative tracker count must not wrap to a huge u32.
-        assert!(!wake_cap_reached(-3, 1, 4));
-        assert!(wake_cap_reached(-3, 4, 4));
+        assert!(!wake_cap_reached(-3, 4));
+        assert!(!wake_cap_reached(-100, 1));
     }
 
     #[test]
@@ -3435,6 +3441,88 @@ workdir = "/tmp"
         )
         .expect("poll");
         assert_eq!(spawned, 0, "cooling repo should be skipped");
+    }
+
+    #[test]
+    fn poll_cycle_caps_concurrent_wakes() {
+        let (db, _index, _dir) = test_storage();
+
+        // Three repos, each of which would wake on the @all broadcast below.
+        let repos: Vec<WatchRepoConfig> = ["legion", "rafters", "smugglr"]
+            .iter()
+            .map(|name| WatchRepoConfig {
+                name: name.to_string(),
+                workdir: "/tmp".to_string(),
+                agent: None,
+                broadcast_tags: vec!["all".to_string()],
+                extra: toml::Table::new(),
+            })
+            .collect();
+        let config = WatchConfig {
+            max_concurrent_wakes: 1,
+            stagger_secs: 0,
+            repos,
+            ..WatchConfig::default()
+        };
+
+        // One wake-worthy @all broadcast every repo would otherwise wake on.
+        db.insert_reflection("kelex", "@all request -- wake everyone", "team")
+            .expect("insert broadcast");
+
+        // Pre-seed the tracker so in-flight wakes already meet the cap of 1.
+        // The dummy stands in for an already-running wake; poll_cycle never
+        // reaps mid-cycle, so active_count() stays at 1 for the whole call.
+        // With the cap met up front, the loop must break on the first
+        // wake-worthy repo BEFORE spawning, so no real agent is launched.
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "filler".to_string(),
+            SpawnedChild::Print(
+                std::process::Command::new("true")
+                    .spawn()
+                    .expect("spawn dummy child"),
+            ),
+            Vec::new(),
+            String::new(),
+            "filler-session".to_string(),
+            "now".to_string(),
+            Vec::new(),
+            None,
+        );
+        assert_eq!(tracker.active_count(), 1);
+
+        let mut cooldown = CooldownTracker::new(300, None, None);
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            None,
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll");
+
+        assert_eq!(
+            spawned, 0,
+            "cap already met by in-flight wakes; poll_cycle must spawn nothing this cycle"
+        );
+
+        // The deferred broadcast must remain pending (not marked handled) so a
+        // later cycle re-polls it once a slot frees.
+        let still_pending = find_pending_signals(
+            &db,
+            "legion",
+            &["legion".to_string(), "all".to_string()],
+            None,
+        )
+        .expect("pending lookup");
+        assert_eq!(
+            still_pending.len(),
+            1,
+            "deferred wake-worthy signal must stay pending for re-poll"
+        );
     }
 
     #[test]
