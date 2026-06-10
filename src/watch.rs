@@ -458,34 +458,11 @@ pub fn add_repo_to_config(
         )));
     }
 
-    // Recipient (signal-routing identity) collision check (#459). Two repos
-    // sharing one recipient creates silent multi-wake on directed signals --
-    // an @platform signal fires both /Volumes/.../platform and any other
-    // repo with agent=platform. The receiving agents have to flag mis-route
-    // every time, burning wake budget. Refuse the add up front; operator
-    // either picks a different agent or removes the conflicting entry.
-    //
-    // `recipient()` returns `agent` if set, else `name`. The proposed new
-    // recipient is `normalized_agent.as_deref().unwrap_or(name)`. Comparing
-    // both via recipient() handles all four cases:
-    //   1. new agent='X', existing name='X' (no agent override) -> conflict
-    //   2. new agent='X', existing agent='X' -> conflict
-    //   3. new name='X' (no agent), existing agent='X' -> conflict
-    //   4. new name='X' (no agent), existing name='X' -> earlier name-conflict path
-    let proposed_recipient = normalized_agent.as_deref().unwrap_or(name);
-    if let Some(existing) = config
-        .repos
-        .iter()
-        .find(|r| r.recipient() == proposed_recipient)
-    {
-        return Err(LegionError::WatchConfig(format!(
-            "recipient '{}' already in use by repo '{}' at {}. \
-             Each watched repo needs a unique signal-routing identity \
-             (its `agent` field, or its name when `agent` is unset). \
-             Pick a different agent for this repo or remove the existing entry.",
-            proposed_recipient, existing.name, existing.workdir
-        )));
-    }
+    // A shared `agent` across repos is intentional (#595): the field marks the
+    // maintaining persona, so several repos legitimately share one agent (e.g.
+    // `platform` owning `ledger`). The persona wake-lease dedups a directed
+    // `@agent` signal to a single wake, so there is nothing to refuse here --
+    // only a duplicate name or path (handled above) is a real conflict.
 
     config.repos.push(WatchRepoConfig {
         name: name.to_string(),
@@ -554,56 +531,13 @@ pub fn load_config(path: &Path) -> Result<WatchConfig> {
         }
     }
 
-    // Collision guard: two repos sharing the same recipient causes silent
-    // multi-wake on directed signals. Refuse startup so the operator
-    // fixes the config rather than chasing mystery double-wakes.
-    //
-    // This supersedes the soft WARNING that `legion watch list` emits for
-    // manually-edited configs. The list command warning is LEFT in place so
-    // operators who load the file with a read-only tool still see it, but
-    // `load_config` is now the hard gate.
-    {
-        let mut recipient_map: std::collections::HashMap<&str, Vec<&str>> =
-            std::collections::HashMap::new();
-        for repo in &config.repos {
-            recipient_map
-                .entry(repo.recipient())
-                .or_default()
-                .push(&repo.name);
-        }
-        for (recipient, names) in &recipient_map {
-            if names.len() > 1 {
-                return Err(LegionError::WatchConfigCollision(format!(
-                    "recipient '{}' is shared by {} repos: {}. \
-                     Each watched repo requires a unique signal-routing identity \
-                     (its `agent` field, or its `name` when `agent` is unset). \
-                     Give each repo a distinct `agent` value, or model the shared \
-                     grouping as a `broadcast_tags` entry.",
-                    recipient,
-                    names.len(),
-                    names.join(", ")
-                )));
-            }
-        }
-
-        // Tag/recipient collision: a tag name that equals any repo's recipient()
-        // makes direct-address vs. tag-address indistinguishable at match time.
-        for repo in &config.repos {
-            for tag in &repo.broadcast_tags {
-                if let Some(names) = recipient_map.get(tag.as_str()) {
-                    return Err(LegionError::WatchConfigCollision(format!(
-                        "broadcast tag '{}' in repo '{}' collides with the recipient of repo(s): {}. \
-                         Tag names must not equal any repo's recipient() value -- \
-                         rename the tag or change the agent override on the conflicting repo.",
-                        tag,
-                        repo.name,
-                        names.join(", ")
-                    )));
-                }
-            }
-        }
-    }
-
+    // A shared `agent` across repos is intentional, not a collision (#595).
+    // The `agent` field marks which persona MAINTAINS a repo, so a tiny lib
+    // (e.g. `ledger`, owned by `platform`) deliberately shares the `platform`
+    // agent instead of conjuring its own voice. The persona wake-lease (#314)
+    // is keyed on the recipient, so a `@platform` signal wakes exactly one
+    // platform session -- the other sharing repos lose the lease race and skip.
+    // There is no multi-wake to guard against here.
     Ok(config)
 }
 
@@ -3593,9 +3527,11 @@ workdir = "/nonexistent/path/that/does/not/exist"
     }
 
     #[test]
-    fn add_repo_errors_on_agent_collision_with_existing_agent() {
-        // #459: two repos with the same `agent` value create silent
-        // multi-wake on directed signals. The add path refuses up front.
+    fn add_repo_allows_shared_agent_across_repos() {
+        // #595: a shared `agent` is intentional (the maintaining persona), so
+        // adding a second repo with an existing agent must SUCCEED. The wake
+        // lease dedups a directed signal to one session; the only real add
+        // conflicts are a duplicate name or path.
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("watch.toml");
         let workdir_a = dir.path().join("a");
@@ -3603,57 +3539,15 @@ workdir = "/nonexistent/path/that/does/not/exist"
         std::fs::create_dir_all(&workdir_a).expect("create a");
         std::fs::create_dir_all(&workdir_b).expect("create b");
 
-        add_repo_to_config(&config_path, "alpha", &workdir_a, Some("platform"))
-            .expect("add a with agent");
-        let err =
-            add_repo_to_config(&config_path, "beta", &workdir_b, Some("platform")).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("recipient 'platform' already in use"),
-            "expected recipient-conflict error, got: {err}"
-        );
-    }
+        add_repo_to_config(&config_path, "platform", &workdir_a, Some("platform"))
+            .expect("add platform");
+        // ledger maintained by the same platform agent -- must be allowed.
+        add_repo_to_config(&config_path, "ledger", &workdir_b, Some("platform"))
+            .expect("ledger sharing the platform agent must be allowed");
 
-    #[test]
-    fn add_repo_errors_when_new_agent_collides_with_existing_name() {
-        // Case 1 from the recipient-conflict matrix: new agent='X' collides
-        // with existing name='X' (which has no agent override). Existing
-        // repo's recipient() returns its name, so the conflict is real.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("watch.toml");
-        let workdir_a = dir.path().join("a");
-        let workdir_b = dir.path().join("b");
-        std::fs::create_dir_all(&workdir_a).expect("create a");
-        std::fs::create_dir_all(&workdir_b).expect("create b");
-
-        add_repo_to_config(&config_path, "platform", &workdir_a, None).expect("add platform");
-        let err =
-            add_repo_to_config(&config_path, "ledger", &workdir_b, Some("platform")).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("recipient 'platform' already in use"),
-            "expected recipient-conflict error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn add_repo_errors_when_new_name_collides_with_existing_agent_override() {
-        // Case 3: new name='X' (no agent) collides with existing agent='X'.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("watch.toml");
-        let workdir_a = dir.path().join("a");
-        let workdir_b = dir.path().join("b");
-        std::fs::create_dir_all(&workdir_a).expect("create a");
-        std::fs::create_dir_all(&workdir_b).expect("create b");
-
-        add_repo_to_config(&config_path, "ledger", &workdir_a, Some("platform"))
-            .expect("add ledger with platform agent");
-        let err = add_repo_to_config(&config_path, "platform", &workdir_b, None).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("recipient 'platform' already in use"),
-            "expected recipient-conflict error, got: {err}"
-        );
+        let repos = list_repos_in_config(&config_path).expect("list");
+        assert_eq!(repos.len(), 2);
+        assert!(repos.iter().all(|r| r.recipient() == "platform"));
     }
 
     #[test]
@@ -4647,67 +4541,28 @@ broadcast_tags = ["eng-team", "backend"]
     }
 
     #[test]
-    fn load_config_rejects_duplicate_recipients() {
-        // Two repos sharing a recipient must cause load_config to return an
-        // error -- the hard gate supersedes the soft `watch list` warning.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("watch.toml");
-        // workdir must be a real directory on every platform (the workdir-exists
-        // check runs before the collision check), and a TOML literal string
-        // ('...') avoids escaping Windows backslashes.
-        let wd = dir.path().display().to_string();
-        std::fs::write(
-            &config_path,
-            format!(
-                "[[repos]]\nname = \"alpha\"\nworkdir = '{wd}'\nagent = \"platform\"\n\n\
-                 [[repos]]\nname = \"beta\"\nworkdir = '{wd}'\nagent = \"platform\"\n"
-            ),
-        )
-        .expect("write");
-
-        let err = load_config(&config_path).unwrap_err();
-        assert!(
-            matches!(err, crate::error::LegionError::WatchConfigCollision(_)),
-            "expected WatchConfigCollision, got: {:?}",
-            err
-        );
-        let msg = err.to_string();
-        assert!(
-            msg.contains("platform"),
-            "error must name the offending recipient"
-        );
-        assert!(
-            msg.contains("alpha") && msg.contains("beta"),
-            "error must list the offending repos"
-        );
-    }
-
-    #[test]
-    fn load_config_rejects_agent_name_equal_to_broadcast_tag() {
-        // A tag that equals any repo's recipient() must be refused.
+    fn load_config_accepts_shared_agent_across_repos() {
+        // A shared `agent` across repos is intentional (#595): one persona
+        // maintains several repos (e.g. platform owns ledger). load_config must
+        // accept it -- the persona wake-lease dedups a directed signal to one
+        // wake, so there is no collision to refuse.
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("watch.toml");
         let wd = dir.path().display().to_string();
         std::fs::write(
             &config_path,
             format!(
-                "[[repos]]\nname = \"alpha\"\nworkdir = '{wd}'\nagent = \"platform\"\n\n\
-                 [[repos]]\nname = \"beta\"\nworkdir = '{wd}'\nbroadcast_tags = [\"platform\"]\n"
+                "[[repos]]\nname = \"platform\"\nworkdir = '{wd}'\nagent = \"platform\"\n\n\
+                 [[repos]]\nname = \"ledger\"\nworkdir = '{wd}'\nagent = \"platform\"\n\n\
+                 [[repos]]\nname = \"astro-data\"\nworkdir = '{wd}'\nagent = \"platform\"\n"
             ),
         )
         .expect("write");
 
-        let err = load_config(&config_path).unwrap_err();
-        assert!(
-            matches!(err, crate::error::LegionError::WatchConfigCollision(_)),
-            "expected WatchConfigCollision for tag/recipient collision, got: {:?}",
-            err
-        );
-        let msg = err.to_string();
-        assert!(
-            msg.contains("platform"),
-            "error must name the offending tag/recipient"
-        );
+        let cfg = load_config(&config_path).expect("shared-agent config must load cleanly");
+        assert_eq!(cfg.repos.len(), 3);
+        // All three resolve to the same recipient -- that is the point.
+        assert!(cfg.repos.iter().all(|r| r.recipient() == "platform"));
     }
 
     #[test]
