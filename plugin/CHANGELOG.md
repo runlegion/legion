@@ -1,5 +1,26 @@
 # Legion Changelog
 
+## 0.17.0
+
+Watch, made reliable and observable. The auto-wake core always worked, but everything around it made it look dead and behave unpredictably: an idle daemon logged nothing, broadcasts and tags were half-built, the poll loop was forked into two drifting copies, interactive sessions were invisible to the spawn gate, and the SubagentStop hook looped on itself. This release closes that gap end to end and makes the wake decision data-driven. Minor release: additive features plus one additive schema migration (`watch_heartbeat`); no wire-format change. The wake-verb set changed membership (see Changed) but informational verbs still never wake, so existing signals behave as before.
+
+### New
+
+- **`legion watch status` + liveness heartbeat** (PR #588, #581): the daemon writes a `watch_heartbeat` row (Migration 24) on every health tick with its pid, version, and repo count, plus a throttled INFO line. `legion watch status` reports `alive | stale | absent` with the running version and the most recent `wake_attempts`, so a frozen `daemon.log` is never again mistaken for a dead loop. Both the daemon and standalone `legion watch` write the beat.
+- **Broadcast wake -- `broadcast_tags`, `@everyone`, typed `Recipient`** (PR #592, #585): repos can subscribe to group tags via `broadcast_tags = [...]`; a `@<tag>` signal wakes exactly the tagged repos, `@all`/`@everyone` wake every repo (each once via `watch_handled` dedup), and the matching layer is generalized over a repo's full addressable name set. Existing configs with no tags are unaffected.
+- **Verb-plugin shapes -- data-driven wake** (PR #594, #587): the wake gate consults TOML verb manifests under `plugin/verbs/` (`wake | record | fuckoff | maybe-close`, with optional `required_fields`) instead of a hard-coded set, resolved from `LEGION_VERBS_DIR` or `${CLAUDE_PLUGIN_ROOT}/verbs`, falling back to an embedded default that reproduces the canon exactly. New verbs ship without a release; `rfc` now requires a `budget` detail, enforced at signal-create.
+
+### Fixed
+
+- **Unified the forked watch poll loop** (PR #589, #582): `watch::run` and `daemon::run_watch_task` now share one `WatchLoop` body (`tick_health` + `tick_poll`) built via one constructor, so a safety gate can never again be present in one loop and absent in the other (the #578 class of bug). Three tests drive the shared `tick_poll` through every spawn-gate outcome.
+- **Interactive sessions no longer get a duplicate spawn** (PR #590, #583, extends #406): a human-started session registers a PID-liveness-gated `<repo>.session` lock at SessionStart, so watch sees it as awake and does not spawn a second agent on top of it. Dead-PID locks self-heal.
+- **SubagentStop re-fire loop** (PR #591, #584): the hook adopted a `stop_hook_active` loop-guard and a per-event idempotency marker, so a re-delivered SubagentStop no longer re-reflects and re-injects context in a loop (observed burning ~337k tokens on one spurious fire). Each subagent stop is processed exactly once.
+- **A shared `agent` across repos is not a collision** (PR #596, #595): the `agent` field marks which persona maintains a repo, so a tiny lib (e.g. `ledger`, owned by `platform`) deliberately shares one agent. The persona wake-lease already dedups a directed signal to a single wake, so the prior hard `load_config` error, the `watch list` warning, and the `add_repo` rejection (all built on a false multi-wake premise) are removed. Duplicate name/path are still rejected.
+
+### Changed
+
+- **Wake-verb canon corrected + send-time feedback** (PR #593, #586): the wake set is now `{question, request, handoff, correction, proposal, decision, rfc, routing}` -- the verbs the team actually pages with. `help` and `blocker` were statuses, not bare verbs, and are dropped. `legion signal` now prints a note when a directed signal uses a non-waking verb, so the silent "I signaled but nobody woke" case is visible at send time.
+
 ## 0.16.4
 
 Watch reliability fix. The auto-wake daemon now honors the subscription-quota panic-stop gate it had been bypassing. Patch release: one fix, no schema migration, no wire-format change.
