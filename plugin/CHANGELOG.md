@@ -1,5 +1,14 @@
 # Legion Changelog
 
+## 0.17.1
+
+Two watch-spawn safety fixes surfaced by a live broadcast-wake incident on 0.17.0. A single `@all` wake-worthy signal woke the entire farm at once, and recovering from it exposed a daemon restart that lied about success when its port was held. Patch release: behavior fixes within existing surfaces, no schema or wire-format change.
+
+### Fixed
+
+- **Concurrent-wake cap -- a broadcast can't boot the whole farm** (PR #600, #598): `poll_cycle` iterated every watched repo and spawned for each one carrying a pending wake-worthy broadcast, throttled only by `stagger_secs`; `evaluate_spawn_gate` ran once per cycle and gated only on quota-panic and health-pressure, neither of which bounds a fan-out. A single `@all` `request` spawned an agent for all 17 repos. New `WatchConfig.max_concurrent_wakes` (default 4; 0 disables) makes `poll_cycle` stop spawning once in-flight wakes reach the cap and defer the rest to later polls, so a broadcast drains at a bounded rate. The decision is a pure `wake_cap_reached(active, cap)` reading `AgentTracker::active_count()` as the single in-flight counter.
+- **Daemon spawn/restart fails loud on an occupied port** (PR #602, #599): `spawn_detached` consulted only the `daemon.pid` file, so when a foreign process held the port (a stray `legion serve`, which shares the port and pidfile, or an orphaned daemon) it forked a child that died on bind while reporting "daemon started (pid N)" and left the pidfile pointing at a corpse. A port preflight now runs after the pidfile already-running check: if the port is not bindable, spawn returns `LegionError::DaemonPortInUse` naming the holder pid (best-effort `lsof`) instead of forking a doomed child, and writes no pidfile. The deeper serve/daemon `:3131` ownership unification is tracked in #601.
+
 ## 0.17.0
 
 Watch, made reliable and observable. The auto-wake core always worked, but everything around it made it look dead and behave unpredictably: an idle daemon logged nothing, broadcasts and tags were half-built, the poll loop was forked into two drifting copies, interactive sessions were invisible to the spawn gate, and the SubagentStop hook looped on itself. This release closes that gap end to end and makes the wake decision data-driven. Minor release: additive features plus one additive schema migration (`watch_heartbeat`); no wire-format change. The wake-verb set changed membership (see Changed) but informational verbs still never wake, so existing signals behave as before.
