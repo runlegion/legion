@@ -1,6 +1,6 @@
 {
   "name": "legion",
-  "version": "0.16.4",
+  "version": "0.17.0",
   "description": "Institutional memory for Claude Code agents with real-time team channel.",
   "author": {
     "name": "Sean Silvius",
