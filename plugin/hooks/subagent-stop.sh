@@ -33,6 +33,30 @@ if [ ! -x "$LEGION_BIN" ]; then
   exit 0
 fi
 
+# Loop guard + idempotency (#584). The additionalContext emitted below
+# continues the parent turn; without a guard a re-delivered SubagentStop event
+# re-reflects and re-injects context, looping and burning tokens (observed 3x,
+# ~337k tokens on one spurious fire). Two guards, mirroring stop.sh:
+#   1. stop_hook_active -- skip a continuation we ourselves caused.
+#   2. A per-event marker keyed on the subagent identity (its transcript path,
+#      else session_id + agent_type) so each subagent stop is processed once.
+STOP_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null)
+if [ "$STOP_ACTIVE" = "true" ]; then
+  exit 0
+fi
+
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+DEDUP_SRC="${TRANSCRIPT:-${SESSION_ID}:${AGENT_TYPE}}"
+DEDUP_KEY=$(echo "$DEDUP_SRC" | md5 -q 2>/dev/null || echo "$DEDUP_SRC" | md5sum 2>/dev/null | cut -d' ' -f1)
+MARKER="${TMPDIR:-/tmp}/legion-subagent-stop-${DEDUP_KEY}"
+if [ -f "$MARKER" ]; then
+  # Already processed this subagent stop. Re-reflecting and re-injecting
+  # additionalContext is exactly what loops, so pass through silently.
+  exit 0
+fi
+# Claim the event before doing work so a fast re-delivery cannot double-fire.
+: > "$MARKER" 2>/dev/null || true
+
 # Scrape the subagent's final output from its transcript tail. Same extraction
 # shape as precompact.sh, with the alternate-format fallback. Bounded to the
 # last ~1500 chars to keep the reflection (and this hook) small.
