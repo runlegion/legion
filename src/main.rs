@@ -2148,6 +2148,28 @@ enum WatchAction {
         #[arg(long)]
         attempt_id: String,
     },
+
+    /// Show whether the watch daemon is alive, stale, or absent (#581).
+    ///
+    /// Reads the heartbeat row the daemon writes on each health tick and
+    /// prints one of:
+    ///   alive  -- beat is newer than two poll intervals
+    ///   stale  -- beat exists but is older than that threshold
+    ///   absent -- no heartbeat has ever been written
+    ///
+    /// Also prints the daemon version, watched repo count, and the most
+    /// recent wake attempts so the operator can verify the daemon is not
+    /// just alive but also doing work.
+    Status {
+        /// Number of recent wake attempts to show (default 5).
+        #[arg(long, default_value = "5")]
+        recent: u32,
+
+        /// Staleness threshold in seconds. A beat older than this is
+        /// reported as stale. Defaults to twice the poll interval (120s).
+        #[arg(long, default_value = "120")]
+        stale_after_secs: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3585,6 +3607,142 @@ fn no_index_found(repo: Option<&str>, lang: Option<&str>) {
         (None, None) => "(any repo)".to_string(),
     };
     eprintln!("[legion] no index found for {scope}; run `legion index <repo>` first");
+}
+
+/// Liveness of a heartbeat row, factored out of [`run_watch_status`] so the
+/// alive/stale boundary is unit-testable without going through stdout or the
+/// wall clock. `Absent` (no row at all) is handled by the caller; this only
+/// classifies an existing beat's `updated_at`.
+#[derive(Debug, PartialEq, Eq)]
+enum BeatLiveness {
+    /// Beat is newer than the stale threshold.
+    Alive,
+    /// Beat is older than the threshold by `age_secs` seconds.
+    Stale { age_secs: i64 },
+    /// Beat timestamp is in the future relative to `now` (clock skew or an
+    /// unparseable timestamp coerced to `i64::MAX`). Treated as not-alive so
+    /// the failure is visible rather than silently passing as healthy.
+    ClockSkew { age_secs: i64 },
+}
+
+/// Classify a heartbeat's `updated_at` against `now` and the stale window.
+///
+/// An unparseable timestamp coerces to `i64::MAX` age, which lands in `Stale`
+/// -- a corrupt beat reads as dead, never alive.
+fn classify_beat(
+    updated_at: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    stale_after_secs: u64,
+) -> BeatLiveness {
+    let age_secs: i64 = chrono::DateTime::parse_from_rfc3339(updated_at)
+        .ok()
+        .map(|ts| (now - ts.with_timezone(&chrono::Utc)).num_seconds())
+        .unwrap_or(i64::MAX);
+
+    if age_secs < 0 {
+        BeatLiveness::ClockSkew { age_secs }
+    } else if (age_secs as u64) < stale_after_secs {
+        BeatLiveness::Alive
+    } else {
+        BeatLiveness::Stale { age_secs }
+    }
+}
+
+/// Human-friendly age for a non-negative second count: `42s ago`, `5m ago`,
+/// `3h ago`.
+fn humanize_age(age_secs: i64) -> String {
+    if age_secs < 60 {
+        format!("{age_secs}s ago")
+    } else if age_secs < 3600 {
+        format!("{}m ago", age_secs / 60)
+    } else {
+        format!("{}h ago", age_secs / 3600)
+    }
+}
+
+/// Render the `legion watch status` output.
+///
+/// Classifies the watch daemon as alive, stale, or absent by comparing
+/// the heartbeat's `updated_at` against `now - stale_after_secs`. Also
+/// prints the daemon version, repo count, and recent wake attempts so
+/// the operator can confirm that the daemon is not just alive but working.
+fn run_watch_status(db: &db::Database, recent: u32, stale_after_secs: u64) -> error::Result<()> {
+    use std::io::Write;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    let beat = db.get_watch_heartbeat(None)?;
+
+    match beat {
+        None => {
+            writeln!(out, "status:  absent")?;
+            writeln!(
+                out,
+                "         no heartbeat row found -- daemon has never run or DB is fresh"
+            )?;
+        }
+        Some(ref hb) => {
+            let now = chrono::Utc::now();
+            match classify_beat(&hb.updated_at, now, stale_after_secs) {
+                BeatLiveness::Alive => {
+                    writeln!(out, "status:  alive")?;
+                }
+                BeatLiveness::ClockSkew { .. } => {
+                    writeln!(
+                        out,
+                        "status:  stale  (last beat: clock skew (future timestamp))"
+                    )?;
+                }
+                BeatLiveness::Stale { age_secs } => {
+                    writeln!(
+                        out,
+                        "status:  stale  (last beat: {})",
+                        humanize_age(age_secs)
+                    )?;
+                }
+            }
+
+            writeln!(out, "host:    {}", hb.host)?;
+            writeln!(out, "pid:     {}", hb.pid)?;
+            writeln!(out, "version: {}", hb.version)?;
+            writeln!(out, "repos:   {}", hb.repo_count)?;
+            writeln!(out, "beat:    {}", hb.updated_at)?;
+
+            if let Some(ref summary) = hb.last_spawn_summary {
+                writeln!(out, "last:    {summary}")?;
+            }
+        }
+    }
+
+    // Recent wake attempts.
+    let attempts = db.recent_wake_attempts(recent)?;
+    if attempts.is_empty() {
+        writeln!(out, "\nwake attempts: none recorded")?;
+    } else {
+        writeln!(out, "\nrecent wake attempts ({}):", attempts.len())?;
+        writeln!(
+            out,
+            "  {:<38} {:<12} {:<12} updated_at",
+            "attempt_id", "persona", "state"
+        )?;
+        for a in &attempts {
+            // Truncate attempt_id to first 8 chars of the UUID for brevity.
+            let id_short: String = a.attempt_id.chars().take(8).collect();
+            let persona_short: String = a.persona_id.chars().take(12).collect();
+            writeln!(
+                out,
+                "  {:<38} {:<12} {:<12} {}",
+                id_short,
+                persona_short,
+                a.state.as_str(),
+                db::format_date(&a.updated_at),
+            )?;
+        }
+    }
+
+    out.flush()?;
+    Ok(())
 }
 
 fn main() -> error::Result<()> {
@@ -6781,6 +6939,14 @@ fn run() -> error::Result<()> {
                     let db = db::Database::open(&db_path)?;
                     watch::record_session_end(&db, &attempt_id, &base)?;
                 }
+                Some(WatchAction::Status {
+                    recent,
+                    stale_after_secs,
+                }) => {
+                    let db_path = base.join("legion.db");
+                    let db = db::Database::open(&db_path)?;
+                    run_watch_status(&db, recent, stale_after_secs)?;
+                }
             }
         }
         Commands::Mcp => {
@@ -7856,5 +8022,58 @@ mod index_banner_tests {
             now,
         );
         assert!(banner.contains("1h ago"));
+    }
+}
+
+#[cfg(test)]
+mod watch_status_tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn classify_beat_alive_within_threshold() {
+        // 20s old, 90s window -> alive.
+        let beat = "2026-05-07T11:59:40Z";
+        assert_eq!(classify_beat(beat, now(), 90), BeatLiveness::Alive);
+    }
+
+    #[test]
+    fn classify_beat_stale_past_threshold() {
+        // 5 minutes old, 90s window -> stale, age 300s.
+        let beat = "2026-05-07T11:55:00Z";
+        assert_eq!(
+            classify_beat(beat, now(), 90),
+            BeatLiveness::Stale { age_secs: 300 }
+        );
+    }
+
+    #[test]
+    fn classify_beat_future_timestamp_is_clock_skew() {
+        // 10s in the future -> clock skew, never alive.
+        let beat = "2026-05-07T12:00:10Z";
+        assert!(matches!(
+            classify_beat(beat, now(), 90),
+            BeatLiveness::ClockSkew { .. }
+        ));
+    }
+
+    #[test]
+    fn classify_beat_unparseable_reads_as_stale() {
+        // A corrupt beat must read as dead, never alive.
+        assert!(matches!(
+            classify_beat("not-a-timestamp", now(), 90),
+            BeatLiveness::Stale { .. }
+        ));
+    }
+
+    #[test]
+    fn humanize_age_picks_unit() {
+        assert_eq!(humanize_age(42), "42s ago");
+        assert_eq!(humanize_age(300), "5m ago");
+        assert_eq!(humanize_age(7200), "2h ago");
     }
 }
