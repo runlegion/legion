@@ -37,6 +37,7 @@ mod telemetry;
 mod testutil;
 mod uncertainty;
 mod usage;
+mod verbs;
 mod verify;
 mod wake_attempts;
 mod watch;
@@ -4312,6 +4313,25 @@ fn run() -> error::Result<()> {
                 })
                 .unwrap_or_default();
 
+            // #587: check required fields for this verb before sending.
+            let provided_keys: std::collections::HashSet<&str> =
+                detail_pairs.iter().map(|(k, _)| k.as_str()).collect();
+            let required: &[String] = verbs::active_manifest().required_fields(&verb);
+            let missing: Vec<&str> = required
+                .iter()
+                .filter(|f| !provided_keys.contains(f.as_str()))
+                .map(|f| f.as_str())
+                .collect();
+            if !missing.is_empty() {
+                let missing_str = missing.join(", ");
+                let example = missing[0];
+                return Err(error::LegionError::SignalMissingRequiredFields {
+                    verb: verb.clone(),
+                    missing: missing_str,
+                    missing_example: example.to_string(),
+                });
+            }
+
             if let Some(ref n) = note {
                 signal::validate_note(n)?;
             }
@@ -4354,12 +4374,13 @@ fn run() -> error::Result<()> {
             // recipient -- a non-wake-worthy verb delivers to a live session but
             // never pages an asleep agent, so surface it at send time.
             if watch::directed_verb_will_not_wake(&to, &verb) {
+                let wake_verbs: Vec<&str> = verbs::active_manifest().wake_verb_names();
                 eprintln!(
                     "[legion] note: verb '{}' will not wake {} -- it delivers to a live \
                      session but does not page an asleep agent. Wake-worthy verbs: {}.",
                     verb,
                     to,
-                    watch::WAKE_WORTHY_VERBS.join(", ")
+                    wake_verbs.join(", ")
                 );
             }
         }

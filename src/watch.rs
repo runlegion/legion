@@ -941,25 +941,29 @@ pub const WAKE_WORTHY_VERBS: &[&str] = &[
 /// its recipient, so the sender can be warned at send time (#586).
 ///
 /// True when the target is a specific agent (not the `@all`/`@everyone`
-/// broadcast, which is never a directed page) AND the verb is outside
-/// [`WAKE_WORTHY_VERBS`]. Such a signal still delivers to a live session via the
-/// channel push, but it does not page an asleep agent -- surfacing that avoids
-/// the silent "I signaled but nobody woke" trap. Reserved broadcast names are
-/// matched case-insensitively.
+/// broadcast, which is never a directed page) AND the verb is not wake-worthy
+/// in the active manifest. Such a signal still delivers to a live session via
+/// the channel push, but it does not page an asleep agent -- surfacing that
+/// avoids the silent "I signaled but nobody woke" trap. Reserved broadcast
+/// names are matched case-insensitively.
 pub fn directed_verb_will_not_wake(to: &str, verb: &str) -> bool {
     let to_normalized = to.trim().to_ascii_lowercase();
     let is_broadcast = matches!(to_normalized.as_str(), "all" | "everyone");
-    !is_broadcast && !WAKE_WORTHY_VERBS.contains(&verb)
+    !is_broadcast && !crate::verbs::active_manifest().is_wake_worthy(verb)
 }
 
 /// Whether a signal text triggers a wake under the verb-driven gate.
 ///
-/// Returns `false` for posts, malformed signals, and signals whose verb is
-/// outside [`WAKE_WORTHY_VERBS`]. The decision is verb-only -- status is
+/// Returns `false` for posts, malformed signals, and signals whose verb is not
+/// wake-worthy in the active manifest. The decision is verb-only -- status is
 /// decoration that downstream tools may use, but the wake gate ignores it.
+///
+/// The active manifest defaults to `builtin_default()`, which reproduces the
+/// #586 canon exactly. Operators can overlay additional verbs via TOML files
+/// in the verbs directory without a legion release.
 pub fn is_wake_worthy(text: &str) -> bool {
     match signal::parse_signal(text) {
-        Some(sig) => WAKE_WORTHY_VERBS.contains(&sig.verb.as_str()),
+        Some(sig) => crate::verbs::active_manifest().is_wake_worthy(&sig.verb),
         None => false,
     }
 }

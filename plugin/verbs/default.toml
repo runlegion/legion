@@ -1,0 +1,68 @@
+# Default verb manifest for legion.
+#
+# This file encodes the canonical verb set introduced in #586. Agents and
+# operators can overlay additional verbs (or override existing ones) by
+# placing *.toml files in the verbs directory pointed to by LEGION_VERBS_DIR
+# or ${CLAUDE_PLUGIN_ROOT}/verbs.
+#
+# Schema: each verb is a section under [verbs.<name>].
+#
+#   [verbs.<name>]
+#   shape = "wake" | "record" | "fuckoff" | "maybe-close"
+#   required_fields = ["field1", "field2"]   # optional; defaults to []
+#
+# Shapes:
+#   wake        -- wakes an asleep recipient; agent MUST reply or decline.
+#   record      -- informational; delivered to live sessions only, no wake.
+#   fuckoff     -- discard; useful for machine-generated noise.
+#   maybe-close -- may resolve a pending ask when status matches a resolution.
+#
+# The wake set below exactly reproduces the #586 canon. Do not add verbs here
+# without updating watch::WAKE_WORTHY_VERBS in src/watch.rs, and vice versa.
+# The shipped_default_toml_wake_set_matches_builtin_default test enforces
+# this invariant at CI time.
+
+# ---------------------------------------------------------------------------
+# Wake verbs (#586 canon)
+# ---------------------------------------------------------------------------
+
+[verbs.question]
+shape = "wake"
+
+[verbs.request]
+shape = "wake"
+
+[verbs.handoff]
+shape = "wake"
+
+[verbs.correction]
+shape = "wake"
+
+[verbs.proposal]
+shape = "wake"
+
+[verbs.decision]
+shape = "wake"
+
+[verbs.rfc]
+shape = "wake"
+required_fields = ["budget"]
+
+[verbs.routing]
+shape = "wake"
+
+# ---------------------------------------------------------------------------
+# Informational verbs (Record shape -- never wake)
+# ---------------------------------------------------------------------------
+
+[verbs.announce]
+shape = "record"
+
+[verbs.ack]
+shape = "record"
+
+[verbs.info]
+shape = "record"
+
+[verbs.answer]
+shape = "record"
