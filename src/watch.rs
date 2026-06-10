@@ -1826,6 +1826,230 @@ impl QuotaPanicGate {
     }
 }
 
+/// How many health ticks between heartbeat INFO log lines.
+///
+/// One every ten ticks keeps an idle watcher visible in the log without
+/// flooding it. Shared by both watch modes so the throttle is identical.
+pub const HEARTBEAT_LOG_CADENCE: u64 = 10;
+
+/// Shared per-iteration state for the watch poll loop.
+///
+/// Both the standalone `watch::run` (sync, `std::thread::sleep`) and the
+/// daemon's `run_watch_task` (async, `tokio::time::sleep`) own one of these
+/// and call `tick_health` / `tick_poll` on their respective intervals.
+///
+/// The things that stay loop-specific are: the sleep mechanism, the timer
+/// types (`std::time::Instant` vs `tokio::time::Instant`), startup logging,
+/// and the cluster sync-actor spawn (standalone only).
+///
+/// Having one shared body means a safety gate can never be present in one
+/// loop and absent in the other -- the #578 bug that motivated this (#582).
+pub struct WatchLoop {
+    /// Watch configuration owned by the loop for the duration of the run.
+    pub config: WatchConfig,
+    /// Database handle owned by the loop for the duration of the run.
+    pub db: Database,
+    /// Per-repo spawn cooldown tracker.
+    pub cooldown: CooldownTracker,
+    /// Tracks live spawned child processes.
+    pub tracker: AgentTracker,
+    /// Per-repo session-lock gate.
+    pub session_locks: SessionLockTracker,
+    /// Rolling health-pressure window.
+    pub sampler: HealthSampler,
+    /// Subscription-quota panic-stop gate.
+    pub quota_gate: QuotaPanicGate,
+    /// Host identity for lease ownership and heartbeat attribution.
+    pub host: String,
+    /// Persona wake-lease TTL.
+    pub lease_ttl: Duration,
+    /// RFC3339 lower-bound for signal lookback (prevents historical flood on restart).
+    pub lookback: String,
+    /// Which spawn backend to use (print vs PTY).
+    pub spawn_mode: SpawnMode,
+    /// How long to retain health samples and watch_handled rows.
+    pub retention_cutoff: chrono::Duration,
+    /// Running count of health ticks elapsed; drives the throttled heartbeat log.
+    pub health_tick_count: u64,
+    /// PID of the running watch process (daemon or standalone).
+    pub pid: u32,
+    /// Cargo package version string for heartbeat rows.
+    pub version: &'static str,
+    /// Log prefix: `"[legion daemon]"` or `"[legion watch]"`.
+    pub log_prefix: &'static str,
+}
+
+impl WatchLoop {
+    /// Build the shared loop state from a loaded config and an open db.
+    ///
+    /// Both `daemon::run_watch_task` and `watch::run` construct the loop this
+    /// way, so the field wiring (cooldown, session locks, quota gate, lookback
+    /// window, heartbeat identity) lives in exactly one place -- the same
+    /// anti-fork principle that motivated unifying the loop body itself. The
+    /// caller passes its own `log_prefix` (`"[legion daemon]"` vs
+    /// `"[legion watch]"`) and `spawn_mode`.
+    pub fn new(
+        config: WatchConfig,
+        db: Database,
+        data_dir: &Path,
+        host: String,
+        spawn_mode: SpawnMode,
+        log_prefix: &'static str,
+    ) -> Self {
+        // Attribute the healthy<->panic bullpen edge posts to the first watched
+        // repo, falling back to "legion" so the alert still lands.
+        let quota_post_repo: String = config
+            .repos
+            .first()
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| "legion".to_string());
+        // On startup, only look back 24 hours for unhandled signals, so a watch
+        // that restarts after downtime does not flood agents with stale ones.
+        let lookback: String = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+
+        WatchLoop {
+            cooldown: CooldownTracker::new(
+                config.cooldown_secs,
+                config.work_hours_start,
+                config.work_hours_end,
+            ),
+            tracker: AgentTracker::new(),
+            session_locks: SessionLockTracker::new(data_dir, config.session_lock_ttl_secs),
+            sampler: HealthSampler::new(config.health_window_size),
+            quota_gate: QuotaPanicGate::new(
+                config.quota_panic_threshold_pct,
+                host.clone(),
+                quota_post_repo,
+            ),
+            host,
+            lease_ttl: Duration::from_secs(config.persona_lease_ttl_secs),
+            lookback,
+            spawn_mode,
+            retention_cutoff: chrono::Duration::days(config.retention_days as i64),
+            health_tick_count: 0,
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION"),
+            log_prefix,
+            config,
+            db,
+        }
+    }
+
+    /// Run one health-tick iteration.
+    ///
+    /// Samples system pressure, reaps finished children, heartbeats persona
+    /// leases, persists a health sample, and upserts the liveness heartbeat
+    /// row so `legion watch status` can report alive/stale/absent.  Also
+    /// emits a throttled INFO line every `HEARTBEAT_LOG_CADENCE` ticks.
+    ///
+    /// This runs in BOTH the daemon and the standalone watch loop so
+    /// `legion watch status` can observe either mode.
+    pub fn tick_health(&mut self) {
+        self.sampler.sample();
+        self.tracker
+            .reap_finished(Some(&self.db), Some(&self.session_locks));
+        if let Err(e) = self.db.heartbeat_persona_leases(&self.host, self.lease_ttl) {
+            eprintln!("{} lease heartbeat error: {e}", self.log_prefix);
+        }
+
+        match self.sampler.to_health_sample(self.tracker.active_count()) {
+            Ok(sample) => {
+                if let Err(e) = self.db.insert_health_sample(&sample) {
+                    eprintln!("{} health persist error: {e}", self.log_prefix);
+                }
+            }
+            Err(e) => {
+                eprintln!("{} health sample error: {e}", self.log_prefix);
+            }
+        }
+
+        // Persist the liveness heartbeat so `legion watch status` can report
+        // alive/stale/absent without requiring ps or log inspection.
+        let repo_count: u32 = self.config.repos.len() as u32;
+        if let Err(e) =
+            self.db
+                .upsert_watch_heartbeat(&self.host, self.pid, self.version, repo_count, None)
+        {
+            eprintln!("{} heartbeat persist error: {e}", self.log_prefix);
+        }
+
+        // Throttled INFO line: once every HEARTBEAT_LOG_CADENCE ticks so an
+        // idle watcher is silent most of the time but still proves liveness.
+        self.health_tick_count += 1;
+        if self.health_tick_count % HEARTBEAT_LOG_CADENCE == 1 {
+            eprintln!(
+                "{} heartbeat tick={} repos={} pid={}",
+                self.log_prefix, self.health_tick_count, repo_count, self.pid
+            );
+        }
+    }
+
+    /// Run one poll-tick iteration.
+    ///
+    /// Evaluates the quota-panic and health-pressure spawn gates (in that
+    /// priority order), runs `poll_cycle` when the gates are clear, then
+    /// prunes stale health samples and watch_handled rows.
+    ///
+    /// Both gates are always evaluated here -- the #578 bug was the daemon
+    /// copy calling `poll_cycle` directly, bypassing the quota-panic gate
+    /// entirely. The unified body makes that class of omission impossible.
+    pub fn tick_poll(&mut self) {
+        let lease_gate = PersonaLeaseGate {
+            db: &self.db,
+            host: &self.host,
+            ttl: self.lease_ttl,
+        };
+
+        match evaluate_spawn_gate(
+            &mut self.quota_gate,
+            &self.sampler,
+            &self.db,
+            self.config.health_threshold_pct,
+        ) {
+            SpawnGate::Proceed => {
+                match poll_cycle(
+                    &self.db,
+                    &self.config,
+                    &mut self.cooldown,
+                    &mut self.tracker,
+                    Some(&self.session_locks),
+                    Some(&lease_gate),
+                    Some(&self.lookback),
+                    self.spawn_mode,
+                ) {
+                    Ok(n) if n > 0 => {
+                        eprintln!("{} watch: {} agent(s) spawned", self.log_prefix, n);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("{} watch poll error: {e}", self.log_prefix);
+                    }
+                }
+            }
+            SpawnGate::QuotaPanic => {
+                eprintln!(
+                    "{} quota panic active (>= {:.1}%) -- skipping spawn cycle",
+                    self.log_prefix, self.config.quota_panic_threshold_pct
+                );
+            }
+            SpawnGate::Pressure(pressure) => {
+                eprintln!(
+                    "{} pressure {:.1}% >= threshold {:.0}% -- skipping spawn cycle",
+                    self.log_prefix, pressure, self.config.health_threshold_pct
+                );
+            }
+        }
+
+        let cutoff = (chrono::Utc::now() - self.retention_cutoff).to_rfc3339();
+        if let Err(e) = self.db.prune_health_samples(&cutoff) {
+            eprintln!("{} health prune error: {e}", self.log_prefix);
+        }
+        if let Err(e) = self.db.prune_watch_handled(&cutoff) {
+            eprintln!("{} watch_handled prune error: {e}", self.log_prefix);
+        }
+    }
+}
+
 /// Outcome of evaluating the per-poll spawn gates. Shared by `watch::run` and
 /// the daemon's `run_watch_task` so the two loops cannot drift on which gates
 /// guard a spawn cycle (#578 -- the daemon copy had silently dropped the quota
@@ -1893,47 +2117,20 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let _guard = PidLockGuard(lock_path);
 
     let db = Database::open(&db_path)?;
-    let mut cooldown = CooldownTracker::new(
-        config.cooldown_secs,
-        config.work_hours_start,
-        config.work_hours_end,
-    );
-    let mut tracker = AgentTracker::new();
-    let session_locks = SessionLockTracker::new(data_dir, config.session_lock_ttl_secs);
-    let mut sampler = HealthSampler::new(config.health_window_size);
 
-    let poll_interval = Duration::from_secs(config.poll_interval_secs);
-    let health_interval = Duration::from_secs(config.health_poll_secs);
-    let retention_cutoff = chrono::Duration::days(config.retention_days as i64);
     let host = resolve_host_id();
-    let lease_ttl = Duration::from_secs(config.persona_lease_ttl_secs);
-    let lease_gate = PersonaLeaseGate {
-        db: &db,
-        host: &host,
-        ttl: lease_ttl,
-    };
-    // Pick a repo to attribute quota-panic bullpen posts to. The first watched
-    // repo's name reads naturally on the bullpen; absent any, fall back to
-    // "legion" so the alert still lands.
-    let quota_post_repo = config
-        .repos
-        .first()
-        .map(|r| r.name.clone())
-        .unwrap_or_else(|| "legion".to_string());
-    let mut quota_gate = QuotaPanicGate::new(
-        config.quota_panic_threshold_pct,
-        host.clone(),
-        quota_post_repo,
-    );
-    // On startup, only look back 24 hours for unhandled signals.
-    // Prevents historical flood when watch restarts after downtime.
-    // The watch_handled table prevents re-processing, but without a
-    // lookback window, the first poll returns every unhandled signal
-    // ever created, overwhelming agents with stale notifications.
-    let lookback = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
 
-    let mut poll_timer = Instant::now() - poll_interval; // poll immediately on start
-    let mut health_timer = Instant::now() - health_interval; // sample immediately on start
+    // Timer intervals are read before `config` moves into the WatchLoop.
+    let poll_interval: Duration = Duration::from_secs(config.poll_interval_secs);
+    let health_interval: Duration = Duration::from_secs(config.health_poll_secs);
+
+    // Use checked_sub so a near-zero system clock cannot overflow and panic.
+    let mut poll_timer: Instant = Instant::now()
+        .checked_sub(poll_interval)
+        .unwrap_or_else(Instant::now);
+    let mut health_timer: Instant = Instant::now()
+        .checked_sub(health_interval)
+        .unwrap_or_else(Instant::now);
 
     eprintln!(
         "[legion watch] watching repos: {}",
@@ -1945,7 +2142,9 @@ pub fn run(data_dir: &Path) -> Result<()> {
             .join(", ")
     );
 
-    // Check cluster sync config and spawn sync actor if enabled
+    // Check cluster sync config and spawn sync actor if enabled.
+    // This stays in watch::run (not in WatchLoop) because the daemon does not
+    // use sync_actor -- it has its own wiring.
     let _sync_handle = match crate::cluster::ClusterConfig::load(data_dir) {
         Ok(cc) if cc.enabled && cc.secret.is_some() => {
             eprintln!(
@@ -1964,74 +2163,20 @@ pub fn run(data_dir: &Path) -> Result<()> {
         _ => None,
     };
 
+    // Move config and db into the shared loop state via the same constructor
+    // the daemon uses, so the field wiring lives in exactly one place.
+    let mut state = WatchLoop::new(config, db, data_dir, host, spawn_mode, "[legion watch]");
+
     loop {
-        // Health sample on its own interval
+        // Health sample on its own interval.
         if health_timer.elapsed() >= health_interval {
-            sampler.sample();
-            tracker.reap_finished(Some(&db), Some(&session_locks));
-            if let Err(e) = db.heartbeat_persona_leases(&host, lease_ttl) {
-                eprintln!("[legion watch] lease heartbeat error: {}", e);
-            }
-
-            // Persist health sample (failure is non-fatal)
-            match sampler.to_health_sample(tracker.active_count()) {
-                Ok(sample) => {
-                    if let Err(e) = db.insert_health_sample(&sample) {
-                        eprintln!("[legion watch] health persist error: {}", e);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[legion watch] health sample error: {}", e);
-                }
-            }
-
+            state.tick_health();
             health_timer = Instant::now();
         }
 
-        // Spawn check on the poll interval
+        // Spawn check on the poll interval.
         if poll_timer.elapsed() >= poll_interval {
-            match evaluate_spawn_gate(&mut quota_gate, &sampler, &db, config.health_threshold_pct) {
-                SpawnGate::Proceed => match poll_cycle(
-                    &db,
-                    &config,
-                    &mut cooldown,
-                    &mut tracker,
-                    Some(&session_locks),
-                    Some(&lease_gate),
-                    Some(&lookback),
-                    spawn_mode,
-                ) {
-                    Ok(n) if n > 0 => {
-                        eprintln!("[legion watch] cycle complete: {} agent(s) spawned", n);
-                    }
-                    Ok(_) => {} // quiet cycle, no spam
-                    Err(e) => {
-                        eprintln!("[legion watch] poll error: {}", e);
-                    }
-                },
-                SpawnGate::QuotaPanic => {
-                    eprintln!(
-                        "[legion watch] quota panic active (>= {:.1}%) -- skipping spawn cycle",
-                        config.quota_panic_threshold_pct
-                    );
-                }
-                SpawnGate::Pressure(pressure) => {
-                    eprintln!(
-                        "[legion watch] pressure {:.1}% >= threshold {:.0}% -- skipping spawn cycle",
-                        pressure, config.health_threshold_pct
-                    );
-                }
-            }
-
-            // Prune old health samples and stale watch_handled records (non-fatal)
-            let cutoff = (chrono::Utc::now() - retention_cutoff).to_rfc3339();
-            if let Err(e) = db.prune_health_samples(&cutoff) {
-                eprintln!("[legion watch] health prune error: {}", e);
-            }
-            if let Err(e) = db.prune_watch_handled(&cutoff) {
-                eprintln!("[legion watch] watch_handled prune error: {}", e);
-            }
-
+            state.tick_poll();
             poll_timer = Instant::now();
         }
 
@@ -3975,5 +4120,150 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
     fn spawn_mode_as_str_matches_env_values() {
         assert_eq!(SpawnMode::Print.as_str(), "print");
         assert_eq!(SpawnMode::Pty.as_str(), "pty");
+    }
+
+    // -- WatchLoop unification (#582) ----------------------------------------
+
+    /// Build a minimal WatchLoop for unit tests. Uses /tmp as the workdir
+    /// (always exists) and the supplied db. The log_prefix and spawn_mode
+    /// are caller-supplied so tests can exercise either mode's prefix.
+    fn test_watch_loop(db: crate::db::Database, log_prefix: &'static str) -> WatchLoop {
+        let config = WatchConfig {
+            repos: vec![WatchRepoConfig {
+                name: "test-repo".to_string(),
+                workdir: "/tmp".to_string(),
+                agent: None,
+                extra: toml::Table::new(),
+            }],
+            ..WatchConfig::default()
+        };
+        WatchLoop {
+            cooldown: CooldownTracker::new(
+                config.cooldown_secs,
+                config.work_hours_start,
+                config.work_hours_end,
+            ),
+            tracker: AgentTracker::new(),
+            // Use a temp-style path; we don't need locks to actually fire in
+            // these tests (no signals are wake-worthy enough to spawn).
+            session_locks: SessionLockTracker::new(std::path::Path::new("/tmp"), 3600),
+            sampler: HealthSampler::new(config.health_window_size),
+            quota_gate: QuotaPanicGate::new(
+                config.quota_panic_threshold_pct,
+                "test-host".to_string(),
+                "test-repo".to_string(),
+            ),
+            host: "test-host".to_string(),
+            lease_ttl: std::time::Duration::from_secs(600),
+            lookback: (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339(),
+            spawn_mode: SpawnMode::Print,
+            retention_cutoff: chrono::Duration::days(7),
+            health_tick_count: 0,
+            pid: std::process::id(),
+            version: "0.0.0-test",
+            log_prefix,
+            config,
+            db,
+        }
+    }
+
+    /// `tick_poll` runs `poll_cycle` when all gates are clear (Proceed path).
+    ///
+    /// Inserts an informational (non-wake-worthy) signal so `poll_cycle` has
+    /// something to process. An informational signal causes `poll_cycle` to
+    /// mark it as handled (without spawning). After `tick_poll`, the signal
+    /// should no longer appear in `find_pending_signals`.
+    ///
+    /// This test exercises the same code path the daemon and standalone watch
+    /// both take -- the unification means there is only ONE path to test.
+    #[test]
+    fn watch_loop_tick_poll_proceed_marks_informational_signal_handled() {
+        let (db, _index, _dir) = test_storage();
+        // Insert an informational signal (verb=announce, not wake-worthy).
+        db.insert_reflection("other-agent", "@test-repo announce -- hello", "team")
+            .expect("insert signal");
+
+        let mut state = test_watch_loop(db, "[legion test]");
+
+        // Before the tick: signal should be pending.
+        let before =
+            find_pending_signals(&state.db, "test-repo", "test-repo", None).expect("find pending");
+        assert!(!before.is_empty(), "signal should be pending before tick");
+
+        state.tick_poll();
+
+        // After the tick: poll_cycle ran (Proceed gate), marked the
+        // non-wake-worthy signal as handled, so the pending list is empty.
+        let after = find_pending_signals(&state.db, "test-repo", "test-repo", None)
+            .expect("find pending after");
+        assert!(
+            after.is_empty(),
+            "informational signal should be handled after tick_poll with Proceed gate"
+        );
+    }
+
+    /// `tick_poll` skips `poll_cycle` when the quota-panic gate is active.
+    ///
+    /// Inserts a rate-limit sample that trips the panic threshold. An
+    /// informational signal is also inserted; after `tick_poll`, the signal
+    /// must still be pending (poll_cycle was NOT called because the quota gate
+    /// fired). This is the exact regression from #578 -- the daemon copy
+    /// bypassed this gate entirely.
+    #[test]
+    fn watch_loop_tick_poll_quota_panic_skips_poll_cycle() {
+        let (db, _index, _dir) = test_storage();
+        // Rate-limit sample that crosses the 99% default threshold.
+        db.insert_rate_limit_sample(&rate_limit_sample("test-host", Some(99.5)))
+            .expect("insert rate-limit sample");
+        // An informational signal that would be consumed if poll_cycle ran.
+        db.insert_reflection(
+            "other-agent",
+            "@test-repo announce -- should not be consumed",
+            "team",
+        )
+        .expect("insert signal");
+
+        let mut state = test_watch_loop(db, "[legion test]");
+
+        state.tick_poll();
+
+        // Signal must still be pending: poll_cycle was skipped due to QuotaPanic.
+        let pending = find_pending_signals(&state.db, "test-repo", "test-repo", None)
+            .expect("find pending after quota panic tick");
+        assert!(
+            !pending.is_empty(),
+            "signal must remain pending when quota panic gate fires (poll_cycle must not run)"
+        );
+    }
+
+    /// `tick_poll` skips `poll_cycle` when system pressure exceeds the threshold.
+    ///
+    /// Uses `push_pressure_for_test` to simulate a fully-loaded system. An
+    /// informational signal should remain pending after the tick because the
+    /// pressure gate fired before `poll_cycle` was reached.
+    #[test]
+    fn watch_loop_tick_poll_pressure_gate_skips_poll_cycle() {
+        let (db, _index, _dir) = test_storage();
+        // An informational signal that would be consumed if poll_cycle ran.
+        db.insert_reflection(
+            "other-agent",
+            "@test-repo announce -- should not be consumed",
+            "team",
+        )
+        .expect("insert signal");
+
+        let mut state = test_watch_loop(db, "[legion test]");
+        // Push pressure above the default 80% threshold.
+        state.sampler.push_pressure_for_test(95.0);
+
+        state.tick_poll();
+
+        // Signal must still be pending: poll_cycle was skipped due to Pressure.
+        let pending = find_pending_signals(&state.db, "test-repo", "test-repo", None)
+            .expect("find pending after pressure gate tick");
+        assert!(
+            !pending.is_empty(),
+            "signal must remain pending when pressure gate fires (poll_cycle must not run)"
+        );
     }
 }
