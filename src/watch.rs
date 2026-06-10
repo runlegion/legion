@@ -252,7 +252,12 @@ fn default_retention_days() -> u64 {
     7
 }
 
-fn default_session_lock_ttl_secs() -> u64 {
+/// Default TTL for the watch-spawn `.lock` files.
+///
+/// Exposed so callers that construct `SessionLockTracker` outside of the
+/// watch daemon (e.g. `legion watch session-start`) can use the same
+/// default without reading watch.toml.
+pub fn default_session_lock_ttl_secs() -> u64 {
     3600
 }
 
@@ -586,22 +591,65 @@ impl SessionLockTracker {
         self.lock_dir.join(format!("{}.lock", repo))
     }
 
-    /// Returns the holding PID when a prior spawn's lockfile is still considered
-    /// live (fresh mtime AND a running PID). Returns `None` on any parse error,
-    /// missing file, or staleness -- callers can safely proceed to spawn in all
-    /// `None` cases. The PID is surfaced so skip-log messages can identify the
-    /// session holding the gate.
+    /// Path for the interactive-session lock file.
+    ///
+    /// Distinct from the TTL-gated `.lock` path used by watch-spawned children.
+    /// Interactive sessions write their pid here; the gate is PID-liveness alone
+    /// (no TTL) because an idle-but-open interactive session must still hold the
+    /// gate -- a live process IS the authoritative signal.
+    fn session_path(&self, repo: &str) -> PathBuf {
+        self.lock_dir.join(format!("{}.session", repo))
+    }
+
+    /// Returns the holding PID when any live session (watch-spawned or interactive)
+    /// holds the gate. Returns `None` when no live holder exists in either lock
+    /// file; callers can safely spawn in all `None` cases.
+    ///
+    /// Two independent sources are checked:
+    ///
+    /// 1. `<repo>.lock` -- watch-spawned children. Held when BOTH mtime is within
+    ///    `ttl` AND the PID is alive. The TTL guards against PID-reuse on
+    ///    un-released locks from crashed spawns.
+    ///
+    /// 2. `<repo>.session` -- interactive (human-started) sessions. Held when
+    ///    the PID is alive, regardless of mtime. No TTL is applied because a
+    ///    live interactive session may be idle for hours and must still gate.
+    ///    When the PID is dead the stale file is deleted opportunistically.
+    ///
+    /// The `.lock` holder is preferred when both sources report a live pid.
+    /// The existing `.lock` mtime-TTL semantics are unchanged.
     pub fn active_pid(&self, repo: &str) -> Option<u32> {
-        let path = self.lock_path(repo);
-        let meta = std::fs::metadata(&path).ok()?;
-        let mtime = meta.modified().ok()?;
-        let age = mtime.elapsed().unwrap_or(Duration::ZERO);
-        if age > self.ttl {
-            return None;
-        }
-        let contents = std::fs::read_to_string(&path).ok()?;
-        let pid = contents.trim().parse::<u32>().ok()?;
-        if process_alive(pid) { Some(pid) } else { None }
+        // -- .lock path (watch-spawned; TTL-gated) ----------------------------
+        let lock_pid: Option<u32> = (|| {
+            let path = self.lock_path(repo);
+            let meta = std::fs::metadata(&path).ok()?;
+            let mtime = meta.modified().ok()?;
+            let age = mtime.elapsed().unwrap_or(Duration::ZERO);
+            if age > self.ttl {
+                return None;
+            }
+            let contents = std::fs::read_to_string(&path).ok()?;
+            let pid = contents.trim().parse::<u32>().ok()?;
+            if process_alive(pid) { Some(pid) } else { None }
+        })();
+
+        // -- .session path (interactive; PID-liveness only) -------------------
+        let session_pid: Option<u32> = (|| {
+            let path = self.session_path(repo);
+            let contents = std::fs::read_to_string(&path).ok()?;
+            let pid = contents.trim().parse::<u32>().ok()?;
+            if process_alive(pid) {
+                Some(pid)
+            } else {
+                // Opportunistically clean up the stale file so it does not
+                // accumulate after the interactive session exits.
+                let _ = std::fs::remove_file(&path);
+                None
+            }
+        })();
+
+        // Prefer .lock if both are held; fall back to .session.
+        lock_pid.or(session_pid)
     }
 
     /// Write or overwrite the lockfile for `repo` with `pid`. Creates the
@@ -611,6 +659,36 @@ impl SessionLockTracker {
         std::fs::create_dir_all(&self.lock_dir)?;
         std::fs::write(self.lock_path(repo), pid.to_string())?;
         Ok(())
+    }
+
+    /// Write or overwrite the interactive-session lock for `repo` with `pid`.
+    ///
+    /// Called from the `legion watch session-start` subcommand, which the
+    /// SessionStart hook invokes with `$PPID` (the Claude session process).
+    /// Unlike `record_spawn`, there is no TTL -- `active_pid` checks the
+    /// written PID for liveness directly, so the lock is released only when
+    /// the process exits (or when `release_interactive` is called explicitly).
+    pub fn record_interactive(&self, repo: &str, pid: u32) -> Result<()> {
+        std::fs::create_dir_all(&self.lock_dir)?;
+        std::fs::write(self.session_path(repo), pid.to_string())?;
+        Ok(())
+    }
+
+    /// Delete the interactive-session lock for `repo`.
+    ///
+    /// Idempotent: a missing file is not an error. Removes only the
+    /// `.session` file; the `.lock` file (watch-spawned) is untouched.
+    ///
+    /// Available for explicit cleanup; the passive path is `active_pid`
+    /// deleting stale files opportunistically when it reads a dead PID.
+    #[allow(dead_code)] // public API completion -- no production call site yet
+    pub fn release_interactive(&self, repo: &str) -> Result<()> {
+        let path = self.session_path(repo);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(LegionError::Io(e)),
+        }
     }
 
     /// Delete the lockfile for `repo`, freeing the per-repo wake gate so
@@ -2575,6 +2653,132 @@ workdir = "/tmp"
             result.is_ok(),
             "release of a missing lockfile must return Ok, got {:?}",
             result
+        );
+    }
+
+    // -- record_interactive / release_interactive / active_pid (.session) ----
+
+    /// A .session file written with the test process's (live) PID makes
+    /// active_pid return Some, even with no .lock file present.
+    #[cfg(unix)]
+    #[test]
+    fn interactive_lock_active_for_live_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        locks
+            .record_interactive("myrepo", std::process::id())
+            .expect("record_interactive");
+        let held = locks.active_pid("myrepo");
+        assert!(
+            held.is_some(),
+            "a .session with a live pid must make active_pid return Some"
+        );
+        assert_eq!(
+            held,
+            Some(std::process::id()),
+            "active_pid must return the pid from the .session file"
+        );
+    }
+
+    /// A .session file with a dead PID returns None.
+    #[test]
+    fn interactive_lock_inactive_for_dead_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        locks
+            .record_interactive("myrepo", dead_pid())
+            .expect("record_interactive");
+        assert!(
+            locks.active_pid("myrepo").is_none(),
+            "a .session with a dead pid must return None"
+        );
+    }
+
+    /// A .session with a live PID gates even when mtime is not fresh (no TTL
+    /// applied). This is the key property: an idle interactive session must
+    /// still hold the gate regardless of how old the file is.
+    /// We cannot easily age the mtime in a test, so we assert that a freshly
+    /// written .session with a live pid -- and no .lock file present -- gates.
+    /// The absence of a TTL check in active_pid for the .session path is the
+    /// structural guarantee; this test confirms the live-pid gate works.
+    #[cfg(unix)]
+    #[test]
+    fn interactive_lock_gates_without_lock_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // TTL=1s so any .lock would expire quickly; .session must still hold.
+        let locks = SessionLockTracker::new(dir.path(), 1);
+        locks
+            .record_interactive("myrepo", std::process::id())
+            .expect("record_interactive");
+        // No .lock file written; gate must still be held via .session alone.
+        assert!(
+            locks.active_pid("myrepo").is_some(),
+            "live .session with no .lock must still gate (no TTL on .session)"
+        );
+    }
+
+    /// release_interactive removes only the .session file; the .lock is untouched.
+    #[cfg(unix)]
+    #[test]
+    fn interactive_lock_release_removes_only_session_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        // Write both a .lock and a .session for the same repo.
+        locks
+            .record_spawn("myrepo", std::process::id())
+            .expect("record_spawn");
+        locks
+            .record_interactive("myrepo", std::process::id())
+            .expect("record_interactive");
+        assert!(
+            locks.active_pid("myrepo").is_some(),
+            "precondition: both locks active"
+        );
+
+        // release_interactive only.
+        locks
+            .release_interactive("myrepo")
+            .expect("release_interactive");
+
+        // The .lock must still hold the gate.
+        assert!(
+            locks.active_pid("myrepo").is_some(),
+            ".lock must still gate after release_interactive"
+        );
+
+        // The .session file must be gone.
+        assert!(
+            !locks.session_path("myrepo").exists(),
+            ".session file must be deleted by release_interactive"
+        );
+    }
+
+    /// release_interactive on a missing .session file is idempotent.
+    #[test]
+    fn interactive_lock_release_of_missing_session_is_ok() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        let result = locks.release_interactive("nonexistent-repo");
+        assert!(
+            result.is_ok(),
+            "release_interactive on missing .session must return Ok, got {:?}",
+            result
+        );
+    }
+
+    /// Coexistence: a live .lock and no .session still gates (existing behavior
+    /// preserved by the refactored active_pid).
+    #[cfg(unix)]
+    #[test]
+    fn lock_file_alone_still_gates_after_active_pid_refactor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        locks
+            .record_spawn("myrepo", std::process::id())
+            .expect("record_spawn");
+        assert!(
+            locks.active_pid("myrepo").is_some(),
+            "a live .lock with no .session must still gate (existing semantics preserved)"
         );
     }
 
