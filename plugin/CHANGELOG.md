@@ -1,5 +1,11 @@
 # Legion Changelog
 
+## Unreleased
+
+### New
+
+- **legion-explore agent -- sym/recall-first exploration** (#604): a plugin-shipped read-only exploration agent (`plugin/agents/legion-explore.md`) that replaces the grep-based harness Explore on legion-equipped repos. Routes by question shape across four lanes: doctrine questions to recall/consult, symbol questions to `legion sym`, targeted Reads only at sym-cited spans, and bounded text search as a declared last resort logged via `legion telemetry record-bypass`. Escalation is deterministic (index-staleness flagging, sym-miss retry rules, enumerate-don't-guess on multi-match); every finding cites file:line or a reflection id. Tool surface is Bash + Read only -- no Grep/Glob. Confidence scoring against the uncertainty engine is deliberately deferred until the spec substrate (#512) lands.
+
 ## 0.17.1
 
 Two watch-spawn safety fixes surfaced by a live broadcast-wake incident on 0.17.0. A single `@all` wake-worthy signal woke the entire farm at once, and recovering from it exposed a daemon restart that lied about success when its port was held. Patch release: behavior fixes within existing surfaces, no schema or wire-format change.
