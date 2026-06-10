@@ -83,6 +83,16 @@ pub enum LegionError {
     #[error("watch already running (pid {0})")]
     WatchAlreadyRunning(u32),
 
+    #[error(
+        "signal verb '{verb}' requires the following detail field(s) that are missing: {missing}. \
+         Pass them via --details '{missing_example}:value'"
+    )]
+    SignalMissingRequiredFields {
+        verb: String,
+        missing: String,
+        missing_example: String,
+    },
+
     #[error("TOML parse error: {0}")]
     Toml(#[from] toml::de::Error),
 
