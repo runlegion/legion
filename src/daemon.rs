@@ -69,6 +69,31 @@ pub fn spawn_detached(data_dir: &Path, port: u16) -> Result<()> {
         }
     }
 
+    // Port preflight (#599). The pidfile check above already returned for a
+    // live daemon we own, so if the port is bound now it is held by a FOREIGN
+    // process: a stray `legion serve` (which shares this port and writes the
+    // same daemon.pid), or an orphaned daemon the pidfile lost track of.
+    // Spawning anyway forks a child that dies on bind ("Address already in
+    // use") while we falsely report "daemon started (pid N)" and leave the
+    // pidfile pointing at a corpse. Fail loud and name the holder instead.
+    if !port_available(port) {
+        let holders = port_listener_pids(port);
+        let (who, hint) = match holders.first() {
+            Some(pid) => (
+                format!("pid {pid}"),
+                format!("stop it first (e.g. `kill {pid}`), then retry"),
+            ),
+            None => (
+                "another process".to_string(),
+                "stop it first, then retry".to_string(),
+            ),
+        };
+        return Err(LegionError::DaemonPortInUse(format!(
+            "port {port} is already held by {who}; not starting a second daemon. \
+             If this is a stray `legion serve` or an orphaned daemon, {hint}."
+        )));
+    }
+
     // Resolve the current binary path so the child runs the same binary.
     let binary = std::env::current_exe().map_err(LegionError::Io)?;
 
@@ -134,6 +159,41 @@ fn is_process_alive(pid: u32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+/// Whether `port` can be bound right now (i.e. it is free).
+///
+/// Binds and immediately drops a listener on `0.0.0.0:port`. A momentary
+/// TOCTOU gap exists between this probe and the daemon child's own bind, but it
+/// converts the common "another process already owns the port" case from a
+/// silent fork-then-die into a clear up-front error. The same race already
+/// existed before this check, so it adds safety without removing any.
+fn port_available(port: u16) -> bool {
+    std::net::TcpListener::bind(("0.0.0.0", port)).is_ok()
+}
+
+/// Best-effort: the PID(s) listening on `port`, for naming the holder in the
+/// port-conflict error. Unix-only via `lsof`; returns empty on other platforms
+/// or when `lsof` is unavailable -- the caller degrades to a generic message.
+fn port_listener_pids(port: u16) -> Vec<u32> {
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("lsof")
+            .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+            .output();
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|l| l.trim().parse::<u32>().ok())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = port;
+        Vec::new()
     }
 }
 
@@ -544,6 +604,36 @@ mod tests {
             "stale (dead) pid -> nothing stopped"
         );
         assert!(!pid_path.exists(), "stale pidfile should be removed");
+    }
+
+    #[test]
+    fn port_available_false_for_bound_port() {
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let port = listener.local_addr().expect("addr").port();
+        assert!(
+            !port_available(port),
+            "a held port must read as unavailable"
+        );
+    }
+
+    #[test]
+    fn spawn_detached_refuses_when_port_held() {
+        // Hold the port the way a stray `legion serve` or orphaned daemon would.
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let port = listener.local_addr().expect("addr").port();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let err = spawn_detached(dir.path(), port).expect_err("must refuse a held port");
+        assert!(
+            matches!(err, LegionError::DaemonPortInUse(_)),
+            "expected DaemonPortInUse, got {err:?}"
+        );
+        // The preflight returns before forking, so no doomed child is spawned
+        // and no pidfile is left pointing at a corpse.
+        assert!(
+            !dir.path().join(DAEMON_PID_FILE).exists(),
+            "no pidfile should be written when the port is held"
+        );
     }
 
     #[tokio::test]

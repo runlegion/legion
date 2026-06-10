@@ -4273,13 +4273,26 @@ fn daemon_auto_spawn_clears_stale_pid() {
     let data_dir = tempfile::tempdir().unwrap();
     let pid_file = data_dir.path().join("daemon.pid");
 
+    // Use a free ephemeral port rather than the default 3131. The #599 port
+    // preflight now refuses to spawn onto an occupied port, and a dev box
+    // commonly already runs a daemon on 3131 -- binding port 0 and dropping the
+    // listener hands us a port that is free at this instant so the spawn path
+    // (and the stale-pid clearing it exercises) is what gets tested, not the
+    // collision guard.
+    // Bind 0.0.0.0:0 to mirror the production `port_available` probe exactly.
+    let port = std::net::TcpListener::bind(("0.0.0.0", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+
     // Write a stale PID: use 2^31 - 1, the maximum valid POSIX PID, which is
     // almost never a live process on any real system.
     let stale_pid: u32 = (i32::MAX) as u32;
     std::fs::write(&pid_file, stale_pid.to_string()).unwrap();
 
     let output = legion_cmd(data_dir.path())
-        .args(["daemon-spawn"])
+        .args(["daemon-spawn", "--port", &port.to_string()])
         .output()
         .unwrap();
 

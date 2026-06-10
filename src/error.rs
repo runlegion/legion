@@ -30,6 +30,9 @@ pub enum LegionError {
     #[error("daemon did not stop: {0}")]
     DaemonStopFailed(String),
 
+    #[error("daemon port in use: {0}")]
+    DaemonPortInUse(String),
+
     #[error("embedding error: {0}")]
     Embedding(String),
 
