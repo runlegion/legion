@@ -26,13 +26,15 @@ without guessing.
 
 ## Procedure
 
-1. **Load the contract.** `legion pr view` for the body and branch; `legion issue view` for
-   the linked issue's acceptance criteria. No linked issue is itself a finding (the workflow
-   requires one).
+1. **Load the contract.** `legion pr view --repo <repo> --number <n>` for the body and
+   branch; `legion issue view --repo <repo> --number <n>` for the linked issue's acceptance
+   criteria. No linked issue is itself a finding (the workflow requires one).
 
-2. **Fan out review dimensions.** Spawn parallel `legion-review` agents via the Task tool
-   (subagent_type: `legion-review`), one per dimension, each given the PR number, branch,
-   issue criteria, and its single focus:
+2. **Fan out review dimensions.** Spawn parallel review agents via the Task tool using
+   subagent_type `legion:legion-review` (plugin agents register namespaced; the bare
+   `legion-review` form exists only if a repo also carries a local .claude/agents copy --
+   check the available-agents list if the namespaced form does not resolve), one per
+   dimension, each given the PR number, branch, issue criteria, and its single focus:
    - `spec`: acceptance-criteria-vs-diff, scope creep, claims the diff does not implement
    - `correctness`: error handling, silent failures, edge cases, concurrency
    - `quality`: repo CLAUDE.md invariants, idioms, test coverage and quality
@@ -42,7 +44,7 @@ without guessing.
    dimensions is acceptable -- say so in the report.
 
 3. **Adversarial verification.** For every HIGH and MED finding the dimensions return, spawn
-   one refuter agent (subagent_type: `legion-review`) prompted to REFUTE the finding: read
+   one refuter agent (subagent_type `legion:legion-review`) prompted to REFUTE the finding: read
    the cited code and argue it is wrong, mitigated elsewhere, or out of the PR's scope.
    Findings the refuter kills are dropped; findings that survive are reported. Record the
    refuted count -- a high kill rate means the dimension prompts are over-claiming.
