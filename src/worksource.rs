@@ -780,24 +780,6 @@ pub fn close_pr(
     Ok(())
 }
 
-/// Detect the external repo identifier from a workdir.
-#[allow(dead_code)]
-pub fn detect_repo(plugin_name: &str, workdir: &str) -> Result<Option<String>> {
-    let plugin_path = match find_plugin(plugin_name) {
-        Some(p) => p,
-        None => return Ok(None),
-    };
-
-    let output = call_plugin(&plugin_path, &["detect"], &[("LEGION_WS_WORKDIR", workdir)])?;
-
-    let trimmed = output.trim().to_string();
-    if trimmed.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(trimmed))
-    }
-}
-
 /// Sync issues from a work source into the kanban board.
 ///
 /// Creates cards for issues that don't already have a linked card.

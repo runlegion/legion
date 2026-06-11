@@ -322,11 +322,6 @@ pub fn get_ready_cards(db: &Database, repo: &str) -> Result<Vec<Card>> {
     db.get_pending_cards_for_repo(repo)
 }
 
-/// Count ready cards for a repo (used by bullpen --count).
-pub fn count_ready_cards(db: &Database, repo: &str) -> Result<u64> {
-    db.count_pending_cards_for_repo(repo)
-}
-
 /// Get per-agent workload summary.
 pub fn agent_workloads(db: &Database) -> Result<Vec<AgentWorkload>> {
     db.get_agent_workloads()
@@ -685,33 +680,6 @@ fn resolve_labels(
     } else {
         Some(set.join(","))
     }
-}
-
-/// Format ready cards for surface output.
-pub fn format_ready_for_surface(cards: &[Card]) -> String {
-    let mut output = String::new();
-    for c in cards {
-        let prio = priority_tag(&c.priority);
-        let context_part = c
-            .context
-            .as_deref()
-            .map(|ctx| {
-                let truncated: String = ctx.chars().take(60).collect();
-                let ellipsis = if ctx.chars().count() > 60 { "..." } else { "" };
-                format!(" (context: {}{})", truncated, ellipsis)
-            })
-            .unwrap_or_default();
-        let source_part = c
-            .source_url
-            .as_deref()
-            .map(|u| format!(" <{}>", u))
-            .unwrap_or_default();
-        output.push_str(&format!(
-            "- Card from {}: \"{}\"{}{}{}\n",
-            c.from_repo, c.text, prio, context_part, source_part
-        ));
-    }
-    output
 }
 
 /// Format a single card for the `legion work` output.
@@ -1158,21 +1126,19 @@ mod tests {
     }
 
     #[test]
-    fn count_and_get_ready_are_consistent() {
+    fn get_ready_cards_returns_assigned_pending_only() {
         let (db, _index, _dir) = test_storage();
 
+        // Born-Backlog: an unassigned card is not ready work.
         create_card(
             &db, "kelex", "legion", "task one", None, "med", None, None, None, None, None,
         )
         .expect("create");
-        create_card(
-            &db, "kelex", "legion", "task two", None, "high", None, None, None, None, None,
-        )
-        .expect("create");
+        let assigned = create_and_assign(&db, "kelex", "legion", "task two", "high");
 
-        let count = count_ready_cards(&db, "legion").expect("count");
         let cards = get_ready_cards(&db, "legion").expect("get");
-        assert_eq!(count, cards.len() as u64);
+        assert_eq!(cards.len(), 1, "only the assigned (Pending) card is ready");
+        assert_eq!(cards[0].id, assigned);
     }
 
     #[test]

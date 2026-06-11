@@ -409,17 +409,6 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
-    /// Count pending cards assigned to a repo.
-    pub fn count_pending_cards_for_repo(&self, repo: &str) -> Result<u64> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT COUNT(*) FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL")?;
-        let count: u64 = stmt
-            .query_row([repo], |row| row.get(0))
-            .map_err(LegionError::Database)?;
-        Ok(count)
-    }
-
     /// Get pending cards assigned to a repo.
     pub fn get_pending_cards_for_repo(&self, repo: &str) -> Result<Vec<crate::kanban::Card>> {
         let sql = format!(
