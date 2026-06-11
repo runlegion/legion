@@ -157,9 +157,9 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
                 kanban::Action::NeedInput,
                 Some("verify: unprovable acceptance criteria, needs human adjudication"),
             ) {
-                Ok(_) => eprintln!(
-                    "\nCard routed to NeedsInput. ->Done stays blocked until resolved."
-                ),
+                Ok(_) => {
+                    eprintln!("\nCard routed to NeedsInput. ->Done stays blocked until resolved.")
+                }
                 Err(e) => eprintln!(
                     "\n->Done stays blocked. (Could not auto-move card to NeedsInput: \
                      {e}; move it manually.)"

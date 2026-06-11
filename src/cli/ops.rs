@@ -678,7 +678,12 @@ pub(crate) fn handle_cluster(action: ClusterAction) -> error::Result<()> {
     Ok(())
 }
 
-pub(crate) fn handle_audit(repo: Option<String>, action: Option<String>, limit: usize, json: bool) -> error::Result<()> {
+pub(crate) fn handle_audit(
+    repo: Option<String>,
+    action: Option<String>,
+    limit: usize,
+    json: bool,
+) -> error::Result<()> {
     let database = open_db()?;
     let entries = database.query_audit_log(repo.as_deref(), action.as_deref(), limit)?;
 
@@ -731,17 +736,14 @@ pub(crate) fn handle_mesh(action: MeshAction) -> error::Result<()> {
                     .collect();
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&rows)
-                        .expect("ranked rows serialize infallibly")
+                    serde_json::to_string_pretty(&rows).expect("ranked rows serialize infallibly")
                 );
             } else if ranked.is_empty() {
                 eprintln!(
                     "[legion] no samples yet -- run `legion statusline` on at least one node first"
                 );
             } else {
-                println!(
-                    "host                 score    5h%    7d%   last_turn       age  status"
-                );
+                println!("host                 score    5h%    7d%   last_turn       age  status");
                 for h in &ranked {
                     let age = h.age.map(format_age).unwrap_or_else(|| "-".into());
                     let status = if h.stale { "stale" } else { "fresh" };
@@ -797,7 +799,13 @@ pub(crate) fn handle_mesh(action: MeshAction) -> error::Result<()> {
     Ok(())
 }
 
-pub(crate) fn handle_usage(session: Option<String>, since: Option<String>, by_session: bool, by_repo: bool, json: bool) -> error::Result<()> {
+pub(crate) fn handle_usage(
+    session: Option<String>,
+    since: Option<String>,
+    by_session: bool,
+    by_repo: bool,
+    json: bool,
+) -> error::Result<()> {
     // LEGION_HOME overrides dirs::home_dir() for test isolation.
     // dirs 5.x on Windows uses SHGetKnownFolderPath and ignores HOME/USERPROFILE
     // env vars, so tests need an explicit override to point at a temp dir.
@@ -825,8 +833,7 @@ pub(crate) fn handle_usage(session: Option<String>, since: Option<String>, by_se
         None
     };
 
-    let sessions =
-        usage::discover_sessions(&home, since_str.as_deref(), session.as_deref());
+    let sessions = usage::discover_sessions(&home, since_str.as_deref(), session.as_deref());
 
     if session.is_some() && sessions.is_empty() {
         eprintln!(
@@ -846,8 +853,7 @@ pub(crate) fn handle_usage(session: Option<String>, since: Option<String>, by_se
         } else {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&sessions)
-                    .map_err(error::LegionError::Json)?
+                serde_json::to_string_pretty(&sessions).map_err(error::LegionError::Json)?
             );
         }
     } else if by_repo {
@@ -862,7 +868,11 @@ pub(crate) fn handle_usage(session: Option<String>, since: Option<String>, by_se
     Ok(())
 }
 
-pub(crate) fn handle_health(history: Option<String>, all_hosts: bool, json: bool) -> error::Result<()> {
+pub(crate) fn handle_health(
+    history: Option<String>,
+    all_hosts: bool,
+    json: bool,
+) -> error::Result<()> {
     let database = open_db()?;
 
     if let Some(duration_str) = history {

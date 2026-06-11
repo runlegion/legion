@@ -283,12 +283,8 @@ pub(crate) fn handle(action: Option<WatchAction>) -> error::Result<()> {
                         })?
                 }
             };
-            let added = watch::add_repo_to_config(
-                &config_path,
-                &effective_name,
-                &path,
-                agent.as_deref(),
-            )?;
+            let added =
+                watch::add_repo_to_config(&config_path, &effective_name, &path, agent.as_deref())?;
             if added {
                 let agent_note = agent
                     .as_deref()
@@ -381,10 +377,8 @@ pub(crate) fn handle(action: Option<WatchAction>) -> error::Result<()> {
             // TTL only affects the `.lock` gate; the `.session` file is
             // PID-liveness only. Using the default avoids reading watch.toml
             // on every SessionStart hook call (matches record_session_end).
-            let locks = watch::SessionLockTracker::new(
-                &base,
-                watch::default_session_lock_ttl_secs(),
-            );
+            let locks =
+                watch::SessionLockTracker::new(&base, watch::default_session_lock_ttl_secs());
             if let Err(e) = locks.record_interactive(&repo, effective_pid) {
                 eprintln!(
                     "[legion watch] session-start: failed to write interactive lock for {}: {}",

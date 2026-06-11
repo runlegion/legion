@@ -5,7 +5,10 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::open_db;
-use crate::{daemon, error, init, kanban, mcp, now, recall, serve, stats, status, statusline, surface, task, watch, worksource};
+use crate::{
+    daemon, error, init, kanban, mcp, now, recall, serve, stats, status, statusline, surface, task,
+    watch, worksource,
+};
 
 #[derive(Subcommand)]
 pub(crate) enum TaskAction {
@@ -311,14 +314,8 @@ pub(crate) fn handle_task(action: TaskAction) -> error::Result<()> {
             context,
             priority,
         } => {
-            let id = task::create_task(
-                &database,
-                &from,
-                &to,
-                &text,
-                context.as_deref(),
-                &priority,
-            )?;
+            let id =
+                task::create_task(&database, &from, &to, &text, context.as_deref(), &priority)?;
             println!("{id}");
             info!("[legion] task created: {} -> {}", from, to);
         }

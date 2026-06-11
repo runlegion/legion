@@ -443,11 +443,7 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                     match worksource::job_id_from_link(&c.link) {
                         Some(job_id) => {
                             println!("\n===== {} ({}) =====", c.name, job_id);
-                            match worksource::fetch_check_log(
-                                &plugin_name,
-                                &source_repo,
-                                job_id,
-                            ) {
+                            match worksource::fetch_check_log(&plugin_name, &source_repo, job_id) {
                                 Ok(log) => print!("{log}"),
                                 Err(e) => {
                                     println!("(log unavailable: {e})");

@@ -695,8 +695,7 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
             }
         }
         KanbanAction::Accept { id } => {
-            let card =
-                kanban::transition_card(&database, &id, kanban::Action::Accept, None)?;
+            let card = kanban::transition_card(&database, &id, kanban::Action::Accept, None)?;
             println!("{id}");
             // #525: accepting a card sets the board-derived goal -- echo
             // the just-accepted card's acceptance criteria as the
@@ -706,12 +705,7 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
             }
         }
         KanbanAction::Block { id, reason } => {
-            kanban::transition_card(
-                &database,
-                &id,
-                kanban::Action::Block,
-                reason.as_deref(),
-            )?;
+            kanban::transition_card(&database, &id, kanban::Action::Block, reason.as_deref())?;
             println!("{id}");
         }
         KanbanAction::Unblock { id } => {
@@ -723,12 +717,7 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
             println!("{id}");
         }
         KanbanAction::NeedInput { id, reason } => {
-            kanban::transition_card(
-                &database,
-                &id,
-                kanban::Action::NeedInput,
-                reason.as_deref(),
-            )?;
+            kanban::transition_card(&database, &id, kanban::Action::NeedInput, reason.as_deref())?;
             println!("{id}");
         }
         KanbanAction::Resume { id } => {
@@ -740,16 +729,10 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
             reason,
             no_propagate,
         } => {
-            kanban::transition_card(
-                &database,
-                &id,
-                kanban::Action::Cancel,
-                reason.as_deref(),
-            )?;
+            kanban::transition_card(&database, &id, kanban::Action::Cancel, reason.as_deref())?;
             println!("{id}");
             if !no_propagate {
-                match propagate_card_close_to_worksource(&database, &id, reason.as_deref())
-                {
+                match propagate_card_close_to_worksource(&database, &id, reason.as_deref()) {
                     PropagateOutcome::Propagated | PropagateOutcome::Skipped => {}
                     PropagateOutcome::Failed => {
                         // Emit a visible warning line on stdout so
@@ -776,16 +759,10 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
             reason,
             no_propagate,
         } => {
-            kanban::transition_card(
-                &database,
-                &id,
-                kanban::Action::Reopen,
-                reason.as_deref(),
-            )?;
+            kanban::transition_card(&database, &id, kanban::Action::Reopen, reason.as_deref())?;
             println!("{id}");
             if !no_propagate {
-                match propagate_card_reopen_to_worksource(&database, &id, reason.as_deref())
-                {
+                match propagate_card_reopen_to_worksource(&database, &id, reason.as_deref()) {
                     PropagateOutcome::Propagated | PropagateOutcome::Skipped => {}
                     PropagateOutcome::Failed => {
                         // Same stdout-visibility pattern as
@@ -876,8 +853,7 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
                 let Some(source) = card.source_type.as_deref() else {
                     continue;
                 };
-                let Some((_, source_repo, _)) = worksource::resolve_config(&card.to_repo)
-                else {
+                let Some((_, source_repo, _)) = worksource::resolve_config(&card.to_repo) else {
                     eprintln!(
                         "[legion] reconcile: skipping card {} -- to_repo '{}' has no work source configured",
                         card.id, card.to_repo

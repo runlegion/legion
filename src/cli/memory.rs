@@ -94,7 +94,10 @@ pub(crate) fn try_load_embed_model() -> Option<embed::EmbedModel> {
 }
 
 /// Compute and store embeddings for all reflections that are missing them.
-pub(crate) fn backfill_embeddings(db: &db::Database, model: &embed::EmbedModel) -> error::Result<usize> {
+pub(crate) fn backfill_embeddings(
+    db: &db::Database,
+    model: &embed::EmbedModel,
+) -> error::Result<usize> {
     let missing = db.get_ids_without_embeddings()?;
     let mut count: usize = 0;
 
@@ -172,7 +175,17 @@ fn run_dedupe_check(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_reflect(repo: Vec<String>, text: Option<String>, transcript: Option<PathBuf>, domain: Option<String>, whoami: bool, tags: Option<String>, follows: Option<String>, force: bool, dedupe_mode: DedupeMode) -> error::Result<()> {
+pub(crate) fn handle_reflect(
+    repo: Vec<String>,
+    text: Option<String>,
+    transcript: Option<PathBuf>,
+    domain: Option<String>,
+    whoami: bool,
+    tags: Option<String>,
+    follows: Option<String>,
+    force: bool,
+    dedupe_mode: DedupeMode,
+) -> error::Result<()> {
     let domain = if whoami {
         Some("identity".to_owned())
     } else {
@@ -309,7 +322,18 @@ pub(crate) fn handle_forget(id: String, repo: Option<String>) -> error::Result<(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_recall(repo: String, context: String, limit: usize, latest: bool, preview: Option<usize>, cosine_only: bool, min_score: Option<f32>, domain: Option<String>, archives: bool, include_archives: bool) -> error::Result<()> {
+pub(crate) fn handle_recall(
+    repo: String,
+    context: String,
+    limit: usize,
+    latest: bool,
+    preview: Option<usize>,
+    cosine_only: bool,
+    min_score: Option<f32>,
+    domain: Option<String>,
+    archives: bool,
+    include_archives: bool,
+) -> error::Result<()> {
     let database = open_db()?;
 
     // Resolve archive mode (#457). Mutually-exclusive flags
@@ -339,21 +363,17 @@ pub(crate) fn handle_recall(repo: String, context: String, limit: usize, latest:
     } else if cosine_only {
         // --cosine-only requires the embed model; error if unavailable.
         let model = embed::EmbedModel::load().map_err(|e| {
-            error::LegionError::Embedding(format!(
-                "--cosine-only requires embedding model: {e}"
-            ))
+            error::LegionError::Embedding(format!("--cosine-only requires embedding model: {e}"))
         })?;
         recall::recall_cosine_only(&database, &model, &repo, &context, limit, min_score)?
     } else {
         let index = search::SearchIndex::open(&data_dir()?.join("index"))?;
         // Try hybrid (BM25 + cosine) recall, fall back to BM25-only
         match try_load_embed_model() {
-            Some(model) => recall::recall_in_mode(
-                &database, &index, &model, &repo, &context, limit, mode,
-            )?,
-            None => recall::recall_bm25_in_mode(
-                &database, &index, &repo, &context, limit, mode,
-            )?,
+            Some(model) => {
+                recall::recall_in_mode(&database, &index, &model, &repo, &context, limit, mode)?
+            }
+            None => recall::recall_bm25_in_mode(&database, &index, &repo, &context, limit, mode)?,
         }
     };
     // Apply min-score filter on hybrid/latest paths (cosine-only applies it inline).
@@ -367,13 +387,18 @@ pub(crate) fn handle_recall(repo: String, context: String, limit: usize, latest:
     Ok(())
 }
 
-pub(crate) fn handle_similar(id: String, limit: usize, cross_repo: bool, min_score: Option<f32>, preview: Option<usize>, json: bool) -> error::Result<()> {
+pub(crate) fn handle_similar(
+    id: String,
+    limit: usize,
+    cross_repo: bool,
+    min_score: Option<f32>,
+    preview: Option<usize>,
+    json: bool,
+) -> error::Result<()> {
     let database = open_db()?;
     // Validate the embed model is available; similar needs embeddings to work.
     embed::EmbedModel::load().map_err(|e| {
-        error::LegionError::Embedding(format!(
-            "legion similar requires embedding model: {e}"
-        ))
+        error::LegionError::Embedding(format!("legion similar requires embedding model: {e}"))
     })?;
     let result = recall::find_similar_by_id(&database, &id, limit, cross_repo, min_score)?;
     if json {
@@ -387,7 +412,12 @@ pub(crate) fn handle_similar(id: String, limit: usize, cross_repo: bool, min_sco
     Ok(())
 }
 
-pub(crate) fn handle_consult(context: Option<String>, symbol: Option<String>, limit: usize, json: bool) -> error::Result<()> {
+pub(crate) fn handle_consult(
+    context: Option<String>,
+    symbol: Option<String>,
+    limit: usize,
+    json: bool,
+) -> error::Result<()> {
     let database = open_db()?;
 
     match (context, symbol) {

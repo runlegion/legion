@@ -84,7 +84,10 @@ pub(crate) fn git_head_commit_and_branch() -> Result<(String, String), error::Le
 /// `None`, from stdin. `flag` names the originating flag for the error
 /// message. Shared by the pr-write and verify gates, which both accept their
 /// payload as either a file or a stdin pipe.
-pub(crate) fn read_file_or_stdin(path: Option<&str>, flag: &str) -> Result<String, error::LegionError> {
+pub(crate) fn read_file_or_stdin(
+    path: Option<&str>,
+    flag: &str,
+) -> Result<String, error::LegionError> {
     match path {
         Some(p) => std::fs::read_to_string(p)
             .map_err(|e| error::LegionError::WorkSource(format!("failed to read {flag} {p}: {e}"))),

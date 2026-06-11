@@ -162,8 +162,7 @@ pub(crate) fn handle_sub_issue(action: SubIssueAction) -> error::Result<()> {
             json,
         } => {
             let (plugin, github_repo, _workdir) = worksource::require_worksource(&repo)?;
-            let issues =
-                worksource::list_sub_issues(&plugin, &github_repo, parent, Some(&state))?;
+            let issues = worksource::list_sub_issues(&plugin, &github_repo, parent, Some(&state))?;
             if json {
                 println!("{}", serde_json::to_string(&issues)?);
             } else if issues.is_empty() {

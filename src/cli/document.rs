@@ -227,9 +227,7 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
         }
         DocumentAction::Validate { schema, file } => {
             let doc = database.get_document(&schema)?.ok_or_else(|| {
-                error::LegionError::WorkSource(format!(
-                    "schema document '{schema}' not found"
-                ))
+                error::LegionError::WorkSource(format!("schema document '{schema}' not found"))
             })?;
             if doc.doc_type != "schema" {
                 return Err(error::LegionError::WorkSource(format!(
@@ -237,18 +235,16 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
                     doc.doc_type
                 )));
             }
-            let schema_value: serde_json::Value = serde_json::from_str(&doc.payload)
-                .map_err(|e| {
+            let schema_value: serde_json::Value =
+                serde_json::from_str(&doc.payload).map_err(|e| {
                     error::LegionError::WorkSource(format!(
                         "stored schema payload is not valid JSON: {e}"
                     ))
                 })?;
             let instance_text = read_json_arg(file)?;
-            let instance: serde_json::Value = serde_json::from_str(&instance_text)
-                .map_err(|e| {
-                    error::LegionError::WorkSource(format!(
-                        "instance is not valid JSON: {e}"
-                    ))
+            let instance: serde_json::Value =
+                serde_json::from_str(&instance_text).map_err(|e| {
+                    error::LegionError::WorkSource(format!("instance is not valid JSON: {e}"))
                 })?;
             let errors = documents::validate_instance(&schema_value, &instance);
             if errors.is_empty() {

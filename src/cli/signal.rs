@@ -4,11 +4,20 @@
 use std::path::PathBuf;
 
 use crate::cli::datadir::data_dir;
-use crate::cli::memory::{backfill_embeddings, run_compound_command_with_meta, try_load_embed_model};
+use crate::cli::memory::{
+    backfill_embeddings, run_compound_command_with_meta, try_load_embed_model,
+};
 use crate::cli::util::{open_db, open_db_and_index};
 use crate::{board, db, error, reflect, signal, task, verbs, watch};
 
-pub(crate) fn handle_post(repo: Vec<String>, text: Option<String>, transcript: Option<PathBuf>, domain: Option<String>, tags: Option<String>, follows: Option<String>) -> error::Result<()> {
+pub(crate) fn handle_post(
+    repo: Vec<String>,
+    text: Option<String>,
+    transcript: Option<PathBuf>,
+    domain: Option<String>,
+    tags: Option<String>,
+    follows: Option<String>,
+) -> error::Result<()> {
     // Redirect @self posts to reflect -- they're private, not for the team
     let is_self_post = text.as_deref().is_some_and(|t| {
         let lower = t.trim_start().to_lowercase();
@@ -62,7 +71,17 @@ pub(crate) fn handle_post(repo: Vec<String>, text: Option<String>, transcript: O
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_signal(repo: Vec<String>, to: String, verb: String, status: Option<String>, note: Option<String>, details: Option<String>, follows: Option<String>, domain: Option<String>, tags: Option<String>) -> error::Result<()> {
+pub(crate) fn handle_signal(
+    repo: Vec<String>,
+    to: String,
+    verb: String,
+    status: Option<String>,
+    note: Option<String>,
+    details: Option<String>,
+    follows: Option<String>,
+    domain: Option<String>,
+    tags: Option<String>,
+) -> error::Result<()> {
     let (database, index) = open_db_and_index()?;
 
     let detail_pairs: Vec<(String, String)> = details
@@ -186,7 +205,16 @@ pub(crate) fn handle_pending_replies(repo: String) -> error::Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_bullpen(repo: Option<String>, count: bool, signals: bool, musings: bool, archive: bool, archived: bool, include_stale: bool, include_resolved: bool) -> error::Result<()> {
+pub(crate) fn handle_bullpen(
+    repo: Option<String>,
+    count: bool,
+    signals: bool,
+    musings: bool,
+    archive: bool,
+    archived: bool,
+    include_stale: bool,
+    include_resolved: bool,
+) -> error::Result<()> {
     let database = open_db()?;
 
     if archive {

@@ -308,7 +308,11 @@ struct ConsultSymbolHit {
 /// definitions, counts references per match. Output is sorted by repo
 /// then lang then file. Empty result exits 0 silently in human mode and
 /// emits `[]` in JSON mode -- a thin response is data, not failure.
-pub(crate) fn run_consult_symbol(database: &db::Database, name: &str, json: bool) -> error::Result<()> {
+pub(crate) fn run_consult_symbol(
+    database: &db::Database,
+    name: &str,
+    json: bool,
+) -> error::Result<()> {
     use std::io::Write;
     let indexes = database.list_scip_indexes_filtered(None, None)?;
 
@@ -835,7 +839,16 @@ fn no_index_found(repo: Option<&str>, lang: Option<&str>) {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_index(repo: Option<String>, file: Option<PathBuf>, status: bool, logs: bool, follow: bool, lines: usize, banner: bool, json: bool) -> error::Result<()> {
+pub(crate) fn handle_index(
+    repo: Option<String>,
+    file: Option<PathBuf>,
+    status: bool,
+    logs: bool,
+    follow: bool,
+    lines: usize,
+    banner: bool,
+    json: bool,
+) -> error::Result<()> {
     let base = data_dir()?;
 
     // --logs: print recent background-indexer log content and return.
@@ -963,9 +976,7 @@ pub(crate) fn handle_index(repo: Option<String>, file: Option<PathBuf>, status: 
         let bytes_len = index.blob.len();
         let hash_prefix = &index.content_hash[..16];
         database.upsert_scip_index(&index)?;
-        eprintln!(
-            "[legion] indexed {repo} ({lang}): {bytes_len} bytes, hash {hash_prefix}"
-        );
+        eprintln!("[legion] indexed {repo} ({lang}): {bytes_len} bytes, hash {hash_prefix}");
         indexed += 1;
     }
     if indexed == 0 {

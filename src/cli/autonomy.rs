@@ -171,11 +171,7 @@ pub(crate) fn handle(action: AutonomyAction) -> error::Result<()> {
                 })
                 .unwrap_or(None);
 
-            match autonomy::decide_burn_rate(
-                rate_sample.as_ref(),
-                operator,
-                burn_rate_threshold,
-            ) {
+            match autonomy::decide_burn_rate(rate_sample.as_ref(), operator, burn_rate_threshold) {
                 autonomy::BurnRateOutcome::OperatorBypass => {
                     // Operator bypass from burn-rate gate -- proceed directly
                     // to work-unit budget check, which also has operator bypass.
