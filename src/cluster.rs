@@ -4,6 +4,14 @@
 //! and synchronize reflections, cards, and schedules using delta packets.
 //! All traffic is encrypted with XChaCha20-Poly1305 using a pre-shared key.
 //!
+//! Trust model: the PSK is the entire boundary. Schedules sync across the
+//! cluster and the schedule runner executes their commands, so possession
+//! of the secret (or compromise of any one node) is command execution on
+//! every node. Share the key accordingly. Discovery announcements are
+//! unauthenticated by design (availability only -- delta payloads stay
+//! AEAD-sealed); an on-LAN spoofer can misdirect traffic but not read or
+//! forge it.
+//!
 //! Configuration is stored in `<data_dir>/cluster.toml`:
 //! ```toml
 //! enabled = true

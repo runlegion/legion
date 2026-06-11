@@ -2286,26 +2286,9 @@ pub fn run(data_dir: &Path) -> Result<()> {
             .join(", ")
     );
 
-    // Check cluster sync config and spawn sync actor if enabled.
-    // This stays in watch::run (not in WatchLoop) because the daemon does not
-    // use sync_actor -- it has its own wiring.
-    let _sync_handle = match crate::cluster::ClusterConfig::load(data_dir) {
-        Ok(cc) if cc.enabled && cc.secret.is_some() => {
-            eprintln!(
-                "[legion watch] cluster sync enabled on port {} (instance: {})",
-                cc.port,
-                cc.resolve_instance_id()
-            );
-            match crate::sync_actor::SyncHandle::spawn(data_dir, cc) {
-                Ok(handle) => Some(handle),
-                Err(e) => {
-                    eprintln!("[legion watch] failed to start sync actor: {}", e);
-                    None
-                }
-            }
-        }
-        _ => None,
-    };
+    // Spawn the cluster sync actor when enabled. Shared gate with the
+    // daemon's watch task (#536: the daemon previously never spawned it).
+    let _sync_handle = crate::sync_actor::spawn_sync_if_enabled(data_dir, "[legion watch]");
 
     // Move config and db into the shared loop state via the same constructor
     // the daemon uses, so the field wiring lives in exactly one place.
