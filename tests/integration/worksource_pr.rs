@@ -794,19 +794,12 @@ fn issue_close_with_configured_worksource_writes_audit_row() {
     );
 }
 
-/// #610 behavior fix: `legion done --id` with a linked external issue now
-/// folds through `propagate_card_close_to_worksource`, so the close writes
-/// the same audit row `legion kanban cancel` writes. The inline copy this
-/// replaced closed the issue with no audit trail.
+/// Create a card on repo `stub` linked to external issue #42 and promote
+/// it to a Done-eligible state (Backlog -> assign -> accept). Shared by
+/// the Done propagation tests.
 #[cfg(unix)]
-#[test]
-fn done_with_linked_issue_propagates_close_and_writes_audit_row() {
-    let data_dir = tempfile::tempdir().unwrap();
-    let plugin_root = tempfile::tempdir().unwrap();
-    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &close_stub_plugin(0));
-
-    // A card linked to an external issue, promoted to a Done-eligible state.
-    let card = run_ok(legion_cmd(data_dir.path()).args([
+fn setup_linked_done_eligible_card(data_dir: &std::path::Path) -> String {
+    let card = run_ok(legion_cmd(data_dir).args([
         "kanban",
         "create",
         "--from",
@@ -822,8 +815,22 @@ fn done_with_linked_issue_propagates_close_and_writes_audit_row() {
     ]))
     .trim()
     .to_string();
-    run_ok(legion_cmd(data_dir.path()).args(["kanban", "assign", "--id", &card, "--to", "stub"]));
-    run_ok(legion_cmd(data_dir.path()).args(["kanban", "accept", "--id", &card]));
+    run_ok(legion_cmd(data_dir).args(["kanban", "assign", "--id", &card, "--to", "stub"]));
+    run_ok(legion_cmd(data_dir).args(["kanban", "accept", "--id", &card]));
+    card
+}
+
+/// #610 behavior fix: `legion done --id` with a linked external issue now
+/// folds through `propagate_card_close_to_worksource`, so the close writes
+/// the same audit row `legion kanban cancel` writes. The inline copy this
+/// replaced closed the issue with no audit trail.
+#[cfg(unix)]
+#[test]
+fn done_with_linked_issue_propagates_close_and_writes_audit_row() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &close_stub_plugin(0));
+    let card = setup_linked_done_eligible_card(data_dir.path());
 
     let stderr = run_ok_stderr(
         pr_read_cmd(data_dir.path(), plugin_root.path())
@@ -855,25 +862,7 @@ fn done_propagation_failure_warns_on_stdout() {
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
     setup_pr_read_stub(data_dir.path(), plugin_root.path(), &close_stub_plugin(1));
-
-    let card = run_ok(legion_cmd(data_dir.path()).args([
-        "kanban",
-        "create",
-        "--from",
-        "sean",
-        "--to",
-        "stub",
-        "--text",
-        "linked work",
-        "--source-url",
-        "https://github.com/owner/stub/issues/42",
-        "--source-type",
-        "github",
-    ]))
-    .trim()
-    .to_string();
-    run_ok(legion_cmd(data_dir.path()).args(["kanban", "assign", "--id", &card, "--to", "stub"]));
-    run_ok(legion_cmd(data_dir.path()).args(["kanban", "accept", "--id", &card]));
+    let card = setup_linked_done_eligible_card(data_dir.path());
 
     let stdout = run_ok(
         pr_read_cmd(data_dir.path(), plugin_root.path())
