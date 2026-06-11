@@ -77,11 +77,16 @@ pub struct RepoStats {
     pub newest: String,
 }
 
+/// The canonical column list for every reflections SELECT consumed by
+/// [`map_reflection_row`]. The order must match the positional `row.get(n)`
+/// reads in that function exactly -- omitting or reordering a column shifts
+/// every subsequent index and fails at runtime, not compile time (#606).
+const REFLECTION_COLUMNS: &str = "id, repo, text, created_at, updated_at, audience, domain, \
+     tags, recall_count, last_recalled_at, parent_id";
+
 /// Map a database row to a Reflection struct.
 ///
-/// Shared by all queries that select
-/// (id, repo, text, created_at, updated_at, audience, domain, tags, recall_count,
-///  last_recalled_at, parent_id).
+/// Shared by all queries that select [`REFLECTION_COLUMNS`] positionally.
 fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
     Ok(Reflection {
         id: row.get(0)?,
@@ -1504,9 +1509,10 @@ impl Database {
     ///
     /// Returns `None` if no reflection exists with the given ID or if soft-deleted.
     pub fn get_reflection_by_id(&self, id: &str) -> Result<Option<Reflection>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE id = ?1 AND deleted_at IS NULL",
-        )?;
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE id = ?1 AND deleted_at IS NULL"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let mut rows = stmt.query_map([id], map_reflection_row)?;
 
@@ -1534,7 +1540,7 @@ impl Database {
             crate::recall::ArchiveMode::Both => "",
         };
         let sql = format!(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+            "SELECT {REFLECTION_COLUMNS} \
              FROM reflections WHERE id = ?1 AND deleted_at IS NULL {where_clause}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1863,8 +1869,7 @@ impl Database {
         }
         let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
         let sql = format!(
-            "SELECT id, repo, text, created_at, audience, domain, tags, recall_count, \
-             last_recalled_at, parent_id FROM reflections WHERE id IN ({}) AND deleted_at IS NULL",
+            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE id IN ({}) AND deleted_at IS NULL",
             placeholders.join(", ")
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1880,9 +1885,10 @@ impl Database {
     /// Retrieve all reflections for a repository, ordered newest first.
     #[cfg(test)]
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
-        )?;
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let rows = stmt.query_map([repo], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1894,9 +1900,10 @@ impl Database {
     /// More efficient than `get_reflections_by_repo` when only a small
     /// number of results are needed, since the database handles the LIMIT.
     pub fn get_latest_self_reflections(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE repo = ?1 AND audience = 'self' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?2",
-        )?;
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE repo = ?1 AND audience = 'self' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let rows = stmt.query_map(rusqlite::params![repo, limit], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1914,10 +1921,11 @@ impl Database {
         domain: &str,
         limit: usize,
     ) -> Result<Vec<Reflection>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE repo = ?1 AND domain = ?2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3",
-        )?;
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
+             FROM reflections WHERE repo = ?1 AND domain = ?2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let rows = stmt.query_map(rusqlite::params![repo, domain, limit], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1938,10 +1946,11 @@ impl Database {
         domain: &str,
         limit: usize,
     ) -> Result<Vec<Reflection>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE repo = ?1 AND domain = ?2 AND parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3",
-        )?;
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
+             FROM reflections WHERE repo = ?1 AND domain = ?2 AND parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let rows = stmt.query_map(rusqlite::params![repo, domain, limit], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1984,7 +1993,7 @@ impl Database {
             " AND resolved_at IS NULL"
         };
         let sql = format!(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+            "SELECT {REFLECTION_COLUMNS} \
              FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL{decay_clause}{resolved_clause} ORDER BY created_at DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -2033,16 +2042,17 @@ impl Database {
         // here too. Backdated inserts past TTL are silently skipped instead of
         // pushed.
         let now = Utc::now().to_rfc3339();
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
              FROM reflections \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
                AND (evergreen = 1 OR expires_at > ?4) \
                AND resolved_at IS NULL \
                AND (created_at > ?1 OR (created_at = ?1 AND id > ?2)) \
              ORDER BY created_at ASC, id ASC \
-             LIMIT ?3",
-        )?;
+             LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let rows = stmt.query_map(
             rusqlite::params![since_created_at, since_id, limit as i64, now],
@@ -2092,8 +2102,8 @@ impl Database {
 
         let txn = self.conn.unchecked_transaction()?;
 
-        let mut stmt = txn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
              FROM reflections \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              AND (evergreen = 1 OR expires_at > ?2) \
@@ -2103,8 +2113,9 @@ impl Database {
                  '' \
              ) \
              AND created_at <= ?2 \
-             ORDER BY created_at DESC",
-        )?;
+             ORDER BY created_at DESC"
+        );
+        let mut stmt = txn.prepare(&sql)?;
 
         let rows = stmt.query_map(rusqlite::params![reader_repo, &now], map_reflection_row)?;
         let posts: Vec<Reflection> = rows
@@ -2139,10 +2150,11 @@ impl Database {
 
     /// Retrieve archived bullpen posts, ordered newest first.
     pub fn get_archived_posts(&self) -> Result<Vec<Reflection>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE audience = 'team' AND archived_at IS NOT NULL AND deleted_at IS NULL ORDER BY created_at DESC",
-        )?;
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
+             FROM reflections WHERE audience = 'team' AND archived_at IS NOT NULL AND deleted_at IS NULL ORDER BY created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let rows = stmt.query_map([], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -2350,9 +2362,11 @@ impl Database {
             parts.join(" OR ")
         };
 
+        // REFLECTION_COLUMNS is unprefixed; the names resolve to the `r`
+        // alias because watch_handled (signal_id, repo_name, handled_at)
+        // shares no column names with reflections.
         let query = format!(
-            "SELECT r.id, r.repo, r.text, r.created_at, r.updated_at, r.audience, r.domain, r.tags, \
-             r.recall_count, r.last_recalled_at, r.parent_id \
+            "SELECT {REFLECTION_COLUMNS} \
              FROM reflections r \
              LEFT JOIN watch_handled wh ON wh.signal_id = r.id AND wh.repo_name = ?{repo_param} \
              WHERE r.audience = 'team' AND r.deleted_at IS NULL \
@@ -2429,9 +2443,8 @@ impl Database {
     /// repo. Used by the `reindex` command to rebuild the search index
     /// from the database (the source of truth).
     pub fn get_all_for_reindex(&self) -> Result<Vec<Reflection>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id FROM reflections WHERE deleted_at IS NULL")?;
+        let sql = format!("SELECT {REFLECTION_COLUMNS} FROM reflections WHERE deleted_at IS NULL");
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
@@ -2472,13 +2485,14 @@ impl Database {
         let now = Utc::now();
         let cutoff = (now - chrono::Duration::hours(hours)).to_rfc3339();
         let now_str = now.to_rfc3339();
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
              FROM reflections WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              AND (evergreen = 1 OR expires_at > ?2) \
              AND resolved_at IS NULL \
-             AND created_at > ?1 ORDER BY created_at DESC",
-        )?;
+             AND created_at > ?1 ORDER BY created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([&cutoff, &now_str], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
@@ -2493,10 +2507,11 @@ impl Database {
         exclude_repo: &str,
         limit: usize,
     ) -> Result<Vec<Reflection>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE repo != ?1 AND recall_count > 0 AND deleted_at IS NULL ORDER BY recall_count DESC LIMIT ?2",
-        )?;
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
+             FROM reflections WHERE repo != ?1 AND recall_count > 0 AND deleted_at IS NULL ORDER BY recall_count DESC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![exclude_repo, limit], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
@@ -3328,10 +3343,11 @@ impl Database {
     /// the last N hours, indicating a chain was recently extended.
     pub fn get_recent_chain_extensions(&self, hours: i64) -> Result<Vec<Reflection>> {
         let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo, text, created_at, updated_at, audience, domain, tags, recall_count, last_recalled_at, parent_id \
-             FROM reflections WHERE parent_id IS NOT NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC",
-        )?;
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
+             FROM reflections WHERE parent_id IS NOT NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([&cutoff], map_reflection_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
@@ -5150,6 +5166,54 @@ mod tests {
         let all = db.get_reflections_by_repo("kelex").unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, r.id);
+    }
+
+    #[test]
+    fn get_reflections_by_ids_round_trip() {
+        let db = test_db();
+        let root = db
+            .insert_reflection("kelex", "root reflection", "self")
+            .unwrap();
+        let meta = ReflectionMeta {
+            domain: Some("workflow".to_string()),
+            tags: Some("alpha,beta".to_string()),
+            parent_id: Some(root.id.clone()),
+        };
+        let child = db
+            .insert_reflection_with_meta("kelex", "child reflection", "self", &meta)
+            .unwrap();
+
+        let ids = [root.id.as_str(), child.id.as_str(), "missing-id"];
+        let found = db.get_reflections_by_ids(&ids).unwrap();
+        // Missing IDs are silently skipped.
+        assert_eq!(found.len(), 2);
+
+        let got_root = found.iter().find(|r| r.id == root.id).unwrap();
+        assert_eq!(got_root.text, "root reflection");
+        // Regression for #606: the SELECT omitted updated_at, shifting every
+        // column from index 4 on (audience loaded into updated_at, and the
+        // parent_id read indexed past the row -- InvalidColumnIndex).
+        assert_eq!(
+            got_root.updated_at.as_deref(),
+            Some(root.created_at.as_str())
+        );
+        assert_eq!(got_root.audience, "self");
+        assert_eq!(got_root.parent_id, None);
+
+        let got_child = found.iter().find(|r| r.id == child.id).unwrap();
+        assert_eq!(
+            got_child.updated_at.as_deref(),
+            Some(child.created_at.as_str())
+        );
+        assert_eq!(got_child.domain.as_deref(), Some("workflow"));
+        assert_eq!(got_child.tags.as_deref(), Some("alpha,beta"));
+        assert_eq!(got_child.parent_id.as_deref(), Some(root.id.as_str()));
+    }
+
+    #[test]
+    fn get_reflections_by_ids_empty_input() {
+        let db = test_db();
+        assert!(db.get_reflections_by_ids(&[]).unwrap().is_empty());
     }
 
     #[test]
