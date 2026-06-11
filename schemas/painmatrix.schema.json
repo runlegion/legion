@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Painmatrix",
+  "description": "Pain point matrix: scored, weighted, evidence-linked pain themes ranked for prioritization. Part of the definition layer (legion #526).",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "review", "done"] },
+        "date": { "type": "string" },
+        "author": { "type": "string" },
+        "threshold": { "type": "number", "description": "Composite score above which a theme is considered validated" }
+      },
+      "required": ["title", "status", "date", "author", "threshold"]
+    },
+    "weights": {
+      "type": "object",
+      "properties": {
+        "frequency": { "type": "number", "minimum": 0, "maximum": 1 },
+        "intensity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "friction": { "type": "number", "minimum": 0, "maximum": 1 },
+        "urgency": { "type": "number", "minimum": 0, "maximum": 1 },
+        "fit": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "required": ["frequency", "intensity", "friction", "urgency", "fit"]
+    },
+    "themes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string" },
+          "description": { "type": "string" },
+          "personas": { "type": "array", "items": { "type": "string" } },
+          "workaround": { "type": "string" },
+          "scores": {
+            "type": "object",
+            "properties": {
+              "frequency": { "type": "number", "minimum": 0, "maximum": 5 },
+              "intensity": { "type": "number", "minimum": 0, "maximum": 5 },
+              "friction": { "type": "number", "minimum": 0, "maximum": 5 },
+              "urgency": { "type": "number", "minimum": 0, "maximum": 5 },
+              "fit": { "type": "number", "minimum": 0, "maximum": 5 },
+              "composite": { "type": "number", "minimum": 0, "maximum": 5 }
+            },
+            "required": ["frequency", "intensity", "friction", "urgency", "fit", "composite"]
+          },
+          "evidence": {
+            "type": "object",
+            "properties": {
+              "monthly_cost": { "type": "string" },
+              "gaps": { "type": "string" },
+              "next_probe": { "type": "string" },
+              "eavesdrop": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "source": { "type": "string" },
+                    "url": { "type": "string" },
+                    "score": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "text": { "type": "string" }
+                  },
+                  "required": ["source", "url", "score", "text"]
+                }
+              }
+            }
+          }
+        },
+        "required": ["id", "label", "description", "personas", "scores"]
+      }
+    }
+  },
+  "required": ["meta", "weights", "themes"]
+}

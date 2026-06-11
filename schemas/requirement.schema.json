@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Requirement",
+  "description": "AI-first requirement: the WHAT derived from service-design artifacts (the WHY). JSON shape per the 2026-05 format reset (no user-story layer; provenance via traces_to; NFRs/constraints are separate doc types referenced by id, per the IEEE 830 load-bearing-separation finding). Part of the definition layer (legion #526).",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Typed id, e.g. FR-EMAIL-003" },
+        "type": { "type": "string", "enum": ["requirement"] },
+        "surface": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "specified", "accepted", "implemented", "verified"] },
+        "priority": { "type": "string", "enum": ["SHALL", "SHOULD", "MAY"], "description": "RFC 2119 / IEEE 830 conformance level" },
+        "phase": { "type": "integer", "minimum": 0 },
+        "owner": { "type": "string" },
+        "date": { "type": "string" },
+        "author": { "type": "string" }
+      },
+      "required": ["id", "type", "surface", "status", "priority", "owner", "date", "author"]
+    },
+    "title": { "type": "string" },
+    "description": { "type": "string" },
+    "traces_to": { "type": "string", "description": "Provenance on the requirement itself: moment_of_truth.<id>, journey phase, or pain theme" },
+    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Requirement ids this depends on; cycle detection enforces consistency" },
+    "nfr_refs": { "type": "array", "items": { "type": "string" }, "description": "Ids of *.nfr.json documents constraining this requirement" },
+    "constraint_refs": { "type": "array", "items": { "type": "string" }, "description": "Ids of *.constraint.json documents binding this requirement" },
+    "api": { "type": "object", "description": "API surface this requirement specifies" },
+    "errors": { "type": "object", "description": "Error behavior this requirement specifies" },
+    "ui": { "type": "object", "description": "UI behavior; references veneer renderings where applicable" },
+    "verification": { "type": "object", "description": "How this requirement is verified: acceptance items, test references" }
+  },
+  "required": ["meta", "title", "description", "traces_to"]
+}

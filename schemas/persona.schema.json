@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Persona",
+  "description": "Service-design persona: behaviors, mental models, and relationship to the service. Not demographics. Part of the definition layer (legion #526); shape validated against real instances in vault-2026.",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "review", "done"] },
+        "date": { "type": "string" },
+        "author": { "type": "string" },
+        "set": { "type": "string", "description": "Product/artifact set this persona belongs to (e.g. gitpress)" },
+        "actor": { "type": "string", "description": "Ecosystem actor this persona embodies" }
+      },
+      "required": ["title", "status", "date", "author", "set", "actor"]
+    },
+    "identity": {
+      "type": "object",
+      "properties": {
+        "description": { "type": "string" },
+        "mental_model": { "type": "string" },
+        "quote": { "type": "string" }
+      },
+      "required": ["description", "mental_model", "quote"]
+    },
+    "behaviors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": { "text": { "type": "string" } },
+        "required": ["text"]
+      }
+    },
+    "frustrations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" },
+          "pain_theme": { "type": "string", "description": "Painmatrix theme id (e.g. T1)" }
+        },
+        "required": ["text"]
+      }
+    },
+    "needs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" },
+          "priority": { "type": "string", "enum": ["SHALL", "SHOULD", "MAY"] }
+        },
+        "required": ["text", "priority"]
+      }
+    },
+    "moment_of_truth": {
+      "type": "object",
+      "properties": {
+        "description": { "type": "string" },
+        "success": { "type": "string" },
+        "failure": { "type": "string" }
+      },
+      "required": ["description", "success", "failure"]
+    }
+  },
+  "required": ["meta", "identity", "behaviors", "frustrations", "needs"]
+}

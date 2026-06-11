@@ -969,6 +969,17 @@ enum DocumentAction {
     },
     /// Mark a document archived.
     Archive { id: String },
+    /// Validate a JSON instance against a landed schema document (#526).
+    /// Checks the dependency-free subset: type, required, properties,
+    /// items, enum. Exits non-zero with one error per violation.
+    Validate {
+        /// Id of the schema document (doc_type=schema) to validate against.
+        #[arg(long)]
+        schema: String,
+        /// Read the instance from this file. When omitted, reads stdin.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4766,6 +4777,18 @@ fn run() -> error::Result<()> {
             info!("[legion] embedded {} reflections", count);
         }
         Commands::Document { action } => {
+            // Payload/instance text from --from/--file path or stdin.
+            fn read_json_arg(path: Option<PathBuf>) -> error::Result<String> {
+                match path {
+                    Some(p) => Ok(std::fs::read_to_string(&p)?),
+                    None => {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        std::io::stdin().read_to_string(&mut buf)?;
+                        Ok(buf)
+                    }
+                }
+            }
             let base = data_dir()?;
             let database = db::Database::open(&base.join("legion.db"))?;
             match action {
@@ -4778,22 +4801,20 @@ fn run() -> error::Result<()> {
                     priority,
                     from,
                 } => {
-                    // Payload from --from <path> or stdin.
-                    let payload = match from {
-                        Some(p) => std::fs::read_to_string(&p)?,
-                        None => {
-                            use std::io::Read;
-                            let mut buf = String::new();
-                            std::io::stdin().read_to_string(&mut buf)?;
-                            buf
-                        }
-                    };
+                    let payload = read_json_arg(from)?;
                     // Sanity-validate JSON shape so a typo doesn't land
-                    // in the table as a string blob. Schema-level
-                    // validation per type lives in a sibling child issue.
+                    // in the table as a string blob.
                     serde_json::from_str::<serde_json::Value>(&payload).map_err(|e| {
                         error::LegionError::WorkSource(format!("payload is not valid JSON: {e}"))
                     })?;
+                    // Schema documents get a structural gate (#526): a
+                    // malformed JSON Schema is rejected at create, and a
+                    // valid one is summarized for the recall pointer below.
+                    let schema_summary = if doc_type == "schema" {
+                        Some(documents::validate_schema_payload(&payload)?)
+                    } else {
+                        None
+                    };
                     let meta = documents::DocumentMeta {
                         id: id.as_deref(),
                         doc_type: &doc_type,
@@ -4803,6 +4824,29 @@ fn run() -> error::Result<()> {
                         owner: &owner,
                     };
                     let doc = database.insert_document(&meta, &payload)?;
+                    // Dual-write a pointer reflection (domain=schema) so
+                    // `legion recall --domain schema` surfaces the schema
+                    // (#526, option A: documents hold the canonical payload,
+                    // reflections hold the searchable prose pointer). Repo
+                    // scoping follows the owning agent.
+                    if let Some(summary) = schema_summary {
+                        let text = documents::schema_pointer_text(&doc.id, &summary);
+                        let meta = db::ReflectionMeta {
+                            domain: Some("schema".to_string()),
+                            tags: Some("schema,document-pointer".to_string()),
+                            parent_id: None,
+                        };
+                        database
+                            .insert_reflection_with_meta(&owner, &text, "self", &meta)
+                            .map_err(|e| {
+                                error::LegionError::WorkSource(format!(
+                                    "document {} created, but the schema pointer reflection \
+                                     failed: {e}. Re-create the pointer with: legion reflect \
+                                     --repo {} --text '{}'",
+                                    doc.id, owner, text
+                                ))
+                            })?;
+                    }
                     println!("{}", doc.id);
                 }
                 DocumentAction::View { id, json } => {
@@ -4880,6 +4924,45 @@ fn run() -> error::Result<()> {
                         doc.id,
                         doc.archived_at.as_deref().unwrap_or("?")
                     );
+                }
+                DocumentAction::Validate { schema, file } => {
+                    let doc = database.get_document(&schema)?.ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "schema document '{schema}' not found"
+                        ))
+                    })?;
+                    if doc.doc_type != "schema" {
+                        return Err(error::LegionError::WorkSource(format!(
+                            "document '{schema}' has doc_type '{}', not 'schema'",
+                            doc.doc_type
+                        )));
+                    }
+                    let schema_value: serde_json::Value = serde_json::from_str(&doc.payload)
+                        .map_err(|e| {
+                            error::LegionError::WorkSource(format!(
+                                "stored schema payload is not valid JSON: {e}"
+                            ))
+                        })?;
+                    let instance_text = read_json_arg(file)?;
+                    let instance: serde_json::Value = serde_json::from_str(&instance_text)
+                        .map_err(|e| {
+                            error::LegionError::WorkSource(format!(
+                                "instance is not valid JSON: {e}"
+                            ))
+                        })?;
+                    let errors = documents::validate_instance(&schema_value, &instance);
+                    if errors.is_empty() {
+                        println!("valid against schema {}", doc.id);
+                    } else {
+                        for e in &errors {
+                            eprintln!("{e}");
+                        }
+                        return Err(error::LegionError::WorkSource(format!(
+                            "instance failed validation against '{}': {} error(s)",
+                            doc.id,
+                            errors.len()
+                        )));
+                    }
                 }
             }
         }
