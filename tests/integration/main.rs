@@ -16,6 +16,7 @@ mod kanban;
 mod mcp;
 mod memory;
 mod mesh;
+mod serve;
 mod task;
 mod uncertainty;
 mod usage;

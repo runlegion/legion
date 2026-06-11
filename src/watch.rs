@@ -4548,6 +4548,63 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         );
     }
 
+    /// WatchLoop-level guard for the #600 concurrent-wake cap: `tick_poll`
+    /// must not spawn past `max_concurrent_wakes` even when a wake-worthy
+    /// signal is pending, and must leave that signal pending so a later
+    /// cycle can pick it up once a slot frees.
+    ///
+    /// `poll_cycle_caps_concurrent_wakes` pins the same behavior at the
+    /// `poll_cycle` seam; this test drives it through the unified loop body
+    /// both the daemon and standalone watch run, so a future refactor of
+    /// `tick_poll` cannot drop the cap from one path (#578 class of bug).
+    #[test]
+    fn watch_loop_tick_poll_respects_concurrent_wake_cap() {
+        let (db, _index, _dir) = test_storage();
+        // A wake-worthy directed signal that would spawn if the cap allowed.
+        db.insert_reflection("other-agent", "@test-repo request -- wake up", "team")
+            .expect("insert signal");
+
+        let mut state = test_watch_loop(db, "[legion test]");
+        state.config.max_concurrent_wakes = 1;
+        state.config.stagger_secs = 0;
+
+        // Pre-seed one in-flight wake so the cap of 1 is already met. The
+        // dummy child stands in for an already-running agent; tick_poll's
+        // reap runs in tick_health, not tick_poll, so active_count() stays
+        // at 1 for the whole call.
+        state.tracker.track(
+            "filler".to_string(),
+            SpawnedChild::Print(
+                std::process::Command::new("true")
+                    .spawn()
+                    .expect("spawn dummy child"),
+            ),
+            Vec::new(),
+            String::new(),
+            "filler-session".to_string(),
+            "now".to_string(),
+            Vec::new(),
+            None,
+        );
+        assert_eq!(state.tracker.active_count(), 1);
+
+        state.tick_poll();
+
+        assert_eq!(
+            state.tracker.active_count(),
+            1,
+            "tick_poll must not spawn past the concurrent-wake cap"
+        );
+        let pending =
+            find_pending_signals(&state.db, "test-repo", &["test-repo".to_string()], None)
+                .expect("find pending after capped tick");
+        assert_eq!(
+            pending.len(),
+            1,
+            "deferred wake-worthy signal must stay pending for re-poll"
+        );
+    }
+
     // -- Broadcast tags + Recipient enum (#585) ----------------------------------
 
     #[test]

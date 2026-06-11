@@ -109,6 +109,38 @@ fn daemon_auto_spawn_clears_stale_pid() {
     }
 }
 
+/// `legion daemon-spawn` onto a port held by a foreign process must fail
+/// loud BEFORE forking (#599/#602 port preflight): non-zero exit, an error
+/// naming the holder, and no pidfile pointing at a corpse.
+///
+/// The unit test `daemon::tests::spawn_detached_refuses_when_port_held`
+/// pins the function-level contract; this drives the same preflight through
+/// the CLI surface so the wiring from `Commands::DaemonSpawn` cannot
+/// regress to start-then-die.
+#[test]
+fn daemon_spawn_preflight_refuses_held_port() {
+    let data_dir = tempfile::tempdir().unwrap();
+
+    // Hold a port for the duration of the test -- this is the "foreign
+    // process" the preflight must detect. Bind 0.0.0.0 to mirror the
+    // production `port_available` probe.
+    let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let (_stdout, stderr) =
+        run_fail(legion_cmd(data_dir.path()).args(["daemon-spawn", "--port", &port.to_string()]));
+    assert!(
+        stderr.contains("already held by"),
+        "preflight must name the port holder, got: {stderr}"
+    );
+    assert!(
+        !data_dir.path().join("daemon.pid").exists(),
+        "preflight must refuse before forking -- no pidfile may be written"
+    );
+
+    drop(listener);
+}
+
 // -- legion watch add / remove / list -----------------------------------------
 
 #[test]

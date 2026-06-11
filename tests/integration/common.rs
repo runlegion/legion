@@ -28,13 +28,10 @@ pub fn legion_cmd_with_home(data_dir: &Path, home_dir: &Path) -> Command {
     cmd
 }
 
-/// Run the command, require success, and return stdout as a `String`.
-///
-/// Panics with the child's stderr (and stdout) when the command fails, so
-/// every call site gets the diagnostic message the old hand-rolled
-/// `assert!(out.status.success(), "...: {}", from_utf8_lossy(&out.stderr))`
-/// idiom used to re-type by hand.
-pub fn run_ok(cmd: &mut Command) -> String {
+/// Run the command and require success, returning the raw `Output`.
+/// Shared body of `run_ok` / `run_ok_stderr`; the panic message surfaces
+/// both streams so no call site has to re-type the diagnostic by hand.
+fn output_ok(cmd: &mut Command) -> Output {
     let out = cmd.output().expect("failed to execute legion binary");
     assert!(
         out.status.success(),
@@ -43,6 +40,17 @@ pub fn run_ok(cmd: &mut Command) -> String {
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout),
     );
+    out
+}
+
+/// Run the command, require success, and return stdout as a `String`.
+///
+/// Panics with the child's stderr (and stdout) when the command fails, so
+/// every call site gets the diagnostic message the old hand-rolled
+/// `assert!(out.status.success(), "...: {}", from_utf8_lossy(&out.stderr))`
+/// idiom used to re-type by hand.
+pub fn run_ok(cmd: &mut Command) -> String {
+    let out = output_ok(cmd);
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -52,14 +60,7 @@ pub fn run_ok(cmd: &mut Command) -> String {
 /// (`eprintln!`) while keeping stdout quiet for piping; tests asserting on
 /// those messages use this variant.
 pub fn run_ok_stderr(cmd: &mut Command) -> String {
-    let out = cmd.output().expect("failed to execute legion binary");
-    assert!(
-        out.status.success(),
-        "command failed (status {:?})\nstderr:\n{}\nstdout:\n{}",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout),
-    );
+    let out = output_ok(cmd);
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
@@ -102,6 +103,19 @@ pub fn run_with_stdin(cmd: &mut Command, payload: &[u8]) -> Output {
     // The taken stdin handle dropped at the end of the statement above,
     // closing the pipe so the child sees EOF.
     child.wait_with_output().expect("failed to wait for child")
+}
+
+/// Drive the schema migrations to completion with one synchronous CLI call.
+///
+/// Legion's schema migrations are not concurrency-safe at first-open time:
+/// two processes racing to ALTER TABLE on a fresh DB produce "duplicate
+/// column name" errors. Any test that runs more than one legion process
+/// against the same data dir must warm the schema first. The MCP push
+/// bridge test documents the original race and keeps its own inline warmup
+/// (it moves untouched per the #608 audit); every new multi-process test
+/// should call this instead.
+pub fn warm_schema(data_dir: &Path) {
+    run_ok(legion_cmd(data_dir).args(["post", "--repo", "warmup-repo", "--text", "schema warmup"]));
 }
 
 /// Assert `s` is a well-formed UUID of version 7 (legion's ID format).

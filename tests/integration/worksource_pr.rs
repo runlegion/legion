@@ -611,3 +611,114 @@ fn sync_command_errors_without_worksource_config() {
         "expected 'no work source configured' error, got: {stderr}"
     );
 }
+
+/// Stub plugin that answers only `view-issue`, returning a fixed issue
+/// whose body declares two acceptance criteria. Used by the pr write-check
+/// gate tests; the unknown-verb fallback fails loud like the PR-read stub.
+#[cfg(unix)]
+fn view_issue_stub_plugin() -> String {
+    r##"#!/bin/bash
+set -e
+case "${1:-}" in
+  view-issue)
+    cat <<'BODY'
+{"url":"https://example.com/issues/7","number":7,"title":"stub issue","body":"Why it matters.\n\n## Acceptance criteria\n- crit one\n- crit two\n","labels":[],"assignees":null,"state":"OPEN"}
+BODY
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##
+    .to_string()
+}
+
+/// `legion pr write-check` with a substantive body: exits 0, reports the
+/// gate clean, and counts one mapping entry per acceptance criterion
+/// (#519 forcing function, #608 coverage net).
+#[cfg(unix)]
+#[test]
+fn pr_write_check_passes_substantive_body_and_reports_clean() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &view_issue_stub_plugin(),
+    );
+
+    let body = "## Summary\n\nDoes the thing.\n\n\
+        ## Acceptance criteria mapping\n\n\
+        ### 1. crit one\n\
+        The handler now threads the flag through the dispatch table so the \
+        first criterion is satisfied end to end.\n\
+        Evidence: tests/integration/worksource_pr.rs::stub_test\n\n\
+        ### 2. crit two\n\
+        The second path is covered by the new guard clause, which refuses \
+        the malformed input before it reaches the store.\n\
+        Evidence: src/pr_write.rs:49 validate_pr_body\n\n\
+        ## Not done\n\n\
+        Did not migrate old rows -- out of scope, tracked separately.\n";
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, body).unwrap();
+
+    let stdout = run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr",
+        "write-check",
+        "--repo",
+        "stub",
+        "--issue",
+        "7",
+        "--body-file",
+        body_file.to_str().unwrap(),
+    ]));
+    assert!(
+        stdout.contains("pr-write gate clean"),
+        "expected clean gate message, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("2 mapping entries"),
+        "expected one mapping entry per criterion, got: {stdout}"
+    );
+}
+
+/// `legion pr write-check` with a boilerplate body (no mapping section, no
+/// not-done section): exits non-zero and lists the structural gaps.
+#[cfg(unix)]
+#[test]
+fn pr_write_check_refuses_boilerplate_body_with_gaps() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &view_issue_stub_plugin(),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, "## Summary\n\nDid stuff.\n").unwrap();
+
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr",
+        "write-check",
+        "--repo",
+        "stub",
+        "--issue",
+        "7",
+        "--body-file",
+        body_file.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("pr-write gate FAILED"),
+        "expected gate failure banner, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Acceptance criteria mapping"),
+        "expected the missing-mapping finding, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Not done"),
+        "expected the missing not-done finding, got: {stderr}"
+    );
+}

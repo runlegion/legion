@@ -231,3 +231,113 @@ fn telemetry_list_filters_by_repo_and_since() {
         assert_eq!(row["repo"], "legion");
     }
 }
+
+/// Full SCIP round-trip at the CLI boundary (#608 coverage net): `legion
+/// index` runs the language indexer subprocess, stores the protobuf blob,
+/// and `legion sym def` / `legion sym refs` answer lookups from it.
+///
+/// The "indexer" is a PATH shim named `scip-rust` that copies a
+/// pre-built index.scip into the repo root -- the same isolation trick the
+/// scip.rs unit tests use -- so the test pins legion's own plumbing
+/// (watch.toml resolution, language detection, blob storage, symbol query)
+/// without needing a real rust-analyzer on the runner.
+#[cfg(unix)]
+#[test]
+fn index_and_sym_def_refs_roundtrip_against_fixture_repo() {
+    use protobuf::Message;
+    use scip::types::{Document, Index, Occurrence, SymbolRole};
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+
+    // Fixture repo: a Cargo.toml marker so detect_languages says "rust".
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    // Register the fixture in watch.toml directly (the `watch add` command
+    // would also kick off a background indexer, which this test does not
+    // want racing its shim).
+    std::fs::write(
+        dir.path().join("watch.toml"),
+        format!(
+            "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"fixture\"\nworkdir = \"{}\"\n",
+            repo.path().display()
+        ),
+    )
+    .unwrap();
+
+    // Build a tiny SCIP index: one definition of Greeter plus two references.
+    let symbol = "rust-analyzer cargo fixture 0.1.0 src/lib.rs/Greeter#";
+    let occurrence = |range: Vec<i32>, is_def: bool| {
+        let mut o = Occurrence::new();
+        o.symbol = symbol.to_string();
+        o.range = range;
+        if is_def {
+            o.symbol_roles = SymbolRole::Definition as i32;
+        }
+        o
+    };
+    let mut document = Document::new();
+    document.relative_path = "src/lib.rs".to_string();
+    document.occurrences = vec![
+        occurrence(vec![4, 0, 4, 7], true),
+        occurrence(vec![10, 8, 10, 15], false),
+        occurrence(vec![20, 4, 20, 11], false),
+    ];
+    let mut index = Index::new();
+    index.documents = vec![document];
+    let blob = index.write_to_bytes().expect("serialize scip index");
+    let blob_path = dir.path().join("fixture-index.scip");
+    std::fs::write(&blob_path, &blob).unwrap();
+
+    // PATH shim: `scip-rust` copies the pre-built blob into the repo root,
+    // exactly where run_indexer_binary expects index.scip to appear.
+    let shim_dir = tempfile::tempdir().unwrap();
+    let shim = shim_dir.path().join("scip-rust");
+    std::fs::write(
+        &shim,
+        format!("#!/bin/sh\ncp '{}' index.scip\n", blob_path.display()),
+    )
+    .unwrap();
+    let mut perm = std::fs::metadata(&shim).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&shim, perm).unwrap();
+    let shim_path = format!("{}:/usr/bin:/bin", shim_dir.path().display());
+
+    // Index the fixture through the CLI -- synchronous, stores the blob.
+    let index_stderr = run_ok_stderr(
+        legion_cmd(dir.path())
+            .env("PATH", &shim_path)
+            .args(["index", "fixture"]),
+    );
+    assert!(
+        index_stderr.contains("indexed fixture (rust)"),
+        "expected index confirmation, got: {index_stderr}"
+    );
+
+    // def: the single definition occurrence, 1-indexed (range line 4 -> 5).
+    let defs = run_ok(
+        legion_cmd(dir.path()).args(["sym", "def", "Greeter", "--repo", "fixture", "--json"]),
+    );
+    let defs: serde_json::Value = serde_json::from_str(defs.trim()).expect("def JSON");
+    let defs = defs.as_array().expect("def array");
+    assert_eq!(defs.len(), 1, "expected exactly one definition: {defs:?}");
+    assert_eq!(defs[0]["file"], "src/lib.rs");
+    assert_eq!(defs[0]["line"], 5);
+    assert_eq!(defs[0]["repo"], "fixture");
+    assert_eq!(defs[0]["lang"], "rust");
+
+    // refs: the two non-definition occurrences, sorted by line.
+    let refs = run_ok(
+        legion_cmd(dir.path()).args(["sym", "refs", "Greeter", "--repo", "fixture", "--json"]),
+    );
+    let refs: serde_json::Value = serde_json::from_str(refs.trim()).expect("refs JSON");
+    let refs = refs.as_array().expect("refs array");
+    assert_eq!(refs.len(), 2, "expected two references: {refs:?}");
+    assert_eq!(refs[0]["line"], 11);
+    assert_eq!(refs[1]["line"], 21);
+}
