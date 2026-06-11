@@ -3,33 +3,22 @@
 #
 # Verifies the hook catches gh invocations regardless of how the binary
 # is referenced: bare command, absolute path, leading whitespace. Run
-# from the repo root:
+# from anywhere:
 #
 #   bash plugin/hooks/test-no-gh.sh
 
 set -u
 
-PASS=0
-FAIL=0
+# shellcheck source=tests/testutil.sh
+source "$(dirname "${BASH_SOURCE[0]}")/tests/testutil.sh"
 
-WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+make_plugin_root no-gh.sh
 
-mkdir -p "$WORK/plugin/hooks"
-cp plugin/hooks/no-gh.sh "$WORK/plugin/hooks/"
-mkdir -p "$WORK/plugin/hooks/lib"
-cp plugin/hooks/lib/prelude.sh plugin/hooks/lib/emit.sh "$WORK/plugin/hooks/lib/"
-# Stub _legion-covered.sh to always return covered so the hook runs the
-# match logic instead of falling through.
-cat > "$WORK/plugin/hooks/_legion-covered.sh" <<'EOF'
-legion_covered() {
-  return 0
-}
-EOF
+# The hook gates on legion coverage; make the test repo covered via the
+# stub's watch-list fixture.
+export FAKE_WATCH="legion-test	/tmp/legion-test"
 
-export CLAUDE_PLUGIN_ROOT="$WORK/plugin"
-
-HOOK="$WORK/plugin/hooks/no-gh.sh"
+HOOK="$CLAUDE_PLUGIN_ROOT/hooks/no-gh.sh"
 
 run_hook() {
   local cmd="$1"
@@ -38,31 +27,12 @@ run_hook() {
 
 assert_blocked() {
   local desc="$1" cmd="$2"
-  local out
-  out=$(run_hook "$cmd")
-  if echo "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
-    PASS=$((PASS + 1))
-    echo "  PASS: $desc"
-  else
-    FAIL=$((FAIL + 1))
-    echo "  FAIL: $desc" >&2
-    echo "    cmd: $cmd" >&2
-    echo "    out: $out" >&2
-  fi
+  assert_contains "$desc" "$(run_hook "$cmd")" '"permissionDecision": "deny"'
 }
 
 assert_allowed() {
   local desc="$1" cmd="$2"
-  local out
-  out=$(run_hook "$cmd")
-  if echo "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
-    FAIL=$((FAIL + 1))
-    echo "  FAIL: $desc (expected allow, got deny)" >&2
-    echo "    cmd: $cmd" >&2
-  else
-    PASS=$((PASS + 1))
-    echo "  PASS: $desc"
-  fi
+  assert_not_contains "$desc" "$(run_hook "$cmd")" '"permissionDecision": "deny"'
 }
 
 echo "==> blocks bare gh invocations"
@@ -84,7 +54,8 @@ assert_allowed "echo gh"          '"echo gh pr merge"'
 assert_allowed "grep gh logs"     '"grep gh /var/log/foo"'
 assert_allowed "path with gh dir" '"ls /opt/ghosts/"'
 
-echo
-echo "PASS: $PASS"
-echo "FAIL: $FAIL"
-[ "$FAIL" -eq 0 ] || exit 1
+echo "==> uncovered repo passes through"
+out=$(printf '%s' '{"tool_input":{"command":"gh pr merge 1"},"cwd":"/tmp/uncovered-repo","session_id":"test"}' | bash "$HOOK")
+assert_empty "gh allowed in a repo legion does not cover" "$out"
+
+finish_tests
