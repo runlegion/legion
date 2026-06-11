@@ -191,6 +191,9 @@ fn uncertainty_emit_witness_end_to_end_via_hook_against_real_binary() {
     let witness_hook = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("plugin/hooks/uncertainty-witness-on-completion.sh");
     let legion_bin = env!("CARGO_BIN_EXE_legion");
+    // The hooks source lib/prelude.sh via ${CLAUDE_PLUGIN_ROOT}/hooks/...
+    // and fail open without it (#614); point at the in-tree plugin root.
+    let plugin_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugin");
 
     // Drive emit-on-task via the actual hook script.
     let emit_out = run_with_stdin(
@@ -198,6 +201,7 @@ fn uncertainty_emit_witness_end_to_end_via_hook_against_real_binary() {
             .arg(&emit_hook)
             .env("LEGION_DATA_DIR", data_dir)
             .env("LEGION_BIN", legion_bin)
+            .env("CLAUDE_PLUGIN_ROOT", &plugin_root)
             .env("XDG_STATE_HOME", &state_dir),
         br#"{"session_id":"e2e","tool_name":"TaskCreate","tool_input":{"subject":"e2e probe task"},"tool_response":{"id":"task-e2e-001"}}"#,
     );
@@ -228,6 +232,7 @@ fn uncertainty_emit_witness_end_to_end_via_hook_against_real_binary() {
             .arg(&witness_hook)
             .env("LEGION_DATA_DIR", data_dir)
             .env("LEGION_BIN", legion_bin)
+            .env("CLAUDE_PLUGIN_ROOT", &plugin_root)
             .env("XDG_STATE_HOME", &state_dir),
         br#"{"session_id":"e2e","tool_name":"TaskUpdate","tool_input":{"task_id":"task-e2e-001","status":"completed"}}"#,
     );

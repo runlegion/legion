@@ -6,8 +6,8 @@ use crate::common::*;
 //
 // legion's own command/skill surfaces must never grant Grep or Glob. The
 // recall/sym-before-grep doctrine is enforced for the main session by the
-// PreToolUse hooks (pre-grep-recall, pre-grep-scip, pre-bash-grep,
-// pre-read-sym), but those hooks do NOT fire while a slash command's or
+// PreToolUse hooks (pre-grep, pre-bash-grep, pre-read-sym), but those
+// hooks do NOT fire while a slash command's or
 // skill's own tool allowlist is active, and they do NOT fire on subagents.
 // The allowlist (`allowed-tools`) is the only enforcement on those surfaces
 // and is strictly stronger than `disallowed-tools` (whitelist vs blacklist).
