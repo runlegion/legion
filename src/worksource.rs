@@ -291,50 +291,71 @@ fn drain_pipe<R: Read>(mut pipe: R) -> std::io::Result<String> {
     Ok(buf)
 }
 
+/// Resolve a plugin by name, failing closed when it is not installed.
+///
+/// The missing-plugin policy, decided once for every work source op: a
+/// missing plugin is a hard `WorkSource` error. Earlier revisions let the
+/// list ops (`list_issues`, `list_prs`, `list_sub_issues`) silently return
+/// empty results instead, which made a sync against a missing plugin report
+/// "zero issues" as success -- the same quiet-failure shape that left #190
+/// open on GitHub for days after its card was marked done (see
+/// `close_issue`'s history). Every op now routes through this single check.
+fn require_plugin(plugin_name: &str) -> Result<PathBuf> {
+    find_plugin(plugin_name)
+        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))
+}
+
+/// Run a plugin subcommand and return its raw stdout. The no-decode variant
+/// of [`plugin_call`], for ops whose output is empty (close, merge, review)
+/// or plain text (CI logs).
+fn plugin_call_raw(plugin_name: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+    let plugin_path = require_plugin(plugin_name)?;
+    call_plugin(&plugin_path, args, env)
+}
+
+/// Run a plugin subcommand and decode its JSON stdout into `T`.
+///
+/// Collapses the find_plugin -> missing-plugin check -> call_plugin ->
+/// serde-decode sequence that every work source op needs.
+fn plugin_call<T: serde::de::DeserializeOwned>(
+    plugin_name: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<T> {
+    let output = plugin_call_raw(plugin_name, args, env)?;
+    serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))
+}
+
 /// List issues from a work source plugin.
+///
+/// Fail-closed: a missing plugin is an error, not an empty list. A sync
+/// against a missing plugin must surface the misconfiguration rather than
+/// report the tracker as empty.
 pub fn list_issues(
     plugin_name: &str,
     github_repo: &str,
     workdir: &str,
 ) -> Result<Vec<ExternalIssue>> {
-    let plugin_path = match find_plugin(plugin_name) {
-        Some(p) => p,
-        None => return Ok(Vec::new()),
-    };
-
-    let output = call_plugin(
-        &plugin_path,
+    plugin_call(
+        plugin_name,
         &["list"],
         &[
             ("LEGION_WS_REPO", github_repo),
             ("LEGION_WS_WORKDIR", workdir),
         ],
-    )?;
-
-    let issues: Vec<ExternalIssue> =
-        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
-
-    Ok(issues)
+    )
 }
 
 /// View a single issue via a work source plugin.
 pub fn view_issue(plugin_name: &str, github_repo: &str, number: u64) -> Result<ExternalIssue> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
-    let output = call_plugin(
-        &plugin_path,
+    plugin_call(
+        plugin_name,
         &["view-issue"],
         &[
             ("LEGION_WS_REPO", github_repo),
             ("LEGION_WS_NUMBER", &number.to_string()),
         ],
-    )?;
-
-    let issue: ExternalIssue =
-        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
-
-    Ok(issue)
+    )
 }
 
 /// Close an issue via a work source plugin.
@@ -356,9 +377,6 @@ pub fn close_issue(
     number: u64,
     comment: Option<&str>,
 ) -> Result<()> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
     let number_str = number.to_string();
     let mut env: Vec<(&str, &str)> = vec![
         ("LEGION_WS_REPO", github_repo),
@@ -368,7 +386,7 @@ pub fn close_issue(
         env.push(("LEGION_WS_COMMENT", c));
     }
 
-    call_plugin(&plugin_path, &["close", &number_str], &env)?;
+    plugin_call_raw(plugin_name, &["close", &number_str], &env)?;
 
     Ok(())
 }
@@ -387,9 +405,6 @@ pub fn reopen_issue(
     number: u64,
     comment: Option<&str>,
 ) -> Result<()> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
     let number_str = number.to_string();
     let mut env: Vec<(&str, &str)> = vec![
         ("LEGION_WS_REPO", github_repo),
@@ -399,7 +414,7 @@ pub fn reopen_issue(
         env.push(("LEGION_WS_COMMENT", c));
     }
 
-    call_plugin(&plugin_path, &["reopen", &number_str], &env)?;
+    plugin_call_raw(plugin_name, &["reopen", &number_str], &env)?;
 
     Ok(())
 }
@@ -427,9 +442,6 @@ pub fn edit_issue(
         ));
     }
 
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
     let number_str = number.to_string();
     let mut env: Vec<(&str, &str)> = vec![
         ("LEGION_WS_REPO", github_repo),
@@ -442,7 +454,7 @@ pub fn edit_issue(
         env.push(("LEGION_WS_BODY", b));
     }
 
-    call_plugin(&plugin_path, &["edit-issue"], &env)?;
+    plugin_call_raw(plugin_name, &["edit-issue"], &env)?;
 
     Ok(())
 }
@@ -473,8 +485,6 @@ pub fn create_sub_issue(
     title: &str,
     body: Option<&str>,
 ) -> Result<CreatedIssue> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
     let parent_str = parent_number.to_string();
     let mut env: Vec<(&str, &str)> = vec![
         ("LEGION_WS_REPO", github_repo),
@@ -484,24 +494,20 @@ pub fn create_sub_issue(
     if let Some(b) = body {
         env.push(("LEGION_WS_BODY", b));
     }
-    let output = call_plugin(&plugin_path, &["create-sub-issue"], &env)?;
-    let created: CreatedIssue =
-        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
-    Ok(created)
+    plugin_call(plugin_name, &["create-sub-issue"], &env)
 }
 
 /// List sub-issues of a parent issue (#462). State filter is one of
 /// `open` / `closed` / `all`; defaults to `open` when None.
+///
+/// Fail-closed: a missing plugin is an error, not an empty list (see
+/// `require_plugin`).
 pub fn list_sub_issues(
     plugin_name: &str,
     github_repo: &str,
     parent_number: u64,
     state: Option<&str>,
 ) -> Result<Vec<ExternalIssue>> {
-    let plugin_path = match find_plugin(plugin_name) {
-        Some(p) => p,
-        None => return Ok(Vec::new()),
-    };
     let parent_str = parent_number.to_string();
     let state_str = state.unwrap_or("open");
     let env: Vec<(&str, &str)> = vec![
@@ -509,10 +515,7 @@ pub fn list_sub_issues(
         ("LEGION_WS_PARENT_NUMBER", &parent_str),
         ("LEGION_WS_STATE", state_str),
     ];
-    let output = call_plugin(&plugin_path, &["list-sub-issues"], &env)?;
-    let issues: Vec<ExternalIssue> =
-        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
-    Ok(issues)
+    plugin_call(plugin_name, &["list-sub-issues"], &env)
 }
 
 pub fn create_issue(
@@ -523,9 +526,6 @@ pub fn create_issue(
     labels: Option<&str>,
     assignee: Option<&str>,
 ) -> Result<CreatedIssue> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
     let mut env: Vec<(&str, &str)> =
         vec![("LEGION_WS_REPO", github_repo), ("LEGION_WS_TITLE", title)];
     if let Some(b) = body {
@@ -538,11 +538,7 @@ pub fn create_issue(
         env.push(("LEGION_WS_ASSIGNEE", a));
     }
 
-    let output = call_plugin(&plugin_path, &["create-issue"], &env)?;
-    let created: CreatedIssue =
-        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
-
-    Ok(created)
+    plugin_call(plugin_name, &["create-issue"], &env)
 }
 
 /// Result of creating a PR via a work source plugin.
@@ -565,9 +561,6 @@ pub fn create_pr(
     labels: Option<&str>,
     reviewer: Option<&str>,
 ) -> Result<CreatedPR> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
     let mut env: Vec<(&str, &str)> =
         vec![("LEGION_WS_REPO", github_repo), ("LEGION_WS_TITLE", title)];
     if let Some(b) = body {
@@ -589,20 +582,13 @@ pub fn create_pr(
         env.push(("LEGION_WS_REVIEWER", r));
     }
 
-    let output = call_plugin(&plugin_path, &["create-pr"], &env)?;
-    let created: CreatedPR =
-        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
-
-    Ok(created)
+    plugin_call(plugin_name, &["create-pr"], &env)
 }
 
 /// Post a comment on an issue or PR via a work source plugin.
 pub fn comment(plugin_name: &str, github_repo: &str, number: u64, body: &str) -> Result<()> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
-    call_plugin(
-        &plugin_path,
+    plugin_call_raw(
+        plugin_name,
         &["comment"],
         &[
             ("LEGION_WS_REPO", github_repo),
@@ -628,22 +614,15 @@ pub struct ExternalPR {
 }
 
 /// List open PRs from a work source plugin.
+///
+/// Fail-closed: a missing plugin is an error, not an empty list (see
+/// `require_plugin`).
 pub fn list_prs(plugin_name: &str, github_repo: &str) -> Result<Vec<ExternalPR>> {
-    let plugin_path = match find_plugin(plugin_name) {
-        Some(p) => p,
-        None => return Ok(Vec::new()),
-    };
-
-    let output = call_plugin(
-        &plugin_path,
+    plugin_call(
+        plugin_name,
         &["pr-list"],
         &[("LEGION_WS_REPO", github_repo)],
-    )?;
-
-    let prs: Vec<ExternalPR> =
-        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
-
-    Ok(prs)
+    )
 }
 
 /// A single CI check on a PR. `state` mirrors gh's check-state vocabulary;
@@ -717,23 +696,14 @@ pub fn pr_checks(
     github_repo: &str,
     pr_number: u64,
 ) -> Result<Vec<ExternalPRCheck>> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
-    let pr_num_str = pr_number.to_string();
-    let output = call_plugin(
-        &plugin_path,
+    plugin_call(
+        plugin_name,
         &["pr-checks"],
         &[
             ("LEGION_WS_REPO", github_repo),
-            ("LEGION_WS_PR_NUMBER", &pr_num_str),
+            ("LEGION_WS_PR_NUMBER", &pr_number.to_string()),
         ],
-    )?;
-
-    let checks: Vec<ExternalPRCheck> =
-        serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))?;
-
-    Ok(checks)
+    )
 }
 
 /// Post a review on a PR via a work source plugin.
@@ -745,9 +715,6 @@ pub fn review_pr(
     body: Option<&str>,
     comments_file: Option<&str>,
 ) -> Result<()> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
     let pr_num_str = pr_number.to_string();
     let mut env: Vec<(&str, &str)> = vec![
         ("LEGION_WS_REPO", github_repo),
@@ -761,7 +728,7 @@ pub fn review_pr(
         env.push(("LEGION_WS_COMMENTS", c));
     }
 
-    call_plugin(&plugin_path, &["review"], &env)?;
+    plugin_call_raw(plugin_name, &["review"], &env)?;
     Ok(())
 }
 
@@ -773,9 +740,6 @@ pub fn merge_pr(
     strategy: &str,
     delete_branch: bool,
 ) -> Result<()> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
     let pr_num_str = pr_number.to_string();
     let delete_str = if delete_branch { "true" } else { "false" };
     let env: Vec<(&str, &str)> = vec![
@@ -785,7 +749,7 @@ pub fn merge_pr(
         ("LEGION_WS_DELETE_BRANCH", delete_str),
     ];
 
-    call_plugin(&plugin_path, &["merge"], &env)?;
+    plugin_call_raw(plugin_name, &["merge"], &env)?;
     Ok(())
 }
 
@@ -801,9 +765,6 @@ pub fn close_pr(
     reason: Option<&str>,
     delete_branch: bool,
 ) -> Result<()> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
     let pr_num_str = pr_number.to_string();
     let delete_str = if delete_branch { "true" } else { "false" };
     let mut env: Vec<(&str, &str)> = vec![
@@ -815,7 +776,7 @@ pub fn close_pr(
         env.push(("LEGION_WS_REASON", r));
     }
 
-    call_plugin(&plugin_path, &["pr-close"], &env)?;
+    plugin_call_raw(plugin_name, &["pr-close"], &env)?;
     Ok(())
 }
 
@@ -841,6 +802,9 @@ pub fn detect_repo(plugin_name: &str, workdir: &str) -> Result<Option<String>> {
 ///
 /// Creates cards for issues that don't already have a linked card.
 /// Returns the number of new cards created.
+///
+/// Fail-closed: a sync against a missing plugin is an error, not a
+/// successful zero-issue sync (the #190 lesson, via `list_issues`).
 pub fn sync_issues(
     db: &Database,
     plugin_name: &str,
@@ -1065,20 +1029,14 @@ pub struct ExternalPRReview {
 /// Callers use this for human review of a PR thread; empty output would
 /// be indistinguishable from an uncommented PR.
 pub fn view_pr(plugin_name: &str, github_repo: &str, pr_number: u64) -> Result<ExternalPRDetails> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
-    let pr_num_str = pr_number.to_string();
-    let output = call_plugin(
-        &plugin_path,
+    plugin_call(
+        plugin_name,
         &["view-pr"],
         &[
             ("LEGION_WS_REPO", github_repo),
-            ("LEGION_WS_NUMBER", &pr_num_str),
+            ("LEGION_WS_NUMBER", &pr_number.to_string()),
         ],
-    )?;
-
-    serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))
+    )
 }
 
 /// List all comments on a PR (top-level + inline review comments) in
@@ -1088,20 +1046,14 @@ pub fn list_pr_comments(
     github_repo: &str,
     pr_number: u64,
 ) -> Result<Vec<ExternalPRComment>> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
-    let pr_num_str = pr_number.to_string();
-    let output = call_plugin(
-        &plugin_path,
+    plugin_call(
+        plugin_name,
         &["pr-comments"],
         &[
             ("LEGION_WS_REPO", github_repo),
-            ("LEGION_WS_NUMBER", &pr_num_str),
+            ("LEGION_WS_NUMBER", &pr_number.to_string()),
         ],
-    )?;
-
-    serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))
+    )
 }
 
 /// List all submitted reviews with their bodies and inline comments.
@@ -1110,20 +1062,14 @@ pub fn list_pr_reviews(
     github_repo: &str,
     pr_number: u64,
 ) -> Result<Vec<ExternalPRReview>> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
-    let pr_num_str = pr_number.to_string();
-    let output = call_plugin(
-        &plugin_path,
+    plugin_call(
+        plugin_name,
         &["pr-reviews"],
         &[
             ("LEGION_WS_REPO", github_repo),
-            ("LEGION_WS_NUMBER", &pr_num_str),
+            ("LEGION_WS_NUMBER", &pr_number.to_string()),
         ],
-    )?;
-
-    serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))
+    )
 }
 
 /// Fetch the raw CI log for a single job. Job IDs come from the numeric
@@ -1132,16 +1078,12 @@ pub fn list_pr_reviews(
 /// Returns the raw log bytes as a UTF-8 string. Callers are responsible
 /// for rendering (ANSI codes, timestamp prefixes, etc. are preserved).
 pub fn fetch_check_log(plugin_name: &str, github_repo: &str, job_id: u64) -> Result<String> {
-    let plugin_path = find_plugin(plugin_name)
-        .ok_or_else(|| LegionError::WorkSource(format!("plugin not found: {plugin_name}")))?;
-
-    let job_id_str = job_id.to_string();
-    call_plugin(
-        &plugin_path,
+    plugin_call_raw(
+        plugin_name,
         &["pr-check-log"],
         &[
             ("LEGION_WS_REPO", github_repo),
-            ("LEGION_WS_JOB_ID", &job_id_str),
+            ("LEGION_WS_JOB_ID", &job_id.to_string()),
         ],
     )
 }
@@ -1237,6 +1179,40 @@ mod tests {
     #[test]
     fn pr_checks_returns_worksource_error_when_plugin_missing() {
         let result = pr_checks("nonexistent-plugin-xyz", "owner/repo", 1);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    /// The list ops were the last holdouts of the silent-empty policy:
+    /// a missing plugin returned `Ok(Vec::new())`, so a sync against a
+    /// missing plugin reported zero issues as success (the #190 shape).
+    /// All three now fail closed through `require_plugin`.
+    #[test]
+    fn list_issues_returns_worksource_error_when_plugin_missing() {
+        let result = list_issues("nonexistent-plugin-xyz", "owner/repo", "/tmp");
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn list_prs_returns_worksource_error_when_plugin_missing() {
+        let result = list_prs("nonexistent-plugin-xyz", "owner/repo");
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn list_sub_issues_returns_worksource_error_when_plugin_missing() {
+        let result = list_sub_issues("nonexistent-plugin-xyz", "owner/repo", 1, None);
         assert!(
             matches!(result, Err(LegionError::WorkSource(_))),
             "expected WorkSource error, got {:?}",
