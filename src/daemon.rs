@@ -486,6 +486,12 @@ async fn run_watch_task(data_dir: &Path) {
 
     let host = watch::resolve_host_id();
 
+    // Spawn the cluster sync actor when enabled (#536 defect 1: this task
+    // previously never loaded cluster.toml, so sync only ran under the
+    // deprecated foreground `legion watch`). The handle lives for the
+    // lifetime of this task; sync is optional and never fatal.
+    let _sync_handle = crate::sync_actor::spawn_sync_if_enabled(data_dir, "[legion daemon]");
+
     // Timer intervals are read before `config` moves into the WatchLoop.
     let poll_interval = std::time::Duration::from_secs(config.poll_interval_secs);
     let health_interval = std::time::Duration::from_secs(config.health_poll_secs);

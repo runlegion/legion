@@ -4025,6 +4025,262 @@ impl Database {
         tx.commit()?;
         Ok(late_loser)
     }
+
+    /// Apply a peer's reflection delta with last-write-wins merge (#536).
+    ///
+    /// No local row: INSERT (embedding stays NULL -- each node computes its
+    /// own embeddings, see the ReflectionDelta doc). Local row exists: the
+    /// delta wins only when its effective timestamp (max of updated_at /
+    /// deleted_at, falling back to created_at) is strictly newer than the
+    /// local row's. Tombstones ride the same comparison.
+    pub fn apply_reflection_delta(&self, delta: &crate::sync::ReflectionDelta) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        let local: Option<(String, Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT created_at, updated_at, deleted_at FROM reflections WHERE id = ?1",
+                rusqlite::params![&delta.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+
+        let delta_ts = effective_sync_ts(&delta.created_at, &delta.updated_at, &delta.deleted_at);
+        match local {
+            None => {
+                tx.execute(
+                    "INSERT INTO reflections \
+                     (id, repo, text, created_at, updated_at, deleted_at, audience, \
+                      domain, tags, recall_count, last_recalled_at, parent_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    rusqlite::params![
+                        &delta.id,
+                        &delta.repo,
+                        &delta.text,
+                        &delta.created_at,
+                        &delta.updated_at,
+                        &delta.deleted_at,
+                        &delta.audience,
+                        &delta.domain,
+                        &delta.tags,
+                        &delta.recall_count,
+                        &delta.last_recalled_at,
+                        &delta.parent_id,
+                    ],
+                )?;
+            }
+            Some((local_created, local_updated, local_deleted)) => {
+                let local_ts = effective_sync_ts(&local_created, &local_updated, &local_deleted);
+                if delta_ts > local_ts {
+                    tx.execute(
+                        "UPDATE reflections SET repo = ?2, text = ?3, created_at = ?4, \
+                         updated_at = ?5, deleted_at = ?6, audience = ?7, domain = ?8, \
+                         tags = ?9, recall_count = ?10, last_recalled_at = ?11, parent_id = ?12 \
+                         WHERE id = ?1",
+                        rusqlite::params![
+                            &delta.id,
+                            &delta.repo,
+                            &delta.text,
+                            &delta.created_at,
+                            &delta.updated_at,
+                            &delta.deleted_at,
+                            &delta.audience,
+                            &delta.domain,
+                            &delta.tags,
+                            &delta.recall_count,
+                            &delta.last_recalled_at,
+                            &delta.parent_id,
+                        ],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Apply a peer's card delta with last-write-wins merge (#536). Same
+    /// LWW rule as [`Self::apply_reflection_delta`].
+    pub fn apply_card_delta(&self, delta: &crate::sync::CardDelta) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        let local: Option<(String, Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT created_at, updated_at, deleted_at FROM tasks WHERE id = ?1",
+                rusqlite::params![&delta.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+
+        let updated = Some(delta.updated_at.clone());
+        let delta_ts = effective_sync_ts(&delta.created_at, &updated, &delta.deleted_at);
+        match local {
+            None => {
+                tx.execute(
+                    "INSERT INTO tasks \
+                     (id, from_repo, to_repo, text, context, priority, status, note, labels, \
+                      parent_card_id, source_url, source_type, sort_order, created_at, \
+                      updated_at, deleted_at, assigned_at, started_at, completed_at, \
+                      problem, solution, acceptance) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
+                             ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                    rusqlite::params![
+                        &delta.id,
+                        &delta.from_repo,
+                        &delta.to_repo,
+                        &delta.text,
+                        &delta.context,
+                        &delta.priority,
+                        &delta.status,
+                        &delta.note,
+                        &delta.labels,
+                        &delta.parent_card_id,
+                        &delta.source_url,
+                        &delta.source_type,
+                        &delta.sort_order,
+                        &delta.created_at,
+                        &delta.updated_at,
+                        &delta.deleted_at,
+                        &delta.assigned_at,
+                        &delta.started_at,
+                        &delta.completed_at,
+                        &delta.problem,
+                        &delta.solution,
+                        &delta.acceptance,
+                    ],
+                )?;
+            }
+            Some((local_created, local_updated, local_deleted)) => {
+                let local_ts = effective_sync_ts(&local_created, &local_updated, &local_deleted);
+                if delta_ts > local_ts {
+                    tx.execute(
+                        "UPDATE tasks SET from_repo = ?2, to_repo = ?3, text = ?4, context = ?5, \
+                         priority = ?6, status = ?7, note = ?8, labels = ?9, parent_card_id = ?10, \
+                         source_url = ?11, source_type = ?12, sort_order = ?13, created_at = ?14, \
+                         updated_at = ?15, deleted_at = ?16, assigned_at = ?17, started_at = ?18, \
+                         completed_at = ?19, problem = ?20, solution = ?21, acceptance = ?22 \
+                         WHERE id = ?1",
+                        rusqlite::params![
+                            &delta.id,
+                            &delta.from_repo,
+                            &delta.to_repo,
+                            &delta.text,
+                            &delta.context,
+                            &delta.priority,
+                            &delta.status,
+                            &delta.note,
+                            &delta.labels,
+                            &delta.parent_card_id,
+                            &delta.source_url,
+                            &delta.source_type,
+                            &delta.sort_order,
+                            &delta.created_at,
+                            &delta.updated_at,
+                            &delta.deleted_at,
+                            &delta.assigned_at,
+                            &delta.started_at,
+                            &delta.completed_at,
+                            &delta.problem,
+                            &delta.solution,
+                            &delta.acceptance,
+                        ],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Apply a peer's schedule delta with last-write-wins merge (#536). Same
+    /// LWW rule as [`Self::apply_reflection_delta`].
+    pub fn apply_schedule_delta(&self, delta: &crate::sync::ScheduleDelta) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        let local: Option<(String, Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT created_at, updated_at, deleted_at FROM schedules WHERE id = ?1",
+                rusqlite::params![&delta.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+
+        let delta_ts = effective_sync_ts(&delta.created_at, &delta.updated_at, &delta.deleted_at);
+        match local {
+            None => {
+                tx.execute(
+                    "INSERT INTO schedules \
+                     (id, name, cron, command, repo, enabled, last_run, next_run, created_at, \
+                      updated_at, deleted_at, active_start, active_end) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    rusqlite::params![
+                        &delta.id,
+                        &delta.name,
+                        &delta.cron,
+                        &delta.command,
+                        &delta.repo,
+                        &delta.enabled,
+                        &delta.last_run,
+                        &delta.next_run,
+                        &delta.created_at,
+                        &delta.updated_at,
+                        &delta.deleted_at,
+                        &delta.active_start,
+                        &delta.active_end,
+                    ],
+                )?;
+            }
+            Some((local_created, local_updated, local_deleted)) => {
+                let local_ts = effective_sync_ts(&local_created, &local_updated, &local_deleted);
+                if delta_ts > local_ts {
+                    tx.execute(
+                        "UPDATE schedules SET name = ?2, cron = ?3, command = ?4, repo = ?5, \
+                         enabled = ?6, last_run = ?7, next_run = ?8, created_at = ?9, \
+                         updated_at = ?10, deleted_at = ?11, active_start = ?12, active_end = ?13 \
+                         WHERE id = ?1",
+                        rusqlite::params![
+                            &delta.id,
+                            &delta.name,
+                            &delta.cron,
+                            &delta.command,
+                            &delta.repo,
+                            &delta.enabled,
+                            &delta.last_run,
+                            &delta.next_run,
+                            &delta.created_at,
+                            &delta.updated_at,
+                            &delta.deleted_at,
+                            &delta.active_start,
+                            &delta.active_end,
+                        ],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+/// Effective timestamp for sync LWW comparisons (#536): the latest of
+/// updated_at / deleted_at, falling back to created_at when neither is set.
+/// RFC3339 strings compare lexicographically in time order.
+fn effective_sync_ts<'a>(
+    created_at: &'a str,
+    updated_at: &'a Option<String>,
+    deleted_at: &'a Option<String>,
+) -> &'a str {
+    let mut best = created_at;
+    if let Some(u) = updated_at.as_deref()
+        && u > best
+    {
+        best = u;
+    }
+    if let Some(d) = deleted_at.as_deref()
+        && d > best
+    {
+        best = d;
+    }
+    best
 }
 
 // -- wake_attempts (#487, part of #495) --------------------------------------
@@ -7460,6 +7716,193 @@ mod tests {
         assert!(
             listed.is_empty(),
             "incoming tombstone with newer updated_at must eclipse local live lease"
+        );
+    }
+
+    // -- apply_*_delta LWW (#536) ------------------------------------------
+
+    fn reflection_delta(id: &str, text: &str, updated_at: &str) -> crate::sync::ReflectionDelta {
+        crate::sync::ReflectionDelta {
+            id: id.into(),
+            repo: "legion".into(),
+            text: text.into(),
+            created_at: "2026-06-01T00:00:00Z".into(),
+            updated_at: Some(updated_at.into()),
+            deleted_at: None,
+            audience: "self".into(),
+            domain: None,
+            tags: None,
+            recall_count: 0,
+            last_recalled_at: None,
+            parent_id: None,
+        }
+    }
+
+    fn read_reflection_text(db: &Database, id: &str) -> Option<String> {
+        db.conn
+            .query_row("SELECT text FROM reflections WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()
+            .unwrap()
+    }
+
+    #[test]
+    fn apply_reflection_delta_inserts_when_missing() {
+        let db = test_db();
+        db.apply_reflection_delta(&reflection_delta(
+            "r-1",
+            "from peer",
+            "2026-06-02T00:00:00Z",
+        ))
+        .unwrap();
+        assert_eq!(
+            read_reflection_text(&db, "r-1").as_deref(),
+            Some("from peer")
+        );
+    }
+
+    #[test]
+    fn apply_reflection_delta_newer_overwrites_older_is_noop() {
+        let db = test_db();
+        db.apply_reflection_delta(&reflection_delta("r-2", "v1", "2026-06-02T00:00:00Z"))
+            .unwrap();
+        // Newer delta wins.
+        db.apply_reflection_delta(&reflection_delta("r-2", "v2", "2026-06-03T00:00:00Z"))
+            .unwrap();
+        assert_eq!(read_reflection_text(&db, "r-2").as_deref(), Some("v2"));
+        // Older delta is a no-op.
+        db.apply_reflection_delta(&reflection_delta("r-2", "stale", "2026-06-01T00:00:00Z"))
+            .unwrap();
+        assert_eq!(read_reflection_text(&db, "r-2").as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn apply_reflection_delta_tombstone_wins_by_lww() {
+        let db = test_db();
+        db.apply_reflection_delta(&reflection_delta("r-3", "alive", "2026-06-02T00:00:00Z"))
+            .unwrap();
+        let mut tomb = reflection_delta("r-3", "alive", "2026-06-02T00:00:00Z");
+        tomb.deleted_at = Some("2026-06-04T00:00:00Z".into());
+        db.apply_reflection_delta(&tomb).unwrap();
+        let deleted: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT deleted_at FROM reflections WHERE id = ?1",
+                ["r-3"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(deleted.as_deref(), Some("2026-06-04T00:00:00Z"));
+    }
+
+    #[test]
+    fn apply_card_delta_insert_then_lww() {
+        let db = test_db();
+        let mut delta = crate::sync::CardDelta {
+            id: "c-1".into(),
+            from_repo: "legion".into(),
+            to_repo: "legion".into(),
+            text: "card v1".into(),
+            context: None,
+            priority: "med".into(),
+            status: "pending".into(),
+            note: None,
+            labels: None,
+            parent_card_id: None,
+            source_url: None,
+            source_type: None,
+            sort_order: 0,
+            created_at: "2026-06-01T00:00:00Z".into(),
+            updated_at: "2026-06-02T00:00:00Z".into(),
+            deleted_at: None,
+            assigned_at: None,
+            started_at: None,
+            completed_at: None,
+            problem: None,
+            solution: None,
+            acceptance: None,
+        };
+        db.apply_card_delta(&delta).unwrap();
+
+        delta.text = "card v2".into();
+        delta.updated_at = "2026-06-03T00:00:00Z".into();
+        db.apply_card_delta(&delta).unwrap();
+
+        // Stale write loses.
+        delta.text = "card stale".into();
+        delta.updated_at = "2026-06-01T12:00:00Z".into();
+        db.apply_card_delta(&delta).unwrap();
+
+        let text: String = db
+            .conn
+            .query_row("SELECT text FROM tasks WHERE id = ?1", ["c-1"], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(text, "card v2");
+    }
+
+    #[test]
+    fn apply_schedule_delta_insert_then_lww() {
+        let db = test_db();
+        let mut delta = crate::sync::ScheduleDelta {
+            id: "s-1".into(),
+            name: "nightly".into(),
+            cron: "0 2 * * *".into(),
+            command: "echo one".into(),
+            repo: "legion".into(),
+            enabled: true,
+            last_run: None,
+            next_run: "2026-06-02T02:00:00Z".into(),
+            created_at: "2026-06-01T00:00:00Z".into(),
+            updated_at: Some("2026-06-02T00:00:00Z".into()),
+            deleted_at: None,
+            active_start: None,
+            active_end: None,
+        };
+        db.apply_schedule_delta(&delta).unwrap();
+
+        delta.command = "echo two".into();
+        delta.updated_at = Some("2026-06-03T00:00:00Z".into());
+        db.apply_schedule_delta(&delta).unwrap();
+
+        delta.command = "echo stale".into();
+        delta.updated_at = Some("2026-06-01T06:00:00Z".into());
+        db.apply_schedule_delta(&delta).unwrap();
+
+        let cmd: String = db
+            .conn
+            .query_row(
+                "SELECT command FROM schedules WHERE id = ?1",
+                ["s-1"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cmd, "echo two");
+    }
+
+    #[test]
+    fn effective_sync_ts_picks_latest_of_three() {
+        assert_eq!(
+            effective_sync_ts("2026-01-01T00:00:00Z", &None, &None),
+            "2026-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            effective_sync_ts(
+                "2026-01-01T00:00:00Z",
+                &Some("2026-02-01T00:00:00Z".into()),
+                &None
+            ),
+            "2026-02-01T00:00:00Z"
+        );
+        assert_eq!(
+            effective_sync_ts(
+                "2026-01-01T00:00:00Z",
+                &Some("2026-02-01T00:00:00Z".into()),
+                &Some("2026-03-01T00:00:00Z".into())
+            ),
+            "2026-03-01T00:00:00Z"
         );
     }
 
