@@ -370,10 +370,8 @@ pub(crate) fn handle_recall(
         let index = search::SearchIndex::open(&data_dir()?.join("index"))?;
         // Try hybrid (BM25 + cosine) recall, fall back to BM25-only
         match try_load_embed_model() {
-            Some(model) => {
-                recall::recall_in_mode(&database, &index, &model, &repo, &context, limit, mode)?
-            }
-            None => recall::recall_bm25_in_mode(&database, &index, &repo, &context, limit, mode)?,
+            Some(model) => recall::recall(&database, &index, &model, &repo, &context, limit, mode)?,
+            None => recall::recall_bm25(&database, &index, &repo, &context, limit, mode)?,
         }
     };
     // Apply min-score filter on hybrid/latest paths (cosine-only applies it inline).
