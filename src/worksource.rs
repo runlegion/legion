@@ -836,11 +836,11 @@ pub fn sync_issues(
         };
 
         let priority = if label_names.iter().any(|l| l == "critical") {
-            "critical"
+            kanban::Priority::Critical
         } else if label_names.iter().any(|l| l == "high" || l == "priority") {
-            "high"
+            kanban::Priority::High
         } else {
-            "med"
+            kanban::Priority::Med
         };
 
         // born-Backlog: synced issues are created in Backlog via create_card's

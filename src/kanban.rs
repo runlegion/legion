@@ -70,6 +70,63 @@ impl CardStatus {
     }
 }
 
+/// Priority of a kanban card.
+///
+/// A closed set with the enum treatment `CardStatus` already got: a typo'd
+/// priority is unrepresentable past the parse boundary, and the clap
+/// surfaces derive their accepted values from this enum (`ValueEnum`).
+/// The db-side scheduler ordering (`Database::PRIORITY_ORDER`) is a SQL
+/// CASE over the same four literals; a test there asserts the SQL covers
+/// every variant.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    Low,
+    Med,
+    High,
+    Critical,
+}
+
+impl fmt::Display for Priority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Low => write!(f, "low"),
+            Self::Med => write!(f, "med"),
+            Self::High => write!(f, "high"),
+            Self::Critical => write!(f, "critical"),
+        }
+    }
+}
+
+impl FromStr for Priority {
+    type Err = LegionError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "low" => Ok(Self::Low),
+            "med" => Ok(Self::Med),
+            "high" => Ok(Self::High),
+            "critical" => Ok(Self::Critical),
+            other => Err(LegionError::InvalidPriority(other.to_string())),
+        }
+    }
+}
+
+impl Priority {
+    /// Human-friendly label for dashboard display, mirroring
+    /// `CardStatus::label`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Med => "Med",
+            Self::High => "High",
+            Self::Critical => "Critical",
+        }
+    }
+}
+
 /// Actions that trigger state transitions on a card.
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
@@ -134,7 +191,7 @@ pub struct Card {
     pub to_repo: String,
     pub text: String,
     pub context: Option<String>,
-    pub priority: String,
+    pub priority: Priority,
     pub status: CardStatus,
     pub note: Option<String>,
     pub labels: Option<String>,
@@ -167,13 +224,17 @@ pub fn map_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
     let status = CardStatus::from_str(&status_str).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
     })?;
+    let priority_str: String = row.get(5)?;
+    let priority = Priority::from_str(&priority_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+    })?;
     Ok(Card {
         id: row.get(0)?,
         from_repo: row.get(1)?,
         to_repo: row.get(2)?,
         text: row.get(3)?,
         context: row.get(4)?,
-        priority: row.get(5)?,
+        priority,
         status,
         note: row.get(7)?,
         labels: row.get(8)?,
@@ -278,7 +339,7 @@ pub fn create_card(
     to_repo: &str,
     text: &str,
     context: Option<&str>,
-    priority: &str,
+    priority: Priority,
     labels: Option<&str>,
     parent_card_id: Option<&str>,
     source_url: Option<&str>,
@@ -364,9 +425,9 @@ pub fn format_active_goal(cards: &[Card]) -> Option<String> {
     Some(out)
 }
 
-/// Format a priority tag for display.
-fn priority_tag(priority: &str) -> String {
-    if priority != "med" {
+/// Format a priority tag for display. Empty for the default Med.
+fn priority_tag(priority: Priority) -> String {
+    if priority != Priority::Med {
         format!(" [{}]", priority)
     } else {
         String::new()
@@ -392,7 +453,7 @@ pub fn format_card_list(cards: &[Card], repo: &str, direction: Direction) -> Str
     );
 
     for c in cards {
-        let prio = priority_tag(&c.priority);
+        let prio = priority_tag(c.priority);
         let peer = match direction {
             Direction::Inbound => format!("from:{}", c.from_repo),
             Direction::Outbound => format!("to:{}", c.to_repo),
@@ -435,7 +496,7 @@ pub struct CardSummary {
     pub from_repo: String,
     pub to_repo: String,
     pub status: CardStatus,
-    pub priority: String,
+    pub priority: Priority,
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
@@ -476,7 +537,7 @@ pub fn format_card_view(card: &Card) -> String {
     out.push_str(&format!("Card: {}\n", card.id));
     out.push_str(&format!("Title: {}\n", derive_title(&card.text)));
     out.push_str(&format!("Status: {}\n", card.status.label()));
-    out.push_str(&format!("Priority: {}\n", card.priority));
+    out.push_str(&format!("Priority: {}\n", card.priority.label()));
     out.push_str(&format!(
         "From: {} -> To: {}\n",
         card.from_repo, card.to_repo
@@ -535,7 +596,7 @@ pub fn format_card_list_json(cards: &[Card]) -> crate::error::Result<String> {
             from_repo: card.from_repo.clone(),
             to_repo: card.to_repo.clone(),
             status: card.status,
-            priority: card.priority.clone(),
+            priority: card.priority,
             title: derive_title(&card.text),
             created_at: card.created_at.clone(),
             updated_at: card.updated_at.clone(),
@@ -556,7 +617,7 @@ pub struct CardUpdateParams {
     /// New body -- re-parsed into problem/solution/acceptance
     pub body: Option<String>,
     /// New priority
-    pub priority: Option<String>,
+    pub priority: Option<Priority>,
     /// Replacement label set (comma-separated)
     pub labels: Option<String>,
     /// Labels to append, deduplicated against existing
@@ -612,6 +673,7 @@ pub fn update_card(
             (None, None, None, None)
         };
 
+    let priority_str = params.priority.map(|p| p.to_string());
     db.update_card_fields(
         id,
         params.text.as_deref(),
@@ -619,7 +681,7 @@ pub fn update_card(
         new_problem.as_deref(),
         new_solution.as_deref(),
         new_acceptance.as_deref(),
-        params.priority.as_deref(),
+        priority_str.as_deref(),
         new_labels.as_deref(),
     )?;
 
@@ -852,7 +914,7 @@ mod tests {
         from: &str,
         to: &str,
         text: &str,
-        priority: &str,
+        priority: Priority,
     ) -> String {
         let id = create_card(
             db, from, to, text, None, priority, None, None, None, None, None,
@@ -872,7 +934,7 @@ mod tests {
             "legion",
             "implement search",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -899,7 +961,7 @@ mod tests {
             "kelex",
             "unconsented",
             None,
-            "high",
+            Priority::High,
             None,
             None,
             None,
@@ -935,7 +997,7 @@ mod tests {
             "kelex",
             "raw inbox",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -943,14 +1005,24 @@ mod tests {
             None,
         )
         .expect("create backlog");
-        create_and_assign(&db, "sean", "kelex", "ready", "med"); // -> Pending
-        let accepted = create_and_assign(&db, "sean", "kelex", "in progress", "med");
+        create_and_assign(&db, "sean", "kelex", "ready", Priority::Med); // -> Pending
+        let accepted = create_and_assign(&db, "sean", "kelex", "in progress", Priority::Med);
         transition_card(&db, &accepted, Action::Accept, None).expect("accept");
-        let done = create_and_assign(&db, "sean", "kelex", "shipped", "med");
+        let done = create_and_assign(&db, "sean", "kelex", "shipped", Priority::Med);
         transition_card(&db, &done, Action::Accept, None).expect("accept");
         transition_card(&db, &done, Action::Done, None).expect("done");
         let cancelled = create_card(
-            &db, "sean", "kelex", "scrapped", None, "med", None, None, None, None, None,
+            &db,
+            "sean",
+            "kelex",
+            "scrapped",
+            None,
+            Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .expect("create cancelled");
         transition_card(&db, &cancelled, Action::Cancel, None).expect("cancel");
@@ -985,7 +1057,7 @@ mod tests {
             "legion",
             "urgent task",
             Some("related to issue #42"),
-            "high",
+            Priority::High,
             Some("backend,search"),
             None,
             Some("https://github.com/runlegion/legion/issues/42"),
@@ -996,7 +1068,7 @@ mod tests {
 
         let card = db.get_card_by_id(&id).expect("get").expect("exists");
         assert_eq!(card.context.as_deref(), Some("related to issue #42"));
-        assert_eq!(card.priority, "high");
+        assert_eq!(card.priority, Priority::High);
         assert_eq!(card.labels.as_deref(), Some("backend,search"));
         assert_eq!(
             card.source_url.as_deref(),
@@ -1009,7 +1081,7 @@ mod tests {
     fn full_lifecycle() {
         let (db, _index, _dir) = test_storage();
 
-        let id = create_and_assign(&db, "kelex", "legion", "do the thing", "med");
+        let id = create_and_assign(&db, "kelex", "legion", "do the thing", Priority::Med);
 
         let card = transition_card(&db, &id, Action::Accept, None).expect("accept");
         assert_eq!(card.status, CardStatus::Accepted);
@@ -1025,7 +1097,7 @@ mod tests {
     fn block_unblock_flow() {
         let (db, _index, _dir) = test_storage();
 
-        let id = create_and_assign(&db, "kelex", "legion", "blocked task", "med");
+        let id = create_and_assign(&db, "kelex", "legion", "blocked task", Priority::Med);
 
         transition_card(&db, &id, Action::Accept, None).expect("accept");
         let card =
@@ -1040,9 +1112,9 @@ mod tests {
     fn next_work_picks_highest_priority() {
         let (db, _index, _dir) = test_storage();
 
-        create_and_assign(&db, "sean", "kelex", "low priority", "low");
-        create_and_assign(&db, "sean", "kelex", "high priority", "high");
-        create_and_assign(&db, "sean", "kelex", "med priority", "med");
+        create_and_assign(&db, "sean", "kelex", "low priority", Priority::Low);
+        create_and_assign(&db, "sean", "kelex", "high priority", Priority::High);
+        create_and_assign(&db, "sean", "kelex", "med priority", Priority::Med);
 
         let card = next_work(&db, "kelex").expect("work").expect("has work");
         assert_eq!(card.text, "high priority");
@@ -1060,7 +1132,7 @@ mod tests {
     fn peek_does_not_accept() {
         let (db, _index, _dir) = test_storage();
 
-        create_and_assign(&db, "sean", "kelex", "peek test", "med");
+        create_and_assign(&db, "sean", "kelex", "peek test", Priority::Med);
 
         let card = peek_work(&db, "kelex").expect("peek").expect("has work");
         assert_eq!(card.status, CardStatus::Pending);
@@ -1080,7 +1152,7 @@ mod tests {
             "kelex",
             "force move",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1112,7 +1184,7 @@ mod tests {
             "legion",
             "premature",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1131,10 +1203,20 @@ mod tests {
 
         // Born-Backlog: an unassigned card is not ready work.
         create_card(
-            &db, "kelex", "legion", "task one", None, "med", None, None, None, None, None,
+            &db,
+            "kelex",
+            "legion",
+            "task one",
+            None,
+            Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .expect("create");
-        let assigned = create_and_assign(&db, "kelex", "legion", "task two", "high");
+        let assigned = create_and_assign(&db, "kelex", "legion", "task two", Priority::High);
 
         let cards = get_ready_cards(&db, "legion").expect("get");
         assert_eq!(cards.len(), 1, "only the assigned (Pending) card is ready");
@@ -1151,7 +1233,7 @@ mod tests {
             "legion",
             "test card",
             None,
-            "high",
+            Priority::High,
             Some("backend"),
             None,
             None,
@@ -1176,7 +1258,7 @@ mod tests {
             to_repo: "kelex".to_string(),
             text: "implement search".to_string(),
             context: Some("see design doc".to_string()),
-            priority: "high".to_string(),
+            priority: Priority::High,
             status: CardStatus::Accepted,
             note: None,
             labels: Some("backend,search".to_string()),
@@ -1204,9 +1286,9 @@ mod tests {
     fn agent_workloads_summary() {
         let (db, _index, _dir) = test_storage();
 
-        create_and_assign(&db, "sean", "kelex", "task 1", "med");
-        create_and_assign(&db, "sean", "kelex", "task 2", "high");
-        create_and_assign(&db, "sean", "rafters", "task 3", "med");
+        create_and_assign(&db, "sean", "kelex", "task 1", Priority::Med);
+        create_and_assign(&db, "sean", "kelex", "task 2", Priority::High);
+        create_and_assign(&db, "sean", "rafters", "task 3", Priority::Med);
 
         let workloads = agent_workloads(&db).expect("workloads");
         assert!(workloads.len() >= 2);
@@ -1226,7 +1308,7 @@ mod tests {
             "kelex",
             "backlog item",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1248,7 +1330,7 @@ mod tests {
     #[test]
     fn cancel_sets_completed_at() {
         let (db, _index, _dir) = test_storage();
-        let id = create_and_assign(&db, "sean", "kelex", "cancel test", "med");
+        let id = create_and_assign(&db, "sean", "kelex", "cancel test", Priority::Med);
         transition_card(&db, &id, Action::Accept, None).expect("accept");
         let card = transition_card(&db, &id, Action::Cancel, None).expect("cancel");
         assert_eq!(card.status, CardStatus::Cancelled);
@@ -1261,7 +1343,7 @@ mod tests {
     #[test]
     fn block_unblock_does_not_clobber_started_at() {
         let (db, _index, _dir) = test_storage();
-        let id = create_and_assign(&db, "sean", "kelex", "block test", "med");
+        let id = create_and_assign(&db, "sean", "kelex", "block test", Priority::Med);
         let card = transition_card(&db, &id, Action::Accept, None).expect("accept");
         let started = card.started_at.clone();
         assert!(started.is_some());
@@ -1284,7 +1366,7 @@ mod tests {
             "kelex",
             "old issue",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1308,7 +1390,7 @@ mod tests {
             "kelex",
             "new issue",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1325,7 +1407,7 @@ mod tests {
             "kelex",
             "old issue",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1351,7 +1433,7 @@ mod tests {
             "kelex",
             "manual card",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1368,7 +1450,7 @@ mod tests {
             "kelex",
             "old github issue",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1455,7 +1537,7 @@ mod tests {
             to_repo: "kelex".to_string(),
             text: "minimal card".to_string(),
             context: None,
-            priority: "med".to_string(),
+            priority: Priority::Med,
             status: CardStatus::Accepted,
             note: None,
             labels: None,
@@ -1487,7 +1569,7 @@ mod tests {
             to_repo: "kelex".to_string(),
             text: text.to_string(),
             context: None,
-            priority: "med".to_string(),
+            priority: Priority::Med,
             status,
             note: None,
             labels: None,
@@ -1537,7 +1619,7 @@ mod tests {
             "kelex",
             "view test",
             None,
-            "high",
+            Priority::High,
             None,
             None,
             None,
@@ -1548,7 +1630,7 @@ mod tests {
         let card = view_card(&db, &id).expect("view");
         assert_eq!(card.id, id);
         assert_eq!(card.text, "view test");
-        assert_eq!(card.priority, "high");
+        assert_eq!(card.priority, Priority::High);
     }
 
     #[test]
@@ -1566,7 +1648,7 @@ mod tests {
             to_repo: "kelex".to_string(),
             text: "## Test Card".to_string(),
             context: None,
-            priority: "high".to_string(),
+            priority: Priority::High,
             status: CardStatus::Pending,
             note: None,
             labels: Some("backend,api".to_string()),
@@ -1604,7 +1686,7 @@ mod tests {
             to_repo: "kelex".to_string(),
             text: "plain card".to_string(),
             context: Some("raw context text".to_string()),
-            priority: "med".to_string(),
+            priority: Priority::Med,
             status: CardStatus::Pending,
             note: None,
             labels: None,
@@ -1635,7 +1717,7 @@ mod tests {
             to_repo: "kelex".to_string(),
             text: "json test".to_string(),
             context: None,
-            priority: "med".to_string(),
+            priority: Priority::Med,
             status: CardStatus::Pending,
             note: None,
             labels: None,
@@ -1669,7 +1751,7 @@ mod tests {
             "kelex",
             "original title",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1697,7 +1779,7 @@ mod tests {
             "kelex",
             "card with body",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1730,7 +1812,7 @@ mod tests {
             "kelex",
             "priority test",
             None,
-            "low",
+            Priority::Low,
             None,
             None,
             None,
@@ -1740,13 +1822,13 @@ mod tests {
         .expect("create");
 
         let params = CardUpdateParams {
-            priority: Some("critical".to_string()),
+            priority: Some(Priority::Critical),
             ..Default::default()
         };
         update_card(&db, &id, "sean", &params).expect("update");
 
         let card = view_card(&db, &id).expect("view");
-        assert_eq!(card.priority, "critical");
+        assert_eq!(card.priority, Priority::Critical);
     }
 
     #[test]
@@ -1758,7 +1840,7 @@ mod tests {
             "kelex",
             "labels test",
             None,
-            "med",
+            Priority::Med,
             Some("backend,api"),
             None,
             None,
@@ -1794,7 +1876,7 @@ mod tests {
             "kelex",
             "remove labels test",
             None,
-            "med",
+            Priority::Med,
             Some("backend,api,frontend"),
             None,
             None,
@@ -1827,7 +1909,7 @@ mod tests {
             "kelex",
             "replace labels test",
             None,
-            "med",
+            Priority::Med,
             Some("backend,api"),
             None,
             None,
@@ -1867,7 +1949,7 @@ mod tests {
             "kelex",
             "timestamp test",
             None,
-            "med",
+            Priority::Med,
             None,
             None,
             None,
@@ -1900,7 +1982,7 @@ mod tests {
             "kelex",
             "## Card One",
             None,
-            "high",
+            Priority::High,
             Some("backend"),
             None,
             None,
@@ -1909,7 +1991,17 @@ mod tests {
         )
         .expect("create 1");
         create_card(
-            &db, "sean", "kelex", "card two", None, "med", None, None, None, None, None,
+            &db,
+            "sean",
+            "kelex",
+            "card two",
+            None,
+            Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .expect("create 2");
 
@@ -1946,7 +2038,7 @@ mod tests {
             "kelex",
             "labeled card",
             None,
-            "med",
+            Priority::Med,
             Some("backend,api"),
             None,
             None,

@@ -26,9 +26,9 @@ pub(crate) enum KanbanAction {
         #[arg(long)]
         context: Option<String>,
 
-        /// Priority: low, med, high, critical (default: med)
-        #[arg(long, default_value = "med", value_parser = ["low", "med", "high", "critical"])]
-        priority: String,
+        /// Priority (default: med)
+        #[arg(long, value_enum, default_value_t = kanban::Priority::Med)]
+        priority: kanban::Priority,
 
         /// Comma-separated labels
         #[arg(long)]
@@ -76,9 +76,9 @@ pub(crate) enum KanbanAction {
         #[arg(long)]
         body: Option<String>,
 
-        /// New priority: low, med, high, critical
-        #[arg(long, value_parser = ["low", "med", "high", "critical"])]
-        priority: Option<String>,
+        /// New priority
+        #[arg(long, value_enum)]
+        priority: Option<kanban::Priority>,
 
         /// Replace labels with this comma-separated list
         #[arg(long, conflicts_with_all = ["add_labels", "remove_labels"])]
@@ -595,7 +595,7 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
                 &to,
                 &text,
                 context.as_deref(),
-                &priority,
+                priority,
                 labels.as_deref(),
                 parent.as_deref(),
                 source_url.as_deref(),

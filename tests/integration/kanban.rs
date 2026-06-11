@@ -364,7 +364,9 @@ fn kanban_view_human_output() {
     let stdout = run_ok(legion_cmd(dir.path()).args(["kanban", "view", "--id", &id]));
     assert!(stdout.contains(&id), "card id in output");
     assert!(stdout.contains("view me"), "title in output");
-    assert!(stdout.contains("high"), "priority in output");
+    // Priority renders via Priority::label, matching the Status line's
+    // human-friendly casing ("Priority: High").
+    assert!(stdout.contains("Priority: High"), "priority in output");
 }
 
 #[test]
