@@ -4263,7 +4263,14 @@ impl Database {
 
 /// Effective timestamp for sync LWW comparisons (#536): the latest of
 /// updated_at / deleted_at, falling back to created_at when neither is set.
-/// RFC3339 strings compare lexicographically in time order.
+///
+/// Precondition: all compared timestamps share legion's uniform format
+/// (`Utc::now().to_rfc3339()`, +00:00 offset, fixed precision), under which
+/// lexicographic order equals time order. Mixed formats (e.g. a 'Z' suffix)
+/// would misorder; every writer in the sync path is legion itself.
+/// Exact ties keep the local row (strict >): no flip-flop, but concurrent
+/// same-instant writes on two nodes stay divergent -- changing that
+/// tiebreaker is a conflict-policy change, out of #536's scope.
 fn effective_sync_ts<'a>(
     created_at: &'a str,
     updated_at: &'a Option<String>,

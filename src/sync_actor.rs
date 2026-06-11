@@ -144,11 +144,28 @@ async fn run_sync_loop(
         }
     };
 
-    let key = config.encryption_key().map_err(|e| {
-        crate::error::LegionError::Config(format!("sync actor key derivation failed: {e}"))
-    })?;
+    // Hard requirement, not Option: without a key, maybe_decrypt would pass
+    // unauthenticated plaintext from 0.0.0.0 straight into the DB. The spawn
+    // gate already filters secretless configs; this is the defense in depth
+    // for any future caller of SyncHandle::spawn.
+    let key = config
+        .encryption_key()
+        .map_err(|e| {
+            crate::error::LegionError::Config(format!("sync actor key derivation failed: {e}"))
+        })?
+        .ok_or_else(|| {
+            crate::error::LegionError::Config(
+                "sync requires a cluster secret; refusing to run unencrypted".into(),
+            )
+        })?;
+    let key = Some(key);
 
-    let data_port = config.port + DATA_PORT_OFFSET;
+    let data_port = config.port.checked_add(DATA_PORT_OFFSET).ok_or_else(|| {
+        crate::error::LegionError::Config(format!(
+            "cluster port {} leaves no room for the data port (port + {DATA_PORT_OFFSET} overflows); pick a lower port",
+            config.port
+        ))
+    })?;
     let data_socket = UdpSocket::bind(("0.0.0.0", data_port)).await.map_err(|e| {
         crate::error::LegionError::Config(format!("sync actor bind data port {data_port}: {e}"))
     })?;
@@ -179,7 +196,12 @@ async fn run_sync_loop(
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
     let sync_interval = Duration::from_secs(config.interval_secs);
     let source_id = discovery.instance_id().to_string();
-    let mut seq: u64 = 0;
+    // Seed seq above any value peers may remember for this instance_id:
+    // their ReplayGuards live as long as their receive loops, so a restart
+    // that re-started from 0 would be rejected as replay until it caught up
+    // (silently losing every cycle in between). Epoch-millis is monotonic
+    // across restarts at any realistic cycle rate.
+    let mut seq: u64 = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
 
     loop {
         // Check for stop signal (non-blocking)
@@ -211,55 +233,56 @@ async fn run_sync_loop(
             eprintln!("[legion sync] {} peer(s) online", peers.len());
 
             let cycle_start = chrono::Utc::now().to_rfc3339();
-            if let Ok(db) = Database::open(&db_path) {
-                let packets = match build_delta_packets(&db, &last_sync, &source_id, &mut seq) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("[legion sync] delta build failed: {e}");
-                        Vec::new()
-                    }
-                };
+            match Database::open(&db_path) {
+                Err(e) => eprintln!("[legion sync] db open for send cycle failed: {e}"),
+                Ok(db) => {
+                    let packets = match build_delta_packets(&db, &last_sync, &source_id, &mut seq) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("[legion sync] delta build failed: {e}");
+                            Vec::new()
+                        }
+                    };
 
-                if !packets.is_empty() {
-                    let upsert_total: usize = packets.iter().map(|p| p.upserts.len()).sum();
-                    eprintln!(
-                        "[legion sync] broadcasting {} delta row(s) in {} packet(s) to {} peer(s)",
-                        upsert_total,
-                        packets.len(),
-                        peers.len()
-                    );
+                    if !packets.is_empty() {
+                        let upsert_total: usize = packets.iter().map(|p| p.upserts.len()).sum();
+                        eprintln!(
+                            "[legion sync] broadcasting {} delta row(s) in {} packet(s) to {} peer(s)",
+                            upsert_total,
+                            packets.len(),
+                            peers.len()
+                        );
 
-                    let mut all_sent = true;
-                    for packet in &packets {
-                        let bytes = match packet.to_bytes().and_then(|b| maybe_encrypt(&b, &key)) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                eprintln!("[legion sync] packet seal failed: {e}");
-                                all_sent = false;
-                                continue;
-                            }
-                        };
-                        for peer in &peers {
-                            let target = std::net::SocketAddr::new(
-                                peer.addr.ip(),
-                                config.port + DATA_PORT_OFFSET,
-                            );
-                            if let Err(e) = data_socket.send_to(&bytes, target).await {
-                                eprintln!(
-                                    "[legion sync] send to {} ({}) failed: {e}",
-                                    peer.instance_id, target
-                                );
-                                all_sent = false;
+                        let mut all_sent = true;
+                        for packet in &packets {
+                            let bytes =
+                                match packet.to_bytes().and_then(|b| maybe_encrypt(&b, &key)) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        eprintln!("[legion sync] packet seal failed: {e}");
+                                        all_sent = false;
+                                        continue;
+                                    }
+                                };
+                            for peer in &peers {
+                                let target = std::net::SocketAddr::new(peer.addr.ip(), data_port);
+                                if let Err(e) = data_socket.send_to(&bytes, target).await {
+                                    eprintln!(
+                                        "[legion sync] send to {} ({}) failed: {e}",
+                                        peer.instance_id, target
+                                    );
+                                    all_sent = false;
+                                }
                             }
                         }
-                    }
 
-                    // Advance and persist last_sync only after a fully
-                    // successful cycle (#536 defects 2+3); a failed peer
-                    // retries the same window next cycle.
-                    if all_sent {
-                        last_sync = cycle_start;
-                        persist_last_sync(data_dir, &last_sync);
+                        // Advance and persist last_sync only after a fully
+                        // successful cycle (#536 defects 2+3); a failed peer
+                        // retries the same window next cycle.
+                        if all_sent {
+                            last_sync = cycle_start;
+                            persist_last_sync(data_dir, &last_sync);
+                        }
                     }
                 }
             }
@@ -331,10 +354,19 @@ fn pack_table<T: serde::Serialize>(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let split = split_delta(source_id, *seq, table, upserts, Vec::new(), SEAL_RESERVE)
+    let mut split = split_delta(source_id, *seq, table, upserts, Vec::new(), SEAL_RESERVE)
         .map_err(|e| crate::error::LegionError::Config(format!("delta split ({table}): {e}")))?;
-    // split_delta emits parts sharing one seq; bump once per table batch.
-    *seq += 1;
+    // split_delta stamps every part with the seq it was given, but the
+    // receiver's ReplayGuard drops repeated seqs as duplicates -- so re-stamp
+    // each part as an independent single-part packet with its own seq (the
+    // same scheme smugglr-core's own multicast engine uses). Each part
+    // carries complete rows, so independent application is sound.
+    for p in &mut split {
+        p.seq = *seq;
+        *seq += 1;
+        p.part = 0;
+        p.total_parts = 1;
+    }
     packets.extend(split);
     Ok(())
 }
@@ -349,11 +381,17 @@ async fn receive_loop(
 ) {
     let mut guard = ReplayGuard::new();
     let mut buf = vec![0u8; 65_536];
+    // One connection for the loop's lifetime, lazily (re)opened on failure --
+    // not per packet. busy_timeout keeps concurrent watch-loop writes from
+    // surfacing as immediate SQLITE_BUSY row drops.
+    let mut db: Option<Database> = None;
     loop {
         let (len, from) = match socket.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("[legion sync] recv error: {e}");
+                // Backoff so a persistent socket error cannot hot-spin.
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
         };
@@ -378,18 +416,28 @@ async fn receive_loop(
         if !guard.check(&packet.source_id, packet.seq) {
             continue; // replay or out-of-order duplicate
         }
-        match Database::open(&db_path) {
-            Ok(db) => {
-                let applied = apply_packet(&db, &packet);
-                eprintln!(
-                    "[legion sync] applied {applied}/{} row(s) from {} (table: {})",
-                    packet.upserts.len(),
-                    packet.source_id,
-                    packet.table
-                );
+        if db.is_none() {
+            match Database::open(&db_path) {
+                Ok(opened) => {
+                    if let Err(e) = opened.conn.busy_timeout(Duration::from_secs(2)) {
+                        eprintln!("[legion sync] busy_timeout not set: {e}");
+                    }
+                    db = Some(opened);
+                }
+                Err(e) => {
+                    eprintln!("[legion sync] db open for apply failed: {e}");
+                    continue;
+                }
             }
-            Err(e) => eprintln!("[legion sync] db open for apply failed: {e}"),
         }
+        let Some(ref open_db) = db else { continue };
+        let applied = apply_packet(open_db, &packet);
+        eprintln!(
+            "[legion sync] applied {applied}/{} row(s) from {} (table: {})",
+            packet.upserts.len(),
+            packet.source_id,
+            packet.table
+        );
     }
 }
 
@@ -541,6 +589,54 @@ mod tests {
             )
             .expect("read back");
         assert_eq!(text, "synced from peer");
+    }
+
+    #[test]
+    fn multipart_batches_pass_a_fresh_replay_guard() {
+        // Regression for the review-caught data-loss bug: split_delta stamps
+        // all parts of a batch with one seq, and ReplayGuard drops repeated
+        // seqs -- so pack_table must re-stamp each part with its own seq.
+        let big_text = "x".repeat(900);
+        let rows: Vec<ReflectionDelta> = (0..8)
+            .map(|i| ReflectionDelta {
+                id: format!("r-big-{i}"),
+                repo: "legion".into(),
+                text: big_text.clone(),
+                created_at: "2026-06-10T00:00:00Z".into(),
+                updated_at: Some("2026-06-10T01:00:00Z".into()),
+                deleted_at: None,
+                audience: "self".into(),
+                domain: None,
+                tags: None,
+                recall_count: 0,
+                last_recalled_at: None,
+                parent_id: None,
+            })
+            .collect();
+
+        let mut seq = 1_000;
+        let mut packets = Vec::new();
+        pack_table(&mut packets, "node-mp", &mut seq, TABLE_REFLECTIONS, &rows).expect("pack");
+        assert!(
+            packets.len() > 1,
+            "test must force a multi-part split, got {} packet(s)",
+            packets.len()
+        );
+
+        // Every packet must clear a fresh ReplayGuard exactly as receive_loop
+        // checks them -- and carry every row exactly once.
+        let mut guard = ReplayGuard::new();
+        let mut total_rows = 0;
+        for p in &packets {
+            assert!(
+                guard.check(&p.source_id, p.seq),
+                "packet seq {} rejected as replay -- parts share a seq",
+                p.seq
+            );
+            total_rows += p.upserts.len();
+        }
+        assert_eq!(total_rows, rows.len());
+        assert_eq!(seq, 1_000 + packets.len() as u64);
     }
 
     #[test]
