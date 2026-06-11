@@ -2,40 +2,24 @@
 # Legion post-compact hook: aggressive re-orientation after context compaction
 # The compaction summary is STALE. This hook provides ground truth.
 
-# Hook subshells do not inherit the plugin bin dir on PATH -- only the Bash
-# tool does. Invoke via full CLAUDE_PLUGIN_ROOT path (fixes #204).
-LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
-LOG=/tmp/legion-hook-errors.log
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/emit.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
 
-# Shared warning helper -- the original incident (2026-04-11) happened here:
-# post-compact silently failed because the checkpoint DB was corrupted. Never
-# again. Every legion call now feeds legion_check, and the warning block is
-# rendered at the top of the re-orientation output. See #209.
-# shellcheck source=_legion-warn.sh
-source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-warn.sh"
+LOG="$LEGION_HOOK_LOG"
 
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+legion_hook_parse || exit 0
 
 if [ -z "$CWD" ]; then
   exit 0
 fi
 
-REPO=$(basename "$CWD")
-CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
+CWD_HASH=$(legion_hash_str "$CWD")
 
 # Clean up stop-hook marker so reflect prompt fires fresh
 MARKER="/tmp/legion-reflected-${CWD_HASH}"
 rm -f "$MARKER" 2>/dev/null
-
-# Read and consume the precompact checkpoint-failed marker, if any.
-# precompact.sh touches this when its reflect call fails, so the failure
-# propagates into this hook's re-orientation output.
-CHECKPOINT_MARKER="/tmp/legion-checkpoint-failed-${CWD_HASH}"
-if [ -f "$CHECKPOINT_MARKER" ]; then
-  legion_check 1 "precompact reflect (checkpoint not saved)"
-  rm -f "$CHECKPOINT_MARKER" 2>/dev/null
-fi
 
 OUTPUT="[Legion] POST-COMPACTION RE-ORIENTATION
 IMPORTANT: You just compacted. The compaction summary may be stale or incomplete.
@@ -66,7 +50,6 @@ fi
 OUTPUT="$OUTPUT"$'\n\n'"--- LEGION CHECKPOINT (stored before compaction) ---"
 
 CHECKPOINT=$("$LEGION" recall --repo "$REPO" --domain checkpoint --limit 1 2>>"$LOG")
-legion_check $? "recall (checkpoint)"
 if [ -n "$CHECKPOINT" ]; then
   OUTPUT="$OUTPUT"$'\n'"$CHECKPOINT"
 else
@@ -84,14 +67,12 @@ fi
 
 # Surface: cross-repo highlights, board posts, pending tasks
 SURFACE=$("$LEGION" surface --repo "$REPO" 2>>"$LOG")
-legion_check $? "surface"
 if [ -n "$SURFACE" ]; then
   OUTPUT="$OUTPUT"$'\n\n'"$SURFACE"
 fi
 
 # Unread bullpen
 BOARD_COUNT=$("$LEGION" bullpen --count --repo "$REPO" 2>>"$LOG")
-legion_check $? "bullpen --count"
 if [ -n "$BOARD_COUNT" ]; then
   OUTPUT="$OUTPUT"$'\n\n'"[Legion] ${BOARD_COUNT}. Run: legion bullpen --repo ${REPO}"
 fi
@@ -104,18 +85,4 @@ OUTPUT="$OUTPUT"$'\n\n'"--- ACTION REQUIRED ---
 
 OUTPUT="$OUTPUT"$'\n\n'"[Legion] consult --context <problem> to search all agents | signal --to <agent> --verb question to ask directly | boost --id <id> when a reflection helps"
 
-# Prepend the warning block above everything else if any legion call failed.
-# This is the highest-priority surface for degraded legion -- agents MUST
-# see this immediately after compaction because a missing checkpoint or
-# broken recall makes post-compact recovery impossible. See #209.
-WARN=$(legion_warnings_block)
-if [ -n "$WARN" ]; then
-  OUTPUT="${WARN}"$'\n\n'"${OUTPUT}"
-fi
-
-jq -n --arg ctx "$OUTPUT" '{
-  "hookSpecificOutput": {
-    "hookEventName": "SessionStart",
-    "additionalContext": $ctx
-  }
-}'
+emit_context "SessionStart" "$OUTPUT"

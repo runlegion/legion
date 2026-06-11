@@ -1,9 +1,9 @@
 #!/bin/bash
-# Shared helpers for the grep/Read enforcement hook ladder (#438/#439).
+# Shared helpers for the search/Read enforcement hook ladder (#438/#439).
 #
-# All three pre-* hooks (pre-bash-grep, pre-grep-scip, pre-grep-recall)
-# source this file to share pattern detection, sym/recall probes,
-# bypass-reason extraction, telemetry write, and ladder decision logic.
+# The search-guard hooks (pre-bash-grep, pre-grep, pre-read-sym) source
+# this file to share pattern detection, sym/recall probes, bypass-reason
+# extraction, telemetry write, and ladder decision logic.
 #
 # Three-state ladder (per repo):
 #
@@ -23,7 +23,10 @@
 # value of telemetry is "what query was the index missing for an agent
 # that escaped" and that question only resolves with both signals.
 
-LEGION_PREQUERY_BIN="${CLAUDE_PLUGIN_ROOT}/bin/legion"
+# Binary: prefer the prelude's resolved $LEGION (plugin-root copy with
+# PATH fallback, #614); standalone consumers fall back to the plugin-root
+# path.
+LEGION_PREQUERY_BIN="${LEGION:-${CLAUDE_PLUGIN_ROOT:-}/bin/legion}"
 LEGION_PREQUERY_LOG=/tmp/legion-hook-errors.log
 
 # Pull in the coverage + indexed-repo probes. Both files are siblings;
@@ -31,11 +34,16 @@ LEGION_PREQUERY_LOG=/tmp/legion-hook-errors.log
 # defined (callers may have sourced them too).
 if ! declare -F legion_covered >/dev/null 2>&1; then
   # shellcheck source=_legion-covered.sh
-  source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh"
+  source "${CLAUDE_PLUGIN_ROOT:-}/hooks/_legion-covered.sh"
 fi
 if ! declare -F legion_indexed >/dev/null 2>&1; then
   # shellcheck source=_legion-indexed.sh
-  source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-indexed.sh"
+  source "${CLAUDE_PLUGIN_ROOT:-}/hooks/_legion-indexed.sh"
+fi
+# Output emission (emit_allow / emit_deny) lives in lib/emit.sh.
+if ! declare -F emit_allow >/dev/null 2>&1; then
+  # shellcheck source=lib/emit.sh
+  source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh"
 fi
 
 # legion_prequery_bash_binary CMD -- echo the leading search binary name
@@ -230,28 +238,4 @@ legion_prequery_filter_hits_local() {
     return 0
   fi
   echo "$hits" | jq --arg r "$repo" '[.[] | select(.repo == $r)]' 2>/dev/null || echo "[]"
-}
-
-# legion_prequery_emit_allow CTX -- emit the PreToolUse JSON shape that
-# allows the call and injects CTX as additionalContext.
-legion_prequery_emit_allow() {
-  local ctx="$1"
-  jq -n --arg ctx "$ctx" '{
-    "hookSpecificOutput": {
-      "hookEventName": "PreToolUse",
-      "permissionDecision": "allow",
-      "permissionDecisionReason": "legion sym/recall results injected",
-      "additionalContext": $ctx
-    }
-  }'
-}
-
-# legion_prequery_emit_block REASON -- emit the PreToolUse JSON shape
-# that blocks the call. The reason is the message the agent reads.
-legion_prequery_emit_block() {
-  local reason="$1"
-  jq -n --arg reason "$reason" '{
-    "decision": "block",
-    "reason": $reason
-  }'
 }

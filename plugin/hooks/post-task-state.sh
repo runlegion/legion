@@ -29,13 +29,10 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
-INPUT=$(cat)
-if [ -z "$INPUT" ]; then
-  exit 0
-fi
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
 
-TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+legion_hook_parse || exit 0
 
 if [ -z "$SESSION_ID" ]; then
   exit 0
@@ -56,8 +53,8 @@ if [ "$TOOL" = "TaskCreate" ]; then
   # TaskCreate returns an id in the tool result; the input carries the
   # subject. The harness's TaskCreate response shape is {"id": "...",
   # "subject": "...", "status": "pending"}. We pull both id and subject.
-  TASK_ID=$(echo "$INPUT" | jq -r '.tool_response.id // empty' 2>/dev/null)
-  SUBJECT=$(echo "$INPUT" | jq -r '.tool_input.subject // empty' 2>/dev/null)
+  TASK_ID=$(legion_hook_field '.tool_response.id')
+  SUBJECT=$(legion_hook_field '.tool_input.subject')
   if [ -z "$TASK_ID" ]; then
     # Some harness versions report the id under a different field; skip
     # silently rather than write a half-event.
@@ -68,8 +65,8 @@ if [ "$TOOL" = "TaskCreate" ]; then
     >> "$LOG" 2>/dev/null
 else
   # TaskUpdate carries task_id + the status field that changed.
-  TASK_ID=$(echo "$INPUT" | jq -r '.tool_input.task_id // empty' 2>/dev/null)
-  STATUS=$(echo "$INPUT" | jq -r '.tool_input.status // empty' 2>/dev/null)
+  TASK_ID=$(legion_hook_field '.tool_input.task_id')
+  STATUS=$(legion_hook_field '.tool_input.status')
   if [ -z "$TASK_ID" ] || [ -z "$STATUS" ]; then
     exit 0
   fi

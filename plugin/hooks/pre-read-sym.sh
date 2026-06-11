@@ -38,16 +38,13 @@ if [ "${LEGION_SKIP_PRE_READ_SYM:-}" = "1" ]; then
   exit 0
 fi
 
-INPUT=$(cat)
-if [ -z "$INPUT" ]; then
-  exit 0
-fi
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
 
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
-TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
-FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
-LIMIT=$(echo "$INPUT" | jq -r '.tool_input.limit // empty' 2>/dev/null)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+legion_hook_parse || exit 0
+
+FILE_PATH=$(legion_hook_field '.tool_input.file_path')
+LIMIT=$(legion_hook_field '.tool_input.limit')
 
 if [ -z "$CWD" ] || [ "$TOOL" != "Read" ] || [ -z "$FILE_PATH" ]; then
   exit 0
@@ -62,19 +59,16 @@ case "$EXT" in
   *) exit 0 ;;
 esac
 
-REPO="${LEGION_REPO:-$(basename "$CWD")}"
 if [ -z "$REPO" ]; then
   exit 0
 fi
 
-# Source the shared library (covers + indexed + telemetry helpers).
+# Source the shared ladder library (indexed + telemetry + emit helpers).
 # shellcheck source=_legion-prequery.sh
 source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-prequery.sh"
 
 # Universal gate.
-if ! legion_covered "$SESSION_ID" "$REPO"; then
-  exit 0
-fi
+legion_hook_covered || exit 0
 
 # Block tier requires an index to redirect to.
 if ! legion_indexed "$SESSION_ID" "$REPO"; then
@@ -135,4 +129,4 @@ If none of those answer your question (e.g. you need to see how multiple symbols
 
 The bypass writes one row to bypass.jsonl so #440's summary will see it."
 
-legion_prequery_emit_block "$REASON"
+emit_deny "$REASON"

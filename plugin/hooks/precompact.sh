@@ -7,22 +7,17 @@
 # A safety-net checkpoint reflection is still written below in case the user
 # overrides the block; losing the checkpoint silently caused #209.
 
-# Hook subshells do not inherit the plugin bin dir on PATH -- only the Bash
-# tool does. Invoke via full CLAUDE_PLUGIN_ROOT path (fixes #204).
-LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
-LOG=/tmp/legion-hook-errors.log
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
 
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
+LOG="$LEGION_HOOK_LOG"
+
+legion_hook_parse || exit 0
+TRANSCRIPT=$(legion_hook_field '.transcript_path')
 
 if [ -z "$CWD" ]; then
   exit 0
 fi
-
-REPO=$(basename "$CWD")
-CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
-CHECKPOINT_MARKER="/tmp/legion-checkpoint-failed-${CWD_HASH}"
 
 # Extract recent assistant text from transcript JSONL as a safety-net checkpoint
 CONTEXT=""
@@ -45,13 +40,9 @@ if [ -z "$CONTEXT" ]; then
 fi
 
 # Safety-net checkpoint reflection. See #209 -- losing a checkpoint silently
-# was the original incident this hook was built to prevent.
-if ! "$LEGION" reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>>"$LOG"; then
-  touch "$CHECKPOINT_MARKER" 2>/dev/null
-else
-  # Previous run may have left a stale marker; clear it on successful reflect.
-  rm -f "$CHECKPOINT_MARKER" 2>/dev/null
-fi
+# was the original incident this hook was built to prevent. A failed reflect
+# leaves its breadcrumb in $LOG (the operator-facing diagnostic path, #383).
+"$LEGION" reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>>"$LOG" || true
 
 # Block auto-compaction. PreCompact reason text goes to the user, not the
 # model, so this is a static heredoc -- no jq dependency, no failure path

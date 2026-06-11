@@ -30,7 +30,10 @@
 # function returns "covered" (0) by default so a degraded legion does
 # not silently disable enforcement everywhere.
 
-LEGION_COVERED_BIN="${CLAUDE_PLUGIN_ROOT}/bin/legion"
+# Binary: prefer the prelude's resolved $LEGION (plugin-root copy with
+# PATH fallback, #614) when this file is sourced through lib/prelude.sh;
+# standalone consumers fall back to the plugin-root path.
+LEGION_COVERED_BIN="${LEGION:-${CLAUDE_PLUGIN_ROOT:-}/bin/legion}"
 
 # legion_covered SESSION_ID REPO -> exit 0 if covered, 1 if not.
 legion_covered() {

@@ -5,13 +5,15 @@
 #
 # Touches /tmp/legion-work-<md5(cwd)>. The Stop hook reads this marker.
 
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+
+legion_hook_parse || exit 0
 
 if [ -z "$CWD" ]; then
   exit 0
 fi
 
-CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
+CWD_HASH=$(legion_hash_str "$CWD")
 touch "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
 exit 0

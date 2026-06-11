@@ -6,67 +6,21 @@
 # pointer to the parent via hookSpecificOutput.additionalContext. Every failure
 # path must exit 0 (never block the parent).
 #
-# Run from the repo root:
+# Run from anywhere:
 #   bash plugin/hooks/test-subagent-stop.sh
 
 set -u
 
-PASS=0
-FAIL=0
+# shellcheck source=tests/testutil.sh
+source "$(dirname "${BASH_SOURCE[0]}")/tests/testutil.sh"
 
-assert_contains() {
-  local desc="$1" haystack="$2" needle="$3"
-  if echo "$haystack" | grep -q -- "$needle"; then
-    PASS=$((PASS + 1)); echo "  PASS: $desc"
-  else
-    FAIL=$((FAIL + 1)); echo "  FAIL: $desc" >&2
-    echo "    expected to find: $needle" >&2
-    echo "    in: $haystack" >&2
-  fi
-}
-
-assert_not_contains() {
-  local desc="$1" haystack="$2" needle="$3"
-  if echo "$haystack" | grep -q -- "$needle"; then
-    FAIL=$((FAIL + 1)); echo "  FAIL: $desc" >&2
-    echo "    expected NOT to find: $needle" >&2
-  else
-    PASS=$((PASS + 1)); echo "  PASS: $desc"
-  fi
-}
-
-assert_empty() {
-  local desc="$1" actual="$2"
-  if [ -z "$actual" ]; then
-    PASS=$((PASS + 1)); echo "  PASS: $desc"
-  else
-    FAIL=$((FAIL + 1)); echo "  FAIL: $desc" >&2
-    echo "    expected empty, got: $actual" >&2
-  fi
-}
-
-WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+make_plugin_root subagent-stop.sh
 
 # Route the hook's dedup markers (#584) into $WORK so they are cleaned on EXIT
 # and cannot leak across test runs in the real /tmp.
 export TMPDIR="$WORK"
 
-mkdir -p "$WORK/plugin/bin" "$WORK/plugin/hooks"
-cp plugin/hooks/subagent-stop.sh "$WORK/plugin/hooks/"
-
-# Stub legion: logs every invocation to $LEGION_STUB_LOG, then exit 0.
-cat > "$WORK/plugin/bin/legion" <<'EOF'
-#!/bin/bash
-if [ -n "${LEGION_STUB_LOG:-}" ]; then
-  echo "$@" >> "$LEGION_STUB_LOG"
-fi
-exit 0
-EOF
-chmod +x "$WORK/plugin/bin/legion"
-
-export CLAUDE_PLUGIN_ROOT="$WORK/plugin"
-HOOK="$WORK/plugin/hooks/subagent-stop.sh"
+HOOK="$CLAUDE_PLUGIN_ROOT/hooks/subagent-stop.sh"
 CWD="/tmp/legion-subagent-test"
 STUB_LOG="$WORK/legion-calls.log"
 
@@ -99,9 +53,14 @@ echo "==> no cwd: pass through silently"
 out=$(echo '{}' | bash "$HOOK")
 assert_empty "no cwd produces no output" "$out"
 
-echo "==> missing legion binary: exit 0, no output"
+echo "==> missing plugin root: exit 0, no output (fail-open source)"
 out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${TRANSCRIPT}\"}" \
   | CLAUDE_PLUGIN_ROOT="/no/such/plugin" bash "$HOOK")
+assert_empty "missing plugin root produces no output" "$out"
+
+echo "==> missing legion binary: exit 0, no output"
+out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${TRANSCRIPT}\"}" \
+  | LEGION_BIN="/no/such/legion" bash "$HOOK")
 assert_empty "missing binary produces no output" "$out"
 
 echo "==> re-delivered SubagentStop is deduped: second fire silent, no double reflect (#584)"
@@ -114,11 +73,7 @@ out2=$(echo "$dedup_in" | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
 assert_contains "first fire informs the parent" "$out1" '"hookEventName": "SubagentStop"'
 assert_empty "second (re-delivered) fire is silent" "$out2"
 reflect_count=$(grep -c 'reflect' "$STUB_LOG" 2>/dev/null || echo 0)
-if [ "$reflect_count" = "1" ]; then
-  PASS=$((PASS + 1)); echo "  PASS: reflect called exactly once across two fires"
-else
-  FAIL=$((FAIL + 1)); echo "  FAIL: reflect called $reflect_count times, expected 1" >&2
-fi
+assert_eq "reflect called exactly once across two fires" "$reflect_count" "1"
 
 echo "==> stop_hook_active=true short-circuits (loop guard, #584)"
 : > "$STUB_LOG"
@@ -127,9 +82,4 @@ out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_pa
 assert_empty "stop_hook_active produces no output" "$out"
 assert_not_contains "no reflect when stop_hook_active" "$(cat "$STUB_LOG")" 'reflect'
 
-echo
-echo "==> $PASS passed, $FAIL failed"
-if [ "$FAIL" -gt 0 ]; then
-  exit 1
-fi
-exit 0
+finish_tests

@@ -26,13 +26,18 @@
 
 set -u
 
-INPUT=$(cat)
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/emit.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
 
 if ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
-COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
+legion_hook_parse || exit 0
+
+COMMAND=$(legion_hook_field '.tool_input.command')
 if [ -z "$COMMAND" ]; then
   exit 0
 fi
@@ -59,20 +64,25 @@ case "$COMMAND" in
   *"--force"*|*"--follows"*) exit 0 ;;
 esac
 
-# Extract --repo argument so we can ask the right repo's identity.
-REPO=$(echo "$COMMAND" | sed -nE 's/.*--repo[= ]+([A-Za-z0-9_,.\/-]+).*/\1/p' | head -n1)
-if [ -z "$REPO" ]; then
+# Extract the --repo argument so we can ask the right repo's identity.
+# This deliberately reads the COMMAND, not the prelude's $REPO: the guard
+# protects the identity of the repo the reflect call TARGETS, which is not
+# necessarily the repo the session is running in.
+TARGET_REPO=$(echo "$COMMAND" | sed -nE 's/.*--repo[= ]+([A-Za-z0-9_,.\/-]+).*/\1/p' | head -n1)
+if [ -z "$TARGET_REPO" ]; then
   exit 0
 fi
 # Compound repo (a,b,c) -- check the first one for an existing identity.
-REPO="${REPO%%,*}"
+TARGET_REPO="${TARGET_REPO%%,*}"
 
-LEGION_BIN="${LEGION_BIN:-legion}"
-if ! command -v "$LEGION_BIN" >/dev/null 2>&1; then
+# Binary resolved by the prelude: plugin-bundled copy first, PATH fallback
+# (#614 -- the old PATH-only lookup left this guard silently inert in hook
+# subshells, which do not inherit the plugin bin dir on PATH).
+if [ -z "$LEGION" ] || [ ! -x "$LEGION" ]; then
   exit 0
 fi
 
-EXISTING=$("$LEGION_BIN" whoami --repo "$REPO" 2>/dev/null)
+EXISTING=$("$LEGION" whoami --repo "$TARGET_REPO" 2>/dev/null)
 if [ -z "$EXISTING" ]; then
   exit 0
 fi
@@ -93,13 +103,10 @@ REASON=$(printf '%s\n%s\n\n%s\n\n%s\n\n%s\n' \
 Have you grown out of this?
 
 - If yes -- you're genuinely evolving your role, voice, or doctrine -- pick the right shape:
-  - Preferred: chain a new beat with --follows <prev-id>. The banner shows the latest beat; older history stays recall-findable. Get the prev-id with: legion recall --repo $REPO --domain identity --limit 1
+  - Preferred: chain a new beat with --follows <prev-id>. The banner shows the latest beat; older history stays recall-findable. Get the prev-id with: legion recall --repo $TARGET_REPO --domain identity --limit 1
   - Full rewrite: re-run with --force. Old identity becomes the previous link in the chain, banner replaced wholesale.
 - If your text is project knowledge (architecture rules, file paths, build commands, naming conventions): drop --whoami. Store as a regular reflection:
-    legion reflect --repo $REPO --text \"...\"
+    legion reflect --repo $TARGET_REPO --text \"...\"
   Recall + consult will surface it when relevant. The 2K SessionStart banner only fits role/voice/doctrine; project rules crowd it out.")
 
-jq -n --arg reason "$REASON" '{
-  "decision": "block",
-  "reason": $reason
-}'
+emit_deny "$REASON"

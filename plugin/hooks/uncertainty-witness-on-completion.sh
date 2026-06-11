@@ -29,20 +29,17 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
-INPUT=$(cat)
-if [ -z "$INPUT" ]; then
-  exit 0
-fi
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
 
-TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+legion_hook_parse || exit 0
 
 if [ "$TOOL" != "TaskUpdate" ] || [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
-STATUS=$(echo "$INPUT" | jq -r '.tool_input.status // empty' 2>/dev/null)
-TASK_ID=$(echo "$INPUT" | jq -r '.tool_input.task_id // empty' 2>/dev/null)
+STATUS=$(legion_hook_field '.tool_input.status')
+TASK_ID=$(legion_hook_field '.tool_input.task_id')
 
 if [ "$STATUS" != "completed" ] || [ -z "$TASK_ID" ]; then
   exit 0
@@ -70,13 +67,15 @@ if [ -z "$PREDICTION_ID" ]; then
   exit 0
 fi
 
-LEGION_BIN="${LEGION_BIN:-legion}"
-if ! command -v "$LEGION_BIN" >/dev/null 2>&1; then
+# Binary resolved by the prelude: plugin-bundled copy first, PATH fallback
+# (#614 -- the old PATH-only lookup left this hook silently inert in hook
+# subshells, which do not inherit the plugin bin dir on PATH).
+if [ -z "$LEGION" ] || [ ! -x "$LEGION" ]; then
   exit 0
 fi
 
 # Placeholder until #283 wires real measurement; see header.
-"$LEGION_BIN" uncertainty witness "$PREDICTION_ID" \
+"$LEGION" uncertainty witness "$PREDICTION_ID" \
   --outcome-label "shipped" \
   --outcome-correctness "1.0" \
   --payload '{"placeholder":true}' >/dev/null 2>&1
