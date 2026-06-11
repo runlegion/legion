@@ -2061,6 +2061,64 @@ impl WatchLoop {
         }
     }
 
+    /// Shared pre-loop bootstrap for both drivers (`watch::run` and the
+    /// daemon's `run_watch_task`).
+    ///
+    /// Owns every pre-loop side effect the two drivers used to duplicate:
+    /// the cluster sync-actor spawn, the watch.toml/watch.pid/legion.db
+    /// path joins, config load, pid-lock acquire (returned as an RAII
+    /// guard), database open, and host-id resolution. The #578/#582 lesson
+    /// is that anything living in two driver bodies eventually forks -- the
+    /// sync-actor spawn already re-forked once (#536). Drivers keep only
+    /// their sleep mechanism and timer types.
+    ///
+    /// Decision (#611, from the PR #624 review): the sync actor spawns
+    /// FIRST, before any watch-config-dependent step. It depends only on
+    /// cluster.toml, so it must not sit behind the watch.toml / pid-lock /
+    /// db-open failure points -- a node with cluster sync enabled but a
+    /// broken watch config still syncs. Callers receive the handle even
+    /// when `watch` is `Err` and decide how long to keep it alive.
+    pub fn bootstrap(
+        data_dir: &Path,
+        spawn_mode: SpawnMode,
+        log_prefix: &'static str,
+    ) -> WatchBootstrap {
+        let sync = crate::sync_actor::spawn_sync_if_enabled(data_dir, log_prefix);
+
+        let watch = (|| {
+            let config_path: PathBuf = data_dir.join("watch.toml");
+            let lock_path: PathBuf = data_dir.join("watch.pid");
+            let db_path: PathBuf = data_dir.join("legion.db");
+
+            let config = load_config(&config_path)?;
+
+            eprintln!(
+                "{log_prefix} config loaded: {} repo(s), poll every {}s, cooldown {}s, \
+                 stagger {}s, health threshold {}%, spawn_mode={}",
+                config.repos.len(),
+                config.poll_interval_secs,
+                config.cooldown_secs,
+                config.stagger_secs,
+                config.health_threshold_pct,
+                spawn_mode.as_str(),
+            );
+
+            acquire_pid_lock(&lock_path)?;
+            eprintln!("{log_prefix} acquired lock (pid {})", std::process::id());
+            let guard = PidLockGuard(lock_path);
+
+            let db = Database::open(&db_path)?;
+            let host = resolve_host_id();
+
+            Ok((
+                WatchLoop::new(config, db, data_dir, host, spawn_mode, log_prefix),
+                guard,
+            ))
+        })();
+
+        WatchBootstrap { sync, watch }
+    }
+
     /// Run one health-tick iteration.
     ///
     /// Samples system pressure, reaps finished children, heartbeats persona
@@ -2229,6 +2287,23 @@ pub fn evaluate_spawn_gate(
     }
 }
 
+/// Everything `WatchLoop::bootstrap` produces for a driver.
+///
+/// The sync handle is a separate field rather than part of the `watch`
+/// result because the two are deliberately independent: cluster sync is
+/// spawned BEFORE any watch-config-dependent step, so a broken watch.toml
+/// (or a lost pid-lock race, or a db-open failure) cannot silently kill
+/// cluster sync on a node that has sync enabled (#611, dispositioned from
+/// the PR #624 review). Drivers must keep the handle alive for the
+/// lifetime of their loop -- dropping it stops the sync actor.
+pub struct WatchBootstrap {
+    /// Cluster sync actor handle when cluster.toml enables sync.
+    pub sync: Option<crate::sync_actor::SyncHandle>,
+    /// The shared loop state plus the pid-lock guard, or the reason the
+    /// watch loop cannot start. Sync (above) runs either way.
+    pub watch: Result<(WatchLoop, PidLockGuard)>,
+}
+
 /// Run the watch daemon main loop.
 ///
 /// Uses a dual-interval loop: health sampling every `health_poll_secs`
@@ -2236,37 +2311,19 @@ pub fn evaluate_spawn_gate(
 /// Spawning is gated on system health -- if pressure exceeds the threshold,
 /// the spawn cycle is skipped.
 pub fn run(data_dir: &Path) -> Result<()> {
-    let config_path: PathBuf = data_dir.join("watch.toml");
-    let lock_path: PathBuf = data_dir.join("watch.pid");
-    let db_path: PathBuf = data_dir.join("legion.db");
-
-    let config = load_config(&config_path)?;
     let spawn_mode = SpawnMode::from_env();
+    let boot = WatchLoop::bootstrap(data_dir, spawn_mode, "[legion watch]");
 
-    eprintln!(
-        "[legion watch] config loaded: {} repo(s), poll every {}s, cooldown {}s, stagger {}s, \
-         health threshold {}%, spawn_mode={}",
-        config.repos.len(),
-        config.poll_interval_secs,
-        config.cooldown_secs,
-        config.stagger_secs,
-        config.health_threshold_pct,
-        spawn_mode.as_str(),
-    );
+    // Keep the sync actor alive for the whole loop. In this foreground
+    // driver a bootstrap failure propagates below and exits the process,
+    // dropping (stopping) sync with it -- fail loud is correct for a
+    // foreground command.
+    let _sync_handle = boot.sync;
+    let (mut state, _guard) = boot.watch?;
 
-    acquire_pid_lock(&lock_path)?;
-    eprintln!("[legion watch] acquired lock (pid {})", std::process::id());
-
-    // Guard that releases the PID lock when dropped
-    let _guard = PidLockGuard(lock_path);
-
-    let db = Database::open(&db_path)?;
-
-    let host = resolve_host_id();
-
-    // Timer intervals are read before `config` moves into the WatchLoop.
-    let poll_interval: Duration = Duration::from_secs(config.poll_interval_secs);
-    let health_interval: Duration = Duration::from_secs(config.health_poll_secs);
+    // Timer intervals are read from the loop-owned config.
+    let poll_interval: Duration = Duration::from_secs(state.config.poll_interval_secs);
+    let health_interval: Duration = Duration::from_secs(state.config.health_poll_secs);
 
     // Use checked_sub so a near-zero system clock cannot overflow and panic.
     let mut poll_timer: Instant = Instant::now()
@@ -2278,21 +2335,14 @@ pub fn run(data_dir: &Path) -> Result<()> {
 
     eprintln!(
         "[legion watch] watching repos: {}",
-        config
+        state
+            .config
             .repos
             .iter()
             .map(|r| r.name.as_str())
             .collect::<Vec<_>>()
             .join(", ")
     );
-
-    // Spawn the cluster sync actor when enabled. Shared gate with the
-    // daemon's watch task (#536: the daemon previously never spawned it).
-    let _sync_handle = crate::sync_actor::spawn_sync_if_enabled(data_dir, "[legion watch]");
-
-    // Move config and db into the shared loop state via the same constructor
-    // the daemon uses, so the field wiring lives in exactly one place.
-    let mut state = WatchLoop::new(config, db, data_dir, host, spawn_mode, "[legion watch]");
 
     loop {
         // Health sample on its own interval.
@@ -4585,6 +4635,68 @@ secret = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
             pending.len(),
             1,
             "deferred wake-worthy signal must stay pending for re-poll"
+        );
+    }
+
+    // -- WatchLoop::bootstrap (#611) ------------------------------------------
+
+    /// Bootstrap with no watch.toml fails the watch half loudly and spawns
+    /// no sync actor when cluster.toml is absent. The pid lock must not be
+    /// touched -- config load fails before the lock step.
+    #[test]
+    fn bootstrap_missing_watch_toml_fails_watch_without_sync() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let boot = WatchLoop::bootstrap(dir.path(), SpawnMode::Print, "[legion test]");
+        assert!(boot.sync.is_none(), "no cluster.toml -> no sync actor");
+        let err = boot
+            .watch
+            .err()
+            .expect("missing watch.toml must fail bootstrap");
+        assert!(
+            err.to_string().contains("config file not found"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !dir.path().join("watch.pid").exists(),
+            "pid lock must not be acquired when config load fails"
+        );
+    }
+
+    /// A successful bootstrap loads the config, acquires the pid lock, and
+    /// the returned guard releases the lock on drop. A second bootstrap
+    /// while the lock is held loses the pid-lock race.
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_acquires_pid_lock_and_guard_releases_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("watch.toml"),
+            "[[repos]]\nname = \"t\"\nworkdir = \"/tmp\"\n",
+        )
+        .expect("write watch.toml");
+
+        let boot = WatchLoop::bootstrap(dir.path(), SpawnMode::Print, "[legion test]");
+        let (state, guard) = boot.watch.expect("bootstrap must succeed");
+        assert_eq!(state.config.repos.len(), 1);
+        assert_eq!(state.spawn_mode, SpawnMode::Print);
+        assert_eq!(state.log_prefix, "[legion test]");
+
+        let pid_path = dir.path().join("watch.pid");
+        assert!(pid_path.exists(), "bootstrap must acquire the pid lock");
+
+        // Second bootstrap while we hold the lock (our own live pid) must
+        // fail the watch half -- the pre-loop side effects cannot double-run.
+        let second = WatchLoop::bootstrap(dir.path(), SpawnMode::Print, "[legion test]");
+        assert!(
+            second.watch.is_err(),
+            "second bootstrap must lose the pid-lock race"
+        );
+
+        drop(state);
+        drop(guard);
+        assert!(
+            !pid_path.exists(),
+            "dropping the guard must release the pid lock"
         );
     }
 
