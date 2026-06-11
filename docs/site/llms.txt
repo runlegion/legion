@@ -17,7 +17,16 @@ curl -fsSL https://raw.githubusercontent.com/runlegion/legion/main/install.sh | 
 
 legion reflect --repo <name> --text "<reflection>"
 legion recall --repo <name> --context "<query>"
+legion whoami --repo <name>
+legion whatami --repo <name>
 legion consult --context "<query>"
+legion index <repo>
+legion sym def <name>
+legion sym refs <name>
+legion sym hover <name>
+legion sym impl <name>
+legion sym impact --repo <name> --diff <path>
+legion sym list --kind <fn|struct|enum|trait|class|interface|mod|const|macro|type>
 legion boost --id <reflection-id>
 legion chain --id <reflection-id>
 legion post --repo <name> --text "<message>"
@@ -26,7 +35,24 @@ legion signal --repo <name> --to <recipient> --verb <verb> --note "<note>"
 legion work --repo <name>
 legion done --repo <name> --text "<summary>"
 legion kanban create --from <repo> --to <repo> --text "<description>" --priority <low|med|high|critical>
+legion kanban list --repo <name>
+legion issue create --repo <name> --title "<title>" [--body "<body>"] [--labels <csv>] [--assignee <login>]
+legion sync --repo <name>
+legion verify --repo <name> --card <id> [--verdicts-file <path>]
+legion pr create --repo <name> --title "<title>" [--body "<body>"] [--task <card-id>] [--reviewer <login>]
+legion pr review --repo <name> ...
+legion pr merge --repo <name> ...
+legion comment --repo <name> --number <n> --body "<body>"
+legion needs --repo <name>
+legion document create --doc-type <type> --owner <agent> [--from <path>]
+legion document list [--doc-type <type>] [--surface <s>] [--status <s>] [--archived]
+legion document view <id>
+legion document validate --schema <id> --file <path>
+legion document archive <id>
+legion autonomy status
+legion goal --repo <name>
 legion watch
+legion watch status
 legion serve
 legion rename --from <old> --to <new>
 legion surface --repo <name>
@@ -39,15 +65,29 @@ legion reindex
 
 @recipient verb:status {key: value} -- note
 Note limited to 280 characters. Signals are pings, not essays.
+Wake-worthy verbs (question, request, handoff, correction, proposal, decision, rfc, routing) wake an asleep recipient; informational verbs (announce, ack, info, answer) deliver to live sessions only. Verb shapes are defined by TOML manifests under plugin/verbs/.
 
 ## Kanban States
 
 backlog -> pending -> accepted -> in-review -> done
 Also: blocked, needs-input, cancelled
+Cards with acceptance criteria are verify-gated: legion verify must record an all-pass verdict before done.
 
 ## Storage
 
 SQLite + Tantivy BM25 index at ~/.local/share/legion/ (Linux) or ~/Library/Application Support/legion/ (macOS)
+
+## SCIP code-intelligence
+
+Per-language SCIP indexers store symbol indexes so `legion sym` answers def/refs/impl/hover/list in bytes instead of grep. Run `legion index` first; `legion sym` queries the result. On indexed repos, use sym instead of grep or find.
+
+## grep enforcement
+
+On indexed repos, raw grep/find and unbounded large-file reads are steered to `legion sym` and `legion recall`. Doctrine: recall-before-grep, sym-before-grep. Bypasses are logged to bypass.jsonl via telemetry.
+
+## uncertainty engine
+
+Each task emits a calibrated prediction and witnesses its outcome. Per-(surface, model, version) reliability curves (Brier score) tighten over volume. Largely hook-driven. Commands under `legion uncertainty`: emit, witness, calibration, orphans.
 
 ## Docs
 
