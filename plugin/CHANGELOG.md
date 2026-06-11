@@ -1,5 +1,11 @@
 # Legion Changelog
 
+## Unreleased
+
+### Changed
+
+- **Hooks refactor: shared lib/, one Grep/Glob guard, dead plumbing deleted** (#614): the hook preamble that had quietly diverged across 10+ scripts now lives in `plugin/hooks/lib/prelude.sh` -- stdin parse, repo identity (LEGION_REPO env takes precedence over basename(cwd) in EVERY hook), binary resolution (`${CLAUDE_PLUGIN_ROOT}/bin/legion` first, PATH fallback; pre-whoami-rewrite and both uncertainty hooks were PATH-only and silently inert in hook subshells), and the coverage gate. `plugin/hooks/lib/emit.sh` owns the output vocabulary (emit_allow/emit_deny/emit_block/emit_context); the legacy PreToolUse `{decision:block}` dialect is migrated to the documented `permissionDecision:deny` shape. `pre-grep-recall.sh` + `pre-grep-scip.sh` (two forked hooks per Grep/Glob call) merged into one `pre-grep.sh` running the same sym-block / sym-inject / recall-inject ladder as `pre-bash-grep.sh`, so Grep-tool and Bash-grep enforcement agree on the same pattern -- including the #458 relevance gate and the LEGION_BYPASS_GREP refusal for local-symbol queries. Deleted: `bullpen-check.sh` (registered nowhere) and `_legion-warn.sh` plus the ~80 lines of unreachable WARN branches its six consumers carried. Tests converge on `plugin/hooks/tests/testutil.sh`: one parameterized stub-legion contract (FAKE_* env vars) instead of 12 bespoke heredocs, plus a structural lock that every production hook sources the prelude.
+
 ## 0.17.2
 
 The quality pipeline completes and the definition layer lands. The plugin now ships every stage of the work pipeline -- explore, simplify, pr-write, review, verify -- and the substrate holds its first real schemas. Patch release: additive features within existing surfaces, no schema migration, no wire-format change.
