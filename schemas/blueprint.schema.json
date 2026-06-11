@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Blueprint",
+  "description": "Service blueprint: frontstage/backstage of a service across a sequence of steps. Part of the definition layer (legion #526). pain_points/metrics are plain string arrays per the validated instances (the vault doc's Zod wrapper objects were a TOML-era artifact).",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "review", "done"] },
+        "date": { "type": "string" },
+        "author": { "type": "string" },
+        "persona": { "type": "string" },
+        "trigger": { "type": "string" },
+        "scope": { "type": "string" },
+        "channels": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["title", "status", "date", "author", "persona", "trigger", "scope", "channels"]
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": { "type": "integer", "minimum": 1 },
+          "title": { "type": "string" },
+          "emotional_score": { "type": "number", "minimum": -3, "maximum": 3 },
+          "emotional_label": { "type": "string" },
+          "layers": {
+            "type": "object",
+            "properties": {
+              "evidence": { "type": "string" },
+              "customer_actions": { "type": "string" },
+              "frontstage": { "type": "string" },
+              "backstage": { "type": "string" },
+              "support": { "type": "string" }
+            },
+            "required": ["evidence", "customer_actions", "frontstage", "backstage", "support"]
+          },
+          "pain_points": { "type": "array", "items": { "type": "string" } },
+          "metrics": { "type": "array", "items": { "type": "string" } },
+          "evidence_links": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": { "type": "string" },
+                "url": { "type": "string" },
+                "score": { "type": "number", "minimum": 0, "maximum": 1 },
+                "text": { "type": "string" }
+              },
+              "required": ["source", "url", "score", "text"]
+            }
+          }
+        },
+        "required": ["number", "title", "emotional_score", "emotional_label", "layers"]
+      }
+    }
+  },
+  "required": ["meta", "steps"]
+}

@@ -6694,3 +6694,215 @@ fn autonomy_status_includes_burn_rate_line_when_sample_exists() {
         "burn-rate line must describe remaining headroom, got: {stdout}"
     );
 }
+
+// --- Documents: schema landing + validation (#526) ---
+
+fn schema_payload_persona() -> String {
+    std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/schemas/persona.schema.json"
+    ))
+    .expect("persona schema file")
+}
+
+fn create_schema_document(dir: &std::path::Path, payload: &str) -> std::process::Output {
+    use std::io::Write;
+    let mut child = legion_cmd(dir)
+        .args([
+            "document",
+            "create",
+            "--doc-type",
+            "schema",
+            "--owner",
+            "legion",
+            "--surface",
+            "definition-layer",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn schema_document_create_writes_recall_pointer() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = create_schema_document(dir.path(), &schema_payload_persona());
+    assert!(
+        out.status.success(),
+        "schema create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc_id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    assert!(!doc_id.is_empty());
+
+    // The pointer reflection makes the schema recallable by domain (#526
+    // option A): recall --domain schema surfaces it, citing the doc id.
+    let out = legion_cmd(dir.path())
+        .args(["recall", "--repo", "legion", "--domain", "schema"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "recall --domain schema failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("[SCHEMA] Persona"),
+        "recall must surface the schema pointer, got: {stdout}"
+    );
+    assert!(
+        stdout.contains(&doc_id),
+        "pointer must cite the document id {doc_id}, got: {stdout}"
+    );
+}
+
+#[test]
+fn schema_document_malformed_rejected_at_create() {
+    let dir = tempfile::tempdir().unwrap();
+    // Valid JSON, invalid JSON Schema: no $schema, no properties.
+    let out = create_schema_document(dir.path(), r#"{"title": "Broken", "type": "object"}"#);
+    assert!(
+        !out.status.success(),
+        "malformed schema must be rejected at create"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("$schema"),
+        "rejection must name the missing field, got: {stderr}"
+    );
+
+    // Nothing landed: the table holds no schema documents.
+    let out = legion_cmd(dir.path())
+        .args(["document", "list", "--doc-type", "schema", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let docs: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+    assert_eq!(docs.as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn document_validate_accepts_real_persona_instance() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = create_schema_document(dir.path(), &schema_payload_persona());
+    assert!(out.status.success());
+    let doc_id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+
+    // The fixture is a verbatim copy of a real vault-2026 instance --
+    // the retroactive-validation AC, pinned in CI without a vault checkout.
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/gitpress-developer.persona.json"
+    );
+    let out = legion_cmd(dir.path())
+        .args([
+            "document", "validate", "--schema", &doc_id, "--file", fixture,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "real persona instance must validate: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("valid against schema"));
+}
+
+#[test]
+fn document_validate_rejects_broken_instance_with_paths() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let out = create_schema_document(dir.path(), &schema_payload_persona());
+    assert!(out.status.success());
+    let doc_id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+
+    // identity missing entirely; needs[0].priority outside the enum.
+    let broken = r#"{
+        "meta": {"title": "X", "status": "done", "date": "2026-06-10",
+                 "author": "t", "set": "s", "actor": "a"},
+        "behaviors": [],
+        "frustrations": [],
+        "needs": [{"text": "n", "priority": "MUST"}]
+    }"#;
+    let mut child = legion_cmd(dir.path())
+        .args(["document", "validate", "--schema", &doc_id])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(broken.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        !out.status.success(),
+        "broken instance must fail validation"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("missing required property 'identity'"),
+        "must report the missing block, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("$.needs[0].priority"),
+        "must report the enum violation with its path, got: {stderr}"
+    );
+}
+
+#[test]
+fn document_validate_refuses_non_schema_document() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    // Land a plain (non-schema) document.
+    let mut child = legion_cmd(dir.path())
+        .args([
+            "document",
+            "create",
+            "--doc-type",
+            "note",
+            "--owner",
+            "legion",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"{}").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let doc_id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "document",
+            "validate",
+            "--schema",
+            &doc_id,
+            "--file",
+            "/dev/null",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not 'schema'"),
+        "must refuse a non-schema document as the schema argument"
+    );
+}

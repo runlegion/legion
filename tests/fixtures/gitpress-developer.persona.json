@@ -1,0 +1,50 @@
+{
+  "meta": {
+    "title": "Developer Who Maintains Content",
+    "status": "done",
+    "date": "2026-03-22",
+    "author": "vault",
+    "set": "gitpress",
+    "actor": "developer"
+  },
+  "identity": {
+    "description": "A developer responsible for a repo-backed website where non-technical teammates need to make content changes. They didn't sign up to be a CMS administrator. They built the site, and now they're the bottleneck for every typo fix, blog post, and page update.",
+    "mental_model": "Content lives in the repo. That's correct. The problem isn't where the content lives. The problem is that my teammates can't edit it without me.",
+    "quote": "I don't need a CMS. I need my teammates to stop asking me to be one."
+  },
+  "behaviors": [
+    { "text": "Gets Slack messages that say 'hey can you update the pricing page?' and internally screams" },
+    { "text": "Writes content PRs on behalf of teammates, spending 30-60 minutes on something that should take the content author 5 minutes" },
+    { "text": "Has tried teaching teammates to use GitHub's web editor. It didn't stick. The UI is confusing and they broke the frontmatter." },
+    { "text": "Has evaluated headless CMS options (Contentful, Sanity, Tina) and rejected them: too expensive, too complex, or requires migrating content out of the repo" },
+    { "text": "Has considered Netlify CMS / Decap CMS but it's abandoned and config-heavy" },
+    { "text": "Solves the problem today by being the human CMS. Every content change goes through them." }
+  ],
+  "frustrations": [
+    { "text": "I'm a developer, not a publishing assistant.", "pain_theme": "T1" },
+    { "text": "Every content update is a context switch that kills 30 minutes of flow.", "pain_theme": "T1" },
+    { "text": "Sarah's Google Docs have 15 versions and none of them are clean markdown.", "pain_theme": "T4" },
+    { "text": "I evaluated Contentful. It's $300/month and I'd have to rewrite the content layer.", "pain_theme": "T3" },
+    { "text": "Netlify CMS was the right idea. It's dead.", "pain_theme": "T3" }
+  ],
+  "needs": [
+    { "text": "Zero-effort install. GitHub Marketplace, one click, pick a folder. If it needs a config file, they won't use it.", "priority": "SHALL" },
+    { "text": "Clean markdown output. The PRs gitpress creates must produce diffs that look like a human wrote them.", "priority": "SHALL" },
+    { "text": "No content migration. The markdown stays in the repo. Gitpress is an editor, not a database.", "priority": "SHALL" },
+    { "text": "GitHub-native review flow. PRs appear in GitHub like any other PR.", "priority": "SHALL" },
+    { "text": "Teammate autonomy. After install, the developer should never touch content again unless they choose to.", "priority": "SHALL" }
+  ],
+  "moment_of_truth": {
+    "description": "The developer installs gitpress, invites a teammate, and watches them fix a typo without asking for help.",
+    "success": "She did it without asking me.",
+    "failure": "The diff is dirty. I don't trust the tool."
+  },
+  "evidence_links": [
+    {
+      "source": "reddit-jamstack",
+      "url": "https://www.reddit.com/r/JAMstack/comments/1p4ff0x/",
+      "score": 0.46,
+      "text": "Anyone else struggling to let non-technical clients edit JAMstack sites easily?"
+    }
+  ]
+}

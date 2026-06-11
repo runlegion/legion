@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Journey",
+  "description": "Service-design journey map: a persona through a scenario over time with an emotional curve. Part of the definition layer (legion #526).",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "review", "done"] },
+        "date": { "type": "string" },
+        "author": { "type": "string" },
+        "persona": { "type": "string" },
+        "scenario": { "type": "string" },
+        "goal": { "type": "string" }
+      },
+      "required": ["title", "status", "date", "author", "persona", "scenario", "goal"]
+    },
+    "phases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "number": { "type": "integer", "minimum": 1 },
+          "title": { "type": "string" },
+          "time_range": { "type": "string" },
+          "emotional_start": { "type": "number", "minimum": -3, "maximum": 3 },
+          "emotional_end": { "type": "number", "minimum": -3, "maximum": 3 },
+          "rows": {
+            "type": "object",
+            "properties": {
+              "actions": { "type": "string" },
+              "thoughts": { "type": "string" },
+              "emotions": { "type": "string" },
+              "touchpoints": { "type": "string" },
+              "pain_points": { "type": "string" },
+              "opportunities": { "type": "string" }
+            },
+            "required": ["actions", "thoughts", "emotions", "touchpoints"]
+          }
+        },
+        "required": ["number", "title", "emotional_start", "emotional_end", "rows"]
+      }
+    }
+  },
+  "required": ["meta", "phases"]
+}
