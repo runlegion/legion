@@ -63,6 +63,9 @@ pub enum LegionError {
     #[error("invalid card status: {0}")]
     InvalidCardStatus(String),
 
+    #[error("invalid priority: {0} (expected low, med, high, or critical)")]
+    InvalidPriority(String),
+
     #[error("work source error: {0}")]
     WorkSource(String),
 

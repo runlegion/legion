@@ -1,9 +1,10 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 use crate::db::{Database, Reflection};
 use crate::error::Result;
 use crate::signal;
 use crate::task::Task;
+use crate::timefmt::relative_time;
 
 /// A single item in a status section.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -395,36 +396,6 @@ fn get_what_changed(posts: &[Reflection], repo: &str, seen_ids: &[String]) -> Ve
     items
 }
 
-/// Convert an ISO 8601 timestamp to a relative time string.
-fn relative_time(iso_timestamp: &str) -> String {
-    let parsed: std::result::Result<DateTime<Utc>, _> =
-        DateTime::parse_from_rfc3339(iso_timestamp).map(|dt| dt.with_timezone(&Utc));
-
-    let ts: DateTime<Utc> = match parsed {
-        Ok(dt) => dt,
-        Err(_) => return iso_timestamp.to_string(),
-    };
-
-    let now: DateTime<Utc> = Utc::now();
-    let diff: chrono::TimeDelta = now.signed_duration_since(ts);
-
-    let minutes: i64 = diff.num_minutes();
-    if minutes < 1 {
-        return "just now".to_string();
-    }
-    if minutes < 60 {
-        return format!("{}m ago", minutes);
-    }
-
-    let hours: i64 = diff.num_hours();
-    if hours < 24 {
-        return format!("{}h ago", hours);
-    }
-
-    let days: i64 = diff.num_days();
-    format!("{}d ago", days)
-}
-
 /// Categorize a signal verb into a display category.
 fn categorize_signal(verb: &str) -> String {
     match verb.to_lowercase().as_str() {
@@ -455,59 +426,18 @@ fn has_update_keyword(text_lower: &str) -> bool {
     KEYWORDS.iter().any(|kw| text_lower.contains(kw))
 }
 
-/// Truncate text to max_chars, using first line only.
+/// Truncate text to at most max_chars, using the first line only. The
+/// char-safe cap + ellipsis (and the #346 underflow guard) come from
+/// the crate-wide `card_parse::truncate_chars`.
 fn truncate(text: &str, max_chars: usize) -> String {
     let first_line: &str = text.lines().next().unwrap_or(text);
-    if first_line.chars().count() <= max_chars {
-        first_line.to_string()
-    } else {
-        let truncated: String = first_line.chars().take(max_chars).collect();
-        format!("{}...", truncated)
-    }
+    crate::card_parse::truncate_chars(first_line, max_chars)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::test_storage;
-
-    #[test]
-    fn relative_time_just_now() {
-        let now = Utc::now().to_rfc3339();
-        let result = relative_time(&now);
-        assert!(
-            result == "just now" || result.ends_with("m ago"),
-            "unexpected: {}",
-            result
-        );
-    }
-
-    #[test]
-    fn relative_time_minutes_ago() {
-        let past = (Utc::now() - chrono::Duration::minutes(15)).to_rfc3339();
-        let result = relative_time(&past);
-        assert!(result.contains("m ago"), "expected minutes ago: {}", result);
-    }
-
-    #[test]
-    fn relative_time_hours_ago() {
-        let past = (Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
-        let result = relative_time(&past);
-        assert_eq!(result, "3h ago");
-    }
-
-    #[test]
-    fn relative_time_days_ago() {
-        let past = (Utc::now() - chrono::Duration::days(2)).to_rfc3339();
-        let result = relative_time(&past);
-        assert_eq!(result, "2d ago");
-    }
-
-    #[test]
-    fn relative_time_invalid_falls_back() {
-        let result = relative_time("not-a-timestamp");
-        assert_eq!(result, "not-a-timestamp");
-    }
 
     #[test]
     fn truncate_short_text() {
@@ -519,8 +449,8 @@ mod tests {
         let long = "a".repeat(200);
         let result = truncate(&long, 120);
         assert!(result.ends_with("..."));
-        // 120 chars + "..."
-        assert_eq!(result.len(), 123);
+        // Cap includes the ellipsis (card_parse::truncate_chars semantics).
+        assert_eq!(result.len(), 120);
     }
 
     #[test]

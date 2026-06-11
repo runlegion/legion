@@ -126,21 +126,31 @@ fn extract_checklist(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Truncate a string to at most `max` characters, appending "..." if truncated.
-/// Safe for multi-byte UTF-8. When `max < 3`, returns the leading `max`
-/// characters with no ellipsis -- there isn't room to keep both content and
-/// the marker, and the previous `max - 3` underflowed on `usize`. Callers
-/// asking for a preview shorter than the ellipsis are getting a hard
-/// truncation by design (#346).
-pub fn truncate_chars(s: &str, max: usize) -> String {
+/// Truncate a string to at most `max` characters, appending `suffix` when
+/// truncated. Safe for multi-byte UTF-8. When `max` is smaller than the
+/// suffix, returns the leading `max` characters with no suffix -- there
+/// isn't room to keep both content and the marker, and the naive
+/// `max - suffix_len` underflowed on `usize`. Callers asking for a preview
+/// shorter than the marker are getting a hard truncation by design (#346).
+///
+/// The crate-wide truncation primitive: `truncate_chars` is the "..." form,
+/// usage's table columns use the "~" form.
+pub fn truncate_chars_with(s: &str, max: usize, suffix: &str) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
-    if max < 3 {
+    let suffix_len = suffix.chars().count();
+    if max < suffix_len {
         return s.chars().take(max).collect();
     }
-    let end: String = s.chars().take(max - 3).collect();
-    format!("{end}...")
+    let end: String = s.chars().take(max - suffix_len).collect();
+    format!("{end}{suffix}")
+}
+
+/// Truncate a string to at most `max` characters, appending "..." if
+/// truncated. See [`truncate_chars_with`] for the underflow guard (#346).
+pub fn truncate_chars(s: &str, max: usize) -> String {
+    truncate_chars_with(s, max, "...")
 }
 
 /// Format a card summary from stored structured fields.
@@ -191,6 +201,15 @@ mod tests {
         assert_eq!(truncate_chars("", 0), "");
         assert_eq!(truncate_chars("hi", 5), "hi");
         assert_eq!(truncate_chars("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_with_alternate_suffix() {
+        // The "~" form used by usage's table columns: cap includes the marker.
+        assert_eq!(truncate_chars_with("abcdefgh", 5, "~"), "abcd~");
+        assert_eq!(truncate_chars_with("abc", 5, "~"), "abc");
+        // Underflow guard (#346): no room for the marker -> hard truncation.
+        assert_eq!(truncate_chars_with("abcdefgh", 0, "~"), "");
     }
 
     #[test]

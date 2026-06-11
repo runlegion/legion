@@ -288,7 +288,7 @@ impl Database {
         to_repo: &str,
         text: &str,
         context: Option<&str>,
-        priority: &str,
+        priority: crate::kanban::Priority,
         labels: Option<&str>,
         parent_card_id: Option<&str>,
         source_url: Option<&str>,
@@ -300,6 +300,7 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         let created_at = created_at_override.unwrap_or(&now);
         let status_str = status.to_string();
+        let priority_str = priority.to_string();
 
         let parsed = context.map(crate::card_parse::parse_issue_body);
         let problem = parsed.as_ref().and_then(|p| p.problem.as_deref());
@@ -326,7 +327,7 @@ impl Database {
                 to_repo,
                 text,
                 context,
-                priority,
+                priority_str,
                 labels,
                 parent_card_id,
                 source_url,
@@ -407,17 +408,6 @@ impl Database {
         let rows = stmt.query_map([], crate::kanban::map_card_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
-    }
-
-    /// Count pending cards assigned to a repo.
-    pub fn count_pending_cards_for_repo(&self, repo: &str) -> Result<u64> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT COUNT(*) FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL")?;
-        let count: u64 = stmt
-            .query_row([repo], |row| row.get(0))
-            .map_err(LegionError::Database)?;
-        Ok(count)
     }
 
     /// Get pending cards assigned to a repo.
@@ -722,6 +712,22 @@ mod tests {
 
     use crate::db::testutil::test_db;
 
+    /// `PRIORITY_ORDER` is a SQL CASE over string literals; the Rust-side
+    /// closed set is `kanban::Priority`. If a variant is added to the enum
+    /// without a WHEN arm here (or vice versa), scheduler ordering silently
+    /// drops to NULL for that priority -- this test pins the two together.
+    #[test]
+    fn priority_order_sql_covers_every_priority_variant() {
+        use clap::ValueEnum;
+        for p in crate::kanban::Priority::value_variants() {
+            let arm = format!("WHEN '{p}' THEN");
+            assert!(
+                Database::PRIORITY_ORDER.contains(&arm),
+                "PRIORITY_ORDER is missing an arm for priority '{p}'"
+            );
+        }
+    }
+
     #[test]
     fn delete_card_removes_row_and_reports_not_found() {
         let db = test_db();
@@ -733,7 +739,7 @@ mod tests {
                 "legion",
                 "test card to delete",
                 None,
-                "med",
+                crate::kanban::Priority::Med,
                 None,
                 None,
                 None,
@@ -768,7 +774,7 @@ mod tests {
                 "legion",
                 "soft delete test card",
                 None,
-                "med",
+                crate::kanban::Priority::Med,
                 None,
                 None,
                 None,

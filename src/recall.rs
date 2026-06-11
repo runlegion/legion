@@ -182,12 +182,6 @@ fn weighted_score(bm25_score: f32, recall_count: i64, last_recalled_at: &Option<
     bm25_score * boost * decay
 }
 
-/// Join search results with the database to produce full reflections.
-///
-/// Looks up each search hit in SQLite to retrieve the full reflection
-/// data (text, repo, created_at). Applies weighted scoring using
-/// recall_count and decay_factor. Missing entries (index/DB desync)
-/// are logged as warnings to stderr.
 /// Archive-mode filter for recall queries (#457). Hot is the default
 /// (exclude archived rows); Cold returns ONLY archived rows (the deep-
 /// dive); Both includes everything. Mutually exclusive at the CLI layer.
@@ -199,15 +193,53 @@ pub enum ArchiveMode {
     Both,
 }
 
-#[allow(dead_code)]
-fn join_search_results(
+/// Join one search hit with the database and apply boost/decay weighting.
+///
+/// Returns `None` when the archive-mode filter rejects the row: the search
+/// index returns ids regardless of archive state, so a miss here is an
+/// expected silent skip, not a desync warning. Shared by the BM25 and
+/// hybrid paths so their join, weighted-score and skip behavior cannot
+/// drift apart.
+fn join_and_score(
     db: &Database,
-    search_results: &[SearchResult],
-) -> Result<Vec<RecalledReflection>> {
-    join_search_results_in_mode(db, search_results, ArchiveMode::Hot)
+    id: &str,
+    base_score: f32,
+    mode: ArchiveMode,
+) -> Result<Option<RecalledReflection>> {
+    Ok(db
+        .get_reflection_by_id_in_mode(id, mode)?
+        .map(|reflection| {
+            let score = weighted_score(
+                base_score,
+                reflection.recall_count,
+                &reflection.last_recalled_at,
+            );
+            RecalledReflection {
+                id: reflection.id,
+                repo: reflection.repo,
+                text: reflection.text,
+                score,
+                created_at: reflection.created_at,
+            }
+        }))
 }
 
-fn join_search_results_in_mode(
+/// Sort reflections by descending weighted score.
+fn sort_by_score_desc(reflections: &mut [RecalledReflection]) {
+    reflections.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Join search results with the database to produce full reflections.
+///
+/// Looks up each search hit in SQLite to retrieve the full reflection
+/// data (text, repo, created_at), scoped by archive mode. Applies
+/// weighted scoring using recall_count and decay_factor, then re-sorts
+/// by the weighted score.
+fn join_search_results(
     db: &Database,
     search_results: &[SearchResult],
     mode: ArchiveMode,
@@ -215,31 +247,12 @@ fn join_search_results_in_mode(
     let mut reflections = Vec::with_capacity(search_results.len());
 
     for sr in search_results {
-        if let Some(reflection) = db.get_reflection_by_id_in_mode(&sr.id, mode)? {
-            let score = weighted_score(
-                sr.score,
-                reflection.recall_count,
-                &reflection.last_recalled_at,
-            );
-            reflections.push(RecalledReflection {
-                id: reflection.id,
-                repo: reflection.repo,
-                text: reflection.text,
-                score,
-                created_at: reflection.created_at,
-            });
+        if let Some(reflection) = join_and_score(db, &sr.id, sr.score, mode)? {
+            reflections.push(reflection);
         }
-        // Archive-mode mismatch: search index returns the id (it doesn't
-        // know about archive state), but the mode filter rejects it.
-        // Silently skip; this is expected and not a desync warning.
     }
 
-    // Re-sort by weighted score since ordering may have changed
-    reflections.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_by_score_desc(&mut reflections);
 
     Ok(reflections)
 }
@@ -248,30 +261,15 @@ fn join_search_results_in_mode(
 ///
 /// Searches the Tantivy index filtered by `repo` and ranked by BM25,
 /// then joins each result with the SQLite database to retrieve full
-/// reflection data (text, created_at). Missing reflections in the DB
-/// (index/DB desync) are logged as warnings to stderr.
+/// reflection data (text, created_at), scoped by archive mode (#457).
+/// The search index returns ids regardless of archive state; the mode
+/// filter applies at the DB join step so cold-only or both modes return
+/// the correct partition. The search index limit is raised when mode is
+/// Cold to compensate for hot rows being filtered out, but the final
+/// result is still capped at the requested limit.
 ///
 /// Returns results ordered by descending relevance score.
-/// Hot-mode BM25 recall shim retained for backwards compatibility and
-/// tests; production CLI calls `recall_bm25_in_mode` directly.
-#[allow(dead_code)]
 pub fn recall_bm25(
-    db: &Database,
-    index: &SearchIndex,
-    repo: &str,
-    context: &str,
-    limit: usize,
-) -> Result<RecallResult> {
-    recall_bm25_in_mode(db, index, repo, context, limit, ArchiveMode::Hot)
-}
-
-/// Same as `recall_bm25` but scopes results by archive mode (#457).
-/// Search index returns ids regardless of archive state; the mode filter
-/// applies at the DB join step so cold-only or both modes return the
-/// correct partition. The search index limit is raised when mode is Cold
-/// to compensate for hot rows being filtered out, but the final result
-/// is still capped at the requested limit.
-pub fn recall_bm25_in_mode(
     db: &Database,
     index: &SearchIndex,
     repo: &str,
@@ -288,7 +286,7 @@ pub fn recall_bm25_in_mode(
         ArchiveMode::Both => limit,
     };
     let search_results = index.search(repo, context, index_limit)?;
-    let mut reflections = join_search_results_in_mode(db, &search_results, mode)?;
+    let mut reflections = join_search_results(db, &search_results, mode)?;
     reflections.truncate(limit);
 
     Ok(RecallResult {
@@ -298,30 +296,15 @@ pub fn recall_bm25_in_mode(
     })
 }
 
-/// Merge BM25 and cosine scores into ranked hybrid results.
+/// Merge BM25 and cosine scores into ranked hybrid results, scoped by
+/// archive mode.
 ///
-/// Shared logic for `recall_hybrid` and `consult_hybrid`. Normalizes BM25
-/// scores, applies the formula `0.6 * bm25_norm + 0.4 * cosine`, then
-/// applies boost/decay via `weighted_score`. Skips cosine-only candidates
-/// below `COSINE_MIN_THRESHOLD`.
+/// Shared logic for `recall` and `consult`. Normalizes BM25 scores,
+/// applies the formula `0.6 * bm25_norm + 0.4 * cosine`, then applies
+/// boost/decay via `weighted_score` (through the shared `join_and_score`,
+/// so the join and skip behavior matches the BM25 path). Skips
+/// cosine-only candidates below `COSINE_MIN_THRESHOLD`.
 fn merge_hybrid_scores(
-    db: &Database,
-    bm25_results: &[SearchResult],
-    embeddings: &[(String, Vec<u8>)],
-    query_embedding: &[f32],
-    limit: usize,
-) -> Result<Vec<RecalledReflection>> {
-    merge_hybrid_scores_in_mode(
-        db,
-        bm25_results,
-        embeddings,
-        query_embedding,
-        limit,
-        ArchiveMode::Hot,
-    )
-}
-
-fn merge_hybrid_scores_in_mode(
     db: &Database,
     bm25_results: &[SearchResult],
     embeddings: &[(String, Vec<u8>)],
@@ -364,70 +347,25 @@ fn merge_hybrid_scores_in_mode(
             continue;
         }
 
-        if let Some(reflection) = db.get_reflection_by_id_in_mode(id, mode)? {
-            let bm25_normalized = bm25_raw / bm25_norm_factor;
-            let hybrid = 0.6 * bm25_normalized + 0.4 * cosine;
-            let score = weighted_score(
-                hybrid,
-                reflection.recall_count,
-                &reflection.last_recalled_at,
-            );
-
-            reflections.push(RecalledReflection {
-                id: reflection.id,
-                repo: reflection.repo,
-                text: reflection.text,
-                score,
-                created_at: reflection.created_at,
-            });
+        let bm25_normalized = bm25_raw / bm25_norm_factor;
+        let hybrid = 0.6 * bm25_normalized + 0.4 * cosine;
+        if let Some(reflection) = join_and_score(db, id, hybrid, mode)? {
+            reflections.push(reflection);
         }
-        // Archive-mode mismatch is silent skip (not a desync warning).
-        // Pre-mode behavior of warning on missing rows is preserved by
-        // the Hot-default path falling through to no-op when the row
-        // exists but is archived; only true index/DB desync (mode=Both)
-        // would surface, and that path keeps the silent treatment for
-        // consistency with the BM25 join.
     }
 
-    reflections.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_by_score_desc(&mut reflections);
     reflections.truncate(limit);
     Ok(reflections)
 }
 
-/// Hybrid recall: BM25 + cosine similarity scoring.
+/// Hybrid recall: BM25 + cosine similarity scoring, with archive-mode
+/// filtering (#457).
 ///
 /// Combines BM25 text search with semantic cosine similarity for better
 /// recall on paraphrased or conceptually related queries. Uses the formula:
 /// `score = 0.6 * bm25_norm + 0.4 * cosine_sim` (then applies boost/decay).
-/// Hot-mode hybrid recall shim retained for backwards compatibility and
-/// tests; production CLI calls `recall_in_mode` directly.
-#[allow(dead_code)]
 pub fn recall(
-    db: &Database,
-    index: &SearchIndex,
-    embed_model: &EmbedModel,
-    repo: &str,
-    context: &str,
-    limit: usize,
-) -> Result<RecallResult> {
-    recall_in_mode(
-        db,
-        index,
-        embed_model,
-        repo,
-        context,
-        limit,
-        ArchiveMode::Hot,
-    )
-}
-
-/// Hybrid recall with archive-mode filtering (#457). Same as `recall`
-/// but scopes to hot / cold / both per the mode.
-pub fn recall_in_mode(
     db: &Database,
     index: &SearchIndex,
     embed_model: &EmbedModel,
@@ -443,7 +381,7 @@ pub fn recall_in_mode(
     let bm25_results = index.search(repo, context, index_limit)?;
     let query_embedding = embed_model.encode_one(context)?;
     let embeddings = db.get_embeddings(Some(repo))?;
-    let reflections = merge_hybrid_scores_in_mode(
+    let reflections = merge_hybrid_scores(
         db,
         &bm25_results,
         &embeddings,
@@ -460,6 +398,10 @@ pub fn recall_in_mode(
 }
 
 /// Consult: BM25 + cosine similarity across all repos.
+///
+/// Pre-existing asymmetry, preserved: hybrid consult joins in Hot mode
+/// (archived rows excluded) while `consult_bm25` pins Both. Changing the
+/// hybrid path's mode is a behavior decision, not a refactor.
 pub fn consult(
     db: &Database,
     index: &SearchIndex,
@@ -470,7 +412,14 @@ pub fn consult(
     let bm25_results = index.search_all(context, limit * 3)?;
     let query_embedding = embed_model.encode_one(context)?;
     let embeddings = db.get_embeddings(None)?;
-    let reflections = merge_hybrid_scores(db, &bm25_results, &embeddings, &query_embedding, limit)?;
+    let reflections = merge_hybrid_scores(
+        db,
+        &bm25_results,
+        &embeddings,
+        &query_embedding,
+        limit,
+        ArchiveMode::Hot,
+    )?;
 
     Ok(RecallResult {
         reflections,
@@ -552,7 +501,7 @@ pub fn consult_bm25(
     // archived bullpen posts the same as fresh ones. Pin Both so the
     // archive-mode default of Hot does not narrow consult's surface
     // when it should not.
-    let reflections = join_search_results_in_mode(db, &search_results, ArchiveMode::Both)?;
+    let reflections = join_search_results(db, &search_results, ArchiveMode::Both)?;
 
     Ok(RecallResult {
         reflections,
@@ -606,11 +555,7 @@ pub fn recall_cosine_only(
         }
     }
 
-    reflections.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_by_score_desc(&mut reflections);
     reflections.truncate(limit);
 
     Ok(RecallResult {
@@ -688,11 +633,7 @@ pub fn find_similar_by_id(
         }
     }
 
-    reflections.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_by_score_desc(&mut reflections);
     reflections.truncate(limit);
 
     let query_label = format!("similar:{id}");
@@ -798,7 +739,15 @@ mod tests {
         )
         .expect("reflect 3");
 
-        let result = recall_bm25(&db, &index, "kelex", "Zod type mapping", 5).expect("recall");
+        let result = recall_bm25(
+            &db,
+            &index,
+            "kelex",
+            "Zod type mapping",
+            5,
+            ArchiveMode::Hot,
+        )
+        .expect("recall");
         assert!(result.reflections.len() >= 2);
         assert!(result.reflections[0].score >= result.reflections[1].score);
     }
@@ -808,7 +757,7 @@ mod tests {
         let (db, index, _dir) = test_storage();
         reflect_from_text(&db, &index, "kelex", "some reflection").expect("reflect");
 
-        let result = recall_bm25(&db, &index, "kelex", "", 5).expect("recall");
+        let result = recall_bm25(&db, &index, "kelex", "", 5, ArchiveMode::Hot).expect("recall");
         assert!(result.reflections.is_empty());
     }
 
@@ -820,7 +769,8 @@ mod tests {
                 .expect("reflect");
         }
 
-        let result = recall_bm25(&db, &index, "test", "testing", 3).expect("recall");
+        let result =
+            recall_bm25(&db, &index, "test", "testing", 3, ArchiveMode::Hot).expect("recall");
         assert_eq!(result.reflections.len(), 3);
     }
 
@@ -836,7 +786,8 @@ mod tests {
         // Add a proper entry through reflect_from_text
         reflect_from_text(&db, &index, "kelex", "properly stored reflection").expect("reflect");
 
-        let result = recall_bm25(&db, &index, "kelex", "reflection", 10).expect("recall");
+        let result =
+            recall_bm25(&db, &index, "kelex", "reflection", 10, ArchiveMode::Hot).expect("recall");
 
         // Only the properly stored one should appear
         for r in &result.reflections {
@@ -850,7 +801,8 @@ mod tests {
         reflect_from_text(&db, &index, "kelex", "Zod schema mapping").expect("reflect kelex");
         reflect_from_text(&db, &index, "rafters", "Zod token generation").expect("reflect rafters");
 
-        let result = recall_bm25(&db, &index, "kelex", "Zod", 10).expect("recall");
+        let result =
+            recall_bm25(&db, &index, "kelex", "Zod", 10, ArchiveMode::Hot).expect("recall");
         assert_eq!(result.reflections.len(), 1);
         assert!(result.reflections[0].text.contains("mapping"));
     }
@@ -860,7 +812,8 @@ mod tests {
         let (db, index, _dir) = test_storage();
         reflect_from_text(&db, &index, "kelex", "test reflection").expect("reflect");
 
-        let result = recall_bm25(&db, &index, "kelex", "test", 5).expect("recall");
+        let result =
+            recall_bm25(&db, &index, "kelex", "test", 5, ArchiveMode::Hot).expect("recall");
         assert_eq!(result.repo, "kelex");
         assert_eq!(result.query, "test");
     }
@@ -1110,7 +1063,7 @@ mod tests {
         db.boost_reflection(second_id).unwrap();
         db.boost_reflection(second_id).unwrap();
 
-        let result = recall_bm25(&db, &index, "kelex", "Zod", 5).expect("recall");
+        let result = recall_bm25(&db, &index, "kelex", "Zod", 5, ArchiveMode::Hot).expect("recall");
         assert!(result.reflections.len() >= 2);
         // The boosted reflection should have a higher weighted score
         let boosted = result

@@ -153,21 +153,25 @@ fn run_scip_rust(repo_path: &Path) -> Result<Vec<u8>> {
     match run_indexer_binary("rust", "scip-rust", &["index"], repo_path) {
         Ok(bytes) => Ok(bytes),
         Err(LegionError::IndexerNotFound { .. }) => {
-            run_indexer_binary("rust", "rust-analyzer", &["scip", "."], repo_path)
-                .map_err(rust_install_hint)
+            run_indexer_binary("rust", "rust-analyzer", &["scip", "."], repo_path).map_err(
+                with_install_hint(
+                    "scip-rust or rust-analyzer (install: rustup component add rust-analyzer)",
+                ),
+            )
         }
         Err(other) => Err(other),
     }
 }
 
-/// Map a missing-binary error from the rust-analyzer fallback to one that
-/// names both candidate binaries plus the rustup install hint.
-fn rust_install_hint(e: LegionError) -> LegionError {
-    match e {
+/// Build a `map_err` closure that rewrites a missing-binary error's `binary`
+/// field to a per-language install hint, leaving every other error variant
+/// untouched. Shared by all the per-language indexer wrappers so the hint
+/// text is the only thing that varies between them.
+fn with_install_hint(hint: &'static str) -> impl FnOnce(LegionError) -> LegionError {
+    move |e| match e {
         LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
             lang,
-            binary: "scip-rust or rust-analyzer (install: rustup component add rust-analyzer)"
-                .to_string(),
+            binary: hint.to_string(),
         },
         other => other,
     }
@@ -233,26 +237,18 @@ fn scip_typescript_args(flavor: TsWorkspaceFlavor) -> &'static [&'static str] {
 /// substitute.
 fn run_scip_typescript(repo_path: &Path) -> Result<Vec<u8>> {
     let args = scip_typescript_args(detect_ts_workspace_flavor(repo_path));
-    run_indexer_binary("typescript", "scip-typescript", args, repo_path).map_err(|e| match e {
-        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
-            lang,
-            binary: "scip-typescript (install: npm i -g @sourcegraph/scip-typescript)".to_string(),
-        },
-        other => other,
-    })
+    run_indexer_binary("typescript", "scip-typescript", args, repo_path).map_err(with_install_hint(
+        "scip-typescript (install: npm i -g @sourcegraph/scip-typescript)",
+    ))
 }
 
 /// Invoke `scip-python index .` against `repo_path`. Canonical Python
 /// indexer from sourcegraph (`pip install scip-python` or
 /// `npm i -g @sourcegraph/scip-python`).
 fn run_scip_python(repo_path: &Path) -> Result<Vec<u8>> {
-    run_indexer_binary("python", "scip-python", &["index", "."], repo_path).map_err(|e| match e {
-        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
-            lang,
-            binary: "scip-python (install: pip install scip-python)".to_string(),
-        },
-        other => other,
-    })
+    run_indexer_binary("python", "scip-python", &["index", "."], repo_path).map_err(
+        with_install_hint("scip-python (install: pip install scip-python)"),
+    )
 }
 
 /// Invoke `scip-java index` against `repo_path`. Canonical Java/Kotlin/
@@ -261,13 +257,9 @@ fn run_scip_python(repo_path: &Path) -> Result<Vec<u8>> {
 /// `gradle build`) so target/build/ artifacts exist for scip-java to walk.
 /// Subprocess stderr surfaces that requirement when the build is absent.
 fn run_scip_java(repo_path: &Path) -> Result<Vec<u8>> {
-    run_indexer_binary("java", "scip-java", &["index"], repo_path).map_err(|e| match e {
-        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
-            lang,
-            binary: "scip-java (install: see https://github.com/sourcegraph/scip-java)".to_string(),
-        },
-        other => other,
-    })
+    run_indexer_binary("java", "scip-java", &["index"], repo_path).map_err(with_install_hint(
+        "scip-java (install: see https://github.com/sourcegraph/scip-java)",
+    ))
 }
 
 /// Invoke `scip-ruby` against `repo_path`. Canonical Ruby indexer from
@@ -280,13 +272,9 @@ fn run_scip_ruby(repo_path: &Path) -> Result<Vec<u8>> {
         &["--index-file", "index.scip", "."],
         repo_path,
     )
-    .map_err(|e| match e {
-        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
-            lang,
-            binary: "scip-ruby (install: gem install scip-ruby)".to_string(),
-        },
-        other => other,
-    })
+    .map_err(with_install_hint(
+        "scip-ruby (install: gem install scip-ruby)",
+    ))
 }
 
 /// Invoke `scip-clang` against `repo_path`. Canonical C/C++ indexer from
@@ -302,14 +290,9 @@ fn run_scip_clang(repo_path: &Path) -> Result<Vec<u8>> {
         &["--compdb-path", "compile_commands.json"],
         repo_path,
     )
-    .map_err(|e| match e {
-        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
-            lang,
-            binary: "scip-clang (install: download release from https://github.com/sourcegraph/scip-clang/releases)"
-                .to_string(),
-        },
-        other => other,
-    })
+    .map_err(with_install_hint(
+        "scip-clang (install: download release from https://github.com/sourcegraph/scip-clang/releases)",
+    ))
 }
 
 /// Invoke `scip-dotnet index` against `repo_path`. Canonical .NET indexer
@@ -317,14 +300,9 @@ fn run_scip_clang(repo_path: &Path) -> Result<Vec<u8>> {
 /// scip-dotnet drives `dotnet build` internally; failure to find the
 /// .NET SDK surfaces in scip-dotnet's own stderr.
 fn run_scip_dotnet(repo_path: &Path) -> Result<Vec<u8>> {
-    run_indexer_binary("csharp", "scip-dotnet", &["index"], repo_path).map_err(|e| match e {
-        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
-            lang,
-            binary: "scip-dotnet (install: dotnet tool install -g sourcegraph.scip.dotnet)"
-                .to_string(),
-        },
-        other => other,
-    })
+    run_indexer_binary("csharp", "scip-dotnet", &["index"], repo_path).map_err(with_install_hint(
+        "scip-dotnet (install: dotnet tool install -g sourcegraph.scip.dotnet)",
+    ))
 }
 
 /// Invoke `scip-php` against `repo_path`. Sourcegraph PHP indexer
@@ -333,28 +311,18 @@ fn run_scip_dotnet(repo_path: &Path) -> Result<Vec<u8>> {
 /// caller should close #430 with that observation rather than landing a
 /// half-working integration.
 fn run_scip_php(repo_path: &Path) -> Result<Vec<u8>> {
-    run_indexer_binary("php", "scip-php", &[], repo_path).map_err(|e| match e {
-        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
-            lang,
-            binary: "scip-php (install: composer global require sourcegraph/scip-php)".to_string(),
-        },
-        other => other,
-    })
+    run_indexer_binary("php", "scip-php", &[], repo_path).map_err(with_install_hint(
+        "scip-php (install: composer global require sourcegraph/scip-php)",
+    ))
 }
 
 /// Invoke `scip-go` against `repo_path`. Canonical Go indexer from
 /// sourcegraph (`go install github.com/sourcegraph/scip-go/cmd/scip-go@latest`).
 /// Writes `index.scip` in the working directory by default; no subcommand.
 fn run_scip_go(repo_path: &Path) -> Result<Vec<u8>> {
-    run_indexer_binary("go", "scip-go", &[], repo_path).map_err(|e| match e {
-        LegionError::IndexerNotFound { lang, .. } => LegionError::IndexerNotFound {
-            lang,
-            binary:
-                "scip-go (install: go install github.com/sourcegraph/scip-go/cmd/scip-go@latest)"
-                    .to_string(),
-        },
-        other => other,
-    })
+    run_indexer_binary("go", "scip-go", &[], repo_path).map_err(with_install_hint(
+        "scip-go (install: go install github.com/sourcegraph/scip-go/cmd/scip-go@latest)",
+    ))
 }
 
 /// Run a SCIP indexer binary against `repo_path`. Returns the bytes of the

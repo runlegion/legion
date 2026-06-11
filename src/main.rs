@@ -35,6 +35,7 @@ mod task;
 mod telemetry;
 #[cfg(test)]
 mod testutil;
+mod timefmt;
 mod uncertainty;
 mod usage;
 mod verbs;
