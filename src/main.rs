@@ -2425,12 +2425,35 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Best-effort audit log entry. Failures warn to stderr, never abort.
-fn audit(input: &db::AuditInput<'_>) {
-    if let Ok(base) = data_dir()
-        && let Ok(database) = db::Database::open(&base.join("legion.db"))
-        && let Err(e) = database.insert_audit_entry(input)
-    {
+/// Open the legion database at the canonical data dir.
+///
+/// The one place the `<data_dir>/legion.db` path is constructed in this
+/// file. Handlers that also need the search index use
+/// `open_db_and_index`; handlers that need the data dir for anything
+/// beyond the database keep calling `data_dir()` themselves.
+fn open_db() -> error::Result<db::Database> {
+    let base = data_dir()?;
+    db::Database::open(&base.join("legion.db"))
+}
+
+/// Open the legion database and the Tantivy search index together.
+///
+/// Companion to `open_db` for the handlers that write reflections (every
+/// reflection insert must hit both stores or search silently diverges
+/// from the database).
+fn open_db_and_index() -> error::Result<(db::Database, search::SearchIndex)> {
+    let base = data_dir()?;
+    let database = db::Database::open(&base.join("legion.db"))?;
+    let index = search::SearchIndex::open(&base.join("index"))?;
+    Ok((database, index))
+}
+
+/// Best-effort audit log entry. Insert failures warn to stderr, never
+/// abort -- but the caller supplies the connection, so an arm that cannot
+/// open the database fails loudly up front instead of silently dropping
+/// its audit trail one row at a time (#610).
+fn audit(database: &db::Database, input: &db::AuditInput<'_>) {
+    if let Err(e) = database.insert_audit_entry(input) {
         eprintln!("[legion] warning: audit log failed: {}", e);
     }
 }
@@ -2461,14 +2484,10 @@ enum PropagateOutcome {
 
 /// Close the GitHub issue linked to a kanban card via the work source
 /// plugin, and write an audit entry describing the propagation. Called by
-/// `legion kanban cancel` to keep the public GitHub state consistent with
-/// the local kanban state.
-///
-/// NOT called by `legion done --id`, which has an equivalent inline
-/// propagation at its own call site in `Commands::Done` (search for the
-/// `// Close the linked external issue if present` block). The two paths
-/// are functionally equivalent today; folding `Commands::Done` through
-/// this helper is tracked as post-#192 cleanup.
+/// `legion kanban cancel` and `legion done --id` (#610 folded the Done
+/// arm's previously inline copy through this helper, restoring the audit
+/// row and `PropagateOutcome` reporting the inline copy had lost) to keep
+/// the public GitHub state consistent with the local kanban state.
 ///
 /// Returns a `PropagateOutcome` so the caller can emit a visible warning
 /// to stdout on failure. Stderr breadcrumbs explain the failure; stdout
@@ -2543,16 +2562,19 @@ fn propagate_card_close_to_worksource(
                 "comment": comment,
             });
             let details_str = details.to_string();
-            audit(&db::AuditInput {
-                agent: &card.to_repo,
-                action: "close-issue",
-                target_type: "issue",
-                target_ref: &number.to_string(),
-                task_id: Some(card_id),
-                source_type: source,
-                details: Some(&details_str),
-                outcome: "success",
-            });
+            audit(
+                database,
+                &db::AuditInput {
+                    agent: &card.to_repo,
+                    action: "close-issue",
+                    target_type: "issue",
+                    target_ref: &number.to_string(),
+                    task_id: Some(card_id),
+                    source_type: source,
+                    details: Some(&details_str),
+                    outcome: "success",
+                },
+            );
             PropagateOutcome::Propagated
         }
         Err(e) => {
@@ -2615,16 +2637,19 @@ fn propagate_card_reopen_to_worksource(
                 "comment": comment,
             });
             let details_str = details.to_string();
-            audit(&db::AuditInput {
-                agent: &card.to_repo,
-                action: "reopen-issue",
-                target_type: "issue",
-                target_ref: &number.to_string(),
-                task_id: Some(card_id),
-                source_type: source,
-                details: Some(&details_str),
-                outcome: "success",
-            });
+            audit(
+                database,
+                &db::AuditInput {
+                    agent: &card.to_repo,
+                    action: "reopen-issue",
+                    target_type: "issue",
+                    target_ref: &number.to_string(),
+                    task_id: Some(card_id),
+                    source_type: source,
+                    details: Some(&details_str),
+                    outcome: "success",
+                },
+            );
             PropagateOutcome::Propagated
         }
         Err(e) => {
@@ -3795,8 +3820,7 @@ fn main() -> error::Result<()> {
 /// orphans surface errors normally -- those are explicit user actions.
 fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
     use std::io::Write;
-    let base = data_dir()?;
-    let database = db::Database::open(&base.join("legion.db"))?;
+    let database = open_db()?;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
@@ -3972,9 +3996,7 @@ fn run() -> error::Result<()> {
             } else {
                 domain
             };
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
-            let index = search::SearchIndex::open(&base.join("index"))?;
+            let (database, index) = open_db_and_index()?;
 
             // Near-duplicate detection before storing (Card C).
             // Skip when --force or --dedupe-mode off.
@@ -4017,9 +4039,7 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Forget { id, repo } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
-            let index = search::SearchIndex::open(&base.join("index"))?;
+            let (database, index) = open_db_and_index()?;
 
             // Peek at the reflection first so we can run the optional
             // --repo safety check AND print a summary of what is about
@@ -4034,16 +4054,19 @@ fn run() -> error::Result<()> {
             // so the three call sites (rejected / success / partial) only
             // name the three things that actually differ.
             let write_audit = |agent: &str, outcome: &str, details: Option<&str>| {
-                audit(&db::AuditInput {
-                    agent,
-                    action: "delete-reflection",
-                    target_type: "reflection",
-                    target_ref: &id,
-                    task_id: None,
-                    source_type: "legion",
-                    details,
-                    outcome,
-                });
+                audit(
+                    &database,
+                    &db::AuditInput {
+                        agent,
+                        action: "delete-reflection",
+                        target_type: "reflection",
+                        target_ref: &id,
+                        task_id: None,
+                        source_type: "legion",
+                        details,
+                        outcome,
+                    },
+                );
             };
 
             if let Some(ref expected_repo) = repo
@@ -4111,8 +4134,7 @@ fn run() -> error::Result<()> {
             archives,
             include_archives,
         } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             // Resolve archive mode (#457). Mutually-exclusive flags
             // enforced at the clap layer via conflicts_with.
@@ -4147,7 +4169,7 @@ fn run() -> error::Result<()> {
                 })?;
                 recall::recall_cosine_only(&database, &model, &repo, &context, limit, min_score)?
             } else {
-                let index = search::SearchIndex::open(&base.join("index"))?;
+                let index = search::SearchIndex::open(&data_dir()?.join("index"))?;
                 // Try hybrid (BM25 + cosine) recall, fall back to BM25-only
                 match try_load_embed_model() {
                     Some(model) => recall::recall_in_mode(
@@ -4175,8 +4197,7 @@ fn run() -> error::Result<()> {
             preview,
             json,
         } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             // Validate the embed model is available; similar needs embeddings to work.
             embed::EmbedModel::load().map_err(|e| {
                 error::LegionError::Embedding(format!(
@@ -4199,12 +4220,11 @@ fn run() -> error::Result<()> {
             limit,
             json,
         } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             match (context, symbol) {
                 (Some(ctx), None) => {
-                    let index = search::SearchIndex::open(&base.join("index"))?;
+                    let index = search::SearchIndex::open(&data_dir()?.join("index"))?;
                     let result = match try_load_embed_model() {
                         Some(model) => recall::consult(&database, &index, &model, &ctx, limit)?,
                         None => recall::consult_bm25(&database, &index, &ctx, limit)?,
@@ -4249,9 +4269,7 @@ fn run() -> error::Result<()> {
                 eprintln!("[legion] @self posts are private -- redirecting to reflect");
             }
 
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
-            let index = search::SearchIndex::open(&base.join("index"))?;
+            let (database, index) = open_db_and_index()?;
             let meta = db::ReflectionMeta {
                 domain,
                 tags,
@@ -4303,9 +4321,7 @@ fn run() -> error::Result<()> {
             domain,
             tags,
         } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
-            let index = search::SearchIndex::open(&base.join("index"))?;
+            let (database, index) = open_db_and_index()?;
 
             let detail_pairs: Vec<(String, String)> = details
                 .as_deref()
@@ -4396,13 +4412,12 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::PendingReplies { repo } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             // Build the full addressable name set for this repo: the repo's
             // recipient() plus any broadcast_tags. Fall back to [repo] for
             // un-watched callers (no watch.toml, or repo not in it).
-            let names: Vec<String> = watch::load_config(&base.join("watch.toml"))
+            let names: Vec<String> = watch::load_config(&data_dir()?.join("watch.toml"))
                 .ok()
                 .and_then(|cfg| {
                     cfg.repos.into_iter().find(|r| r.name == repo).map(|r| {
@@ -4425,8 +4440,7 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Boost { id } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             if database.boost_reflection(&id)? {
                 info!("[legion] boosted reflection {}", id);
@@ -4435,8 +4449,7 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Resolve { id, reflection } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             if database.resolve_post(&id, reflection.as_deref())? {
                 info!("[legion] resolved {}", id);
@@ -4446,8 +4459,7 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Chain { id, full } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             let chain = database.get_chain(&id)?;
             if chain.is_empty() {
@@ -4500,8 +4512,7 @@ fn run() -> error::Result<()> {
             include_stale,
             include_resolved,
         } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             if archive {
                 let count = board::archive_read_posts(&database)?;
@@ -4575,7 +4586,7 @@ fn run() -> error::Result<()> {
 
             // --status: dump scip_indexes inventory and return.
             if status {
-                let database = db::Database::open(&base.join("legion.db"))?;
+                let database = open_db()?;
                 let indexes = database.list_scip_indexes_filtered(repo.as_deref(), None)?;
                 if json {
                     let rows: Vec<serde_json::Value> = indexes
@@ -4662,7 +4673,7 @@ fn run() -> error::Result<()> {
                 )));
             }
 
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             let mut indexed: u32 = 0;
             for lang in &langs {
                 let blob = match scip::run_indexer(lang, &repo_path) {
@@ -4699,14 +4710,11 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Sym { action } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             run_sym_action(&database, action)?;
         }
         Commands::Reindex => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
-            let index = search::SearchIndex::open(&base.join("index"))?;
+            let (database, index) = open_db_and_index()?;
 
             let reflections = database.get_all_for_reindex()?;
             let count = reflections.len();
@@ -4714,8 +4722,7 @@ fn run() -> error::Result<()> {
             info!("[legion] reindexed {} reflections", count);
         }
         Commands::Cleanup { retention_days } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             let result = database.cleanup_tombstones(retention_days)?;
             if result.is_empty() {
@@ -4737,9 +4744,7 @@ fn run() -> error::Result<()> {
                 return Ok(());
             }
 
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
-            let index = search::SearchIndex::open(&base.join("index"))?;
+            let (database, index) = open_db_and_index()?;
 
             let counts = database.rename_repo(&from, &to)?;
             eprintln!(
@@ -4761,7 +4766,7 @@ fn run() -> error::Result<()> {
             eprintln!("[legion] reindexed {} reflections", reindex_count);
 
             // Update watch.toml
-            let watch_path = base.join("watch.toml");
+            let watch_path = data_dir()?.join("watch.toml");
             if watch::rename_in_config(&watch_path, &from, &to)? {
                 eprintln!("[legion] updated watch.toml: '{}' -> '{}'", from, to);
             }
@@ -4769,8 +4774,7 @@ fn run() -> error::Result<()> {
             eprintln!("[legion] total: {} rows updated", counts.total());
         }
         Commands::Backfill => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             let model = embed::EmbedModel::load()?;
             let count = backfill_embeddings(&database, &model)?;
@@ -4789,8 +4793,7 @@ fn run() -> error::Result<()> {
                     }
                 }
             }
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             match action {
                 DocumentAction::Create {
                     doc_type,
@@ -4973,12 +4976,7 @@ fn run() -> error::Result<()> {
                 title,
                 body,
             } => {
-                let (plugin, github_repo, _) =
-                    worksource::resolve_config(&repo).ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{repo}'"
-                        ))
-                    })?;
+                let (plugin, github_repo, _workdir) = worksource::require_worksource(&repo)?;
                 let created = worksource::create_sub_issue(
                     &plugin,
                     &github_repo,
@@ -4994,12 +4992,7 @@ fn run() -> error::Result<()> {
                 state,
                 json,
             } => {
-                let (plugin, github_repo, _) =
-                    worksource::resolve_config(&repo).ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{repo}'"
-                        ))
-                    })?;
+                let (plugin, github_repo, _workdir) = worksource::require_worksource(&repo)?;
                 let issues =
                     worksource::list_sub_issues(&plugin, &github_repo, parent, Some(&state))?;
                 if json {
@@ -5086,8 +5079,7 @@ fn run() -> error::Result<()> {
             init::init(force)?;
         }
         Commands::Surface { repo } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             let result = surface::surface(&database, &repo)?;
             let output = surface::format_surface(&result, &repo);
@@ -5096,8 +5088,7 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Whoami { repo, limit } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             let roots = database.get_identity_roots(&repo, limit)?;
             if roots.is_empty() {
                 return Ok(());
@@ -5115,8 +5106,7 @@ fn run() -> error::Result<()> {
             print!("{output}");
         }
         Commands::Whatami { repo, limit } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             let roots = database.get_domain_roots(&repo, "workflow", limit)?;
             if roots.is_empty() {
                 return Ok(());
@@ -5134,8 +5124,7 @@ fn run() -> error::Result<()> {
             print!("{output}");
         }
         Commands::Stats { repo } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             stats::stats(&database, repo.as_deref())?;
         }
         Commands::Telemetry { action } => match action {
@@ -5237,8 +5226,7 @@ fn run() -> error::Result<()> {
             serve::run_server(port, base)?;
         }
         Commands::Status { repo, json } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             let output = status::get_status(&database, &repo)?;
             if json {
                 println!(
@@ -5258,15 +5246,12 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Needs { repo } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             let items = status::get_needs(&database, &repo)?;
             print!("{}", status::format_needs(&repo, &items));
         }
         Commands::Done { repo, text, id } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
-            let index = search::SearchIndex::open(&base.join("index"))?;
+            let (database, index) = open_db_and_index()?;
 
             // Validate card transition BEFORE posting announcements
             if let Some(ref card_id) = id {
@@ -5301,20 +5286,27 @@ fn run() -> error::Result<()> {
                     }
                 }
 
-                let card =
-                    kanban::transition_card(&database, card_id, kanban::Action::Done, Some(&text))?;
+                kanban::transition_card(&database, card_id, kanban::Action::Done, Some(&text))?;
                 println!("{card_id}");
 
                 // Close the linked external issue if present, using the
                 // done-text as the closing comment so the GitHub issue thread
-                // records why it was closed.
-                if let (Some(url), Some(source)) = (&card.source_url, &card.source_type)
-                    && let Some(number) = worksource::extract_issue_number(url)
-                    && let Some((_, source_repo, _)) = worksource::resolve_config(&repo)
-                    && let Err(e) =
-                        worksource::close_issue(source, &source_repo, number, Some(&text))
-                {
-                    eprintln!("[legion] failed to close {source} issue #{number}: {e}");
+                // records why it was closed. Folded through the shared
+                // propagation helper (#610) so `legion done` writes the same
+                // audit row and stdout partial-failure warning as
+                // `legion kanban cancel`, and resolves the work source from
+                // the card's own to_repo instead of the --repo argument.
+                match propagate_card_close_to_worksource(&database, card_id, Some(&text)) {
+                    PropagateOutcome::Propagated | PropagateOutcome::Skipped => {}
+                    PropagateOutcome::Failed => {
+                        // Same stdout-visibility pattern as KanbanAction::Cancel:
+                        // the card is Done locally (the println of {card_id}
+                        // above stands), but the linked GitHub issue was NOT
+                        // closed and scripted callers need to see that.
+                        println!(
+                            "[legion] WARNING: card {card_id} completed locally but linked github issue propagation FAILED -- run `legion kanban reconcile --close-stale` to retry"
+                        );
+                    }
                 }
             }
 
@@ -5352,8 +5344,7 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Work { repo, peek } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             // Sync from external work sources before checking the queue
             if let Some((plugin, source_repo, workdir)) = worksource::resolve_config(&repo) {
@@ -5376,20 +5367,16 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Sync { repo } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
-            // Sync from external work sources
-            if let Some((plugin, source_repo, workdir)) = worksource::resolve_config(&repo) {
-                match worksource::sync_issues(&database, &plugin, &source_repo, &workdir, &repo) {
-                    Ok(n) if n > 0 => info!("[legion] synced {n} new issues from {plugin}"),
-                    Ok(_) => {}
-                    Err(e) => eprintln!("[legion] work source sync failed: {e}"),
-                }
-            } else {
-                return Err(error::LegionError::WorkSource(format!(
-                    "no work source configured for {repo}"
-                )));
+            // Sync from external work sources. Unlike `legion work`, an
+            // unconfigured repo is a hard error here: syncing is the whole
+            // point of the command.
+            let (plugin, source_repo, workdir) = worksource::require_worksource(&repo)?;
+            match worksource::sync_issues(&database, &plugin, &source_repo, &workdir, &repo) {
+                Ok(n) if n > 0 => info!("[legion] synced {n} new issues from {plugin}"),
+                Ok(_) => {}
+                Err(e) => eprintln!("[legion] work source sync failed: {e}"),
             }
         }
         Commands::Cluster { action } => {
@@ -5397,8 +5384,7 @@ fn run() -> error::Result<()> {
             cluster::handle_cluster_command(&base, action)?;
         }
         Commands::Kanban { action } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             match action {
                 KanbanAction::Create {
@@ -5470,16 +5456,19 @@ fn run() -> error::Result<()> {
                     };
                     let card_id = kanban::update_card(&database, &id, &repo, &params)?;
                     println!("{card_id}");
-                    audit(&db::AuditInput {
-                        agent: &repo,
-                        action: "update-card",
-                        target_type: "card",
-                        target_ref: &id,
-                        task_id: Some(&id),
-                        source_type: "legion",
-                        details: None,
-                        outcome: "success",
-                    });
+                    audit(
+                        &database,
+                        &db::AuditInput {
+                            agent: &repo,
+                            action: "update-card",
+                            target_type: "card",
+                            target_ref: &id,
+                            task_id: Some(&id),
+                            source_type: "legion",
+                            details: None,
+                            outcome: "success",
+                        },
+                    );
                 }
                 KanbanAction::List {
                     repo,
@@ -5639,16 +5628,19 @@ fn run() -> error::Result<()> {
                     database.delete_card(&id)?;
                     println!("{id}");
 
-                    audit(&db::AuditInput {
-                        agent: &agent_repo,
-                        action: "delete-card",
-                        target_type: "card",
-                        target_ref: &id,
-                        task_id: Some(&id),
-                        source_type: "legion",
-                        details: None,
-                        outcome: "success",
-                    });
+                    audit(
+                        &database,
+                        &db::AuditInput {
+                            agent: &agent_repo,
+                            action: "delete-card",
+                            target_type: "card",
+                            target_ref: &id,
+                            task_id: Some(&id),
+                            source_type: "legion",
+                            details: None,
+                            outcome: "success",
+                        },
+                    );
                 }
                 KanbanAction::Reconcile {
                     repo,
@@ -5806,16 +5798,19 @@ fn run() -> error::Result<()> {
                                         "propagation": "reconcile",
                                     });
                                     let details_str = details.to_string();
-                                    audit(&db::AuditInput {
-                                        agent: &card.to_repo,
-                                        action: "close-issue",
-                                        target_type: "issue",
-                                        target_ref: &number.to_string(),
-                                        task_id: Some(&card.id),
-                                        source_type: source,
-                                        details: Some(&details_str),
-                                        outcome: "success",
-                                    });
+                                    audit(
+                                        &database,
+                                        &db::AuditInput {
+                                            agent: &card.to_repo,
+                                            action: "close-issue",
+                                            target_type: "issue",
+                                            target_ref: &number.to_string(),
+                                            task_id: Some(&card.id),
+                                            source_type: source,
+                                            details: Some(&details_str),
+                                            outcome: "success",
+                                        },
+                                    );
                                 }
                                 Err(e) => {
                                     failed += 1;
@@ -5840,16 +5835,19 @@ fn run() -> error::Result<()> {
                                         "error": err_msg,
                                     });
                                     let details_str = details.to_string();
-                                    audit(&db::AuditInput {
-                                        agent: &card.to_repo,
-                                        action: "close-issue",
-                                        target_type: "issue",
-                                        target_ref: &number.to_string(),
-                                        task_id: Some(&card.id),
-                                        source_type: source,
-                                        details: Some(&details_str),
-                                        outcome: "failure",
-                                    });
+                                    audit(
+                                        &database,
+                                        &db::AuditInput {
+                                            agent: &card.to_repo,
+                                            action: "close-issue",
+                                            target_type: "issue",
+                                            target_ref: &number.to_string(),
+                                            task_id: Some(&card.id),
+                                            source_type: source,
+                                            details: Some(&details_str),
+                                            outcome: "failure",
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -5904,16 +5902,19 @@ fn run() -> error::Result<()> {
                                         "external_number": number,
                                     });
                                     let details_str = details.to_string();
-                                    audit(&db::AuditInput {
-                                        agent: &card.to_repo,
-                                        action: "cancel-card",
-                                        target_type: "card",
-                                        target_ref: &card.id,
-                                        task_id: Some(&card.id),
-                                        source_type,
-                                        details: Some(&details_str),
-                                        outcome: "success",
-                                    });
+                                    audit(
+                                        &database,
+                                        &db::AuditInput {
+                                            agent: &card.to_repo,
+                                            action: "cancel-card",
+                                            target_type: "card",
+                                            target_ref: &card.id,
+                                            task_id: Some(&card.id),
+                                            source_type,
+                                            details: Some(&details_str),
+                                            outcome: "success",
+                                        },
+                                    );
                                 }
                                 Err(e) => {
                                     failed += 1;
@@ -5928,16 +5929,19 @@ fn run() -> error::Result<()> {
                                         "error": err_msg,
                                     });
                                     let details_str = details.to_string();
-                                    audit(&db::AuditInput {
-                                        agent: &card.to_repo,
-                                        action: "cancel-card",
-                                        target_type: "card",
-                                        target_ref: &card.id,
-                                        task_id: Some(&card.id),
-                                        source_type,
-                                        details: Some(&details_str),
-                                        outcome: "failure",
-                                    });
+                                    audit(
+                                        &database,
+                                        &db::AuditInput {
+                                            agent: &card.to_repo,
+                                            action: "cancel-card",
+                                            target_type: "card",
+                                            target_ref: &card.id,
+                                            task_id: Some(&card.id),
+                                            source_type,
+                                            details: Some(&details_str),
+                                            outcome: "failure",
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -5956,8 +5960,7 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Task { action } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             match action {
                 TaskAction::Create {
@@ -6011,8 +6014,7 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Schedule { action } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             match action {
                 ScheduleAction::Create {
@@ -6120,13 +6122,8 @@ fn run() -> error::Result<()> {
                 labels,
                 assignee,
             } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+                let database = open_db()?;
 
                 let created = worksource::create_issue(
                     &plugin_name,
@@ -6141,16 +6138,19 @@ fn run() -> error::Result<()> {
                     "title": title, "labels": labels, "assignee": assignee,
                 });
                 let details_str = details.to_string();
-                audit(&db::AuditInput {
-                    agent: &repo,
-                    action: "create-issue",
-                    target_type: "issue",
-                    target_ref: &created.number.to_string(),
-                    task_id: None,
-                    source_type: &plugin_name,
-                    details: Some(&details_str),
-                    outcome: "success",
-                });
+                audit(
+                    &database,
+                    &db::AuditInput {
+                        agent: &repo,
+                        action: "create-issue",
+                        target_type: "issue",
+                        target_ref: &created.number.to_string(),
+                        task_id: None,
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    },
+                );
 
                 println!("{}", created.url);
                 eprintln!(
@@ -6159,13 +6159,7 @@ fn run() -> error::Result<()> {
                 );
             }
             IssueAction::View { repo, number } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
                 let issue = worksource::view_issue(&plugin_name, &source_repo, number)?;
                 let parsed = card_parse::parse_issue_body(issue.body.as_deref().unwrap_or(""));
@@ -6201,28 +6195,26 @@ fn run() -> error::Result<()> {
                 number,
                 comment,
             } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+                let database = open_db()?;
 
                 worksource::close_issue(&plugin_name, &source_repo, number, comment.as_deref())?;
 
                 let details = serde_json::json!({ "comment": comment });
                 let details_str = details.to_string();
-                audit(&db::AuditInput {
-                    agent: &repo,
-                    action: "close-issue",
-                    target_type: "issue",
-                    target_ref: &number.to_string(),
-                    task_id: None,
-                    source_type: &plugin_name,
-                    details: Some(&details_str),
-                    outcome: "success",
-                });
+                audit(
+                    &database,
+                    &db::AuditInput {
+                        agent: &repo,
+                        action: "close-issue",
+                        target_type: "issue",
+                        target_ref: &number.to_string(),
+                        task_id: None,
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    },
+                );
 
                 println!("closed issue #{} on {}", number, source_repo);
             }
@@ -6231,28 +6223,26 @@ fn run() -> error::Result<()> {
                 number,
                 comment,
             } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+                let database = open_db()?;
 
                 worksource::reopen_issue(&plugin_name, &source_repo, number, comment.as_deref())?;
 
                 let details = serde_json::json!({ "comment": comment });
                 let details_str = details.to_string();
-                audit(&db::AuditInput {
-                    agent: &repo,
-                    action: "reopen-issue",
-                    target_type: "issue",
-                    target_ref: &number.to_string(),
-                    task_id: None,
-                    source_type: &plugin_name,
-                    details: Some(&details_str),
-                    outcome: "success",
-                });
+                audit(
+                    &database,
+                    &db::AuditInput {
+                        agent: &repo,
+                        action: "reopen-issue",
+                        target_type: "issue",
+                        target_ref: &number.to_string(),
+                        task_id: None,
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    },
+                );
 
                 println!("reopened issue #{} on {}", number, source_repo);
             }
@@ -6268,13 +6258,8 @@ fn run() -> error::Result<()> {
                     ));
                 }
 
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+                let database = open_db()?;
 
                 worksource::edit_issue(
                     &plugin_name,
@@ -6289,16 +6274,19 @@ fn run() -> error::Result<()> {
                     "body_set": body.is_some(),
                 });
                 let details_str = details.to_string();
-                audit(&db::AuditInput {
-                    agent: &repo,
-                    action: "edit-issue",
-                    target_type: "issue",
-                    target_ref: &number.to_string(),
-                    task_id: None,
-                    source_type: &plugin_name,
-                    details: Some(&details_str),
-                    outcome: "success",
-                });
+                audit(
+                    &database,
+                    &db::AuditInput {
+                        agent: &repo,
+                        action: "edit-issue",
+                        target_type: "issue",
+                        target_ref: &number.to_string(),
+                        task_id: None,
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    },
+                );
 
                 println!("edited issue #{} on {}", number, source_repo);
             }
@@ -6316,32 +6304,40 @@ fn run() -> error::Result<()> {
                 task,
                 skip_gates,
             } => {
+                // One database handle for the whole arm (#610): the gate
+                // check, the skip-gates audit entry, the card link, the
+                // create-pr audit row, and the review auto-signal all share
+                // it instead of opening up to four separate connections, two
+                // of which silently swallowed open failures.
+                let database = open_db()?;
+
                 // Quality gates: verify legion-simplify AND legion-pr-write ran
                 // clean on HEAD before calling the work source. This runs before
-                // worksource::resolve_config so the gate error is always surfaced,
+                // worksource resolution so the gate error is always surfaced,
                 // even if the worksource is not configured. --skip-gates is a
                 // bootstrap escape hatch for the branch that ships the skills
                 // themselves; it writes an audit entry so it cannot be done silently.
                 if skip_gates {
-                    audit(&db::AuditInput {
-                        agent: &repo,
-                        action: "skip-gate-bootstrap",
-                        target_type: "pr",
-                        target_ref: "pending",
-                        task_id: task.as_deref(),
-                        source_type: "unknown",
-                        details: Some(
-                            r#"{"skills":["legion-simplify","legion-pr-write"],"reason":"bootstrap"}"#,
-                        ),
-                        outcome: "skipped",
-                    });
+                    audit(
+                        &database,
+                        &db::AuditInput {
+                            agent: &repo,
+                            action: "skip-gate-bootstrap",
+                            target_type: "pr",
+                            target_ref: "pending",
+                            task_id: task.as_deref(),
+                            source_type: "unknown",
+                            details: Some(
+                                r#"{"skills":["legion-simplify","legion-pr-write"],"reason":"bootstrap"}"#,
+                            ),
+                            outcome: "skipped",
+                        },
+                    );
                     eprintln!("[legion] warning: quality gate skipped (--skip-gates bootstrap)");
                 } else {
                     let (commit_hash, _branch) = git_head_commit_and_branch()?;
                     let short_hash: &str = &commit_hash[..commit_hash.len().min(8)];
 
-                    let db_base = data_dir()?;
-                    let gate_db = db::Database::open(&db_base.join("legion.db"))?;
                     // Both forcing-function gates must be clean on HEAD before the
                     // PR opens: simplify (structural quality) and pr-write (the
                     // articulated criterion-to-work mapping the verify gate later
@@ -6351,7 +6347,7 @@ fn run() -> error::Result<()> {
                         ("legion-simplify", "/legion-simplify"),
                         ("legion-pr-write", "/legion-pr-write"),
                     ] {
-                        match gate_db.get_quality_gate(&commit_hash, skill)? {
+                        match database.get_quality_gate(&commit_hash, skill)? {
                             None => {
                                 eprintln!(
                                     "[legion] error: no clean {skill} gate on HEAD ({short_hash}). \
@@ -6374,13 +6370,7 @@ fn run() -> error::Result<()> {
                     }
                 }
 
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
                 let created = worksource::create_pr(
                     &plugin_name,
@@ -6396,8 +6386,6 @@ fn run() -> error::Result<()> {
 
                 // Store PR URL on the kanban card if linked
                 if let Some(ref task_id) = task {
-                    let db_base = data_dir()?;
-                    let database = db::Database::open(&db_base.join("legion.db"))?;
                     // Update the card's context with the PR URL
                     if let Some(_card) = database.get_card_by_id(task_id)? {
                         eprintln!("[legion] linked PR #{} to card {}", created.number, task_id);
@@ -6408,16 +6396,19 @@ fn run() -> error::Result<()> {
                     "title": title, "base": base, "head": head, "draft": draft,
                 });
                 let details_str = details.to_string();
-                audit(&db::AuditInput {
-                    agent: &repo,
-                    action: "create-pr",
-                    target_type: "pr",
-                    target_ref: &created.number.to_string(),
-                    task_id: task.as_deref(),
-                    source_type: &plugin_name,
-                    details: Some(&details_str),
-                    outcome: "success",
-                });
+                audit(
+                    &database,
+                    &db::AuditInput {
+                        agent: &repo,
+                        action: "create-pr",
+                        target_type: "pr",
+                        target_ref: &created.number.to_string(),
+                        task_id: task.as_deref(),
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    },
+                );
 
                 // Auto-signal review agent if configured
                 if let Some(review_cfg) = worksource::resolve_review_config()
@@ -6427,24 +6418,28 @@ fn run() -> error::Result<()> {
                         "@{} review:ready -- repo:{},pr:{},source:{}",
                         review_cfg.agent, repo, created.number, source_repo
                     );
-                    if let Ok(db_base) = data_dir()
-                        && let Ok(database) = db::Database::open(&db_base.join("legion.db"))
-                        && let Ok(index) = search::SearchIndex::open(&db_base.join("index"))
-                    {
-                        let meta = db::ReflectionMeta::default();
-                        match board::post_from_text_with_meta(
-                            &database,
-                            &index,
-                            &repo,
-                            &signal_text,
-                            &meta,
-                        ) {
-                            Ok(_) => {
-                                eprintln!("[legion] signaled @{} for review", review_cfg.agent)
-                            }
-                            Err(e) => {
-                                eprintln!("[legion] warning: review signal failed: {}", e)
-                            }
+                    // The PR already exists at this point, so a broken index
+                    // must not fail the command -- but it must be loud (#610).
+                    // The previous if-let-Ok chain swallowed open failures
+                    // without a trace.
+                    let signal_result = data_dir()
+                        .and_then(|b| search::SearchIndex::open(&b.join("index")))
+                        .and_then(|index| {
+                            let meta = db::ReflectionMeta::default();
+                            board::post_from_text_with_meta(
+                                &database,
+                                &index,
+                                &repo,
+                                &signal_text,
+                                &meta,
+                            )
+                        });
+                    match signal_result {
+                        Ok(_) => {
+                            eprintln!("[legion] signaled @{} for review", review_cfg.agent)
+                        }
+                        Err(e) => {
+                            eprintln!("[legion] warning: review signal failed: {}", e)
                         }
                     }
                 }
@@ -6453,13 +6448,7 @@ fn run() -> error::Result<()> {
                 eprintln!("[legion] created PR #{} on {}", created.number, source_repo);
             }
             PrAction::List { repo } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
                 let prs = worksource::list_prs(&plugin_name, &source_repo)?;
                 if prs.is_empty() {
@@ -6481,13 +6470,7 @@ fn run() -> error::Result<()> {
                 json,
                 log_failed,
             } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
                 let checks = worksource::pr_checks(&plugin_name, &source_repo, number)?;
 
@@ -6563,13 +6546,7 @@ fn run() -> error::Result<()> {
                 }
             }
             PrAction::View { repo, number, json } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
                 let pr = worksource::view_pr(&plugin_name, &source_repo, number)?;
                 if json {
@@ -6587,13 +6564,7 @@ fn run() -> error::Result<()> {
                 issue,
                 body_file,
             } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
                 // Load the issue's acceptance criteria -- the claim set the body
                 // must map. Parsed from the same template card_parse reads for
@@ -6618,8 +6589,7 @@ fn run() -> error::Result<()> {
                 })
                 .to_string();
 
-                let base = data_dir()?;
-                let database = db::Database::open(&base.join("legion.db"))?;
+                let database = open_db()?;
                 database.record_quality_gate(
                     &branch,
                     &commit_hash,
@@ -6652,13 +6622,7 @@ fn run() -> error::Result<()> {
                 }
             }
             PrAction::Comments { repo, number, json } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
                 let comments = worksource::list_pr_comments(&plugin_name, &source_repo, number)?;
                 if json {
@@ -6674,13 +6638,7 @@ fn run() -> error::Result<()> {
                 }
             }
             PrAction::Reviews { repo, number, json } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
                 let reviews = worksource::list_pr_reviews(&plugin_name, &source_repo, number)?;
                 if json {
@@ -6703,13 +6661,7 @@ fn run() -> error::Result<()> {
                 body,
                 comments,
             } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
                 let event = if approve {
                     "APPROVE"
@@ -6725,6 +6677,7 @@ fn run() -> error::Result<()> {
                     "COMMENT"
                 };
 
+                let database = open_db()?;
                 worksource::review_pr(
                     &plugin_name,
                     &source_repo,
@@ -6736,16 +6689,19 @@ fn run() -> error::Result<()> {
 
                 let details = serde_json::json!({ "event": event });
                 let details_str = details.to_string();
-                audit(&db::AuditInput {
-                    agent: &repo,
-                    action: "review",
-                    target_type: "pr",
-                    target_ref: &number.to_string(),
-                    task_id: None,
-                    source_type: &plugin_name,
-                    details: Some(&details_str),
-                    outcome: "success",
-                });
+                audit(
+                    &database,
+                    &db::AuditInput {
+                        agent: &repo,
+                        action: "review",
+                        target_type: "pr",
+                        target_ref: &number.to_string(),
+                        task_id: None,
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    },
+                );
 
                 eprintln!(
                     "[legion] posted {} review on PR #{} on {}",
@@ -6759,20 +6715,13 @@ fn run() -> error::Result<()> {
                 keep_branch,
                 task,
             } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+                let database = open_db()?;
 
                 worksource::merge_pr(&plugin_name, &source_repo, number, &strategy, !keep_branch)?;
 
                 // Transition kanban card to done if linked
                 if let Some(ref task_id) = task {
-                    let db_base = data_dir()?;
-                    let database = db::Database::open(&db_base.join("legion.db"))?;
                     match kanban::transition_card(
                         &database,
                         task_id,
@@ -6816,16 +6765,19 @@ fn run() -> error::Result<()> {
                     "strategy": strategy, "delete_branch": !keep_branch,
                 });
                 let details_str = details.to_string();
-                audit(&db::AuditInput {
-                    agent: &repo,
-                    action: "merge",
-                    target_type: "pr",
-                    target_ref: &number.to_string(),
-                    task_id: task.as_deref(),
-                    source_type: &plugin_name,
-                    details: Some(&details_str),
-                    outcome: "success",
-                });
+                audit(
+                    &database,
+                    &db::AuditInput {
+                        agent: &repo,
+                        action: "merge",
+                        target_type: "pr",
+                        target_ref: &number.to_string(),
+                        task_id: task.as_deref(),
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    },
+                );
 
                 println!("PR #{} merged on {}", number, source_repo);
             }
@@ -6835,13 +6787,8 @@ fn run() -> error::Result<()> {
                 reason,
                 delete_branch,
             } => {
-                let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                    .ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "no work source configured for repo '{}' in watch.toml",
-                            repo
-                        ))
-                    })?;
+                let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+                let database = open_db()?;
 
                 worksource::close_pr(
                     &plugin_name,
@@ -6855,41 +6802,42 @@ fn run() -> error::Result<()> {
                     "reason": reason, "delete_branch": delete_branch,
                 });
                 let details_str = details.to_string();
-                audit(&db::AuditInput {
-                    agent: &repo,
-                    action: "close-pr",
-                    target_type: "pr",
-                    target_ref: &number.to_string(),
-                    task_id: None,
-                    source_type: &plugin_name,
-                    details: Some(&details_str),
-                    outcome: "success",
-                });
+                audit(
+                    &database,
+                    &db::AuditInput {
+                        agent: &repo,
+                        action: "close-pr",
+                        target_type: "pr",
+                        target_ref: &number.to_string(),
+                        task_id: None,
+                        source_type: &plugin_name,
+                        details: Some(&details_str),
+                        outcome: "success",
+                    },
+                );
 
                 println!("closed PR #{} on {}", number, source_repo);
             }
         },
         Commands::Comment { repo, number, body } => {
-            let (plugin_name, source_repo, _workdir) = worksource::resolve_config(&repo)
-                .ok_or_else(|| {
-                    error::LegionError::WorkSource(format!(
-                        "no work source configured for repo '{}' in watch.toml",
-                        repo
-                    ))
-                })?;
+            let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+            let database = open_db()?;
 
             worksource::comment(&plugin_name, &source_repo, number, &body)?;
 
-            audit(&db::AuditInput {
-                agent: &repo,
-                action: "comment",
-                target_type: "comment",
-                target_ref: &number.to_string(),
-                task_id: None,
-                source_type: &plugin_name,
-                details: None,
-                outcome: "success",
-            });
+            audit(
+                &database,
+                &db::AuditInput {
+                    agent: &repo,
+                    action: "comment",
+                    target_type: "comment",
+                    target_ref: &number.to_string(),
+                    task_id: None,
+                    source_type: &plugin_name,
+                    details: None,
+                    outcome: "success",
+                },
+            );
 
             eprintln!("[legion] commented on #{} on {}", number, source_repo);
         }
@@ -6899,8 +6847,7 @@ fn run() -> error::Result<()> {
             limit,
             json,
         } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             let entries = database.query_audit_log(repo.as_deref(), action.as_deref(), limit)?;
 
             if json {
@@ -7017,9 +6964,7 @@ fn run() -> error::Result<()> {
                     }
                 }
                 Some(WatchAction::Leases { action }) => {
-                    let base = data_dir()?;
-                    let db_path = base.join("legion.db");
-                    let db = db::Database::open(&db_path)?;
+                    let db = open_db()?;
                     match action {
                         LeaseAction::List { persona } => {
                             let leases = db.list_persona_leases(persona.as_deref())?;
@@ -7069,16 +7014,14 @@ fn run() -> error::Result<()> {
                     }
                 }
                 Some(WatchAction::SessionEnd { attempt_id }) => {
-                    let db_path = base.join("legion.db");
-                    let db = db::Database::open(&db_path)?;
+                    let db = open_db()?;
                     watch::record_session_end(&db, &attempt_id, &base)?;
                 }
                 Some(WatchAction::Status {
                     recent,
                     stale_after_secs,
                 }) => {
-                    let db_path = base.join("legion.db");
-                    let db = db::Database::open(&db_path)?;
+                    let db = open_db()?;
                     run_watch_status(&db, recent, stale_after_secs)?;
                 }
             }
@@ -7156,8 +7099,7 @@ fn run() -> error::Result<()> {
             } => {
                 let (commit_hash, branch) = git_head_commit_and_branch()?;
 
-                let base = data_dir()?;
-                let database = db::Database::open(&base.join("legion.db"))?;
+                let database = open_db()?;
                 let row = database.record_quality_gate(
                     &branch,
                     &commit_hash,
@@ -7174,8 +7116,7 @@ fn run() -> error::Result<()> {
             card,
             verdicts_file,
         } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             let card_row = database
                 .get_card_by_id(&card)?
@@ -7288,8 +7229,7 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Autonomy { action } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             let now = chrono::Utc::now();
 
             // Recompute the ceiling from this host's remaining weekly headroom
@@ -7465,8 +7405,7 @@ fn run() -> error::Result<()> {
             }
         }
         Commands::Goal { repo } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
             let cards = kanban::list_cards(
                 &database,
                 &repo,
@@ -7487,8 +7426,7 @@ fn run() -> error::Result<()> {
         }
 
         Commands::Mesh { action } => {
-            let db_path = data_dir()?.join("legion.db");
-            let database = db::Database::open(&db_path)?;
+            let database = open_db()?;
             let stale_cutoff = resolve_stale_cutoff();
             let now = chrono::Utc::now();
             let ranked = mesh::ranked_hosts_from_db(&database, now, stale_cutoff)?;
@@ -7654,8 +7592,7 @@ fn run() -> error::Result<()> {
             all_hosts,
             json,
         } => {
-            let base = data_dir()?;
-            let database = db::Database::open(&base.join("legion.db"))?;
+            let database = open_db()?;
 
             if let Some(duration_str) = history {
                 // History mode: read from DB only

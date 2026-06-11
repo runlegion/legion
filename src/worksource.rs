@@ -959,6 +959,25 @@ pub fn resolve_config(legion_repo: &str) -> Option<(String, String, String)> {
     None
 }
 
+/// Resolve work source config for a repo, or fail with the canonical
+/// "no work source configured" error.
+///
+/// The fatal companion to `resolve_config`, for CLI arms that cannot
+/// proceed without a configured work source. Best-effort paths
+/// (kanban-close propagation, reconcile, the `work` queue sync) keep
+/// calling `resolve_config` directly because an unconfigured repo is a
+/// skip for them, not an error. This function is the single source of the
+/// operator-facing error text; integration tests assert its prefix
+/// (`no work source configured`), so changing the wording here is a
+/// test-visible change.
+pub fn require_worksource(legion_repo: &str) -> Result<(String, String, String)> {
+    resolve_config(legion_repo).ok_or_else(|| {
+        LegionError::WorkSource(format!(
+            "no work source configured for repo '{legion_repo}' in watch.toml"
+        ))
+    })
+}
+
 /// Review agent configuration from watch.toml.
 pub struct ReviewConfig {
     pub agent: String,

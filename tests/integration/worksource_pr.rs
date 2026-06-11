@@ -722,3 +722,154 @@ fn pr_write_check_refuses_boilerplate_body_with_gaps() {
         "expected the missing not-done finding, got: {stderr}"
     );
 }
+
+// --- #610: require_worksource + Done close-propagation fold ---
+
+/// Stub worksource plugin whose `close` verb exits with the given code.
+/// Used by the require_worksource configured-path test and the Done
+/// propagation tests; the unknown-verb fallback fails loud like the
+/// PR-read stub.
+#[cfg(unix)]
+fn close_stub_plugin(close_exit: i32) -> String {
+    format!(
+        r##"#!/bin/bash
+case "${{1:-}}" in
+  close)
+    exit {close_exit}
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##
+    )
+}
+
+/// #610: `require_worksource` is now the single source of the fatal
+/// "no work source configured" error text. Assert the full canonical
+/// message (not just the prefix) so drift in the pinned literal is caught.
+#[test]
+fn require_worksource_missing_emits_canonical_error() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "issue",
+        "close",
+        "--repo",
+        "no-such-repo",
+        "--number",
+        "7",
+    ]));
+    assert!(
+        stderr.contains("no work source configured for repo 'no-such-repo' in watch.toml"),
+        "expected the canonical require_worksource error, got: {stderr}"
+    );
+}
+
+/// #610: with a configured work source, `require_worksource` resolves the
+/// (plugin, source_repo, workdir) tuple and the command proceeds to the
+/// plugin. Also covers the threaded db handle: `issue close` now opens one
+/// connection up front and the audit row must land.
+#[cfg(unix)]
+#[test]
+fn issue_close_with_configured_worksource_writes_audit_row() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &close_stub_plugin(0));
+
+    let stdout = run_ok(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["issue", "close", "--repo", "stub", "--number", "42"]),
+    );
+    assert!(
+        stdout.contains("closed issue #42 on owner/stub"),
+        "expected close confirmation, got: {stdout}"
+    );
+
+    let audit_out = run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "close-issue"]));
+    assert!(
+        audit_out.contains("close-issue") && audit_out.contains("#42"),
+        "expected a close-issue audit row for #42, got: {audit_out}"
+    );
+}
+
+/// Create a card on repo `stub` linked to external issue #42 and promote
+/// it to a Done-eligible state (Backlog -> assign -> accept). Shared by
+/// the Done propagation tests.
+#[cfg(unix)]
+fn setup_linked_done_eligible_card(data_dir: &std::path::Path) -> String {
+    let card = run_ok(legion_cmd(data_dir).args([
+        "kanban",
+        "create",
+        "--from",
+        "sean",
+        "--to",
+        "stub",
+        "--text",
+        "linked work",
+        "--source-url",
+        "https://github.com/owner/stub/issues/42",
+        "--source-type",
+        "github",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(data_dir).args(["kanban", "assign", "--id", &card, "--to", "stub"]));
+    run_ok(legion_cmd(data_dir).args(["kanban", "accept", "--id", &card]));
+    card
+}
+
+/// #610 behavior fix: `legion done --id` with a linked external issue now
+/// folds through `propagate_card_close_to_worksource`, so the close writes
+/// the same audit row `legion kanban cancel` writes. The inline copy this
+/// replaced closed the issue with no audit trail.
+#[cfg(unix)]
+#[test]
+fn done_with_linked_issue_propagates_close_and_writes_audit_row() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &close_stub_plugin(0));
+    let card = setup_linked_done_eligible_card(data_dir.path());
+
+    let stderr = run_ok_stderr(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["done", "--repo", "stub", "--text", "shipped", "--id", &card]),
+    );
+    assert!(
+        stderr.contains("closed github issue #42"),
+        "expected the propagation breadcrumb, got: {stderr}"
+    );
+
+    let audit_out = run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "close-issue"]));
+    assert!(
+        audit_out.contains("#42"),
+        "expected a close-issue audit row for the propagated close, got: {audit_out}"
+    );
+    assert!(
+        audit_out.contains(&card),
+        "expected the audit row to carry the card id as task, got: {audit_out}"
+    );
+}
+
+/// #610: when close propagation fails, `legion done` still succeeds (the
+/// card is Done locally) but emits the same stdout WARNING line
+/// `legion kanban cancel` emits, instead of the old stderr-only failure
+/// scripted callers could not see.
+#[cfg(unix)]
+#[test]
+fn done_propagation_failure_warns_on_stdout() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &close_stub_plugin(1));
+    let card = setup_linked_done_eligible_card(data_dir.path());
+
+    let stdout = run_ok(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["done", "--repo", "stub", "--text", "shipped", "--id", &card]),
+    );
+    assert!(
+        stdout.contains("propagation FAILED"),
+        "expected the stdout partial-failure warning, got: {stdout}"
+    );
+}
