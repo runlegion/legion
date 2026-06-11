@@ -1527,9 +1527,17 @@ impl AgentTracker {
 /// check if any cards blocked on that repo can be auto-unblocked.
 pub fn check_auto_unblock(db: &Database, signals: &[(String, String, String)]) -> u32 {
     let mut unblocked = 0u32;
-    for (_id, text, _created) in signals {
-        // Look for announce signals about completed work
-        if !text.contains("announce") || !text.contains("completed:") {
+    for (_id, text, _from_repo) in signals {
+        // Completion announcements only: the verb slot must parse as
+        // `announce` (structural, via signal::parse_signal -- the same
+        // parser the wake gate uses) and the text must carry a
+        // `completed:` marker. The old check substring-fished for
+        // "announce" anywhere in the text, so e.g. a question whose note
+        // mentioned "announce ... completed:" could trigger an unblock
+        // scan; requiring the parsed verb is the intended tightening (#611).
+        let is_announce =
+            signal::parse_signal(text).is_some_and(|sig| sig.verb.eq_ignore_ascii_case("announce"));
+        if !is_announce || !text.contains("completed:") {
             continue;
         }
 
@@ -1607,21 +1615,23 @@ pub fn poll_cycle(
 ) -> Result<u32> {
     let mut spawned: u32 = 0;
 
-    // Check for auto-unblock opportunities from recent signals
     for repo in &config.repos {
+        let recipient = repo.recipient();
         let names = repo.wake_addresses();
-        match find_pending_signals(db, &repo.name, &names, since) {
-            Ok(signals) => {
-                check_auto_unblock(db, &signals);
-            }
-            Err(e) => eprintln!(
-                "[legion watch] auto-unblock signal lookup failed for {}: {}",
-                repo.name, e
-            ),
+        let signals = find_pending_signals(db, &repo.name, &names, since)?;
+        if signals.is_empty() {
+            continue;
         }
-    }
 
-    for repo in &config.repos {
+        // Auto-unblock runs on every repo's pending signals BEFORE the
+        // cooldown / session-lock spawn gates below: unblocking a card is
+        // not a spawn, so it must not be deferred by spawn gating. This
+        // used to be a separate prepass that re-queried every repo; folding
+        // it here gives exactly one find_pending_signals call per repo per
+        // cycle (#611). Repos after a concurrent-wake-cap `break` defer
+        // their unblock check to the next poll -- the signals stay pending.
+        check_auto_unblock(db, &signals);
+
         if cooldown.is_cooling_down(&repo.name) {
             continue;
         }
@@ -1633,13 +1643,6 @@ pub fn poll_cycle(
                 "[legion watch] skipping {}: active session (pid {})",
                 repo.name, pid
             );
-            continue;
-        }
-
-        let recipient = repo.recipient();
-        let names = repo.wake_addresses();
-        let signals = find_pending_signals(db, &repo.name, &names, since)?;
-        if signals.is_empty() {
             continue;
         }
 
@@ -3568,6 +3571,134 @@ workdir = "/tmp"
             still_pending.len(),
             1,
             "deferred wake-worthy signal must stay pending for re-poll"
+        );
+    }
+
+    // -- check_auto_unblock (#611) ---------------------------------------------
+
+    /// Create a card and walk it to Blocked with the given note.
+    fn blocked_card(db: &Database, note: &str) -> String {
+        let id = crate::kanban::create_card(
+            db,
+            "kelex",
+            "rafters",
+            "do the thing",
+            None,
+            "medium",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create card");
+        crate::kanban::transition_card(db, &id, crate::kanban::Action::Assign, None)
+            .expect("assign");
+        crate::kanban::transition_card(db, &id, crate::kanban::Action::Accept, None)
+            .expect("accept");
+        crate::kanban::transition_card(db, &id, crate::kanban::Action::Block, Some(note))
+            .expect("block");
+        id
+    }
+
+    #[test]
+    fn check_auto_unblock_unblocks_card_on_announce_completion() {
+        let (db, _index, _dir) = test_storage();
+        let id = blocked_card(&db, "blocked on legion #611");
+        let signals = vec![(
+            "sig-1".to_string(),
+            "@all announce -- legion completed: watch split".to_string(),
+            "legion".to_string(),
+        )];
+        assert_eq!(check_auto_unblock(&db, &signals), 1);
+        let card = db.get_card_by_id(&id).expect("get").expect("card");
+        assert_eq!(
+            card.status,
+            crate::kanban::CardStatus::Accepted,
+            "Unblock transitions Blocked -> Accepted"
+        );
+    }
+
+    #[test]
+    fn check_auto_unblock_requires_announce_verb_not_substring() {
+        let (db, _index, _dir) = test_storage();
+        let id = blocked_card(&db, "blocked on legion #611");
+        // The old substring fishing matched this text ("announce" and
+        // "completed:" both appear) even though the verb slot is `question`.
+        // The structural gate via signal::parse_signal must skip it.
+        let signals = vec![(
+            "sig-2".to_string(),
+            "@rafters question -- will announce once legion completed: the split?".to_string(),
+            "kelex".to_string(),
+        )];
+        assert_eq!(
+            check_auto_unblock(&db, &signals),
+            0,
+            "non-announce verb must not trigger an unblock scan"
+        );
+        let card = db.get_card_by_id(&id).expect("get").expect("card");
+        assert_eq!(card.status, crate::kanban::CardStatus::Blocked);
+    }
+
+    #[test]
+    fn check_auto_unblock_ignores_announce_without_completion_marker() {
+        let (db, _index, _dir) = test_storage();
+        let id = blocked_card(&db, "blocked on legion #611");
+        let signals = vec![(
+            "sig-3".to_string(),
+            "@all announce -- legion shipped v0.17".to_string(),
+            "legion".to_string(),
+        )];
+        assert_eq!(check_auto_unblock(&db, &signals), 0);
+        let card = db.get_card_by_id(&id).expect("get").expect("card");
+        assert_eq!(card.status, crate::kanban::CardStatus::Blocked);
+    }
+
+    /// Auto-unblock is deliberately NOT gated by cooldown: the fold into the
+    /// main poll loop (#611, one find_pending_signals per repo per cycle)
+    /// runs check_auto_unblock before the cooldown / session-lock spawn
+    /// gates, preserving the old prepass semantics.
+    #[test]
+    fn poll_cycle_runs_auto_unblock_even_for_cooling_repos() {
+        let (db, _index, _dir) = test_storage();
+        let config = WatchConfig {
+            repos: vec![WatchRepoConfig {
+                name: "rafters".to_string(),
+                workdir: "/tmp".to_string(),
+                agent: None,
+                broadcast_tags: Vec::new(),
+                extra: toml::Table::new(),
+            }],
+            ..WatchConfig::default()
+        };
+        let id = blocked_card(&db, "blocked on legion #611");
+        db.insert_reflection(
+            "legion",
+            "@all announce -- legion completed: watch split",
+            "team",
+        )
+        .expect("insert announce");
+
+        let mut cooldown = CooldownTracker::new(300, None, None);
+        cooldown.record_wake("rafters"); // repo is cooling; spawn path must skip
+        let mut tracker = AgentTracker::new();
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            None,
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll");
+        assert_eq!(spawned, 0, "cooling repo must not spawn");
+        let card = db.get_card_by_id(&id).expect("get").expect("card");
+        assert_eq!(
+            card.status,
+            crate::kanban::CardStatus::Accepted,
+            "auto-unblock must run before the cooldown spawn gate"
         );
     }
 
