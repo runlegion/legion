@@ -295,10 +295,9 @@ pub(crate) fn handle_sync(repo: String) -> error::Result<()> {
     // unconfigured repo is a hard error here: syncing is the whole
     // point of the command.
     let (plugin, source_repo, workdir) = worksource::require_worksource(&repo)?;
-    match worksource::sync_issues(&database, &plugin, &source_repo, &workdir, &repo) {
-        Ok(n) if n > 0 => info!("[legion] synced {n} new issues from {plugin}"),
-        Ok(_) => {}
-        Err(e) => eprintln!("[legion] work source sync failed: {e}"),
+    let synced = worksource::sync_issues(&database, &plugin, &source_repo, &workdir, &repo)?;
+    if synced > 0 {
+        info!("[legion] synced {synced} new issues from {plugin}");
     }
     Ok(())
 }
