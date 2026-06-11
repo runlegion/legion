@@ -270,6 +270,7 @@ pub fn orphan_after_from_ttl(days: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::testutil::test_db;
     use crate::uncertainty::types::{Confidence, PredictionInput};
 
     fn fresh_input() -> PredictionInput {
@@ -285,19 +286,9 @@ mod tests {
         }
     }
 
-    /// Build a DB on a fresh tempdir. Returns both so the caller binds the
-    /// TempDir for the test body's lifetime -- letting the handle drop would
-    /// delete the directory before the DB is done with it.
-    fn test_db() -> (tempfile::TempDir, Database) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let db = Database::open(&path).unwrap();
-        (dir, db)
-    }
-
     #[test]
     fn insert_and_get_prediction_round_trips() {
-        let (_dir, db) = test_db();
+        let db = test_db();
         let p = Prediction::new(fresh_input());
         db.insert_prediction(&p).unwrap();
         let fetched = db.get_prediction(&p.id).unwrap().unwrap();
@@ -310,14 +301,14 @@ mod tests {
 
     #[test]
     fn get_prediction_missing_returns_none() {
-        let (_dir, db) = test_db();
+        let db = test_db();
         let none = db.get_prediction("nope").unwrap();
         assert!(none.is_none());
     }
 
     #[test]
     fn update_prediction_persists_state_transition() {
-        let (_dir, db) = test_db();
+        let db = test_db();
         let mut p = Prediction::new(fresh_input());
         db.insert_prediction(&p).unwrap();
         p.witness(
@@ -336,7 +327,7 @@ mod tests {
 
     #[test]
     fn update_prediction_missing_returns_not_found() {
-        let (_dir, db) = test_db();
+        let db = test_db();
         let p = Prediction::new(fresh_input());
         let err = db.update_prediction(&p).unwrap_err();
         assert!(matches!(err, UncertaintyError::PredictionNotFound(_)));
@@ -344,7 +335,7 @@ mod tests {
 
     #[test]
     fn insert_prediction_rejects_duplicate_id() {
-        let (_dir, db) = test_db();
+        let db = test_db();
         let p = Prediction::new(fresh_input());
         db.insert_prediction(&p).unwrap();
         let err = db.insert_prediction(&p).unwrap_err();
@@ -353,7 +344,7 @@ mod tests {
 
     #[test]
     fn count_orphans_groups_by_surface() {
-        let (_dir, db) = test_db();
+        let db = test_db();
         // Each prediction is constructed Emitted, transitioned to Orphaned,
         // then inserted: the row lands with state='orphaned' directly.
         for _ in 0..3 {
@@ -393,7 +384,7 @@ mod tests {
 
     #[test]
     fn list_calibration_snapshots_empty_db_returns_empty() {
-        let (_dir, db) = test_db();
+        let db = test_db();
         let snaps = db.list_calibration_snapshots(None, None).unwrap();
         assert!(snaps.is_empty());
     }
