@@ -60,7 +60,7 @@ pub fn spawn_detached(data_dir: &Path, port: u16) -> Result<()> {
     if pid_path.exists() {
         let contents = std::fs::read_to_string(&pid_path).unwrap_or_default();
         if let Ok(pid) = contents.trim().parse::<u32>() {
-            if is_process_alive(pid) {
+            if watch::process_alive(pid) {
                 eprintln!("legion daemon already running (pid {pid})");
                 return Ok(());
             }
@@ -140,28 +140,6 @@ pub fn spawn_detached(data_dir: &Path, port: u16) -> Result<()> {
     Ok(())
 }
 
-/// Check whether a process with the given PID is alive on this platform.
-///
-/// Uses `kill -0` on Unix (no signal sent, just existence check). Always
-/// returns `false` on non-Unix platforms where we cannot probe process state.
-fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
 /// Whether `port` can be bound right now (i.e. it is free).
 ///
 /// Binds and immediately drops a listener on `0.0.0.0:port`. A momentary
@@ -210,7 +188,7 @@ fn read_daemon_pid(pid_path: &Path) -> Option<u32> {
 
 /// Send a signal (e.g. "TERM", "KILL") to a process. Unix-only; returns false on
 /// other platforms. Uses `kill` to avoid a libc dependency, matching
-/// `is_process_alive`.
+/// `watch::process_alive`.
 fn send_signal(pid: u32, signal: &str) -> bool {
     #[cfg(unix)]
     {
@@ -233,12 +211,12 @@ fn send_signal(pid: u32, signal: &str) -> bool {
 fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        if !is_process_alive(pid) {
+        if !watch::process_alive(pid) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    !is_process_alive(pid)
+    !watch::process_alive(pid)
 }
 
 /// Stop a running daemon and wait for it to release its port.
@@ -253,7 +231,7 @@ pub fn stop_detached(data_dir: &Path) -> Result<bool> {
     let Some(pid) = read_daemon_pid(&pid_path) else {
         return Ok(false);
     };
-    if !is_process_alive(pid) {
+    if !watch::process_alive(pid) {
         // Stale pidfile -- nothing to stop, clean it up.
         let _ = std::fs::remove_file(&pid_path);
         return Ok(false);
@@ -441,60 +419,45 @@ async fn run_mcp_stdio_only(data_dir: PathBuf) -> Result<()> {
 
 /// Run the watch loop inside a tokio task.
 ///
-/// Loads watch.toml from data_dir. If the config is missing or has no repos,
-/// logs a warning and exits the task (does not crash the daemon).
+/// All pre-loop scaffolding (sync-actor spawn, config load, pid lock, db
+/// open, host id) lives in `WatchLoop::bootstrap`, shared with the
+/// standalone `watch::run` driver. When the watch loop cannot start but
+/// cluster sync is enabled, the task parks instead of returning so sync
+/// keeps running; with no sync configured it returns, which shuts the
+/// daemon down via the select! in `run_daemon_async`.
 ///
 /// The PID lock is held via a RAII guard so it is always released when the
 /// task exits -- whether by normal return, abort, or panic.
 async fn run_watch_task(data_dir: &Path) {
-    let config_path = data_dir.join("watch.toml");
-    let lock_path = data_dir.join("watch.pid");
-    let db_path = data_dir.join("legion.db");
+    let spawn_mode = watch::SpawnMode::from_env();
+    let boot = watch::WatchLoop::bootstrap(data_dir, spawn_mode, "[legion daemon]");
 
-    let config = match watch::load_config(&config_path) {
-        Ok(c) => c,
+    // Keep the sync actor alive for the lifetime of this task; sync is
+    // optional and never fatal (#536).
+    let sync_handle = boot.sync;
+
+    let (mut state, _pid_guard) = match boot.watch {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("[legion daemon] watch not started: {e}");
-            return;
-        }
-    };
-    let spawn_mode = watch::SpawnMode::from_env();
-    eprintln!("[legion daemon] watch spawn_mode={}", spawn_mode.as_str());
-
-    // Acquire PID lock -- if another watcher is running, skip gracefully.
-    if let Err(e) = watch::acquire_pid_lock(&lock_path) {
-        eprintln!("[legion daemon] watch skipped ({})", e);
-        return;
-    }
-
-    // RAII guard releases the lock when this task exits (abort, panic, or return).
-    let _pid_guard = watch::PidLockGuard(lock_path);
-
-    eprintln!(
-        "[legion daemon] watch active: {} repo(s), poll every {}s",
-        config.repos.len(),
-        config.poll_interval_secs
-    );
-
-    let db = match crate::db::Database::open(&db_path) {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!("[legion daemon] watch: db open error: {e}");
+            if sync_handle.is_some() {
+                // Cluster sync is already running even though the watch loop
+                // cannot start (broken watch.toml, pid-lock held elsewhere,
+                // db open error). Park this task instead of returning: a
+                // return drops the sync handle AND shuts the whole daemon
+                // down via the select! in run_daemon_async. Dispositioned
+                // from the PR #624 review (#611): a node with cluster sync
+                // enabled but a broken watch config must still sync.
+                eprintln!("[legion daemon] cluster sync stays up without watch");
+                std::future::pending::<()>().await;
+            }
             return;
         }
     };
 
-    let host = watch::resolve_host_id();
-
-    // Spawn the cluster sync actor when enabled (#536 defect 1: this task
-    // previously never loaded cluster.toml, so sync only ran under the
-    // deprecated foreground `legion watch`). The handle lives for the
-    // lifetime of this task; sync is optional and never fatal.
-    let _sync_handle = crate::sync_actor::spawn_sync_if_enabled(data_dir, "[legion daemon]");
-
-    // Timer intervals are read before `config` moves into the WatchLoop.
-    let poll_interval = std::time::Duration::from_secs(config.poll_interval_secs);
-    let health_interval = std::time::Duration::from_secs(config.health_poll_secs);
+    // Timer intervals are read from the loop-owned config.
+    let poll_interval = std::time::Duration::from_secs(state.config.poll_interval_secs);
+    let health_interval = std::time::Duration::from_secs(state.config.health_poll_secs);
 
     let mut poll_timer = tokio::time::Instant::now()
         .checked_sub(poll_interval)
@@ -502,11 +465,6 @@ async fn run_watch_task(data_dir: &Path) {
     let mut health_timer = tokio::time::Instant::now()
         .checked_sub(health_interval)
         .unwrap_or_else(tokio::time::Instant::now);
-
-    // Move config and db into the shared loop state. Both are owned so the
-    // WatchLoop struct is Send (needed by tokio::spawn).
-    let mut state =
-        watch::WatchLoop::new(config, db, data_dir, host, spawn_mode, "[legion daemon]");
 
     loop {
         // Yield to tokio scheduler each iteration.
