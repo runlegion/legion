@@ -10,7 +10,7 @@ use crate::{db, embed, error, recall, reflect, search};
 
 /// Controls near-duplicate detection behavior on `legion reflect`.
 #[derive(clap::ValueEnum, Clone, Debug, Default)]
-enum DedupeMode {
+pub(crate) enum DedupeMode {
     /// Warn on stderr when a near-duplicate is found, but still store the reflection.
     #[default]
     Warn,
@@ -25,7 +25,7 @@ enum DedupeMode {
 /// Prints each stored ID to stdout (one per repo) so callers and scripts
 /// can capture them. Returns an error if any repo fails.
 #[allow(clippy::too_many_arguments)]
-fn run_compound_command_with_meta(
+pub(crate) fn run_compound_command_with_meta(
     db: &db::Database,
     index: &search::SearchIndex,
     repos: &[String],
@@ -83,7 +83,7 @@ fn run_compound_command_with_meta(
 /// in `--verbose` mode without spamming default-quiet runs (which otherwise
 /// fail integration tests asserting `stderr.is_empty()` whenever the model
 /// fetch hits a transient network error like HuggingFace 429).
-fn try_load_embed_model() -> Option<embed::EmbedModel> {
+pub(crate) fn try_load_embed_model() -> Option<embed::EmbedModel> {
     match embed::EmbedModel::load() {
         Ok(model) => Some(model),
         Err(e) => {
@@ -94,7 +94,7 @@ fn try_load_embed_model() -> Option<embed::EmbedModel> {
 }
 
 /// Compute and store embeddings for all reflections that are missing them.
-fn backfill_embeddings(db: &db::Database, model: &embed::EmbedModel) -> error::Result<usize> {
+pub(crate) fn backfill_embeddings(db: &db::Database, model: &embed::EmbedModel) -> error::Result<usize> {
     let missing = db.get_ids_without_embeddings()?;
     let mut count: usize = 0;
 

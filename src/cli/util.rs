@@ -10,7 +10,7 @@ use crate::{db, error, search};
 /// file. Handlers that also need the search index use
 /// `open_db_and_index`; handlers that need the data dir for anything
 /// beyond the database keep calling `data_dir()` themselves.
-fn open_db() -> error::Result<db::Database> {
+pub(crate) fn open_db() -> error::Result<db::Database> {
     let base = data_dir()?;
     db::Database::open(&base.join("legion.db"))
 }
@@ -20,7 +20,7 @@ fn open_db() -> error::Result<db::Database> {
 /// Companion to `open_db` for the handlers that write reflections (every
 /// reflection insert must hit both stores or search silently diverges
 /// from the database).
-fn open_db_and_index() -> error::Result<(db::Database, search::SearchIndex)> {
+pub(crate) fn open_db_and_index() -> error::Result<(db::Database, search::SearchIndex)> {
     let base = data_dir()?;
     let database = db::Database::open(&base.join("legion.db"))?;
     let index = search::SearchIndex::open(&base.join("index"))?;
@@ -31,7 +31,7 @@ fn open_db_and_index() -> error::Result<(db::Database, search::SearchIndex)> {
 /// abort -- but the caller supplies the connection, so an arm that cannot
 /// open the database fails loudly up front instead of silently dropping
 /// its audit trail one row at a time (#610).
-fn audit(database: &db::Database, input: &db::AuditInput<'_>) {
+pub(crate) fn audit(database: &db::Database, input: &db::AuditInput<'_>) {
     if let Err(e) = database.insert_audit_entry(input) {
         eprintln!("[legion] warning: audit log failed: {}", e);
     }
@@ -42,7 +42,7 @@ fn audit(database: &db::Database, input: &db::AuditInput<'_>) {
 /// macOS ships a low soft limit (often 2560) which Tantivy can exhaust
 /// when opening index segments. The hard limit is much higher (or unlimited).
 /// This is a no-op on failure -- the worst case is the original limit.
-fn raise_fd_limit() {
+pub(crate) fn raise_fd_limit() {
     match rlimit::increase_nofile_limit(u64::MAX) {
         Ok(_) => {}
         Err(e) => eprintln!("[legion] warning: could not raise fd limit: {e}"),
@@ -54,7 +54,7 @@ fn raise_fd_limit() {
 /// to "unknown" when its lookup fails, since a detached HEAD still has a valid
 /// commit to key a quality gate on. Shared by the quality-gate recorder and
 /// the `pr create` / `pr write-check` gate checks.
-fn git_head_commit_and_branch() -> Result<(String, String), error::LegionError> {
+pub(crate) fn git_head_commit_and_branch() -> Result<(String, String), error::LegionError> {
     let head = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
@@ -84,7 +84,7 @@ fn git_head_commit_and_branch() -> Result<(String, String), error::LegionError> 
 /// `None`, from stdin. `flag` names the originating flag for the error
 /// message. Shared by the pr-write and verify gates, which both accept their
 /// payload as either a file or a stdin pipe.
-fn read_file_or_stdin(path: Option<&str>, flag: &str) -> Result<String, error::LegionError> {
+pub(crate) fn read_file_or_stdin(path: Option<&str>, flag: &str) -> Result<String, error::LegionError> {
     match path {
         Some(p) => std::fs::read_to_string(p)
             .map_err(|e| error::LegionError::WorkSource(format!("failed to read {flag} {p}: {e}"))),
@@ -99,7 +99,7 @@ fn read_file_or_stdin(path: Option<&str>, flag: &str) -> Result<String, error::L
     }
 }
 
-fn format_age(d: std::time::Duration) -> String {
+pub(crate) fn format_age(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
         format!("{}s", secs)

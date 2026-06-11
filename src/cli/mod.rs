@@ -40,17 +40,17 @@ use self::watch::WatchAction;
     about = "Agent specialization through deliberate practice",
     version
 )]
-struct Cli {
+pub(crate) struct Cli {
     /// Show informational messages on stderr (quiet by default)
     #[arg(long, short, global = true)]
-    verbose: bool,
+    pub(crate) verbose: bool,
 
     #[command(subcommand)]
-    command: Commands,
+    pub(crate) command: Commands,
 }
 
 #[derive(Subcommand)]
-enum Commands {
+pub(crate) enum Commands {
     /// Store a reflection from a completed session
     Reflect {
         /// Repository name(s), comma-separated (e.g., "myrepo" or "frontend,backend")

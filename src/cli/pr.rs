@@ -7,7 +7,7 @@ use crate::cli::util::{audit, git_head_commit_and_branch, open_db, read_file_or_
 use crate::{board, card_parse, db, error, kanban, pr_view, pr_write, search, worksource};
 
 #[derive(Subcommand, Debug)]
-enum PrAction {
+pub(crate) enum PrAction {
     /// Create a pull request via the configured work source
     Create {
         /// Repository name (resolves work source config from watch.toml)

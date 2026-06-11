@@ -55,7 +55,7 @@ static VERBOSE: AtomicBool = AtomicBool::new(false);
 /// Print an informational message to stderr, only when --verbose is set.
 macro_rules! info {
     ($($arg:tt)*) => {
-        if VERBOSE.load(Ordering::Relaxed) {
+        if crate::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!($($arg)*);
         }
     };

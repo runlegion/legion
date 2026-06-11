@@ -8,7 +8,7 @@ use crate::cli::util::open_db;
 use crate::{daemon, error, init, kanban, mcp, now, recall, serve, stats, status, statusline, surface, task, watch, worksource};
 
 #[derive(Subcommand)]
-enum TaskAction {
+pub(crate) enum TaskAction {
     /// Create a new task for another agent
     Create {
         /// Sender repository name

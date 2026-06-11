@@ -6,7 +6,7 @@ use crate::cli::util::open_db;
 use crate::{db, error};
 
 #[derive(Subcommand)]
-enum ScheduleAction {
+pub(crate) enum ScheduleAction {
     /// Create a new scheduled bullpen post
     Create {
         /// Human-readable name for the schedule

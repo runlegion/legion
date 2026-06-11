@@ -11,7 +11,7 @@ use crate::cli::util::open_db;
 use crate::{cluster, error, health, mesh, telemetry, uncertainty, usage};
 
 #[derive(Subcommand)]
-enum TelemetryAction {
+pub(crate) enum TelemetryAction {
     /// Append one bypass row to `bypass.jsonl`. Called by the grep/Read
     /// enforcement hooks (#438/#439) when an agent escapes via env var or
     /// `# legion-bypass:` sentinel in a Bash command. Errors are surfaced;
@@ -78,7 +78,7 @@ enum TelemetryAction {
 }
 
 #[derive(Subcommand)]
-enum UncertaintyAction {
+pub(crate) enum UncertaintyAction {
     /// Record a fresh prediction. Mirrors platform's
     /// POST /api/uncertainty/predictions. Returns JSON `{id, orphan_after}`
     /// on stdout. Non-blocking: failures log to stderr and exit 0 so a
@@ -162,7 +162,7 @@ enum UncertaintyAction {
 }
 
 #[derive(Subcommand)]
-enum ClusterAction {
+pub(crate) enum ClusterAction {
     /// Initialize cluster sync with a shared encryption key
     Init {
         /// 256-bit hex-encoded key (64 chars). Generated if omitted.
@@ -188,7 +188,7 @@ enum ClusterAction {
 }
 
 #[derive(Subcommand)]
-enum MeshAction {
+pub(crate) enum MeshAction {
     /// Print per-host ranked table with headroom, burn, and staleness
     Headroom {
         /// Emit raw JSON instead of the human-formatted table

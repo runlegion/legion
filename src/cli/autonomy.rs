@@ -7,7 +7,7 @@ use crate::{autonomy, db, error, statusline};
 
 /// The kind of self-directed work a gate spend covers.
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
-enum AutonomyKind {
+pub(crate) enum AutonomyKind {
     /// The agent accepting its own Pending card (Pending -> Accepted).
     SelfAccept,
     /// Sanctioned exploration when the board is dry; output feeds reflections.
@@ -15,7 +15,7 @@ enum AutonomyKind {
 }
 
 #[derive(Subcommand, Debug)]
-enum AutonomyAction {
+pub(crate) enum AutonomyAction {
     /// Show the current window: spent / ceiling, remaining, and reset date.
     Status {
         /// Repository name (the agent whose budget to show).

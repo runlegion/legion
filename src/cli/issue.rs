@@ -6,7 +6,7 @@ use crate::cli::util::{audit, open_db};
 use crate::{card_parse, db, error, worksource};
 
 #[derive(Subcommand)]
-enum SubIssueAction {
+pub(crate) enum SubIssueAction {
     /// Create a child issue linked to a parent via GitHub's native
     /// sub-issue relationship (#462). The plugin looks up the parent
     /// node id first, errors if the parent does not exist, then
@@ -43,7 +43,7 @@ enum SubIssueAction {
 }
 
 #[derive(Subcommand, Debug)]
-enum IssueAction {
+pub(crate) enum IssueAction {
     /// Create an issue via the configured work source
     Create {
         /// Repository name (used to resolve work source config from watch.toml)

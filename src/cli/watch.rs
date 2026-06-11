@@ -8,7 +8,7 @@ use crate::cli::util::open_db;
 use crate::{db, error, watch};
 
 #[derive(Subcommand, Debug)]
-enum WatchAction {
+pub(crate) enum WatchAction {
     /// Add a working directory to watch.toml (idempotent by canonicalized path)
     Add {
         /// Absolute or relative path to the working directory
@@ -94,7 +94,7 @@ enum WatchAction {
 }
 
 #[derive(Subcommand, Debug)]
-enum LeaseAction {
+pub(crate) enum LeaseAction {
     /// List currently held persona wake leases
     List {
         /// Show only leases for this persona (e.g. `legion`, `huttspawn`)

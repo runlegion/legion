@@ -7,7 +7,7 @@ use crate::cli::util::{audit, open_db, open_db_and_index};
 use crate::{db, error, kanban, status, verify, worksource};
 
 #[derive(Subcommand)]
-enum KanbanAction {
+pub(crate) enum KanbanAction {
     /// Create a new card on the kanban board
     Create {
         /// Who is creating the card

@@ -8,7 +8,7 @@ use crate::cli::util::open_db;
 use crate::{db, documents, error};
 
 #[derive(Subcommand)]
-enum DocumentAction {
+pub(crate) enum DocumentAction {
     /// Insert a new document. Payload is read from --from (file path)
     /// or stdin when --from is omitted. Meta fields are passed
     /// explicitly to keep the storage layer type-agnostic; the schema

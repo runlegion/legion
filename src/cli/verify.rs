@@ -6,7 +6,7 @@ use crate::cli::util::{git_head_commit_and_branch, open_db, read_file_or_stdin};
 use crate::{error, kanban, verify};
 
 #[derive(Subcommand, Debug)]
-enum QualityGateAction {
+pub(crate) enum QualityGateAction {
     /// Record a quality gate result for the current HEAD commit.
     ///
     /// Reads git HEAD and branch automatically. The skill runner calls this

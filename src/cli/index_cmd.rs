@@ -10,7 +10,7 @@ use crate::cli::util::{open_db, open_db_and_index};
 use crate::{db, error, scip, sym, watch};
 
 #[derive(Subcommand)]
-enum SymAction {
+pub(crate) enum SymAction {
     /// Print definitions of a symbol
     Def {
         /// Symbol name to look up (substring-matched against SCIP symbol strings)
@@ -308,7 +308,7 @@ struct ConsultSymbolHit {
 /// definitions, counts references per match. Output is sorted by repo
 /// then lang then file. Empty result exits 0 silently in human mode and
 /// emits `[]` in JSON mode -- a thin response is data, not failure.
-fn run_consult_symbol(database: &db::Database, name: &str, json: bool) -> error::Result<()> {
+pub(crate) fn run_consult_symbol(database: &db::Database, name: &str, json: bool) -> error::Result<()> {
     use std::io::Write;
     let indexes = database.list_scip_indexes_filtered(None, None)?;
 
@@ -374,7 +374,7 @@ fn run_consult_symbol(database: &db::Database, name: &str, json: bool) -> error:
 /// failure the watch add still succeeds and a warning is printed --
 /// background indexing is best-effort, the operator can always run
 /// `legion index <repo>` manually later.
-fn spawn_background_indexer(repo_name: &str) {
+pub(crate) fn spawn_background_indexer(repo_name: &str) {
     let self_path = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
