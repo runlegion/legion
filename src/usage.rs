@@ -14,7 +14,6 @@
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
-use chrono::Timelike;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -398,29 +397,13 @@ pub fn format_cost(usd: f64) -> String {
     format!("${:.2}", usd)
 }
 
-/// Format a session start_time as a relative "Xh ago" string if it is today,
-/// otherwise return the ISO timestamp unchanged.
+/// Format a session start_time as a relative "Nm/Nh/Nd ago" string via the
+/// shared `timefmt::relative_time`. Replaces a hand-rolled string-slice
+/// hour/minute computation that only handled same-day timestamps and
+/// silently clamped negatives. Unparseable input falls back to the raw
+/// timestamp (the table column truncates it).
 pub fn format_start_time(ts: &str) -> String {
-    // Parse the first 19 chars (YYYY-MM-DDTHH:MM:SS) and compare to now.
-    if ts.len() < 19 {
-        return ts.to_string();
-    }
-    let now = chrono::Utc::now();
-    let today_prefix = now.format("%Y-%m-%dT").to_string();
-    if ts.starts_with(&today_prefix) {
-        // Parse the hour/minute from the timestamp for a rough "Xh ago".
-        if let (Ok(ts_h), Ok(ts_m)) = (ts[11..13].parse::<i64>(), ts[14..16].parse::<i64>()) {
-            let now_h = now.hour() as i64;
-            let now_m = now.minute() as i64;
-            let diff_mins = (now_h * 60 + now_m) - (ts_h * 60 + ts_m);
-            if diff_mins < 60 {
-                return format!("{}m ago", diff_mins.max(0));
-            } else {
-                return format!("{}h ago", diff_mins / 60);
-            }
-        }
-    }
-    ts[..19].to_string()
+    crate::timefmt::relative_time(ts)
 }
 
 // ---------------------------------------------------------------------------
@@ -546,14 +529,11 @@ fn extract_tokens(usage: &Value) -> RawTokens {
 }
 
 /// Truncate a string to at most `max_len` chars, appending `~` if cut.
+/// Thin wrapper over the crate-wide `card_parse::truncate_chars_with`
+/// (which carries the #346 underflow guard) keeping the table-column
+/// `~` marker.
 fn truncate_str(s: &str, max_len: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_len {
-        s.to_string()
-    } else {
-        let cut: String = chars[..max_len.saturating_sub(1)].iter().collect();
-        format!("{cut}~")
-    }
+    crate::card_parse::truncate_chars_with(s, max_len, "~")
 }
 
 // ---------------------------------------------------------------------------
