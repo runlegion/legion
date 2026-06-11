@@ -22,7 +22,10 @@
 # "covered=true") because a missing/degraded probe must not let block-state
 # fire on a repo with no real index to redirect to.
 
-LEGION_INDEXED_BIN="${CLAUDE_PLUGIN_ROOT}/bin/legion"
+# Binary: prefer the prelude's resolved $LEGION (plugin-root copy with
+# PATH fallback, #614) when sourced through the lib; standalone consumers
+# fall back to the plugin-root path.
+LEGION_INDEXED_BIN="${LEGION:-${CLAUDE_PLUGIN_ROOT:-}/bin/legion}"
 
 # legion_indexed SESSION_ID REPO -> exit 0 if indexed, 1 if not.
 legion_indexed() {

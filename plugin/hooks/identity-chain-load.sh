@@ -11,12 +11,14 @@
 # Error handling: legion failures are logged to /tmp/legion-hook-errors.log.
 # The hook always exits 0 so a degraded legion never blocks user prompts.
 
-LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
-LOG=/tmp/legion-hook-errors.log
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/emit.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
 
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+LOG="$LEGION_HOOK_LOG"
+
+legion_hook_parse || exit 0
 
 if [ -z "$CWD" ] || [ -z "$SESSION_ID" ]; then
   exit 0
@@ -38,7 +40,6 @@ if [ -f "$SENTINEL" ]; then
   exit 0
 fi
 
-REPO=$(basename "$CWD")
 
 # Find the newest identity reflection. legion chain --id walks both backward
 # and forward from any node, so any identity reflection ID gets the whole
@@ -74,12 +75,7 @@ CTX="[Legion] Identity chain (deeper doctrine, walked once per session):
 ${CHAIN}
 This chain extends the identity banner you saw at session start. The root reflection appears first; subsequent links carry doctrine in decreasing importance order. Internalize the rules, do not just acknowledge them."
 
-jq -n --arg ctx "$CTX" '{
-  "hookSpecificOutput": {
-    "hookEventName": "UserPromptSubmit",
-    "additionalContext": $ctx
-  }
-}' 2>>"$LOG" || true
+emit_context "UserPromptSubmit" "$CTX" 2>>"$LOG" || true
 
 # Always exit 0 so a degraded legion (or jq failure) never blocks user
 # prompts. The script either injected context or it didn't; either way the

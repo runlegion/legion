@@ -62,6 +62,8 @@ WORK=$(mktemp -d)
 mkdir -p "$WORK/plugin/bin" "$WORK/plugin/hooks" "$WORK/state/legion"
 cp plugin/hooks/post-task-state.sh "$WORK/plugin/hooks/"
 cp plugin/hooks/stop.sh "$WORK/plugin/hooks/"
+mkdir -p "$WORK/plugin/hooks/lib"
+cp plugin/hooks/lib/prelude.sh plugin/hooks/lib/emit.sh "$WORK/plugin/hooks/lib/"
 
 # Stub legion. Logs every invocation to $LEGION_STUB_LOG when set (so the #493
 # handoff tests can assert call shape). Returns an Accepted kanban card when

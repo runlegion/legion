@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: shellcheck install.sh plugin/bin/legion plugin/hooks/*.sh scripts/*.sh
+      - run: shellcheck install.sh plugin/bin/legion plugin/hooks/*.sh plugin/hooks/lib/*.sh plugin/hooks/tests/*.sh scripts/*.sh
 
   test:
     name: Test

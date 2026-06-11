@@ -24,25 +24,25 @@
 # telemetry row via `legion telemetry record-bypass` so the escape is
 # visible to #440's summary.
 
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/emit.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
+
+legion_hook_parse || exit 0
 # stop_hook_active is true when this Stop was itself triggered by a prior hook
 # continuation. The reflection nudge (which now continues the turn via
 # additionalContext, #569) honors it as a loop guard so a continuation we
 # caused does not re-nudge. The in-progress block deliberately ignores it --
 # that gate must keep firing while Accepted work exists (the 8-block cap is its
 # own backstop).
-STOP_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false')
+STOP_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null)
 
 if [ -z "$CWD" ]; then
   exit 0
 fi
 
-REPO=$(basename "$CWD")
-CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
-
-LEGION_BIN="${CLAUDE_PLUGIN_ROOT}/bin/legion"
+CWD_HASH=$(legion_hash_str "$CWD")
 
 # Session-end handoff (#493): optimistic expediter for the watch
 # reaper. Lets the reaper skip a poll cycle when the agent has cleanly
@@ -57,8 +57,8 @@ LEGION_BIN="${CLAUDE_PLUGIN_ROOT}/bin/legion"
 # before any caller; placed up here so all subsequent bypass paths can
 # invoke it cleanly.
 session_end_handoff() {
-  if [ -n "${LEGION_WAKE_ATTEMPT_ID:-}" ] && [ -x "$LEGION_BIN" ]; then
-    "$LEGION_BIN" watch session-end \
+  if [ -n "${LEGION_WAKE_ATTEMPT_ID:-}" ] && [ -x "$LEGION" ]; then
+    "$LEGION" watch session-end \
       --attempt-id "$LEGION_WAKE_ATTEMPT_ID" \
       >/dev/null 2>&1 || true
   fi
@@ -66,8 +66,8 @@ session_end_handoff() {
 
 # Bypass: skip both gates, log the escape if telemetry is available.
 if [ "${LEGION_SKIP_STOP_BLOCK:-}" = "1" ]; then
-  if [ -x "$LEGION_BIN" ] && [ -n "$SESSION_ID" ]; then
-    "$LEGION_BIN" telemetry record-bypass \
+  if [ -x "$LEGION" ] && [ -n "$SESSION_ID" ]; then
+    "$LEGION" telemetry record-bypass \
       --repo "$REPO" \
       --session-id "$SESSION_ID" \
       --tool Stop \
@@ -93,8 +93,8 @@ fi
 # legion code today; #489 introduces the PTY spawn branch that stamps
 # it. Until then this block is dead code that proves out the wire-up.
 if [ "${LEGION_SPAWN_SOURCE:-}" = "watch-pty" ]; then
-  if [ -x "$LEGION_BIN" ] && [ -n "$SESSION_ID" ]; then
-    "$LEGION_BIN" telemetry record-bypass \
+  if [ -x "$LEGION" ] && [ -n "$SESSION_ID" ]; then
+    "$LEGION" telemetry record-bypass \
       --repo "$REPO" \
       --session-id "$SESSION_ID" \
       --tool Stop \
@@ -124,8 +124,8 @@ fi
 # the agent on an infra hiccup -- LEGION_SKIP_STOP_BLOCK is the deliberate
 # escape, but failing open is the safe direction when the check itself breaks.
 
-if command -v jq >/dev/null 2>&1 && [ -x "$LEGION_BIN" ]; then
-  ACCEPTED=$("$LEGION_BIN" kanban list --repo "$REPO" --json 2>/dev/null \
+if command -v jq >/dev/null 2>&1 && [ -x "$LEGION" ]; then
+  ACCEPTED=$("$LEGION" kanban list --repo "$REPO" --json 2>/dev/null \
     | jq -r 'select(.status == "accepted") | "- " + (.title // .text // .id)' 2>/dev/null)
 
   if [ -n "$ACCEPTED" ]; then
@@ -146,14 +146,14 @@ To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_
     # Surface the board-derived goal (#525) so the completion condition the
     # agent must drive the Accepted card to is in front of it, not just "keep
     # going." Fail-open: any error leaves GOAL empty and the block fires plain.
-    GOAL=$("$LEGION_BIN" goal --repo "$REPO" 2>/dev/null)
+    GOAL=$("$LEGION" goal --repo "$REPO" 2>/dev/null)
     if [ -n "$GOAL" ]; then
       REASON="${REASON}
 
 ${GOAL}"
     fi
 
-    jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
+    emit_block "$REASON"
     exit 0
   fi
 fi
@@ -192,7 +192,7 @@ REASON="Drop one thing a teammate would not have known walking in cold -- a gotc
 
 # Surface the board-derived goal (#525) with the nudge so the completion
 # condition carries across the turn. Fail-open: empty GOAL leaves it off.
-GOAL=$("$LEGION_BIN" goal --repo "$REPO" 2>/dev/null)
+GOAL=$("$LEGION" goal --repo "$REPO" 2>/dev/null)
 if [ -n "$GOAL" ]; then
   REASON="${REASON}
 
@@ -203,7 +203,7 @@ fi
 # budget. Tells the agent, as it wraps up, that it has sanctioned units left
 # to self-direct more work, so stopping is a choice, not a default. Fail-open:
 # any error leaves BUDGET empty and the reflection prompt fires unchanged.
-BUDGET=$("$LEGION_BIN" autonomy status --repo "$REPO" --banner 2>/dev/null)
+BUDGET=$("$LEGION" autonomy status --repo "$REPO" --banner 2>/dev/null)
 if [ -n "$BUDGET" ]; then
   REASON="${REASON}
 
@@ -218,9 +218,4 @@ fi
 # above stays a hard decision:block on purpose (it must be able to refuse the
 # stop, and wants the cap as a safety valve); this softer nudge is the right
 # tool for a once-per-session prompt the agent should act on.
-jq -n --arg ctx "$REASON" '{
-  "hookSpecificOutput": {
-    "hookEventName": "Stop",
-    "additionalContext": $ctx
-  }
-}'
+emit_context "Stop" "$REASON"

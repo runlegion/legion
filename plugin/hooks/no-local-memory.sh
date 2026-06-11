@@ -24,36 +24,24 @@
 # Bypass: none. If you genuinely need a file there, do it from your own
 # terminal outside Claude Code.
 
-INPUT=$(cat)
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/emit.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
 
-FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
+legion_hook_parse || exit 0
+
+FILE_PATH=$(legion_hook_field '.tool_input.file_path')
 
 if [ -z "$FILE_PATH" ]; then
   exit 0
 fi
 
 # Skip enforcement in repos legion does not cover (#353).
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
-REPO="${LEGION_REPO:-$(basename "${CWD:-$PWD}")}"
-if [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh" ]; then
-  # shellcheck source=_legion-covered.sh
-  source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh"
-  if ! legion_covered "$SESSION_ID" "$REPO"; then
-    exit 0
-  fi
-fi
+legion_hook_covered || exit 0
 
 if echo "$FILE_PATH" | grep -qE '\.claude/projects/.*/memory/'; then
-  jq -n --arg reason "Blocked: this file path is in the Claude Code auto-memory directory. Legion is the memory layer for this project -- use \`legion reflect --repo <name> --text '...'\` instead. Reflections stored via legion are searchable across sessions, repos, and agents via \`legion recall\` and \`legion consult\`; files in ~/.claude/projects/*/memory/ are invisible outside this single session/agent. If the content is project-wide guidance (not a personal reflection), it belongs in CLAUDE.md, not auto-memory." '
-    {
-      "hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": "deny",
-        "permissionDecisionReason": $reason
-      }
-    }
-  '
+  emit_deny "Blocked: this file path is in the Claude Code auto-memory directory. Legion is the memory layer for this project -- use \`legion reflect --repo <name> --text '...'\` instead. Reflections stored via legion are searchable across sessions, repos, and agents via \`legion recall\` and \`legion consult\`; files in ~/.claude/projects/*/memory/ are invisible outside this single session/agent. If the content is project-wide guidance (not a personal reflection), it belongs in CLAUDE.md, not auto-memory."
   exit 0
 fi
 

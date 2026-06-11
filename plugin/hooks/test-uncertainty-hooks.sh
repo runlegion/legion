@@ -63,6 +63,8 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/plugin/bin" "$WORK/plugin/hooks" "$WORK/state/legion"
 cp plugin/hooks/uncertainty-emit-on-task.sh "$WORK/plugin/hooks/"
 cp plugin/hooks/uncertainty-witness-on-completion.sh "$WORK/plugin/hooks/"
+mkdir -p "$WORK/plugin/hooks/lib"
+cp plugin/hooks/lib/prelude.sh plugin/hooks/lib/emit.sh "$WORK/plugin/hooks/lib/"
 
 # Stub legion binary: emit returns a fixed prediction id, witness logs
 # its call to a side-effect file so we can assert it ran.
@@ -84,8 +86,8 @@ exit 0
 EOF
 chmod +x "$WORK/plugin/bin/legion"
 
-# Put stub legion ahead of any real legion on PATH.
-export PATH="$WORK/plugin/bin:$PATH"
+# Hooks resolve the binary via the prelude: plugin-root copy first.
+export CLAUDE_PLUGIN_ROOT="$WORK/plugin"
 export XDG_STATE_HOME="$WORK/state"
 
 EMIT_HOOK="$WORK/plugin/hooks/uncertainty-emit-on-task.sh"

@@ -48,6 +48,8 @@ cp plugin/hooks/_legion-covered.sh "$WORK/plugin/hooks/"
 cp plugin/hooks/_legion-indexed.sh "$WORK/plugin/hooks/"
 cp plugin/hooks/_legion-prequery.sh "$WORK/plugin/hooks/"
 cp plugin/hooks/pre-read-sym.sh "$WORK/plugin/hooks/"
+mkdir -p "$WORK/plugin/hooks/lib"
+cp plugin/hooks/lib/prelude.sh plugin/hooks/lib/emit.sh "$WORK/plugin/hooks/lib/"
 
 # Fake source files: one large (>500 lines), one small.
 yes 'fn dummy_line() {}' | head -800 > "$WORK/repo/src/big.rs"
@@ -100,7 +102,7 @@ assert_empty "limit=200 boundary allowed" "$out"
 
 echo "==> large file with no limit -> BLOCK"
 out=$(echo "{\"cwd\":\"$WORK/repo\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$WORK/repo/src/big.rs\"},\"session_id\":\"t-block\"}" | bash "$HOOK")
-assert_contains "block decision present" "$out" '"decision": "block"'
+assert_contains "block decision present" "$out" '"permissionDecision": "deny"'
 assert_contains "block reason names line count" "$out" '800'
 assert_contains "block reason mentions sym hover" "$out" 'legion sym hover'
 assert_contains "block reason mentions limit alternative" "$out" 'limit=200'
@@ -108,7 +110,7 @@ assert_contains "block reason offers env bypass" "$out" 'LEGION_BYPASS_READ=1'
 
 echo "==> large file with limit=600 (above threshold) -> BLOCK"
 out=$(echo "{\"cwd\":\"$WORK/repo\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$WORK/repo/src/big.rs\",\"limit\":600},\"session_id\":\"t-block-large-limit\"}" | bash "$HOOK")
-assert_contains "limit > threshold still blocks" "$out" '"decision": "block"'
+assert_contains "limit > threshold still blocks" "$out" '"permissionDecision": "deny"'
 
 echo "==> bypass via env -> allow + telemetry"
 export LEGION_TEST_MARKER="$WORK/state/bypass-marker.log"

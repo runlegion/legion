@@ -31,20 +31,17 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
-INPUT=$(cat)
-if [ -z "$INPUT" ]; then
-  exit 0
-fi
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
 
-TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+legion_hook_parse || exit 0
 
 if [ "$TOOL" != "TaskCreate" ] || [ -z "$SESSION_ID" ]; then
   exit 0
 fi
 
-TASK_ID=$(echo "$INPUT" | jq -r '.tool_response.id // empty' 2>/dev/null)
-SUBJECT=$(echo "$INPUT" | jq -r '.tool_input.subject // empty' 2>/dev/null)
+TASK_ID=$(legion_hook_field '.tool_response.id')
+SUBJECT=$(legion_hook_field '.tool_input.subject')
 
 if [ -z "$TASK_ID" ] || [ -z "$SUBJECT" ]; then
   exit 0
@@ -56,9 +53,10 @@ fi
 # scale.
 SUBJECT=$(printf '%s' "$SUBJECT" | cut -c 1-1024)
 
-# Resolve legion binary. Prefer the plugin-bundled copy if present.
-LEGION_BIN="${LEGION_BIN:-legion}"
-if ! command -v "$LEGION_BIN" >/dev/null 2>&1; then
+# Binary resolved by the prelude: plugin-bundled copy first, PATH fallback
+# (#614 -- the old PATH-only lookup left this hook silently inert in hook
+# subshells, which do not inherit the plugin bin dir on PATH).
+if [ -z "$LEGION" ] || [ ! -x "$LEGION" ]; then
   exit 0
 fi
 
@@ -83,7 +81,7 @@ ORPHAN_TTL_DAYS="30"
 PAYLOAD=$(jq -c -n --arg task_id "$TASK_ID" --arg subject "$SUBJECT" \
   '{task_id: $task_id, subject: $subject}')
 
-EMIT_OUT=$("$LEGION_BIN" uncertainty emit \
+EMIT_OUT=$("$LEGION" uncertainty emit \
   --surface "$SURFACE" \
   --feature-key "$FEATURE_KEY" \
   --input-fingerprint "$FINGERPRINT" \

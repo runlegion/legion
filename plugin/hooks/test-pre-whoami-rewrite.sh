@@ -16,6 +16,8 @@ trap 'rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/plugin/bin" "$WORK/plugin/hooks"
 cp plugin/hooks/pre-whoami-rewrite.sh "$WORK/plugin/hooks/"
+mkdir -p "$WORK/plugin/hooks/lib"
+cp plugin/hooks/lib/prelude.sh plugin/hooks/lib/emit.sh "$WORK/plugin/hooks/lib/"
 
 # Stub legion: switches behaviour on $LEGION_TEST_HAS_IDENTITY.
 cat > "$WORK/plugin/bin/legion" <<'EOF'
@@ -52,7 +54,7 @@ assert_blocked() {
   local desc="$1" cmd="$2"
   local out
   out=$(LEGION_TEST_HAS_IDENTITY=1 run_hook "$cmd")
-  if echo "$out" | grep -q '"decision":[[:space:]]*"block"'; then
+  if echo "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
     PASS=$((PASS + 1))
     echo "  PASS: $desc"
   else
@@ -67,7 +69,7 @@ assert_allowed() {
   local desc="$1" cmd="$2" has_id="${3:-1}"
   local out
   out=$(LEGION_TEST_HAS_IDENTITY=$has_id run_hook "$cmd")
-  if echo "$out" | grep -q '"decision":[[:space:]]*"block"'; then
+  if echo "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
     FAIL=$((FAIL + 1))
     echo "  FAIL: $desc (expected allow, got block)" >&2
     echo "    cmd: $cmd" >&2

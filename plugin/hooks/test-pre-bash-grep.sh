@@ -61,6 +61,8 @@ cp plugin/hooks/_legion-covered.sh "$WORK/plugin/hooks/"
 cp plugin/hooks/_legion-indexed.sh "$WORK/plugin/hooks/"
 cp plugin/hooks/_legion-prequery.sh "$WORK/plugin/hooks/"
 cp plugin/hooks/pre-bash-grep.sh "$WORK/plugin/hooks/"
+mkdir -p "$WORK/plugin/hooks/lib"
+cp plugin/hooks/lib/prelude.sh plugin/hooks/lib/emit.sh "$WORK/plugin/hooks/lib/"
 
 # Stub legion binary: dispatches on argv[1].
 cat > "$WORK/plugin/bin/legion" <<'EOF'
@@ -169,7 +171,7 @@ assert_empty "regex pattern -> pass through" "$out"
 
 echo "==> hook end-to-end: indexed repo + symbol-shape pattern with LOCAL-REPO hit -> BLOCK"
 out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"block-t"}' | bash "$HOOK")
-assert_contains "block decision present" "$out" '"decision": "block"'
+assert_contains "block decision present" "$out" '"permissionDecision": "deny"'
 assert_contains "block reason mentions sym def" "$out" 'legion sym def'
 assert_contains "block reason names the pattern" "$out" 'Symbol'
 assert_contains "block reason offers env bypass" "$out" 'LEGION_BYPASS_GREP=1'
@@ -180,7 +182,7 @@ echo "==> #458 relevance gate: cluster-wide hit but NOT in this repo -> pass thr
 # Pre-#458 behavior: would block on those cross-repo hits.
 # Post-#458 behavior: relevance gate filters to local hits (empty) and falls through.
 out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r commonword src/"},"session_id":"relevance-t"}' | bash "$HOOK")
-if echo "$out" | grep -q '"decision": "block"'; then
+if echo "$out" | grep -q '"permissionDecision": "deny"'; then
   FAIL=$((FAIL + 1)); echo "  FAIL: cross-repo-only hits should NOT trigger block in target repo"
   echo "    output: $out" >&2
 else
@@ -194,7 +196,7 @@ rm -f "$LEGION_TEST_MARKER"
 # is refused. The hook emits a block decision pointing at sym and
 # names the hard escape; no telemetry row is written for the refusal.
 out=$(LEGION_BYPASS_GREP=1 echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"bypass-env-t"}' | LEGION_BYPASS_GREP=1 bash "$HOOK")
-assert_contains "soft env bypass refused on local symbol" "$out" '"decision": "block"'
+assert_contains "soft env bypass refused on local symbol" "$out" '"permissionDecision": "deny"'
 assert_contains "refusal points to sym list, not a hard escape" "$out" 'sym list'
 if [ -f "$LEGION_TEST_MARKER" ] && grep -q "record-bypass" "$LEGION_TEST_MARKER"; then
   FAIL=$((FAIL + 1)); echo "  FAIL: refused soft bypass should NOT write telemetry row"
@@ -206,7 +208,7 @@ unset LEGION_BYPASS_GREP
 echo "==> harder bypass: soft sentinel bypass REFUSED for symbol with local hit"
 rm -f "$LEGION_TEST_MARKER"
 out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/ # legion-bypass: testing"},"session_id":"bypass-sentinel-t"}' | bash "$HOOK")
-assert_contains "soft sentinel bypass refused on local symbol" "$out" '"decision": "block"'
+assert_contains "soft sentinel bypass refused on local symbol" "$out" '"permissionDecision": "deny"'
 assert_contains "refusal explains the sentinel is for free text" "$out" 'free-text searches'
 
 echo "==> harder bypass: soft bypass STILL allowed for non-symbol pattern"
@@ -228,7 +230,7 @@ echo "==> #560: LEGION_BYPASS_GREP_HARD is RETIRED -- it no longer escapes the b
 # operator's permissions.deny. Setting the old env var must NOT bypass: a
 # symbol with a local hit still blocks.
 out=$(LEGION_BYPASS_GREP_HARD=1 echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"hard-gone-t"}' | LEGION_BYPASS_GREP_HARD=1 bash "$HOOK")
-assert_contains "retired hard-bypass env no longer escapes -- still blocks" "$out" '"decision": "block"'
+assert_contains "retired hard-bypass env no longer escapes -- still blocks" "$out" '"permissionDecision": "deny"'
 
 echo "==> hook end-to-end: skip via LEGION_SKIP_PRE_BASH_GREP=1"
 out=$(LEGION_SKIP_PRE_BASH_GREP=1 echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"skip-t"}' | LEGION_SKIP_PRE_BASH_GREP=1 bash "$HOOK")

@@ -15,30 +15,24 @@
 
 set -u
 
-LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
-LOG=/tmp/legion-hook-errors.log
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
 
-# shellcheck source=_legion-covered.sh
-source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh"
+LOG="$LEGION_HOOK_LOG"
 
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+legion_hook_parse || exit 0
+FILE_PATH=$(legion_hook_field '.tool_input.file_path')
 
 if [ -z "$FILE_PATH" ] || [ -z "$CWD" ]; then
   exit 0
 fi
 
-REPO=$(basename "$CWD")
-if ! legion_covered "$SESSION_ID" "$REPO"; then
-  exit 0
-fi
+legion_hook_covered || exit 0
 
 # Debounce per file path: skip if the lockfile mtime is newer than 500ms ago.
 # GNU date supports %3N (millisecond precision); BSD date emits the literal
 # "%3N" instead. Detect by checking whether the output contains a non-digit.
-PATH_HASH=$(echo "$FILE_PATH" | md5 -q 2>/dev/null || echo "$FILE_PATH" | md5sum 2>/dev/null | cut -d' ' -f1)
+PATH_HASH=$(legion_hash_str "$FILE_PATH")
 LOCK="/tmp/legion-index-${PATH_HASH}.lock"
 NOW_MS=$(date +%s%3N 2>/dev/null || true)
 case "$NOW_MS" in

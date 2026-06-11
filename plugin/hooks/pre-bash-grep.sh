@@ -12,8 +12,7 @@
 #                 hard escape (#560): mandatory shell-grep blocking is the
 #                 operator's permissions.deny, not this hook.
 #
-# Sibling of pre-grep-scip.sh and pre-grep-recall.sh which cover the
-# Grep and Glob tools. This hook is now SOFT FALLBACK GUIDANCE: the
+# Sibling of pre-grep.sh which covers the Grep and Glob tools. This hook is now SOFT FALLBACK GUIDANCE: the
 # mandatory shell-grep block is the operator's settings.json
 # permissions.deny (Bash(grep:*)/Bash(rg:*)/...), which is evaluated
 # before this hook runs and inherits to subagents. See
@@ -37,34 +36,28 @@ if [ "${LEGION_SKIP_PRE_BASH_GREP:-}" = "1" ]; then
   exit 0
 fi
 
-INPUT=$(cat)
-if [ -z "$INPUT" ]; then
-  exit 0
-fi
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
 
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
-TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
-COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+legion_hook_parse || exit 0
+
+COMMAND=$(legion_hook_field '.tool_input.command')
 
 if [ -z "$CWD" ] || [ "$TOOL" != "Bash" ] || [ -z "$COMMAND" ]; then
   exit 0
 fi
 
-REPO="${LEGION_REPO:-$(basename "$CWD")}"
 if [ -z "$REPO" ]; then
   exit 0
 fi
 
-# Source the shared library. It sources _legion-covered.sh and
-# _legion-indexed.sh transitively.
+# Source the shared ladder library. It sources _legion-indexed.sh and
+# lib/emit.sh transitively.
 # shellcheck source=_legion-prequery.sh
 source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-prequery.sh"
 
 # Universal gate: skip uncovered repos.
-if ! legion_covered "$SESSION_ID" "$REPO"; then
-  exit 0
-fi
+legion_hook_covered || exit 0
 
 # Detect leading search binary; pass through if none.
 BINARY=$(legion_prequery_bash_binary "$COMMAND")
@@ -119,7 +112,7 @@ ${LOCAL_HITS}
 \`\`\`
 
 For symbols, \`legion sym def ${PATTERN}\` / \`sym refs\` / \`sym list\` answer in bytes. For genuinely non-symbol, non-indexed content (e.g. an .astro file), use the Grep tool -- not shell ${BINARY}. Your operator may block shell ${BINARY} outright via permissions.deny; that is the intended mandatory gate, and there is no env-var escape from it."
-    legion_prequery_emit_block "$REASON"
+    emit_deny "$REASON"
     exit 0
   fi
   # Soft bypass allowed: pattern is free-text or has no local symbol hits.
@@ -164,7 +157,7 @@ ${LOCAL_HITS}
 \`\`\`
 
 The soft bypass (\`# legion-bypass: <reason>\` or LEGION_BYPASS_GREP=1) is REFUSED for symbol-shaped patterns that resolve in this repo's SCIP index -- the sentinel exists for free-text searches, not for symbol queries dressed up as text. For symbols use \`legion sym def ${PATTERN}\` / \`sym refs\` / \`sym list\`; for genuinely non-symbol, non-indexed content use the Grep tool, not shell ${BINARY}. There is no env-var hard escape -- the mandatory shell-grep block is the operator's permissions.deny."
-    legion_prequery_emit_block "$REASON"
+    emit_deny "$REASON"
     exit 0
   fi
 fi
@@ -181,4 +174,4 @@ ${HITS}
 \`\`\`
 
 This repo has no SCIP index, so the block tier is disabled. Consider \`legion sym def ${PATTERN}\` instead of ${BINARY} on this pattern."
-legion_prequery_emit_allow "$CTX"
+emit_allow "$CTX" "legion sym/recall results injected"

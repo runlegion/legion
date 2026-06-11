@@ -17,6 +17,8 @@ trap 'rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/plugin/hooks"
 cp plugin/hooks/no-gh.sh "$WORK/plugin/hooks/"
+mkdir -p "$WORK/plugin/hooks/lib"
+cp plugin/hooks/lib/prelude.sh plugin/hooks/lib/emit.sh "$WORK/plugin/hooks/lib/"
 # Stub _legion-covered.sh to always return covered so the hook runs the
 # match logic instead of falling through.
 cat > "$WORK/plugin/hooks/_legion-covered.sh" <<'EOF'
@@ -38,7 +40,7 @@ assert_blocked() {
   local desc="$1" cmd="$2"
   local out
   out=$(run_hook "$cmd")
-  if echo "$out" | grep -q '"decision":[[:space:]]*"block"'; then
+  if echo "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
     PASS=$((PASS + 1))
     echo "  PASS: $desc"
   else
@@ -53,9 +55,9 @@ assert_allowed() {
   local desc="$1" cmd="$2"
   local out
   out=$(run_hook "$cmd")
-  if echo "$out" | grep -q '"decision":[[:space:]]*"block"'; then
+  if echo "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
     FAIL=$((FAIL + 1))
-    echo "  FAIL: $desc (expected allow, got block)" >&2
+    echo "  FAIL: $desc (expected allow, got deny)" >&2
     echo "    cmd: $cmd" >&2
   else
     PASS=$((PASS + 1))

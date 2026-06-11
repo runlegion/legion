@@ -2,20 +2,20 @@
 # Legion post-compact hook: aggressive re-orientation after context compaction
 # The compaction summary is STALE. This hook provides ground truth.
 
-# Hook subshells do not inherit the plugin bin dir on PATH -- only the Bash
-# tool does. Invoke via full CLAUDE_PLUGIN_ROOT path (fixes #204).
-LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
-LOG=/tmp/legion-hook-errors.log
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/emit.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
 
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+LOG="$LEGION_HOOK_LOG"
+
+legion_hook_parse || exit 0
 
 if [ -z "$CWD" ]; then
   exit 0
 fi
 
-REPO=$(basename "$CWD")
-CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
+CWD_HASH=$(legion_hash_str "$CWD")
 
 # Clean up stop-hook marker so reflect prompt fires fresh
 MARKER="/tmp/legion-reflected-${CWD_HASH}"
@@ -85,9 +85,4 @@ OUTPUT="$OUTPUT"$'\n\n'"--- ACTION REQUIRED ---
 
 OUTPUT="$OUTPUT"$'\n\n'"[Legion] consult --context <problem> to search all agents | signal --to <agent> --verb question to ask directly | boost --id <id> when a reflection helps"
 
-jq -n --arg ctx "$OUTPUT" '{
-  "hookSpecificOutput": {
-    "hookEventName": "SessionStart",
-    "additionalContext": $ctx
-  }
-}'
+emit_context "SessionStart" "$OUTPUT"

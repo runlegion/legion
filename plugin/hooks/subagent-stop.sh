@@ -18,18 +18,20 @@
 # Never blocks the parent: every failure path exits 0. Cheap by design
 # (bounded transcript tail) to stay well under the hook timeout.
 
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/emit.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
+
+legion_hook_parse || exit 0
 if [ -z "$CWD" ]; then
   exit 0
 fi
 
-REPO="${LEGION_REPO:-$(basename "$CWD")}"
 AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "subagent"' 2>/dev/null)
-TRANSCRIPT=$(echo "$INPUT" | jq -r '.agent_transcript_path // empty' 2>/dev/null)
+TRANSCRIPT=$(legion_hook_field '.agent_transcript_path')
 
-LEGION_BIN="${CLAUDE_PLUGIN_ROOT}/bin/legion"
-if [ ! -x "$LEGION_BIN" ]; then
+if [ ! -x "$LEGION" ]; then
   exit 0
 fi
 
@@ -45,9 +47,8 @@ if [ "$STOP_ACTIVE" = "true" ]; then
   exit 0
 fi
 
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 DEDUP_SRC="${TRANSCRIPT:-${SESSION_ID}:${AGENT_TYPE}}"
-DEDUP_KEY=$(echo "$DEDUP_SRC" | md5 -q 2>/dev/null || echo "$DEDUP_SRC" | md5sum 2>/dev/null | cut -d' ' -f1)
+DEDUP_KEY=$(legion_hash_str "$DEDUP_SRC")
 MARKER="${TMPDIR:-/tmp}/legion-subagent-stop-${DEDUP_KEY}"
 if [ -f "$MARKER" ]; then
   # Already processed this subagent stop. Re-reflecting and re-injecting
@@ -77,7 +78,7 @@ fi
 # entirely rather than store an empty marker; the parent pointer below still
 # fires so the parent knows the subagent ended.
 if [ -n "$SUMMARY" ]; then
-  "$LEGION_BIN" reflect --repo "$REPO" --domain checkpoint --tags subagent,auto \
+  "$LEGION" reflect --repo "$REPO" --domain checkpoint --tags subagent,auto \
     --text "[SUBAGENT CHECKPOINT] ${AGENT_TYPE}: ${SUMMARY}" >/dev/null 2>&1 || true
 fi
 
@@ -86,11 +87,6 @@ fi
 # restating the subagent's output, which the parent already received.
 CTX="Subagent ${AGENT_TYPE} finished. Its work is checkpointed in legion (domain=checkpoint); recall with: legion recall --repo ${REPO} --domain checkpoint --limit 1."
 
-jq -n --arg ctx "$CTX" '{
-  "hookSpecificOutput": {
-    "hookEventName": "SubagentStop",
-    "additionalContext": $ctx
-  }
-}' 2>/dev/null || true
+emit_context "SubagentStop" "$CTX" 2>/dev/null || true
 
 exit 0

@@ -12,23 +12,24 @@
 # Also warms the Tantivy index in the background so the first PreToolUse
 # recall hit is fast (cold ~2.2s, warm ~170ms).
 
-LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
-LOG=/tmp/legion-hook-errors.log
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/emit.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
 
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+LOG="$LEGION_HOOK_LOG"
+
+legion_hook_parse || exit 0
 
 if [ -z "$CWD" ]; then
   exit 0
 fi
 
-REPO=$(basename "$CWD")
-
 # Clean up per-session markers from prior session. Reset both -- the Stop
 # hook gates its reflect prompt on the work marker, which is touched by the
 # PostToolUse mark-work hook on any actual tool use. Sessions with only prose
 # Q&A (no tools) skip the reflect prompt. See #339 cleanup batch.
-CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
+CWD_HASH=$(legion_hash_str "$CWD")
 rm -f "/tmp/legion-reflected-${CWD_HASH}" 2>/dev/null
 rm -f "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
 
@@ -144,10 +145,5 @@ BUDGET=$("$LEGION" autonomy status --repo "$REPO" --banner 2>>"$LOG")
 append_block "$BUDGET"
 
 if [ -n "$OUTPUT" ]; then
-  jq -n --arg ctx "$OUTPUT" '{
-    "hookSpecificOutput": {
-      "hookEventName": "SessionStart",
-      "additionalContext": $ctx
-    }
-  }'
+  emit_context "SessionStart" "$OUTPUT"
 fi

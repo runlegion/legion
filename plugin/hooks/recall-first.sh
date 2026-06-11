@@ -3,7 +3,7 @@
 # reflections as additionalContext before the search tool fires.
 #
 # Fires on WebFetch, WebSearch, and Agent (Explore only). Grep and Glob are
-# handled by pre-grep-recall.sh which has better query sanitization for those.
+# handled by pre-grep.sh which has better query sanitization for those.
 #
 # For Explore agent spawns: if recall has strong hits (score >= threshold),
 # the hook DENIES the spawn and returns recall results instead. This prevents
@@ -17,30 +17,25 @@
 # migration, DB schema mismatch) leaves a breadcrumb. The hook still exits 0
 # on legion failure so the tool call proceeds as if nothing was injected.
 
-# Hook subshells do not inherit the plugin bin dir on PATH -- only the Bash
-# tool does. Invoke via full CLAUDE_PLUGIN_ROOT path (fixes #204).
-LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
-LOG=/tmp/legion-hook-errors.log
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/emit.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
 
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
-TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
+LOG="$LEGION_HOOK_LOG"
+
+legion_hook_parse || exit 0
 
 if [ -z "$CWD" ] || [ -z "$TOOL" ]; then
   exit 0
 fi
 
-REPO=$(basename "$CWD")
+if [ ! -x "$LEGION" ]; then
+  exit 0
+fi
 
 # Skip injection in repos legion does not cover (#353).
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
-if [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh" ]; then
-  # shellcheck source=_legion-covered.sh
-  source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-covered.sh"
-  if ! legion_covered "$SESSION_ID" "$REPO"; then
-    exit 0
-  fi
-fi
+legion_hook_covered || exit 0
 
 # Check the clamp list -- skip recall for tools that burn tokens without value
 CLAMP_FILE="${CLAUDE_PLUGIN_ROOT}/hooks/recall-clamp.conf"
@@ -55,18 +50,18 @@ case "$TOOL" in
   WebFetch)
     # Use the prompt (user intent), not the URL -- URL path components
     # produce garbage BM25 matches. The prompt carries actual topic signal.
-    QUERY=$(echo "$INPUT" | jq -r '.tool_input.prompt // empty')
+    QUERY=$(legion_hook_field '.tool_input.prompt')
     ;;
   WebSearch)
-    QUERY=$(echo "$INPUT" | jq -r '.tool_input.query // empty')
+    QUERY=$(legion_hook_field '.tool_input.query')
     ;;
   Agent)
     # For Explore agents, try recall first and deny the spawn if we have
     # strong hits. Other agent types pass through.
-    AGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // empty')
+    AGENT_TYPE=$(legion_hook_field '.tool_input.subagent_type')
     if [ "$AGENT_TYPE" = "Explore" ]; then
       IS_EXPLORE=true
-      QUERY=$(echo "$INPUT" | jq -r '.tool_input.prompt // empty')
+      QUERY=$(legion_hook_field '.tool_input.prompt')
     else
       exit 0
     fi
@@ -204,11 +199,8 @@ ${SECTIONS}Read the specific files referenced in these results for detail. Do NO
   fi
 fi
 
-jq -n --arg ctx "$CTX" --arg decision "$DECISION" --arg reason "$REASON" '{
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "permissionDecision": $decision,
-    "permissionDecisionReason": $reason,
-    "additionalContext": $ctx
-  }
-}'
+if [ "$DECISION" = "deny" ]; then
+  emit_deny "$REASON" "$CTX"
+else
+  emit_allow "$CTX" "$REASON"
+fi

@@ -54,6 +54,8 @@ export TMPDIR="$WORK"
 
 mkdir -p "$WORK/plugin/bin" "$WORK/plugin/hooks"
 cp plugin/hooks/subagent-stop.sh "$WORK/plugin/hooks/"
+mkdir -p "$WORK/plugin/hooks/lib"
+cp plugin/hooks/lib/prelude.sh plugin/hooks/lib/emit.sh "$WORK/plugin/hooks/lib/"
 
 # Stub legion: logs every invocation to $LEGION_STUB_LOG, then exit 0.
 cat > "$WORK/plugin/bin/legion" <<'EOF'
