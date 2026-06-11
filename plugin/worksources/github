@@ -346,12 +346,21 @@ case "${1:-}" in
       echo '{"error":"gh CLI not found"}' >&2
       exit 1
     fi
-    # Check review status before merging
+    # Review gate defers to the repo's own policy (#621): reviewDecision is
+    # empty when the repo has no required-review branch protection, so only
+    # an explicit negative decision blocks here. gh pr merge still fails if
+    # any actual branch protection is unmet.
     REVIEW_STATUS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json reviewDecision -q '.reviewDecision' 2>/dev/null)
-    if [ "$REVIEW_STATUS" != "APPROVED" ]; then
-      echo "{\"error\":\"PR #${PR_NUMBER} not approved (status: ${REVIEW_STATUS:-NONE})\"}" >&2
-      exit 1
-    fi
+    case "$REVIEW_STATUS" in
+      CHANGES_REQUESTED)
+        echo "{\"error\":\"PR #${PR_NUMBER} has changes requested -- address the review before merging\"}" >&2
+        exit 1
+        ;;
+      REVIEW_REQUIRED)
+        echo "{\"error\":\"PR #${PR_NUMBER} requires a review per branch protection and has none\"}" >&2
+        exit 1
+        ;;
+    esac
     ARGS=(pr merge "$PR_NUMBER" --repo "$REPO")
     case "$STRATEGY" in
       squash) ARGS+=(--squash) ;;
