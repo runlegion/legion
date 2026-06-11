@@ -72,9 +72,10 @@ pub const HEARTBEAT_LOG_CADENCE: u64 = 10;
 /// daemon's `run_watch_task` (async, `tokio::time::sleep`) own one of these
 /// and call `tick_health` / `tick_poll` on their respective intervals.
 ///
-/// The things that stay loop-specific are: the sleep mechanism, the timer
-/// types (`std::time::Instant` vs `tokio::time::Instant`), startup logging,
-/// and the cluster sync-actor spawn (standalone only).
+/// The things that stay loop-specific are the sleep mechanism and the timer
+/// types (`std::time::Instant` vs `tokio::time::Instant`); every pre-loop
+/// side effect, including the cluster sync-actor spawn, lives in
+/// [`WatchLoop::bootstrap`] so it cannot fork between the drivers again.
 ///
 /// Having one shared body means a safety gate can never be present in one
 /// loop and absent in the other -- the #578 bug that motivated this (#582).

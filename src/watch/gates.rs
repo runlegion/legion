@@ -14,9 +14,6 @@ use super::spawn::{spawn_agent, SpawnMode};
 use super::tracker::AgentTracker;
 use super::wake_cap_reached;
 
-/// Run a single poll cycle across all configured repos.
-///
-/// Returns the number of agents spawned in this cycle.
 /// Check for blocked cards that might be unblocked by recent announce signals.
 ///
 /// When an agent announces completion ("@all announce -- repo completed: ..."),
@@ -92,6 +89,9 @@ pub struct PersonaLeaseGate<'a> {
     pub ttl: Duration,
 }
 
+/// Run a single poll cycle across all configured repos.
+///
+/// Returns the number of agents spawned in this cycle.
 #[allow(clippy::too_many_arguments)]
 pub fn poll_cycle(
     db: &Database,
