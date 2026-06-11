@@ -2741,6 +2741,31 @@ workdir = "/tmp"
         }
     }
 
+    /// `signal_requires_reply` is a deliberate alias of `is_wake_worthy`:
+    /// one verb cut so a signal that woke the agent always lands in the
+    /// section the agent must answer. Pin the equivalence so the two names
+    /// cannot drift apart silently -- an intentional divergence must come
+    /// here and change this test.
+    #[test]
+    fn signal_requires_reply_matches_is_wake_worthy() {
+        let samples = [
+            "@kessel question -- can you help?",
+            "@kessel request:help -- pls",
+            "@kessel handoff -- yours now",
+            "@all announce -- shipped",
+            "@kessel ack -- got it",
+            "@kessel review:approved -- LGTM",
+            "not a signal at all",
+        ];
+        for text in samples {
+            assert_eq!(
+                signal_requires_reply(text),
+                is_wake_worthy(text),
+                "wake decision and reply-required routing diverged for: {text}"
+            );
+        }
+    }
+
     #[test]
     fn is_wake_worthy_rejects_posts() {
         // Posts don't start with @recipient -- never wake.
@@ -3708,6 +3733,22 @@ workdir = "/nonexistent/path/that/does/not/exist"
 
         let err = load_config(&config_path).unwrap_err();
         assert!(err.to_string().contains("workdir does not exist"));
+    }
+
+    /// The single liveness probe shared by watch locks and the daemon
+    /// pidfile machinery: our own PID reads as alive, a reaped child's PID
+    /// reads as dead.
+    #[cfg(unix)]
+    #[test]
+    fn process_alive_distinguishes_live_and_dead_pids() {
+        assert!(
+            process_alive(std::process::id()),
+            "our own PID must read as alive"
+        );
+        assert!(
+            !process_alive(dead_pid()),
+            "a reaped child's PID must read as dead"
+        );
     }
 
     #[test]
