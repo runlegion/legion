@@ -86,7 +86,7 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
 /// The bullpen lifecycle columns (decay #376, resolution #362) are board
 /// domain and migrate in `super::board::migrate`.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
-    // Migration 1: add audience column + board_reads table.
+    // Migration 1: add audience column (board_reads lives in super::board).
     // Only run when the column does not yet exist.
     if !Database::has_column(conn, "reflections", "audience")? {
         conn.execute_batch(

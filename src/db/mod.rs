@@ -226,6 +226,54 @@ mod tests {
     }
 
     #[test]
+    fn init_schema_migrates_a_v1_database() {
+        // A database created at the original v1 shape (base reflections
+        // table only) must come up through every column migration when
+        // reopened through the split dispatcher, ending insert-ready.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE reflections (
+                    id TEXT PRIMARY KEY,
+                    repo TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    embedding BLOB
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO reflections (id, repo, text, created_at) \
+                 VALUES ('old-row', 'legion', 'pre-migration row', '2026-01-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+
+        // Migration 14 backfill ran: updated_at seeded from created_at.
+        let updated: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT updated_at FROM reflections WHERE id = 'old-row'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+
+        // The current full-column write and read paths work on the
+        // migrated database.
+        let r = db
+            .insert_reflection("legion", "post-migration row", "team")
+            .unwrap();
+        assert!(db.get_reflection_by_id(&r.id).unwrap().is_some());
+    }
+
+    #[test]
     fn partial_indexes_created_for_soft_delete() {
         let db = test_db();
 
