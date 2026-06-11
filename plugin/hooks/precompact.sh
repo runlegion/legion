@@ -21,8 +21,6 @@ if [ -z "$CWD" ]; then
 fi
 
 REPO=$(basename "$CWD")
-CWD_HASH=$(echo "$CWD" | md5 -q 2>/dev/null || echo "$CWD" | md5sum 2>/dev/null | cut -d' ' -f1)
-CHECKPOINT_MARKER="/tmp/legion-checkpoint-failed-${CWD_HASH}"
 
 # Extract recent assistant text from transcript JSONL as a safety-net checkpoint
 CONTEXT=""
@@ -45,13 +43,9 @@ if [ -z "$CONTEXT" ]; then
 fi
 
 # Safety-net checkpoint reflection. See #209 -- losing a checkpoint silently
-# was the original incident this hook was built to prevent.
-if ! "$LEGION" reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>>"$LOG"; then
-  touch "$CHECKPOINT_MARKER" 2>/dev/null
-else
-  # Previous run may have left a stale marker; clear it on successful reflect.
-  rm -f "$CHECKPOINT_MARKER" 2>/dev/null
-fi
+# was the original incident this hook was built to prevent. A failed reflect
+# leaves its breadcrumb in $LOG (the operator-facing diagnostic path, #383).
+"$LEGION" reflect --repo "$REPO" --text "[COMPACT CHECKPOINT] Work in progress before compaction: ${CONTEXT}" --domain "checkpoint" --tags "auto,precompact" 2>>"$LOG" || true
 
 # Block auto-compaction. PreCompact reason text goes to the user, not the
 # model, so this is a static heredoc -- no jq dependency, no failure path

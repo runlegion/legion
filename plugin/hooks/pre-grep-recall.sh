@@ -26,12 +26,6 @@
 LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
 LOG=/tmp/legion-hook-errors.log
 
-# Shared warning helper (optional; do not fail if missing).
-if [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-warn.sh" ]; then
-  # shellcheck source=_legion-warn.sh
-  source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-warn.sh"
-fi
-
 # Explicit skip override -- exit before doing any work.
 if [ "${LEGION_SKIP_PRE_GREP:-}" = "1" ]; then
   echo "[legion-pre-grep] skipped (LEGION_SKIP_PRE_GREP=1)" >&2
@@ -153,20 +147,8 @@ if [ "$RC" -eq 124 ] || [ "$RC" -eq 142 ]; then
   exit 0
 fi
 
-# Surface legion degradation via the shared warning helper if it exists.
-# _legion-warn.sh provides legion_check and legion_warnings_block; guard calls.
-if command -v legion_check >/dev/null 2>&1; then
-  legion_check "$RC" "recall"
-fi
-
-WARN=""
-if command -v legion_warnings_block >/dev/null 2>&1; then
-  WARN=$(legion_warnings_block)
-fi
-
-# If recall failed hard and we have no hits, fall through to the warning-only
-# injection path so the agent at least knows recall is broken.
-if [ "$RC" -ne 0 ] && [ -z "$WARN" ]; then
+# Recall failed hard: skip injection (breadcrumb already in $LOG).
+if [ "$RC" -ne 0 ]; then
   echo "[legion-pre-grep] recall exited $RC; skipping injection" >&2
   exit 0
 fi
@@ -181,32 +163,23 @@ if [ -n "$HITS" ]; then
     PASSING=$(echo "$SCORES" | awk '$1 >= 0.3 { print }')
     if [ -z "$PASSING" ]; then
       echo "[legion-pre-grep] skipped (all recall scores below 0.3 threshold)" >&2
-      # Empty hits -- fall through to warning-only if warn is non-empty.
-      HITS=""
+      exit 0
     fi
   fi
 fi
 
-# No hits and no warning -- exit 0 without emitting any JSON.
-if [ -z "$HITS" ] && [ -z "$WARN" ]; then
+# No hits -- exit 0 without emitting any JSON.
+if [ -z "$HITS" ]; then
   exit 0
 fi
 
-# Build the additionalContext block. Warning first if present, then hits.
-if [ -z "$HITS" ]; then
-  CTX="$WARN"
-else
-  CTX="## Legion memory for this query
+CTX="## Legion memory for this query
 
 Before ${TOOL} on \`${QUERY}\`, legion recall returned:
 
 ${HITS}
 
 If these answer your question, skip the ${TOOL}. Otherwise continue -- but consider whether the reflection explains WHY before you search for WHAT."
-  if [ -n "$WARN" ]; then
-    CTX="${WARN}"$'\n\n'"${CTX}"
-  fi
-fi
 
 # Emit the PreToolUse hookSpecificOutput block.
 jq -n --arg ctx "$CTX" '{

@@ -14,10 +14,6 @@
 LEGION="${CLAUDE_PLUGIN_ROOT}/bin/legion"
 LOG=/tmp/legion-hook-errors.log
 
-# Shared warning helper.
-# shellcheck source=_legion-warn.sh
-source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-warn.sh"
-
 INPUT=$(cat)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
@@ -46,12 +42,8 @@ REPO=$(basename "$CWD")
 
 # Find the newest identity reflection. legion chain --id walks both backward
 # and forward from any node, so any identity reflection ID gets the whole
-# chain. The newest reflection is most likely to be the active root. Capture
-# legion's exit status separately from the pipeline so a missing match (grep
-# exit 1) does not get reported as a recall failure.
+# chain. The newest reflection is most likely to be the active root.
 RECALL_OUT=$("$LEGION" recall --repo "$REPO" --domain identity --limit 1 --preview 60 2>>"$LOG")
-RECALL_RC=$?
-legion_check "$RECALL_RC" "recall (identity root)"
 ROOT_LINE=$(printf '%s\n' "$RECALL_OUT" | grep -oE '\(id: [0-9a-f-]+' | head -1)
 
 if [ -z "$ROOT_LINE" ]; then
@@ -64,7 +56,6 @@ fi
 ROOT_ID="${ROOT_LINE#(id: }"
 
 CHAIN=$("$LEGION" chain --id "$ROOT_ID" --full 2>>"$LOG")
-legion_check $? "chain"
 
 # Mark loaded regardless of chain content -- a single-node chain (no children)
 # returns just the root, which the agent already saw via whoami. No need to
@@ -78,16 +69,10 @@ if [ "$LINK_COUNT" -lt 2 ]; then
   exit 0
 fi
 
-WARN=$(legion_warnings_block)
-
 CTX="[Legion] Identity chain (deeper doctrine, walked once per session):
 
 ${CHAIN}
 This chain extends the identity banner you saw at session start. The root reflection appears first; subsequent links carry doctrine in decreasing importance order. Internalize the rules, do not just acknowledge them."
-
-if [ -n "$WARN" ]; then
-  CTX="${WARN}"$'\n\n'"${CTX}"
-fi
 
 jq -n --arg ctx "$CTX" '{
   "hookSpecificOutput": {
