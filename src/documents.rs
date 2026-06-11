@@ -418,14 +418,7 @@ fn map_document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Document> {
 mod tests {
     use super::*;
 
-    fn open_test_db() -> Database {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.db");
-        // Leak the tempdir so the path stays valid for the test's lifetime.
-        // Tests run in isolated processes; the OS reclaims at exit.
-        std::mem::forget(dir);
-        Database::open(&path).expect("open")
-    }
+    use crate::db::testutil::test_db;
 
     fn sample_meta<'a>(doc_type: &'a str, owner: &'a str) -> DocumentMeta<'a> {
         DocumentMeta {
@@ -440,7 +433,7 @@ mod tests {
 
     #[test]
     fn insert_and_get_document_round_trips() {
-        let db = open_test_db();
+        let db = test_db();
         let meta = DocumentMeta {
             id: Some("FR-EMAIL-003"),
             doc_type: "requirement",
@@ -467,7 +460,7 @@ mod tests {
 
     #[test]
     fn insert_without_id_generates_uuidv7() {
-        let db = open_test_db();
+        let db = test_db();
         let inserted = db
             .insert_document(&sample_meta("persona", "vault"), "{}")
             .expect("insert");
@@ -478,7 +471,7 @@ mod tests {
 
     #[test]
     fn insert_with_duplicate_id_errors() {
-        let db = open_test_db();
+        let db = test_db();
         let mut meta = sample_meta("requirement", "mail");
         meta.id = Some("FR-TEST-001");
         db.insert_document(&meta, "{}").expect("first");
@@ -491,13 +484,13 @@ mod tests {
 
     #[test]
     fn get_nonexistent_returns_none() {
-        let db = open_test_db();
+        let db = test_db();
         assert!(db.get_document("FR-NOPE-999").expect("get").is_none());
     }
 
     #[test]
     fn list_documents_filters_by_type() {
-        let db = open_test_db();
+        let db = test_db();
         db.insert_document(&sample_meta("requirement", "mail"), "{}")
             .unwrap();
         db.insert_document(&sample_meta("persona", "vault"), "{}")
@@ -516,7 +509,7 @@ mod tests {
 
     #[test]
     fn list_documents_filters_by_surface_owner_status() {
-        let db = open_test_db();
+        let db = test_db();
         let mut a = sample_meta("requirement", "mail");
         a.surface = Some("email");
         a.status = Some("specified");
@@ -541,7 +534,7 @@ mod tests {
 
     #[test]
     fn list_documents_excludes_archived_by_default() {
-        let db = open_test_db();
+        let db = test_db();
         let mut m = sample_meta("requirement", "mail");
         m.id = Some("FR-A");
         db.insert_document(&m, "{}").unwrap();
@@ -566,7 +559,7 @@ mod tests {
 
     #[test]
     fn archive_document_is_idempotent() {
-        let db = open_test_db();
+        let db = test_db();
         let mut m = sample_meta("requirement", "mail");
         m.id = Some("FR-IDEM");
         db.insert_document(&m, "{}").unwrap();
@@ -583,7 +576,7 @@ mod tests {
 
     #[test]
     fn archive_nonexistent_returns_error() {
-        let db = open_test_db();
+        let db = test_db();
         let err = db.archive_document("FR-NOPE").unwrap_err();
         assert!(err.to_string().contains("not found"));
     }

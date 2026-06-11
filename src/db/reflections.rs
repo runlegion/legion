@@ -1,0 +1,1160 @@
+//! Reflections: the core memory rows, embeddings, learning chains, and
+//! domain-root queries. Owns the `reflections` table DDL and its column
+//! migrations (bullpen lifecycle columns migrate in `super::board`).
+
+use chrono::Utc;
+use rusqlite::{Connection, OptionalExtension};
+use uuid::Uuid;
+
+use super::Database;
+use super::board::compute_post_ttl;
+use crate::error::{LegionError, Result};
+
+/// A reflection row returned with its embedding blob for dedupe checks.
+///
+/// Tuple fields: (id, embedding_bytes, text, created_at).
+pub type ReflectionWithEmbedding = (String, Vec<u8>, String, String);
+
+/// A single stored reflection tied to a repository.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Reflection {
+    pub id: String,
+    pub repo: String,
+    pub text: String,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+    pub audience: String,
+    // Phase 2.0: Synapse metadata
+    pub domain: Option<String>,
+    pub tags: Option<String>,
+    pub recall_count: i64,
+    pub last_recalled_at: Option<String>,
+    pub parent_id: Option<String>,
+}
+
+/// The canonical column list for every reflections SELECT consumed by
+/// [`map_reflection_row`]. The order must match the positional `row.get(n)`
+/// reads in that function exactly -- omitting or reordering a column shifts
+/// every subsequent index and fails at runtime, not compile time (#606).
+pub(crate) const REFLECTION_COLUMNS: &str = "id, repo, text, created_at, updated_at, audience, domain, \
+     tags, recall_count, last_recalled_at, parent_id";
+
+/// Map a database row to a Reflection struct.
+///
+/// Shared by all queries that select [`REFLECTION_COLUMNS`] positionally.
+pub(crate) fn map_reflection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reflection> {
+    Ok(Reflection {
+        id: row.get(0)?,
+        repo: row.get(1)?,
+        text: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+        audience: row.get(5)?,
+        domain: row.get(6)?,
+        tags: row.get(7)?,
+        recall_count: row.get(8)?,
+        last_recalled_at: row.get(9)?,
+        parent_id: row.get(10)?,
+    })
+}
+
+/// Optional metadata for a new reflection (Phase 2.0 Synapse fields).
+#[derive(Default)]
+pub struct ReflectionMeta {
+    pub domain: Option<String>,
+    pub tags: Option<String>,
+    pub parent_id: Option<String>,
+}
+
+/// Base `reflections` table and the indexes over its original columns.
+pub(super) fn create_tables(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS reflections (
+                id TEXT PRIMARY KEY,
+                repo TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                embedding BLOB
+            );
+            CREATE INDEX IF NOT EXISTS idx_reflections_repo ON reflections(repo);
+            CREATE INDEX IF NOT EXISTS idx_reflections_created ON reflections(created_at);",
+    )?;
+    Ok(())
+}
+
+/// Column migrations for `reflections`, in their original patch order.
+/// The bullpen lifecycle columns (decay #376, resolution #362) are board
+/// domain and migrate in `super::board::migrate`.
+pub(super) fn migrate(conn: &Connection) -> Result<()> {
+    // Migration 1: add audience column (board_reads lives in super::board).
+    // Only run when the column does not yet exist.
+    if !Database::has_column(conn, "reflections", "audience")? {
+        conn.execute_batch(
+            "ALTER TABLE reflections ADD COLUMN audience TEXT NOT NULL DEFAULT 'self';",
+        )?;
+    }
+
+    // Migration 2: Phase 2.0 Synapse metadata columns.
+    if !Database::has_column(conn, "reflections", "domain")? {
+        conn.execute_batch("ALTER TABLE reflections ADD COLUMN domain TEXT;")?;
+    }
+    if !Database::has_column(conn, "reflections", "tags")? {
+        conn.execute_batch("ALTER TABLE reflections ADD COLUMN tags TEXT;")?;
+    }
+    if !Database::has_column(conn, "reflections", "recall_count")? {
+        conn.execute_batch(
+            "ALTER TABLE reflections ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    if !Database::has_column(conn, "reflections", "last_recalled_at")? {
+        conn.execute_batch("ALTER TABLE reflections ADD COLUMN last_recalled_at TEXT;")?;
+    }
+    if !Database::has_column(conn, "reflections", "parent_id")? {
+        conn.execute_batch("ALTER TABLE reflections ADD COLUMN parent_id TEXT;")?;
+    }
+
+    // Migration 6: Add handled_at column for watch auto-wake tracking.
+    if !Database::has_column(conn, "reflections", "handled_at")? {
+        conn.execute_batch("ALTER TABLE reflections ADD COLUMN handled_at TEXT;")?;
+    }
+
+    // Migration 10: Bullpen archive -- nullable archived_at on reflections (#168).
+    if !Database::has_column(conn, "reflections", "archived_at")? {
+        conn.execute_batch("ALTER TABLE reflections ADD COLUMN archived_at TEXT;")?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_reflections_archived \
+             ON reflections(archived_at, created_at);",
+    )?;
+
+    // Migration 13: Soft delete support for multi-node sync (#245).
+    // Adds deleted_at column to syncable tables. Rows with deleted_at set
+    // are excluded from normal queries but included in sync deltas.
+    if !Database::has_column(conn, "reflections", "deleted_at")? {
+        conn.execute_batch("ALTER TABLE reflections ADD COLUMN deleted_at TEXT;")?;
+    }
+
+    // Migration 14: Add updated_at for LWW conflict resolution (#255).
+    // Required for multi-node sync to determine which version wins when
+    // the same row is modified on different nodes.
+    if !Database::has_column(conn, "reflections", "updated_at")? {
+        conn.execute_batch(
+            "ALTER TABLE reflections ADD COLUMN updated_at TEXT;
+                 UPDATE reflections SET updated_at = created_at WHERE updated_at IS NULL;",
+        )?;
+    }
+
+    // Migration 15: Partial indexes for soft-deleted rows (#256).
+    // Most queries filter by deleted_at IS NULL. Partial indexes exclude
+    // tombstones, reducing index size and improving query performance.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_reflections_repo_live \
+                 ON reflections(repo) WHERE deleted_at IS NULL;
+             CREATE INDEX IF NOT EXISTS idx_reflections_audience_live \
+                 ON reflections(audience, created_at) WHERE deleted_at IS NULL;",
+    )?;
+    Ok(())
+}
+
+impl Database {
+    /// Insert a new reflection for the given repository.
+    ///
+    /// Generates a UUIDv7 id and ISO 8601 timestamp automatically.
+    /// The `audience` parameter controls visibility: "self" for private
+    /// reflections, "team" for bullpen posts visible to all agents.
+    #[allow(dead_code)]
+    pub fn insert_reflection(&self, repo: &str, text: &str, audience: &str) -> Result<Reflection> {
+        self.insert_reflection_with_meta(repo, text, audience, &ReflectionMeta::default())
+    }
+
+    /// Insert a new reflection with optional Synapse metadata.
+    ///
+    /// Like `insert_reflection` but accepts domain, tags, and parent_id
+    /// for learning chain linking and classification.
+    pub fn insert_reflection_with_meta(
+        &self,
+        repo: &str,
+        text: &str,
+        audience: &str,
+        meta: &ReflectionMeta,
+    ) -> Result<Reflection> {
+        let id = Uuid::now_v7().to_string();
+        let created_at_dt = Utc::now();
+        let created_at = created_at_dt.to_rfc3339();
+        let (expires_at, evergreen) = compute_post_ttl(
+            audience,
+            meta.domain.as_deref(),
+            meta.tags.as_deref(),
+            text,
+            created_at_dt,
+        );
+
+        self.conn.execute(
+            "INSERT INTO reflections (id, repo, text, created_at, updated_at, audience, domain, tags, parent_id, expires_at, evergreen) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                &id, repo, text, &created_at, &created_at, audience,
+                &meta.domain, &meta.tags, &meta.parent_id,
+                expires_at, evergreen as i32,
+            ],
+        )?;
+
+        Ok(Reflection {
+            id,
+            repo: repo.to_owned(),
+            text: text.to_owned(),
+            created_at: created_at.clone(),
+            updated_at: Some(created_at),
+            audience: audience.to_owned(),
+            domain: meta.domain.clone(),
+            tags: meta.tags.clone(),
+            recall_count: 0,
+            last_recalled_at: None,
+            parent_id: meta.parent_id.clone(),
+        })
+    }
+
+    /// Store an embedding BLOB for an existing reflection.
+    pub fn store_embedding(&self, id: &str, embedding_bytes: &[u8]) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE reflections SET embedding = ?1, updated_at = ?3 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![embedding_bytes, id, &now],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Retrieve the embedding BLOB for a reflection, if it exists.
+    pub fn get_embedding(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT embedding FROM reflections WHERE id = ?1 AND deleted_at IS NULL")?;
+        let mut rows = stmt.query_map([id], |row| {
+            let blob: Option<Vec<u8>> = row.get(0)?;
+            Ok(blob)
+        })?;
+        match rows.next() {
+            Some(row) => Ok(row?),
+            None => Ok(None),
+        }
+    }
+
+    /// Retrieve all reflections that have embeddings, optionally filtered by repo.
+    ///
+    /// Returns (id, embedding_bytes) pairs for cosine similarity search.
+    /// Pass `None` for cross-repo search (consult), or `Some(repo)` for
+    /// repo-scoped search (recall).
+    pub fn get_embeddings(&self, repo: Option<&str>) -> Result<Vec<(String, Vec<u8>)>> {
+        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, Vec<u8>)> {
+            Ok((row.get(0)?, row.get(1)?))
+        };
+
+        let base = "SELECT id, embedding FROM reflections WHERE embedding IS NOT NULL AND deleted_at IS NULL";
+        let sql = match repo {
+            Some(_) => format!("{base} AND repo = ?1"),
+            None => base.to_owned(),
+        };
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = match repo {
+            Some(r) => stmt.query_map([r], map_row)?,
+            None => stmt.query_map([], map_row)?,
+        };
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get all reflection IDs that are missing embeddings.
+    pub fn get_ids_without_embeddings(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text FROM reflections WHERE embedding IS NULL AND deleted_at IS NULL ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let text: String = row.get(1)?;
+            Ok((id, text))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Retrieve the most recent reflections with embeddings for a repo.
+    ///
+    /// Returns (id, embedding_blob, text, created_at) tuples, ordered newest
+    /// first, for near-duplicate detection on `legion reflect`. Only rows that
+    /// have a non-NULL embedding are returned, so reflections that predate the
+    /// embed backfill are naturally skipped.
+    pub fn get_recent_reflections_with_embeddings(
+        &self,
+        repo: &str,
+        limit: usize,
+    ) -> Result<Vec<ReflectionWithEmbedding>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, embedding, text, created_at FROM reflections \
+             WHERE repo = ?1 AND embedding IS NOT NULL AND deleted_at IS NULL \
+             ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![repo, limit], |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            let text: String = row.get(2)?;
+            let created_at: String = row.get(3)?;
+            Ok((id, blob, text, created_at))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Increment a reflection's recall count and update last_recalled_at.
+    ///
+    /// Used by `legion boost` to mark a reflection as useful after being
+    /// recalled and applied. Reflections with higher recall counts are
+    /// ranked higher in future searches.
+    pub fn boost_reflection(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE reflections SET recall_count = recall_count + 1, last_recalled_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            (&now, id),
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Retrieve a learning chain starting from the given reflection ID.
+    ///
+    /// Walks the parent_id links backward to find the chain root, then
+    /// walks forward to collect all reflections in chronological order.
+    /// Returns an empty vec if the ID does not exist.
+    pub fn get_chain(&self, id: &str) -> Result<Vec<Reflection>> {
+        // Walk backward to find the root
+        let mut root_id = id.to_string();
+        loop {
+            let r = self.get_reflection_by_id(&root_id)?;
+            match r {
+                Some(ref reflection) => match &reflection.parent_id {
+                    Some(pid) => root_id = pid.clone(),
+                    None => break,
+                },
+                None => break,
+            }
+        }
+
+        // Walk forward from root collecting children
+        let mut chain = Vec::new();
+        let mut current_id = Some(root_id);
+
+        while let Some(cid) = current_id {
+            match self.get_reflection_by_id(&cid)? {
+                Some(r) => {
+                    let next = self.find_child(&r.id)?;
+                    chain.push(r);
+                    current_id = next;
+                }
+                None => break,
+            }
+        }
+
+        Ok(chain)
+    }
+
+    /// True if this reflection (live, not soft-deleted) participates in a
+    /// chain -- either it has a parent or at least one live child. Used by
+    /// `whoami` to decide whether to surface a `legion chain --id <id>`
+    /// pointer without forcing callers to walk the full chain.
+    pub fn is_in_chain(&self, id: &str) -> Result<bool> {
+        let row: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM reflections r \
+                 WHERE r.id = ?1 AND r.deleted_at IS NULL \
+                   AND (r.parent_id IS NOT NULL \
+                        OR EXISTS (SELECT 1 FROM reflections c \
+                                   WHERE c.parent_id = r.id AND c.deleted_at IS NULL))",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(row.is_some())
+    }
+
+    /// Find the child reflection that follows the given parent ID.
+    fn find_child(&self, parent_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM reflections WHERE parent_id = ?1 AND deleted_at IS NULL LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([parent_id], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Retrieve a single reflection by its ID.
+    ///
+    /// Returns `None` if no reflection exists with the given ID or if soft-deleted.
+    pub fn get_reflection_by_id(&self, id: &str) -> Result<Option<Reflection>> {
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE id = ?1 AND deleted_at IS NULL"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let mut rows = stmt.query_map([id], map_reflection_row)?;
+
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Read a reflection by id, applying an archive-mode filter (#457).
+    /// Hot: returns None if archived_at IS NOT NULL.
+    /// Cold: returns None if archived_at IS NULL.
+    /// Both: same behavior as `get_reflection_by_id` (no archive filter).
+    ///
+    /// The deleted_at filter applies in all modes (soft-deleted rows are
+    /// always hidden).
+    pub fn get_reflection_by_id_in_mode(
+        &self,
+        id: &str,
+        mode: crate::recall::ArchiveMode,
+    ) -> Result<Option<Reflection>> {
+        let where_clause = match mode {
+            crate::recall::ArchiveMode::Hot => "AND archived_at IS NULL",
+            crate::recall::ArchiveMode::Cold => "AND archived_at IS NOT NULL",
+            crate::recall::ArchiveMode::Both => "",
+        };
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
+             FROM reflections WHERE id = ?1 AND deleted_at IS NULL {where_clause}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query_map([id], map_reflection_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Permanently remove a reflection from the database by id.
+    ///
+    /// Returns the deleted reflection so the caller can confirm what was
+    /// removed (repo, audience, first 80 chars of text, etc). Returns
+    /// `LegionError::ReflectionNotFound` if the id does not match any
+    /// row.
+    ///
+    /// This is a HARD delete from SQLite only. Callers must also call
+    /// `SearchIndex::delete(id)` to remove the matching document from
+    /// the tantivy index, or subsequent BM25 queries will still return
+    /// the deleted reflection as a "ghost" until the next reindex.
+    ///
+    /// Destructive. No soft-delete, no undo. Used by `legion forget` to
+    /// retire stale workaround reflections, bad reflections, or personal
+    /// data that should not persist in the corpus.
+    pub fn delete_reflection(&self, id: &str) -> Result<Reflection> {
+        // Fetch first so we can return it and so a missing id produces a
+        // clear error rather than a silent zero-row delete.
+        let reflection = self
+            .get_reflection_by_id(id)?
+            .ok_or_else(|| LegionError::ReflectionNotFound(id.to_string()))?;
+
+        let rows = self.conn.execute(
+            "DELETE FROM reflections WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        if rows == 0 {
+            // Race: reflection existed at the fetch above but was
+            // deleted before our delete ran. Surface as NotFound rather
+            // than success.
+            return Err(LegionError::ReflectionNotFound(id.to_string()));
+        }
+        Ok(reflection)
+    }
+
+    /// Soft-delete a reflection by setting its deleted_at timestamp.
+    ///
+    /// Unlike `delete_reflection` (hard delete), this preserves the row for
+    /// multi-node sync tombstone propagation. The row becomes invisible to
+    /// normal queries but can still be synced to other nodes.
+    #[allow(dead_code)] // Used by sync module in #248
+    pub fn soft_delete_reflection(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE reflections SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Retrieve reflections by a list of IDs. Returns them in the order found
+    /// (not necessarily the input order). Missing IDs are silently skipped.
+    pub fn get_reflections_by_ids(&self, ids: &[&str]) -> Result<Vec<Reflection>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE id IN ({}) AND deleted_at IS NULL",
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Retrieve all reflections for a repository, ordered newest first.
+    #[cfg(test)]
+    pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let rows = stmt.query_map([repo], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Retrieve the most recent reflections for a repository, limited by SQL.
+    ///
+    /// More efficient than `get_reflections_by_repo` when only a small
+    /// number of results are needed, since the database handles the LIMIT.
+    pub fn get_latest_self_reflections(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE repo = ?1 AND audience = 'self' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let rows = stmt.query_map(rusqlite::params![repo, limit], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Retrieve latest reflections matching a specific domain for a repository.
+    ///
+    /// Bypasses search entirely -- pure SQL lookup by domain. Used for
+    /// reserved domains like `identity` and `snooze` that get injected
+    /// on every session start without needing a search query.
+    pub fn get_reflections_by_domain(
+        &self,
+        repo: &str,
+        domain: &str,
+        limit: usize,
+    ) -> Result<Vec<Reflection>> {
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
+             FROM reflections WHERE repo = ?1 AND domain = ?2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let rows = stmt.query_map(rusqlite::params![repo, domain, limit], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Retrieve identity reflections that are chain roots or orphans for
+    /// `whoami`. Excludes reflections with a `parent_id` (chain children),
+    /// because their content is reachable via `legion chain --id <root>`
+    /// and including them would bloat the whoami banner past the inline
+    /// context budget. Ordered newest first.
+    /// Fetch the root reflections (no parent) for a repo in a given domain,
+    /// newest first. Backs the SessionStart boot banners: `whoami`
+    /// (domain=identity, who I am) and `whatami` (domain=workflow, how I operate).
+    pub fn get_domain_roots(
+        &self,
+        repo: &str,
+        domain: &str,
+        limit: usize,
+    ) -> Result<Vec<Reflection>> {
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
+             FROM reflections WHERE repo = ?1 AND domain = ?2 AND parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let rows = stmt.query_map(rusqlite::params![repo, domain, limit], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Identity roots (domain=identity). Thin wrapper over [`get_domain_roots`].
+    pub fn get_identity_roots(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
+        self.get_domain_roots(repo, "identity", limit)
+    }
+
+    /// Retrieve all reflections for reindexing.
+    ///
+    /// Returns every reflection in the database regardless of audience or
+    /// repo. Used by the `reindex` command to rebuild the search index
+    /// from the database (the source of truth).
+    pub fn get_all_for_reindex(&self) -> Result<Vec<Reflection>> {
+        let sql = format!("SELECT {REFLECTION_COLUMNS} FROM reflections WHERE deleted_at IS NULL");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Get the most recent created_at timestamp from reflections.
+    pub fn get_max_created_at(&self) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT MAX(created_at) FROM reflections WHERE deleted_at IS NULL")?;
+        let result: Option<String> = stmt
+            .query_row([], |row| row.get(0))
+            .map_err(LegionError::Database)?;
+        Ok(result)
+    }
+
+    /// Get recently extended learning chains.
+    ///
+    /// Returns reflections that have a parent_id and were created within
+    /// the last N hours, indicating a chain was recently extended.
+    pub fn get_recent_chain_extensions(&self, hours: i64) -> Result<Vec<Reflection>> {
+        let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+        let sql = format!(
+            "SELECT {REFLECTION_COLUMNS} \
+             FROM reflections WHERE parent_id IS NOT NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([&cutoff], map_reflection_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::db::testutil::test_db;
+
+    #[test]
+    fn insert_and_retrieve_reflection() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("kelex", "mapping rules are fragile", "self")
+            .unwrap();
+        assert_eq!(r.repo, "kelex");
+        assert_eq!(r.text, "mapping rules are fragile");
+        assert!(!r.id.is_empty());
+
+        let all = db.get_reflections_by_repo("kelex").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, r.id);
+    }
+
+    #[test]
+    fn get_reflections_by_ids_round_trip() {
+        let db = test_db();
+        let root = db
+            .insert_reflection("kelex", "root reflection", "self")
+            .unwrap();
+        let meta = ReflectionMeta {
+            domain: Some("workflow".to_string()),
+            tags: Some("alpha,beta".to_string()),
+            parent_id: Some(root.id.clone()),
+        };
+        let child = db
+            .insert_reflection_with_meta("kelex", "child reflection", "self", &meta)
+            .unwrap();
+
+        let ids = [root.id.as_str(), child.id.as_str(), "missing-id"];
+        let found = db.get_reflections_by_ids(&ids).unwrap();
+        // Missing IDs are silently skipped.
+        assert_eq!(found.len(), 2);
+
+        let got_root = found.iter().find(|r| r.id == root.id).unwrap();
+        assert_eq!(got_root.text, "root reflection");
+        // Regression for #606: the SELECT omitted updated_at, shifting every
+        // column from index 4 on (audience loaded into updated_at, and the
+        // parent_id read indexed past the row -- InvalidColumnIndex).
+        assert_eq!(
+            got_root.updated_at.as_deref(),
+            Some(root.created_at.as_str())
+        );
+        assert_eq!(got_root.audience, "self");
+        assert_eq!(got_root.parent_id, None);
+
+        let got_child = found.iter().find(|r| r.id == child.id).unwrap();
+        assert_eq!(
+            got_child.updated_at.as_deref(),
+            Some(child.created_at.as_str())
+        );
+        assert_eq!(got_child.domain.as_deref(), Some("workflow"));
+        assert_eq!(got_child.tags.as_deref(), Some("alpha,beta"));
+        assert_eq!(got_child.parent_id.as_deref(), Some(root.id.as_str()));
+    }
+
+    #[test]
+    fn get_reflections_by_ids_empty_input() {
+        let db = test_db();
+        assert!(db.get_reflections_by_ids(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn updated_at_set_on_insert() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("test", "test reflection", "self")
+            .unwrap();
+        // updated_at should be set to created_at on insert
+        assert!(r.updated_at.is_some());
+        assert_eq!(r.updated_at.as_ref().unwrap(), &r.created_at);
+    }
+
+    #[test]
+    fn updated_at_refreshed_on_boost() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("test", "test reflection", "self")
+            .unwrap();
+        let original_updated_at = r.updated_at.clone();
+
+        // Small delay to ensure timestamp differs
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        db.boost_reflection(&r.id).unwrap();
+
+        let boosted = db.get_reflection_by_id(&r.id).unwrap().unwrap();
+        assert!(boosted.updated_at.is_some());
+        // updated_at should be later than the original
+        assert!(boosted.updated_at.unwrap() > original_updated_at.unwrap());
+    }
+
+    #[test]
+    fn reflections_scoped_to_repo() {
+        let db = test_db();
+        db.insert_reflection("kelex", "reflection 1", "self")
+            .unwrap();
+        db.insert_reflection("rafters", "reflection 2", "self")
+            .unwrap();
+
+        let kelex = db.get_reflections_by_repo("kelex").unwrap();
+        assert_eq!(kelex.len(), 1);
+        assert_eq!(kelex[0].text, "reflection 1");
+    }
+
+    #[test]
+    fn ids_are_uuidv7() {
+        let db = test_db();
+        let r = db.insert_reflection("test", "text", "self").unwrap();
+        assert_eq!(r.id.len(), 36);
+        // UUIDv7 has version nibble '7' at position 14
+        assert_eq!(&r.id[14..15], "7");
+    }
+
+    #[test]
+    fn created_at_is_iso8601() {
+        let db = test_db();
+        let r = db.insert_reflection("test", "text", "self").unwrap();
+        // ISO 8601 strings contain 'T' separator and '+' or end with 'Z'
+        assert!(r.created_at.contains('T'));
+    }
+
+    #[test]
+    fn empty_repo_returns_empty_vec() {
+        let db = test_db();
+        let results = db.get_reflections_by_repo("nonexistent").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn insert_reflection_with_audience_self() {
+        let db = test_db();
+        let r = db.insert_reflection("kelex", "test", "self").unwrap();
+        assert_eq!(r.audience, "self");
+    }
+
+    #[test]
+    fn insert_reflection_with_audience_team() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("rafters", "night shift musings", "team")
+            .unwrap();
+        assert_eq!(r.audience, "team");
+    }
+
+    #[test]
+    fn get_all_for_reindex_returns_all_reflections() {
+        let db = test_db();
+        db.insert_reflection("kelex", "one", "self").unwrap();
+        db.insert_reflection("rafters", "two", "team").unwrap();
+        db.insert_reflection("platform", "three", "self").unwrap();
+
+        let all = db.get_all_for_reindex().unwrap();
+        assert_eq!(all.len(), 3);
+
+        let repos: Vec<&str> = all.iter().map(|r| r.repo.as_str()).collect();
+        assert!(repos.contains(&"kelex"));
+        assert!(repos.contains(&"rafters"));
+        assert!(repos.contains(&"platform"));
+    }
+
+    #[test]
+    fn get_all_for_reindex_empty_db() {
+        let db = test_db();
+        let all = db.get_all_for_reindex().unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn existing_reflections_default_to_self() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("test", "old reflection", "self")
+            .unwrap();
+        assert_eq!(r.audience, "self");
+        let posts = db.get_board_posts().unwrap();
+        assert!(posts.is_empty());
+    }
+
+    #[test]
+    fn insert_with_meta_stores_domain_and_tags() {
+        let db = test_db();
+        let meta = ReflectionMeta {
+            domain: Some("color-tokens".into()),
+            tags: Some("semantic-tokens,consumer".into()),
+            parent_id: None,
+        };
+        let r = db
+            .insert_reflection_with_meta("kelex", "oklch insight", "self", &meta)
+            .unwrap();
+        assert_eq!(r.domain.as_deref(), Some("color-tokens"));
+        assert_eq!(r.tags.as_deref(), Some("semantic-tokens,consumer"));
+        assert!(r.parent_id.is_none());
+
+        let fetched = db.get_reflection_by_id(&r.id).unwrap().unwrap();
+        assert_eq!(fetched.domain.as_deref(), Some("color-tokens"));
+        assert_eq!(fetched.tags.as_deref(), Some("semantic-tokens,consumer"));
+    }
+
+    #[test]
+    fn insert_with_meta_stores_parent_id() {
+        let db = test_db();
+        let parent = db.insert_reflection("kelex", "first", "self").unwrap();
+        let meta = ReflectionMeta {
+            domain: None,
+            tags: None,
+            parent_id: Some(parent.id.clone()),
+        };
+        let child = db
+            .insert_reflection_with_meta("kelex", "follows up", "self", &meta)
+            .unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+    }
+
+    #[test]
+    fn boost_increments_recall_count() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("kelex", "useful insight", "self")
+            .unwrap();
+        assert_eq!(r.recall_count, 0);
+        assert!(r.last_recalled_at.is_none());
+
+        let found = db.boost_reflection(&r.id).unwrap();
+        assert!(found);
+
+        let boosted = db.get_reflection_by_id(&r.id).unwrap().unwrap();
+        assert_eq!(boosted.recall_count, 1);
+        assert!(boosted.last_recalled_at.is_some());
+
+        db.boost_reflection(&r.id).unwrap();
+        let double = db.get_reflection_by_id(&r.id).unwrap().unwrap();
+        assert_eq!(double.recall_count, 2);
+    }
+
+    #[test]
+    fn boost_nonexistent_returns_false() {
+        let db = test_db();
+        let found = db.boost_reflection("nonexistent-id").unwrap();
+        assert!(!found);
+    }
+
+    #[test]
+    fn get_chain_single_node() {
+        let db = test_db();
+        let r = db.insert_reflection("kelex", "standalone", "self").unwrap();
+        let chain = db.get_chain(&r.id).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].id, r.id);
+    }
+
+    #[test]
+    fn get_chain_three_links() {
+        let db = test_db();
+        let first = db
+            .insert_reflection("kelex", "root insight", "self")
+            .unwrap();
+        let second = db
+            .insert_reflection_with_meta(
+                "kelex",
+                "builds on root",
+                "self",
+                &ReflectionMeta {
+                    parent_id: Some(first.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let third = db
+            .insert_reflection_with_meta(
+                "kelex",
+                "final refinement",
+                "self",
+                &ReflectionMeta {
+                    parent_id: Some(second.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Querying from any node should return the full chain in order
+        let chain = db.get_chain(&third.id).unwrap();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].id, first.id);
+        assert_eq!(chain[1].id, second.id);
+        assert_eq!(chain[2].id, third.id);
+
+        let from_middle = db.get_chain(&second.id).unwrap();
+        assert_eq!(from_middle.len(), 3);
+        assert_eq!(from_middle[0].id, first.id);
+    }
+
+    #[test]
+    fn get_identity_roots_excludes_chain_children() {
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "root identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let _child = db
+            .insert_reflection_with_meta(
+                "legion",
+                "chain child identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    parent_id: Some(root.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let orphan = db
+            .insert_reflection_with_meta(
+                "legion",
+                "orphan identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        let ids: Vec<&str> = roots.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(roots.len(), 2);
+        assert!(ids.contains(&root.id.as_str()));
+        assert!(ids.contains(&orphan.id.as_str()));
+    }
+
+    #[test]
+    fn get_identity_roots_filters_by_repo_and_domain() {
+        let db = test_db();
+        let _other_domain = db
+            .insert_reflection_with_meta(
+                "legion",
+                "not identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("architecture".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let _other_repo = db
+            .insert_reflection_with_meta(
+                "kelex",
+                "wrong repo",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let target = db
+            .insert_reflection_with_meta(
+                "legion",
+                "right one",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, target.id);
+    }
+
+    #[test]
+    fn get_chain_nonexistent_returns_empty() {
+        let db = test_db();
+        let chain = db.get_chain("nonexistent").unwrap();
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn get_reflection_by_id_found() {
+        let db = test_db();
+        let r = db.insert_reflection("kelex", "findable", "self").unwrap();
+        let found = db.get_reflection_by_id(&r.id).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().text, "findable");
+    }
+
+    #[test]
+    fn get_reflection_by_id_not_found() {
+        let db = test_db();
+        let found = db.get_reflection_by_id("no-such-id").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn get_recent_reflections_with_embeddings_returns_only_embedded() {
+        let db = test_db();
+        // Insert two reflections; only give one an embedding.
+        let r1 = db
+            .insert_reflection("kelex", "has embedding", "self")
+            .unwrap();
+        let _r2 = db
+            .insert_reflection("kelex", "no embedding", "self")
+            .unwrap();
+
+        let blob = vec![0u8; 256 * 4]; // 256 f32 zeros
+        db.store_embedding(&r1.id, &blob).unwrap();
+
+        let results = db
+            .get_recent_reflections_with_embeddings("kelex", 10)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "only the embedded reflection should appear"
+        );
+        assert_eq!(results[0].0, r1.id);
+    }
+
+    #[test]
+    fn get_recent_reflections_with_embeddings_respects_repo_scope() {
+        let db = test_db();
+        let r_kelex = db.insert_reflection("kelex", "kelex text", "self").unwrap();
+        let r_rafters = db
+            .insert_reflection("rafters", "rafters text", "self")
+            .unwrap();
+
+        let blob = vec![0u8; 256 * 4];
+        db.store_embedding(&r_kelex.id, &blob).unwrap();
+        db.store_embedding(&r_rafters.id, &blob).unwrap();
+
+        let kelex_results = db
+            .get_recent_reflections_with_embeddings("kelex", 10)
+            .unwrap();
+        assert_eq!(kelex_results.len(), 1);
+        assert_eq!(kelex_results[0].0, r_kelex.id);
+    }
+
+    #[test]
+    fn get_recent_reflections_with_embeddings_respects_limit() {
+        let db = test_db();
+        let blob = vec![0u8; 256 * 4];
+
+        for i in 0..5 {
+            let r = db
+                .insert_reflection("legion", &format!("reflection {i}"), "self")
+                .unwrap();
+            db.store_embedding(&r.id, &blob).unwrap();
+        }
+
+        let results = db
+            .get_recent_reflections_with_embeddings("legion", 3)
+            .unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn delete_reflection_removes_row_and_returns_deleted() {
+        let db = test_db();
+
+        // Insert a reflection via the real path so the schema columns
+        // are all populated exactly as production would.
+        let inserted = db
+            .insert_reflection("shingle", "stale workaround doctrine", "self")
+            .unwrap();
+
+        // Confirm it is visible before the delete.
+        assert!(db.get_reflection_by_id(&inserted.id).unwrap().is_some());
+
+        // Delete, confirm the returned row matches what was stored.
+        let deleted = db.delete_reflection(&inserted.id).expect("delete");
+        assert_eq!(deleted.id, inserted.id);
+        assert_eq!(deleted.repo, "shingle");
+        assert_eq!(deleted.text, "stale workaround doctrine");
+
+        // Gone from the table.
+        assert!(db.get_reflection_by_id(&inserted.id).unwrap().is_none());
+
+        // Second delete on the same id returns ReflectionNotFound,
+        // not silent success.
+        let result = db.delete_reflection(&inserted.id);
+        assert!(
+            matches!(result, Err(LegionError::ReflectionNotFound(_))),
+            "expected ReflectionNotFound, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn soft_delete_reflection_hides_from_queries() {
+        let db = test_db();
+
+        // Insert a reflection.
+        let r = db
+            .insert_reflection("test-repo", "soft delete test reflection", "self")
+            .unwrap();
+        let id = r.id;
+        assert!(db.get_reflection_by_id(&id).unwrap().is_some());
+
+        // Soft delete it.
+        let deleted = db.soft_delete_reflection(&id).unwrap();
+        assert!(deleted, "soft_delete_reflection should return true");
+
+        // The reflection should now be invisible to normal queries.
+        assert!(
+            db.get_reflection_by_id(&id).unwrap().is_none(),
+            "soft-deleted reflection should not be visible"
+        );
+
+        // Soft deleting again returns false (already deleted).
+        let deleted_again = db.soft_delete_reflection(&id).unwrap();
+        assert!(
+            !deleted_again,
+            "soft_delete_reflection on already-deleted should return false"
+        );
+    }
+}

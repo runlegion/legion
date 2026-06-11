@@ -45,26 +45,19 @@ pub fn stats(db: &Database, repo: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
-    /// Create a test database and keep TempDir alive so SQLite
-    /// does not lose the backing file.
-    fn test_db() -> (Database, TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.db")).unwrap();
-        (db, dir)
-    }
+    use crate::db::testutil::test_db;
 
     #[test]
     fn stats_empty_database() {
-        let (db, _dir) = test_db();
+        let db = test_db();
         // Should print "no reflections stored yet" and not error.
         stats(&db, None).unwrap();
     }
 
     #[test]
     fn stats_single_repo() {
-        let (db, _dir) = test_db();
+        let db = test_db();
         db.insert_reflection("kelex", "one", "self").unwrap();
         db.insert_reflection("kelex", "two", "self").unwrap();
 
@@ -78,7 +71,7 @@ mod tests {
 
     #[test]
     fn stats_all_repos() {
-        let (db, _dir) = test_db();
+        let db = test_db();
         db.insert_reflection("kelex", "one", "self").unwrap();
         db.insert_reflection("rafters", "two", "self").unwrap();
 
@@ -91,7 +84,7 @@ mod tests {
 
     #[test]
     fn stats_nonexistent_repo_shows_empty_message() {
-        let (db, _dir) = test_db();
+        let db = test_db();
         db.insert_reflection("kelex", "one", "self").unwrap();
 
         // Filtering on a repo with no reflections should behave
