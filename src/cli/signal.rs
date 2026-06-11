@@ -177,18 +177,17 @@ pub(crate) fn handle_signal(
 pub(crate) fn handle_pending_replies(repo: String) -> error::Result<()> {
     let database = open_db()?;
 
-    // Build the full addressable name set for this repo: the repo's
-    // recipient() plus any broadcast_tags. Fall back to [repo] for
-    // un-watched callers (no watch.toml, or repo not in it).
+    // Build the full addressable name set for this repo via the same
+    // wake_addresses() the watch poll cycle uses, so the read path can never
+    // disagree with the wake path on which addresses reach this repo. Fall
+    // back to [repo] for un-watched callers (no watch.toml, or repo not in it).
     let names: Vec<String> = watch::load_config(&data_dir()?.join("watch.toml"))
         .ok()
         .and_then(|cfg| {
-            cfg.repos.into_iter().find(|r| r.name == repo).map(|r| {
-                let mut ns: Vec<String> = Vec::with_capacity(1 + r.broadcast_tags.len());
-                ns.push(r.recipient().to_string());
-                ns.extend(r.broadcast_tags);
-                ns
-            })
+            cfg.repos
+                .iter()
+                .find(|r| r.name == repo)
+                .map(watch::WatchRepoConfig::wake_addresses)
         })
         .unwrap_or_else(|| vec![repo.clone()]);
 

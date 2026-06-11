@@ -60,7 +60,7 @@ pub fn spawn_detached(data_dir: &Path, port: u16) -> Result<()> {
     if pid_path.exists() {
         let contents = std::fs::read_to_string(&pid_path).unwrap_or_default();
         if let Ok(pid) = contents.trim().parse::<u32>() {
-            if is_process_alive(pid) {
+            if watch::process_alive(pid) {
                 eprintln!("legion daemon already running (pid {pid})");
                 return Ok(());
             }
@@ -140,28 +140,6 @@ pub fn spawn_detached(data_dir: &Path, port: u16) -> Result<()> {
     Ok(())
 }
 
-/// Check whether a process with the given PID is alive on this platform.
-///
-/// Uses `kill -0` on Unix (no signal sent, just existence check). Always
-/// returns `false` on non-Unix platforms where we cannot probe process state.
-fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
 /// Whether `port` can be bound right now (i.e. it is free).
 ///
 /// Binds and immediately drops a listener on `0.0.0.0:port`. A momentary
@@ -210,7 +188,7 @@ fn read_daemon_pid(pid_path: &Path) -> Option<u32> {
 
 /// Send a signal (e.g. "TERM", "KILL") to a process. Unix-only; returns false on
 /// other platforms. Uses `kill` to avoid a libc dependency, matching
-/// `is_process_alive`.
+/// `watch::process_alive`.
 fn send_signal(pid: u32, signal: &str) -> bool {
     #[cfg(unix)]
     {
@@ -233,12 +211,12 @@ fn send_signal(pid: u32, signal: &str) -> bool {
 fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        if !is_process_alive(pid) {
+        if !watch::process_alive(pid) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    !is_process_alive(pid)
+    !watch::process_alive(pid)
 }
 
 /// Stop a running daemon and wait for it to release its port.
@@ -253,7 +231,7 @@ pub fn stop_detached(data_dir: &Path) -> Result<bool> {
     let Some(pid) = read_daemon_pid(&pid_path) else {
         return Ok(false);
     };
-    if !is_process_alive(pid) {
+    if !watch::process_alive(pid) {
         // Stale pidfile -- nothing to stop, clean it up.
         let _ = std::fs::remove_file(&pid_path);
         return Ok(false);

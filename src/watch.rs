@@ -56,6 +56,19 @@ impl WatchRepoConfig {
             .filter(|s| !s.is_empty())
             .unwrap_or(&self.name)
     }
+
+    /// The full addressable name set for this repo: `recipient()` plus every
+    /// `broadcast_tags` entry. This is exactly the `names` contract of
+    /// `find_pending_signals` -- the wake path (poll_cycle) and the read path
+    /// (`legion pending-replies`) must agree on the address set by
+    /// construction, so all callers build it here instead of hand-rolling
+    /// the vec (#611; the #585/#586 routing conflict surface).
+    pub fn wake_addresses(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::with_capacity(1 + self.broadcast_tags.len());
+        names.push(self.recipient().to_string());
+        names.extend(self.broadcast_tags.iter().cloned());
+        names
+    }
 }
 
 /// A signal recipient parsed from a raw address string.
@@ -598,12 +611,16 @@ impl Drop for PidLockGuard {
 }
 
 /// Check whether a process with the given PID is alive.
-fn process_alive(pid: u32) -> bool {
-    // On Unix, signal 0 checks process existence without sending a signal.
-    // SAFETY: this is not unsafe -- libc::kill with signal 0 is a standard POSIX check.
+///
+/// Shells out to `kill -0` on Unix (signal 0 probes existence without
+/// delivering a signal; the no-unsafe invariant rules out libc::kill).
+/// Always returns `false` on non-Unix platforms where we cannot probe
+/// process state. This is the single liveness probe for the whole binary --
+/// watch locks and the daemon pidfile machinery share it so they can never
+/// disagree about whether a pidfile holder is alive (#611).
+pub(crate) fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // kill(pid, 0) returns 0 if the process exists and we can signal it
         let result = std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .stdout(std::process::Stdio::null())
@@ -1592,9 +1609,7 @@ pub fn poll_cycle(
 
     // Check for auto-unblock opportunities from recent signals
     for repo in &config.repos {
-        let mut names: Vec<String> = Vec::with_capacity(1 + repo.broadcast_tags.len());
-        names.push(repo.recipient().to_string());
-        names.extend(repo.broadcast_tags.iter().cloned());
+        let names = repo.wake_addresses();
         match find_pending_signals(db, &repo.name, &names, since) {
             Ok(signals) => {
                 check_auto_unblock(db, &signals);
@@ -1622,9 +1637,7 @@ pub fn poll_cycle(
         }
 
         let recipient = repo.recipient();
-        let mut names: Vec<String> = Vec::with_capacity(1 + repo.broadcast_tags.len());
-        names.push(recipient.to_string());
-        names.extend(repo.broadcast_tags.iter().cloned());
+        let names = repo.wake_addresses();
         let signals = find_pending_signals(db, &repo.name, &names, since)?;
         if signals.is_empty() {
             continue;
@@ -3797,6 +3810,35 @@ workdir = "/nonexistent/path/that/does/not/exist"
             extra: toml::Table::new(),
         };
         assert_eq!(repo_without_agent.recipient(), "legion");
+    }
+
+    #[test]
+    fn wake_addresses_is_recipient_plus_broadcast_tags() {
+        let repo = WatchRepoConfig {
+            name: "ledger".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: Some("platform".to_string()),
+            broadcast_tags: vec!["eng-team".to_string(), "backend".to_string()],
+            extra: toml::Table::new(),
+        };
+        assert_eq!(
+            repo.wake_addresses(),
+            vec!["platform", "eng-team", "backend"],
+            "wake_addresses must be recipient() followed by every broadcast tag"
+        );
+
+        let untagged = WatchRepoConfig {
+            name: "legion".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: None,
+            broadcast_tags: Vec::new(),
+            extra: toml::Table::new(),
+        };
+        assert_eq!(
+            untagged.wake_addresses(),
+            vec!["legion"],
+            "no agent + no tags must collapse to just the repo name"
+        );
     }
 
     #[test]
