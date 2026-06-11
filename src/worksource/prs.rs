@@ -363,7 +363,6 @@ pub fn job_id_from_link(link: &str) -> Option<u64> {
     numeric_part.parse().ok()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +538,4 @@ mod tests {
             result
         );
     }
-
 }

@@ -1,9 +1,9 @@
 //! Issue operations against a work source plugin (carved from
 //! worksource.rs, #615).
 
-use std::collections::HashSet;
 use crate::db::Database;
 use crate::kanban;
+use std::collections::HashSet;
 
 use crate::error::{LegionError, Result};
 
@@ -344,7 +344,6 @@ pub fn extract_issue_number(url: &str) -> Option<u64> {
     url.rsplit('/').next().and_then(|s| s.parse().ok())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +470,4 @@ mod tests {
             "expected validation error message, got: {msg}"
         );
     }
-
 }
