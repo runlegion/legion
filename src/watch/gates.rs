@@ -10,7 +10,7 @@ use crate::signal;
 use super::config::WatchConfig;
 use super::locks::{CooldownTracker, SessionLockTracker};
 use super::signals::{build_wake_prompt, find_pending_signals, is_wake_worthy};
-use super::spawn::{spawn_agent, SpawnMode};
+use super::spawn::{SpawnMode, spawn_agent};
 use super::tracker::AgentTracker;
 use super::wake_cap_reached;
 

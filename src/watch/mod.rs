@@ -15,17 +15,17 @@ mod spawn;
 mod tracker;
 
 pub use config::{
-    add_repo_to_config, default_session_lock_ttl_secs, list_repos_in_config, load_config,
-    remove_repo_from_config, rename_in_config, WatchConfig, WatchRepoConfig,
+    WatchConfig, WatchRepoConfig, add_repo_to_config, default_session_lock_ttl_secs,
+    list_repos_in_config, load_config, remove_repo_from_config, rename_in_config,
 };
-pub use gates::{poll_cycle, PersonaLeaseGate, QuotaPanicGate};
-pub use locks::{acquire_pid_lock, CooldownTracker, PidLockGuard, SessionLockTracker};
+pub use gates::{PersonaLeaseGate, QuotaPanicGate, poll_cycle};
 pub(crate) use locks::process_alive;
+pub use locks::{CooldownTracker, PidLockGuard, SessionLockTracker, acquire_pid_lock};
 pub use signals::{
-    build_wake_prompt, directed_verb_will_not_wake, find_pending_signals, signal_requires_reply,
-    WAKE_WORTHY_VERBS,
+    WAKE_WORTHY_VERBS, build_wake_prompt, directed_verb_will_not_wake, find_pending_signals,
+    signal_requires_reply,
 };
-pub use spawn::{record_session_end, SpawnMode};
+pub use spawn::{SpawnMode, record_session_end};
 pub use tracker::AgentTracker;
 
 // Re-exports with no caller outside this module tree today. Kept addressable
@@ -41,7 +41,7 @@ pub use locks::release_pid_lock;
 #[allow(unused_imports)]
 pub use signals::is_wake_worthy;
 #[allow(unused_imports)]
-pub use spawn::{spawn_agent, SpawnedChild};
+pub use spawn::{SpawnedChild, spawn_agent};
 #[allow(unused_imports)]
 pub use tracker::TrackedChild;
 
