@@ -1,6 +1,8 @@
 # Legion Changelog
 
-## Unreleased
+## 0.17.2
+
+The quality pipeline completes and the definition layer lands. The plugin now ships every stage of the work pipeline -- explore, simplify, pr-write, review, verify -- and the substrate holds its first real schemas. Patch release: additive features within existing surfaces, no schema migration, no wire-format change.
 
 ### New
 
