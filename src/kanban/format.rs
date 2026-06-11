@@ -237,7 +237,6 @@ pub fn format_work_card(card: &Card) -> String {
     output
 }
 
-
 #[cfg(test)]
 mod tests {
     use crate::kanban::*;
@@ -574,5 +573,4 @@ mod tests {
         assert!(labels.iter().any(|l| l.as_str() == Some("backend")));
         assert!(labels.iter().any(|l| l.as_str() == Some("api")));
     }
-
 }

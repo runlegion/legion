@@ -185,7 +185,6 @@ pub fn transition(current: CardStatus, action: Action) -> Result<CardStatus> {
     Ok(next)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +382,4 @@ mod tests {
         let result = transition(CardStatus::Blocked, Action::Done);
         assert!(result.is_err());
     }
-
 }
