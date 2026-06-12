@@ -4,6 +4,7 @@
 use clap::Subcommand;
 
 use crate::cli::util::{audit, open_db, open_db_and_index};
+use crate::cli::verify::resolve_acceptance_criteria;
 use crate::verify::GateResult;
 use crate::{db, error, kanban, status, verify, worksource};
 
@@ -515,23 +516,28 @@ pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> err
         // with no criteria (chores) are not gated. Done is the terminal
         // QA gate for a solo team, so there is no --skip here.
         if let Some(card) = database.get_card_by_id(card_id)? {
-            let acceptance = verify::acceptance_items(card.acceptance.as_deref());
+            // Resolve AC with spec-document precedence (#644): a spec-bound card
+            // gates on the bound document's verification.acceptance, not
+            // tasks.acceptance. A dangling document_id is a hard error here too,
+            // matching the behaviour of handle_verify.
+            let (acceptance, ac_source) = resolve_acceptance_criteria(&database, &card)?;
             if !acceptance.is_empty() {
                 let skill = verify::verify_gate_key(card_id);
                 match database.get_latest_quality_gate_by_skill(&skill)? {
                     Some(gate) if gate.result == GateResult::Clean => {}
                     Some(_) => {
                         eprintln!(
-                            "[legion] error: verify gate is not clean for card {card_id}. \
-                             Resolve the failing/uncertain criteria and re-run verify \
-                             before Done."
+                            "[legion] error: verify gate is not clean for card {card_id} \
+                             (ac source: {ac_source}). Resolve the failing/uncertain criteria \
+                             and re-run verify before Done."
                         );
                         return Err(error::LegionError::ExitWith(1));
                     }
                     None => {
                         eprintln!(
-                            "[legion] error: card {card_id} has acceptance criteria but no \
-                             verify verdict. Run the verify skill before Done."
+                            "[legion] error: card {card_id} has acceptance criteria \
+                             (ac source: {ac_source}) but no verify verdict. Run the verify \
+                             skill before Done."
                         );
                         return Err(error::LegionError::ExitWith(1));
                     }

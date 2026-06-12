@@ -504,3 +504,297 @@ fn autonomy_status_includes_burn_rate_line_when_sample_exists() {
         "burn-rate line must describe remaining headroom, got: {stdout}"
     );
 }
+
+// #644: spec-bound card's Done gate uses verification.acceptance from the bound
+// document, not tasks.acceptance. Without the fix, the gate would key on
+// tasks.acceptance and the wrong set would block or unblock Done.
+#[test]
+fn done_gate_spec_bound_card_keys_on_spec_criteria() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    // Insert a requirement document whose verification.acceptance differs from
+    // the card's tasks.acceptance (they are different strings). The gate must
+    // key on the spec set.
+    let doc_payload = serde_json::json!({
+        "meta": {
+            "id": "FR-DONE-GATE-001",
+            "type": "requirement",
+            "surface": "test",
+            "status": "specified",
+            "priority": "SHALL",
+            "owner": "kelex",
+            "date": "2026-06-12",
+            "author": "test"
+        },
+        "title": "Done gate spec test",
+        "description": "Requirement for done gate spec-awareness test.",
+        "traces_to": "user-story-1",
+        "depends_on": [],
+        "verification": {
+            "acceptance": [
+                "spec criterion from document alpha",
+                "spec criterion from document beta"
+            ]
+        }
+    });
+    let out = run_with_stdin(
+        legion_cmd(data).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "kelex",
+            "--id",
+            "FR-DONE-GATE-001",
+            "--surface",
+            "test",
+            "--status",
+            "specified",
+        ]),
+        doc_payload.to_string().as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Create a card with DIFFERENT tasks.acceptance criteria. Without the fix,
+    // the done gate would key on tasks.acceptance and miss the spec criteria.
+    let card = run_ok(legion_cmd(data).args([
+        "kanban",
+        "create",
+        "--from",
+        "kelex",
+        "--to",
+        "kelex",
+        "--text",
+        "spec-bound done gate test",
+        "--context",
+        "## Acceptance criteria\n- card-level criterion only\n",
+    ]))
+    .trim()
+    .to_string();
+
+    // Bind the card to the spec document.
+    run_ok(legion_cmd(data).args([
+        "kanban",
+        "bind",
+        "--id",
+        &card,
+        "--document",
+        "FR-DONE-GATE-001",
+    ]));
+
+    // Promote through the lifecycle: Backlog -> Pending -> Accepted.
+    run_ok(legion_cmd(data).args(["kanban", "assign", "--id", &card, "--to", "kelex"]));
+    run_ok(legion_cmd(data).args(["kanban", "accept", "--id", &card]));
+
+    // Done must be refused: no verify verdict yet.
+    let (_stdout, stderr) = run_fail(
+        legion_cmd(data).args(["done", "--repo", "kelex", "--text", "done", "--id", &card]),
+    );
+    assert!(
+        stderr.contains("verify verdict") || stderr.contains("acceptance criteria"),
+        "expected a verify-gate block, got: {stderr}"
+    );
+
+    // Record a clean verify verdict against the SPEC criteria (not card criteria).
+    let verdicts = data.join("spec_verdicts.json");
+    std::fs::write(
+        &verdicts,
+        r#"[
+          {"criterion":"spec criterion from document alpha","verdict":"pass","evidence":"tests::spec_alpha_passes"},
+          {"criterion":"spec criterion from document beta","verdict":"pass","evidence":"src/test.rs:42 returns expected"}
+        ]"#,
+    )
+    .unwrap();
+    run_ok(legion_cmd(data).args([
+        "verify",
+        "--repo",
+        "kelex",
+        "--card",
+        &card,
+        "--verdicts-file",
+        verdicts.to_str().unwrap(),
+    ]));
+
+    // Done now succeeds -- the gate accepted the spec criteria verdict.
+    let stdout = run_ok(legion_cmd(data).args([
+        "done",
+        "--repo",
+        "kelex",
+        "--text",
+        "spec gate passed",
+        "--id",
+        &card,
+    ]));
+    assert!(
+        stdout.trim() == card,
+        "expected done to echo the card id, got: {stdout}"
+    );
+}
+
+// #644: unbound card gates on tasks.acceptance exactly as before. This test
+// verifies the fallback path is not broken by the spec-aware change.
+#[test]
+fn done_gate_unbound_card_keys_on_tasks_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    let card = run_ok(legion_cmd(data).args([
+        "kanban",
+        "create",
+        "--from",
+        "kelex",
+        "--to",
+        "kelex",
+        "--text",
+        "unbound done gate test",
+        "--context",
+        "## Acceptance criteria\n- unbound crit one\n- unbound crit two\n",
+    ]))
+    .trim()
+    .to_string();
+
+    run_ok(legion_cmd(data).args(["kanban", "assign", "--id", &card, "--to", "kelex"]));
+    run_ok(legion_cmd(data).args(["kanban", "accept", "--id", &card]));
+
+    // No verify verdict -> Done blocked, error mentions ac source "card".
+    let (_stdout, stderr) = run_fail(
+        legion_cmd(data).args(["done", "--repo", "kelex", "--text", "done", "--id", &card]),
+    );
+    assert!(
+        stderr.contains("ac source: card"),
+        "error must identify ac source as 'card' for unbound card, got: {stderr}"
+    );
+
+    // Record a clean verdict for the card's own criteria.
+    let verdicts = data.join("card_verdicts.json");
+    std::fs::write(
+        &verdicts,
+        r#"[
+          {"criterion":"unbound crit one","verdict":"pass","evidence":"tests::unbound_one"},
+          {"criterion":"unbound crit two","verdict":"pass","evidence":"src/t.rs:10 returns ok"}
+        ]"#,
+    )
+    .unwrap();
+    run_ok(legion_cmd(data).args([
+        "verify",
+        "--repo",
+        "kelex",
+        "--card",
+        &card,
+        "--verdicts-file",
+        verdicts.to_str().unwrap(),
+    ]));
+
+    // Done succeeds.
+    run_ok(legion_cmd(data).args([
+        "done",
+        "--repo",
+        "kelex",
+        "--text",
+        "unbound done",
+        "--id",
+        &card,
+    ]));
+}
+
+// #644: the Done gate error for a spec-bound card must identify the spec source
+// so the operator knows which document to inspect. The unit test
+// `resolve_ac_hard_errors_on_dangling_document_id` in src/cli/verify.rs covers
+// the dangling-document_id hard-error path; this integration test exercises the
+// observable error surface (the "ac source: spec:<id>" label) via the Done gate
+// when a bound card has no verify verdict yet.
+//
+// Note: a true dangling document_id cannot be produced via the CLI (kanban bind
+// requires the doc to exist, get_document returns archived rows, and there is no
+// `document delete` surface). The unit test in verify.rs covers that path
+// directly against the database layer.
+#[test]
+fn done_gate_bound_card_error_names_spec_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    // Create a requirement document.
+    let doc_payload = serde_json::json!({
+        "meta": {
+            "id": "FR-DANGLE-001",
+            "type": "requirement",
+            "surface": "test",
+            "status": "specified",
+            "priority": "SHALL",
+            "owner": "kelex",
+            "date": "2026-06-12",
+            "author": "test"
+        },
+        "title": "Dangle test",
+        "description": "Used to test dangling document_id.",
+        "traces_to": "user-story-2",
+        "depends_on": [],
+        "verification": {
+            "acceptance": ["dangle crit one"]
+        }
+    });
+    let out = run_with_stdin(
+        legion_cmd(data).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "kelex",
+            "--id",
+            "FR-DANGLE-001",
+            "--surface",
+            "test",
+            "--status",
+            "specified",
+        ]),
+        doc_payload.to_string().as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Create and bind a card.
+    let card = run_ok(legion_cmd(data).args([
+        "kanban",
+        "create",
+        "--from",
+        "kelex",
+        "--to",
+        "kelex",
+        "--text",
+        "dangling doc test",
+    ]))
+    .trim()
+    .to_string();
+
+    run_ok(legion_cmd(data).args([
+        "kanban",
+        "bind",
+        "--id",
+        &card,
+        "--document",
+        "FR-DANGLE-001",
+    ]));
+    run_ok(legion_cmd(data).args(["kanban", "assign", "--id", &card, "--to", "kelex"]));
+    run_ok(legion_cmd(data).args(["kanban", "accept", "--id", &card]));
+
+    // Done gate is blocked: bound card with spec criteria but no verify verdict.
+    // This exercises the gate reading from spec source (spec:FR-DANGLE-001).
+    let (_stdout, stderr) = run_fail(
+        legion_cmd(data).args(["done", "--repo", "kelex", "--text", "done", "--id", &card]),
+    );
+    // The error names the spec source so the operator knows which document to look at.
+    assert!(
+        stderr.contains("ac source: spec:FR-DANGLE-001"),
+        "error must identify spec source with document id, got: {stderr}"
+    );
+}
