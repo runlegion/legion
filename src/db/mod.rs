@@ -29,7 +29,8 @@ mod wake;
 pub use audit::AuditInput;
 pub use kanban::CardTimestamp;
 pub use reflections::{Reflection, ReflectionMeta};
-pub use schedules::validate_hhmm;
+pub use schedules::{Schedule, validate_hhmm};
+pub use stats::DashboardRepoStats;
 
 use std::path::Path;
 

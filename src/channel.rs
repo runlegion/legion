@@ -67,6 +67,64 @@ pub struct ChannelState {
     pub tx: broadcast::Sender<ChannelEvent>,
 }
 
+/// Error type for every serve.rs and channel.rs HTTP handler (#613).
+///
+/// Implements `IntoResponse`, so handlers return `Result<_, ServeError>` and
+/// propagate failures with `?` instead of hand-writing the same
+/// match-to-json-error block per call site. The wire shape -- a JSON body of
+/// `{"error": <message>}` with the matching status code -- and the
+/// per-endpoint message prefixes (e.g. "query error: ...", "status error:
+/// ...") are part of the public contract and are preserved exactly.
+#[derive(Debug, thiserror::Error)]
+pub enum ServeError {
+    /// The legion database could not be opened. Always 500.
+    #[error("failed to open database")]
+    DbOpen,
+    /// The search index could not be opened. Always 500.
+    #[error("failed to open search index")]
+    IndexOpen,
+    /// Internal failure with a handler-chosen message. 500.
+    #[error("{0}")]
+    Internal(String),
+    /// Caller error. 400.
+    #[error("{0}")]
+    BadRequest(String),
+    /// Resource missing. 404.
+    #[error("{0}")]
+    NotFound(String),
+}
+
+impl ServeError {
+    /// Internal error with a contextual prefix, preserving the per-endpoint
+    /// message conventions ("status error: <e>", "insert error: <e>", ...).
+    pub fn internal(context: &str, e: impl std::fmt::Display) -> Self {
+        ServeError::Internal(format!("{context}: {e}"))
+    }
+}
+
+/// The dominant handler convention: a `LegionError` escaping a handler is a
+/// query failure and renders as 500 `{"error": "query error: <e>"}`. Sites
+/// with a different deliberate prefix call `ServeError::internal` explicitly.
+impl From<LegionError> for ServeError {
+    fn from(e: LegionError) -> Self {
+        ServeError::internal("query error", e)
+    }
+}
+
+impl IntoResponse for ServeError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            ServeError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ServeError::NotFound(_) => StatusCode::NOT_FOUND,
+            ServeError::DbOpen | ServeError::IndexOpen | ServeError::Internal(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        let body = serde_json::json!({ "error": self.to_string() });
+        (status, Json(body)).into_response()
+    }
+}
+
 /// Feed item returned by GET /api/feed. Field names (snake_case) and is_signal flag are part of the
 /// public JSON contract -- changing them breaks dashboard and external tooling.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -100,26 +158,22 @@ pub fn router(state: ChannelState) -> Router {
         .with_state(state)
 }
 
-/// Open a Database from the data_dir. Maps failure to a 500 status and logs.
-fn open_db(data_dir: &std::path::Path) -> Result<Database, StatusCode> {
+/// Open a Database from the data_dir. Logs and maps failure to
+/// `ServeError::DbOpen` (renders as 500 "failed to open database").
+pub(crate) fn open_db(data_dir: &std::path::Path) -> Result<Database, ServeError> {
     Database::open(&data_dir.join("legion.db")).map_err(|e| {
         eprintln!("[legion channel] open_db failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
+        ServeError::DbOpen
     })
 }
 
-/// Open the search index from the data_dir.
-fn open_index(data_dir: &std::path::Path) -> Result<SearchIndex, StatusCode> {
+/// Open the search index from the data_dir. Logs and maps failure to
+/// `ServeError::IndexOpen` (renders as 500 "failed to open search index").
+pub(crate) fn open_index(data_dir: &std::path::Path) -> Result<SearchIndex, ServeError> {
     SearchIndex::open(&data_dir.join("index")).map_err(|e| {
         eprintln!("[legion channel] open_index failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
+        ServeError::IndexOpen
     })
-}
-
-/// JSON error response helper (mirrors serve.rs).
-fn json_error(status: StatusCode, message: &str) -> Response {
-    let body = serde_json::json!({ "error": message });
-    (status, Json(body)).into_response()
 }
 
 /// GET /api/feed -- bullpen posts with optional repo and signal/musing filter.
@@ -131,32 +185,13 @@ fn json_error(status: StatusCode, message: &str) -> Response {
 pub async fn api_feed(
     State(state): State<ChannelState>,
     Query(params): Query<FeedQuery>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<Vec<FeedItem>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     let posts = if let Some(reader) = params.unread_for.as_deref() {
-        match db.get_and_mark_unread_board_posts(reader) {
-            Ok(p) => p,
-            Err(e) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("query error: {e}"),
-                );
-            }
-        }
+        db.get_and_mark_unread_board_posts(reader)?
     } else {
-        match db.get_board_posts() {
-            Ok(p) => p,
-            Err(e) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("query error: {e}"),
-                );
-            }
-        }
+        db.get_board_posts()?
     };
 
     let repo_filter = params.repo.as_deref().unwrap_or("all");
@@ -189,23 +224,15 @@ pub async fn api_feed(
         .take(FEED_LIMIT)
         .collect();
 
-    Json(items).into_response()
+    Ok(Json(items))
 }
 
 /// GET /api/tasks -- all tasks serialized as the legacy Task shape.
-pub async fn api_tasks(State(state): State<ChannelState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match db.get_all_tasks() {
-        Ok(tasks) => Json(tasks).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+pub async fn api_tasks(
+    State(state): State<ChannelState>,
+) -> Result<Json<Vec<crate::task::Task>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(db.get_all_tasks()?))
 }
 
 /// POST /api/post request body.
@@ -223,46 +250,32 @@ pub struct PostRequest {
 pub async fn api_post(
     State(state): State<ChannelState>,
     Json(body): Json<PostRequest>,
-) -> Response {
+) -> Result<Json<serde_json::Value>, ServeError> {
     let trimmed = body.text.trim().to_string();
     if trimmed.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "text is required");
+        return Err(ServeError::BadRequest("text is required".to_string()));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    let index = match open_index(&state.data_dir) {
-        Ok(idx) => idx,
-        Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to open search index",
-            );
-        }
-    };
+    let db = open_db(&state.data_dir)?;
+    let index = open_index(&state.data_dir)?;
 
     // TODO(019d7991-2eab): compute and store embedding so this post is similarity-searchable
-    let id = match board::post_from_text_with_meta(
+    let id = board::post_from_text_with_meta(
         &db,
         &index,
         &body.repo,
         &trimmed,
         &ReflectionMeta::default(),
-    ) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("[legion channel] api_post failed: {e}");
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to store post");
-        }
-    };
+    )
+    .map_err(|e| {
+        eprintln!("[legion channel] api_post failed: {e}");
+        ServeError::Internal("failed to store post".to_string())
+    })?;
 
     // Notify SSE subscribers (best-effort; no SSE listeners is not an error).
     let _ = state.tx.send(ChannelEvent::Feed);
 
-    Json(serde_json::json!({ "id": id })).into_response()
+    Ok(Json(serde_json::json!({ "id": id })))
 }
 
 /// SSE handler -- streams feed, tasks, and ping events to subscribers.

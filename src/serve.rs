@@ -14,6 +14,7 @@ use axum::{Json, Router};
 use rust_embed::Embed;
 use tokio::signal;
 
+use crate::channel::ServeError;
 use crate::db::{Database, ReflectionMeta};
 use crate::error;
 use crate::health::HealthSample;
@@ -35,15 +36,10 @@ struct AppState {
 
 /// Open a database connection from the data directory.
 ///
-/// Returns a 500 status code if the database cannot be opened.
-fn open_db(data_dir: &Path) -> Result<Database, StatusCode> {
-    Database::open(&data_dir.join("legion.db")).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-/// JSON error response helper.
-fn json_error(status: StatusCode, message: &str) -> Response {
-    let body = serde_json::json!({ "error": message });
-    (status, Json(body)).into_response()
+/// Renders as 500 {"error": "failed to open database"} when propagated
+/// from a handler with `?`.
+fn open_db(data_dir: &Path) -> Result<Database, ServeError> {
+    Database::open(&data_dir.join("legion.db")).map_err(|_| ServeError::DbOpen)
 }
 
 /// Resolve the daemon pidfile path. Lives under XDG_STATE_HOME (same root
@@ -361,26 +357,16 @@ struct AgentInfo {
 }
 
 /// GET /api/agents -- per-repo agent overview with unread counts.
-async fn api_agents(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+async fn api_agents(State(state): State<AppState>) -> Result<Json<Vec<AgentInfo>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
-    let stats = match db.get_dashboard_stats() {
-        Ok(s) => s,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("query error: {e}"),
-            );
-        }
-    };
+    let stats = db.get_dashboard_stats()?;
 
-    let unread_map: HashMap<String, u64> = match db.get_unread_counts_all() {
-        Ok(counts) => counts.into_iter().collect(),
-        Err(_) => HashMap::new(),
-    };
+    let unread_map: HashMap<String, u64> = db
+        .get_unread_counts_all()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
     let agents: Vec<AgentInfo> = stats
         .into_iter()
@@ -394,7 +380,7 @@ async fn api_agents(State(state): State<AppState>) -> Response {
         })
         .collect();
 
-    Json(agents).into_response()
+    Ok(Json(agents))
 }
 
 /// Feed item returned by GET /api/feed.
@@ -423,34 +409,18 @@ struct FeedQuery {
 /// GET /api/feed -- bullpen posts with optional repo and signal/musing filter.
 /// When `unread_for=<repo>` is set, returns only posts unread by that repo
 /// and atomically marks them as read so the same post is never delivered twice.
-async fn api_feed(State(state): State<AppState>, Query(params): Query<FeedQuery>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+async fn api_feed(
+    State(state): State<AppState>,
+    Query(params): Query<FeedQuery>,
+) -> Result<Json<Vec<FeedItem>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     // When `unread_for` is set, use the atomic unread-and-mark query so the
     // channel backlog delivers each post exactly once across connections.
     let posts = if let Some(reader) = params.unread_for.as_deref() {
-        match db.get_and_mark_unread_board_posts(reader) {
-            Ok(p) => p,
-            Err(e) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("query error: {e}"),
-                );
-            }
-        }
+        db.get_and_mark_unread_board_posts(reader)?
     } else {
-        match db.get_board_posts() {
-            Ok(p) => p,
-            Err(e) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("query error: {e}"),
-                );
-            }
-        }
+        db.get_board_posts()?
     };
 
     let repo_filter = params.repo.as_deref().unwrap_or("all");
@@ -480,39 +450,23 @@ async fn api_feed(State(state): State<AppState>, Query(params): Query<FeedQuery>
         })
         .collect();
 
-    Json(items).into_response()
+    Ok(Json(items))
 }
 
 /// GET /api/tasks -- all tasks for kanban view.
-async fn api_tasks(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match db.get_all_tasks() {
-        Ok(tasks) => Json(tasks).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+async fn api_tasks(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::task::Task>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(db.get_all_tasks()?))
 }
 
 /// GET /api/stats -- per-repo dashboard stats (same data as agents minus unread).
-async fn api_stats(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match db.get_dashboard_stats() {
-        Ok(stats) => Json(stats).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+async fn api_stats(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::db::DashboardRepoStats>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(db.get_dashboard_stats()?))
 }
 
 /// A parsed signal with source metadata for the signals API.
@@ -528,21 +482,9 @@ struct SignalItem {
 }
 
 /// GET /api/signals -- unresolved signals from the bullpen.
-async fn api_signals(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    let posts = match db.get_board_posts() {
-        Ok(p) => p,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("query error: {e}"),
-            );
-        }
-    };
+async fn api_signals(State(state): State<AppState>) -> Result<Json<Vec<SignalItem>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    let posts = db.get_board_posts()?;
 
     let items: Vec<SignalItem> = posts
         .into_iter()
@@ -561,7 +503,7 @@ async fn api_signals(State(state): State<AppState>) -> Response {
         })
         .collect();
 
-    Json(items).into_response()
+    Ok(Json(items))
 }
 
 /// Query parameters for GET /api/status.
@@ -571,45 +513,38 @@ struct StatusQuery {
 }
 
 /// GET /api/status?repo=<name> -- agent status overview.
-async fn api_status(State(state): State<AppState>, Query(params): Query<StatusQuery>) -> Response {
+async fn api_status(
+    State(state): State<AppState>,
+    Query(params): Query<StatusQuery>,
+) -> Result<Response, ServeError> {
     let repo = params.repo.trim();
     if repo.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "repo parameter is required");
+        return Err(ServeError::BadRequest(
+            "repo parameter is required".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match status::get_status(&db, repo) {
-        Ok(output) => Json(output).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("status error: {e}"),
-        ),
-    }
+    let db = open_db(&state.data_dir)?;
+    let output =
+        status::get_status(&db, repo).map_err(|e| ServeError::internal("status error", e))?;
+    Ok(Json(output).into_response())
 }
 
 /// GET /api/needs?repo=<name> -- team help opportunities for an agent.
-async fn api_needs(State(state): State<AppState>, Query(params): Query<StatusQuery>) -> Response {
+async fn api_needs(
+    State(state): State<AppState>,
+    Query(params): Query<StatusQuery>,
+) -> Result<Response, ServeError> {
     let repo = params.repo.trim();
     if repo.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "repo parameter is required");
+        return Err(ServeError::BadRequest(
+            "repo parameter is required".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match status::get_needs(&db, repo) {
-        Ok(items) => Json(items).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("needs error: {e}"),
-        ),
-    }
+    let db = open_db(&state.data_dir)?;
+    let items = status::get_needs(&db, repo).map_err(|e| ServeError::internal("needs error", e))?;
+    Ok(Json(items).into_response())
 }
 
 /// Request body for POST /api/done.
@@ -620,43 +555,25 @@ struct DoneRequest {
 }
 
 /// POST /api/done -- announce completed work and notify blocked agents.
-async fn api_done(State(state): State<AppState>, Json(body): Json<DoneRequest>) -> Response {
+async fn api_done(
+    State(state): State<AppState>,
+    Json(body): Json<DoneRequest>,
+) -> Result<Json<status::DoneResult>, ServeError> {
     let repo = body.repo.trim();
     let text = body.text.trim();
     if repo.is_empty() || text.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "repo and text are required");
+        return Err(ServeError::BadRequest(
+            "repo and text are required".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    let index = match open_search_index(&state.data_dir) {
-        Ok(idx) => idx,
-        Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to open search index",
-            );
-        }
-    };
+    let db = open_db(&state.data_dir)?;
+    let index = open_search_index(&state.data_dir)?;
 
     let announcement = format!("{repo} completed: {text}");
-    let reflection = match db.insert_reflection_with_meta(
-        repo,
-        &announcement,
-        "team",
-        &ReflectionMeta::default(),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("insert error: {e}"),
-            );
-        }
-    };
+    let reflection = db
+        .insert_reflection_with_meta(repo, &announcement, "team", &ReflectionMeta::default())
+        .map_err(|e| ServeError::internal("insert error", e))?;
 
     let _ = index.add(&reflection.id, &reflection.repo, &announcement);
 
@@ -674,11 +591,10 @@ async fn api_done(State(state): State<AppState>, Json(body): Json<DoneRequest>) 
         }
     }
 
-    Json(status::DoneResult {
+    Ok(Json(status::DoneResult {
         announcement,
         notified,
-    })
-    .into_response()
+    }))
 }
 
 /// Request body for POST /api/post.
@@ -689,69 +605,49 @@ struct PostRequest {
 }
 
 /// Open the search index from the data directory.
-fn open_search_index(data_dir: &Path) -> Result<SearchIndex, StatusCode> {
-    SearchIndex::open(&data_dir.join("index")).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+///
+/// Renders as 500 {"error": "failed to open search index"} when propagated
+/// from a handler with `?`.
+fn open_search_index(data_dir: &Path) -> Result<SearchIndex, ServeError> {
+    SearchIndex::open(&data_dir.join("index")).map_err(|_| ServeError::IndexOpen)
 }
 
 /// POST /api/post -- broadcast a message to the bullpen.
-async fn api_post(State(state): State<AppState>, Json(body): Json<PostRequest>) -> Response {
+async fn api_post(
+    State(state): State<AppState>,
+    Json(body): Json<PostRequest>,
+) -> Result<Json<crate::db::Reflection>, ServeError> {
     let trimmed = body.text.trim();
     if trimmed.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "text is required");
+        return Err(ServeError::BadRequest("text is required".to_string()));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+    let db = open_db(&state.data_dir)?;
+    let index = open_search_index(&state.data_dir)?;
 
-    let index = match open_search_index(&state.data_dir) {
-        Ok(idx) => idx,
-        Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to open search index",
-            );
-        }
-    };
-
-    let reflection = match db.insert_reflection_with_meta(
-        &body.repo,
-        trimmed,
-        "team",
-        &ReflectionMeta::default(),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("insert error: {e}"),
-            );
-        }
-    };
+    let reflection = db
+        .insert_reflection_with_meta(&body.repo, trimmed, "team", &ReflectionMeta::default())
+        .map_err(|e| ServeError::internal("insert error", e))?;
 
     // Best-effort add to search index; post is already in DB.
     if let Err(e) = index.add(&reflection.id, &reflection.repo, trimmed) {
         eprintln!("[legion] search index add failed: {e}");
     }
 
-    Json(reflection).into_response()
+    Ok(Json(reflection))
 }
 
 /// POST /api/boost/:id -- boost a reflection's recall count.
-async fn api_boost(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+async fn api_boost(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     match db.boost_reflection(&id) {
-        Ok(true) => Json(serde_json::json!({"ok": true})).into_response(),
-        Ok(false) => json_error(StatusCode::NOT_FOUND, "reflection not found"),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("boost error: {e}"),
-        ),
+        Ok(true) => Ok(Json(serde_json::json!({"ok": true}))),
+        Ok(false) => Err(ServeError::NotFound("reflection not found".to_string())),
+        Err(e) => Err(ServeError::internal("boost error", e)),
     }
 }
 
@@ -769,61 +665,45 @@ struct CreateTaskRequest {
 async fn api_create_task(
     State(state): State<AppState>,
     Json(body): Json<CreateTaskRequest>,
-) -> Response {
+) -> Result<(StatusCode, Json<crate::task::Task>), ServeError> {
     let text = body.text.trim().to_string();
     if text.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "text is required");
+        return Err(ServeError::BadRequest("text is required".to_string()));
     }
     if body.to.trim().is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "to is required");
+        return Err(ServeError::BadRequest("to is required".to_string()));
     }
     if !["low", "med", "high"].contains(&body.priority.as_str()) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "priority must be low, med, or high",
-        );
+        return Err(ServeError::BadRequest(
+            "priority must be low, med, or high".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+    let db = open_db(&state.data_dir)?;
 
     let context_ref = body.context.as_deref().filter(|c| !c.trim().is_empty());
 
-    let id = match db.insert_task(
-        &body.from,
-        body.to.trim(),
-        &text,
-        context_ref,
-        &body.priority,
-    ) {
-        Ok(id) => id,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("insert error: {e}"),
-            );
-        }
-    };
+    let id = db
+        .insert_task(
+            &body.from,
+            body.to.trim(),
+            &text,
+            context_ref,
+            &body.priority,
+        )
+        .map_err(|e| ServeError::internal("insert error", e))?;
 
     let task = match db.get_task_by_id(&id) {
         Ok(Some(t)) => t,
         Ok(None) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "task created but not found",
-            );
+            return Err(ServeError::Internal(
+                "task created but not found".to_string(),
+            ));
         }
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("fetch error: {e}"),
-            );
-        }
+        Err(e) => return Err(ServeError::internal("fetch error", e)),
     };
 
-    (StatusCode::CREATED, Json(task)).into_response()
+    Ok((StatusCode::CREATED, Json(task)))
 }
 
 /// Optional request body for task state transitions.
@@ -836,15 +716,13 @@ struct TaskTransitionBody {
 async fn api_task_accept(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-    match crate::task::accept_task(&db, &id) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
-    }
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    // Task-domain errors (unknown id, illegal transition) render as 400
+    // with the bare error message -- a deliberate divergence from the
+    // 500 "query error" convention, preserved from the original handlers.
+    crate::task::accept_task(&db, &id).map_err(|e| ServeError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// POST /api/tasks/:id/done -- complete an accepted task.
@@ -852,16 +730,12 @@ async fn api_task_done(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     body: Option<Json<TaskTransitionBody>>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
     let note = body.and_then(|b| b.note.clone());
-    match crate::task::complete_task(&db, &id, note.as_deref()) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
-    }
+    crate::task::complete_task(&db, &id, note.as_deref())
+        .map_err(|e| ServeError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// POST /api/tasks/:id/block -- block an accepted task.
@@ -869,31 +743,22 @@ async fn api_task_block(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     body: Option<Json<TaskTransitionBody>>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
     let reason = body.and_then(|b| b.note.clone());
-    match crate::task::block_task(&db, &id, reason.as_deref()) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
-    }
+    crate::task::block_task(&db, &id, reason.as_deref())
+        .map_err(|e| ServeError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// POST /api/tasks/:id/unblock -- unblock a blocked task.
 async fn api_task_unblock(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-    match crate::task::unblock_task(&db, &id) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
-    }
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    crate::task::unblock_task(&db, &id).map_err(|e| ServeError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// Query parameters for GET /api/chat.
@@ -912,26 +777,19 @@ struct ChatMessage {
 }
 
 /// GET /api/chat?agent=<name> -- filtered conversation between meatbag and an agent.
-async fn api_chat(State(state): State<AppState>, Query(params): Query<ChatQuery>) -> Response {
+async fn api_chat(
+    State(state): State<AppState>,
+    Query(params): Query<ChatQuery>,
+) -> Result<Json<Vec<ChatMessage>>, ServeError> {
     let agent = params.agent.trim().to_lowercase();
     if agent.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "agent parameter is required");
+        return Err(ServeError::BadRequest(
+            "agent parameter is required".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    let posts = match db.get_board_posts() {
-        Ok(p) => p,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("query error: {e}"),
-            );
-        }
-    };
+    let db = open_db(&state.data_dir)?;
+    let posts = db.get_board_posts()?;
 
     let at_agent = format!("@{agent}");
     let at_meatbag = "@meatbag";
@@ -966,23 +824,15 @@ async fn api_chat(State(state): State<AppState>, Query(params): Query<ChatQuery>
         messages = messages.split_off(start);
     }
 
-    Json(messages).into_response()
+    Ok(Json(messages))
 }
 
 /// GET /api/schedules -- list all schedules.
-async fn api_schedules(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match db.list_schedules() {
-        Ok(schedules) => Json(schedules).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+async fn api_schedules(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::db::Schedule>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(db.list_schedules()?))
 }
 
 /// Request body for POST /api/schedules/create.
@@ -1000,71 +850,56 @@ struct CreateScheduleRequest {
 async fn api_create_schedule(
     State(state): State<AppState>,
     Json(body): Json<CreateScheduleRequest>,
-) -> Response {
+) -> Result<Json<serde_json::Value>, ServeError> {
     let name = body.name.trim();
     if name.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "name is required");
+        return Err(ServeError::BadRequest("name is required".to_string()));
     }
     let command = body.command.trim();
     if command.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "command is required");
+        return Err(ServeError::BadRequest("command is required".to_string()));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+    let db = open_db(&state.data_dir)?;
 
-    match db.insert_schedule(
-        name,
-        &body.cron,
-        command,
-        &body.repo,
-        body.active_start.as_deref(),
-        body.active_end.as_deref(),
-    ) {
-        Ok(id) => Json(serde_json::json!({"ok": true, "id": id})).into_response(),
-        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("create error: {e}")),
-    }
+    // Insert failures are caller errors (bad cron expression, bad time
+    // window), so they render as 400 -- preserved from the original handler.
+    let id = db
+        .insert_schedule(
+            name,
+            &body.cron,
+            command,
+            &body.repo,
+            body.active_start.as_deref(),
+            body.active_end.as_deref(),
+        )
+        .map_err(|e| ServeError::BadRequest(format!("create error: {e}")))?;
+
+    Ok(Json(serde_json::json!({"ok": true, "id": id})))
 }
 
 /// POST /api/schedules/:id/toggle -- toggle a schedule's enabled state.
 async fn api_toggle_schedule(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     // Read current state to toggle it
-    let schedules = match db.list_schedules() {
-        Ok(s) => s,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("query error: {e}"),
-            );
-        }
-    };
+    let schedules = db.list_schedules()?;
 
-    let current = schedules.iter().find(|s| s.id == id);
-    match current {
-        None => json_error(StatusCode::NOT_FOUND, "schedule not found"),
-        Some(s) => {
-            let new_enabled = !s.enabled;
-            match db.toggle_schedule(&id, new_enabled) {
-                Ok(true) => {
-                    Json(serde_json::json!({"ok": true, "enabled": new_enabled})).into_response()
-                }
-                Ok(false) => json_error(StatusCode::NOT_FOUND, "schedule not found"),
-                Err(e) => json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("toggle error: {e}"),
-                ),
-            }
-        }
+    let current = schedules
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| ServeError::NotFound("schedule not found".to_string()))?;
+
+    let new_enabled = !current.enabled;
+    match db.toggle_schedule(&id, new_enabled) {
+        Ok(true) => Ok(Json(
+            serde_json::json!({"ok": true, "enabled": new_enabled}),
+        )),
+        Ok(false) => Err(ServeError::NotFound("schedule not found".to_string())),
+        Err(e) => Err(ServeError::internal("toggle error", e)),
     }
 }
 
@@ -1076,25 +911,19 @@ struct HealthQuery {
 }
 
 /// GET /api/health -- latest health samples per host + recent history.
-async fn api_health(State(state): State<AppState>, Query(params): Query<HealthQuery>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+async fn api_health(
+    State(state): State<AppState>,
+    Query(params): Query<HealthQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     let minutes = params.minutes.unwrap_or(60);
     let since = chrono::Utc::now() - chrono::Duration::minutes(minutes as i64);
     let since_str = since.to_rfc3339();
 
-    let samples: Vec<HealthSample> = match db.get_health_all_hosts(&since_str) {
-        Ok(s) => s,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("health query error: {e}"),
-            );
-        }
-    };
+    let samples: Vec<HealthSample> = db
+        .get_health_all_hosts(&since_str)
+        .map_err(|e| ServeError::internal("health query error", e))?;
 
     // Group by hostname, return latest + history
     let mut by_host: HashMap<String, Vec<&HealthSample>> = HashMap::new();
@@ -1147,7 +976,7 @@ async fn api_health(State(state): State<AppState>, Query(params): Query<HealthQu
         })
         .collect();
 
-    Json(hosts).into_response()
+    Ok(Json(hosts))
 }
 
 /// Query parameters for GET /api/health/history.
@@ -1163,23 +992,17 @@ struct HealthHistoryQuery {
 async fn api_health_history(
     State(state): State<AppState>,
     Query(params): Query<HealthHistoryQuery>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<Vec<HealthSample>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     let minutes = params.minutes.unwrap_or(60);
     let since = chrono::Utc::now() - chrono::Duration::minutes(minutes as i64);
     let since_str = since.to_rfc3339();
 
-    match db.get_health_history(&params.hostname, &since_str) {
-        Ok(samples) => Json(samples).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("health history error: {e}"),
-        ),
-    }
+    let samples = db
+        .get_health_history(&params.hostname, &since_str)
+        .map_err(|e| ServeError::internal("health history error", e))?;
+    Ok(Json(samples))
 }
 
 /// Query parameters for GET /api/search.
@@ -1194,23 +1017,22 @@ struct SearchQuery {
 }
 
 /// GET /api/search -- BM25-ranked reflection search.
-async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQuery>) -> Response {
+async fn api_search(
+    State(state): State<AppState>,
+    Query(params): Query<SearchQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ServeError> {
     let q = params.q.trim();
     if q.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "q parameter is required");
+        return Err(ServeError::BadRequest(
+            "q parameter is required".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    let index = match open_search_index(&state.data_dir) {
-        Ok(idx) => idx,
-        Err(_) => {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "search index error");
-        }
-    };
+    let db = open_db(&state.data_dir)?;
+    // Preserved wire message: this endpoint reported index-open failure as
+    // "search index error", not the shared "failed to open search index".
+    let index = open_search_index(&state.data_dir)
+        .map_err(|_| ServeError::Internal("search index error".to_string()))?;
 
     let limit = params.limit.unwrap_or(10).min(50);
 
@@ -1218,27 +1040,12 @@ async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQu
         Some(repo) => index.search(repo, q, limit),
         None => index.search_all(q, limit),
     };
-
-    let hits = match hits {
-        Ok(hits) => hits,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("search error: {e}"),
-            );
-        }
-    };
+    let hits = hits.map_err(|e| ServeError::internal("search error", e))?;
 
     let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
-    let reflections = match db.get_reflections_by_ids(&ids) {
-        Ok(r) => r,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("reflection lookup error: {e}"),
-            );
-        }
-    };
+    let reflections = db
+        .get_reflections_by_ids(&ids)
+        .map_err(|e| ServeError::internal("reflection lookup error", e))?;
 
     // Build score map from search hits, then return reflections in score order
     let score_map: HashMap<&str, f32> = hits.iter().map(|h| (h.id.as_str(), h.score)).collect();
@@ -1263,7 +1070,7 @@ async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQu
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    Json(results).into_response()
+    Ok(Json(results))
 }
 
 /// Query parameters for GET /api/audit.
@@ -1278,37 +1085,26 @@ struct AuditQuery {
 }
 
 /// GET /api/audit -- recent audit log entries.
-async fn api_audit(State(state): State<AppState>, Query(params): Query<AuditQuery>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+async fn api_audit(
+    State(state): State<AppState>,
+    Query(params): Query<AuditQuery>,
+) -> Result<Response, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     let limit = params.limit.unwrap_or(50).min(200);
 
-    match db.query_audit_log(params.agent.as_deref(), params.action.as_deref(), limit) {
-        Ok(entries) => Json(entries).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("audit query error: {e}"),
-        ),
-    }
+    let entries = db
+        .query_audit_log(params.agent.as_deref(), params.action.as_deref(), limit)
+        .map_err(|e| ServeError::internal("audit query error", e))?;
+    Ok(Json(entries).into_response())
 }
 
 /// GET /api/kanban -- all kanban cards for the board view.
-async fn api_kanban(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match crate::kanban::board_cards(&db) {
-        Ok(cards) => Json(cards).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+async fn api_kanban(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::kanban::Card>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(crate::kanban::board_cards(&db)?))
 }
 
 /// Request body for POST /api/kanban/{id}/move.
@@ -1323,40 +1119,25 @@ async fn api_kanban_move(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(body): Json<KanbanMoveRequest>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
-    let new_status = match body.status.parse::<crate::kanban::CardStatus>() {
-        Ok(s) => s,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid status: {e}")),
-    };
+    let new_status = body
+        .status
+        .parse::<crate::kanban::CardStatus>()
+        .map_err(|e| ServeError::BadRequest(format!("invalid status: {e}")))?;
 
-    match crate::kanban::force_move(&db, &id, new_status, body.sort_order) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("move failed: {e}"),
-        ),
-    }
+    crate::kanban::force_move(&db, &id, new_status, body.sort_order)
+        .map_err(|e| ServeError::internal("move failed", e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// GET /api/kanban/workloads -- per-agent workload summary for the agent strip.
-async fn api_kanban_workloads(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match crate::kanban::agent_workloads(&db) {
-        Ok(workloads) => Json(workloads).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+async fn api_kanban_workloads(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::kanban::AgentWorkload>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(crate::kanban::agent_workloads(&db)?))
 }
 
 /// Query parameters for GET /api/telemetry/bypasses.
@@ -1375,27 +1156,20 @@ struct TelemetryQuery {
 /// uncertainty engine consumer (#354). Reads bypass.jsonl directly;
 /// the file is append-only, so even if the legion DB is unavailable
 /// this endpoint still works.
-async fn api_telemetry_bypasses(Query(params): Query<TelemetryQuery>) -> Response {
+async fn api_telemetry_bypasses(
+    Query(params): Query<TelemetryQuery>,
+) -> Result<Response, ServeError> {
     let since_dur = match params.since.as_deref() {
-        Some(s) => match crate::telemetry::parse_duration(s) {
-            Ok(d) => Some(d),
-            Err(e) => {
-                return json_error(StatusCode::BAD_REQUEST, &format!("invalid since: {e}"));
-            }
-        },
+        Some(s) => Some(
+            crate::telemetry::parse_duration(s)
+                .map_err(|e| ServeError::BadRequest(format!("invalid since: {e}")))?,
+        ),
         None => None,
     };
-    let rows = match crate::telemetry::list_bypasses(since_dur, params.repo.as_deref()) {
-        Ok(r) => r,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("read bypass log: {e}"),
-            );
-        }
-    };
+    let rows = crate::telemetry::list_bypasses(since_dur, params.repo.as_deref())
+        .map_err(|e| ServeError::internal("read bypass log", e))?;
     let summary = crate::telemetry::summarize(&rows, params.top.unwrap_or(20));
-    Json(summary).into_response()
+    Ok(Json(summary).into_response())
 }
 
 async fn shutdown_signal() {
