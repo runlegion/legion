@@ -37,12 +37,20 @@ pub enum GateResult {
     Issues,
 }
 
+impl GateResult {
+    /// The serialized column value. Display and the SQL write path both
+    /// delegate here so the wire form has exactly one source.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Issues => "issues",
+        }
+    }
+}
+
 impl fmt::Display for GateResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Clean => write!(f, "clean"),
-            Self::Issues => write!(f, "issues"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -527,13 +535,5 @@ mod tests {
         // handle_verify (write site) and handle_done (read site).
         let key = verify_gate_key("card-abc-123");
         assert_eq!(key, "legion-verify:card-abc-123");
-    }
-
-    #[test]
-    fn verify_gate_key_stable_across_callers() {
-        // Both call sites must produce identical keys for the same card_id.
-        // This test documents the contract rather than testing logic.
-        let card_id = "019e-some-uuid-v7";
-        assert_eq!(verify_gate_key(card_id), format!("legion-verify:{card_id}"));
     }
 }

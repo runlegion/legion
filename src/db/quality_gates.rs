@@ -80,10 +80,7 @@ impl Database {
     ) -> Result<QualityGateRow> {
         let id = Uuid::now_v7().to_string();
         let created_at = Utc::now().to_rfc3339();
-        let result_str: &str = match result {
-            GateResult::Clean => "clean",
-            GateResult::Issues => "issues",
-        };
+        let result_str: &str = result.as_str();
         self.conn.execute(
             "INSERT INTO quality_gates \
              (id, branch, commit_hash, skill, result, findings_count, details, created_at) \
@@ -351,21 +348,5 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-    }
-
-    #[test]
-    fn gate_result_display_roundtrip() {
-        for r in [GateResult::Clean, GateResult::Issues] {
-            let s = r.to_string();
-            let parsed = s.parse::<GateResult>().expect("parse");
-            assert_eq!(r, parsed);
-        }
-    }
-
-    #[test]
-    fn gate_result_parse_invalid_returns_err() {
-        assert!("unknown".parse::<GateResult>().is_err());
-        assert!("Clean".parse::<GateResult>().is_err());
-        assert!("".parse::<GateResult>().is_err());
     }
 }

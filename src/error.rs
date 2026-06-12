@@ -245,14 +245,13 @@ mod tests {
     }
 
     #[test]
-    fn exit_with_carries_code() {
-        // ExitWith must preserve the exact code so callers that differ by code
-        // (e.g. exit(2) for bad --kind vs exit(1) for gate failures) are not collapsed.
-        let err = LegionError::ExitWith(2);
-        assert!(matches!(err, LegionError::ExitWith(2)));
-
-        let err1 = LegionError::ExitWith(1);
-        assert!(matches!(err1, LegionError::ExitWith(1)));
+    fn exit_with_displays_empty() {
+        // main() intercepts ExitWith and exits without printing; the empty
+        // Display is the contract that keeps a stray eprintln!("{e}") from
+        // emitting a blank-prefixed error line if a future refactor reorders
+        // the intercept below the generic printer.
+        assert_eq!(LegionError::ExitWith(1).to_string(), "");
+        assert_eq!(LegionError::ExitWith(2).to_string(), "");
     }
 
     #[test]
