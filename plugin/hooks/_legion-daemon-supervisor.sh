@@ -120,7 +120,21 @@ if [ "$DAEMON_VERSION" = "$LOCAL_VERSION" ]; then
   exit 0
 fi
 
-# Version mismatch: kill stale, spawn fresh.
+# Version mismatch. Who answers the port decides the remedy (#613,
+# absorbed #601): the daemon owns :3131 while it runs, and replacing it
+# with a `legion serve` would silently drop the watch loop. /health now
+# reports a `role` field; a daemon gets bounced in place via
+# daemon-restart (which owns the stop/spawn dance against the daemon's
+# own pidfile). Pre-#613 binaries report no role -- they can only be a
+# `legion serve`, so the kill+spawn path below keeps working for them.
+DAEMON_ROLE=$(echo "$RESPONSE" | jq -r '.role // empty' 2>/dev/null)
+if [ "$DAEMON_ROLE" = "daemon" ]; then
+  echo "[legion-daemon-supervisor] daemon v${DAEMON_VERSION} != local v${LOCAL_VERSION}; restarting daemon in place" >> "$LOG"
+  "$LEGION_BIN" daemon-restart >/dev/null 2>>"$LOG"
+  exit 0
+fi
+
+# Role "serve" (or absent): kill stale serve, spawn fresh.
 echo "[legion-daemon-supervisor] daemon v${DAEMON_VERSION} != local v${LOCAL_VERSION}; replacing" >> "$LOG"
 if [ -f "$PIDFILE" ]; then
   kill_stale_daemon "$(cat "$PIDFILE" 2>/dev/null)"

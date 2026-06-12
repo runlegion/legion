@@ -154,7 +154,7 @@ fn port_available(port: u16) -> bool {
 /// Best-effort: the PID(s) listening on `port`, for naming the holder in the
 /// port-conflict error. Unix-only via `lsof`; returns empty on other platforms
 /// or when `lsof` is unavailable -- the caller degrades to a generic message.
-fn port_listener_pids(port: u16) -> Vec<u32> {
+pub(crate) fn port_listener_pids(port: u16) -> Vec<u32> {
     #[cfg(unix)]
     {
         let output = std::process::Command::new("lsof")
@@ -184,6 +184,16 @@ const SIGKILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 fn read_daemon_pid(pid_path: &Path) -> Option<u32> {
     let contents = std::fs::read_to_string(pid_path).ok()?;
     contents.trim().parse::<u32>().ok()
+}
+
+/// PID of the live daemon tracked by `data_dir/daemon.pid`, if any.
+///
+/// #613 (absorbed #601): lets `legion serve` name the daemon as the port
+/// holder when its own bind fails, instead of emitting a bare bind error.
+/// Stale pidfiles (dead process) read as None.
+pub(crate) fn live_daemon_pid(data_dir: &Path) -> Option<u32> {
+    let pid = read_daemon_pid(&data_dir.join(DAEMON_PID_FILE))?;
+    watch::process_alive(pid).then_some(pid)
 }
 
 /// Send a signal (e.g. "TERM", "KILL") to a process. Unix-only; returns false on
@@ -346,6 +356,7 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
         data_dir: data_dir.clone(),
         tx,
         started_at: chrono::Utc::now(),
+        role: channel::ServerRole::Daemon,
     };
     let app = channel::router(channel_state);
 
@@ -620,6 +631,7 @@ mod tests {
             data_dir: data_dir.clone(),
             tx,
             started_at: chrono::Utc::now(),
+            role: channel::ServerRole::Daemon,
         };
 
         let app = channel::router(state);

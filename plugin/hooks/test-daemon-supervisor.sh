@@ -39,8 +39,9 @@ write_curl_stub() {
 case "$mode" in
   refused) exit 7 ;;
   empty) exit 0 ;;
-  match) echo '{"status":"ok","version":"9.9.9","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
+  match) echo '{"status":"ok","version":"9.9.9","role":"serve","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
   mismatch) echo '{"status":"ok","version":"1.0.0","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
+  mismatch_daemon) echo '{"status":"ok","version":"1.0.0","role":"daemon","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
   malformed) echo 'not json' ;;
 esac
 EOF
@@ -89,6 +90,16 @@ wait
 sleep 0.3
 assert_file_contains "spawned replacement" "$FAKE_SPAWN_LOG" "spawned at"
 assert_file_contains "log notes replacement" "$TEST_LOG" "replaced stale v1.0.0"
+
+echo "==> /health version mismatch with role=daemon -> daemon-restart, never a serve spawn"
+reset_log
+write_curl_stub mismatch_daemon
+bash "$HOOK_PATH"
+wait
+sleep 0.3
+assert_file_contains "daemon bounced in place" "$FAKE_SPAWN_LOG" "daemon-restart at"
+assert_file_not_contains "no serve spawned over the daemon" "$FAKE_SPAWN_LOG" "spawned at"
+assert_file_contains "log notes in-place restart" "$TEST_LOG" "restarting daemon in place"
 
 echo "==> /health malformed JSON -> respawn"
 reset_log

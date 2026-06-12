@@ -101,12 +101,6 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
         // in-process write wakes connected dashboards immediately.
         let (tx, _rx) = crate::channel::new_broadcast();
 
-        // One background task owns schedule firing (#613) -- previously it
-        // ran inside the per-connection SSE stream body, so schedules only
-        // fired while a dashboard was open and fired once per connected
-        // client.
-        let _firing = crate::channel::spawn_schedule_firing(data_dir.clone(), tx.clone());
-
         // The shared endpoint contract (/health, /sse, /api/feed,
         // /api/tasks, /api/post) is owned by channel::router (#613) --
         // one implementation whether the daemon or `legion serve`
@@ -115,8 +109,9 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
         // daemon does not need.
         let channel_state = crate::channel::ChannelState {
             data_dir: data_dir.clone(),
-            tx,
+            tx: tx.clone(),
             started_at: chrono::Utc::now(),
+            role: crate::channel::ServerRole::Serve,
         };
 
         let app = Router::new()
@@ -150,9 +145,10 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .merge(crate::channel::router(channel_state));
 
         let addr = format!("0.0.0.0:{port}");
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| error::LegionError::Server(format!("failed to bind {addr}: {e}")))?;
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => return Err(bind_refusal(port, &data_dir, &addr, &e)),
+        };
 
         eprintln!("[legion] dashboard at http://localhost:{port}");
 
@@ -161,6 +157,13 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
         // PID that the supervisor's "is this process alive" probe would
         // then have to disambiguate.
         write_daemon_pidfile(std::process::id());
+
+        // One background task owns schedule firing (#613) -- previously it
+        // ran inside the per-connection SSE stream body, so schedules only
+        // fired while a dashboard was open and fired once per connected
+        // client. Spawned only after the bind succeeded: a process that
+        // failed to become the server must not produce side effects.
+        let _firing = crate::channel::spawn_schedule_firing(data_dir.clone(), tx);
 
         let serve_result = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
@@ -172,6 +175,32 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
 
         Ok(())
     })
+}
+
+/// Shape the error for a failed `legion serve` bind (#613, absorbed #601).
+///
+/// Port-ownership decision: the daemon owns the port while it runs.
+/// `legion serve` never takes the port over; it refuses with a pointer,
+/// and `legion daemon-stop` is the explicit takeover path. When the data
+/// dir's daemon pidfile names a live process, the error says so -- lsof
+/// confirmation (when available) upgrades "likely owns" to "owns" --
+/// instead of leaving the operator to map a bare EADDRINUSE to the
+/// daemon by hand, which is exactly how the wake-storm recovery went
+/// sideways (recall 019eb03a).
+fn bind_refusal(port: u16, data_dir: &Path, addr: &str, e: &std::io::Error) -> error::LegionError {
+    if let Some(pid) = crate::daemon::live_daemon_pid(data_dir) {
+        let qualifier = if crate::daemon::port_listener_pids(port).contains(&pid) {
+            "owns"
+        } else {
+            "is running and likely owns"
+        };
+        return error::LegionError::Server(format!(
+            "failed to bind {addr}: {e}. The legion daemon (pid {pid}) {qualifier} port {port} -- \
+             it serves the channel API and fires schedules while it runs. Stop it first with \
+             `legion daemon-stop`, or run the dashboard on another port with --port."
+        ));
+    }
+    error::LegionError::Server(format!("failed to bind {addr}: {e}"))
 }
 
 async fn index_handler() -> impl IntoResponse {
@@ -960,5 +989,53 @@ mod tests {
         // Idempotent overwrite.
         write_daemon_pidfile_at(&path, 67890);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "67890");
+    }
+
+    #[test]
+    fn serve_refuses_port_held_by_live_daemon_with_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        // A "live daemon": this test process itself, recorded in the
+        // pidfile path the daemon writes (data_dir/daemon.pid).
+        std::fs::write(
+            dir.path().join("daemon.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        // Hold a port the way the daemon would.
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let err = run_server(port, dir.path().to_path_buf()).expect_err("bind must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legion daemon"),
+            "error must name the daemon as the holder: {msg}"
+        );
+        assert!(
+            msg.contains("daemon-stop"),
+            "error must point at the takeover path: {msg}"
+        );
+        assert!(
+            msg.contains("--port"),
+            "error must offer the alternate-port escape: {msg}"
+        );
+    }
+
+    #[test]
+    fn serve_bind_failure_without_daemon_stays_bare() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let err = run_server(port, dir.path().to_path_buf()).expect_err("bind must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to bind"),
+            "bare bind error expected: {msg}"
+        );
+        assert!(
+            !msg.contains("legion daemon (pid"),
+            "no daemon attribution without a live pidfile: {msg}"
+        );
     }
 }

@@ -72,6 +72,28 @@ pub enum ChannelEvent {
     Tasks,
 }
 
+/// Which server process answers the shared endpoints. Baked into /health
+/// as the `role` field so port-:3131 clients -- above all the SessionStart
+/// supervisor (#321) -- can tell the daemon from a `legion serve` and pick
+/// the right remedy on version mismatch (#613, absorbed #601).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerRole {
+    /// `legion serve`: the dashboard process.
+    Serve,
+    /// `legion daemon`: watch loop + channel HTTP in one process.
+    Daemon,
+}
+
+impl ServerRole {
+    /// Wire value for the /health `role` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ServerRole::Serve => "serve",
+            ServerRole::Daemon => "daemon",
+        }
+    }
+}
+
 /// Shared state for the channel HTTP server.
 #[derive(Clone)]
 pub struct ChannelState {
@@ -80,6 +102,8 @@ pub struct ChannelState {
     /// Wall-clock start of the owning server process. Captured once at boot
     /// so /health (#319) can report uptime without per-request work.
     pub started_at: chrono::DateTime<chrono::Utc>,
+    /// Which process this state belongs to; reported by /health.
+    pub role: ServerRole,
 }
 
 /// Error type for every serve.rs and channel.rs HTTP handler (#613).
@@ -181,7 +205,12 @@ pub fn router(state: ChannelState) -> Router {
 
 /// Pure builder for the `/health` JSON body. Separated from the axum
 /// handler so it's directly unit-testable without spinning up a server.
+///
+/// `role` is additive to the #319 contract (status/version/started_at/
+/// uptime_secs are unchanged): pre-#613 clients ignore it, the supervisor
+/// uses it to pick between respawning a serve and bouncing the daemon.
 fn build_health_body(
+    role: ServerRole,
     started_at: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> serde_json::Value {
@@ -189,6 +218,7 @@ fn build_health_body(
     serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        "role": role.as_str(),
         "started_at": started_at.to_rfc3339(),
         "uptime_secs": uptime_secs,
     })
@@ -202,7 +232,11 @@ fn build_health_body(
 /// `version` field is baked in at compile time from CARGO_PKG_VERSION so
 /// clients can detect protocol drift after a plugin upgrade.
 pub async fn health_endpoint(State(state): State<ChannelState>) -> Json<serde_json::Value> {
-    Json(build_health_body(state.started_at, chrono::Utc::now()))
+    Json(build_health_body(
+        state.role,
+        state.started_at,
+        chrono::Utc::now(),
+    ))
 }
 
 /// Open a Database from the data_dir. Logs and maps failure to
@@ -732,11 +766,15 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:01:30Z")
             .expect("parse")
             .with_timezone(&chrono::Utc);
-        let body = build_health_body(started, now);
+        let body = build_health_body(ServerRole::Serve, started, now);
         assert_eq!(body["status"], "ok");
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["role"], "serve");
         assert_eq!(body["started_at"], "2026-05-10T12:00:00+00:00");
         assert_eq!(body["uptime_secs"], 90);
+
+        let daemon_body = build_health_body(ServerRole::Daemon, started, now);
+        assert_eq!(daemon_body["role"], "daemon");
     }
 
     #[test]
@@ -749,7 +787,7 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T11:59:00Z")
             .expect("parse")
             .with_timezone(&chrono::Utc);
-        let body = build_health_body(started, now);
+        let body = build_health_body(ServerRole::Daemon, started, now);
         assert_eq!(body["uptime_secs"], 0);
     }
 
@@ -793,6 +831,7 @@ mod tests {
             data_dir: data_dir.clone(),
             tx,
             started_at: chrono::Utc::now(),
+            role: ServerRole::Daemon,
         };
         let app = router(state);
 
