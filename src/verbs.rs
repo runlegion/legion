@@ -4,7 +4,43 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::watch::WAKE_WORTHY_VERBS;
+// ---------------------------------------------------------------------------
+// Wake-verb canon
+// ---------------------------------------------------------------------------
+
+/// Verbs whose presence in a directed signal triggers a watch wake (#404, #586).
+///
+/// `--verb` was designed to express intent; this set is the subsection of
+/// intents that warrant spawning an asleep recipient. Other verbs
+/// (`announce`, `ack`, `info`, `answer`, bare `review`) deliver to live
+/// sessions via the channel push but do not page an asleep agent.
+///
+/// The canon (#586) is the set of verbs that actually mean "I need you to act":
+/// `question`, `request`, `handoff`, `correction`, `proposal`, `decision`,
+/// `rfc`, `routing`. The original #404 set carried `help` and `blocker`, but
+/// those are *statuses* (`request:help`, `review:blocker`), not bare verbs --
+/// they decorated the status slot, never the verb slot, so they never matched a
+/// real signal's verb and only crowded the wake set. The verbs added here are
+/// the ones bullpen mining shows the team actually uses to page each other.
+///
+/// Posts (text without a leading `@recipient`) never wake -- posts are
+/// broadcasts; the `legion signal --to <agent> --verb <wake-worthy>`
+/// primitive is the agent equivalent of a tweet at someone.
+///
+/// This const lives here -- not in watch -- because it is verb policy: it
+/// seeds `VerbManifest::builtin_default()`'s Wake set, and the watch gate
+/// consumes it through `active_manifest()` (#612 broke the former
+/// watch <-> verbs module cycle by moving it).
+pub const WAKE_WORTHY_VERBS: &[&str] = &[
+    "question",
+    "request",
+    "handoff",
+    "correction",
+    "proposal",
+    "decision",
+    "rfc",
+    "routing",
+];
 
 // ---------------------------------------------------------------------------
 // Types
@@ -80,15 +116,15 @@ pub struct VerbManifest {
 impl VerbManifest {
     /// Return the embedded default manifest.
     ///
-    /// The Wake set is derived directly from `WAKE_WORTHY_VERBS` (watch.rs) so
-    /// the two sources cannot drift without a compile error.  Informational
-    /// verbs (`announce`, `ack`, `info`, `answer`) are `Record`.  `rfc` carries
-    /// `required_fields = ["budget"]` as the canonical example of a structured
-    /// wake verb.
+    /// The Wake set is derived directly from [`WAKE_WORTHY_VERBS`] (defined
+    /// above in this module) so the two sources cannot drift without a
+    /// compile error.  Informational verbs (`announce`, `ack`, `info`,
+    /// `answer`) are `Record`.  `rfc` carries `required_fields = ["budget"]`
+    /// as the canonical example of a structured wake verb.
     pub fn builtin_default() -> Self {
         let mut verbs: HashMap<String, VerbSpec> = HashMap::new();
 
-        // Wake set -- derived from the watch.rs const so drift is impossible.
+        // Wake set -- derived from the canon const so drift is impossible.
         for &verb in WAKE_WORTHY_VERBS {
             verbs.insert(
                 verb.to_string(),
@@ -193,6 +229,14 @@ impl VerbManifest {
                 ..
             })
         )
+    }
+
+    /// Returns the behavioral shape for `verb`, or `None` for verbs the
+    /// manifest does not know. Callers classifying verbs (e.g. the status
+    /// surface's actionable/informational buckets) branch on this instead
+    /// of keeping their own literal verb sets (#612).
+    pub fn shape(&self, verb: &str) -> Option<VerbShape> {
+        self.verbs.get(verb).map(|s| s.shape)
     }
 
     /// Returns the required detail-field names for `verb`.

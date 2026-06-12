@@ -35,35 +35,6 @@ pub fn find_pending_signals(
     Ok(signals)
 }
 
-/// Verbs whose presence in a directed signal triggers a watch wake (#404, #586).
-///
-/// `--verb` was designed to express intent; this set is the subsection of
-/// intents that warrant spawning an asleep recipient. Other verbs
-/// (`announce`, `ack`, `info`, `answer`, bare `review`) deliver to live
-/// sessions via the channel push but do not page an asleep agent.
-///
-/// The canon (#586) is the set of verbs that actually mean "I need you to act":
-/// `question`, `request`, `handoff`, `correction`, `proposal`, `decision`,
-/// `rfc`, `routing`. The original #404 set carried `help` and `blocker`, but
-/// those are *statuses* (`request:help`, `review:blocker`), not bare verbs --
-/// they decorated the status slot, never the verb slot, so they never matched a
-/// real signal's verb and only crowded the wake set. The verbs added here are
-/// the ones bullpen mining shows the team actually uses to page each other.
-///
-/// Posts (text without a leading `@recipient`) never wake -- posts are
-/// broadcasts; the `legion signal --to <agent> --verb <wake-worthy>`
-/// primitive is the agent equivalent of a tweet at someone.
-pub const WAKE_WORTHY_VERBS: &[&str] = &[
-    "question",
-    "request",
-    "handoff",
-    "correction",
-    "proposal",
-    "decision",
-    "rfc",
-    "routing",
-];
-
 /// Whether a directed `legion signal --to <to> --verb <verb>` will fail to wake
 /// its recipient, so the sender can be warned at send time (#586).
 ///
@@ -179,6 +150,7 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
 mod tests {
     use super::*;
     use crate::testutil::test_storage;
+    use crate::verbs::WAKE_WORTHY_VERBS;
 
     #[test]
     fn find_pending_signals_detects_targeted_signals() {
@@ -211,6 +183,29 @@ mod tests {
             signals
                 .iter()
                 .any(|(_, text, _)| text == "@all announce: shipped")
+        );
+    }
+
+    #[test]
+    fn find_pending_signals_detects_colon_suffixed_recipient() {
+        // '@legion: ...' is the same address as '@legion ...' under the
+        // single addressing rule (#612). Pre-unification it delivered on
+        // the live channel but never woke -- this pins the alignment.
+        let (db, _index, _dir) = test_storage();
+
+        db.insert_reflection("kelex", "@legion: question -- can you review?", "team")
+            .expect("insert colon-suffixed signal");
+
+        let signals = find_pending_signals(&db, "legion", &["legion".to_string()], None)
+            .expect("find signals");
+        assert_eq!(
+            signals.len(),
+            1,
+            "colon-suffixed directed signal must wake its recipient"
+        );
+        assert!(
+            is_wake_worthy(&signals[0].1),
+            "the colon-suffixed form must also pass the verb gate"
         );
     }
 

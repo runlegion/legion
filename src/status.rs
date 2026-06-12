@@ -5,6 +5,7 @@ use crate::error::Result;
 use crate::signal;
 use crate::task::Task;
 use crate::timefmt::relative_time;
+use crate::verbs;
 
 /// A single item in a status section.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -277,13 +278,20 @@ fn get_team_needs_with_limit(
             continue;
         }
 
-        // Signals directed at this repo (not @all) with actionable verbs
+        // Signals directed at this repo (not @all) with actionable verbs.
+        // Signal.recipient is canonical (parse_signal routes it through
+        // recipient_token, the single addressing rule, #612), so the
+        // colon-suffixed form `@name: ...` lands here exactly as it does
+        // on the channel and wake surfaces. Case-insensitivity is this
+        // surface's own policy.
+        // "Actionable" is the manifest's Wake shape -- the same cut that
+        // pages an asleep agent -- replacing a pre-manifest literal verb
+        // set that had drifted from the #586 canon (it still matched
+        // 'blocker', which is a status, not a verb). A verb that misses
+        // this cut still surfaces through the @mention branch below.
         if let Some(sig) = signal::parse_signal(&p.text)
             && sig.recipient.to_lowercase() == repo_lower
-            && matches!(
-                sig.verb.to_lowercase().as_str(),
-                "review" | "question" | "request" | "blocker"
-            )
+            && verbs::active_manifest().is_wake_worthy(&sig.verb.to_lowercase())
         {
             items.push(StatusItem {
                 category: categorize_signal(&sig.verb),
@@ -360,12 +368,14 @@ fn get_what_changed(posts: &[Reflection], repo: &str, seen_ids: &[String]) -> Ve
 
         let text_lower: String = p.text.to_lowercase();
 
-        // Signals with announce/status verbs
+        // Signals with informational verbs: the manifest's Record shape
+        // (announce, ack, info, answer in the builtin canon), replacing a
+        // pre-manifest literal set ('announce'/'status'/'update'; the
+        // latter two were never manifest verbs). Posts using update-like
+        // wording still land here via the keyword branch below.
         if let Some(sig) = signal::parse_signal(&p.text)
-            && matches!(
-                sig.verb.to_lowercase().as_str(),
-                "announce" | "status" | "update"
-            )
+            && verbs::active_manifest().shape(&sig.verb.to_lowercase())
+                == Some(verbs::VerbShape::Record)
         {
             items.push(StatusItem {
                 category: "UPDATE".to_string(),
@@ -396,13 +406,15 @@ fn get_what_changed(posts: &[Reflection], repo: &str, seen_ids: &[String]) -> Ve
     items
 }
 
-/// Categorize a signal verb into a display category.
+/// Categorize a signal verb into a display category. Only wake-shaped verbs
+/// reach this (the manifest gate above); verbs without a named bucket render
+/// as the generic SIGNAL. The former 'blocker' arm is gone -- blocker is a
+/// status, not a verb (#586), so it never occupied the verb slot.
 fn categorize_signal(verb: &str) -> String {
     match verb.to_lowercase().as_str() {
         "review" => "REVIEW".to_string(),
         "question" => "QUESTION".to_string(),
         "request" => "REQUEST".to_string(),
-        "blocker" => "BLOCKER".to_string(),
         _ => "SIGNAL".to_string(),
     }
 }
@@ -640,6 +652,71 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].category, "REVIEW");
         assert_eq!(items[0].from, "mail");
+    }
+
+    #[test]
+    fn team_needs_picks_up_colon_suffixed_signals() {
+        // '@kelex: ...' is the same address as '@kelex ...' under the
+        // single addressing rule (#612); status must agree with the
+        // channel and wake surfaces on the colon decoration.
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection(
+            "mail",
+            "@kelex: review:ready PR #36 needs your eyes",
+            "team",
+        )
+        .expect("insert");
+
+        let (items, _ids) = get_team_needs(&get_posts(&db), "kelex");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].category, "REVIEW");
+        assert_eq!(items[0].from, "mail");
+    }
+
+    #[test]
+    fn team_needs_signal_bucket_is_manifest_driven() {
+        // 'handoff' is wake-shaped in the manifest canon but was absent
+        // from the deleted literal set -- it must land in TEAM NEEDS as a
+        // signal (generic SIGNAL category; no named bucket).
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection("mail", "@kelex handoff -- taking #36 over to you", "team")
+            .expect("insert");
+
+        let (items, _ids) = get_team_needs(&get_posts(&db), "kelex");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].category, "SIGNAL");
+    }
+
+    #[test]
+    fn team_needs_blocker_verb_has_no_named_bucket() {
+        // 'blocker' was removed from the verb canon in #586 (it is a
+        // status, not a verb) but survived in the old literal set. It now
+        // misses the manifest cut and surfaces via the @mention branch
+        // with a text-derived category instead of the dead BLOCKER bucket.
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection("mail", "@kelex blocker -- the build is red", "team")
+            .expect("insert");
+
+        let (items, _ids) = get_team_needs(&get_posts(&db), "kelex");
+        assert_eq!(items.len(), 1, "still surfaces via the @mention branch");
+        assert_ne!(
+            items[0].category, "BLOCKER",
+            "blocker is not a verb; the named bucket is gone"
+        );
+    }
+
+    #[test]
+    fn what_changed_bucket_is_record_shape_driven() {
+        // 'ack' is Record-shaped in the manifest but was absent from the
+        // deleted literal set ('announce'/'status'/'update') -- it must now
+        // land in WHAT CHANGED as an UPDATE.
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection("mail", "@all ack: noted the schema change", "team")
+            .expect("insert");
+
+        let items = get_what_changed(&get_posts(&db), "kelex", &[]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].category, "UPDATE");
     }
 
     #[test]
