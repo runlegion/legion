@@ -345,16 +345,9 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     // Build the broadcast channel for SSE notifications.
     let (tx, _rx) = channel::new_broadcast();
 
-    // Schedules fire under the daemon too (#613 decision): the daemon is
-    // the long-lived server on a watch node, so cron posts must not depend
-    // on someone running `legion serve`. The task is deliberately not in
-    // the select! below -- it is a side loop, not a liveness-critical
-    // component, and it is cancelled when the runtime shuts down.
-    let _firing = channel::spawn_schedule_firing(data_dir.clone(), tx.clone());
-
     let channel_state = channel::ChannelState {
         data_dir: data_dir.clone(),
-        tx,
+        tx: tx.clone(),
         started_at: chrono::Utc::now(),
         role: channel::ServerRole::Daemon,
     };
@@ -367,6 +360,16 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
         .map_err(|e| LegionError::Server(format!("failed to bind {addr}: {e}")))?;
 
     eprintln!("[legion daemon] channel server at http://localhost:{port}");
+
+    // Schedules fire under the daemon too (#613 decision): the daemon is
+    // the long-lived server on a watch node, so cron posts must not depend
+    // on someone running `legion serve`. Spawned only after the bind
+    // succeeded -- same invariant as run_server: a process that failed to
+    // become the server must not produce side effects. The task is
+    // deliberately not in the select! below -- it is a side loop, not a
+    // liveness-critical component, and it is cancelled when the runtime
+    // shuts down.
+    let _firing = channel::spawn_schedule_firing(data_dir.clone(), tx);
 
     // Spawn the watch loop as a background task.
     let watch_handle = tokio::spawn(async move {
