@@ -697,7 +697,7 @@ mod tests {
             "rafters",
             "do the thing",
             None,
-            "medium",
+            crate::kanban::Priority::Med,
             None,
             None,
             None,
