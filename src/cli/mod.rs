@@ -295,10 +295,15 @@ pub(crate) enum Commands {
 
     /// Send a directed message to another agent.
     ///
-    /// Watch wakes the recipient when `--verb` is in the wake-worthy set
-    /// (`question`, `request`, `help`, `blocker`). Other verbs (`announce`,
-    /// `ack`, `info`, `answer`, bare `review`) deliver to live sessions via
-    /// the channel push but do not wake an asleep recipient.
+    /// Watch wakes the recipient when `--verb` is in the wake-worthy set.
+    /// Wake-worthy verbs: `question`, `request`, `handoff`, `correction`,
+    /// `proposal`, `decision`, `routing` -- these spawn an asleep recipient.
+    /// `rfc` is also wake-worthy but additionally requires a `budget:` detail
+    /// in `--details` (e.g. `--details "budget:2h"`).
+    ///
+    /// Informational verbs: `announce`, `ack`, `info`, `answer` -- these
+    /// deliver to live sessions via the channel push but do not wake an
+    /// asleep recipient. Silence is acknowledgment; do not send empty acks.
     ///
     /// The minimum form is `--to <agent> --verb <verb>`; everything else is
     /// optional structure for RFC-shaped asks. For a one-line ask, just
@@ -312,9 +317,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         to: String,
 
-        /// Signal verb. Wake-worthy: question, request, help, blocker
-        /// (these spawn an asleep recipient). Informational: announce, ack,
-        /// info, answer, review (deliver to live sessions only).
+        /// Signal verb.
+        /// Wake-worthy (spawn an asleep recipient): question, request,
+        /// handoff, correction, proposal, decision, rfc, routing.
+        /// rfc additionally requires --details budget:<amount>.
+        /// Informational (deliver to live sessions only, no wake):
+        /// announce, ack, info, answer.
         #[arg(long)]
         verb: String,
 
@@ -619,7 +627,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         text: String,
 
-        /// Card ID to mark as complete (optional)
+        /// Card ID to mark as complete (optional). When the card has
+        /// acceptance criteria, a clean `legion verify` verdict must
+        /// exist for it before Done is accepted; exits non-zero otherwise.
         #[arg(long)]
         id: Option<String>,
     },
@@ -779,6 +789,12 @@ pub(crate) enum Commands {
     /// ->Done (records a clean legion-verify:<card> gate); any Fail hard-blocks;
     /// any Uncertain (or a Pass with no evidence) routes the card to NeedsInput
     /// for a human. A card with no acceptance criteria is blocked outright.
+    ///
+    /// Acceptance-criteria precedence: the bound spec document
+    /// (`spec.verification.acceptance` in the document payload) is consulted
+    /// first when the card has a `document_id`; if absent, `tasks.acceptance`
+    /// is used. A card whose `document_id` points to a non-existent or
+    /// non-spec document is a hard error.
     Verify {
         /// Repository name (resolves work source config from watch.toml)
         #[arg(long)]
@@ -883,7 +899,11 @@ pub(crate) enum Commands {
     /// plus born-Backlog kanban cards.  Re-running on unchanged input is safe
     /// (idempotent): existing (traces_to, surface) pairs are skipped.
     SpecGen {
-        /// Surface (repo/functional area) to generate requirements for.
+        /// Functional surface to generate requirements for. This is the
+        /// `surface` field stored on the source service-design documents
+        /// (e.g. "payments", "onboarding"), NOT a git repository name.
+        /// All non-archived service-design documents whose `surface` field
+        /// matches this value are used as input.
         #[arg(long)]
         repo: String,
     },

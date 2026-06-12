@@ -28,6 +28,7 @@ pub(crate) enum SymAction {
 
     /// Print references / call sites of a symbol
     Refs {
+        /// Symbol name to look up (substring-matched against SCIP symbol strings)
         name: String,
         #[arg(long)]
         repo: Option<String>,
@@ -39,7 +40,7 @@ pub(crate) enum SymAction {
 
     /// Print types implementing a trait or interface
     Impl {
-        /// Trait or interface name
+        /// Trait or interface name (substring-matched against SCIP symbol strings)
         trait_name: String,
         #[arg(long)]
         repo: Option<String>,
@@ -51,6 +52,7 @@ pub(crate) enum SymAction {
 
     /// Print signature + docstring for a symbol
     Hover {
+        /// Symbol name to look up (substring-matched against SCIP symbol strings)
         name: String,
         #[arg(long)]
         repo: Option<String>,
