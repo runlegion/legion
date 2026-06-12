@@ -277,9 +277,13 @@ fn get_team_needs_with_limit(
             continue;
         }
 
-        // Signals directed at this repo (not @all) with actionable verbs
+        // Signals directed at this repo (not @all) with actionable verbs.
+        // Recipient matching goes through signal::recipient_token -- the
+        // single addressing rule (#612) -- so the colon-suffixed form
+        // `@name: ...` lands here exactly as it does on the channel and
+        // wake surfaces. Case-insensitivity is this surface's own policy.
         if let Some(sig) = signal::parse_signal(&p.text)
-            && sig.recipient.to_lowercase() == repo_lower
+            && signal::recipient_token(&p.text).is_some_and(|t| t.to_lowercase() == repo_lower)
             && matches!(
                 sig.verb.to_lowercase().as_str(),
                 "review" | "question" | "request" | "blocker"
@@ -635,6 +639,25 @@ mod tests {
         let (db, _index, _dir) = test_storage();
         db.insert_reflection("mail", "@kelex review:ready PR #36 needs your eyes", "team")
             .expect("insert");
+
+        let (items, _ids) = get_team_needs(&get_posts(&db), "kelex");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].category, "REVIEW");
+        assert_eq!(items[0].from, "mail");
+    }
+
+    #[test]
+    fn team_needs_picks_up_colon_suffixed_signals() {
+        // '@kelex: ...' is the same address as '@kelex ...' under the
+        // single addressing rule (#612); status must agree with the
+        // channel and wake surfaces on the colon decoration.
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection(
+            "mail",
+            "@kelex: review:ready PR #36 needs your eyes",
+            "team",
+        )
+        .expect("insert");
 
         let (items, _ids) = get_team_needs(&get_posts(&db), "kelex");
         assert_eq!(items.len(), 1);

@@ -545,7 +545,9 @@ impl Database {
     /// `names` is the full addressable name set for this repo: the repo's
     /// `recipient()` value plus any `broadcast_tags`. A signal is returned
     /// when its text starts with (or contains mid-string) `@<name>` for any
-    /// name in `names`, OR when it starts with `@all` / `@everyone`.
+    /// name in `names`, OR when it starts with `@all` / `@everyone`. A
+    /// trailing `:` after the name (`@<name>: ...`) is decoration and
+    /// matches too, mirroring `signal::recipient_token` (#612).
     ///
     /// Uses the `watch_handled` table for per-repo dedup keyed on `repo_name`
     /// (not on recipient or tags), so `@all` / `@everyone` broadcasts wake
@@ -568,47 +570,34 @@ impl Database {
         let now = Utc::now().to_rfc3339();
 
         // Build LIKE patterns for every addressable name plus the reserved
-        // broadcast aliases. Parameters are bound positionally, so we
-        // pre-compute the full set before building the SQL.
+        // broadcast aliases (`all`, `everyone`). Pattern construction is
+        // delegated to `signal::address_like_patterns` -- the SQL projection
+        // of the single addressing rule (#612) -- so each name matches four
+        // forms: "@name ", "%@name ", "@name: ", "%@name: " (the trailing
+        // `:` is decoration that `signal::recipient_token` trims, and the
+        // wake path must agree with the parser on that or a colon-suffixed
+        // directed signal delivers live but never wakes).
         //
-        // Reserved pattern slots (always present, param-indexed from 1):
-        //   1: "@all %"
-        //   2: "%@all %"
-        //   3: "@everyone %"
-        //   4: "%@everyone %"
+        // Known residual divergence from the parser, pinned by tests below:
+        // every pattern requires a literal space after the (possibly
+        // colon-suffixed) name, so "@name\nverb ..." parses as a valid
+        // signal but does not wake. See signal::address_like_patterns.
         //
-        // Per-name slots (two per name, starting at param 5):
-        //   5k-4: "@<name> %"
-        //   5k-3: "%@<name> %"
-        //   ...
-        //
-        // Fixed trailing params:
-        //   repo_name (for watch_handled join + self-exclusion)
-        //   now       (for expires_at > now)
-        //   since_ts  (optional, last)
-
-        // Build the dynamic name OR clauses. Each name contributes two LIKE
-        // patterns: one anchored at the start ("@name ...") and one mid-text
-        // ("%@name ..."). The param indices start at 5 (1-4 are the reserved
-        // @all / @everyone patterns).
-        let mut name_clauses: Vec<String> = Vec::with_capacity(names.len() * 2);
-        for (i, _) in names.iter().enumerate() {
-            // Each name occupies two consecutive parameter slots: 2*(i+2)+1 and 2*(i+2)+2.
-            // With 4 reserved slots (params 1-4), name[0] uses params 5,6;
-            // name[1] uses 7,8; etc.
-            let p_start = 5 + i * 2;
-            let p_mid = 6 + i * 2;
-            name_clauses.push(format!(
-                "r.text LIKE ?{} OR r.text LIKE ?{}",
-                p_start, p_mid
-            ));
+        // Parameters are bound positionally: pattern slots first (?1..?N),
+        // then repo_name (watch_handled join + self-exclusion), now
+        // (expires_at check), and optionally since_ts.
+        let mut patterns: Vec<String> = Vec::with_capacity((names.len() + 2) * 4);
+        for reserved in ["all", "everyone"] {
+            patterns.extend(crate::signal::address_like_patterns(reserved));
+        }
+        for name in names {
+            patterns.extend(crate::signal::address_like_patterns(name));
         }
 
-        // The last two fixed params follow all name params.
-        let n_name_params = names.len() * 2;
-        let p_repo = 5 + n_name_params; // repo_name
-        let p_now = 6 + n_name_params; // now (expires_at check)
-        let p_since = 7 + n_name_params; // since_ts (optional)
+        // Fixed params follow the pattern slots.
+        let p_repo = patterns.len() + 1; // repo_name
+        let p_now = patterns.len() + 2; // now (expires_at check)
+        let p_since = patterns.len() + 3; // since_ts (optional)
 
         let since_clause = if since.is_some() {
             format!(" AND r.created_at > ?{}", p_since)
@@ -616,17 +605,11 @@ impl Database {
             String::new()
         };
 
-        // Assemble the WHERE text fragment: reserved broadcasts + per-name.
-        let text_filter = {
-            let mut parts: Vec<String> = vec![
-                "r.text LIKE ?1".to_string(),
-                "r.text LIKE ?2".to_string(),
-                "r.text LIKE ?3".to_string(),
-                "r.text LIKE ?4".to_string(),
-            ];
-            parts.extend(name_clauses);
-            parts.join(" OR ")
-        };
+        // Assemble the WHERE text fragment: one LIKE per pattern slot.
+        let text_filter = (1..=patterns.len())
+            .map(|i| format!("r.text LIKE ?{}", i))
+            .collect::<Vec<String>>()
+            .join(" OR ");
 
         // REFLECTION_COLUMNS is unprefixed; the names resolve to the `r`
         // alias because watch_handled (signal_id, repo_name, handled_at)
@@ -650,21 +633,13 @@ impl Database {
 
         let mut stmt = self.conn.prepare(&query)?;
 
-        // Bind params in slot order: reserved broadcasts, then per-name pairs,
-        // then repo_name, now, and optionally since_ts.
+        // Bind params in slot order: pattern slots (reserved broadcasts,
+        // then per-name), then repo_name, now, and optionally since_ts.
         use rusqlite::types::ToSql;
-        // Slots 1-4: reserved broadcasts. Per-name slots follow (two per name),
-        // then repo_name and now as fixed trailing params.
-        let mut params: Vec<Box<dyn ToSql>> = vec![
-            Box::new("@all %".to_string()),
-            Box::new("%@all %".to_string()),
-            Box::new("@everyone %".to_string()),
-            Box::new("%@everyone %".to_string()),
-        ];
-        for name in names {
-            params.push(Box::new(format!("@{} %", name)));
-            params.push(Box::new(format!("%@{} %", name)));
-        }
+        let mut params: Vec<Box<dyn ToSql>> = patterns
+            .into_iter()
+            .map(|p| Box::new(p) as Box<dyn ToSql>)
+            .collect();
         params.push(Box::new(repo_name.to_string()));
         params.push(Box::new(now));
 
@@ -1234,6 +1209,81 @@ mod tests {
         assert!(
             signals.is_empty(),
             "wake loop must not deliver stale @kessel signals"
+        );
+    }
+
+    // -- Addressing-rule parity at the wake query (#612) ------------------
+
+    #[test]
+    fn colon_suffixed_directed_signal_is_returned() {
+        // '@kessel: ...' delivers on the live channel (the parser trims the
+        // trailing ':'); pre-#612 it never matched the wake LIKE patterns,
+        // so it delivered live but woke nobody. The wake query must agree
+        // with signal::recipient_token on the colon rule.
+        let db = test_db();
+        db.insert_reflection("platform", "@kessel: question -- can you review?", "team")
+            .unwrap();
+        let signals = db
+            .get_unhandled_signals_for_repo("kessel", &["kessel".to_string()], None)
+            .unwrap();
+        assert_eq!(
+            signals.len(),
+            1,
+            "colon-suffixed directed signal must reach the wake path"
+        );
+    }
+
+    #[test]
+    fn colon_suffixed_broadcast_is_returned() {
+        let db = test_db();
+        db.insert_reflection("platform", "@all: announce -- shipped", "team")
+            .unwrap();
+        let signals = db
+            .get_unhandled_signals_for_repo("kessel", &["kessel".to_string()], None)
+            .unwrap();
+        assert_eq!(
+            signals.len(),
+            1,
+            "colon-suffixed @all broadcast must reach the wake path"
+        );
+    }
+
+    #[test]
+    fn colon_suffix_does_not_widen_to_prefix_names() {
+        // '@kesseltwo: ...' must not match the 'kessel' patterns: the ':'
+        // variants still require the full name before the colon.
+        let db = test_db();
+        db.insert_reflection("platform", "@kesseltwo: question -- not for kessel", "team")
+            .unwrap();
+        let signals = db
+            .get_unhandled_signals_for_repo("kessel", &["kessel".to_string()], None)
+            .unwrap();
+        assert!(
+            signals.is_empty(),
+            "colon patterns must not match a longer name sharing the prefix"
+        );
+    }
+
+    #[test]
+    fn newline_after_name_does_not_wake_pinned_divergence() {
+        // Documented residual divergence from signal::recipient_token (see
+        // signal::address_like_patterns): the LIKE patterns require a
+        // literal space after the name, so a newline-delimited signal
+        // parses as addressed but does not wake. Pinned here so any change
+        // to that behavior is a conscious one.
+        let db = test_db();
+        db.insert_reflection("platform", "@kessel\nquestion -- review?", "team")
+            .unwrap();
+        assert!(crate::signal::is_addressed_to(
+            "@kessel\nquestion -- review?",
+            "kessel"
+        ));
+        let signals = db
+            .get_unhandled_signals_for_repo("kessel", &["kessel".to_string()], None)
+            .unwrap();
+        assert!(
+            signals.is_empty(),
+            "newline-after-name is the accepted parser/SQL divergence"
         );
     }
 

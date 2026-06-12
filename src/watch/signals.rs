@@ -215,6 +215,29 @@ mod tests {
     }
 
     #[test]
+    fn find_pending_signals_detects_colon_suffixed_recipient() {
+        // '@legion: ...' is the same address as '@legion ...' under the
+        // single addressing rule (#612). Pre-unification it delivered on
+        // the live channel but never woke -- this pins the alignment.
+        let (db, _index, _dir) = test_storage();
+
+        db.insert_reflection("kelex", "@legion: question -- can you review?", "team")
+            .expect("insert colon-suffixed signal");
+
+        let signals = find_pending_signals(&db, "legion", &["legion".to_string()], None)
+            .expect("find signals");
+        assert_eq!(
+            signals.len(),
+            1,
+            "colon-suffixed directed signal must wake its recipient"
+        );
+        assert!(
+            is_wake_worthy(&signals[0].1),
+            "the colon-suffixed form must also pass the verb gate"
+        );
+    }
+
+    #[test]
     fn find_pending_signals_detects_multi_recipient() {
         let (db, _index, _dir) = test_storage();
 

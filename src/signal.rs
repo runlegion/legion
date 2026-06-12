@@ -34,6 +34,61 @@ pub fn is_signal(text: &str) -> bool {
     text.trim_start().starts_with('@')
 }
 
+/// Extract the `@recipient` token from a post text -- THE addressing rule.
+///
+/// A text is a signal addressed to X iff it starts with `@` + X's recipient
+/// token, where the token ends at the first whitespace and a trailing `:` is
+/// decoration (trimmed). Every routing surface (live channel delivery,
+/// cold-boot replay, the SQL wake path, status buckets) must agree on this
+/// rule or a signal delivers on one surface and silently drops on another
+/// (#612; the pre-unification colon divergence was exactly that bug).
+///
+/// Returns `None` for non-signals, an empty token (`@` alone at end of
+/// text), and tokens that themselves begin with `@` -- `@@all` is a
+/// fat-fingered broadcast and is deliberately rejected rather than routed
+/// as if the sender meant `@all`.
+///
+/// Broadcast handling (`all` / `everyone`), case policy, and verb gating
+/// are caller policy layered on top of this token rule, not part of it.
+pub fn recipient_token(text: &str) -> Option<&str> {
+    let rest = text.trim_start().strip_prefix('@')?;
+    let token_raw = rest.split_whitespace().next().unwrap_or("");
+    let token = token_raw.trim_end_matches(':');
+    if token.is_empty() || token.starts_with('@') {
+        return None;
+    }
+    Some(token)
+}
+
+/// Whether `text` is a signal whose recipient token equals `name` exactly
+/// (case-sensitive). Callers wanting case-insensitive matching compare
+/// [`recipient_token`] under their own normalization.
+pub fn is_addressed_to(text: &str, name: &str) -> bool {
+    recipient_token(text) == Some(name)
+}
+
+/// SQL LIKE patterns matching a signal addressed to `name`, anchored at the
+/// start of the text and mid-string, with and without the trailing-`:`
+/// decoration that [`recipient_token`] trims. Owned by the signal module so
+/// the wake path's SQL cannot drift from the parser on the colon rule.
+///
+/// Known divergence from [`recipient_token`] (documented, test-pinned at the
+/// query in `db/board.rs`): every pattern requires a literal space after the
+/// (possibly colon-suffixed) name. `@name` at end-of-text parses as
+/// addressed but carries no verb, so it could never pass the wake gate;
+/// `@name\nverb ...` (newline instead of space) parses as a valid signal
+/// yet does not match these patterns and will not wake. That narrow case is
+/// the accepted residual divergence -- senders use `legion signal`, which
+/// always emits the space form.
+pub fn address_like_patterns(name: &str) -> [String; 4] {
+    [
+        format!("@{} %", name),
+        format!("%@{} %", name),
+        format!("@{}: %", name),
+        format!("%@{}: %", name),
+    ]
+}
+
 /// Parse a signal from bullpen post text.
 ///
 /// Format: `@recipient verb:status {key: value, key: value}`
@@ -260,6 +315,57 @@ mod tests {
         assert!(is_signal("  @all announce: shipped"));
         assert!(!is_signal("just a regular post"));
         assert!(!is_signal("email@example.com is not a signal"));
+    }
+
+    #[test]
+    fn recipient_token_extracts_first_word() {
+        assert_eq!(recipient_token("@legion review:approved"), Some("legion"));
+        assert_eq!(recipient_token("@all announce: shipped"), Some("all"));
+        assert_eq!(recipient_token("  @kessel question -- hi"), Some("kessel"));
+    }
+
+    #[test]
+    fn recipient_token_trims_trailing_colon() {
+        assert_eq!(recipient_token("@kessel: please review"), Some("kessel"));
+        assert_eq!(recipient_token("@kessel:"), Some("kessel"));
+    }
+
+    #[test]
+    fn recipient_token_rejects_malformed_prefixes() {
+        // Lone '@' has no token.
+        assert_eq!(recipient_token("@"), None);
+        assert_eq!(recipient_token("@@"), None);
+        // '@@all' is a fat-finger, not a broadcast.
+        assert_eq!(recipient_token("@@all urgent"), None);
+        // Non-signals have no recipient.
+        assert_eq!(recipient_token("just a post"), None);
+        assert_eq!(recipient_token("email@example.com mid-text"), None);
+        assert_eq!(recipient_token(""), None);
+    }
+
+    #[test]
+    fn is_addressed_to_is_exact_and_colon_tolerant() {
+        assert!(is_addressed_to("@kessel ping:open hello", "kessel"));
+        assert!(is_addressed_to("@kessel: please review", "kessel"));
+        assert!(!is_addressed_to("@kessel ping", "kesseltwo"));
+        assert!(!is_addressed_to("@kesseltwo ping", "kessel"));
+        // Case-sensitive by contract; callers normalize if they want CI.
+        assert!(!is_addressed_to("@Kessel ping", "kessel"));
+        assert!(!is_addressed_to("not a signal", "kessel"));
+    }
+
+    #[test]
+    fn address_like_patterns_cover_plain_and_colon_forms() {
+        let patterns = address_like_patterns("kessel");
+        assert_eq!(
+            patterns,
+            [
+                "@kessel %".to_string(),
+                "%@kessel %".to_string(),
+                "@kessel: %".to_string(),
+                "%@kessel: %".to_string(),
+            ]
+        );
     }
 
     #[test]

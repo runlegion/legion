@@ -626,26 +626,21 @@ const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB
 ///    (the client wrote it; no need to echo a general musing back to its author).
 /// 5. Otherwise (general musing, no `@` prefix, from a different agent), deliver.
 ///
-/// Recipient parsing treats anything after a leading `@` up to the first
-/// whitespace as the recipient token, with a trailing `:` trimmed. An empty
-/// recipient (`@` alone) or a recipient that itself begins with `@` (e.g.
-/// `@@all`, which looks like a broadcast but isn't) is NOT treated as `@all`
-/// or any named target -- the post falls through the signal branch and is
-/// suppressed. This is deliberately strict: if an agent fat-fingers a
-/// broadcast as `@@all`, it should silently fail rather than silently succeed
-/// with the wrong-looking prefix.
+/// Recipient parsing is `signal::recipient_token` -- the single addressing
+/// rule (#612): first-whitespace token after the leading `@`, trailing `:`
+/// trimmed. An empty recipient (`@` alone) or a recipient that itself begins
+/// with `@` (e.g. `@@all`, which looks like a broadcast but isn't) is NOT
+/// treated as `@all` or any named target -- the post falls through the
+/// signal branch and is suppressed. This is deliberately strict: if an agent
+/// fat-fingers a broadcast as `@@all`, it should silently fail rather than
+/// silently succeed with the wrong-looking prefix.
 pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool {
-    if let Some(rest) = text.strip_prefix('@') {
-        // It's a signal. Extract the recipient token (first whitespace word).
-        let recipient_raw = rest.split_whitespace().next().unwrap_or("");
-        let recipient = recipient_raw.trim_end_matches(':');
-
-        // Reject empty or `@`-prefixed recipients -- `@` alone, `@@all`,
-        // `@@`, etc. These are suppressed rather than passed to the @all /
-        // named-target branches. See docstring above for the reasoning.
-        if recipient.is_empty() || recipient.starts_with('@') {
+    if sig::is_signal(text) {
+        // Reject malformed prefixes (`@` alone, `@@all`) -- suppressed
+        // rather than passed to the @all / named-target branches.
+        let Some(recipient) = sig::recipient_token(text) else {
             return false;
-        }
+        };
 
         if recipient == "all" {
             return true;
@@ -677,23 +672,16 @@ pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool 
 /// them. Stale `@all` broadcasts and team musings are not worth the
 /// flood when 24h of bullpen activity is replayed.
 ///
-/// Mirrors `should_notify`'s recipient parsing so `@kessel:`, `@kessel `,
-/// and `@kessel\n` all match (the `:` trim and whitespace split). When
+/// Shares `should_notify`'s recipient parsing -- `signal::is_addressed_to`,
+/// the single addressing rule (#612) -- so `@kessel:`, `@kessel `, and
+/// `@kessel\n` all match (the `:` trim and whitespace split). When
 /// `client_repo` is unknown the function returns false -- without an
 /// identity we cannot safely deliver any directed signal anyway.
 pub fn replay_should_deliver(text: &str, client_repo: Option<&str>) -> bool {
     let Some(recipient) = client_repo else {
         return false;
     };
-    let Some(rest) = text.strip_prefix('@') else {
-        return false;
-    };
-    let token_raw = rest.split_whitespace().next().unwrap_or("");
-    let token = token_raw.trim_end_matches(':');
-    if token.is_empty() || token.starts_with('@') {
-        return false;
-    }
-    token == recipient
+    sig::is_addressed_to(text, recipient)
 }
 
 /// Split a CDATA body around any literal `]]>` occurrences so the terminator
