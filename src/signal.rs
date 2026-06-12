@@ -101,9 +101,13 @@ pub fn parse_signal(text: &str) -> Option<Signal> {
         return None;
     }
 
-    // Split off the @recipient
+    // Split off the @recipient. The token comes from recipient_token -- THE
+    // addressing rule -- so Signal.recipient is canonical: `@kelex:` and
+    // `@kelex` both yield "kelex", and malformed prefixes (`@@all`) are
+    // rejected here exactly as on every other routing surface.
+    let recipient = recipient_token(trimmed)?.to_string();
     let after_at = &trimmed[1..];
-    let (recipient, rest) = split_first_word(after_at)?;
+    let (_, rest) = split_first_word(after_at)?;
 
     // Parse verb:status or just verb:
     let (verb_part, after_verb) = if let Some(brace_pos) = rest.find('{') {
@@ -487,6 +491,16 @@ mod tests {
     fn parse_non_signal_returns_none() {
         assert!(parse_signal("just a post").is_none());
         assert!(parse_signal("").is_none());
+    }
+
+    #[test]
+    fn parse_signal_recipient_is_canonical() {
+        // Signal.recipient goes through recipient_token: the trailing-colon
+        // decoration never reaches the struct, and fat-fingered `@@` prefixes
+        // are rejected, matching every other routing surface.
+        let sig = parse_signal("@kelex: question -- ping").unwrap();
+        assert_eq!(sig.recipient, "kelex");
+        assert!(parse_signal("@@all announce: oops").is_none());
     }
 
     #[test]

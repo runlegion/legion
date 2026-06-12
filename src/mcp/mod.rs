@@ -14,12 +14,6 @@ mod tools;
 
 pub use self::log::{mcp_log_dir, mcp_log_path, mcp_trace, most_recent_mcp_log};
 pub use self::notifier::{NotifierHealth, NotifierHeartbeat, classify_notifier_health};
-// should_notify / replay_should_deliver are public mcp:: API consumed only
-// inside the notifier; the re-export exists to keep the pre-split
-// `mcp::` paths addressable (`mod mcp` is private in main.rs, so an
-// un-called re-export would otherwise trip unused_imports).
-#[allow(unused_imports)]
-pub use self::notifier::{replay_should_deliver, should_notify};
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;

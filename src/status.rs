@@ -279,17 +279,18 @@ fn get_team_needs_with_limit(
         }
 
         // Signals directed at this repo (not @all) with actionable verbs.
-        // Recipient matching goes through signal::recipient_token -- the
-        // single addressing rule (#612) -- so the colon-suffixed form
-        // `@name: ...` lands here exactly as it does on the channel and
-        // wake surfaces. Case-insensitivity is this surface's own policy.
+        // Signal.recipient is canonical (parse_signal routes it through
+        // recipient_token, the single addressing rule, #612), so the
+        // colon-suffixed form `@name: ...` lands here exactly as it does
+        // on the channel and wake surfaces. Case-insensitivity is this
+        // surface's own policy.
         // "Actionable" is the manifest's Wake shape -- the same cut that
         // pages an asleep agent -- replacing a pre-manifest literal verb
         // set that had drifted from the #586 canon (it still matched
         // 'blocker', which is a status, not a verb). A verb that misses
         // this cut still surfaces through the @mention branch below.
         if let Some(sig) = signal::parse_signal(&p.text)
-            && signal::recipient_token(&p.text).is_some_and(|t| t.to_lowercase() == repo_lower)
+            && sig.recipient.to_lowercase() == repo_lower
             && verbs::active_manifest().is_wake_worthy(&sig.verb.to_lowercase())
         {
             items.push(StatusItem {
