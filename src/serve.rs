@@ -9,11 +9,10 @@ use axum::{Json, Router};
 use rust_embed::Embed;
 use tokio::signal;
 
-use crate::channel::ServeError;
-use crate::db::{Database, ReflectionMeta};
+use crate::channel::{ServeError, open_db, open_index as open_search_index};
+use crate::db::ReflectionMeta;
 use crate::error;
 use crate::health::HealthSample;
-use crate::search::SearchIndex;
 use crate::signal as sig;
 use crate::status;
 
@@ -24,14 +23,6 @@ struct StaticAssets;
 #[derive(Clone)]
 struct AppState {
     data_dir: PathBuf,
-}
-
-/// Open a database connection from the data directory.
-///
-/// Renders as 500 {"error": "failed to open database"} when propagated
-/// from a handler with `?`.
-fn open_db(data_dir: &Path) -> Result<Database, ServeError> {
-    Database::open(&data_dir.join("legion.db")).map_err(|_| ServeError::DbOpen)
 }
 
 /// Resolve the daemon pidfile path. Lives under XDG_STATE_HOME (same root
@@ -383,14 +374,6 @@ async fn api_done(
         announcement,
         notified,
     }))
-}
-
-/// Open the search index from the data directory.
-///
-/// Renders as 500 {"error": "failed to open search index"} when propagated
-/// from a handler with `?`.
-fn open_search_index(data_dir: &Path) -> Result<SearchIndex, ServeError> {
-    SearchIndex::open(&data_dir.join("index")).map_err(|_| ServeError::IndexOpen)
 }
 
 /// POST /api/boost/:id -- boost a reflection's recall count.
