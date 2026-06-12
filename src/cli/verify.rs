@@ -68,34 +68,53 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
 /// 1. When the card has a `document_id` AND the bound document's payload has a
 ///    non-empty `verification.acceptance` array, those strings become the AC.
 ///    Source label: `"spec:<document_id>"`.
-/// 2. Otherwise: `tasks.acceptance` split by newline, same as before.
-///    Source label: `"card"`.
+/// 2. When the card has a `document_id` but the document cannot be found, this
+///    is a hard error -- a bound card whose spec has vanished must not silently
+///    fall back; verify must not paper over a dangling reference. This matches
+///    the behavior of `transition_card_status_with_sync`, which also hard-errors
+///    on a missing bound document.
+/// 3. When the bound document exists but has no `verification` block, or the
+///    `verification.acceptance` array is empty, or the payload cannot be parsed
+///    (corrupt doc), falls back to `tasks.acceptance` with source `"card"`.
+/// 4. When the card has no `document_id`: `tasks.acceptance`. Source `"card"`.
 fn resolve_acceptance_criteria(
     database: &crate::db::Database,
     card: &kanban::Card,
 ) -> error::Result<(Vec<String>, String)> {
-    // When the card has a bound document, try to read verification.acceptance
-    // from the document payload. A JSON parse failure is non-fatal: fall back
-    // to tasks.acceptance so a corrupt payload does not hard-block verify.
-    if let Some(ref doc_id) = card.document_id
-        && let Some(doc) = database.get_document(doc_id)?
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&doc.payload)
-        && let Some(arr) = value
-            .get("verification")
-            .and_then(|v| v.get("acceptance"))
-            .and_then(|a| a.as_array())
-    {
-        let criteria: Vec<String> = arr
-            .iter()
-            .filter_map(|v| v.as_str())
-            .map(str::to_owned)
-            .filter(|s| !s.trim().is_empty())
-            .collect();
-        if !criteria.is_empty() {
-            return Ok((criteria, format!("spec:{doc_id}")));
+    if let Some(ref doc_id) = card.document_id {
+        // The document must exist. A dangling document_id is a hard error: the
+        // spec that was authoritative has been deleted while work was in flight.
+        let doc = database.get_document(doc_id)?.ok_or_else(|| {
+            error::LegionError::WorkSource(format!(
+                "card '{}' has document_id '{doc_id}' but the document does not exist; \
+                 verify cannot proceed with a dangling spec reference",
+                card.id
+            ))
+        })?;
+
+        // Parse the payload and look for verification.acceptance. A corrupt
+        // payload or a missing verification block is non-fatal: fall back to
+        // tasks.acceptance so a structural gap in the spec does not hard-block
+        // verify (the intent is that the human fills in the spec).
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&doc.payload)
+            && let Some(arr) = value
+                .get("verification")
+                .and_then(|v| v.get("acceptance"))
+                .and_then(|a| a.as_array())
+        {
+            let criteria: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_owned)
+                .filter(|s| !s.trim().is_empty())
+                .collect();
+            if !criteria.is_empty() {
+                return Ok((criteria, format!("spec:{doc_id}")));
+            }
         }
+        // Document exists but has no usable verification.acceptance: fall back.
     }
-    // Fallback: tasks.acceptance.
+    // No document_id, or document exists without usable verification.acceptance.
     let criteria = verify::acceptance_items(card.acceptance.as_deref());
     Ok((criteria, "card".to_string()))
 }
@@ -367,5 +386,22 @@ mod tests {
         let (criteria, source) = resolve_acceptance_criteria(&db, &card).expect("resolve");
         assert_eq!(criteria, vec!["fallback when spec empty"]);
         assert_eq!(source, "card");
+    }
+
+    /// When the card has a document_id that refers to a non-existent document,
+    /// resolve_acceptance_criteria must hard-error. A dangling reference means
+    /// the spec was deleted while work was in flight; verify must not silently
+    /// fall back to tasks.acceptance in that state.
+    #[test]
+    fn resolve_ac_hard_errors_on_dangling_document_id() {
+        let db = test_db();
+        // Card points at a document that was never inserted.
+        let card = make_card(Some("nonexistent-doc-id"), Some("card fallback criterion"));
+        let err = resolve_acceptance_criteria(&db, &card)
+            .expect_err("expected hard error on dangling document_id");
+        assert!(
+            err.to_string().contains("nonexistent-doc-id"),
+            "error must name the missing document id, got: {err}"
+        );
     }
 }

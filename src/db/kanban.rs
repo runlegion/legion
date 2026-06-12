@@ -509,18 +509,28 @@ impl Database {
         }
     }
 
-    /// Map a kanban card status to its requirement `meta.status` equivalent
+    /// Map a typed `CardStatus` to its requirement `meta.status` equivalent
     /// for the v2 requirement schema status enum (#528).
     ///
     /// Returns `None` for statuses that carry no spec meaning (the spec stays
     /// where it is). Returns `Some(status_str)` for the four mapped states.
-    pub(crate) fn requirement_status_for_card_status(card_status: &str) -> Option<&'static str> {
+    /// The match is exhaustive with no catch-all so a new `CardStatus` variant
+    /// forces a compile-time decision here.
+    pub(crate) fn requirement_status_for_card_status(
+        card_status: crate::kanban::CardStatus,
+    ) -> Option<&'static str> {
+        use crate::kanban::CardStatus;
         match card_status {
-            "accepted" => Some("accepted"),
-            "in-review" => Some("implemented"),
-            "done" => Some("verified"),
-            "cancelled" => Some("cancelled"),
-            _ => None,
+            // Mapped: these transitions carry spec meaning.
+            CardStatus::Accepted => Some("accepted"),
+            CardStatus::InReview => Some("implemented"),
+            CardStatus::Done => Some("verified"),
+            CardStatus::Cancelled => Some("cancelled"),
+            // Unmapped: spec stays where it is.
+            CardStatus::Backlog => None,
+            CardStatus::Pending => None,
+            CardStatus::NeedsInput => None,
+            CardStatus::Blocked => None,
         }
     }
 
@@ -574,8 +584,13 @@ impl Database {
         }
 
         // -- sync the bound document if the new status maps to a spec status --
+        // Parse `status` into the typed enum so requirement_status_for_card_status
+        // gets an exhaustive-match guarantee. An unrecognised status string is
+        // treated as no-sync (same outcome as a None return from the mapping).
+        let card_status_typed = std::str::FromStr::from_str(status).ok();
         if let Some(doc_id) = document_id
-            && let Some(spec_status) = Self::requirement_status_for_card_status(status)
+            && let Some(typed) = card_status_typed
+            && let Some(spec_status) = Self::requirement_status_for_card_status(typed)
         {
             // Fetch and mutate the payload inside the transaction.
             // Borrowing `tx` as a read source is fine because rusqlite
@@ -713,17 +728,45 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Look up a card by its bound document_id.
+    /// Return the id of the live (non-cancelled, non-deleted) card bound to
+    /// `document_id`, or `None` when no such card exists.
     ///
-    /// Returns the first live (non-deleted) card whose `document_id` matches.
-    /// `document_id` has application-layer uniqueness, so at most one card
-    /// should ever match; the query uses LIMIT 1 as a safety net.
+    /// "Live" matches the bind guard's definition: `status != 'cancelled'` AND
+    /// `deleted_at IS NULL`. Both `archive_document` and `bind_card_to_document`
+    /// call this to enforce uniqueness.
+    pub fn live_card_bound_to_document(&self, document_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM tasks WHERE document_id = ?1 \
+             AND deleted_at IS NULL \
+             AND status != 'cancelled' \
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query([document_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Look up the live (non-cancelled, non-deleted) card whose `document_id`
+    /// matches.
+    ///
+    /// Invariant: at most one live card is bound to a given document at any
+    /// time (enforced by `bind_card_to_document`). The query adds
+    /// `status != 'cancelled'` so a cancelled card that retains its
+    /// `document_id` is never returned in place of a live successor.
+    ///
+    /// No production code path reaches this today; it is retained for the
+    /// reverse-lookup AC from #512 and exercised by the binding tests (#528).
+    #[allow(dead_code)]
     pub fn get_card_by_document_id(
         &self,
         document_id: &str,
     ) -> Result<Option<crate::kanban::Card>> {
         let sql = format!(
-            "SELECT {} FROM tasks WHERE document_id = ?1 AND deleted_at IS NULL LIMIT 1",
+            "SELECT {} FROM tasks \
+             WHERE document_id = ?1 AND deleted_at IS NULL AND status != 'cancelled' \
+             LIMIT 1",
             Self::CARD_COLUMNS
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -754,16 +797,7 @@ impl Database {
         }
 
         // Guard 2: no other live card is bound to this document_id.
-        // "Live" means not cancelled and not deleted.
-        let mut check_stmt = self.conn.prepare(
-            "SELECT id FROM tasks WHERE document_id = ?1 \
-             AND deleted_at IS NULL \
-             AND status != 'cancelled' \
-             LIMIT 1",
-        )?;
-        let mut rows = check_stmt.query([document_id])?;
-        if let Some(row) = rows.next()? {
-            let existing_id: String = row.get(0)?;
+        if let Some(existing_id) = self.live_card_bound_to_document(document_id)? {
             return Err(LegionError::WorkSource(format!(
                 "document '{document_id}' is already bound to live card '{existing_id}'"
             )));
@@ -1130,30 +1164,62 @@ mod tests {
         assert_eq!(card2.document_id.as_deref(), Some(doc_id.as_str()));
     }
 
+    /// get_card_by_document_id returns the LIVE card when both a cancelled and
+    /// a live card share the same document_id. The cancelled card must not
+    /// shadow the live one.
+    #[test]
+    fn get_card_by_document_id_returns_live_card_not_cancelled() {
+        let db = test_db();
+        let card_id1 = insert_test_card(&db);
+        let card_id2 = insert_test_card(&db);
+        let doc_id = insert_test_document(&db);
+
+        // Bind to card1, cancel it, then bind card2 to the same doc.
+        db.bind_card_to_document(&card_id1, &doc_id)
+            .expect("bind card1");
+        db.force_move_card(&card_id1, "cancelled", None)
+            .expect("cancel card1");
+        db.bind_card_to_document(&card_id2, &doc_id)
+            .expect("bind card2");
+
+        // Reverse lookup must return card2 (live), not card1 (cancelled).
+        let found = db
+            .get_card_by_document_id(&doc_id)
+            .expect("lookup")
+            .expect("some card found");
+        assert_eq!(
+            found.id, card_id2,
+            "get_card_by_document_id must return the live card, not the cancelled one"
+        );
+    }
+
     /// requirement_status_for_card_status maps the four expected statuses.
+    /// Uses typed CardStatus so adding a new variant forces a compile-time
+    /// decision in the match (no catch-all).
     #[test]
     fn requirement_status_mapping_covers_all_mapped_statuses() {
+        use crate::kanban::CardStatus;
         assert_eq!(
-            Database::requirement_status_for_card_status("accepted"),
+            Database::requirement_status_for_card_status(CardStatus::Accepted),
             Some("accepted")
         );
         assert_eq!(
-            Database::requirement_status_for_card_status("in-review"),
+            Database::requirement_status_for_card_status(CardStatus::InReview),
             Some("implemented")
         );
         assert_eq!(
-            Database::requirement_status_for_card_status("done"),
+            Database::requirement_status_for_card_status(CardStatus::Done),
             Some("verified")
         );
         assert_eq!(
-            Database::requirement_status_for_card_status("cancelled"),
+            Database::requirement_status_for_card_status(CardStatus::Cancelled),
             Some("cancelled")
         );
         // Statuses that carry no spec meaning return None.
-        assert!(Database::requirement_status_for_card_status("backlog").is_none());
-        assert!(Database::requirement_status_for_card_status("pending").is_none());
-        assert!(Database::requirement_status_for_card_status("needs-input").is_none());
-        assert!(Database::requirement_status_for_card_status("blocked").is_none());
+        assert!(Database::requirement_status_for_card_status(CardStatus::Backlog).is_none());
+        assert!(Database::requirement_status_for_card_status(CardStatus::Pending).is_none());
+        assert!(Database::requirement_status_for_card_status(CardStatus::NeedsInput).is_none());
+        assert!(Database::requirement_status_for_card_status(CardStatus::Blocked).is_none());
     }
 
     /// Transactional sync: transitioning a bound card to "done" updates BOTH

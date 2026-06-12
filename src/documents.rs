@@ -301,15 +301,7 @@ impl Database {
     /// would orphan the card from its spec.
     pub fn archive_document(&self, id: &str) -> Result<Document> {
         // Guard: refuse archive when a live card is bound to this document.
-        let mut check_stmt = self.conn.prepare(
-            "SELECT id FROM tasks WHERE document_id = ?1 \
-             AND deleted_at IS NULL \
-             AND status != 'cancelled' \
-             LIMIT 1",
-        )?;
-        let mut rows = check_stmt.query(params![id])?;
-        if let Some(row) = rows.next()? {
-            let card_id: String = row.get(0)?;
+        if let Some(card_id) = self.live_card_bound_to_document(id)? {
             return Err(LegionError::WorkSource(format!(
                 "document '{id}' cannot be archived: live card '{card_id}' is bound to it"
             )));

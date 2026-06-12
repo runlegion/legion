@@ -241,13 +241,6 @@ pub fn view_card(db: &Database, id: &str) -> Result<Card> {
         .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
 }
 
-/// Look up a card by its bound document id.
-///
-/// Returns None when no live card is bound to the given document_id.
-pub fn find_card_for_document(db: &Database, document_id: &str) -> Result<Option<Card>> {
-    db.get_card_by_document_id(document_id)
-}
-
 /// Bind a document to a card (manual path; spec-gen uses the atomic insert).
 ///
 /// Fails when the card is already bound, the document does not exist or is
