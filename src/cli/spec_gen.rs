@@ -4,7 +4,7 @@
 use crate::cli::util::open_db;
 use crate::documents::DocumentFilter;
 use crate::error::Result;
-use crate::spec_gen;
+use crate::spec_gen::{self, SERVICE_DESIGN_TYPES};
 
 /// Run spec-gen for a surface: read all non-archived service-design docs,
 /// run the pipeline, and print a summary.
@@ -12,10 +12,8 @@ pub(crate) fn handle(surface: &str) -> Result<()> {
     let db = open_db()?;
 
     // Collect all non-archived service-design documents on this surface.
-    // Types: persona, journey, blueprint, painmatrix, ecosystem.
-    let service_design_types = ["persona", "journey", "blueprint", "painmatrix", "ecosystem"];
     let mut docs = Vec::new();
-    for doc_type in service_design_types {
+    for doc_type in SERVICE_DESIGN_TYPES {
         let filter = DocumentFilter {
             doc_type: Some(doc_type),
             surface: Some(surface),
@@ -28,7 +26,8 @@ pub(crate) fn handle(surface: &str) -> Result<()> {
     if docs.is_empty() {
         println!(
             "[spec-gen] no service-design documents found on surface '{surface}' \
-             (types: persona, journey, blueprint, painmatrix, ecosystem)"
+             (types: {})",
+            SERVICE_DESIGN_TYPES.join(", ")
         );
         return Ok(());
     }

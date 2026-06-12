@@ -34,10 +34,13 @@
 //!
 //! # Idempotency
 //!
-//! Deduplication key: `(traces_to, meta.surface)`.  Before creating a
-//! requirement document, `persist_requirements` queries existing non-archived
-//! documents of type `requirement` on the surface and skips candidates whose
-//! `traces_to` already exists.
+//! Deduplication key: `(traces_to, surface)`.  Before creating a requirement
+//! document, `persist_requirements` queries existing non-archived documents of
+//! type `requirement` on the surface and skips candidates whose `traces_to`
+//! already exists.  `persist_requirements` accepts a `surface` scope parameter;
+//! candidates whose `req.surface` differs from that scope are skipped with a
+//! logged mismatch (the CLI always passes the same surface used to fetch docs,
+//! so mismatches in production indicate a caller bug).
 
 use chrono::Utc;
 use serde_json::json;
@@ -49,6 +52,13 @@ use crate::error::{LegionError, Result};
 use crate::kanban::{self, Priority};
 
 const REQUIREMENT_SCHEMA_ID: &str = "019eb45a-2fdd-7fd2-a574-96a3302bd15a";
+
+/// Service-design document types that spec-gen reads as input.
+///
+/// Journey, blueprint, and painmatrix are included so the CLI can filter for
+/// them in a single loop; in v1 they contribute no candidates (no moments).
+pub const SERVICE_DESIGN_TYPES: &[&str] =
+    &["persona", "journey", "blueprint", "painmatrix", "ecosystem"];
 
 /// A fully-composed requirement payload ready for insertion.
 #[derive(Debug, Clone)]
@@ -67,12 +77,14 @@ pub struct Requirement {
     pub payload: String,
 }
 
-/// A candidate that was rejected because its `traces_to` did not resolve.
+/// A candidate that was rejected because its `traces_to` did not resolve or
+/// its source document was structurally invalid (no surface, missing title).
 #[derive(Debug, Clone)]
 pub struct Rejection {
     /// The candidate title (for human-readable output).
     pub title: String,
-    /// The traces_to value that failed to resolve.
+    /// The traces_to value that failed to resolve, or a placeholder when the
+    /// fragment could not be formed at all.
     pub traces_to: String,
     /// Human-readable reason for rejection.
     pub reason: String,
@@ -83,7 +95,8 @@ pub struct Rejection {
 pub struct GenerateOutcome {
     /// Fully-validated requirement payloads, ready for persistence.
     pub requirements: Vec<Requirement>,
-    /// Candidates rejected because their `traces_to` did not resolve.
+    /// Candidates rejected because their `traces_to` did not resolve or their
+    /// source document was structurally invalid.
     pub rejected: Vec<Rejection>,
 }
 
@@ -120,14 +133,19 @@ pub fn generate_requirements(service_design: &[Document]) -> Result<GenerateOutc
 
 /// Persist validated requirements to the database.
 ///
+/// `surface` is the CLI scope (repo name) -- used as the dedup key and the
+/// `to_repo` for created kanban cards.  Candidates whose `req.surface` does
+/// not match `surface` are skipped and counted as `skipped_existing` with a
+/// note; in normal operation (CLI fetches docs by surface) this never fires.
+///
 /// For each `Requirement` in `outcome.requirements`:
-/// 1. Check for an existing document with the same `(traces_to, surface)`.
-///    If found, skip it (increment `skipped_existing`).
-/// 2. Validate the payload against the requirement schema document from the DB.
+/// 1. Skip if `req.surface != surface` (scope mismatch; counted as skipped).
+/// 2. Skip if `(traces_to, surface)` already exists (idempotency).
+/// 3. Validate the payload against the requirement schema document from the DB.
 ///    A validation failure is a hard `Err` (bug in spec-gen).
-/// 3. Insert the requirement document (`doc_type="requirement"`, `status="draft"`,
+/// 4. Insert the requirement document (`doc_type="requirement"`, `status="draft"`,
 ///    `owner="legion"`).
-/// 4. Create a born-Backlog kanban card linked to the document.
+/// 5. Create a born-Backlog kanban card linked to the document.
 pub fn persist_requirements(
     db: &Database,
     surface: &str,
@@ -137,7 +155,7 @@ pub fn persist_requirements(
     let schema_doc = db.get_document(REQUIREMENT_SCHEMA_ID)?.ok_or_else(|| {
         LegionError::WorkSource(format!(
             "requirement schema document '{}' not found -- run `legion document create` \
-                 to land the adopted schema first",
+             to land the adopted schema first",
             REQUIREMENT_SCHEMA_ID
         ))
     })?;
@@ -148,22 +166,30 @@ pub fn persist_requirements(
             ))
         })?;
 
-    // Build the set of existing (traces_to) values on this surface to enable
-    // deduplication without repeated queries.
+    // Build the set of existing traces_to values on this surface to enable
+    // deduplication without repeated queries.  A parse error on a stored
+    // payload is DB corruption -- surface it as a hard Err rather than
+    // silently dropping the entry from the dedup set (which would cause
+    // duplicate creation on re-run).
     let existing_filter = DocumentFilter {
         doc_type: Some("requirement"),
         surface: Some(surface),
         ..Default::default()
     };
     let existing_docs = db.list_documents(&existing_filter)?;
-    let existing_traces: std::collections::HashSet<String> = existing_docs
-        .iter()
-        .filter_map(|d| {
-            serde_json::from_str::<serde_json::Value>(&d.payload)
-                .ok()
-                .and_then(|v| v["traces_to"].as_str().map(str::to_string))
-        })
-        .collect();
+    let mut existing_traces: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(existing_docs.len());
+    for d in &existing_docs {
+        let v = serde_json::from_str::<serde_json::Value>(&d.payload).map_err(|e| {
+            LegionError::WorkSource(format!(
+                "stored requirement document '{}' has unparseable payload (DB corruption?): {e}",
+                d.id
+            ))
+        })?;
+        if let Some(t) = v["traces_to"].as_str() {
+            existing_traces.insert(t.to_string());
+        }
+    }
 
     let mut persist_outcome = PersistOutcome {
         rejected: outcome.rejected,
@@ -171,6 +197,12 @@ pub fn persist_requirements(
     };
 
     for req in outcome.requirements {
+        // Scope guard: skip candidates that don't belong to this surface.
+        if req.surface != surface {
+            persist_outcome.skipped_existing += 1;
+            continue;
+        }
+
         // Idempotency: skip if (traces_to, surface) already exists.
         if existing_traces.contains(&req.traces_to) {
             persist_outcome.skipped_existing += 1;
@@ -209,7 +241,7 @@ pub fn persist_requirements(
         kanban::create_card(
             db,
             "legion",
-            surface,
+            &req.surface,
             &req.title,
             Some(req.description.as_str()),
             Priority::Med,
@@ -228,21 +260,49 @@ pub fn persist_requirements(
 
 // -- private helpers ---------------------------------------------------------
 
+/// Parse a service-design document's surface and JSON payload.
+///
+/// Returns `(surface, payload_value)`.  Rejects surfaceless documents (a
+/// document without a surface cannot be deduped) and unparseable payloads.
+/// The rejection is pushed onto `outcome.rejected` and `Err` is returned only
+/// for internal logic bugs; bad source documents produce `Ok(None)`.
+fn parse_doc(doc: &Document) -> Result<Option<(&str, serde_json::Value)>> {
+    let surface = match doc.surface.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(None), // surfaceless: caller pushes Rejection
+    };
+    let payload: serde_json::Value = serde_json::from_str(&doc.payload).map_err(|e| {
+        LegionError::WorkSource(format!(
+            "{} document '{}' has invalid JSON payload: {e}",
+            doc.doc_type, doc.id
+        ))
+    })?;
+    Ok(Some((surface, payload)))
+}
+
 /// Extract `moments_of_truth` entries from an ecosystem document and add
 /// one candidate per entry.  Duplicate moment numbers within a single
 /// document make the fragment ambiguous; those entries are rejected.
+/// A moment with no `title` field is also rejected (not silently defaulted).
 fn collect_ecosystem_candidates(doc: &Document, outcome: &mut GenerateOutcome) -> Result<()> {
-    let surface = doc.surface.as_deref().unwrap_or("unknown");
-    let payload: serde_json::Value = serde_json::from_str(&doc.payload).map_err(|e| {
-        LegionError::WorkSource(format!(
-            "ecosystem document '{}' has invalid JSON payload: {e}",
-            doc.id
-        ))
-    })?;
+    let (surface, payload) = match parse_doc(doc)? {
+        Some(pair) => pair,
+        None => {
+            outcome.rejected.push(Rejection {
+                title: format!("(ecosystem {})", doc.id),
+                traces_to: format!("{}#moment_of_truth.?", doc.id),
+                reason: format!(
+                    "ecosystem document '{}' has no surface -- cannot dedup generated requirements",
+                    doc.id
+                ),
+            });
+            return Ok(());
+        }
+    };
 
     let moments = match payload["moments_of_truth"].as_array() {
         Some(arr) => arr,
-        None => return Ok(()), // no moments: no candidates
+        None => return Ok(()), // no moments array: no candidates
     };
 
     // Build a count map to detect duplicate moment numbers before emitting
@@ -256,10 +316,29 @@ fn collect_ecosystem_candidates(doc: &Document, outcome: &mut GenerateOutcome) -
 
     for entry in moments.iter() {
         let number = entry["number"].as_i64();
-        let title_raw = entry["title"].as_str().unwrap_or("");
         let actor = entry["actor"].as_str().unwrap_or("");
         let success = entry["success"].as_str().unwrap_or("");
         let failure = entry["failure"].as_str().unwrap_or("");
+
+        // Missing title -> Rejection (not a silent empty string).
+        let title_raw = match entry["title"].as_str().filter(|s| !s.is_empty()) {
+            Some(t) => t,
+            None => {
+                let placeholder = match number {
+                    Some(n) => format!("{}#moment_of_truth.{n}", doc.id),
+                    None => format!("{}#moment_of_truth.?", doc.id),
+                };
+                outcome.rejected.push(Rejection {
+                    title: format!("(untitled moment in ecosystem {})", doc.id),
+                    traces_to: placeholder.clone(),
+                    reason: format!(
+                        "ecosystem document '{}' has a moment_of_truth entry with no title",
+                        doc.id
+                    ),
+                });
+                continue;
+            }
+        };
 
         let candidate_title = format!("MoT: {title_raw}");
 
@@ -293,14 +372,7 @@ fn collect_ecosystem_candidates(doc: &Document, outcome: &mut GenerateOutcome) -
         };
 
         let description = format!("Actor: {actor}. Success: {success}. Failure: {failure}.");
-
-        let req = build_requirement(
-            doc.id.as_str(),
-            surface,
-            &candidate_title,
-            &description,
-            &traces_to,
-        )?;
+        let req = build_requirement(surface, &candidate_title, &description, &traces_to)?;
         outcome.requirements.push(req);
     }
 
@@ -308,14 +380,22 @@ fn collect_ecosystem_candidates(doc: &Document, outcome: &mut GenerateOutcome) -
 }
 
 /// Extract the `moment_of_truth` singleton from a persona document, if present.
+/// A persona with no surface or no `meta.title` is rejected, not silently defaulted.
 fn collect_persona_candidates(doc: &Document, outcome: &mut GenerateOutcome) -> Result<()> {
-    let surface = doc.surface.as_deref().unwrap_or("unknown");
-    let payload: serde_json::Value = serde_json::from_str(&doc.payload).map_err(|e| {
-        LegionError::WorkSource(format!(
-            "persona document '{}' has invalid JSON payload: {e}",
-            doc.id
-        ))
-    })?;
+    let (surface, payload) = match parse_doc(doc)? {
+        Some(pair) => pair,
+        None => {
+            outcome.rejected.push(Rejection {
+                title: format!("(persona {})", doc.id),
+                traces_to: format!("{}#moment_of_truth", doc.id),
+                reason: format!(
+                    "persona document '{}' has no surface -- cannot dedup generated requirements",
+                    doc.id
+                ),
+            });
+            return Ok(());
+        }
+    };
 
     // Persona singleton moment_of_truth is optional; no field means no candidate.
     let mot = match payload.get("moment_of_truth") {
@@ -327,8 +407,22 @@ fn collect_persona_candidates(doc: &Document, outcome: &mut GenerateOutcome) -> 
     let success = mot["success"].as_str().unwrap_or("");
     let failure = mot["failure"].as_str().unwrap_or("");
 
-    // Use the persona's meta.title for the candidate title, falling back to doc id.
-    let persona_title = payload["meta"]["title"].as_str().unwrap_or(doc.id.as_str());
+    // Missing meta.title -> Rejection (not a silent fallback to doc id).
+    let persona_title = match payload["meta"]["title"].as_str().filter(|s| !s.is_empty()) {
+        Some(t) => t,
+        None => {
+            outcome.rejected.push(Rejection {
+                title: format!("(persona {})", doc.id),
+                traces_to: format!("{}#moment_of_truth", doc.id),
+                reason: format!(
+                    "persona document '{}' has no meta.title -- cannot compose requirement title",
+                    doc.id
+                ),
+            });
+            return Ok(());
+        }
+    };
+
     let candidate_title = format!("MoT: {persona_title}");
     let traces_to = format!("{}#moment_of_truth", doc.id);
 
@@ -338,13 +432,7 @@ fn collect_persona_candidates(doc: &Document, outcome: &mut GenerateOutcome) -> 
         format!("{description_text} Success: {success}. Failure: {failure}.")
     };
 
-    let req = build_requirement(
-        doc.id.as_str(),
-        surface,
-        &candidate_title,
-        &description,
-        &traces_to,
-    )?;
+    let req = build_requirement(surface, &candidate_title, &description, &traces_to)?;
     outcome.requirements.push(req);
 
     Ok(())
@@ -352,7 +440,6 @@ fn collect_persona_candidates(doc: &Document, outcome: &mut GenerateOutcome) -> 
 
 /// Build a fully-composed `Requirement` struct with a valid JSON payload.
 fn build_requirement(
-    _source_doc_id: &str,
     surface: &str,
     title: &str,
     description: &str,
@@ -539,6 +626,129 @@ mod tests {
         }
     }
 
+    /// An ecosystem doc with no surface set.
+    fn ecosystem_doc_no_surface() -> Document {
+        let payload = serde_json::json!({
+            "meta": {
+                "title": "Surfaceless Ecosystem",
+                "status": "draft",
+                "date": "2026-06-01",
+                "author": "vault",
+                "core_service": "unknown"
+            },
+            "actors": {"primary": [{"name": "Actor", "role": "role"}]},
+            "channels": [{"name": "web", "type": "digital", "purpose": "x"}],
+            "value_exchanges": [{"from": "A", "to": "B", "gives": "x", "gets": "y"}],
+            "moments_of_truth": [
+                {"number": 1, "title": "MoT One", "actor": "Actor", "success": "ok", "failure": "fail"}
+            ]
+        });
+        Document {
+            id: "eco-nosurface-001".to_string(),
+            doc_type: "ecosystem".to_string(),
+            surface: None,
+            status: "draft".to_string(),
+            priority: None,
+            owner: "vault".to_string(),
+            payload: payload.to_string(),
+            archived_at: None,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// A persona doc with no surface set.
+    fn persona_doc_no_surface() -> Document {
+        let payload = serde_json::json!({
+            "meta": {
+                "title": "Surfaceless Persona",
+                "status": "draft",
+                "date": "2026-06-01",
+                "author": "vault",
+                "set": "unknown",
+                "actor": "User"
+            },
+            "identity": {"description": "desc", "mental_model": "model", "quote": "q"},
+            "behaviors": [],
+            "frustrations": [],
+            "needs": [],
+            "moment_of_truth": {"description": "desc", "success": "ok", "failure": "fail"}
+        });
+        Document {
+            id: "persona-nosurface-001".to_string(),
+            doc_type: "persona".to_string(),
+            surface: None,
+            status: "draft".to_string(),
+            priority: None,
+            owner: "vault".to_string(),
+            payload: payload.to_string(),
+            archived_at: None,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// An ecosystem doc with a moment that has no title.
+    fn ecosystem_doc_with_untitled_moment() -> Document {
+        let payload = serde_json::json!({
+            "meta": {
+                "title": "Eco",
+                "status": "draft",
+                "date": "2026-06-01",
+                "author": "vault",
+                "core_service": "x"
+            },
+            "actors": {"primary": [{"name": "A", "role": "r"}]},
+            "channels": [{"name": "web", "type": "digital", "purpose": "p"}],
+            "value_exchanges": [{"from": "A", "to": "B", "gives": "x", "gets": "y"}],
+            "moments_of_truth": [
+                {"number": 1, "actor": "A", "success": "ok", "failure": "fail"}
+            ]
+        });
+        Document {
+            id: "eco-notitle-001".to_string(),
+            doc_type: "ecosystem".to_string(),
+            surface: Some("gitpress".to_string()),
+            status: "draft".to_string(),
+            priority: None,
+            owner: "vault".to_string(),
+            payload: payload.to_string(),
+            archived_at: None,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// A persona doc with no meta.title.
+    fn persona_doc_no_title() -> Document {
+        let payload = serde_json::json!({
+            "meta": {
+                "status": "draft",
+                "date": "2026-06-01",
+                "author": "vault",
+                "set": "gitpress",
+                "actor": "User"
+            },
+            "identity": {"description": "d", "mental_model": "m", "quote": "q"},
+            "behaviors": [],
+            "frustrations": [],
+            "needs": [],
+            "moment_of_truth": {"description": "desc", "success": "ok", "failure": "fail"}
+        });
+        Document {
+            id: "persona-notitle-001".to_string(),
+            doc_type: "persona".to_string(),
+            surface: Some("gitpress".to_string()),
+            status: "draft".to_string(),
+            priority: None,
+            owner: "vault".to_string(),
+            payload: payload.to_string(),
+            archived_at: None,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+        }
+    }
+
     /// Land the requirement schema doc so persist_requirements can validate.
     fn seed_requirement_schema(db: &Database) {
         let schema_payload = std::fs::read_to_string(concat!(
@@ -634,6 +844,64 @@ mod tests {
     }
 
     #[test]
+    fn surfaceless_ecosystem_doc_yields_rejection() {
+        let docs = vec![ecosystem_doc_no_surface()];
+        let outcome = generate_requirements(&docs).expect("generate");
+        assert!(
+            outcome.requirements.is_empty(),
+            "no candidates from surfaceless doc"
+        );
+        assert_eq!(outcome.rejected.len(), 1, "one rejection expected");
+        assert!(
+            outcome.rejected[0].reason.contains("no surface"),
+            "rejection must mention surface: {:?}",
+            outcome.rejected[0].reason
+        );
+    }
+
+    #[test]
+    fn surfaceless_persona_doc_yields_rejection() {
+        let docs = vec![persona_doc_no_surface()];
+        let outcome = generate_requirements(&docs).expect("generate");
+        assert!(outcome.requirements.is_empty());
+        assert_eq!(outcome.rejected.len(), 1);
+        assert!(
+            outcome.rejected[0].reason.contains("no surface"),
+            "rejection must mention surface: {:?}",
+            outcome.rejected[0].reason
+        );
+    }
+
+    #[test]
+    fn untitled_moment_yields_rejection() {
+        let docs = vec![ecosystem_doc_with_untitled_moment()];
+        let outcome = generate_requirements(&docs).expect("generate");
+        assert!(
+            outcome.requirements.is_empty(),
+            "no candidate from untitled moment"
+        );
+        assert_eq!(outcome.rejected.len(), 1);
+        assert!(
+            outcome.rejected[0].reason.contains("no title"),
+            "rejection must mention title: {:?}",
+            outcome.rejected[0].reason
+        );
+    }
+
+    #[test]
+    fn persona_with_no_meta_title_yields_rejection() {
+        let docs = vec![persona_doc_no_title()];
+        let outcome = generate_requirements(&docs).expect("generate");
+        assert!(outcome.requirements.is_empty());
+        assert_eq!(outcome.rejected.len(), 1);
+        assert!(
+            outcome.rejected[0].reason.contains("meta.title"),
+            "rejection must mention meta.title: {:?}",
+            outcome.rejected[0].reason
+        );
+    }
+
+    #[test]
     fn idempotency_second_run_creates_zero_docs_and_cards() {
         let db = test_db();
         seed_requirement_schema(&db);
@@ -702,9 +970,8 @@ mod tests {
 
     #[test]
     fn schema_validation_catches_malformed_generated_payload() {
-        // This test verifies the validation path by directly calling
-        // validate_instance with a deliberately malformed payload that is
-        // missing required fields.
+        // Verifies the validation path by calling validate_instance with a
+        // deliberately malformed payload missing all required fields.
         let schema_payload = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/schemas/requirement.schema.json"
@@ -713,18 +980,46 @@ mod tests {
         let schema: serde_json::Value =
             serde_json::from_str(&schema_payload).expect("parse schema");
 
-        // A payload missing all required fields.
         let bad_payload = serde_json::json!({});
         let errors = validate_instance(&schema, &bad_payload);
         assert!(
             !errors.is_empty(),
             "malformed payload must have validation errors"
         );
-        // Should complain about missing 'meta', 'title', 'description', 'traces_to'.
         let joined = errors.join("; ");
         assert!(
             joined.contains("meta"),
             "must report missing meta: {joined}"
+        );
+    }
+
+    #[test]
+    fn corrupt_stored_payload_in_dedup_set_returns_err() {
+        // Finding #4: a stored requirement with an unparseable payload must
+        // surface as a hard Err from persist_requirements, not silently drop
+        // the entry from the dedup set.
+        let db = test_db();
+        seed_requirement_schema(&db);
+
+        // Manually insert a requirement doc with a corrupt (non-JSON) payload.
+        let corrupt_meta = DocumentMeta {
+            id: None,
+            doc_type: "requirement",
+            surface: Some("gitpress"),
+            status: Some("draft"),
+            priority: None,
+            owner: "legion",
+        };
+        db.insert_document(&corrupt_meta, "NOT JSON AT ALL")
+            .expect("insert corrupt doc");
+
+        // persist_requirements must fail with a WorkSource error citing DB corruption.
+        let docs = vec![ecosystem_doc_with_two_moments()];
+        let outcome = generate_requirements(&docs).expect("generate");
+        let err = persist_requirements(&db, "gitpress", outcome).unwrap_err();
+        assert!(
+            err.to_string().contains("unparseable payload"),
+            "error must cite the corrupt payload: {err}"
         );
     }
 }
