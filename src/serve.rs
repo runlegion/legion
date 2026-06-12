@@ -1,23 +1,18 @@
-#![allow(clippy::manual_is_multiple_of)] // Use modulo for MSRV compatibility
-
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
-use axum::response::sse::{Event, KeepAlive};
-use axum::response::{Html, IntoResponse, Response, Sse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rust_embed::Embed;
 use tokio::signal;
 
-use crate::db::{Database, ReflectionMeta};
+use crate::channel::{ServeError, open_db, open_index as open_search_index};
+use crate::db::ReflectionMeta;
 use crate::error;
 use crate::health::HealthSample;
-use crate::search::SearchIndex;
 use crate::signal as sig;
 use crate::status;
 
@@ -28,22 +23,6 @@ struct StaticAssets;
 #[derive(Clone)]
 struct AppState {
     data_dir: PathBuf,
-    /// Wall-clock start of this server process. Captured once at boot so the
-    /// `/health` endpoint (#319) can report uptime without per-request work.
-    started_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Open a database connection from the data directory.
-///
-/// Returns a 500 status code if the database cannot be opened.
-fn open_db(data_dir: &Path) -> Result<Database, StatusCode> {
-    Database::open(&data_dir.join("legion.db")).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-/// JSON error response helper.
-fn json_error(status: StatusCode, message: &str) -> Response {
-    let body = serde_json::json!({ "error": message });
-    (status, Json(body)).into_response()
 }
 
 /// Resolve the daemon pidfile path. Lives under XDG_STATE_HOME (same root
@@ -105,23 +84,35 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
 
     runtime.block_on(async {
         let state = AppState {
-            data_dir,
+            data_dir: data_dir.clone(),
+        };
+
+        // One broadcast channel is shared by the schedule-firing task
+        // (sender) and the channel SSE handler (subscribers), so an
+        // in-process write wakes connected dashboards immediately.
+        let (tx, _rx) = crate::channel::new_broadcast();
+
+        // The shared endpoint contract (/health, /sse, /api/feed,
+        // /api/tasks, /api/post) is owned by channel::router (#613) --
+        // one implementation whether the daemon or `legion serve`
+        // answers the port. This router holds only the serve-specific
+        // surface: the embedded dashboard assets and the endpoints the
+        // daemon does not need.
+        let channel_state = crate::channel::ChannelState {
+            data_dir: data_dir.clone(),
+            tx: tx.clone(),
             started_at: chrono::Utc::now(),
+            role: crate::channel::ServerRole::Serve,
         };
 
         let app = Router::new()
             .route("/", get(index_handler))
-            .route("/health", get(health_endpoint))
-            .route("/sse", get(sse_handler))
             .route("/api/agents", get(api_agents))
-            .route("/api/feed", get(api_feed))
-            .route("/api/tasks", get(api_tasks))
             .route("/api/stats", get(api_stats))
             .route("/api/signals", get(api_signals))
             .route("/api/status", get(api_status))
             .route("/api/needs", get(api_needs))
             .route("/api/done", post(api_done))
-            .route("/api/post", post(api_post))
             .route("/api/tasks/create", post(api_create_task))
             .route("/api/tasks/{id}/accept", post(api_task_accept))
             .route("/api/tasks/{id}/done", post(api_task_done))
@@ -141,12 +132,14 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/kanban/{id}/move", post(api_kanban_move))
             .route("/api/kanban/workloads", get(api_kanban_workloads))
             .route("/{*path}", get(static_handler))
-            .with_state(state);
+            .with_state(state)
+            .merge(crate::channel::router(channel_state));
 
         let addr = format!("0.0.0.0:{port}");
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| error::LegionError::Server(format!("failed to bind {addr}: {e}")))?;
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => return Err(bind_refusal(port, &data_dir, &addr, &e)),
+        };
 
         eprintln!("[legion] dashboard at http://localhost:{port}");
 
@@ -155,6 +148,13 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
         // PID that the supervisor's "is this process alive" probe would
         // then have to disambiguate.
         write_daemon_pidfile(std::process::id());
+
+        // One background task owns schedule firing (#613) -- previously it
+        // ran inside the per-connection SSE stream body, so schedules only
+        // fired while a dashboard was open and fired once per connected
+        // client. Spawned only after the bind succeeded: a process that
+        // failed to become the server must not produce side effects.
+        let _firing = crate::channel::spawn_schedule_firing(data_dir.clone(), tx);
 
         let serve_result = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
@@ -168,30 +168,30 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
     })
 }
 
-/// Pure builder for the `/health` JSON body. Separated from the axum
-/// handler so it's directly unit-testable without spinning up a server.
-fn build_health_body(
-    started_at: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> serde_json::Value {
-    let uptime_secs = (now - started_at).num_seconds().max(0);
-    serde_json::json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-        "started_at": started_at.to_rfc3339(),
-        "uptime_secs": uptime_secs,
-    })
-}
-
-/// GET /health -- cheap daemon liveness probe (#319).
+/// Shape the error for a failed `legion serve` bind (#613, absorbed #601).
 ///
-/// Returns `{status, version, started_at, uptime_secs}` with NO database
-/// access so it can be polled aggressively by hooks, the MCP reconnect
-/// path (#320), and the SessionStart auto-spawn supervisor (#321). The
-/// `version` field is baked in at compile time from CARGO_PKG_VERSION so
-/// clients can detect protocol drift after a plugin upgrade.
-async fn health_endpoint(State(state): State<AppState>) -> Response {
-    Json(build_health_body(state.started_at, chrono::Utc::now())).into_response()
+/// Port-ownership decision: the daemon owns the port while it runs.
+/// `legion serve` never takes the port over; it refuses with a pointer,
+/// and `legion daemon-stop` is the explicit takeover path. When the data
+/// dir's daemon pidfile names a live process, the error says so -- lsof
+/// confirmation (when available) upgrades "likely owns" to "owns" --
+/// instead of leaving the operator to map a bare EADDRINUSE to the
+/// daemon by hand, which is exactly how the wake-storm recovery went
+/// sideways (recall 019eb03a).
+fn bind_refusal(port: u16, data_dir: &Path, addr: &str, e: &std::io::Error) -> error::LegionError {
+    if let Some(pid) = crate::daemon::live_daemon_pid(data_dir) {
+        let qualifier = if crate::daemon::port_listener_pids(port).contains(&pid) {
+            "owns"
+        } else {
+            "is running and likely owns"
+        };
+        return error::LegionError::Server(format!(
+            "failed to bind {addr}: {e}. The legion daemon (pid {pid}) {qualifier} port {port} -- \
+             it serves the channel API and fires schedules while it runs. Stop it first with \
+             `legion daemon-stop`, or run the dashboard on another port with --port."
+        ));
+    }
+    error::LegionError::Server(format!("failed to bind {addr}: {e}"))
 }
 
 async fn index_handler() -> impl IntoResponse {
@@ -216,303 +216,23 @@ async fn static_handler(AxumPath(path): AxumPath<String>) -> Response {
     }
 }
 
-async fn sse_handler(
-    State(state): State<AppState>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let stream = async_stream::stream! {
-        let mut last_reflection_ts: Option<String> = None;
-        let mut last_task_ts: Option<String> = None;
-        let mut tick: u64 = 0;
-        let poll_interval: Duration = Duration::from_secs(2);
-        // Send a ping every 30s = every 15 poll ticks
-        let ping_every: u64 = 15;
-
-        loop {
-            tokio::time::sleep(poll_interval).await;
-            tick += 1;
-
-            let db = match open_db(&state.data_dir) {
-                Ok(db) => db,
-                Err(_) => {
-                    if tick % ping_every == 0 {
-                        yield Ok(Event::default().event("ping").data("{}"));
-                    }
-                    continue;
-                }
-            };
-
-            // Check for new reflections
-            let current_reflection_ts = db.get_max_created_at().ok().flatten();
-            if current_reflection_ts != last_reflection_ts && current_reflection_ts.is_some() {
-                last_reflection_ts = current_reflection_ts;
-
-                // Emit agents event
-                if let Ok(agents_json) = build_agents_json(&db) {
-                    yield Ok(Event::default().event("agents").data(agents_json));
-                }
-
-                // Emit feed event (last 20 team posts)
-                if let Ok(feed_json) = build_feed_json(&db) {
-                    yield Ok(Event::default().event("feed").data(feed_json));
-                }
-            }
-
-            // Check for task changes
-            let current_task_ts = db.get_max_task_updated_at().ok().flatten();
-            if current_task_ts != last_task_ts && current_task_ts.is_some() {
-                last_task_ts = current_task_ts;
-
-                if let Ok(tasks) = db.get_all_tasks()
-                    && let Ok(json) = serde_json::to_string(&tasks)
-                {
-                    yield Ok(Event::default().event("tasks").data(json));
-                }
-            }
-
-            // Check for due schedules and fire them
-            if let Ok(due) = db.get_due_schedules() {
-                for schedule in &due {
-                    // Post to bullpen
-                    if let Ok(reflection) = db.insert_reflection_with_meta(
-                        &schedule.repo,
-                        &schedule.command,
-                        "team",
-                        &ReflectionMeta::default(),
-                    ) {
-                        // Best-effort add to search index
-                        if let Ok(index) = SearchIndex::open(&state.data_dir.join("index"))
-                            && let Err(e) = index.add(&reflection.id, &reflection.repo, &schedule.command)
-                        {
-                            eprintln!("[legion] search index add failed for schedule: {e}");
-                        }
-                        eprintln!("[legion] schedule fired: {}", schedule.name);
-                    }
-                    // Mark as run regardless of post success to avoid infinite retries
-                    if let Err(e) = db.mark_schedule_run(&schedule.id) {
-                        eprintln!("[legion] failed to mark schedule run: {e}");
-                    }
-                }
-            }
-
-            // Periodic ping keepalive
-            if tick % ping_every == 0 {
-                yield Ok(Event::default().event("ping").data("{}"));
-            }
-        }
-    };
-
-    Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
-/// Build the agents JSON payload (same logic as api_agents).
-fn build_agents_json(db: &Database) -> Result<String, error::LegionError> {
-    let stats = db.get_dashboard_stats()?;
-    let unread_map: HashMap<String, u64> = db
-        .get_unread_counts_all()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    let agents: Vec<AgentInfo> = stats
-        .into_iter()
-        .map(|s| AgentInfo {
-            unread: unread_map.get(&s.repo).copied().unwrap_or(0),
-            repo: s.repo,
-            reflection_count: s.reflection_count,
-            boost_sum: s.boost_sum,
-            team_post_count: s.team_post_count,
-            last_activity: s.last_activity,
-        })
-        .collect();
-
-    Ok(serde_json::to_string(&agents)?)
-}
-
-/// Build the feed JSON payload (last 20 team posts).
-fn build_feed_json(db: &Database) -> Result<String, error::LegionError> {
-    let posts = db.get_board_posts()?;
-    let items: Vec<FeedItem> = posts
-        .into_iter()
-        .take(20)
-        .map(|p| {
-            let is_signal = sig::is_signal(&p.text);
-            FeedItem {
-                id: p.id,
-                repo: p.repo,
-                text: p.text,
-                created_at: p.created_at,
-                is_signal,
-            }
-        })
-        .collect();
-
-    Ok(serde_json::to_string(&items)?)
-}
-
-/// Agent info returned by GET /api/agents.
-#[derive(serde::Serialize)]
-struct AgentInfo {
-    repo: String,
-    unread: u64,
-    reflection_count: u64,
-    boost_sum: i64,
-    team_post_count: u64,
-    last_activity: String,
-}
-
 /// GET /api/agents -- per-repo agent overview with unread counts.
-async fn api_agents(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    let stats = match db.get_dashboard_stats() {
-        Ok(s) => s,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("query error: {e}"),
-            );
-        }
-    };
-
-    let unread_map: HashMap<String, u64> = match db.get_unread_counts_all() {
-        Ok(counts) => counts.into_iter().collect(),
-        Err(_) => HashMap::new(),
-    };
-
-    let agents: Vec<AgentInfo> = stats
-        .into_iter()
-        .map(|s| AgentInfo {
-            unread: unread_map.get(&s.repo).copied().unwrap_or(0),
-            repo: s.repo,
-            reflection_count: s.reflection_count,
-            boost_sum: s.boost_sum,
-            team_post_count: s.team_post_count,
-            last_activity: s.last_activity,
-        })
-        .collect();
-
-    Json(agents).into_response()
-}
-
-/// Feed item returned by GET /api/feed.
-#[derive(serde::Serialize)]
-struct FeedItem {
-    id: String,
-    repo: String,
-    text: String,
-    created_at: String,
-    is_signal: bool,
-}
-
-/// Query parameters for GET /api/feed.
-#[derive(serde::Deserialize)]
-struct FeedQuery {
-    repo: Option<String>,
-    filter: Option<String>,
-    /// When set, return only posts unread by this reader repo AND atomically
-    /// mark them as read. Used by the channel backlog fetch so agents only
-    /// see each post once. The reader's own posts are excluded from the
-    /// response regardless of other filters. Combining with `repo` narrows
-    /// unread posts to that repo (not mutually exclusive).
-    unread_for: Option<String>,
-}
-
-/// GET /api/feed -- bullpen posts with optional repo and signal/musing filter.
-/// When `unread_for=<repo>` is set, returns only posts unread by that repo
-/// and atomically marks them as read so the same post is never delivered twice.
-async fn api_feed(State(state): State<AppState>, Query(params): Query<FeedQuery>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    // When `unread_for` is set, use the atomic unread-and-mark query so the
-    // channel backlog delivers each post exactly once across connections.
-    let posts = if let Some(reader) = params.unread_for.as_deref() {
-        match db.get_and_mark_unread_board_posts(reader) {
-            Ok(p) => p,
-            Err(e) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("query error: {e}"),
-                );
-            }
-        }
-    } else {
-        match db.get_board_posts() {
-            Ok(p) => p,
-            Err(e) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("query error: {e}"),
-                );
-            }
-        }
-    };
-
-    let repo_filter = params.repo.as_deref().unwrap_or("all");
-    let type_filter = params.filter.as_deref().unwrap_or("all");
-    let reader = params.unread_for.as_deref();
-
-    let items: Vec<FeedItem> = posts
-        .into_iter()
-        // Exclude the reader's own posts from unread delivery.
-        .filter(|p| reader.is_none_or(|r| p.repo != r))
-        .filter(|p| repo_filter == "all" || p.repo == repo_filter)
-        .filter(|p| match type_filter {
-            "signals" => sig::is_signal(&p.text),
-            "musings" => !sig::is_signal(&p.text),
-            _ => true,
-        })
-        .take(100)
-        .map(|p| {
-            let is_signal = sig::is_signal(&p.text);
-            FeedItem {
-                id: p.id,
-                repo: p.repo,
-                text: p.text,
-                created_at: p.created_at,
-                is_signal,
-            }
-        })
-        .collect();
-
-    Json(items).into_response()
-}
-
-/// GET /api/tasks -- all tasks for kanban view.
-async fn api_tasks(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match db.get_all_tasks() {
-        Ok(tasks) => Json(tasks).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+///
+/// Shares its builder with the SSE `agents` event (channel.rs) so push
+/// and pull of the agent list cannot diverge (audit DC3).
+async fn api_agents(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::channel::AgentInfo>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(crate::channel::build_agents(&db)?))
 }
 
 /// GET /api/stats -- per-repo dashboard stats (same data as agents minus unread).
-async fn api_stats(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match db.get_dashboard_stats() {
-        Ok(stats) => Json(stats).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+async fn api_stats(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::db::DashboardRepoStats>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(db.get_dashboard_stats()?))
 }
 
 /// A parsed signal with source metadata for the signals API.
@@ -528,21 +248,9 @@ struct SignalItem {
 }
 
 /// GET /api/signals -- unresolved signals from the bullpen.
-async fn api_signals(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    let posts = match db.get_board_posts() {
-        Ok(p) => p,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("query error: {e}"),
-            );
-        }
-    };
+async fn api_signals(State(state): State<AppState>) -> Result<Json<Vec<SignalItem>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    let posts = db.get_board_posts()?;
 
     let items: Vec<SignalItem> = posts
         .into_iter()
@@ -561,7 +269,7 @@ async fn api_signals(State(state): State<AppState>) -> Response {
         })
         .collect();
 
-    Json(items).into_response()
+    Ok(Json(items))
 }
 
 /// Query parameters for GET /api/status.
@@ -571,45 +279,38 @@ struct StatusQuery {
 }
 
 /// GET /api/status?repo=<name> -- agent status overview.
-async fn api_status(State(state): State<AppState>, Query(params): Query<StatusQuery>) -> Response {
+async fn api_status(
+    State(state): State<AppState>,
+    Query(params): Query<StatusQuery>,
+) -> Result<Response, ServeError> {
     let repo = params.repo.trim();
     if repo.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "repo parameter is required");
+        return Err(ServeError::BadRequest(
+            "repo parameter is required".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match status::get_status(&db, repo) {
-        Ok(output) => Json(output).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("status error: {e}"),
-        ),
-    }
+    let db = open_db(&state.data_dir)?;
+    let output =
+        status::get_status(&db, repo).map_err(|e| ServeError::internal("status error", e))?;
+    Ok(Json(output).into_response())
 }
 
 /// GET /api/needs?repo=<name> -- team help opportunities for an agent.
-async fn api_needs(State(state): State<AppState>, Query(params): Query<StatusQuery>) -> Response {
+async fn api_needs(
+    State(state): State<AppState>,
+    Query(params): Query<StatusQuery>,
+) -> Result<Response, ServeError> {
     let repo = params.repo.trim();
     if repo.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "repo parameter is required");
+        return Err(ServeError::BadRequest(
+            "repo parameter is required".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match status::get_needs(&db, repo) {
-        Ok(items) => Json(items).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("needs error: {e}"),
-        ),
-    }
+    let db = open_db(&state.data_dir)?;
+    let items = status::get_needs(&db, repo).map_err(|e| ServeError::internal("needs error", e))?;
+    Ok(Json(items).into_response())
 }
 
 /// Request body for POST /api/done.
@@ -620,45 +321,35 @@ struct DoneRequest {
 }
 
 /// POST /api/done -- announce completed work and notify blocked agents.
-async fn api_done(State(state): State<AppState>, Json(body): Json<DoneRequest>) -> Response {
+async fn api_done(
+    State(state): State<AppState>,
+    Json(body): Json<DoneRequest>,
+) -> Result<Json<status::DoneResult>, ServeError> {
     let repo = body.repo.trim();
     let text = body.text.trim();
     if repo.is_empty() || text.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "repo and text are required");
+        return Err(ServeError::BadRequest(
+            "repo and text are required".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+    let db = open_db(&state.data_dir)?;
+    let index = open_search_index(&state.data_dir)?;
 
-    let index = match open_search_index(&state.data_dir) {
-        Ok(idx) => idx,
-        Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to open search index",
-            );
-        }
-    };
-
+    // Both posts route through board::post_from_text_with_meta so the
+    // write+index invariant lives in one place (#613). Consequence: an
+    // index failure now fails the post (the announcement returns 500, a
+    // notification does not count its agent as notified) instead of the
+    // old silently-unsearchable best effort.
     let announcement = format!("{repo} completed: {text}");
-    let reflection = match db.insert_reflection_with_meta(
+    crate::board::post_from_text_with_meta(
+        &db,
+        &index,
         repo,
         &announcement,
-        "team",
         &ReflectionMeta::default(),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("insert error: {e}"),
-            );
-        }
-    };
-
-    let _ = index.add(&reflection.id, &reflection.repo, &announcement);
+    )
+    .map_err(|e| ServeError::internal("insert error", e))?;
 
     let blocked_agents = status::find_blocked_agents(&db, repo).unwrap_or_default();
     let mut notified: Vec<String> = Vec::new();
@@ -666,92 +357,36 @@ async fn api_done(State(state): State<AppState>, Json(body): Json<DoneRequest>) 
         let notify_text = format!(
             "@{agent} announce from {repo} -- {repo} completed: {text}. Your blocker may be cleared."
         );
-        if let Ok(r) =
-            db.insert_reflection_with_meta(repo, &notify_text, "team", &ReflectionMeta::default())
+        if crate::board::post_from_text_with_meta(
+            &db,
+            &index,
+            repo,
+            &notify_text,
+            &ReflectionMeta::default(),
+        )
+        .is_ok()
         {
-            let _ = index.add(&r.id, &r.repo, &notify_text);
             notified.push(agent.clone());
         }
     }
 
-    Json(status::DoneResult {
+    Ok(Json(status::DoneResult {
         announcement,
         notified,
-    })
-    .into_response()
-}
-
-/// Request body for POST /api/post.
-#[derive(serde::Deserialize)]
-struct PostRequest {
-    repo: String,
-    text: String,
-}
-
-/// Open the search index from the data directory.
-fn open_search_index(data_dir: &Path) -> Result<SearchIndex, StatusCode> {
-    SearchIndex::open(&data_dir.join("index")).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-/// POST /api/post -- broadcast a message to the bullpen.
-async fn api_post(State(state): State<AppState>, Json(body): Json<PostRequest>) -> Response {
-    let trimmed = body.text.trim();
-    if trimmed.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "text is required");
-    }
-
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    let index = match open_search_index(&state.data_dir) {
-        Ok(idx) => idx,
-        Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to open search index",
-            );
-        }
-    };
-
-    let reflection = match db.insert_reflection_with_meta(
-        &body.repo,
-        trimmed,
-        "team",
-        &ReflectionMeta::default(),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("insert error: {e}"),
-            );
-        }
-    };
-
-    // Best-effort add to search index; post is already in DB.
-    if let Err(e) = index.add(&reflection.id, &reflection.repo, trimmed) {
-        eprintln!("[legion] search index add failed: {e}");
-    }
-
-    Json(reflection).into_response()
+    }))
 }
 
 /// POST /api/boost/:id -- boost a reflection's recall count.
-async fn api_boost(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+async fn api_boost(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     match db.boost_reflection(&id) {
-        Ok(true) => Json(serde_json::json!({"ok": true})).into_response(),
-        Ok(false) => json_error(StatusCode::NOT_FOUND, "reflection not found"),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("boost error: {e}"),
-        ),
+        Ok(true) => Ok(Json(serde_json::json!({"ok": true}))),
+        Ok(false) => Err(ServeError::NotFound("reflection not found".to_string())),
+        Err(e) => Err(ServeError::internal("boost error", e)),
     }
 }
 
@@ -769,61 +404,45 @@ struct CreateTaskRequest {
 async fn api_create_task(
     State(state): State<AppState>,
     Json(body): Json<CreateTaskRequest>,
-) -> Response {
+) -> Result<(StatusCode, Json<crate::task::Task>), ServeError> {
     let text = body.text.trim().to_string();
     if text.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "text is required");
+        return Err(ServeError::BadRequest("text is required".to_string()));
     }
     if body.to.trim().is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "to is required");
+        return Err(ServeError::BadRequest("to is required".to_string()));
     }
     if !["low", "med", "high"].contains(&body.priority.as_str()) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "priority must be low, med, or high",
-        );
+        return Err(ServeError::BadRequest(
+            "priority must be low, med, or high".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+    let db = open_db(&state.data_dir)?;
 
     let context_ref = body.context.as_deref().filter(|c| !c.trim().is_empty());
 
-    let id = match db.insert_task(
-        &body.from,
-        body.to.trim(),
-        &text,
-        context_ref,
-        &body.priority,
-    ) {
-        Ok(id) => id,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("insert error: {e}"),
-            );
-        }
-    };
+    let id = db
+        .insert_task(
+            &body.from,
+            body.to.trim(),
+            &text,
+            context_ref,
+            &body.priority,
+        )
+        .map_err(|e| ServeError::internal("insert error", e))?;
 
     let task = match db.get_task_by_id(&id) {
         Ok(Some(t)) => t,
         Ok(None) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "task created but not found",
-            );
+            return Err(ServeError::Internal(
+                "task created but not found".to_string(),
+            ));
         }
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("fetch error: {e}"),
-            );
-        }
+        Err(e) => return Err(ServeError::internal("fetch error", e)),
     };
 
-    (StatusCode::CREATED, Json(task)).into_response()
+    Ok((StatusCode::CREATED, Json(task)))
 }
 
 /// Optional request body for task state transitions.
@@ -836,15 +455,13 @@ struct TaskTransitionBody {
 async fn api_task_accept(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-    match crate::task::accept_task(&db, &id) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
-    }
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    // Task-domain errors (unknown id, illegal transition) render as 400
+    // with the bare error message -- a deliberate divergence from the
+    // 500 "query error" convention, preserved from the original handlers.
+    crate::task::accept_task(&db, &id).map_err(|e| ServeError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// POST /api/tasks/:id/done -- complete an accepted task.
@@ -852,16 +469,12 @@ async fn api_task_done(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     body: Option<Json<TaskTransitionBody>>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
     let note = body.and_then(|b| b.note.clone());
-    match crate::task::complete_task(&db, &id, note.as_deref()) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
-    }
+    crate::task::complete_task(&db, &id, note.as_deref())
+        .map_err(|e| ServeError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// POST /api/tasks/:id/block -- block an accepted task.
@@ -869,31 +482,22 @@ async fn api_task_block(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     body: Option<Json<TaskTransitionBody>>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
     let reason = body.and_then(|b| b.note.clone());
-    match crate::task::block_task(&db, &id, reason.as_deref()) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
-    }
+    crate::task::block_task(&db, &id, reason.as_deref())
+        .map_err(|e| ServeError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// POST /api/tasks/:id/unblock -- unblock a blocked task.
 async fn api_task_unblock(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-    match crate::task::unblock_task(&db, &id) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
-    }
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    crate::task::unblock_task(&db, &id).map_err(|e| ServeError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// Query parameters for GET /api/chat.
@@ -912,26 +516,19 @@ struct ChatMessage {
 }
 
 /// GET /api/chat?agent=<name> -- filtered conversation between meatbag and an agent.
-async fn api_chat(State(state): State<AppState>, Query(params): Query<ChatQuery>) -> Response {
+async fn api_chat(
+    State(state): State<AppState>,
+    Query(params): Query<ChatQuery>,
+) -> Result<Json<Vec<ChatMessage>>, ServeError> {
     let agent = params.agent.trim().to_lowercase();
     if agent.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "agent parameter is required");
+        return Err(ServeError::BadRequest(
+            "agent parameter is required".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    let posts = match db.get_board_posts() {
-        Ok(p) => p,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("query error: {e}"),
-            );
-        }
-    };
+    let db = open_db(&state.data_dir)?;
+    let posts = db.get_board_posts()?;
 
     let at_agent = format!("@{agent}");
     let at_meatbag = "@meatbag";
@@ -966,23 +563,15 @@ async fn api_chat(State(state): State<AppState>, Query(params): Query<ChatQuery>
         messages = messages.split_off(start);
     }
 
-    Json(messages).into_response()
+    Ok(Json(messages))
 }
 
 /// GET /api/schedules -- list all schedules.
-async fn api_schedules(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match db.list_schedules() {
-        Ok(schedules) => Json(schedules).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+async fn api_schedules(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::db::Schedule>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(db.list_schedules()?))
 }
 
 /// Request body for POST /api/schedules/create.
@@ -1000,71 +589,56 @@ struct CreateScheduleRequest {
 async fn api_create_schedule(
     State(state): State<AppState>,
     Json(body): Json<CreateScheduleRequest>,
-) -> Response {
+) -> Result<Json<serde_json::Value>, ServeError> {
     let name = body.name.trim();
     if name.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "name is required");
+        return Err(ServeError::BadRequest("name is required".to_string()));
     }
     let command = body.command.trim();
     if command.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "command is required");
+        return Err(ServeError::BadRequest("command is required".to_string()));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+    let db = open_db(&state.data_dir)?;
 
-    match db.insert_schedule(
-        name,
-        &body.cron,
-        command,
-        &body.repo,
-        body.active_start.as_deref(),
-        body.active_end.as_deref(),
-    ) {
-        Ok(id) => Json(serde_json::json!({"ok": true, "id": id})).into_response(),
-        Err(e) => json_error(StatusCode::BAD_REQUEST, &format!("create error: {e}")),
-    }
+    // Insert failures are caller errors (bad cron expression, bad time
+    // window), so they render as 400 -- preserved from the original handler.
+    let id = db
+        .insert_schedule(
+            name,
+            &body.cron,
+            command,
+            &body.repo,
+            body.active_start.as_deref(),
+            body.active_end.as_deref(),
+        )
+        .map_err(|e| ServeError::BadRequest(format!("create error: {e}")))?;
+
+    Ok(Json(serde_json::json!({"ok": true, "id": id})))
 }
 
 /// POST /api/schedules/:id/toggle -- toggle a schedule's enabled state.
 async fn api_toggle_schedule(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     // Read current state to toggle it
-    let schedules = match db.list_schedules() {
-        Ok(s) => s,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("query error: {e}"),
-            );
-        }
-    };
+    let schedules = db.list_schedules()?;
 
-    let current = schedules.iter().find(|s| s.id == id);
-    match current {
-        None => json_error(StatusCode::NOT_FOUND, "schedule not found"),
-        Some(s) => {
-            let new_enabled = !s.enabled;
-            match db.toggle_schedule(&id, new_enabled) {
-                Ok(true) => {
-                    Json(serde_json::json!({"ok": true, "enabled": new_enabled})).into_response()
-                }
-                Ok(false) => json_error(StatusCode::NOT_FOUND, "schedule not found"),
-                Err(e) => json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("toggle error: {e}"),
-                ),
-            }
-        }
+    let current = schedules
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| ServeError::NotFound("schedule not found".to_string()))?;
+
+    let new_enabled = !current.enabled;
+    match db.toggle_schedule(&id, new_enabled) {
+        Ok(true) => Ok(Json(
+            serde_json::json!({"ok": true, "enabled": new_enabled}),
+        )),
+        Ok(false) => Err(ServeError::NotFound("schedule not found".to_string())),
+        Err(e) => Err(ServeError::internal("toggle error", e)),
     }
 }
 
@@ -1076,25 +650,19 @@ struct HealthQuery {
 }
 
 /// GET /api/health -- latest health samples per host + recent history.
-async fn api_health(State(state): State<AppState>, Query(params): Query<HealthQuery>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+async fn api_health(
+    State(state): State<AppState>,
+    Query(params): Query<HealthQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     let minutes = params.minutes.unwrap_or(60);
     let since = chrono::Utc::now() - chrono::Duration::minutes(minutes as i64);
     let since_str = since.to_rfc3339();
 
-    let samples: Vec<HealthSample> = match db.get_health_all_hosts(&since_str) {
-        Ok(s) => s,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("health query error: {e}"),
-            );
-        }
-    };
+    let samples: Vec<HealthSample> = db
+        .get_health_all_hosts(&since_str)
+        .map_err(|e| ServeError::internal("health query error", e))?;
 
     // Group by hostname, return latest + history
     let mut by_host: HashMap<String, Vec<&HealthSample>> = HashMap::new();
@@ -1147,7 +715,7 @@ async fn api_health(State(state): State<AppState>, Query(params): Query<HealthQu
         })
         .collect();
 
-    Json(hosts).into_response()
+    Ok(Json(hosts))
 }
 
 /// Query parameters for GET /api/health/history.
@@ -1163,23 +731,17 @@ struct HealthHistoryQuery {
 async fn api_health_history(
     State(state): State<AppState>,
     Query(params): Query<HealthHistoryQuery>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<Vec<HealthSample>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     let minutes = params.minutes.unwrap_or(60);
     let since = chrono::Utc::now() - chrono::Duration::minutes(minutes as i64);
     let since_str = since.to_rfc3339();
 
-    match db.get_health_history(&params.hostname, &since_str) {
-        Ok(samples) => Json(samples).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("health history error: {e}"),
-        ),
-    }
+    let samples = db
+        .get_health_history(&params.hostname, &since_str)
+        .map_err(|e| ServeError::internal("health history error", e))?;
+    Ok(Json(samples))
 }
 
 /// Query parameters for GET /api/search.
@@ -1194,23 +756,22 @@ struct SearchQuery {
 }
 
 /// GET /api/search -- BM25-ranked reflection search.
-async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQuery>) -> Response {
+async fn api_search(
+    State(state): State<AppState>,
+    Query(params): Query<SearchQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, ServeError> {
     let q = params.q.trim();
     if q.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "q parameter is required");
+        return Err(ServeError::BadRequest(
+            "q parameter is required".to_string(),
+        ));
     }
 
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    let index = match open_search_index(&state.data_dir) {
-        Ok(idx) => idx,
-        Err(_) => {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "search index error");
-        }
-    };
+    let db = open_db(&state.data_dir)?;
+    // Preserved wire message: this endpoint reported index-open failure as
+    // "search index error", not the shared "failed to open search index".
+    let index = open_search_index(&state.data_dir)
+        .map_err(|_| ServeError::Internal("search index error".to_string()))?;
 
     let limit = params.limit.unwrap_or(10).min(50);
 
@@ -1218,27 +779,12 @@ async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQu
         Some(repo) => index.search(repo, q, limit),
         None => index.search_all(q, limit),
     };
-
-    let hits = match hits {
-        Ok(hits) => hits,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("search error: {e}"),
-            );
-        }
-    };
+    let hits = hits.map_err(|e| ServeError::internal("search error", e))?;
 
     let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
-    let reflections = match db.get_reflections_by_ids(&ids) {
-        Ok(r) => r,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("reflection lookup error: {e}"),
-            );
-        }
-    };
+    let reflections = db
+        .get_reflections_by_ids(&ids)
+        .map_err(|e| ServeError::internal("reflection lookup error", e))?;
 
     // Build score map from search hits, then return reflections in score order
     let score_map: HashMap<&str, f32> = hits.iter().map(|h| (h.id.as_str(), h.score)).collect();
@@ -1263,7 +809,7 @@ async fn api_search(State(state): State<AppState>, Query(params): Query<SearchQu
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    Json(results).into_response()
+    Ok(Json(results))
 }
 
 /// Query parameters for GET /api/audit.
@@ -1278,37 +824,26 @@ struct AuditQuery {
 }
 
 /// GET /api/audit -- recent audit log entries.
-async fn api_audit(State(state): State<AppState>, Query(params): Query<AuditQuery>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+async fn api_audit(
+    State(state): State<AppState>,
+    Query(params): Query<AuditQuery>,
+) -> Result<Response, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
     let limit = params.limit.unwrap_or(50).min(200);
 
-    match db.query_audit_log(params.agent.as_deref(), params.action.as_deref(), limit) {
-        Ok(entries) => Json(entries).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("audit query error: {e}"),
-        ),
-    }
+    let entries = db
+        .query_audit_log(params.agent.as_deref(), params.action.as_deref(), limit)
+        .map_err(|e| ServeError::internal("audit query error", e))?;
+    Ok(Json(entries).into_response())
 }
 
 /// GET /api/kanban -- all kanban cards for the board view.
-async fn api_kanban(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match crate::kanban::board_cards(&db) {
-        Ok(cards) => Json(cards).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+async fn api_kanban(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::kanban::Card>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(crate::kanban::board_cards(&db)?))
 }
 
 /// Request body for POST /api/kanban/{id}/move.
@@ -1323,40 +858,25 @@ async fn api_kanban_move(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(body): Json<KanbanMoveRequest>,
-) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let db = open_db(&state.data_dir)?;
 
-    let new_status = match body.status.parse::<crate::kanban::CardStatus>() {
-        Ok(s) => s,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid status: {e}")),
-    };
+    let new_status = body
+        .status
+        .parse::<crate::kanban::CardStatus>()
+        .map_err(|e| ServeError::BadRequest(format!("invalid status: {e}")))?;
 
-    match crate::kanban::force_move(&db, &id, new_status, body.sort_order) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("move failed: {e}"),
-        ),
-    }
+    crate::kanban::force_move(&db, &id, new_status, body.sort_order)
+        .map_err(|e| ServeError::internal("move failed", e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// GET /api/kanban/workloads -- per-agent workload summary for the agent strip.
-async fn api_kanban_workloads(State(state): State<AppState>) -> Response {
-    let db = match open_db(&state.data_dir) {
-        Ok(db) => db,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to open database"),
-    };
-
-    match crate::kanban::agent_workloads(&db) {
-        Ok(workloads) => Json(workloads).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("query error: {e}"),
-        ),
-    }
+async fn api_kanban_workloads(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::kanban::AgentWorkload>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    Ok(Json(crate::kanban::agent_workloads(&db)?))
 }
 
 /// Query parameters for GET /api/telemetry/bypasses.
@@ -1375,27 +895,20 @@ struct TelemetryQuery {
 /// uncertainty engine consumer (#354). Reads bypass.jsonl directly;
 /// the file is append-only, so even if the legion DB is unavailable
 /// this endpoint still works.
-async fn api_telemetry_bypasses(Query(params): Query<TelemetryQuery>) -> Response {
+async fn api_telemetry_bypasses(
+    Query(params): Query<TelemetryQuery>,
+) -> Result<Response, ServeError> {
     let since_dur = match params.since.as_deref() {
-        Some(s) => match crate::telemetry::parse_duration(s) {
-            Ok(d) => Some(d),
-            Err(e) => {
-                return json_error(StatusCode::BAD_REQUEST, &format!("invalid since: {e}"));
-            }
-        },
+        Some(s) => Some(
+            crate::telemetry::parse_duration(s)
+                .map_err(|e| ServeError::BadRequest(format!("invalid since: {e}")))?,
+        ),
         None => None,
     };
-    let rows = match crate::telemetry::list_bypasses(since_dur, params.repo.as_deref()) {
-        Ok(r) => r,
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("read bypass log: {e}"),
-            );
-        }
-    };
+    let rows = crate::telemetry::list_bypasses(since_dur, params.repo.as_deref())
+        .map_err(|e| ServeError::internal("read bypass log", e))?;
     let summary = crate::telemetry::summarize(&rows, params.top.unwrap_or(20));
-    Json(summary).into_response()
+    Ok(Json(summary).into_response())
 }
 
 async fn shutdown_signal() {
@@ -1427,21 +940,6 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn health_body_shape() {
-        let started = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:01:30Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let body = build_health_body(started, now);
-        assert_eq!(body["status"], "ok");
-        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(body["started_at"], "2026-05-10T12:00:00+00:00");
-        assert_eq!(body["uptime_secs"], 90);
-    }
 
     #[test]
     fn daemon_pid_path_honors_xdg_state_home() {
@@ -1477,16 +975,50 @@ mod tests {
     }
 
     #[test]
-    fn health_uptime_clamped_at_zero_for_clock_skew() {
-        // If `now` is somehow before `started_at` (clock jump, NTP
-        // correction, test fixture), uptime must not go negative.
-        let started = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T11:59:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let body = build_health_body(started, now);
-        assert_eq!(body["uptime_secs"], 0);
+    fn serve_refuses_port_held_by_live_daemon_with_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        // A "live daemon": this test process itself, recorded in the
+        // pidfile path the daemon writes (data_dir/daemon.pid).
+        std::fs::write(
+            dir.path().join("daemon.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        // Hold a port the way the daemon would.
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let err = run_server(port, dir.path().to_path_buf()).expect_err("bind must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legion daemon"),
+            "error must name the daemon as the holder: {msg}"
+        );
+        assert!(
+            msg.contains("daemon-stop"),
+            "error must point at the takeover path: {msg}"
+        );
+        assert!(
+            msg.contains("--port"),
+            "error must offer the alternate-port escape: {msg}"
+        );
+    }
+
+    #[test]
+    fn serve_bind_failure_without_daemon_stays_bare() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let err = run_server(port, dir.path().to_path_buf()).expect_err("bind must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to bind"),
+            "bare bind error expected: {msg}"
+        );
+        assert!(
+            !msg.contains("legion daemon (pid"),
+            "no daemon attribution without a live pidfile: {msg}"
+        );
     }
 }

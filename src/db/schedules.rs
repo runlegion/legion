@@ -282,6 +282,21 @@ impl Database {
         Ok(())
     }
 
+    /// Force a schedule's next_run into the past so it reads as due.
+    ///
+    /// Test seam only: `insert_schedule` always computes a future next_run,
+    /// so exercising the due->fire->mark_run path would otherwise require
+    /// a real cron wait.
+    #[cfg(test)]
+    pub fn force_schedule_due(&self, id: &str) -> Result<()> {
+        let past = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        self.conn.execute(
+            "UPDATE schedules SET next_run = ?1 WHERE id = ?2",
+            rusqlite::params![&past, id],
+        )?;
+        Ok(())
+    }
+
     /// List all schedules.
     pub fn list_schedules(&self) -> Result<Vec<Schedule>> {
         let mut stmt = self.conn.prepare(

@@ -164,7 +164,8 @@ finish_tests() {
 #   FAKE_WHOAMI_BODY         `whoami` body below the standard banner header
 #   FAKE_PREDICTION_ID       `uncertainty emit` row id (pred-fixed-1)
 #   FAKE_WITNESS_LOG=<file>  `uncertainty witness` appends its argv here
-#   FAKE_SPAWN_LOG=<file>    `serve` appends "spawned at <epoch>" here
+#   FAKE_SPAWN_LOG=<file>    `serve` appends "spawned at <epoch>" here;
+#                            `daemon-restart` appends "daemon-restart at <epoch>"
 #   LEGION_TEST_MARKER=<file> `telemetry ...` appends its argv (sans
 #                            leading "telemetry") here
 make_stub_legion() {
@@ -260,6 +261,9 @@ case "${1:-}" in
     ;;
   serve)
     echo "spawned at $(date +%s)" >> "${FAKE_SPAWN_LOG:-/dev/null}"
+    ;;
+  daemon-restart)
+    echo "daemon-restart at $(date +%s)" >> "${FAKE_SPAWN_LOG:-/dev/null}"
     ;;
   telemetry)
     shift
