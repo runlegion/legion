@@ -161,6 +161,7 @@ pub fn transition_card(
         note,
         ts,
         card.document_id.as_deref(),
+        None,
     )?;
     db.get_card_by_id(id)?
         .ok_or_else(|| LegionError::CardNotFound(id.to_string()))

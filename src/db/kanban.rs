@@ -463,11 +463,14 @@ impl Database {
     /// Atomically pick the next pending card for a repo and accept it.
     ///
     /// Selects highest priority, then lowest sort_order, then oldest.
-    /// Transitions to Accepted and sets started_at. Returns None if empty.
+    /// Transitions to Accepted and sets started_at. Returns None if empty
+    /// or if the card was raced away (another picker accepted it first).
     ///
-    /// Routes through `transition_card_status_with_sync` so a bound document's
-    /// `meta.status` and hoisted `status` column are kept in sync (#528). The
-    /// prior direct UPDATE bypassed the sync path and left specs stale.
+    /// The `expected_from_status = Some("pending")` argument to
+    /// `transition_card_status_with_sync` ensures only one concurrent picker
+    /// wins: the UPDATE's `AND status = 'pending'` predicate makes it
+    /// conditional, so the second caller gets `rows_affected == 0` -> `CardNotFound`
+    /// -> `Ok(None)` here, matching the original direct-UPDATE semantics.
     pub fn pick_next_card(&self, repo: &str) -> Result<Option<crate::kanban::Card>> {
         let sql = format!(
             "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL \
@@ -484,16 +487,17 @@ impl Database {
         drop(rows);
         drop(stmt);
 
-        // Use the shared sync path: updates tasks + syncs bound document in one
-        // transaction. The optimistic WHERE status='pending' guard is preserved
-        // inside transition_card_status_with_sync via rows_affected == 0 ->
-        // CardNotFound, which callers can treat as a lost race (return None).
+        // Pass expected_from_status = Some("pending") so the UPDATE is
+        // conditional on the card still being pending at write time.
+        // CardNotFound covers both "card deleted" and "status already changed"
+        // (lost race) -- both map to Ok(None).
         match self.transition_card_status_with_sync(
             &card.id,
             &crate::kanban::CardStatus::Accepted.to_string(),
             None,
             CardTimestamp::Started,
             card.document_id.as_deref(),
+            Some("pending"),
         ) {
             Ok(()) => {}
             Err(LegionError::CardNotFound(_)) => return Ok(None),
@@ -554,6 +558,14 @@ impl Database {
     ///
     /// When `document_id` is `None` this behaves identically to the old
     /// `update_card_status` path but inside an `unchecked_transaction`.
+    ///
+    /// `expected_from_status`: when `Some(s)`, the UPDATE predicate includes
+    /// `AND status = s` so the write is conditional on the card still being in
+    /// that exact status at write time. A mismatch (rows_affected == 0) maps
+    /// to `CardNotFound`, letting callers treat a lost race as "no card to
+    /// update" without a separate read-modify-write. `pick_next_card` passes
+    /// `Some("pending")` to restore the atomicity guarantee the prior direct
+    /// UPDATE had. All other callers pass `None`.
     pub fn transition_card_status_with_sync(
         &self,
         id: &str,
@@ -561,32 +573,59 @@ impl Database {
         note: Option<&str>,
         timestamp: CardTimestamp,
         document_id: Option<&str>,
+        expected_from_status: Option<&str>,
     ) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
 
         let tx = self.conn.unchecked_transaction()?;
 
         // -- update the card row --
-        let rows_affected = match timestamp {
-            CardTimestamp::Assigned => tx.execute(
+        // When expected_from_status is Some, the WHERE clause includes
+        // `AND status = ?` so the update is conditional on the card still
+        // being in the expected status at commit time.
+        let rows_affected = match (timestamp, expected_from_status) {
+            (CardTimestamp::Assigned, None) => tx.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
                  assigned_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
-            CardTimestamp::Started => tx.execute(
+            (CardTimestamp::Assigned, Some(from)) => tx.execute(
+                "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
+                 assigned_at = ?3, updated_at = ?4 \
+                 WHERE id = ?5 AND status = ?6 AND deleted_at IS NULL",
+                rusqlite::params![status, note, now, now, id, from],
+            )?,
+            (CardTimestamp::Started, None) => tx.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
                  started_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
-            CardTimestamp::Completed => tx.execute(
+            (CardTimestamp::Started, Some(from)) => tx.execute(
+                "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
+                 started_at = ?3, updated_at = ?4 \
+                 WHERE id = ?5 AND status = ?6 AND deleted_at IS NULL",
+                rusqlite::params![status, note, now, now, id, from],
+            )?,
+            (CardTimestamp::Completed, None) => tx.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
                  completed_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
-            CardTimestamp::None => tx.execute(
+            (CardTimestamp::Completed, Some(from)) => tx.execute(
+                "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
+                 completed_at = ?3, updated_at = ?4 \
+                 WHERE id = ?5 AND status = ?6 AND deleted_at IS NULL",
+                rusqlite::params![status, note, now, now, id, from],
+            )?,
+            (CardTimestamp::None, None) => tx.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
                  updated_at = ?3 WHERE id = ?4 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, id],
+            )?,
+            (CardTimestamp::None, Some(from)) => tx.execute(
+                "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
+                 updated_at = ?3 WHERE id = ?4 AND status = ?5 AND deleted_at IS NULL",
+                rusqlite::params![status, note, now, id, from],
             )?,
         };
         if rows_affected == 0 {
@@ -741,9 +780,12 @@ impl Database {
     /// Return the id of the live (non-cancelled, non-deleted) card bound to
     /// `document_id`, or `None` when no such card exists.
     ///
-    /// "Live" matches the bind guard's definition: `status != 'cancelled'` AND
-    /// `deleted_at IS NULL`. Both `archive_document` and `bind_card_to_document`
-    /// call this to enforce uniqueness.
+    /// "Live" means `status != 'cancelled'` AND `deleted_at IS NULL`.
+    ///
+    /// `archive_document` calls this to enforce the guard. `bind_card_to_document`
+    /// uses equivalent inline SQL inside its own transaction (it cannot call this
+    /// method because `&self` and `&Transaction` are incompatible receivers);
+    /// if the live definition changes, both sites must be kept in sync.
     pub fn live_card_bound_to_document(&self, document_id: &str) -> Result<Option<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT id FROM tasks WHERE document_id = ?1 \
@@ -1294,6 +1336,7 @@ mod tests {
             None,
             CardTimestamp::Completed,
             Some(&doc_id),
+            None,
         )
         .expect("transition");
 
@@ -1338,6 +1381,7 @@ mod tests {
             None,
             CardTimestamp::Completed,
             Some(&doc_id),
+            None,
         )
         .expect("cancel transition");
 
@@ -1403,6 +1447,7 @@ mod tests {
                 None,
                 CardTimestamp::Completed,
                 Some(&doc_id),
+                None,
             )
             .unwrap_err();
         assert!(
@@ -1444,6 +1489,7 @@ mod tests {
             None,
             CardTimestamp::None,
             Some(&doc_id),
+            None,
         )
         .expect("transition to blocked");
 
@@ -1490,6 +1536,51 @@ mod tests {
             payload["meta"]["status"].as_str(),
             Some("accepted"),
             "spec payload meta.status must be updated by pick_next_card"
+        );
+    }
+
+    /// Concurrent-pick loser returns Ok(None). Simulated by calling
+    /// transition_card_status_with_sync directly with expected_from_status =
+    /// Some("pending") after the card is already accepted -- the AND status =
+    /// 'pending' predicate finds no matching row (rows_affected == 0 ->
+    /// CardNotFound), and pick_next_card maps that to Ok(None).
+    ///
+    /// This pins the guard that pick_next_card relies on: two concurrent callers
+    /// race to transition the same card; exactly one wins, the other gets None.
+    #[test]
+    fn pick_next_card_race_loser_returns_none() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+
+        // Move the card to pending so the first pick succeeds.
+        db.force_move_card(&card_id, "pending", None)
+            .expect("move to pending");
+
+        // First pick: succeeds and transitions the card to accepted.
+        let first = db.pick_next_card("legion").expect("first pick");
+        assert!(first.is_some(), "first pick must succeed");
+        assert_eq!(
+            first.unwrap().status,
+            crate::kanban::CardStatus::Accepted,
+            "first pick must set status to accepted"
+        );
+
+        // Simulate the second picker: it read the card when it was still pending,
+        // but by the time it writes, the card is accepted. Call the inner path
+        // directly with expected_from_status = Some("pending") -- the predicate
+        // now fails because status = 'accepted', so rows_affected == 0 ->
+        // CardNotFound, which pick_next_card maps to Ok(None).
+        let race_result = db.transition_card_status_with_sync(
+            &card_id,
+            &crate::kanban::CardStatus::Accepted.to_string(),
+            None,
+            CardTimestamp::Started,
+            None,
+            Some("pending"), // stale expectation: card is already accepted
+        );
+        assert!(
+            matches!(race_result, Err(LegionError::CardNotFound(_))),
+            "stale expected_from_status must yield CardNotFound, got: {race_result:?}"
         );
     }
 }
