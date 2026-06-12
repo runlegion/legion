@@ -22,8 +22,7 @@ pub use gates::{PersonaLeaseGate, QuotaPanicGate, poll_cycle};
 pub(crate) use locks::process_alive;
 pub use locks::{CooldownTracker, PidLockGuard, SessionLockTracker, acquire_pid_lock};
 pub use signals::{
-    WAKE_WORTHY_VERBS, build_wake_prompt, directed_verb_will_not_wake, find_pending_signals,
-    signal_requires_reply,
+    build_wake_prompt, directed_verb_will_not_wake, find_pending_signals, signal_requires_reply,
 };
 pub use spawn::{SpawnMode, record_session_end};
 pub use tracker::AgentTracker;
