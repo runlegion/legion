@@ -696,5 +696,4 @@ mod tests {
         assert!(std::str::from_utf8(result.as_bytes()).is_ok());
         assert!(result.len() <= MAX_TOOL_RESULT_LEN);
     }
-
 }

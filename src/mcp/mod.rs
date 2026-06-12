@@ -34,8 +34,8 @@ use crate::error::Result;
 use self::log::redirect_stderr_to_log;
 use self::notifier::{mcp_poll_interval, resolve_session_repo_from_cwd, run_notifier_loop};
 use self::tools::{
-    error_response, handle_tool_call, success_response, tool_definitions, tool_error,
-    tool_result, truncate,
+    error_response, handle_tool_call, success_response, tool_definitions, tool_error, tool_result,
+    truncate,
 };
 
 /// Protocol version string returned by initialize.
@@ -385,7 +385,6 @@ pub(crate) mod testutil {
         let _index = SearchIndex::open(&dir.path().join("index")).expect("open index");
         (db, dir)
     }
-
 }
 
 #[cfg(test)]
@@ -520,5 +519,4 @@ mod tests {
             "instructions must mention notifications/claude/channel; got: {instructions}"
         );
     }
-
 }
