@@ -1,14 +1,9 @@
-#![allow(clippy::manual_is_multiple_of)] // Use modulo for MSRV compatibility
-
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
-use axum::response::sse::{Event, KeepAlive};
-use axum::response::{Html, IntoResponse, Response, Sse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rust_embed::Embed;
@@ -29,9 +24,6 @@ struct StaticAssets;
 #[derive(Clone)]
 struct AppState {
     data_dir: PathBuf,
-    /// Wall-clock start of this server process. Captured once at boot so the
-    /// `/health` endpoint (#319) can report uptime without per-request work.
-    started_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Open a database connection from the data directory.
@@ -102,31 +94,39 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
     runtime.block_on(async {
         let state = AppState {
             data_dir: data_dir.clone(),
-            started_at: chrono::Utc::now(),
         };
+
+        // One broadcast channel is shared by the schedule-firing task
+        // (sender) and the channel SSE handler (subscribers), so an
+        // in-process write wakes connected dashboards immediately.
+        let (tx, _rx) = crate::channel::new_broadcast();
 
         // One background task owns schedule firing (#613) -- previously it
         // ran inside the per-connection SSE stream body, so schedules only
         // fired while a dashboard was open and fired once per connected
-        // client. The broadcast sender wakes in-process SSE subscribers
-        // when a schedule posts (serve's own SSE still detects the write
-        // by timestamp poll; the channel SSE handler subscribes).
-        let (tx, _rx) = crate::channel::new_broadcast();
-        let _firing = crate::channel::spawn_schedule_firing(data_dir.clone(), tx);
+        // client.
+        let _firing = crate::channel::spawn_schedule_firing(data_dir.clone(), tx.clone());
+
+        // The shared endpoint contract (/health, /sse, /api/feed,
+        // /api/tasks, /api/post) is owned by channel::router (#613) --
+        // one implementation whether the daemon or `legion serve`
+        // answers the port. This router holds only the serve-specific
+        // surface: the embedded dashboard assets and the endpoints the
+        // daemon does not need.
+        let channel_state = crate::channel::ChannelState {
+            data_dir: data_dir.clone(),
+            tx,
+            started_at: chrono::Utc::now(),
+        };
 
         let app = Router::new()
             .route("/", get(index_handler))
-            .route("/health", get(health_endpoint))
-            .route("/sse", get(sse_handler))
             .route("/api/agents", get(api_agents))
-            .route("/api/feed", get(api_feed))
-            .route("/api/tasks", get(api_tasks))
             .route("/api/stats", get(api_stats))
             .route("/api/signals", get(api_signals))
             .route("/api/status", get(api_status))
             .route("/api/needs", get(api_needs))
             .route("/api/done", post(api_done))
-            .route("/api/post", post(api_post))
             .route("/api/tasks/create", post(api_create_task))
             .route("/api/tasks/{id}/accept", post(api_task_accept))
             .route("/api/tasks/{id}/done", post(api_task_done))
@@ -146,7 +146,8 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
             .route("/api/kanban/{id}/move", post(api_kanban_move))
             .route("/api/kanban/workloads", get(api_kanban_workloads))
             .route("/{*path}", get(static_handler))
-            .with_state(state);
+            .with_state(state)
+            .merge(crate::channel::router(channel_state));
 
         let addr = format!("0.0.0.0:{port}");
         let listener = tokio::net::TcpListener::bind(&addr)
@@ -173,32 +174,6 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
     })
 }
 
-/// Pure builder for the `/health` JSON body. Separated from the axum
-/// handler so it's directly unit-testable without spinning up a server.
-fn build_health_body(
-    started_at: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> serde_json::Value {
-    let uptime_secs = (now - started_at).num_seconds().max(0);
-    serde_json::json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-        "started_at": started_at.to_rfc3339(),
-        "uptime_secs": uptime_secs,
-    })
-}
-
-/// GET /health -- cheap daemon liveness probe (#319).
-///
-/// Returns `{status, version, started_at, uptime_secs}` with NO database
-/// access so it can be polled aggressively by hooks, the MCP reconnect
-/// path (#320), and the SessionStart auto-spawn supervisor (#321). The
-/// `version` field is baked in at compile time from CARGO_PKG_VERSION so
-/// clients can detect protocol drift after a plugin upgrade.
-async fn health_endpoint(State(state): State<AppState>) -> Response {
-    Json(build_health_body(state.started_at, chrono::Utc::now())).into_response()
-}
-
 async fn index_handler() -> impl IntoResponse {
     match StaticAssets::get("index.html") {
         Some(file) => Html(String::from_utf8_lossy(file.data.as_ref()).to_string()).into_response(),
@@ -221,228 +196,15 @@ async fn static_handler(AxumPath(path): AxumPath<String>) -> Response {
     }
 }
 
-async fn sse_handler(
-    State(state): State<AppState>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let stream = async_stream::stream! {
-        let mut last_reflection_ts: Option<String> = None;
-        let mut last_task_ts: Option<String> = None;
-        let mut tick: u64 = 0;
-        let poll_interval: Duration = Duration::from_secs(2);
-        // Send a ping every 30s = every 15 poll ticks
-        let ping_every: u64 = 15;
-
-        loop {
-            tokio::time::sleep(poll_interval).await;
-            tick += 1;
-
-            let db = match open_db(&state.data_dir) {
-                Ok(db) => db,
-                Err(_) => {
-                    if tick % ping_every == 0 {
-                        yield Ok(Event::default().event("ping").data("{}"));
-                    }
-                    continue;
-                }
-            };
-
-            // Check for new reflections
-            let current_reflection_ts = db.get_max_created_at().ok().flatten();
-            if current_reflection_ts != last_reflection_ts && current_reflection_ts.is_some() {
-                last_reflection_ts = current_reflection_ts;
-
-                // Emit agents event
-                if let Ok(agents_json) = build_agents_json(&db) {
-                    yield Ok(Event::default().event("agents").data(agents_json));
-                }
-
-                // Emit feed event (last 20 team posts)
-                if let Ok(feed_json) = build_feed_json(&db) {
-                    yield Ok(Event::default().event("feed").data(feed_json));
-                }
-            }
-
-            // Check for task changes
-            let current_task_ts = db.get_max_task_updated_at().ok().flatten();
-            if current_task_ts != last_task_ts && current_task_ts.is_some() {
-                last_task_ts = current_task_ts;
-
-                if let Ok(tasks) = db.get_all_tasks()
-                    && let Ok(json) = serde_json::to_string(&tasks)
-                {
-                    yield Ok(Event::default().event("tasks").data(json));
-                }
-            }
-
-            // Periodic ping keepalive
-            if tick % ping_every == 0 {
-                yield Ok(Event::default().event("ping").data("{}"));
-            }
-        }
-    };
-
-    Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
-/// Build the agents JSON payload (same logic as api_agents).
-fn build_agents_json(db: &Database) -> Result<String, error::LegionError> {
-    let stats = db.get_dashboard_stats()?;
-    let unread_map: HashMap<String, u64> = db
-        .get_unread_counts_all()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    let agents: Vec<AgentInfo> = stats
-        .into_iter()
-        .map(|s| AgentInfo {
-            unread: unread_map.get(&s.repo).copied().unwrap_or(0),
-            repo: s.repo,
-            reflection_count: s.reflection_count,
-            boost_sum: s.boost_sum,
-            team_post_count: s.team_post_count,
-            last_activity: s.last_activity,
-        })
-        .collect();
-
-    Ok(serde_json::to_string(&agents)?)
-}
-
-/// Build the feed JSON payload (last 20 team posts).
-fn build_feed_json(db: &Database) -> Result<String, error::LegionError> {
-    let posts = db.get_board_posts()?;
-    let items: Vec<FeedItem> = posts
-        .into_iter()
-        .take(20)
-        .map(|p| {
-            let is_signal = sig::is_signal(&p.text);
-            FeedItem {
-                id: p.id,
-                repo: p.repo,
-                text: p.text,
-                created_at: p.created_at,
-                is_signal,
-            }
-        })
-        .collect();
-
-    Ok(serde_json::to_string(&items)?)
-}
-
-/// Agent info returned by GET /api/agents.
-#[derive(serde::Serialize)]
-struct AgentInfo {
-    repo: String,
-    unread: u64,
-    reflection_count: u64,
-    boost_sum: i64,
-    team_post_count: u64,
-    last_activity: String,
-}
-
 /// GET /api/agents -- per-repo agent overview with unread counts.
-async fn api_agents(State(state): State<AppState>) -> Result<Json<Vec<AgentInfo>>, ServeError> {
-    let db = open_db(&state.data_dir)?;
-
-    let stats = db.get_dashboard_stats()?;
-
-    let unread_map: HashMap<String, u64> = db
-        .get_unread_counts_all()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    let agents: Vec<AgentInfo> = stats
-        .into_iter()
-        .map(|s| AgentInfo {
-            unread: unread_map.get(&s.repo).copied().unwrap_or(0),
-            repo: s.repo,
-            reflection_count: s.reflection_count,
-            boost_sum: s.boost_sum,
-            team_post_count: s.team_post_count,
-            last_activity: s.last_activity,
-        })
-        .collect();
-
-    Ok(Json(agents))
-}
-
-/// Feed item returned by GET /api/feed.
-#[derive(serde::Serialize)]
-struct FeedItem {
-    id: String,
-    repo: String,
-    text: String,
-    created_at: String,
-    is_signal: bool,
-}
-
-/// Query parameters for GET /api/feed.
-#[derive(serde::Deserialize)]
-struct FeedQuery {
-    repo: Option<String>,
-    filter: Option<String>,
-    /// When set, return only posts unread by this reader repo AND atomically
-    /// mark them as read. Used by the channel backlog fetch so agents only
-    /// see each post once. The reader's own posts are excluded from the
-    /// response regardless of other filters. Combining with `repo` narrows
-    /// unread posts to that repo (not mutually exclusive).
-    unread_for: Option<String>,
-}
-
-/// GET /api/feed -- bullpen posts with optional repo and signal/musing filter.
-/// When `unread_for=<repo>` is set, returns only posts unread by that repo
-/// and atomically marks them as read so the same post is never delivered twice.
-async fn api_feed(
+///
+/// Shares its builder with the SSE `agents` event (channel.rs) so push
+/// and pull of the agent list cannot diverge (audit DC3).
+async fn api_agents(
     State(state): State<AppState>,
-    Query(params): Query<FeedQuery>,
-) -> Result<Json<Vec<FeedItem>>, ServeError> {
+) -> Result<Json<Vec<crate::channel::AgentInfo>>, ServeError> {
     let db = open_db(&state.data_dir)?;
-
-    // When `unread_for` is set, use the atomic unread-and-mark query so the
-    // channel backlog delivers each post exactly once across connections.
-    let posts = if let Some(reader) = params.unread_for.as_deref() {
-        db.get_and_mark_unread_board_posts(reader)?
-    } else {
-        db.get_board_posts()?
-    };
-
-    let repo_filter = params.repo.as_deref().unwrap_or("all");
-    let type_filter = params.filter.as_deref().unwrap_or("all");
-    let reader = params.unread_for.as_deref();
-
-    let items: Vec<FeedItem> = posts
-        .into_iter()
-        // Exclude the reader's own posts from unread delivery.
-        .filter(|p| reader.is_none_or(|r| p.repo != r))
-        .filter(|p| repo_filter == "all" || p.repo == repo_filter)
-        .filter(|p| match type_filter {
-            "signals" => sig::is_signal(&p.text),
-            "musings" => !sig::is_signal(&p.text),
-            _ => true,
-        })
-        .take(100)
-        .map(|p| {
-            let is_signal = sig::is_signal(&p.text);
-            FeedItem {
-                id: p.id,
-                repo: p.repo,
-                text: p.text,
-                created_at: p.created_at,
-                is_signal,
-            }
-        })
-        .collect();
-
-    Ok(Json(items))
-}
-
-/// GET /api/tasks -- all tasks for kanban view.
-async fn api_tasks(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<crate::task::Task>>, ServeError> {
-    let db = open_db(&state.data_dir)?;
-    Ok(Json(db.get_all_tasks()?))
+    Ok(Json(crate::channel::build_agents(&db)?))
 }
 
 /// GET /api/stats -- per-repo dashboard stats (same data as agents minus unread).
@@ -594,44 +356,12 @@ async fn api_done(
     }))
 }
 
-/// Request body for POST /api/post.
-#[derive(serde::Deserialize)]
-struct PostRequest {
-    repo: String,
-    text: String,
-}
-
 /// Open the search index from the data directory.
 ///
 /// Renders as 500 {"error": "failed to open search index"} when propagated
 /// from a handler with `?`.
 fn open_search_index(data_dir: &Path) -> Result<SearchIndex, ServeError> {
     SearchIndex::open(&data_dir.join("index")).map_err(|_| ServeError::IndexOpen)
-}
-
-/// POST /api/post -- broadcast a message to the bullpen.
-async fn api_post(
-    State(state): State<AppState>,
-    Json(body): Json<PostRequest>,
-) -> Result<Json<crate::db::Reflection>, ServeError> {
-    let trimmed = body.text.trim();
-    if trimmed.is_empty() {
-        return Err(ServeError::BadRequest("text is required".to_string()));
-    }
-
-    let db = open_db(&state.data_dir)?;
-    let index = open_search_index(&state.data_dir)?;
-
-    let reflection = db
-        .insert_reflection_with_meta(&body.repo, trimmed, "team", &ReflectionMeta::default())
-        .map_err(|e| ServeError::internal("insert error", e))?;
-
-    // Best-effort add to search index; post is already in DB.
-    if let Err(e) = index.add(&reflection.id, &reflection.repo, trimmed) {
-        eprintln!("[legion] search index add failed: {e}");
-    }
-
-    Ok(Json(reflection))
 }
 
 /// POST /api/boost/:id -- boost a reflection's recall count.
@@ -1200,21 +930,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn health_body_shape() {
-        let started = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:01:30Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let body = build_health_body(started, now);
-        assert_eq!(body["status"], "ok");
-        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(body["started_at"], "2026-05-10T12:00:00+00:00");
-        assert_eq!(body["uptime_secs"], 90);
-    }
-
-    #[test]
     fn daemon_pid_path_honors_xdg_state_home() {
         // SAFETY: test mutates process env. Other tests in this module
         // do not read XDG_STATE_HOME, so isolation by `cargo test`
@@ -1245,19 +960,5 @@ mod tests {
         // Idempotent overwrite.
         write_daemon_pidfile_at(&path, 67890);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "67890");
-    }
-
-    #[test]
-    fn health_uptime_clamped_at_zero_for_clock_skew() {
-        // If `now` is somehow before `started_at` (clock jump, NTP
-        // correction, test fixture), uptime must not go negative.
-        let started = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T11:59:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let body = build_health_body(started, now);
-        assert_eq!(body["uptime_secs"], 0);
     }
 }

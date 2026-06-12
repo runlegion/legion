@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -28,6 +29,17 @@ const SSE_FEED_LIMIT: usize = 20;
 
 /// Seconds between keepalive pings when no change has been detected.
 const PING_INTERVAL_SECS: u64 = 30;
+
+/// Seconds between SSE poll-fallback wakeups (#613 cadence decision).
+///
+/// The broadcast channel only fires for in-process writes (HTTP /api/post,
+/// the schedule-firing task, MCP handlers in the daemon). Cross-process
+/// writes -- `legion post` from a CLI session, another legion binary
+/// touching the same database -- never reach this process's broadcast, so
+/// every connected SSE stream also re-checks the change timestamps on this
+/// interval. 5s is the worst-case dashboard latency for a CLI write;
+/// in-process writes surface immediately via the edge trigger.
+const SSE_POLL_FALLBACK_SECS: u64 = 5;
 
 /// Wake-up signal for in-process consumers of the broadcast channel. The
 /// variants carry no payload: every consumer re-reads from the database on
@@ -65,6 +77,9 @@ pub enum ChannelEvent {
 pub struct ChannelState {
     pub data_dir: PathBuf,
     pub tx: broadcast::Sender<ChannelEvent>,
+    /// Wall-clock start of the owning server process. Captured once at boot
+    /// so /health (#319) can report uptime without per-request work.
+    pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Error type for every serve.rs and channel.rs HTTP handler (#613).
@@ -148,14 +163,46 @@ pub struct FeedQuery {
 
 /// Build the axum Router for the channel HTTP server.
 ///
-/// This is a standalone router -- the caller mounts it into the main axum app.
+/// This is a standalone router -- the caller mounts it into the main axum
+/// app. It is the single owner of the shared endpoint contract (#613):
+/// /health, /sse, /api/feed, /api/tasks, /api/post. Both `legion serve`
+/// (which merges this router into the dashboard app) and the daemon (which
+/// serves it bare) answer these paths with the same implementation, so the
+/// wire shapes cannot fork again.
 pub fn router(state: ChannelState) -> Router {
     Router::new()
+        .route("/health", get(health_endpoint))
         .route("/sse", get(sse_handler))
         .route("/api/feed", get(api_feed))
         .route("/api/tasks", get(api_tasks))
         .route("/api/post", post(api_post))
         .with_state(state)
+}
+
+/// Pure builder for the `/health` JSON body. Separated from the axum
+/// handler so it's directly unit-testable without spinning up a server.
+fn build_health_body(
+    started_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    let uptime_secs = (now - started_at).num_seconds().max(0);
+    serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "started_at": started_at.to_rfc3339(),
+        "uptime_secs": uptime_secs,
+    })
+}
+
+/// GET /health -- cheap daemon liveness probe (#319).
+///
+/// Returns `{status, version, started_at, uptime_secs}` with NO database
+/// access so it can be polled aggressively by hooks, the MCP reconnect
+/// path (#320), and the SessionStart auto-spawn supervisor (#321). The
+/// `version` field is baked in at compile time from CARGO_PKG_VERSION so
+/// clients can detect protocol drift after a plugin upgrade.
+pub async fn health_endpoint(State(state): State<ChannelState>) -> Json<serde_json::Value> {
+    Json(build_health_body(state.started_at, chrono::Utc::now()))
 }
 
 /// Open a Database from the data_dir. Logs and maps failure to
@@ -244,9 +291,20 @@ pub struct PostRequest {
 
 /// POST /api/post -- broadcast a message to the bullpen and notify SSE subscribers.
 ///
-/// Index failures are treated as errors (500) rather than silently swallowed -- a post
-/// that cannot be indexed is unsearchable, which is a half-broken state. Callers should
-/// retry if they get a 500.
+/// Response shape (#613 divergence resolution): `{"id": <reflection id>}`.
+/// serve.rs used to return the full reflection object from its own copy of
+/// this handler; the channel shape won because the only verified consumer
+/// (static/app.js) ignores the response body entirely, and the id is all a
+/// caller needs to reference the post. Pinned by the
+/// api_post_returns_id_only_shape test.
+///
+/// Index-failure policy (#613 divergence resolution): failures are 500s
+/// rather than silently swallowed -- a post that cannot be indexed is
+/// unsearchable, which is a half-broken state. serve.rs used to treat
+/// indexing as best-effort; the strict policy won because it lives in
+/// board::post_from_text_with_meta, the single owner of the write+index
+/// invariant. The post may already be in the DB when a 500 is returned;
+/// callers should retry.
 pub async fn api_post(
     State(state): State<ChannelState>,
     Json(body): Json<PostRequest>,
@@ -382,17 +440,24 @@ fn fire_due_schedules(db: &Database, index: &SearchIndex) -> usize {
     fired
 }
 
-/// SSE handler -- streams feed, tasks, and ping events to subscribers.
+/// SSE handler -- streams agents, feed, tasks, and ping events to
+/// subscribers (#613: the canonical implementation; serve.rs's 2s-polling
+/// twin is deleted and the dashboard connects here).
 ///
 /// Opens the database once at stream start and holds it for the stream's
-/// lifetime. On each broadcast notification, queries the new max timestamp
-/// and emits feed/tasks events. Emits a keepalive ping every PING_INTERVAL_SECS
-/// when there is no activity.
+/// lifetime. Wakes on either edge (a broadcast notification from an
+/// in-process write) or the SSE_POLL_FALLBACK_SECS timer (cross-process
+/// writes -- see the constant's doc for the cadence decision), then emits
+/// events only for timestamps that actually changed. Emits a keepalive
+/// ping after PING_INTERVAL_SECS without any event. The stream itself is
+/// read-only: schedule firing lives in spawn_schedule_firing, never here.
 ///
-/// Event shapes:
-///   feed  -- JSON array of FeedItem (last SSE_FEED_LIMIT team posts)
-///   tasks -- JSON array of Task
-///   ping  -- `{}` heartbeat every 30s
+/// Event shapes (all consumed by static/app.js -- the dashboard
+/// subscribes to agents, feed, and tasks):
+///   agents -- JSON array of AgentInfo (same shape as GET /api/agents)
+///   feed   -- JSON array of FeedItem (last SSE_FEED_LIMIT team posts)
+///   tasks  -- JSON array of Task
+///   ping   -- `{}` heartbeat
 pub async fn sse_handler(
     State(state): State<ChannelState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
@@ -410,10 +475,12 @@ pub async fn sse_handler(
 
         let mut last_reflection_ts: Option<String> = None;
         let mut last_task_ts: Option<String> = None;
+        let poll_fallback = Duration::from_secs(SSE_POLL_FALLBACK_SECS);
         let ping_interval = Duration::from_secs(PING_INTERVAL_SECS);
+        let mut last_emit = tokio::time::Instant::now();
 
         loop {
-            // Wait for a broadcast notification or a ping timeout.
+            // Wait for a broadcast notification or the poll fallback.
             tokio::select! {
                 result = rx.recv() => {
                     match result {
@@ -432,20 +499,29 @@ pub async fn sse_handler(
                         }
                     }
                 }
-                _ = tokio::time::sleep(ping_interval) => {
-                    // No change notification for a while -- emit keepalive only.
-                    yield Ok(Event::default().event("ping").data("{}"));
-                    continue;
+                _ = tokio::time::sleep(poll_fallback) => {
+                    // Cross-process writes never hit this process's
+                    // broadcast; fall through to the timestamp checks.
                 }
             }
 
-            // Feed: emit when max created_at changes.
+            let mut emitted = false;
+
+            // Agents + feed: emit when max created_at changes. The agents
+            // event carries the same AgentInfo array as GET /api/agents so
+            // the dashboard's live update matches its initial load.
             let current_reflection_ts = db.get_max_created_at().ok().flatten();
             if current_reflection_ts != last_reflection_ts && current_reflection_ts.is_some() {
                 last_reflection_ts = current_reflection_ts;
 
+                if let Ok(agents_json) = build_agents_json(&db) {
+                    yield Ok(Event::default().event("agents").data(agents_json));
+                    emitted = true;
+                }
+
                 if let Ok(feed_json) = build_feed_json(&db) {
                     yield Ok(Event::default().event("feed").data(feed_json));
+                    emitted = true;
                 }
             }
 
@@ -458,12 +534,63 @@ pub async fn sse_handler(
                     && let Ok(json) = serde_json::to_string(&tasks)
                 {
                     yield Ok(Event::default().event("tasks").data(json));
+                    emitted = true;
                 }
+            }
+
+            if emitted {
+                last_emit = tokio::time::Instant::now();
+            } else if last_emit.elapsed() >= ping_interval {
+                yield Ok(Event::default().event("ping").data("{}"));
+                last_emit = tokio::time::Instant::now();
             }
         }
     };
 
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Agent info returned by GET /api/agents and the SSE `agents` event.
+/// Field names are part of the public JSON contract (static/app.js reads
+/// repo, unread, boost_sum, last_activity directly).
+#[derive(serde::Serialize)]
+pub struct AgentInfo {
+    pub repo: String,
+    pub unread: u64,
+    pub reflection_count: u64,
+    pub boost_sum: i64,
+    pub team_post_count: u64,
+    pub last_activity: String,
+}
+
+/// Build the per-repo agent overview: dashboard stats merged with unread
+/// counts. The single source for both GET /api/agents (serve.rs) and the
+/// SSE `agents` event -- push and pull of the same resource must emit the
+/// same shape or the dashboard diverges mid-session (audit DC3).
+pub fn build_agents(db: &Database) -> Result<Vec<AgentInfo>, LegionError> {
+    let stats = db.get_dashboard_stats()?;
+    let unread_map: HashMap<String, u64> = db
+        .get_unread_counts_all()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    Ok(stats
+        .into_iter()
+        .map(|s| AgentInfo {
+            unread: unread_map.get(&s.repo).copied().unwrap_or(0),
+            repo: s.repo,
+            reflection_count: s.reflection_count,
+            boost_sum: s.boost_sum,
+            team_post_count: s.team_post_count,
+            last_activity: s.last_activity,
+        })
+        .collect())
+}
+
+/// Serialized form of `build_agents` for the SSE event payload.
+fn build_agents_json(db: &Database) -> Result<String, LegionError> {
+    Ok(serde_json::to_string(&build_agents(db)?)?)
 }
 
 /// Build the feed JSON payload (last SSE_FEED_LIMIT team posts).
@@ -595,6 +722,129 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
         assert!(parsed.is_array());
         assert_eq!(parsed.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn health_body_shape() {
+        let started = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:00:00Z")
+            .expect("parse")
+            .with_timezone(&chrono::Utc);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:01:30Z")
+            .expect("parse")
+            .with_timezone(&chrono::Utc);
+        let body = build_health_body(started, now);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["started_at"], "2026-05-10T12:00:00+00:00");
+        assert_eq!(body["uptime_secs"], 90);
+    }
+
+    #[test]
+    fn health_uptime_clamped_at_zero_for_clock_skew() {
+        // If `now` is somehow before `started_at` (clock jump, NTP
+        // correction, test fixture), uptime must not go negative.
+        let started = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:00:00Z")
+            .expect("parse")
+            .with_timezone(&chrono::Utc);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T11:59:00Z")
+            .expect("parse")
+            .with_timezone(&chrono::Utc);
+        let body = build_health_body(started, now);
+        assert_eq!(body["uptime_secs"], 0);
+    }
+
+    #[test]
+    fn build_agents_merges_stats_and_unread() {
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection_with_meta("kelex", "hello team", "team", &ReflectionMeta::default())
+            .expect("insert");
+
+        let agents = build_agents(&db).expect("build agents");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].repo, "kelex");
+        assert_eq!(agents[0].team_post_count, 1);
+
+        // Serialized shape: the SSE agents event and GET /api/agents both
+        // emit these field names (public JSON contract, app.js reads them).
+        let json = serde_json::to_value(&agents).expect("serialize");
+        let first = &json[0];
+        for key in [
+            "repo",
+            "unread",
+            "reflection_count",
+            "boost_sum",
+            "team_post_count",
+            "last_activity",
+        ] {
+            assert!(first.get(key).is_some(), "missing agents field {key}");
+        }
+    }
+
+    /// Pins the #613 api_post divergence resolution: the response body is
+    /// exactly {"id": <uuid>} -- not serve's old full-reflection object.
+    #[tokio::test]
+    async fn api_post_returns_id_only_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let _db = Database::open(&data_dir.join("legion.db")).expect("open db");
+
+        let (tx, _rx) = new_broadcast();
+        let state = ChannelState {
+            data_dir: data_dir.clone(),
+            tx,
+            started_at: chrono::Utc::now(),
+        };
+        let app = router(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let response = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            use std::net::TcpStream;
+
+            let body = r#"{"repo":"kelex","text":"hello shape"}"#;
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+            stream
+                .write_all(
+                    format!(
+                        "POST /api/post HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .expect("write");
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).expect("read");
+            buf
+        })
+        .await
+        .expect("spawn_blocking");
+
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(
+            response_str.starts_with("HTTP/1.1 200"),
+            "expected 200 OK, got: {}",
+            &response_str[..response_str.len().min(200)]
+        );
+        let json_body = response_str
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("response body");
+        let parsed: serde_json::Value = serde_json::from_str(json_body.trim()).expect("parse body");
+        let obj = parsed.as_object().expect("object body");
+        assert!(obj.contains_key("id"), "body must carry the post id");
+        assert_eq!(
+            obj.len(),
+            1,
+            "api_post body is exactly {{\"id\"}}, got: {parsed}"
+        );
     }
 
     #[test]

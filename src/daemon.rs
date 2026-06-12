@@ -345,6 +345,7 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     let channel_state = channel::ChannelState {
         data_dir: data_dir.clone(),
         tx,
+        started_at: chrono::Utc::now(),
     };
     let app = channel::router(channel_state);
 
@@ -618,6 +619,7 @@ mod tests {
         let state = channel::ChannelState {
             data_dir: data_dir.clone(),
             tx,
+            started_at: chrono::Utc::now(),
         };
 
         let app = channel::router(state);
