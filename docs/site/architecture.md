@@ -215,6 +215,10 @@ The `init_schema` function applies migrations incrementally using `has_column` c
 | 14 | LWW conflict resolution: add updated_at on reflections and schedules (#255) |
 | 15 | Partial indexes that skip soft-deleted rows (#256) |
 | 16 | Card-spec binding: add document_id to tasks, partial index on document_id (#528) |
+| 17 | SCIP indexes for code intelligence (#278); also assigned to persona wake leases (#308) -- the number collides across domain modules, the guards make it harmless |
+| 18 | Bullpen post decay (#376) |
+| 19 | Signal/post resolution marker (#362) |
+| 20 | Agent session log (#389) |
 | 21 | Documents table for the coordination substrate (#456) |
 | 22 | Uncertainty engine: uncertainty_prediction + uncertainty_calibration_snapshot tables (#355) |
 | 23 | wake_attempts table -- per-wake lifecycle FSM for PTY spawn tracking (#487) |
@@ -736,10 +740,10 @@ Status transitions for bound cards are synchronized to the document's `status` f
 
 `legion verify` determines acceptance criteria in this order:
 
-1. If the card has a `document_id`, load the bound document and read `spec.verification.acceptance` from the payload. If that key is present and non-empty, it is used.
-2. Otherwise, use `tasks.acceptance` (the newline-separated criteria parsed from the issue body at sync time).
+1. If the card has a `document_id`, load the bound document and read the top-level `verification.acceptance` array from the payload. If that key is present and non-empty, it is used (source labeled `spec:<doc id>` in output).
+2. Otherwise, use `tasks.acceptance` (the newline-separated criteria parsed from the issue body at sync time; source labeled `card`).
 
-A card with `document_id` pointing to a document that does not exist, or a document whose payload does not parse as a spec, is a hard error -- `verify` exits non-zero rather than silently falling back to `tasks.acceptance`.
+Only a dangling `document_id` -- the bound document does not exist -- is a hard error: `verify` (and the Done gate, which shares the resolver as of #644) exits non-zero rather than gating on criteria for a spec that vanished. An unparseable payload or an absent/empty `verification.acceptance` block is non-fatal and falls back to `tasks.acceptance`.
 
 ## Quality-gate chain
 
@@ -751,14 +755,14 @@ A card with `document_id` pointing to a document that does not exist, or a docum
 
 The full quality pipeline for a branch is:
 
-1. `/legion-simplify` -- review for code quality (duplication, unnecessary abstraction, stringly-typed state). Records a `simplify` gate via `legion quality-gate record`.
+1. `/legion-simplify` -- review for code quality (duplication, unnecessary abstraction, stringly-typed state). Records a `legion-simplify` gate via `legion quality-gate record`.
 2. `/legion-pr-write` -- compose the PR body mapping each acceptance criterion to the change that satisfies it, with evidence. Validates the body is non-empty and non-boilerplate via `legion pr write-check`. Records a `legion-pr-write` gate.
 3. `/legion-review` -- parallel dimension review (spec, correctness, quality, security) with adversarial refutation of HIGH/MED findings. Records a `legion-review` gate.
 4. `/legion-verify` -- per-criterion verdict (pass/fail/uncertain + evidence). Records a `legion-verify:<card>` gate.
 
 ### PR create gate requirements
 
-`legion pr create` requires a clean `simplify` gate AND a clean `legion-pr-write` gate on HEAD before a PR may be opened. Both forcing functions must have run. `--skip-gates` bypasses both with an audit row.
+`legion pr create` requires a clean `legion-simplify` gate AND a clean `legion-pr-write` gate on HEAD before a PR may be opened. Both forcing functions must have run. `--skip-gates` bypasses both with an audit row.
 
 ### Done verify gate
 

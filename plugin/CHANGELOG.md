@@ -2,15 +2,15 @@
 
 ## 0.18.0
 
-The refactor release. Six streams of structural work deliver a codebase that is split by domain, observable, and covered. The god files (db.rs 8,815 lines; main.rs 8,130 lines; watch.rs 4,767 lines) are carved into 50+ focused modules. Three live defects are fixed alongside the structural work. The coordination substrate gains spec binding, spec-gen, and a verify gate that reads bound-spec AC. The quality-gate chain ships end to end.
+The refactor release. Six streams of structural work deliver a codebase that is split by domain, observable, and covered. The god files (per the June audit: db.rs 8,815 lines; main.rs 8,130 lines; watch.rs 4,767 lines) are carved into 50+ focused modules. Three live defects are fixed alongside the structural work. The coordination substrate gains spec binding, spec-gen, and a verify gate that reads bound-spec AC. The quality-gate chain ships end to end. Minor release: structural refactor plus additive features and one additive schema migration (tasks.document_id); no wire-format change.
 
 ### New
 
 - **Spec-gen pipeline** (PR #639, #527): `legion spec-gen --repo <surface>` derives requirement documents from non-archived service-design inputs (persona, journey, blueprint, painmatrix, ecosystem) on the specified surface. One requirement candidate is produced per `moment_of_truth` entry, validated against the requirement schema, and inserted as a `doc_type=requirement` document plus a born-Backlog kanban card. Re-running on unchanged input is safe: existing `(traces_to, surface)` pairs are skipped. The `--repo` argument is the `surface` field on the source documents, not a git repository name.
 
-- **Card-spec binding and transactional status sync** (PR #640, #528): `tasks.document_id` binds a kanban card to a spec document. Status transitions for bound cards synchronize the document's `status` field in the same transaction (accepted -> accepted, in-review -> implemented, done -> verified, cancelled -> cancelled). A dangling `document_id` is a hard error on any syncing transition. `legion verify` reads AC from `spec.verification.acceptance` when a bound spec is present, falling back to `tasks.acceptance`. The bind guard ensures a given document is held by at most one non-cancelled card.
+- **Card-spec binding and transactional status sync** (PR #640, #528): `tasks.document_id` binds a kanban card to a spec document. Status transitions for bound cards synchronize the document's `status` field in the same transaction (accepted -> accepted, in-review -> implemented, done -> verified, cancelled -> cancelled). A dangling `document_id` is a hard error on any syncing transition. `legion verify` reads AC from the bound document's top-level `verification.acceptance` when present and non-empty, falling back to `tasks.acceptance`. The bind guard ensures a given document is held by at most one non-cancelled card.
 
-- **Done verify gate is spec-aware** (PR #TBD, #644): ...
+- **Done verify gate is spec-aware** (PR #645, #644): `legion done --id` resolved its acceptance criteria from `tasks.acceptance` directly while `legion verify` used spec-document precedence, so a spec-bound card gated Done on the wrong criteria set. Both gates now share one resolver: bound `verification.acceptance` first, `tasks.acceptance` fallback, hard error on a dangling binding. Gate error messages name the AC source (`ac source: card` or `ac source: spec:<doc id>`).
 
 ### Fixed
 

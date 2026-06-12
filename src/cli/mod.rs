@@ -790,11 +790,11 @@ pub(crate) enum Commands {
     /// any Uncertain (or a Pass with no evidence) routes the card to NeedsInput
     /// for a human. A card with no acceptance criteria is blocked outright.
     ///
-    /// Acceptance-criteria precedence: the bound spec document
-    /// (`spec.verification.acceptance` in the document payload) is consulted
-    /// first when the card has a `document_id`; if absent, `tasks.acceptance`
-    /// is used. A card whose `document_id` points to a non-existent or
-    /// non-spec document is a hard error.
+    /// Acceptance-criteria precedence: when the card has a `document_id`,
+    /// the bound document's top-level `verification.acceptance` array is
+    /// consulted first; a missing or empty block (or an unparseable payload)
+    /// falls back to `tasks.acceptance`. A dangling `document_id` -- the
+    /// document does not exist -- is a hard error.
     Verify {
         /// Repository name (resolves work source config from watch.toml)
         #[arg(long)]
