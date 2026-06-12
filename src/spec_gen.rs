@@ -50,8 +50,6 @@ use crate::db::Database;
 use crate::documents::{Document, DocumentFilter, DocumentMeta, validate_instance};
 use crate::error::{LegionError, Result};
 
-const REQUIREMENT_SCHEMA_ID: &str = "019eb45a-2fdd-7fd2-a574-96a3302bd15a";
-
 /// Service-design document types that spec-gen reads as input.
 ///
 /// Journey, blueprint, and painmatrix are included so the CLI can filter for
@@ -155,14 +153,11 @@ pub fn persist_requirements(
     surface: &str,
     outcome: GenerateOutcome,
 ) -> Result<PersistOutcome> {
-    // Load the requirement schema document for validation.
-    let schema_doc = db.get_document(REQUIREMENT_SCHEMA_ID)?.ok_or_else(|| {
-        LegionError::WorkSource(format!(
-            "requirement schema document '{}' not found -- run `legion document create` \
-             to land the adopted schema first",
-            REQUIREMENT_SCHEMA_ID
-        ))
-    })?;
+    // Dynamically find the newest non-archived schema document whose payload
+    // title is "Requirement" (#528: the v1 schema id is archived; hardcoding
+    // ids is fragile across schema versions). The filter returns docs ordered
+    // by updated_at DESC, so the first result is the most recent live schema.
+    let schema_doc = find_requirement_schema(db)?;
     let schema_value: serde_json::Value =
         serde_json::from_str(&schema_doc.payload).map_err(|e| {
             LegionError::WorkSource(format!(
@@ -259,6 +254,66 @@ pub fn persist_requirements(
 }
 
 // -- private helpers ---------------------------------------------------------
+
+/// Find the active requirement schema document.
+///
+/// Searches for non-archived documents of `doc_type = "schema"` whose
+/// payload carries `"title": "Requirement"` (case-sensitive). The list
+/// is ordered by `updated_at DESC` (from `list_documents`), so the first
+/// match is the most recently updated live schema.
+///
+/// The lookup is deterministic only when exactly one live schema titled
+/// "Requirement" exists. The expected workflow is archive-on-adopt: when a
+/// new schema version is adopted, the prior one should be archived so only
+/// one live match exists at any time. When more than one live match is found,
+/// this function emits a warning to stderr naming the chosen document id and
+/// the number of shadowed documents, so operators can see the violation and
+/// archive the stale copies.
+///
+/// Returns a clear error when no active schema is found.
+fn find_requirement_schema(db: &Database) -> Result<Document> {
+    let filter = DocumentFilter {
+        doc_type: Some("schema"),
+        archived: Some(false),
+        ..Default::default()
+    };
+    let candidates = db.list_documents(&filter)?;
+
+    // Collect all matches; warn when there is more than one.
+    let mut matches: Vec<Document> = candidates
+        .into_iter()
+        .filter(|doc| {
+            serde_json::from_str::<serde_json::Value>(&doc.payload)
+                .ok()
+                .and_then(|v| v["title"].as_str().map(str::to_owned))
+                .as_deref()
+                == Some("Requirement")
+        })
+        .collect();
+
+    if matches.is_empty() {
+        return Err(LegionError::WorkSource(
+            "no active requirement schema found: expected a non-archived document \
+             of doc_type='schema' with payload title='Requirement'. \
+             Run `legion document create --type schema` to land the requirement schema."
+                .to_string(),
+        ));
+    }
+
+    if matches.len() > 1 {
+        // The list is ordered by updated_at DESC; the first element is the
+        // most recently updated and is what we will use.
+        let shadowed = matches.len() - 1;
+        eprintln!(
+            "[legion] warning: {} live requirement schema(s) found in addition to '{}'; \
+             using the most recently updated one. Archive the {} shadowed document(s) \
+             with `legion document archive` to restore deterministic lookup.",
+            shadowed, matches[0].id, shadowed,
+        );
+    }
+
+    Ok(matches.remove(0))
+}
 
 /// Parse a service-design document's surface and JSON payload.
 ///
@@ -787,6 +842,9 @@ mod tests {
     }
 
     /// Land the requirement schema doc so persist_requirements can validate.
+    ///
+    /// No longer uses a hardcoded id -- the dynamic lookup in find_requirement_schema
+    /// finds any non-archived schema doc with title "Requirement" (#528).
     fn seed_requirement_schema(db: &Database) {
         let schema_payload = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -794,7 +852,7 @@ mod tests {
         ))
         .expect("requirement schema file");
         let meta = DocumentMeta {
-            id: Some(REQUIREMENT_SCHEMA_ID),
+            id: None, // generate a fresh UUIDv7; the lookup is by title, not id
             doc_type: "schema",
             surface: Some("definition-layer"),
             status: Some("adopted"),
@@ -1196,6 +1254,105 @@ mod tests {
             cards[0].source_url.as_deref(),
             Some(req_docs[0].id.as_str()),
             "card source_url links to the requirement document"
+        );
+    }
+
+    // --- dynamic schema lookup + card document_id binding (#528) ---
+
+    /// Dynamic schema lookup finds v2 by title "Requirement" when no hardcoded id is used.
+    #[test]
+    fn dynamic_schema_lookup_finds_requirement_schema_by_title() {
+        let db = test_db();
+        seed_requirement_schema(&db);
+
+        let schema = find_requirement_schema(&db).expect("should find schema");
+        // The schema file has "title": "Requirement".
+        let value: serde_json::Value =
+            serde_json::from_str(&schema.payload).expect("parse schema payload");
+        assert_eq!(
+            value["title"].as_str(),
+            Some("Requirement"),
+            "found schema must have title Requirement"
+        );
+    }
+
+    /// Dynamic schema lookup returns a clear error when no requirement schema exists.
+    #[test]
+    fn dynamic_schema_lookup_errors_clearly_when_no_schema_exists() {
+        let db = test_db();
+        // No schema seeded.
+        let err = find_requirement_schema(&db).unwrap_err();
+        assert!(
+            err.to_string().contains("no active requirement schema"),
+            "error must name what was looked for: {err}"
+        );
+        assert!(
+            err.to_string().contains("Requirement"),
+            "error must mention the expected title: {err}"
+        );
+    }
+
+    /// spec-gen created cards carry document_id pointing at the requirement doc (#528).
+    #[test]
+    fn spec_gen_card_has_document_id_set() {
+        let db = test_db();
+        seed_requirement_schema(&db);
+
+        let docs = vec![persona_doc_with_mot()];
+        let outcome = generate_requirements(&docs).expect("generate");
+        persist_requirements(&db, "gitpress", outcome).expect("persist");
+
+        let req_docs = db
+            .list_documents(&DocumentFilter {
+                doc_type: Some("requirement"),
+                surface: Some("gitpress"),
+                ..Default::default()
+            })
+            .expect("list docs");
+        assert_eq!(req_docs.len(), 1, "one requirement document");
+
+        let cards = list_cards(&db, "gitpress", Direction::Inbound, CardScope::Backlog)
+            .expect("list cards");
+        assert_eq!(cards.len(), 1, "one born-Backlog card");
+
+        // The card must have document_id set to the requirement document's id.
+        assert_eq!(
+            cards[0].document_id.as_deref(),
+            Some(req_docs[0].id.as_str()),
+            "card document_id must point to the requirement document"
+        );
+    }
+
+    /// Dynamic lookup skips archived schemas and finds the live one.
+    #[test]
+    fn dynamic_schema_lookup_skips_archived_schema() {
+        let db = test_db();
+        // Seed the schema, then archive it.
+        seed_requirement_schema(&db);
+
+        // To archive, we need to find the schema doc first.
+        let candidates = db
+            .list_documents(&DocumentFilter {
+                doc_type: Some("schema"),
+                ..Default::default()
+            })
+            .expect("list");
+        assert_eq!(candidates.len(), 1);
+        // Archive the only schema -- but first we need to make sure there's no
+        // live card bound (there isn't in this test). Use conn directly via
+        // a raw UPDATE since archive_document checks for live cards.
+        db.conn
+            .execute(
+                "UPDATE documents SET archived_at = ?1 WHERE id = ?2",
+                rusqlite::params!["2026-06-12T00:00:00Z", candidates[0].id],
+            )
+            .expect("archive");
+
+        // Now the lookup should fail (no live requirement schema).
+        let err = find_requirement_schema(&db).unwrap_err();
+        assert!(
+            err.to_string().contains("no active requirement schema"),
+            "archived schema must not be found: {err}"
         );
     }
 }

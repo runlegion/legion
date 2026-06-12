@@ -293,6 +293,7 @@ mod tests {
             problem: None,
             solution: None,
             acceptance: None,
+            document_id: None,
         };
         let output = format_work_card(&card);
         assert!(output.contains("Priority: high"));
@@ -333,6 +334,7 @@ mod tests {
             problem: None,
             solution: None,
             acceptance: None,
+            document_id: None,
         };
         let output = format_work_card(&card);
         assert!(output.contains("minimal card"));
@@ -365,6 +367,7 @@ mod tests {
             problem: None,
             solution: None,
             acceptance: ac.map(str::to_string),
+            document_id: None,
         };
 
         // An Accepted card with AC becomes the goal, listing its criteria.
@@ -412,6 +415,7 @@ mod tests {
             problem: Some("Things are broken".to_string()),
             solution: Some("Fix them".to_string()),
             acceptance: Some("Tests pass\nClipy clean".to_string()),
+            document_id: None,
         };
         let output = format_card_view(&card);
         assert!(output.contains("Test Card"), "title derived correctly");
@@ -450,6 +454,7 @@ mod tests {
             problem: None,
             solution: None,
             acceptance: None,
+            document_id: None,
         };
         let output = format_card_view(&card);
         assert!(output.contains("## Context"), "context section present");
@@ -481,6 +486,7 @@ mod tests {
             problem: None,
             solution: None,
             acceptance: None,
+            document_id: None,
         };
         let json = format_card_json(&card).expect("json");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");

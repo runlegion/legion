@@ -247,11 +247,14 @@ impl Database {
             .filter(|a| !a.is_empty())
             .map(|a| a.join("\n"));
 
+        // NOTE on param numbering: status binds ?16 (matching the pattern in
+        // db/kanban.rs insert_card). document_id is appended as ?17 and binds
+        // the 17th param slot -- do not reuse earlier numbers.
         tx.execute(
             "INSERT INTO tasks (id, from_repo, to_repo, text, context, priority, status, \
              labels, parent_card_id, source_url, source_type, created_at, updated_at, \
-             problem, solution, acceptance) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?16, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             problem, solution, acceptance, document_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?16, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?17)",
             rusqlite::params![
                 card_id,
                 card_from_repo,
@@ -268,7 +271,8 @@ impl Database {
                 problem,
                 solution,
                 acceptance,
-                "backlog", // status -- born Backlog
+                "backlog", // status -- born Backlog (?16)
+                &doc_id,   // document_id (#528 binding) (?17)
             ],
         )?;
 
@@ -291,7 +295,18 @@ impl Database {
     /// Mark a document archived. Sets `archived_at = now`, updates
     /// `updated_at`. Idempotent: archiving an already-archived doc is
     /// a no-op success. Returns the updated Document.
+    ///
+    /// Errors when the document is bound to a live (non-cancelled, non-deleted)
+    /// kanban card (#528): archiving a live requirement while work is in flight
+    /// would orphan the card from its spec.
     pub fn archive_document(&self, id: &str) -> Result<Document> {
+        // Guard: refuse archive when a live card is bound to this document.
+        if let Some(card_id) = self.live_card_bound_to_document(id)? {
+            return Err(LegionError::WorkSource(format!(
+                "document '{id}' cannot be archived: live card '{card_id}' is bound to it"
+            )));
+        }
+
         let now = Utc::now().to_rfc3339();
         let rows = self.conn.execute(
             "UPDATE documents \
@@ -685,6 +700,67 @@ mod tests {
         let db = test_db();
         let err = db.archive_document("FR-NOPE").unwrap_err();
         assert!(err.to_string().contains("not found"));
+    }
+
+    // -- archive guard: bound-live-card protection (#528) ------------------
+
+    fn insert_bound_card(db: &Database, doc_id: &str) -> String {
+        let card_id = db
+            .insert_card(
+                "legion",
+                "legion",
+                "bound card",
+                None,
+                crate::kanban::Priority::Med,
+                None,
+                None,
+                None,
+                None,
+                None,
+                crate::kanban::CardStatus::Accepted,
+            )
+            .expect("insert card");
+        db.bind_card_to_document(&card_id, doc_id).expect("bind");
+        card_id
+    }
+
+    /// archive_document errors when a live (non-cancelled) card is bound.
+    #[test]
+    fn archive_document_blocked_by_live_bound_card() {
+        let db = test_db();
+        let mut m = sample_meta("requirement", "mail");
+        m.id = Some("FR-LIVE");
+        db.insert_document(&m, "{}").unwrap();
+
+        let card_id = insert_bound_card(&db, "FR-LIVE");
+
+        let err = db.archive_document("FR-LIVE").unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be archived"),
+            "archive must be blocked: {err}"
+        );
+        assert!(
+            err.to_string().contains(&card_id),
+            "error must name the blocking card: {err}"
+        );
+    }
+
+    /// archive_document succeeds when the bound card is cancelled.
+    #[test]
+    fn archive_document_allowed_when_bound_card_is_cancelled() {
+        let db = test_db();
+        let mut m = sample_meta("requirement", "mail");
+        m.id = Some("FR-CANCEL");
+        db.insert_document(&m, "{}").unwrap();
+
+        let card_id = insert_bound_card(&db, "FR-CANCEL");
+        // Cancel the card.
+        db.force_move_card(&card_id, "cancelled", None)
+            .expect("cancel card");
+
+        // Now archive_document should succeed.
+        let doc = db.archive_document("FR-CANCEL").expect("archive");
+        assert!(doc.archived_at.is_some(), "should be archived");
     }
 
     // -- schema payload validation (#526) ---------------------------------

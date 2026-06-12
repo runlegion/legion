@@ -60,13 +60,78 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
     Ok(())
 }
 
+/// Resolve acceptance criteria for a card, with spec-document precedence (#528).
+///
+/// Returns `(criteria, source_label)`.
+///
+/// Precedence:
+/// 1. When the card has a `document_id` AND the bound document's payload has a
+///    non-empty `verification.acceptance` array, those strings become the AC.
+///    Source label: `"spec:<document_id>"`.
+/// 2. When the card has a `document_id` but the document cannot be found, this
+///    is a hard error -- a bound card whose spec has vanished must not silently
+///    fall back; verify must not paper over a dangling reference. This matches
+///    the behavior of `transition_card_status_with_sync`, which also hard-errors
+///    on a missing bound document.
+/// 3. When the bound document exists but has no `verification` block, or the
+///    `verification.acceptance` array is empty, or the payload cannot be parsed
+///    (corrupt doc), falls back to `tasks.acceptance` with source `"card"`.
+/// 4. When the card has no `document_id`: `tasks.acceptance`. Source `"card"`.
+fn resolve_acceptance_criteria(
+    database: &crate::db::Database,
+    card: &kanban::Card,
+) -> error::Result<(Vec<String>, String)> {
+    if let Some(ref doc_id) = card.document_id {
+        // The document must exist. A dangling document_id is a hard error: the
+        // spec that was authoritative has been deleted while work was in flight.
+        let doc = database.get_document(doc_id)?.ok_or_else(|| {
+            error::LegionError::WorkSource(format!(
+                "card '{}' has document_id '{doc_id}' but the document does not exist; \
+                 verify cannot proceed with a dangling spec reference",
+                card.id
+            ))
+        })?;
+
+        // Parse the payload and look for verification.acceptance. A corrupt
+        // payload or a missing verification block is non-fatal: fall back to
+        // tasks.acceptance so a structural gap in the spec does not hard-block
+        // verify (the intent is that the human fills in the spec).
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&doc.payload)
+            && let Some(arr) = value
+                .get("verification")
+                .and_then(|v| v.get("acceptance"))
+                .and_then(|a| a.as_array())
+        {
+            let criteria: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_owned)
+                .filter(|s| !s.trim().is_empty())
+                .collect();
+            if !criteria.is_empty() {
+                return Ok((criteria, format!("spec:{doc_id}")));
+            }
+        }
+        // Document exists but has no usable verification.acceptance: fall back.
+    }
+    // No document_id, or document exists without usable verification.acceptance.
+    let criteria = verify::acceptance_items(card.acceptance.as_deref());
+    Ok((criteria, "card".to_string()))
+}
+
 pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> error::Result<()> {
     let database = open_db()?;
 
     let card_row = database
         .get_card_by_id(&card)?
         .ok_or_else(|| error::LegionError::CardNotFound(card.clone()))?;
-    let acceptance = verify::acceptance_items(card_row.acceptance.as_deref());
+
+    // AC source precedence (#528):
+    // 1. When the card has a bound document AND the document's payload has a
+    //    non-empty `verification.acceptance` array, those strings are the
+    //    canonical criteria -- the spec is authoritative.
+    // 2. Otherwise fall back to `tasks.acceptance` exactly as before.
+    let (acceptance, ac_source) = resolve_acceptance_criteria(&database, &card_row)?;
 
     // Read the agent's per-criterion verdicts (file or stdin).
     let raw = read_file_or_stdin(verdicts_file.as_deref(), "--verdicts-file")?;
@@ -114,7 +179,7 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
     match decision {
         verify::VerifyDecision::Proceed => {
             println!(
-                "[legion] verify PASS for card {card} ({} criteria). ->Done is unblocked.",
+                "[legion] verify PASS for card {card} ({} criteria, source: {ac_source}). ->Done is unblocked.",
                 acceptance.len()
             );
         }
@@ -174,4 +239,169 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::testutil::test_db;
+    use crate::documents::DocumentMeta;
+    use crate::kanban::{Card, CardStatus, Priority};
+
+    fn make_card(doc_id: Option<&str>, acceptance: Option<&str>) -> Card {
+        Card {
+            id: "card-test".to_string(),
+            from_repo: "legion".to_string(),
+            to_repo: "legion".to_string(),
+            text: "test card".to_string(),
+            context: None,
+            priority: Priority::Med,
+            status: CardStatus::Accepted,
+            note: None,
+            labels: None,
+            parent_card_id: None,
+            source_url: None,
+            source_type: None,
+            sort_order: 0,
+            created_at: "2026-06-12T00:00:00Z".to_string(),
+            updated_at: "2026-06-12T00:00:00Z".to_string(),
+            assigned_at: None,
+            started_at: None,
+            completed_at: None,
+            problem: None,
+            solution: None,
+            acceptance: acceptance.map(str::to_string),
+            document_id: doc_id.map(str::to_string),
+        }
+    }
+
+    /// When no document_id, falls back to tasks.acceptance.
+    #[test]
+    fn resolve_ac_falls_back_to_tasks_acceptance_when_no_document() {
+        let db = test_db();
+        let card = make_card(None, Some("criterion one\ncriterion two"));
+        let (criteria, source) = resolve_acceptance_criteria(&db, &card).expect("resolve");
+        assert_eq!(criteria, vec!["criterion one", "criterion two"]);
+        assert_eq!(source, "card");
+    }
+
+    /// When document_id present but document has no verification block,
+    /// falls back to tasks.acceptance.
+    #[test]
+    fn resolve_ac_falls_back_when_doc_has_no_verification_block() {
+        let db = test_db();
+        let meta = DocumentMeta {
+            id: Some("doc-no-ver"),
+            doc_type: "requirement",
+            surface: Some("test"),
+            status: Some("draft"),
+            priority: None,
+            owner: "legion",
+        };
+        let payload = serde_json::json!({
+            "meta": {"id": "doc-no-ver", "type": "requirement", "surface": "test",
+                     "status": "draft", "priority": "SHOULD", "owner": "legion",
+                     "date": "2026-06-12", "author": "test"},
+            "title": "Test",
+            "description": "desc",
+            "traces_to": "x",
+            "depends_on": []
+        })
+        .to_string();
+        db.insert_document(&meta, &payload).expect("insert");
+
+        let card = make_card(Some("doc-no-ver"), Some("fallback criterion"));
+        let (criteria, source) = resolve_acceptance_criteria(&db, &card).expect("resolve");
+        assert_eq!(criteria, vec!["fallback criterion"]);
+        assert_eq!(source, "card");
+    }
+
+    /// When document has a non-empty verification.acceptance array,
+    /// those strings are the criteria.
+    #[test]
+    fn resolve_ac_uses_spec_verification_acceptance_when_present() {
+        let db = test_db();
+        let meta = DocumentMeta {
+            id: Some("doc-with-ver"),
+            doc_type: "requirement",
+            surface: Some("test"),
+            status: Some("draft"),
+            priority: None,
+            owner: "legion",
+        };
+        let payload = serde_json::json!({
+            "meta": {"id": "doc-with-ver", "type": "requirement", "surface": "test",
+                     "status": "draft", "priority": "SHOULD", "owner": "legion",
+                     "date": "2026-06-12", "author": "test"},
+            "title": "Test",
+            "description": "desc",
+            "traces_to": "x",
+            "depends_on": [],
+            "verification": {
+                "acceptance": [
+                    "spec criterion alpha",
+                    "spec criterion beta"
+                ]
+            }
+        })
+        .to_string();
+        db.insert_document(&meta, &payload).expect("insert");
+
+        // tasks.acceptance says something different -- the spec wins.
+        let card = make_card(Some("doc-with-ver"), Some("should be ignored"));
+        let (criteria, source) = resolve_acceptance_criteria(&db, &card).expect("resolve");
+        assert_eq!(
+            criteria,
+            vec!["spec criterion alpha", "spec criterion beta"]
+        );
+        assert_eq!(source, "spec:doc-with-ver");
+    }
+
+    /// When the verification.acceptance array is empty, falls back to tasks.acceptance.
+    #[test]
+    fn resolve_ac_falls_back_when_verification_acceptance_is_empty() {
+        let db = test_db();
+        let meta = DocumentMeta {
+            id: Some("doc-empty-ver"),
+            doc_type: "requirement",
+            surface: Some("test"),
+            status: Some("draft"),
+            priority: None,
+            owner: "legion",
+        };
+        let payload = serde_json::json!({
+            "meta": {"id": "doc-empty-ver", "type": "requirement", "surface": "test",
+                     "status": "draft", "priority": "SHOULD", "owner": "legion",
+                     "date": "2026-06-12", "author": "test"},
+            "title": "Test",
+            "description": "desc",
+            "traces_to": "x",
+            "depends_on": [],
+            "verification": {"acceptance": []}
+        })
+        .to_string();
+        db.insert_document(&meta, &payload).expect("insert");
+
+        let card = make_card(Some("doc-empty-ver"), Some("fallback when spec empty"));
+        let (criteria, source) = resolve_acceptance_criteria(&db, &card).expect("resolve");
+        assert_eq!(criteria, vec!["fallback when spec empty"]);
+        assert_eq!(source, "card");
+    }
+
+    /// When the card has a document_id that refers to a non-existent document,
+    /// resolve_acceptance_criteria must hard-error. A dangling reference means
+    /// the spec was deleted while work was in flight; verify must not silently
+    /// fall back to tasks.acceptance in that state.
+    #[test]
+    fn resolve_ac_hard_errors_on_dangling_document_id() {
+        let db = test_db();
+        // Card points at a document that was never inserted.
+        let card = make_card(Some("nonexistent-doc-id"), Some("card fallback criterion"));
+        let err = resolve_acceptance_criteria(&db, &card)
+            .expect_err("expected hard error on dangling document_id");
+        assert!(
+            err.to_string().contains("nonexistent-doc-id"),
+            "error must name the missing document id, got: {err}"
+        );
+    }
 }
