@@ -170,7 +170,7 @@ fn run_sym_list(
                     "[legion] unknown --kind '{k}'. Supported: fn, struct, enum, trait, \
                      class, interface, mod, const, macro, type"
                 );
-                std::process::exit(2);
+                return Err(error::LegionError::ExitWith(2));
             }
         },
         None => None,
@@ -738,7 +738,7 @@ where
     let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
     if indexes.is_empty() {
         no_index_found(repo.as_deref(), lang.as_deref());
-        std::process::exit(1);
+        return Err(error::LegionError::ExitWith(1));
     }
 
     // Skip non-rust indexes for `impl` queries (SCIP only models the
@@ -800,7 +800,7 @@ fn run_hover_query(
     let indexes = database.list_scip_indexes_filtered(repo.as_deref(), lang.as_deref())?;
     if indexes.is_empty() {
         no_index_found(repo.as_deref(), lang.as_deref());
-        std::process::exit(1);
+        return Err(error::LegionError::ExitWith(1));
     }
     let mut hover: Option<sym::HoverInfo> = None;
     for idx in &indexes {

@@ -19,6 +19,54 @@
 //     ->Done; any Uncertain (no Fail) routes the card to NeedsInput; all Pass
 //     proceeds.
 
+use std::fmt;
+use std::str::FromStr;
+
+use crate::error::{LegionError, Result};
+
+/// Result of a quality gate run: either clean (no issues) or issues found.
+///
+/// Stored as lowercase string in the `quality_gates.result` column so the
+/// SQL stays human-readable. Parse and display are symmetric: the closed
+/// set of valid values is enforced at the boundary rather than scattered
+/// across `== "clean"` comparisons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GateResult {
+    Clean,
+    Issues,
+}
+
+impl fmt::Display for GateResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Clean => write!(f, "clean"),
+            Self::Issues => write!(f, "issues"),
+        }
+    }
+}
+
+impl FromStr for GateResult {
+    type Err = LegionError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "clean" => Ok(Self::Clean),
+            "issues" => Ok(Self::Issues),
+            other => Err(LegionError::InvalidGateResult(other.to_string())),
+        }
+    }
+}
+
+/// Build the quality-gate skill key for a verify verdict on `card_id`.
+///
+/// The key is single-sourced here so that the handler that writes the gate
+/// (`cli::verify::handle_verify`) and the handler that reads it
+/// (`cli::kanban::handle_done`) cannot drift.
+pub fn verify_gate_key(card_id: &str) -> String {
+    format!("legion-verify:{card_id}")
+}
+
 /// One verdict for one acceptance criterion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -442,5 +490,50 @@ mod tests {
     fn is_vacuous_unicode_safe() {
         // Unicode text with no assertion markers is vacuous; must not panic.
         assert!(is_vacuous_evidence("critere", "\u{00e9}l\u{00e8}ve"));
+    }
+
+    // --- GateResult tests ---
+
+    #[test]
+    fn gate_result_display_roundtrip() {
+        // Every variant serializes to lowercase and parses back exactly.
+        for r in [GateResult::Clean, GateResult::Issues] {
+            let s = r.to_string();
+            let parsed = s.parse::<GateResult>().expect("parse should succeed");
+            assert_eq!(r, parsed, "display/parse roundtrip failed for {r}");
+        }
+    }
+
+    #[test]
+    fn gate_result_display_values() {
+        assert_eq!(GateResult::Clean.to_string(), "clean");
+        assert_eq!(GateResult::Issues.to_string(), "issues");
+    }
+
+    #[test]
+    fn gate_result_parse_invalid_returns_err() {
+        // Typos and case variants are rejected at the parse boundary.
+        assert!("unknown".parse::<GateResult>().is_err());
+        assert!("Clean".parse::<GateResult>().is_err());
+        assert!("CLEAN".parse::<GateResult>().is_err());
+        assert!("".parse::<GateResult>().is_err());
+    }
+
+    // --- verify_gate_key tests ---
+
+    #[test]
+    fn verify_gate_key_format() {
+        // The key is the single-source for the card-keyed gate used by
+        // handle_verify (write site) and handle_done (read site).
+        let key = verify_gate_key("card-abc-123");
+        assert_eq!(key, "legion-verify:card-abc-123");
+    }
+
+    #[test]
+    fn verify_gate_key_stable_across_callers() {
+        // Both call sites must produce identical keys for the same card_id.
+        // This test documents the contract rather than testing logic.
+        let card_id = "019e-some-uuid-v7";
+        assert_eq!(verify_gate_key(card_id), format!("legion-verify:{card_id}"));
     }
 }

@@ -2,12 +2,15 @@
 //! `legion pr create` can verify a clean gate (#200). Owns the
 //! `quality_gates` DDL.
 
+use std::str::FromStr;
+
 use chrono::Utc;
 use rusqlite::Connection;
 use uuid::Uuid;
 
 use super::Database;
 use crate::error::{LegionError, Result};
+use crate::verify::GateResult;
 
 /// `quality_gates` table (#200).
 pub(super) fn create_tables(conn: &Connection) -> Result<()> {
@@ -42,10 +45,22 @@ pub struct QualityGateRow {
     pub branch: String,
     pub commit_hash: String,
     pub skill: String,
-    pub result: String,
+    pub result: GateResult,
     pub findings_count: u64,
     pub details: Option<String>,
     pub created_at: String,
+}
+
+/// Parse a `GateResult` from a DB string, mapping unknown values to a
+/// `LegionError::Database` so the error stays in the rusqlite query path.
+fn parse_result_from_db(s: String) -> std::result::Result<GateResult, rusqlite::Error> {
+    GateResult::from_str(&s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(e.to_string())),
+        )
+    })
 }
 
 impl Database {
@@ -59,12 +74,16 @@ impl Database {
         branch: &str,
         commit_hash: &str,
         skill: &str,
-        result: &str,
+        result: GateResult,
         findings_count: u64,
         details: Option<&str>,
     ) -> Result<QualityGateRow> {
         let id = Uuid::now_v7().to_string();
         let created_at = Utc::now().to_rfc3339();
+        let result_str: &str = match result {
+            GateResult::Clean => "clean",
+            GateResult::Issues => "issues",
+        };
         self.conn.execute(
             "INSERT INTO quality_gates \
              (id, branch, commit_hash, skill, result, findings_count, details, created_at) \
@@ -74,7 +93,7 @@ impl Database {
                 branch,
                 commit_hash,
                 skill,
-                result,
+                result_str,
                 findings_count as i64,
                 details,
                 &created_at,
@@ -85,7 +104,7 @@ impl Database {
             branch: branch.to_owned(),
             commit_hash: commit_hash.to_owned(),
             skill: skill.to_owned(),
-            result: result.to_owned(),
+            result,
             findings_count,
             details: details.map(str::to_owned),
             created_at,
@@ -109,13 +128,14 @@ impl Database {
              LIMIT 1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![commit_hash, skill], |row| {
+            let result_str: String = row.get(4)?;
             let findings_count_i64: i64 = row.get(5)?;
             Ok(QualityGateRow {
                 id: row.get(0)?,
                 branch: row.get(1)?,
                 commit_hash: row.get(2)?,
                 skill: row.get(3)?,
-                result: row.get(4)?,
+                result: parse_result_from_db(result_str)?,
                 findings_count: findings_count_i64.unsigned_abs(),
                 details: row.get(6)?,
                 created_at: row.get(7)?,
@@ -145,13 +165,14 @@ impl Database {
              LIMIT 1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![skill], |row| {
+            let result_str: String = row.get(4)?;
             let findings_count_i64: i64 = row.get(5)?;
             Ok(QualityGateRow {
                 id: row.get(0)?,
                 branch: row.get(1)?,
                 commit_hash: row.get(2)?,
                 skill: row.get(3)?,
-                result: row.get(4)?,
+                result: parse_result_from_db(result_str)?,
                 findings_count: findings_count_i64.unsigned_abs(),
                 details: row.get(6)?,
                 created_at: row.get(7)?,
@@ -168,6 +189,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use crate::db::testutil::test_db;
+    use crate::verify::GateResult;
 
     #[test]
     fn quality_gate_insert_and_lookup() {
@@ -177,7 +199,7 @@ mod tests {
                 "feat/test-branch",
                 "abc1234def5678",
                 "legion-simplify",
-                "clean",
+                GateResult::Clean,
                 0,
                 None,
             )
@@ -186,7 +208,7 @@ mod tests {
         assert_eq!(row.branch, "feat/test-branch");
         assert_eq!(row.commit_hash, "abc1234def5678");
         assert_eq!(row.skill, "legion-simplify");
-        assert_eq!(row.result, "clean");
+        assert_eq!(row.result, GateResult::Clean);
         assert_eq!(row.findings_count, 0);
         assert!(row.details.is_none());
 
@@ -196,7 +218,7 @@ mod tests {
         assert!(fetched.is_some());
         let fetched = fetched.unwrap();
         assert_eq!(fetched.id, row.id);
-        assert_eq!(fetched.result, "clean");
+        assert_eq!(fetched.result, GateResult::Clean);
     }
 
     #[test]
@@ -211,8 +233,15 @@ mod tests {
     #[test]
     fn quality_gate_missing_skill_returns_none() {
         let db = test_db();
-        db.record_quality_gate("main", "abc1234", "legion-simplify", "clean", 0, None)
-            .unwrap();
+        db.record_quality_gate(
+            "main",
+            "abc1234",
+            "legion-simplify",
+            GateResult::Clean,
+            0,
+            None,
+        )
+        .unwrap();
         // Different skill on the same commit should not match.
         let result = db.get_quality_gate("abc1234", "legion-review").unwrap();
         assert!(result.is_none());
@@ -222,22 +251,29 @@ mod tests {
     fn quality_gate_multiple_skills_on_same_commit() {
         let db = test_db();
         let hash = "deadbeef12345";
-        db.record_quality_gate("main", hash, "legion-simplify", "clean", 0, None)
+        db.record_quality_gate("main", hash, "legion-simplify", GateResult::Clean, 0, None)
             .unwrap();
-        db.record_quality_gate("main", hash, "legion-review", "issues", 2, Some("{}"))
-            .unwrap();
+        db.record_quality_gate(
+            "main",
+            hash,
+            "legion-review",
+            GateResult::Issues,
+            2,
+            Some("{}"),
+        )
+        .unwrap();
 
         let simplify = db
             .get_quality_gate(hash, "legion-simplify")
             .unwrap()
             .expect("simplify gate should exist");
-        assert_eq!(simplify.result, "clean");
+        assert_eq!(simplify.result, GateResult::Clean);
 
         let review = db
             .get_quality_gate(hash, "legion-review")
             .unwrap()
             .expect("review gate should exist");
-        assert_eq!(review.result, "issues");
+        assert_eq!(review.result, GateResult::Issues);
         assert_eq!(review.findings_count, 2);
     }
 
@@ -246,10 +282,10 @@ mod tests {
         let db = test_db();
         let hash = "cafecafe99";
         // First run: issues found.
-        db.record_quality_gate("main", hash, "legion-simplify", "issues", 3, None)
+        db.record_quality_gate("main", hash, "legion-simplify", GateResult::Issues, 3, None)
             .unwrap();
         // Second run after fixing: clean.
-        db.record_quality_gate("main", hash, "legion-simplify", "clean", 0, None)
+        db.record_quality_gate("main", hash, "legion-simplify", GateResult::Clean, 0, None)
             .unwrap();
 
         let gate = db
@@ -257,7 +293,8 @@ mod tests {
             .unwrap()
             .expect("gate should exist");
         assert_eq!(
-            gate.result, "clean",
+            gate.result,
+            GateResult::Clean,
             "should return the most recent (clean) result"
         );
     }
@@ -271,7 +308,7 @@ mod tests {
                 "feat/x",
                 "hash123",
                 "legion-simplify",
-                "issues",
+                GateResult::Issues,
                 1,
                 Some(details),
             )
@@ -292,9 +329,9 @@ mod tests {
         // done` may run on a different commit than verify did.
         let db = test_db();
         let skill = "legion-verify:card-7";
-        db.record_quality_gate("feat/x", "commit-old", skill, "issues", 1, None)
+        db.record_quality_gate("feat/x", "commit-old", skill, GateResult::Issues, 1, None)
             .unwrap();
-        db.record_quality_gate("main", "commit-new", skill, "clean", 0, None)
+        db.record_quality_gate("main", "commit-new", skill, GateResult::Clean, 0, None)
             .unwrap();
 
         let latest = db
@@ -302,7 +339,8 @@ mod tests {
             .unwrap()
             .expect("a verify gate should exist for the card");
         assert_eq!(
-            latest.result, "clean",
+            latest.result,
+            GateResult::Clean,
             "most recent row wins across commits"
         );
         assert_eq!(latest.commit_hash, "commit-new");
@@ -313,5 +351,21 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn gate_result_display_roundtrip() {
+        for r in [GateResult::Clean, GateResult::Issues] {
+            let s = r.to_string();
+            let parsed = s.parse::<GateResult>().expect("parse");
+            assert_eq!(r, parsed);
+        }
+    }
+
+    #[test]
+    fn gate_result_parse_invalid_returns_err() {
+        assert!("unknown".parse::<GateResult>().is_err());
+        assert!("Clean".parse::<GateResult>().is_err());
+        assert!("".parse::<GateResult>().is_err());
     }
 }
