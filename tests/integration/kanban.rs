@@ -303,7 +303,7 @@ fn kanban_invalid_transition() {
     let (_stdout, stderr) =
         run_fail(legion_cmd(dir.path()).args(["kanban", "review", "--id", &id]));
     assert!(
-        stderr.contains("InvalidCardTransition"),
+        stderr.contains("invalid card transition"),
         "expected transition error, got: {stderr}"
     );
 }

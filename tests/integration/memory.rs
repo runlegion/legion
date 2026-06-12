@@ -422,8 +422,8 @@ fn forget_rejects_wrong_repo_safety_check() {
     let (_stdout, stderr) =
         run_fail(legion_cmd(dir.path()).args(["forget", "--id", &id, "--repo", "rafters"]));
     assert!(
-        stderr.contains("ReflectionRepoMismatch"),
-        "expected safety check error variant, got: {stderr}"
+        stderr.contains("repo safety check failed"),
+        "expected safety check error, got: {stderr}"
     );
     assert!(
         stderr.contains("kelex"),
@@ -539,7 +539,7 @@ fn reflect_no_input_errors() {
     // neither --text nor --transcript is provided.
     let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args(["reflect", "--repo", "test"]));
     assert!(
-        stderr.contains("NoReflectionInput"),
+        stderr.contains("no reflection text provided"),
         "expected missing input error, got: {stderr}"
     );
 }

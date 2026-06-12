@@ -181,7 +181,7 @@ fn task_invalid_state_transition() {
     let (_stdout, stderr) =
         run_fail(legion_cmd(dir.path()).args(["task", "done", "--id", &task_id]));
     assert!(
-        stderr.contains("InvalidTaskTransition"),
+        stderr.contains("invalid state transition"),
         "expected state transition error, got: {stderr}"
     );
 }
