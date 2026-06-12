@@ -1,12 +1,12 @@
-/// Hand-rolled JSON-RPC 2.0 stdio server for the MCP protocol.
-///
-/// Reads newline-delimited JSON from stdin, writes responses to stdout.
-/// Implements only the subset of MCP that the legion channel uses:
-///   - initialize
-///   - tools/list
-///   - tools/call
-///
-/// No Content-Length headers. Each message is a single JSON line.
+//! Hand-rolled JSON-RPC 2.0 stdio server for the MCP protocol.
+//!
+//! Reads newline-delimited JSON from stdin, writes responses to stdout.
+//! Implements only the subset of MCP that the legion channel uses:
+//!   - initialize
+//!   - tools/list
+//!   - tools/call
+//!
+//! No Content-Length headers. Each message is a single JSON line.
 
 mod log;
 mod notifier;
@@ -359,12 +359,12 @@ pub(crate) mod testutil {
     use crate::db::Database;
     use crate::search::SearchIndex;
 
-    fn make_tx() -> broadcast::Sender<ChannelEvent> {
+    pub(crate) fn make_tx() -> broadcast::Sender<ChannelEvent> {
         let (tx, _rx) = broadcast::channel(16);
         tx
     }
 
-    fn make_request(method: &str, params: Option<Value>) -> Value {
+    pub(crate) fn make_request(method: &str, params: Option<Value>) -> Value {
         let mut req = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -378,7 +378,7 @@ pub(crate) mod testutil {
 
     /// Create a temp dir with `legion.db` and `index/` at the expected paths.
     /// The MCP handler always opens `data_dir/legion.db` and `data_dir/index`.
-    fn mcp_test_dir() -> (Database, tempfile::TempDir) {
+    pub(crate) fn mcp_test_dir() -> (Database, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Database::open(&dir.path().join("legion.db")).expect("open legion.db");
         // Initialize search index so handle_tool_call can open it.

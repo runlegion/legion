@@ -130,7 +130,7 @@ const NOTIFIER_BATCH_LIMIT: usize = 100;
 /// Read the notifier poll interval from the environment, falling back to the
 /// default. Invalid values (non-numeric, zero) fall back silently -- the
 /// failure mode is "notifier ticks at the default rate", not crash.
-fn mcp_poll_interval() -> std::time::Duration {
+pub(super) fn mcp_poll_interval() -> std::time::Duration {
     let ms = std::env::var("LEGION_MCP_POLL_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -165,7 +165,7 @@ const NOTIFIER_COLD_BOOT_REPLAY: chrono::Duration = chrono::Duration::hours(24);
 ///
 /// All three failure modes are non-fatal: a misconfigured workstation gets
 /// the pre-fix behaviour (broadcasts only) rather than no channel at all.
-fn resolve_session_repo_from_cwd(data_dir: &std::path::Path) -> Option<String> {
+pub(super) fn resolve_session_repo_from_cwd(data_dir: &std::path::Path) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     resolve_session_repo_for_cwd(data_dir, &cwd)
 }
@@ -364,7 +364,7 @@ pub fn classify_notifier_health(
     }
 }
 
-fn run_notifier_loop(
+pub(super) fn run_notifier_loop(
     data_dir: PathBuf,
     out: Arc<Mutex<std::io::BufWriter<std::io::Stdout>>>,
     client_repo_cell: Arc<OnceLock<String>>,

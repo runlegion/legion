@@ -44,7 +44,7 @@ pub fn mcp_log_dir() -> Result<PathBuf> {
 /// are non-fatal -- without redirection the MCP still functions, we just
 /// lose observability.
 #[cfg(unix)]
-fn redirect_stderr_to_log() {
+pub(super) fn redirect_stderr_to_log() {
     let pid = std::process::id();
     let Ok(path) = mcp_log_path(pid) else {
         return;
@@ -73,7 +73,7 @@ fn redirect_stderr_to_log() {
 }
 
 #[cfg(not(unix))]
-fn redirect_stderr_to_log() {}
+pub(super) fn redirect_stderr_to_log() {}
 
 /// Emit a trace event to stderr (which #395 redirects to the per-PID log
 /// file). Lifecycle and error events use this unconditionally; verbose
@@ -94,7 +94,7 @@ pub fn mcp_trace(event: &str, kvs: &[(&str, &str)]) {
 }
 
 /// Whether verbose tracing is enabled (per-poll, per-post-decision).
-fn mcp_verbose() -> bool {
+pub(super) fn mcp_verbose() -> bool {
     std::env::var("LEGION_MCP_TRACE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)

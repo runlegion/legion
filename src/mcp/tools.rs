@@ -17,7 +17,7 @@ use crate::task;
 const MAX_TOOL_RESULT_LEN: usize = 2000;
 
 /// Tool definitions returned by tools/list. Shape is a public contract -- external MCP clients pin to these field names.
-fn tool_definitions() -> Value {
+pub(super) fn tool_definitions() -> Value {
     json!([
         {
             "name": "legion_post",
@@ -120,7 +120,7 @@ fn tool_definitions() -> Value {
 }
 
 /// Build a JSON-RPC 2.0 success response.
-fn success_response(id: &Value, result: Value) -> Value {
+pub(super) fn success_response(id: &Value, result: Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -129,7 +129,7 @@ fn success_response(id: &Value, result: Value) -> Value {
 }
 
 /// Build a JSON-RPC 2.0 error response.
-fn error_response(id: &Value, code: i64, message: &str) -> Value {
+pub(super) fn error_response(id: &Value, code: i64, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -141,7 +141,7 @@ fn error_response(id: &Value, code: i64, message: &str) -> Value {
 }
 
 /// Build a tool result content array (the MCP tools/call response shape).
-fn tool_result(text: &str) -> Value {
+pub(super) fn tool_result(text: &str) -> Value {
     json!({
         "content": [
             {
@@ -157,7 +157,7 @@ fn tool_result(text: &str) -> Value {
 /// Tool execution errors are returned in the SUCCESS envelope with `isError: true`,
 /// not as JSON-RPC error responses. JSON-RPC errors are reserved for protocol-level
 /// failures (parse errors, method not found, invalid request envelope).
-fn tool_error(id: &Value, err: &LegionError) -> Value {
+pub(super) fn tool_error(id: &Value, err: &LegionError) -> Value {
     // Avoid leaking internal details (file paths, DB internals) for non-argument errors.
     let msg = match err {
         LegionError::McpInvalidArgument(m) => m.clone(),
@@ -176,7 +176,7 @@ fn tool_error(id: &Value, err: &LegionError) -> Value {
 /// Truncate content to MAX_TOOL_RESULT_LEN with a trailing hint.
 ///
 /// Cuts at a UTF-8 codepoint boundary to avoid panicking on multi-byte chars.
-fn truncate(content: &str) -> String {
+pub(super) fn truncate(content: &str) -> String {
     if content.len() <= MAX_TOOL_RESULT_LEN {
         return content.to_string();
     }
@@ -197,7 +197,7 @@ fn truncate(content: &str) -> String {
 /// Opens a fresh DB connection on each call (consistent with legion's
 /// single-connection model for the CLI). The MCP server is long-lived but
 /// calls are infrequent.
-fn handle_tool_call(
+pub(super) fn handle_tool_call(
     data_dir: &std::path::Path,
     name: &str,
     args: &Value,
