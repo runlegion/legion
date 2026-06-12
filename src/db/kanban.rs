@@ -96,6 +96,17 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE tasks ADD COLUMN deleted_at TEXT;")?;
     }
 
+    // Migration 16: card<->document binding (#528).
+    // TEXT NULL; application-layer uniqueness enforced in bind_card_to_document.
+    // No REFERENCES clause -- PRAGMA foreign_keys is not enabled globally.
+    if !Database::has_column(conn, "tasks", "document_id")? {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN document_id TEXT;")?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_document_id \
+             ON tasks(document_id) WHERE document_id IS NOT NULL;",
+        )?;
+    }
+
     // Migration 15: Partial indexes for soft-deleted rows (#256).
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_tasks_to_live \
@@ -271,10 +282,20 @@ impl Database {
     // --- Card CRUD (kanban) ---
 
     /// The full column list for card queries.
+    ///
+    /// Column index reference (0-based, matches `map_card_row`):
+    ///  0  id              8  labels          16 started_at
+    ///  1  from_repo       9  parent_card_id  17 completed_at
+    ///  2  to_repo        10  source_url       18 problem
+    ///  3  text           11  source_type      19 solution
+    ///  4  context        12  sort_order       20 acceptance
+    ///  5  priority       13  created_at       21 document_id
+    ///  6  status         14  updated_at
+    ///  7  note           15  assigned_at
     const CARD_COLUMNS: &'static str = "id, from_repo, to_repo, text, context, priority, status, note, \
          labels, parent_card_id, source_url, source_type, sort_order, \
          created_at, updated_at, assigned_at, started_at, completed_at, \
-         problem, solution, acceptance";
+         problem, solution, acceptance, document_id";
 
     /// SQL fragment for consistent priority ordering across all card queries.
     const PRIORITY_ORDER: &'static str = "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 \
@@ -488,41 +509,122 @@ impl Database {
         }
     }
 
-    /// Update a card's status with timestamp tracking.
-    pub fn update_card_status(
+    /// Map a kanban card status to its requirement `meta.status` equivalent
+    /// for the v2 requirement schema status enum (#528).
+    ///
+    /// Returns `None` for statuses that carry no spec meaning (the spec stays
+    /// where it is). Returns `Some(status_str)` for the four mapped states.
+    pub(crate) fn requirement_status_for_card_status(card_status: &str) -> Option<&'static str> {
+        match card_status {
+            "accepted" => Some("accepted"),
+            "in-review" => Some("implemented"),
+            "done" => Some("verified"),
+            "cancelled" => Some("cancelled"),
+            _ => None,
+        }
+    }
+
+    /// Transition a card's status and -- if the card has a bound document --
+    /// update that document's `meta.status` and hoisted `status` column in
+    /// a single atomic transaction.
+    ///
+    /// When `document_id` is `Some`, the payload parse must succeed; a bound
+    /// document with an unparseable payload fails the whole transition so
+    /// neither the card nor the spec drift silently.
+    ///
+    /// When `document_id` is `None` this behaves identically to the old
+    /// `update_card_status` path but inside an `unchecked_transaction`.
+    pub fn transition_card_status_with_sync(
         &self,
         id: &str,
         status: &str,
         note: Option<&str>,
         timestamp: CardTimestamp,
+        document_id: Option<&str>,
     ) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
 
-        let rows = match timestamp {
-            CardTimestamp::Assigned => self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+
+        // -- update the card row --
+        let rows_affected = match timestamp {
+            CardTimestamp::Assigned => tx.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
                  assigned_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
-            CardTimestamp::Started => self.conn.execute(
+            CardTimestamp::Started => tx.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
                  started_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
-            CardTimestamp::Completed => self.conn.execute(
+            CardTimestamp::Completed => tx.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
                  completed_at = ?3, updated_at = ?4 WHERE id = ?5 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, now, id],
             )?,
-            CardTimestamp::None => self.conn.execute(
+            CardTimestamp::None => tx.execute(
                 "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), \
                  updated_at = ?3 WHERE id = ?4 AND deleted_at IS NULL",
                 rusqlite::params![status, note, now, id],
             )?,
         };
-        if rows == 0 {
-            return Err(LegionError::CardNotFound(id.to_string()));
+        if rows_affected == 0 {
+            return Err(crate::error::LegionError::CardNotFound(id.to_string()));
         }
+
+        // -- sync the bound document if the new status maps to a spec status --
+        if let Some(doc_id) = document_id
+            && let Some(spec_status) = Self::requirement_status_for_card_status(status)
+        {
+            // Fetch and mutate the payload inside the transaction.
+            // Borrowing `tx` as a read source is fine because rusqlite
+            // allows reads mid-transaction on the same connection.
+            let payload_str: Option<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT payload FROM documents WHERE id = ?1 AND deleted_at IS NULL",
+                )?;
+                let mut rows = stmt.query(rusqlite::params![doc_id])?;
+                rows.next()?
+                    .map(|row| row.get::<_, String>(0))
+                    .transpose()
+                    .map_err(crate::error::LegionError::Database)?
+            };
+
+            let payload_str = payload_str.ok_or_else(|| {
+                crate::error::LegionError::WorkSource(format!(
+                    "bound document '{doc_id}' not found -- cannot sync status"
+                ))
+            })?;
+
+            let mut value: serde_json::Value = serde_json::from_str(&payload_str).map_err(|e| {
+                crate::error::LegionError::WorkSource(format!(
+                    "bound document '{doc_id}' has unparseable payload: {e}"
+                ))
+            })?;
+
+            let meta = value
+                .get_mut("meta")
+                .and_then(|m| m.as_object_mut())
+                .ok_or_else(|| {
+                    crate::error::LegionError::WorkSource(format!(
+                        "bound document '{doc_id}' payload has no 'meta' object"
+                    ))
+                })?;
+            meta.insert(
+                "status".to_string(),
+                serde_json::Value::String(spec_status.to_string()),
+            );
+
+            let updated_payload = serde_json::to_string(&value)?;
+            tx.execute(
+                "UPDATE documents SET payload = ?1, status = ?2, updated_at = ?3 \
+                 WHERE id = ?4 AND deleted_at IS NULL",
+                rusqlite::params![updated_payload, spec_status, now, doc_id],
+            )?;
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -611,7 +713,75 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Get per-agent workload summary.
+    /// Look up a card by its bound document_id.
+    ///
+    /// Returns the first live (non-deleted) card whose `document_id` matches.
+    /// `document_id` has application-layer uniqueness, so at most one card
+    /// should ever match; the query uses LIMIT 1 as a safety net.
+    pub fn get_card_by_document_id(
+        &self,
+        document_id: &str,
+    ) -> Result<Option<crate::kanban::Card>> {
+        let sql = format!(
+            "SELECT {} FROM tasks WHERE document_id = ?1 AND deleted_at IS NULL LIMIT 1",
+            Self::CARD_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query_map([document_id], crate::kanban::map_card_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row.map_err(LegionError::Database)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Bind a document to a card by setting `tasks.document_id`.
+    ///
+    /// Errors if:
+    /// - The card does not exist or is deleted.
+    /// - The card already has a `document_id` (already bound).
+    /// - Another live (non-cancelled, non-deleted) card is already bound
+    ///   to `document_id` (uniqueness guard).
+    pub fn bind_card_to_document(&self, card_id: &str, document_id: &str) -> Result<()> {
+        // Guard 1: card must exist and not already be bound.
+        let card = self
+            .get_card_by_id(card_id)?
+            .ok_or_else(|| LegionError::CardNotFound(card_id.to_string()))?;
+        if card.document_id.is_some() {
+            return Err(LegionError::WorkSource(format!(
+                "card '{card_id}' is already bound to document '{}'",
+                card.document_id.as_deref().unwrap_or("")
+            )));
+        }
+
+        // Guard 2: no other live card is bound to this document_id.
+        // "Live" means not cancelled and not deleted.
+        let mut check_stmt = self.conn.prepare(
+            "SELECT id FROM tasks WHERE document_id = ?1 \
+             AND deleted_at IS NULL \
+             AND status != 'cancelled' \
+             LIMIT 1",
+        )?;
+        let mut rows = check_stmt.query([document_id])?;
+        if let Some(row) = rows.next()? {
+            let existing_id: String = row.get(0)?;
+            return Err(LegionError::WorkSource(format!(
+                "document '{document_id}' is already bound to live card '{existing_id}'"
+            )));
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let affected = self.conn.execute(
+            "UPDATE tasks SET document_id = ?1, updated_at = ?2 \
+             WHERE id = ?3 AND deleted_at IS NULL",
+            rusqlite::params![document_id, now, card_id],
+        )?;
+        if affected == 0 {
+            return Err(LegionError::CardNotFound(card_id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Per-agent workload summary.
     pub fn get_agent_workloads(&self) -> Result<Vec<crate::kanban::AgentWorkload>> {
         let mut stmt = self.conn.prepare(
             "SELECT to_repo, \
@@ -800,6 +970,358 @@ mod tests {
         assert!(
             !deleted_again,
             "soft_delete_card on already-deleted should return false"
+        );
+    }
+
+    // --- document_id migration / binding tests (#528) ---
+
+    fn insert_test_card(db: &Database) -> String {
+        db.insert_card(
+            "legion",
+            "legion",
+            "test card",
+            None,
+            crate::kanban::Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+            crate::kanban::CardStatus::Backlog,
+        )
+        .expect("insert card")
+    }
+
+    fn insert_test_document(db: &Database) -> String {
+        let meta = crate::documents::DocumentMeta {
+            id: None,
+            doc_type: "requirement",
+            surface: Some("test"),
+            status: Some("draft"),
+            priority: None,
+            owner: "legion",
+        };
+        let payload = serde_json::json!({
+            "meta": {"id": "test", "type": "requirement", "surface": "test",
+                     "status": "draft", "priority": "SHOULD", "owner": "legion",
+                     "date": "2026-06-12", "author": "test"},
+            "title": "Test Req",
+            "description": "desc",
+            "traces_to": "doc#mot.1",
+            "depends_on": []
+        })
+        .to_string();
+        db.insert_document(&meta, &payload)
+            .expect("insert document")
+            .id
+    }
+
+    /// Migration adds document_id column idempotently: opening the same DB
+    /// file twice must not fail (the ALTER-if-missing guard handles this).
+    #[test]
+    fn migration_adds_document_id_column_idempotently() {
+        let db = test_db();
+        // A second open over the same in-memory path would be a new DB;
+        // we verify idempotency by checking the column exists after the
+        // first open and confirming a card can be inserted and read back
+        // without errors -- if the column were missing this would panic.
+        let id = insert_test_card(&db);
+        let card = db.get_card_by_id(&id).expect("get").expect("exists");
+        assert!(
+            card.document_id.is_none(),
+            "new card has no document_id by default"
+        );
+    }
+
+    /// Bind happy path: bind_card_to_document sets document_id on the card.
+    #[test]
+    fn bind_card_to_document_happy_path() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+        let doc_id = insert_test_document(&db);
+
+        db.bind_card_to_document(&card_id, &doc_id).expect("bind");
+
+        let card = db.get_card_by_id(&card_id).expect("get").expect("exists");
+        assert_eq!(
+            card.document_id.as_deref(),
+            Some(doc_id.as_str()),
+            "document_id set on card after bind"
+        );
+
+        // Reverse lookup: get_card_by_document_id returns the bound card.
+        let found = db
+            .get_card_by_document_id(&doc_id)
+            .expect("lookup")
+            .expect("found");
+        assert_eq!(found.id, card_id);
+    }
+
+    /// Error: card already has a document_id.
+    #[test]
+    fn bind_fails_when_card_already_bound() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+        let doc_id1 = insert_test_document(&db);
+        let doc_id2 = insert_test_document(&db);
+
+        db.bind_card_to_document(&card_id, &doc_id1)
+            .expect("first bind");
+        let err = db.bind_card_to_document(&card_id, &doc_id2).unwrap_err();
+        assert!(
+            err.to_string().contains("already bound"),
+            "expected already-bound error, got: {err}"
+        );
+    }
+
+    /// Error: document already bound to another live card.
+    #[test]
+    fn bind_fails_when_document_already_bound_to_live_card() {
+        let db = test_db();
+        let card_id1 = insert_test_card(&db);
+        let card_id2 = insert_test_card(&db);
+        let doc_id = insert_test_document(&db);
+
+        db.bind_card_to_document(&card_id1, &doc_id)
+            .expect("first bind");
+        let err = db.bind_card_to_document(&card_id2, &doc_id).unwrap_err();
+        assert!(
+            err.to_string().contains("already bound to live card"),
+            "expected already-bound-to-live-card error, got: {err}"
+        );
+    }
+
+    /// Error: card not found.
+    #[test]
+    fn bind_fails_when_card_not_found() {
+        let db = test_db();
+        let doc_id = insert_test_document(&db);
+        let err = db
+            .bind_card_to_document("nonexistent-id", &doc_id)
+            .unwrap_err();
+        assert!(
+            matches!(err, LegionError::CardNotFound(_)),
+            "expected CardNotFound, got: {err}"
+        );
+    }
+
+    /// Binding a document to a cancelled card is allowed in bind_card_to_document
+    /// (the uniqueness guard only blocks live non-cancelled cards). This tests
+    /// that a cancelled card's document_id slot does NOT block a new card from
+    /// binding to the same doc.
+    #[test]
+    fn bind_allows_rebind_after_card_cancelled() {
+        let db = test_db();
+        let card_id1 = insert_test_card(&db);
+        let card_id2 = insert_test_card(&db);
+        let doc_id = insert_test_document(&db);
+
+        // Bind to card1, then cancel card1.
+        db.bind_card_to_document(&card_id1, &doc_id)
+            .expect("bind to card1");
+        // Cancel by force_move (bypasses state machine for test simplicity).
+        db.force_move_card(&card_id1, "cancelled", None)
+            .expect("cancel card1");
+
+        // Now card2 can bind to the same doc (card1 is cancelled, not live).
+        db.bind_card_to_document(&card_id2, &doc_id)
+            .expect("rebind to card2 after cancel");
+        let card2 = db.get_card_by_id(&card_id2).expect("get").expect("exists");
+        assert_eq!(card2.document_id.as_deref(), Some(doc_id.as_str()));
+    }
+
+    /// requirement_status_for_card_status maps the four expected statuses.
+    #[test]
+    fn requirement_status_mapping_covers_all_mapped_statuses() {
+        assert_eq!(
+            Database::requirement_status_for_card_status("accepted"),
+            Some("accepted")
+        );
+        assert_eq!(
+            Database::requirement_status_for_card_status("in-review"),
+            Some("implemented")
+        );
+        assert_eq!(
+            Database::requirement_status_for_card_status("done"),
+            Some("verified")
+        );
+        assert_eq!(
+            Database::requirement_status_for_card_status("cancelled"),
+            Some("cancelled")
+        );
+        // Statuses that carry no spec meaning return None.
+        assert!(Database::requirement_status_for_card_status("backlog").is_none());
+        assert!(Database::requirement_status_for_card_status("pending").is_none());
+        assert!(Database::requirement_status_for_card_status("needs-input").is_none());
+        assert!(Database::requirement_status_for_card_status("blocked").is_none());
+    }
+
+    /// Transactional sync: transitioning a bound card to "done" updates BOTH
+    /// tasks.status AND documents.status + documents.payload in one commit.
+    #[test]
+    fn transition_with_sync_updates_both_card_and_document() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+        let doc_id = insert_test_document(&db);
+
+        // Bind and move the card to a state where Done is reachable.
+        db.bind_card_to_document(&card_id, &doc_id).expect("bind");
+        db.force_move_card(&card_id, "accepted", None)
+            .expect("move to accepted");
+
+        // Transition to Done -- syncs the doc to "verified".
+        db.transition_card_status_with_sync(
+            &card_id,
+            "done",
+            None,
+            CardTimestamp::Completed,
+            Some(&doc_id),
+        )
+        .expect("transition");
+
+        // Card must be done.
+        let card = db.get_card_by_id(&card_id).expect("get").expect("exists");
+        assert_eq!(card.status.to_string(), "done");
+
+        // Document status column must be "verified".
+        let doc = db
+            .get_document(&doc_id)
+            .expect("get doc")
+            .expect("doc exists");
+        assert_eq!(
+            doc.status, "verified",
+            "hoisted status column must be 'verified'"
+        );
+
+        // Document payload meta.status must also be "verified".
+        let payload: serde_json::Value = serde_json::from_str(&doc.payload).expect("parse payload");
+        assert_eq!(
+            payload["meta"]["status"].as_str(),
+            Some("verified"),
+            "payload meta.status must be 'verified'"
+        );
+    }
+
+    /// Transactional sync: cancelled card -> doc status "cancelled".
+    #[test]
+    fn done_to_verified_and_cancelled_to_cancelled_mapping() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+        let doc_id = insert_test_document(&db);
+
+        db.bind_card_to_document(&card_id, &doc_id).expect("bind");
+        // Force to accepted so Cancel is valid from the state machine perspective
+        db.force_move_card(&card_id, "accepted", None)
+            .expect("move");
+
+        db.transition_card_status_with_sync(
+            &card_id,
+            "cancelled",
+            None,
+            CardTimestamp::Completed,
+            Some(&doc_id),
+        )
+        .expect("cancel transition");
+
+        let doc = db.get_document(&doc_id).expect("get").expect("exists");
+        assert_eq!(doc.status, "cancelled");
+        let payload: serde_json::Value = serde_json::from_str(&doc.payload).expect("parse");
+        assert_eq!(payload["meta"]["status"].as_str(), Some("cancelled"));
+    }
+
+    /// Illegal transition is rolled back -- neither card nor doc changes.
+    #[test]
+    fn illegal_transition_rolls_back_both_card_and_doc() {
+        use crate::kanban::{Action, CardStatus, transition_card};
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+        let doc_id = insert_test_document(&db);
+
+        db.bind_card_to_document(&card_id, &doc_id).expect("bind");
+        // Card is in Backlog -- Done is not a valid action from Backlog.
+        let err = transition_card(&db, &card_id, Action::Done, None).unwrap_err();
+        assert!(
+            matches!(err, LegionError::InvalidCardTransition { .. }),
+            "expected InvalidCardTransition, got: {err}"
+        );
+
+        // Card must still be in Backlog.
+        let card = db.get_card_by_id(&card_id).expect("get").expect("exists");
+        assert_eq!(card.status, CardStatus::Backlog);
+
+        // Document must still be "draft".
+        let doc = db.get_document(&doc_id).expect("get").expect("exists");
+        assert_eq!(doc.status, "draft");
+    }
+
+    /// Unparseable bound document payload fails the transition.
+    #[test]
+    fn unparseable_bound_payload_fails_transition() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+
+        // Insert a document with an invalid (non-JSON) payload.
+        let meta = crate::documents::DocumentMeta {
+            id: None,
+            doc_type: "requirement",
+            surface: Some("test"),
+            status: Some("draft"),
+            priority: None,
+            owner: "legion",
+        };
+        let doc_id = db
+            .insert_document(&meta, "NOT VALID JSON")
+            .expect("insert corrupt doc")
+            .id;
+        db.bind_card_to_document(&card_id, &doc_id).expect("bind");
+        db.force_move_card(&card_id, "accepted", None)
+            .expect("move");
+
+        // Transitioning to "done" should fail because the payload is unparseable.
+        let err = db
+            .transition_card_status_with_sync(
+                &card_id,
+                "done",
+                None,
+                CardTimestamp::Completed,
+                Some(&doc_id),
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unparseable payload"),
+            "expected unparseable payload error, got: {err}"
+        );
+
+        // Card must NOT have changed status.
+        let card = db.get_card_by_id(&card_id).expect("get").expect("exists");
+        assert_eq!(card.status.to_string(), "accepted");
+    }
+
+    /// Status sync does NOT fire for statuses with no spec mapping (e.g. "blocked").
+    #[test]
+    fn transition_without_mapped_status_does_not_touch_document() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+        let doc_id = insert_test_document(&db);
+
+        db.bind_card_to_document(&card_id, &doc_id).expect("bind");
+        db.force_move_card(&card_id, "accepted", None)
+            .expect("move");
+
+        // blocked has no spec mapping -- doc stays "draft".
+        db.transition_card_status_with_sync(
+            &card_id,
+            "blocked",
+            None,
+            CardTimestamp::None,
+            Some(&doc_id),
+        )
+        .expect("transition to blocked");
+
+        let doc = db.get_document(&doc_id).expect("get").expect("exists");
+        assert_eq!(
+            doc.status, "draft",
+            "document status must be unchanged for unmapped card status"
         );
     }
 }

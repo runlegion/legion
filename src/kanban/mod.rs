@@ -38,6 +38,10 @@ pub struct Card {
     pub problem: Option<String>,
     pub solution: Option<String>,
     pub acceptance: Option<String>,
+    /// Optional bound document id (#528). When set, the spec document's
+    /// `verification.acceptance` block overrides `tasks.acceptance` as the
+    /// source of acceptance criteria for `legion verify`.
+    pub document_id: Option<String>,
 }
 
 /// Per-agent workload summary for the dashboard agent strip.
@@ -81,6 +85,7 @@ pub fn map_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
         problem: row.get(18)?,
         solution: row.get(19)?,
         acceptance: row.get(20)?,
+        document_id: row.get(21)?,
     })
 }
 
@@ -133,6 +138,11 @@ fn timestamp_for_action(action: &Action) -> crate::db::CardTimestamp {
 }
 
 /// Transition a card through the state machine.
+///
+/// When the card has a `document_id`, the bound document's `meta.status` and
+/// hoisted `status` column are updated in the same transaction as the card's
+/// status column. A bound document with an unparseable payload fails the whole
+/// transition -- neither card nor spec drift silently (#528).
 pub fn transition_card(
     db: &Database,
     id: &str,
@@ -145,7 +155,13 @@ pub fn transition_card(
 
     let new_status = transition(card.status, action)?;
     let ts = timestamp_for_action(&action);
-    db.update_card_status(id, &new_status.to_string(), note, ts)?;
+    db.transition_card_status_with_sync(
+        id,
+        &new_status.to_string(),
+        note,
+        ts,
+        card.document_id.as_deref(),
+    )?;
     db.get_card_by_id(id)?
         .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
 }
@@ -223,6 +239,30 @@ pub fn agent_workloads(db: &Database) -> Result<Vec<AgentWorkload>> {
 pub fn view_card(db: &Database, id: &str) -> Result<Card> {
     db.get_card_by_id(id)?
         .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
+}
+
+/// Look up a card by its bound document id.
+///
+/// Returns None when no live card is bound to the given document_id.
+pub fn find_card_for_document(db: &Database, document_id: &str) -> Result<Option<Card>> {
+    db.get_card_by_document_id(document_id)
+}
+
+/// Bind a document to a card (manual path; spec-gen uses the atomic insert).
+///
+/// Fails when the card is already bound, the document does not exist or is
+/// archived, or another live card is already bound to the document.
+pub fn bind_document(db: &Database, card_id: &str, document_id: &str) -> Result<()> {
+    // Verify the document exists and is not archived before writing.
+    let doc = db
+        .get_document(document_id)?
+        .ok_or_else(|| LegionError::WorkSource(format!("document '{document_id}' not found")))?;
+    if doc.archived_at.is_some() {
+        return Err(LegionError::WorkSource(format!(
+            "document '{document_id}' is archived and cannot be bound"
+        )));
+    }
+    db.bind_card_to_document(card_id, document_id)
 }
 
 /// Parameters for updating a card's mutable fields.
