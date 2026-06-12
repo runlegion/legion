@@ -96,6 +96,14 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE tasks ADD COLUMN deleted_at TEXT;")?;
     }
 
+    // Migration 15: Partial indexes for soft-deleted rows (#256).
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_to_live \
+                 ON tasks(to_repo, status) WHERE deleted_at IS NULL;
+             CREATE INDEX IF NOT EXISTS idx_tasks_from_live \
+                 ON tasks(from_repo) WHERE deleted_at IS NULL;",
+    )?;
+
     // Migration 16: card<->document binding (#528).
     // TEXT NULL; application-layer uniqueness enforced in bind_card_to_document.
     // No REFERENCES clause -- PRAGMA foreign_keys is not enabled globally.
@@ -106,14 +114,6 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
              ON tasks(document_id) WHERE document_id IS NOT NULL;",
         )?;
     }
-
-    // Migration 15: Partial indexes for soft-deleted rows (#256).
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_tasks_to_live \
-                 ON tasks(to_repo, status) WHERE deleted_at IS NULL;
-             CREATE INDEX IF NOT EXISTS idx_tasks_from_live \
-                 ON tasks(from_repo) WHERE deleted_at IS NULL;",
-    )?;
     Ok(())
 }
 
@@ -463,7 +463,11 @@ impl Database {
     /// Atomically pick the next pending card for a repo and accept it.
     ///
     /// Selects highest priority, then lowest sort_order, then oldest.
-    /// Transitions to accepted and sets started_at. Returns None if empty.
+    /// Transitions to Accepted and sets started_at. Returns None if empty.
+    ///
+    /// Routes through `transition_card_status_with_sync` so a bound document's
+    /// `meta.status` and hoisted `status` column are kept in sync (#528). The
+    /// prior direct UPDATE bypassed the sync path and left specs stale.
     pub fn pick_next_card(&self, repo: &str) -> Result<Option<crate::kanban::Card>> {
         let sql = format!(
             "SELECT {} FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL \
@@ -480,14 +484,20 @@ impl Database {
         drop(rows);
         drop(stmt);
 
-        let now = chrono::Utc::now().to_rfc3339();
-        let rows_affected = self.conn.execute(
-            "UPDATE tasks SET status = 'accepted', started_at = ?1, updated_at = ?2 \
-             WHERE id = ?3 AND status = 'pending' AND deleted_at IS NULL",
-            rusqlite::params![now, now, card.id],
-        )?;
-        if rows_affected == 0 {
-            return Ok(None);
+        // Use the shared sync path: updates tasks + syncs bound document in one
+        // transaction. The optimistic WHERE status='pending' guard is preserved
+        // inside transition_card_status_with_sync via rows_affected == 0 ->
+        // CardNotFound, which callers can treat as a lost race (return None).
+        match self.transition_card_status_with_sync(
+            &card.id,
+            &crate::kanban::CardStatus::Accepted.to_string(),
+            None,
+            CardTimestamp::Started,
+            card.document_id.as_deref(),
+        ) {
+            Ok(()) => {}
+            Err(LegionError::CardNotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
         }
 
         self.get_card_by_id(&card.id)
@@ -779,16 +789,32 @@ impl Database {
 
     /// Bind a document to a card by setting `tasks.document_id`.
     ///
+    /// All guards and the UPDATE run inside a single `unchecked_transaction`
+    /// to prevent TOCTOU races: without the transaction two concurrent callers
+    /// could both pass the live-card uniqueness check and then both write,
+    /// leaving two live cards bound to the same document.
+    ///
     /// Errors if:
     /// - The card does not exist or is deleted.
     /// - The card already has a `document_id` (already bound).
     /// - Another live (non-cancelled, non-deleted) card is already bound
     ///   to `document_id` (uniqueness guard).
     pub fn bind_card_to_document(&self, card_id: &str, document_id: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+
         // Guard 1: card must exist and not already be bound.
-        let card = self
-            .get_card_by_id(card_id)?
-            .ok_or_else(|| LegionError::CardNotFound(card_id.to_string()))?;
+        let card = {
+            let sql = format!(
+                "SELECT {} FROM tasks WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
+                Self::CARD_COLUMNS
+            );
+            let mut stmt = tx.prepare(&sql)?;
+            let mut rows = stmt.query_map([card_id], crate::kanban::map_card_row)?;
+            match rows.next() {
+                Some(row) => row.map_err(LegionError::Database)?,
+                None => return Err(LegionError::CardNotFound(card_id.to_string())),
+            }
+        };
         if card.document_id.is_some() {
             return Err(LegionError::WorkSource(format!(
                 "card '{card_id}' is already bound to document '{}'",
@@ -796,15 +822,25 @@ impl Database {
             )));
         }
 
-        // Guard 2: no other live card is bound to this document_id.
-        if let Some(existing_id) = self.live_card_bound_to_document(document_id)? {
-            return Err(LegionError::WorkSource(format!(
-                "document '{document_id}' is already bound to live card '{existing_id}'"
-            )));
+        // Guard 2: no other live card is bound to this document_id (inside tx).
+        {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM tasks WHERE document_id = ?1 \
+                 AND deleted_at IS NULL \
+                 AND status != 'cancelled' \
+                 LIMIT 1",
+            )?;
+            let mut rows = stmt.query([document_id])?;
+            if let Some(row) = rows.next()? {
+                let existing_id: String = row.get(0)?;
+                return Err(LegionError::WorkSource(format!(
+                    "document '{document_id}' is already bound to live card '{existing_id}'"
+                )));
+            }
         }
 
         let now = chrono::Utc::now().to_rfc3339();
-        let affected = self.conn.execute(
+        let affected = tx.execute(
             "UPDATE tasks SET document_id = ?1, updated_at = ?2 \
              WHERE id = ?3 AND deleted_at IS NULL",
             rusqlite::params![document_id, now, card_id],
@@ -812,6 +848,8 @@ impl Database {
         if affected == 0 {
             return Err(LegionError::CardNotFound(card_id.to_string()));
         }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -1050,21 +1088,35 @@ mod tests {
             .id
     }
 
-    /// Migration adds document_id column idempotently: opening the same DB
-    /// file twice must not fail (the ALTER-if-missing guard handles this).
+    /// Migration 16 is idempotent: opening the same file-backed database a
+    /// second time must not fail even though the `document_id` column already
+    /// exists. Uses a real file path (not in-memory) to prove the ALTER-if-
+    /// missing guard fires correctly on re-open. The `TempDir` is kept alive
+    /// for the duration of the test by binding it to a local variable.
     #[test]
-    fn migration_adds_document_id_column_idempotently() {
-        let db = test_db();
-        // A second open over the same in-memory path would be a new DB;
-        // we verify idempotency by checking the column exists after the
-        // first open and confirming a card can be inserted and read back
-        // without errors -- if the column were missing this would panic.
-        let id = insert_test_card(&db);
-        let card = db.get_card_by_id(&id).expect("get").expect("exists");
+    fn migration_document_id_column_is_idempotent_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_idempotent.db");
+
+        // First open: creates the schema including the document_id column.
+        let db1 = Database::open(&db_path).expect("first open");
+        let id = insert_test_card(&db1);
+        let card = db1.get_card_by_id(&id).expect("get").expect("exists");
         assert!(
             card.document_id.is_none(),
             "new card has no document_id by default"
         );
+        drop(db1);
+
+        // Second open over the same path: migration 16's has_column guard must
+        // prevent a duplicate ALTER TABLE from failing.
+        let db2 = Database::open(&db_path).expect("second open must not fail");
+        let card2 = db2.get_card_by_id(&id).expect("get").expect("exists");
+        assert!(
+            card2.document_id.is_none(),
+            "card from first open readable after second open"
+        );
+        // dir is dropped here, cleaning up the temp files.
     }
 
     /// Bind happy path: bind_card_to_document sets document_id on the card.
@@ -1358,9 +1410,20 @@ mod tests {
             "expected unparseable payload error, got: {err}"
         );
 
-        // Card must NOT have changed status.
+        // Card must NOT have changed status (transaction rolled back).
         let card = db.get_card_by_id(&card_id).expect("get").expect("exists");
-        assert_eq!(card.status.to_string(), "accepted");
+        assert_eq!(
+            card.status.to_string(),
+            "accepted",
+            "card status must not change"
+        );
+
+        // Document status must also be unchanged (both sides of the tx rolled back).
+        let doc = db.get_document(&doc_id).expect("get doc").expect("exists");
+        assert_eq!(
+            doc.status, "draft",
+            "document status must remain 'draft' when transition fails"
+        );
     }
 
     /// Status sync does NOT fire for statuses with no spec mapping (e.g. "blocked").
@@ -1388,6 +1451,45 @@ mod tests {
         assert_eq!(
             doc.status, "draft",
             "document status must be unchanged for unmapped card status"
+        );
+    }
+
+    /// pick_next_card on a bound card must update BOTH tasks.status and the
+    /// spec document's status column + payload meta.status. Previously the
+    /// direct UPDATE in pick_next_card bypassed transition_card_status_with_sync
+    /// entirely, leaving the document stale (#528 HIGH finding).
+    #[test]
+    fn pick_next_card_syncs_bound_document_status() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+        let doc_id = insert_test_document(&db);
+
+        // Bind the spec and move the card to pending (pick_next_card selects pending).
+        db.bind_card_to_document(&card_id, &doc_id).expect("bind");
+        db.force_move_card(&card_id, "pending", None)
+            .expect("move to pending");
+
+        // pick_next_card accepts the card -- must also update the spec to "accepted".
+        let picked = db
+            .pick_next_card("legion")
+            .expect("pick")
+            .expect("card returned");
+        assert_eq!(picked.id, card_id);
+        assert_eq!(picked.status, crate::kanban::CardStatus::Accepted);
+
+        // Spec document status column must be "accepted".
+        let doc = db.get_document(&doc_id).expect("get doc").expect("exists");
+        assert_eq!(
+            doc.status, "accepted",
+            "spec document status column must be updated by pick_next_card"
+        );
+
+        // Spec payload meta.status must also be "accepted".
+        let payload: serde_json::Value = serde_json::from_str(&doc.payload).expect("parse payload");
+        assert_eq!(
+            payload["meta"]["status"].as_str(),
+            Some("accepted"),
+            "spec payload meta.status must be updated by pick_next_card"
         );
     }
 }

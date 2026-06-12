@@ -259,12 +259,18 @@ pub fn persist_requirements(
 ///
 /// Searches for non-archived documents of `doc_type = "schema"` whose
 /// payload carries `"title": "Requirement"` (case-sensitive). The list
-/// is ordered by `updated_at DESC` so the first match is the most
-/// recently updated live schema.
+/// is ordered by `updated_at DESC` (from `list_documents`), so the first
+/// match is the most recently updated live schema.
 ///
-/// Returns a clear error naming what was looked for when no schema is found,
-/// so operators know exactly which document is missing rather than seeing a
-/// generic "not found" from a stale hardcoded id.
+/// The lookup is deterministic only when exactly one live schema titled
+/// "Requirement" exists. The expected workflow is archive-on-adopt: when a
+/// new schema version is adopted, the prior one should be archived so only
+/// one live match exists at any time. When more than one live match is found,
+/// this function emits a warning to stderr naming the chosen document id and
+/// the number of shadowed documents, so operators can see the violation and
+/// archive the stale copies.
+///
+/// Returns a clear error when no active schema is found.
 fn find_requirement_schema(db: &Database) -> Result<Document> {
     let filter = DocumentFilter {
         doc_type: Some("schema"),
@@ -272,20 +278,41 @@ fn find_requirement_schema(db: &Database) -> Result<Document> {
         ..Default::default()
     };
     let candidates = db.list_documents(&filter)?;
-    for doc in candidates {
-        // Parse lazily; skip docs whose payload is not valid JSON or has no title.
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&doc.payload)
-            && value["title"].as_str() == Some("Requirement")
-        {
-            return Ok(doc);
-        }
+
+    // Collect all matches; warn when there is more than one.
+    let mut matches: Vec<Document> = candidates
+        .into_iter()
+        .filter(|doc| {
+            serde_json::from_str::<serde_json::Value>(&doc.payload)
+                .ok()
+                .and_then(|v| v["title"].as_str().map(str::to_owned))
+                .as_deref()
+                == Some("Requirement")
+        })
+        .collect();
+
+    if matches.is_empty() {
+        return Err(LegionError::WorkSource(
+            "no active requirement schema found: expected a non-archived document \
+             of doc_type='schema' with payload title='Requirement'. \
+             Run `legion document create --type schema` to land the requirement schema."
+                .to_string(),
+        ));
     }
-    Err(LegionError::WorkSource(
-        "no active requirement schema found: expected a non-archived document \
-         of doc_type='schema' with payload title='Requirement'. \
-         Run `legion document create --type schema` to land the requirement schema."
-            .to_string(),
-    ))
+
+    if matches.len() > 1 {
+        // The list is ordered by updated_at DESC; the first element is the
+        // most recently updated and is what we will use.
+        let shadowed = matches.len() - 1;
+        eprintln!(
+            "[legion] warning: {} live requirement schema(s) found in addition to '{}'; \
+             using the most recently updated one. Archive the {} shadowed document(s) \
+             with `legion document archive` to restore deterministic lookup.",
+            shadowed, matches[0].id, shadowed,
+        );
+    }
+
+    Ok(matches.remove(0))
 }
 
 /// Parse a service-design document's surface and JSON payload.
