@@ -400,28 +400,26 @@ fn handle_tool_call(
             let note = get_str("note");
             let details_str = get_str("details");
 
-            // Validate note length
-            if let Some(ref n) = note {
-                sig::validate_note(n)?;
-            }
-
-            // Parse details string "key:value,key:value" into Vec<(String, String)>
-            let details: Vec<(String, String)> = details_str
-                .as_deref()
-                .unwrap_or("")
-                .split(',')
-                .filter_map(|pair| {
-                    let pair = pair.trim();
-                    let pos = pair.find(':')?;
-                    Some((
-                        pair[..pos].trim().to_string(),
-                        pair[pos + 1..].trim().to_string(),
-                    ))
-                })
-                .collect();
-
-            let signal_text =
-                sig::format_signal(&to, &verb, status.as_deref(), note.as_deref(), &details);
+            // One compose/validate entry point shared with the CLI signal
+            // arm (#612): details wire parsing, the #587 required-fields
+            // gate, and the note length cap all live in signal::compose.
+            // Validation failures are argument errors, not internal ones --
+            // surface the message to the MCP client verbatim.
+            let signal_text = sig::compose(
+                &to,
+                &verb,
+                status.as_deref(),
+                note.as_deref(),
+                details_str.as_deref(),
+                crate::verbs::active_manifest(),
+            )
+            .map_err(|e| match e {
+                LegionError::SignalMissingRequiredFields { .. }
+                | LegionError::SignalNoteTooLong { .. } => {
+                    LegionError::McpInvalidArgument(e.to_string())
+                }
+                other => other,
+            })?;
 
             let db = Database::open(&data_dir.join("legion.db"))?;
             let index = SearchIndex::open(&data_dir.join("index"))?;
@@ -1880,6 +1878,108 @@ mod tests {
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].text, "@legion review:approved");
         assert!(crate::signal::is_signal(&posts[0].text));
+    }
+
+    #[test]
+    fn legion_signal_enforces_required_fields() {
+        // The #587 required-fields gate must hold on the MCP surface too --
+        // it lived only in the CLI arm before #612, so an MCP rfc with no
+        // budget sailed through. signal::compose is now the shared gate.
+        let (db, dir) = mcp_test_dir();
+        drop(db);
+
+        let tx = make_tx();
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "legion_signal",
+                "arguments": {
+                    "repo": "kelex",
+                    "to": "legion",
+                    "verb": "rfc",
+                    "note": "proposal with no budget"
+                }
+            })),
+        );
+
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        assert!(
+            resp.get("error").is_none(),
+            "validation failures are tool errors, not JSON-RPC errors"
+        );
+        assert_eq!(resp["result"]["isError"], true);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("budget"),
+            "error must name the missing field: {text}"
+        );
+        assert!(
+            !text.starts_with("internal error:"),
+            "missing required fields is an argument error, not internal: {text}"
+        );
+
+        // Nothing must have been posted.
+        let db2 = Database::open(&dir.path().join("legion.db")).expect("open");
+        assert!(db2.get_board_posts().expect("posts").is_empty());
+    }
+
+    #[test]
+    fn legion_signal_with_required_fields_succeeds() {
+        let (db, dir) = mcp_test_dir();
+        drop(db);
+
+        let tx = make_tx();
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "legion_signal",
+                "arguments": {
+                    "repo": "kelex",
+                    "to": "legion",
+                    "verb": "rfc",
+                    "note": "proposal",
+                    "details": "budget: 2h"
+                }
+            })),
+        );
+
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        assert!(resp.get("error").is_none());
+        assert!(resp["result"].get("isError").is_none());
+
+        let db2 = Database::open(&dir.path().join("legion.db")).expect("open");
+        let posts = db2.get_board_posts().expect("posts");
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].text, "@legion rfc {budget: 2h} -- proposal");
+    }
+
+    #[test]
+    fn legion_signal_rejects_overlong_note_as_argument_error() {
+        let (db, dir) = mcp_test_dir();
+        drop(db);
+
+        let tx = make_tx();
+        let long_note = "a".repeat(sig::MAX_SIGNAL_NOTE_LENGTH + 1);
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "legion_signal",
+                "arguments": {
+                    "repo": "kelex",
+                    "to": "legion",
+                    "verb": "question",
+                    "note": long_note
+                }
+            })),
+        );
+
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        assert_eq!(resp["result"]["isError"], true);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            !text.starts_with("internal error:"),
+            "note-too-long is an argument error, not internal: {text}"
+        );
     }
 
     #[test]

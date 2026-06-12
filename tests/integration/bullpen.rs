@@ -220,6 +220,62 @@ fn signal_with_details() {
 }
 
 #[test]
+fn signal_missing_required_fields_fails_on_cli_surface() {
+    // The #587 gate, exercised through the binary: rfc requires 'budget'.
+    // The MCP twin of this test lives in src/mcp tool-call tests -- both
+    // surfaces go through signal::compose (#612).
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "signal",
+        "--repo",
+        "kelex",
+        "--to",
+        "legion",
+        "--verb",
+        "rfc",
+        "--note",
+        "no budget",
+    ]));
+    assert!(
+        stderr.contains("budget"),
+        "expected the missing field named in the error, got: {stderr}"
+    );
+
+    // Nothing must have landed on the bullpen.
+    let stdout = run_ok(legion_cmd(dir.path()).args(["bullpen", "--repo", "platform"]));
+    assert!(
+        !stdout.contains("rfc"),
+        "rejected signal must not be posted, got: {stdout}"
+    );
+}
+
+#[test]
+fn signal_with_required_fields_passes_on_cli_surface() {
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "signal",
+        "--repo",
+        "kelex",
+        "--to",
+        "legion",
+        "--verb",
+        "rfc",
+        "--note",
+        "proposal",
+        "--details",
+        "budget:2h",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["bullpen", "--repo", "platform"]));
+    assert!(
+        stdout.contains("budget: 2h"),
+        "expected the composed details block on the bullpen, got: {stdout}"
+    );
+}
+
+#[test]
 fn bullpen_signals_filter() {
     let dir = tempfile::tempdir().unwrap();
 

@@ -84,53 +84,17 @@ pub(crate) fn handle_signal(
 ) -> error::Result<()> {
     let (database, index) = open_db_and_index()?;
 
-    let detail_pairs: Vec<(String, String)> = details
-        .as_deref()
-        .map(|d| {
-            d.split(',')
-                .filter_map(|pair| {
-                    let pair = pair.trim();
-                    pair.find(':').map(|pos| {
-                        (
-                            pair[..pos].trim().to_string(),
-                            pair[pos + 1..].trim().to_string(),
-                        )
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // #587: check required fields for this verb before sending.
-    let provided_keys: std::collections::HashSet<&str> =
-        detail_pairs.iter().map(|(k, _)| k.as_str()).collect();
-    let required: &[String] = verbs::active_manifest().required_fields(&verb);
-    let missing: Vec<&str> = required
-        .iter()
-        .filter(|f| !provided_keys.contains(f.as_str()))
-        .map(|f| f.as_str())
-        .collect();
-    if !missing.is_empty() {
-        let missing_str = missing.join(", ");
-        let example = missing[0];
-        return Err(error::LegionError::SignalMissingRequiredFields {
-            verb: verb.clone(),
-            missing: missing_str,
-            missing_example: example.to_string(),
-        });
-    }
-
-    if let Some(ref n) = note {
-        signal::validate_note(n)?;
-    }
-
-    let text = signal::format_signal(
+    // One compose/validate entry point shared with the MCP legion_signal
+    // tool (#612): details wire parsing, the #587 required-fields gate,
+    // and the note length cap all live in signal::compose.
+    let text = signal::compose(
         &to,
         &verb,
         status.as_deref(),
         note.as_deref(),
-        &detail_pairs,
-    );
+        details.as_deref(),
+        verbs::active_manifest(),
+    )?;
 
     let meta = db::ReflectionMeta {
         domain,

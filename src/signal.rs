@@ -156,6 +156,73 @@ pub fn parse_signal(text: &str) -> Option<Signal> {
     })
 }
 
+/// Parse the `--details` wire argument: comma-separated `key:value` pairs,
+/// split on the first colon, both sides trimmed. Pairs without a colon are
+/// skipped. This is the inverse-adjacent grammar to [`parse_details_block`],
+/// which parses the braced display form `{k: v, k: v}`; the wire form is
+/// what the two send surfaces (CLI `--details`, MCP `details`) accept.
+pub fn parse_details_arg(details: &str) -> Vec<(String, String)> {
+    details
+        .split(',')
+        .filter_map(|pair| {
+            let pair = pair.trim();
+            let pos = pair.find(':')?;
+            Some((
+                pair[..pos].trim().to_string(),
+                pair[pos + 1..].trim().to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// Compose-and-validate entry point for the signal send path (#612).
+///
+/// Both send surfaces -- the CLI `legion signal` arm and the MCP
+/// `legion_signal` tool -- call this one function, so send-time validation
+/// cannot diverge between them (the MCP arm bypassed the #587
+/// required-fields gate entirely before this existed). In order:
+///
+/// 1. Parse the `details` wire argument via [`parse_details_arg`].
+/// 2. Enforce the verb's `required_fields` from the manifest (#587).
+/// 3. Enforce the note length cap via [`validate_note`].
+/// 4. Format via [`format_signal`].
+///
+/// Send-time UX that is genuinely surface-specific (the CLI's
+/// directed-verb-will-not-wake warning) stays caller-side.
+pub fn compose(
+    to: &str,
+    verb: &str,
+    status: Option<&str>,
+    note: Option<&str>,
+    details: Option<&str>,
+    manifest: &crate::verbs::VerbManifest,
+) -> error::Result<String> {
+    let detail_pairs = details.map(parse_details_arg).unwrap_or_default();
+
+    // #587: a verb's required fields are a send-time error, on every surface.
+    let provided_keys: std::collections::HashSet<&str> =
+        detail_pairs.iter().map(|(k, _)| k.as_str()).collect();
+    let missing: Vec<&str> = manifest
+        .required_fields(verb)
+        .iter()
+        .filter(|f| !provided_keys.contains(f.as_str()))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        return Err(error::LegionError::SignalMissingRequiredFields {
+            verb: verb.to_string(),
+            missing: missing.join(", "),
+            missing_example: missing[0].to_string(),
+        });
+    }
+
+    if let Some(n) = note {
+        validate_note(n)?;
+    }
+
+    Ok(format_signal(to, verb, status, note, &detail_pairs))
+}
+
 /// Format a signal for posting to the bullpen.
 ///
 /// Constructs the `@recipient verb:status {details}` format.
@@ -426,6 +493,90 @@ mod tests {
     fn parse_signal_recipient_only_returns_none() {
         // @recipient with no verb is not a valid signal
         assert!(parse_signal("@legion").is_none());
+    }
+
+    #[test]
+    fn parse_details_arg_splits_pairs_on_first_colon() {
+        let pairs = parse_details_arg("surface: cap-output, url: https://example.com/x");
+        assert_eq!(
+            pairs,
+            vec![
+                ("surface".to_string(), "cap-output".to_string()),
+                ("url".to_string(), "https://example.com/x".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_details_arg_skips_colonless_pairs_and_trims() {
+        let pairs = parse_details_arg(" key : value , no-colon-here ,  k2:v2 ");
+        assert_eq!(
+            pairs,
+            vec![
+                ("key".to_string(), "value".to_string()),
+                ("k2".to_string(), "v2".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_details_arg_empty_string_yields_no_pairs() {
+        assert!(parse_details_arg("").is_empty());
+    }
+
+    #[test]
+    fn compose_enforces_required_fields() {
+        // rfc requires 'budget' in the builtin manifest (#587). compose is
+        // the shared gate for both send surfaces.
+        let manifest = crate::verbs::VerbManifest::builtin_default();
+        let err = compose("legion", "rfc", None, Some("proposal"), None, &manifest)
+            .expect_err("rfc without budget must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("budget"), "error must name the field: {msg}");
+    }
+
+    #[test]
+    fn compose_accepts_verb_with_required_fields_present() {
+        let manifest = crate::verbs::VerbManifest::builtin_default();
+        let text = compose(
+            "legion",
+            "rfc",
+            None,
+            Some("proposal"),
+            Some("budget: 2h"),
+            &manifest,
+        )
+        .expect("rfc with budget must compose");
+        assert_eq!(text, "@legion rfc {budget: 2h} -- proposal");
+    }
+
+    #[test]
+    fn compose_rejects_overlong_note() {
+        let manifest = crate::verbs::VerbManifest::builtin_default();
+        let long = "a".repeat(MAX_SIGNAL_NOTE_LENGTH + 1);
+        assert!(compose("legion", "question", None, Some(&long), None, &manifest).is_err());
+    }
+
+    #[test]
+    fn compose_matches_format_signal_for_plain_sends() {
+        let manifest = crate::verbs::VerbManifest::builtin_default();
+        let composed = compose(
+            "legion",
+            "review",
+            Some("approved"),
+            None,
+            Some("surface: cap-output"),
+            &manifest,
+        )
+        .expect("compose");
+        let formatted = format_signal(
+            "legion",
+            "review",
+            Some("approved"),
+            None,
+            &[("surface".to_string(), "cap-output".to_string())],
+        );
+        assert_eq!(composed, formatted);
     }
 
     #[test]
