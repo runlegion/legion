@@ -13,6 +13,7 @@ pub(crate) mod ops;
 pub(crate) mod pr;
 pub(crate) mod schedule;
 pub(crate) mod signal;
+pub(crate) mod spec_gen;
 pub(crate) mod util;
 pub(crate) mod verify;
 pub(crate) mod watch;
@@ -871,5 +872,19 @@ pub(crate) enum Commands {
         /// Output as JSON instead of a human-readable table
         #[arg(long)]
         json: bool,
+    },
+
+    /// Generate requirement documents from service-design artifacts (#527).
+    ///
+    /// Reads all non-archived service-design documents (types: persona, journey,
+    /// blueprint, painmatrix, ecosystem) on the given surface, derives one
+    /// requirement candidate per moment_of_truth, validates each candidate
+    /// against the requirement schema, and inserts new requirement documents
+    /// plus born-Backlog kanban cards.  Re-running on unchanged input is safe
+    /// (idempotent): existing (traces_to, surface) pairs are skipped.
+    SpecGen {
+        /// Surface (repo/functional area) to generate requirements for.
+        #[arg(long)]
+        repo: String,
     },
 }

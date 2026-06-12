@@ -182,6 +182,112 @@ impl Database {
         Ok(out)
     }
 
+    /// Insert a requirement document and its born-Backlog kanban card atomically.
+    ///
+    /// Both writes occur inside a single SQLite transaction via
+    /// `unchecked_transaction()` (the established pattern for shared-ref callers;
+    /// see `rename_repo` in `db/mod.rs`).  If card creation fails after the
+    /// document is inserted, the transaction is rolled back and neither row is
+    /// committed, preventing orphaned requirement documents that dedup would
+    /// permanently hide from re-runs.
+    ///
+    /// Returns the inserted `Document` (id, etc.) on success.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_requirement_with_card(
+        &self,
+        doc_meta: &DocumentMeta<'_>,
+        doc_payload: &str,
+        card_from_repo: &str,
+        card_to_repo: &str,
+        card_text: &str,
+        card_context: Option<&str>,
+        card_source_url: &str,
+    ) -> Result<Document> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        // -- insert document --------------------------------------------------
+        let now = Utc::now().to_rfc3339();
+        let doc_id = match doc_meta.id {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => Uuid::now_v7().to_string(),
+        };
+        let doc_status = doc_meta.status.unwrap_or("draft");
+
+        tx.execute(
+            "INSERT INTO documents (id, type, surface, status, priority, owner, payload, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![
+                &doc_id,
+                doc_meta.doc_type,
+                doc_meta.surface,
+                doc_status,
+                doc_meta.priority,
+                doc_meta.owner,
+                doc_payload,
+                &now,
+            ],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(ref err, _)
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                LegionError::WorkSource(format!("document id '{doc_id}' already exists"))
+            }
+            other => LegionError::Database(other),
+        })?;
+
+        // -- insert card ------------------------------------------------------
+        let card_id = Uuid::now_v7().to_string();
+        let parsed = card_context.map(crate::card_parse::parse_issue_body);
+        let problem = parsed.as_ref().and_then(|p| p.problem.as_deref());
+        let solution = parsed.as_ref().and_then(|p| p.solution.as_deref());
+        let acceptance = parsed
+            .as_ref()
+            .map(|p| &p.acceptance)
+            .filter(|a| !a.is_empty())
+            .map(|a| a.join("\n"));
+
+        tx.execute(
+            "INSERT INTO tasks (id, from_repo, to_repo, text, context, priority, status, \
+             labels, parent_card_id, source_url, source_type, created_at, updated_at, \
+             problem, solution, acceptance) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?16, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            rusqlite::params![
+                card_id,
+                card_from_repo,
+                card_to_repo,
+                card_text,
+                card_context,
+                "med",
+                Option::<&str>::None, // labels
+                Option::<&str>::None, // parent_card_id
+                card_source_url,
+                "document",
+                &now, // created_at
+                &now, // updated_at
+                problem,
+                solution,
+                acceptance,
+                "backlog", // status -- born Backlog
+            ],
+        )?;
+
+        tx.commit()?;
+
+        Ok(Document {
+            id: doc_id,
+            doc_type: doc_meta.doc_type.to_string(),
+            surface: doc_meta.surface.map(str::to_string),
+            status: doc_status.to_string(),
+            priority: doc_meta.priority.map(str::to_string),
+            owner: doc_meta.owner.to_string(),
+            payload: doc_payload.to_string(),
+            archived_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
     /// Mark a document archived. Sets `archived_at = now`, updates
     /// `updated_at`. Idempotent: archiving an already-archived doc is
     /// a no-op success. Returns the updated Document.

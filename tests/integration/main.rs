@@ -17,6 +17,7 @@ mod mcp;
 mod memory;
 mod mesh;
 mod serve;
+mod spec_gen;
 mod task;
 mod uncertainty;
 mod usage;
