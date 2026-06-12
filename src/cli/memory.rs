@@ -468,7 +468,7 @@ pub(crate) fn handle_resolve(id: String, reflection: Option<String>) -> error::R
         info!("[legion] resolved {}", id);
     } else {
         eprintln!("[legion] post not found: {}", id);
-        std::process::exit(1);
+        return Err(error::LegionError::ExitWith(1));
     }
     Ok(())
 }

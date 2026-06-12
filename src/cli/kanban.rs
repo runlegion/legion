@@ -4,6 +4,7 @@
 use clap::Subcommand;
 
 use crate::cli::util::{audit, open_db, open_db_and_index};
+use crate::verify::GateResult;
 use crate::{db, error, kanban, status, verify, worksource};
 
 #[derive(Subcommand)]
@@ -493,23 +494,23 @@ pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> err
         if let Some(card) = database.get_card_by_id(card_id)? {
             let acceptance = verify::acceptance_items(card.acceptance.as_deref());
             if !acceptance.is_empty() {
-                let skill = format!("legion-verify:{card_id}");
+                let skill = verify::verify_gate_key(card_id);
                 match database.get_latest_quality_gate_by_skill(&skill)? {
-                    Some(gate) if gate.result == "clean" => {}
+                    Some(gate) if gate.result == GateResult::Clean => {}
                     Some(_) => {
                         eprintln!(
                             "[legion] error: verify gate is not clean for card {card_id}. \
                              Resolve the failing/uncertain criteria and re-run verify \
                              before Done."
                         );
-                        std::process::exit(1);
+                        return Err(error::LegionError::ExitWith(1));
                     }
                     None => {
                         eprintln!(
                             "[legion] error: card {card_id} has acceptance criteria but no \
                              verify verdict. Run the verify skill before Done."
                         );
-                        std::process::exit(1);
+                        return Err(error::LegionError::ExitWith(1));
                     }
                 }
             }
@@ -635,7 +636,7 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
                 eprintln!(
                     "[legion] no fields to update: pass at least one of --text, --body, --priority, --labels, --add-labels, --remove-labels"
                 );
-                std::process::exit(1);
+                return Err(error::LegionError::ExitWith(1));
             }
             let params = kanban::CardUpdateParams {
                 text,

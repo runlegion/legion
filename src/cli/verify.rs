@@ -1,8 +1,11 @@
 //! `legion verify` and `legion quality-gate` handlers (carved from main.rs, #610).
 
+use std::str::FromStr;
+
 use clap::Subcommand;
 
 use crate::cli::util::{git_head_commit_and_branch, open_db, read_file_or_stdin};
+use crate::verify::GateResult;
 use crate::{error, kanban, verify};
 
 #[derive(Subcommand, Debug)]
@@ -39,6 +42,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             findings_count,
             details_json,
         } => {
+            let gate_result = GateResult::from_str(&result)?;
             let (commit_hash, branch) = git_head_commit_and_branch()?;
 
             let database = open_db()?;
@@ -46,7 +50,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 &branch,
                 &commit_hash,
                 &skill,
-                &result,
+                gate_result,
                 findings_count,
                 details_json.as_deref(),
             )?;
@@ -77,7 +81,7 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
 
     // Record the verdict as a card-keyed gate so `legion done` can gate
     // on it regardless of which commit it runs on (e.g. post-merge).
-    let skill = format!("legion-verify:{card}");
+    let skill = verify::verify_gate_key(&card);
     let (commit_hash, branch) = git_head_commit_and_branch()?;
     let details = serde_json::json!({
         "skill": "legion-verify",
@@ -93,15 +97,16 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
         verify::VerifyDecision::NoCheckableAc => 1,
         verify::VerifyDecision::Proceed => 0,
     };
+    let gate_result = if decision.allows_done() {
+        GateResult::Clean
+    } else {
+        GateResult::Issues
+    };
     database.record_quality_gate(
         &branch,
         &commit_hash,
         &skill,
-        if decision.allows_done() {
-            "clean"
-        } else {
-            "issues"
-        },
+        gate_result,
         findings,
         Some(&details),
     )?;
@@ -118,7 +123,7 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
                 "[legion] verify BLOCKED for card {card}: no acceptance criteria to check. \
                  A card cannot reach Done without checkable criteria -- add them upstream."
             );
-            std::process::exit(1);
+            return Err(error::LegionError::ExitWith(1));
         }
         verify::VerifyDecision::Incomplete { unaddressed } => {
             eprintln!(
@@ -126,7 +131,7 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
                  no verdict. Emit one verdict per criterion.",
                 acceptance.len()
             );
-            std::process::exit(1);
+            return Err(error::LegionError::ExitWith(1));
         }
         verify::VerifyDecision::Block { failed } => {
             eprintln!(
@@ -137,7 +142,7 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
                 eprintln!("  - {c}");
             }
             eprintln!("\n->Done is blocked. Finish the work and re-verify.");
-            std::process::exit(1);
+            return Err(error::LegionError::ExitWith(1));
         }
         verify::VerifyDecision::NeedsInput { uncertain } => {
             eprintln!(
@@ -165,7 +170,7 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
                      {e}; move it manually.)"
                 ),
             }
-            std::process::exit(1);
+            return Err(error::LegionError::ExitWith(1));
         }
     }
     Ok(())

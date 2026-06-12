@@ -821,7 +821,7 @@ pub(crate) fn handle_usage(
         // RFC3339-comparable prefix (timestamps sort lexicographically).
         if d.len() != 10 || !d.chars().all(|c| c.is_ascii_digit() || c == '-') {
             eprintln!("[legion] error: --since expects YYYY-MM-DD, got '{d}'");
-            std::process::exit(1);
+            return Err(error::LegionError::ExitWith(1));
         }
         Some(format!("{d}T00:00:00"))
     } else if session.is_none() {
@@ -840,7 +840,7 @@ pub(crate) fn handle_usage(
             "[legion] error: session not found: {}",
             session.as_deref().unwrap_or("")
         );
-        std::process::exit(1);
+        return Err(error::LegionError::ExitWith(1));
     }
 
     if json {

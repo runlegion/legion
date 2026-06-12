@@ -187,7 +187,7 @@ pub(crate) fn handle(action: AutonomyAction) -> error::Result<()> {
                          used (threshold {threshold_pct:.0}%). Self-directed work paused; \
                          operator-requested work still proceeds."
                     );
-                    std::process::exit(1);
+                    return Err(error::LegionError::ExitWith(1));
                 }
                 autonomy::BurnRateOutcome::Allowed { .. } => {
                     // Headroom is fine; fall through to work-unit budget check.
@@ -233,7 +233,7 @@ pub(crate) fn handle(action: AutonomyAction) -> error::Result<()> {
                          Operator-requested work still proceeds; self-directed work waits.",
                         budget.resets_at().format("%Y-%m-%d")
                     );
-                    std::process::exit(1);
+                    return Err(error::LegionError::ExitWith(1));
                 }
             }
         }

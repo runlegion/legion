@@ -4,6 +4,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{audit, git_head_commit_and_branch, open_db, read_file_or_stdin};
+use crate::verify::GateResult;
 use crate::{board, card_parse, db, error, kanban, pr_view, pr_write, search, worksource};
 
 #[derive(Subcommand, Debug)]
@@ -286,15 +287,15 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                                 "[legion] error: no clean {skill} gate on HEAD ({short_hash}). \
                                  Run {run_hint} before creating the PR."
                             );
-                            std::process::exit(1);
+                            return Err(error::LegionError::ExitWith(1));
                         }
-                        Some(gate) if gate.result != "clean" => {
+                        Some(gate) if gate.result != GateResult::Clean => {
                             eprintln!(
                                 "[legion] error: {skill} recorded issues on HEAD ({short_hash}), \
                                  {} findings. Fix them and re-run the skill before creating the PR.",
                                 gate.findings_count
                             );
-                            std::process::exit(1);
+                            return Err(error::LegionError::ExitWith(1));
                         }
                         Some(_) => {
                             // Gate is clean -- continue to the next.
@@ -509,7 +510,11 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
             // Record the gate on HEAD so `legion pr create` can gate on it,
             // exactly as it does for legion-simplify.
             let (commit_hash, branch) = git_head_commit_and_branch()?;
-            let result = if report.ok { "clean" } else { "issues" };
+            let gate_result = if report.ok {
+                GateResult::Clean
+            } else {
+                GateResult::Issues
+            };
             let details = serde_json::json!({
                 "skill": "legion-pr-write",
                 "issue": issue,
@@ -523,7 +528,7 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 &branch,
                 &commit_hash,
                 "legion-pr-write",
-                result,
+                gate_result,
                 report.findings.len() as u64,
                 Some(&details),
             )?;
@@ -547,7 +552,7 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                      criterion, each citing evidence (a test, a file:line, an observable \
                      behavior) -- plus a 'Not done' section. Fix the body and re-run."
                 );
-                std::process::exit(1);
+                return Err(error::LegionError::ExitWith(1));
             }
         }
         PrAction::Comments { repo, number, json } => {
