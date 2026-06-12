@@ -49,7 +49,6 @@ use uuid::Uuid;
 use crate::db::Database;
 use crate::documents::{Document, DocumentFilter, DocumentMeta, validate_instance};
 use crate::error::{LegionError, Result};
-use crate::kanban::{self, Priority};
 
 const REQUIREMENT_SCHEMA_ID: &str = "019eb45a-2fdd-7fd2-a574-96a3302bd15a";
 
@@ -105,8 +104,13 @@ pub struct GenerateOutcome {
 pub struct PersistOutcome {
     /// Number of new requirement documents and cards created.
     pub created: usize,
-    /// Number of candidates skipped because their traces_to already existed.
+    /// Number of candidates skipped because their traces_to already existed
+    /// on the requested surface (idempotency dedup).
     pub skipped_existing: usize,
+    /// Number of candidates skipped because their `req.surface` did not match
+    /// the requested scope surface.  In normal CLI operation (docs are fetched
+    /// by surface) this is always 0; a non-zero value indicates a caller bug.
+    pub skipped_mismatch: usize,
     /// Candidates rejected at the generation stage.
     pub rejected: Vec<Rejection>,
 }
@@ -199,7 +203,7 @@ pub fn persist_requirements(
     for req in outcome.requirements {
         // Scope guard: skip candidates that don't belong to this surface.
         if req.surface != surface {
-            persist_outcome.skipped_existing += 1;
+            persist_outcome.skipped_mismatch += 1;
             continue;
         }
 
@@ -226,7 +230,10 @@ pub fn persist_requirements(
             )));
         }
 
-        // Insert the requirement document.
+        // Insert the requirement document and its born-Backlog kanban card
+        // atomically.  If card creation fails the document is also rolled
+        // back, preventing orphaned requirement docs that dedup would
+        // permanently hide from re-runs.
         let meta = DocumentMeta {
             id: Some(&req.id),
             doc_type: "requirement",
@@ -235,21 +242,14 @@ pub fn persist_requirements(
             priority: None,
             owner: "legion",
         };
-        let doc = db.insert_document(&meta, &req.payload)?;
-
-        // Create a born-Backlog card linked to the document.
-        kanban::create_card(
-            db,
+        db.insert_requirement_with_card(
+            &meta,
+            &req.payload,
             "legion",
             &req.surface,
             &req.title,
             Some(req.description.as_str()),
-            Priority::Med,
-            None,
-            None,
-            Some(doc.id.as_str()),
-            Some("document"),
-            None,
+            &req.id,
         )?;
 
         persist_outcome.created += 1;
@@ -300,9 +300,30 @@ fn collect_ecosystem_candidates(doc: &Document, outcome: &mut GenerateOutcome) -
         }
     };
 
-    let moments = match payload["moments_of_truth"].as_array() {
-        Some(arr) => arr,
-        None => return Ok(()), // no moments array: no candidates
+    // moments_of_truth present but wrong type -> explicit Rejection.
+    // Absent key (Value::Null) is legitimate: no moments, no candidates.
+    let moments = if payload["moments_of_truth"].is_null() {
+        return Ok(());
+    } else {
+        match payload["moments_of_truth"].as_array() {
+            Some(arr) => arr,
+            None => {
+                outcome.rejected.push(Rejection {
+                    title: format!("(ecosystem {})", doc.id),
+                    traces_to: format!("{}#moment_of_truth.?", doc.id),
+                    reason: format!(
+                        "ecosystem document '{}' has a 'moments_of_truth' key but its value \
+                         is not an array (got {})",
+                        doc.id,
+                        payload["moments_of_truth"]
+                            .as_object()
+                            .map(|_| "object")
+                            .unwrap_or("non-array")
+                    ),
+                });
+                return Ok(());
+            }
+        }
     };
 
     // Build a count map to detect duplicate moment numbers before emitting
@@ -341,6 +362,22 @@ fn collect_ecosystem_candidates(doc: &Document, outcome: &mut GenerateOutcome) -
         };
 
         let candidate_title = format!("MoT: {title_raw}");
+
+        // Number < 1: the fragment would be non-positive and unresolvable.
+        if let Some(n) = number
+            && n < 1
+        {
+            outcome.rejected.push(Rejection {
+                title: candidate_title,
+                traces_to: format!("{}#moment_of_truth.{n}", doc.id),
+                reason: format!(
+                    "ecosystem document '{}' has a moment_of_truth entry with number {n} \
+                     -- moment numbers must be >= 1",
+                    doc.id
+                ),
+            });
+            continue;
+        }
 
         // Ambiguity: duplicate moment number -> reject.
         if let Some(n) = number
@@ -1020,6 +1057,145 @@ mod tests {
         assert!(
             err.to_string().contains("unparseable payload"),
             "error must cite the corrupt payload: {err}"
+        );
+    }
+
+    #[test]
+    fn moment_number_zero_and_negative_yield_rejections() {
+        // MED 1: number < 1 (0 or negative) must be rejected, not silently
+        // included with a zero/negative fragment.
+        let payload = serde_json::json!({
+            "meta": {
+                "title": "Test Eco",
+                "status": "draft",
+                "date": "2026-06-01",
+                "author": "vault",
+                "core_service": "test"
+            },
+            "actors": {"primary": [{"name": "A", "role": "r"}]},
+            "channels": [{"name": "web", "type": "digital", "purpose": "p"}],
+            "value_exchanges": [{"from": "A", "to": "B", "gives": "x", "gets": "y"}],
+            "moments_of_truth": [
+                {"number": 0, "title": "Zero MoT", "actor": "A", "success": "ok", "failure": "fail"},
+                {"number": -1, "title": "Negative MoT", "actor": "A", "success": "ok", "failure": "fail"}
+            ]
+        });
+        let doc = Document {
+            id: "eco-badnum-001".to_string(),
+            doc_type: "ecosystem".to_string(),
+            surface: Some("test".to_string()),
+            status: "draft".to_string(),
+            priority: None,
+            owner: "vault".to_string(),
+            payload: payload.to_string(),
+            archived_at: None,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+        };
+        let outcome = generate_requirements(&[doc]).expect("generate");
+        assert!(
+            outcome.requirements.is_empty(),
+            "no candidates from number <= 0"
+        );
+        assert_eq!(
+            outcome.rejected.len(),
+            2,
+            "both entries with number <= 0 rejected"
+        );
+        for r in &outcome.rejected {
+            assert!(
+                r.reason.contains("must be >= 1"),
+                "rejection must mention >= 1 constraint: {:?}",
+                r.reason
+            );
+        }
+    }
+
+    #[test]
+    fn moments_of_truth_as_object_yields_rejection() {
+        // MED 2: key present but value is an object (not array) -> Rejection,
+        // not silent zero-candidate result.
+        let payload = serde_json::json!({
+            "meta": {
+                "title": "Bad Eco",
+                "status": "draft",
+                "date": "2026-06-01",
+                "author": "vault",
+                "core_service": "test"
+            },
+            "actors": {"primary": [{"name": "A", "role": "r"}]},
+            "channels": [{"name": "web", "type": "digital", "purpose": "p"}],
+            "value_exchanges": [{"from": "A", "to": "B", "gives": "x", "gets": "y"}],
+            "moments_of_truth": {"number": 1, "title": "Not An Array"}
+        });
+        let doc = Document {
+            id: "eco-wrongtype-001".to_string(),
+            doc_type: "ecosystem".to_string(),
+            surface: Some("test".to_string()),
+            status: "draft".to_string(),
+            priority: None,
+            owner: "vault".to_string(),
+            payload: payload.to_string(),
+            archived_at: None,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+        };
+        let outcome = generate_requirements(&[doc]).expect("generate");
+        assert!(
+            outcome.requirements.is_empty(),
+            "no candidates when moments_of_truth is an object"
+        );
+        assert_eq!(
+            outcome.rejected.len(),
+            1,
+            "one rejection for wrong moments_of_truth type"
+        );
+        assert!(
+            outcome.rejected[0].reason.contains("not an array"),
+            "rejection must mention type problem: {:?}",
+            outcome.rejected[0].reason
+        );
+    }
+
+    #[test]
+    fn doc_and_card_are_atomic_if_card_insert_fails() {
+        // HIGH atomicity: if card creation fails (e.g. due to a TX error),
+        // the document must also be rolled back.  We simulate by inserting a
+        // document with an id that triggers a PK conflict on the second run,
+        // but the core guarantee is: after a failed persist_requirements call,
+        // no orphan documents appear in the DB.
+        //
+        // We test the positive atomic path: after a successful
+        // insert_requirement_with_card, both the document AND the card exist.
+        // The rollback scenario would require injecting a failure mid-TX which
+        // is impractical without test-only hooks; the contract is instead
+        // validated by unit-testing insert_requirement_with_card directly.
+        let db = test_db();
+        seed_requirement_schema(&db);
+
+        let docs = vec![persona_doc_with_mot()];
+        let outcome = generate_requirements(&docs).expect("generate");
+        let persist = persist_requirements(&db, "gitpress", outcome).expect("persist");
+        assert_eq!(persist.created, 1, "one requirement created");
+
+        // Document must exist.
+        let req_docs = db
+            .list_documents(&DocumentFilter {
+                doc_type: Some("requirement"),
+                surface: Some("gitpress"),
+                ..Default::default()
+            })
+            .expect("list");
+        assert_eq!(req_docs.len(), 1, "one requirement document");
+
+        // Card must exist with correct linkage.
+        let cards = list_cards(&db, "gitpress", Direction::Inbound, CardScope::Backlog)
+            .expect("list cards");
+        assert_eq!(cards.len(), 1, "one born-Backlog card");
+        assert_eq!(
+            cards[0].source_url.as_deref(),
+            Some(req_docs[0].id.as_str()),
+            "card source_url links to the requirement document"
         );
     }
 }

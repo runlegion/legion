@@ -36,9 +36,11 @@ pub(crate) fn handle(surface: &str) -> Result<()> {
     let persist = spec_gen::persist_requirements(&db, surface, outcome)?;
 
     println!(
-        "[spec-gen] surface={surface}: created {created}, skipped {skipped} existing, rejected {rejected}",
+        "[spec-gen] surface={surface}: created {created}, skipped {skipped} existing, \
+         skipped {mismatch} surface-mismatch, rejected {rejected}",
         created = persist.created,
         skipped = persist.skipped_existing,
+        mismatch = persist.skipped_mismatch,
         rejected = persist.rejected.len(),
     );
 

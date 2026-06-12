@@ -138,6 +138,48 @@ fn spec_gen_creates_requirements_and_cards() {
             "traces_to must embed moment number, got: {traces_to}"
         );
     }
+
+    // Two born-Backlog kanban cards must exist for the surface.
+    // Cards are born in Backlog status which is excluded from the default
+    // working-set view; use --backlog to see the unconsented inbox.
+    let kanban_out = run_ok(legion_cmd(dir.path()).args([
+        "kanban",
+        "list",
+        "--repo",
+        "gitpress",
+        "--backlog",
+        "--json",
+    ]));
+    let cards: Vec<serde_json::Value> = kanban_out
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("valid card JSON"))
+        .collect();
+    // All cards in this fresh DB are spec-gen born-Backlog cards.
+    // Verify status and that source_url points to one of the requirement doc ids.
+    let req_doc_ids: std::collections::HashSet<String> = docs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        cards.len(),
+        2,
+        "expected 2 born-Backlog cards, got: {cards:?}"
+    );
+    for card in &cards {
+        assert_eq!(
+            card["status"].as_str(),
+            Some("backlog"),
+            "card must be born Backlog, got: {card}"
+        );
+        let source_url = card["source_url"].as_str().unwrap_or("");
+        assert!(
+            req_doc_ids.contains(source_url),
+            "card source_url '{source_url}' must match a requirement doc id in {req_doc_ids:?}"
+        );
+    }
 }
 
 #[test]
