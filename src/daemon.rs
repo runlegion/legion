@@ -335,6 +335,13 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     // Build the broadcast channel for SSE notifications.
     let (tx, _rx) = channel::new_broadcast();
 
+    // Schedules fire under the daemon too (#613 decision): the daemon is
+    // the long-lived server on a watch node, so cron posts must not depend
+    // on someone running `legion serve`. The task is deliberately not in
+    // the select! below -- it is a side loop, not a liveness-critical
+    // component, and it is cancelled when the runtime shuts down.
+    let _firing = channel::spawn_schedule_firing(data_dir.clone(), tx.clone());
+
     let channel_state = channel::ChannelState {
         data_dir: data_dir.clone(),
         tx,

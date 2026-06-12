@@ -101,9 +101,18 @@ pub fn run_server(port: u16, data_dir: PathBuf) -> error::Result<()> {
 
     runtime.block_on(async {
         let state = AppState {
-            data_dir,
+            data_dir: data_dir.clone(),
             started_at: chrono::Utc::now(),
         };
+
+        // One background task owns schedule firing (#613) -- previously it
+        // ran inside the per-connection SSE stream body, so schedules only
+        // fired while a dashboard was open and fired once per connected
+        // client. The broadcast sender wakes in-process SSE subscribers
+        // when a schedule posts (serve's own SSE still detects the write
+        // by timestamp poll; the channel SSE handler subscribes).
+        let (tx, _rx) = crate::channel::new_broadcast();
+        let _firing = crate::channel::spawn_schedule_firing(data_dir.clone(), tx);
 
         let app = Router::new()
             .route("/", get(index_handler))
@@ -262,31 +271,6 @@ async fn sse_handler(
                     && let Ok(json) = serde_json::to_string(&tasks)
                 {
                     yield Ok(Event::default().event("tasks").data(json));
-                }
-            }
-
-            // Check for due schedules and fire them
-            if let Ok(due) = db.get_due_schedules() {
-                for schedule in &due {
-                    // Post to bullpen
-                    if let Ok(reflection) = db.insert_reflection_with_meta(
-                        &schedule.repo,
-                        &schedule.command,
-                        "team",
-                        &ReflectionMeta::default(),
-                    ) {
-                        // Best-effort add to search index
-                        if let Ok(index) = SearchIndex::open(&state.data_dir.join("index"))
-                            && let Err(e) = index.add(&reflection.id, &reflection.repo, &schedule.command)
-                        {
-                            eprintln!("[legion] search index add failed for schedule: {e}");
-                        }
-                        eprintln!("[legion] schedule fired: {}", schedule.name);
-                    }
-                    // Mark as run regardless of post success to avoid infinite retries
-                    if let Err(e) = db.mark_schedule_run(&schedule.id) {
-                        eprintln!("[legion] failed to mark schedule run: {e}");
-                    }
                 }
             }
 
@@ -570,12 +554,20 @@ async fn api_done(
     let db = open_db(&state.data_dir)?;
     let index = open_search_index(&state.data_dir)?;
 
+    // Both posts route through board::post_from_text_with_meta so the
+    // write+index invariant lives in one place (#613). Consequence: an
+    // index failure now fails the post (the announcement returns 500, a
+    // notification does not count its agent as notified) instead of the
+    // old silently-unsearchable best effort.
     let announcement = format!("{repo} completed: {text}");
-    let reflection = db
-        .insert_reflection_with_meta(repo, &announcement, "team", &ReflectionMeta::default())
-        .map_err(|e| ServeError::internal("insert error", e))?;
-
-    let _ = index.add(&reflection.id, &reflection.repo, &announcement);
+    crate::board::post_from_text_with_meta(
+        &db,
+        &index,
+        repo,
+        &announcement,
+        &ReflectionMeta::default(),
+    )
+    .map_err(|e| ServeError::internal("insert error", e))?;
 
     let blocked_agents = status::find_blocked_agents(&db, repo).unwrap_or_default();
     let mut notified: Vec<String> = Vec::new();
@@ -583,10 +575,15 @@ async fn api_done(
         let notify_text = format!(
             "@{agent} announce from {repo} -- {repo} completed: {text}. Your blocker may be cleared."
         );
-        if let Ok(r) =
-            db.insert_reflection_with_meta(repo, &notify_text, "team", &ReflectionMeta::default())
+        if crate::board::post_from_text_with_meta(
+            &db,
+            &index,
+            repo,
+            &notify_text,
+            &ReflectionMeta::default(),
+        )
+        .is_ok()
         {
-            let _ = index.add(&r.id, &r.repo, &notify_text);
             notified.push(agent.clone());
         }
     }

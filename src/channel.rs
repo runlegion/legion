@@ -278,6 +278,110 @@ pub async fn api_post(
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
+/// Interval between due-schedule checks by the background firing task.
+///
+/// Schedule granularity is minutes (`*/Nm` or daily `HH:MM`), so a 30s
+/// poll bounds firing latency at half the finest cron step. The previous
+/// home of this loop -- the per-connection SSE stream body -- polled at
+/// 2s, but only while a dashboard was connected and once per client.
+const SCHEDULE_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Spawn the single background task that fires due schedules (#613).
+///
+/// Exactly one task per server process owns the get_due_schedules ->
+/// post -> mark_schedule_run loop. It previously ran inside the
+/// per-connection SSE stream body in serve.rs, which meant schedules
+/// fired only while a dashboard was open, fired once per connected
+/// client, and raced the get_due/mark_run window across connections.
+/// Now both server entry points spawn it once at startup -- `legion
+/// serve` (run_server) and the daemon (run_daemon_async) -- so
+/// schedules fire under whichever server is running, with zero
+/// connected clients. The two servers cannot share a port, so only one
+/// fires per host in the default configuration; running both on
+/// different ports against the same data dir is the one (accepted,
+/// documented) double-firing window.
+///
+/// `tx` wakes in-process SSE subscribers after a successful fire so
+/// dashboards update immediately instead of waiting for the poll
+/// fallback.
+pub fn spawn_schedule_firing(
+    data_dir: PathBuf,
+    tx: broadcast::Sender<ChannelEvent>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_schedule_firing_with_interval(data_dir, tx, SCHEDULE_POLL_INTERVAL)
+}
+
+/// Interval-injectable form of `spawn_schedule_firing` -- the test seam.
+fn spawn_schedule_firing_with_interval(
+    data_dir: PathBuf,
+    tx: broadcast::Sender<ChannelEvent>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            // Open per tick: a missing or locked database must not kill
+            // the task for the lifetime of the server.
+            let db = match Database::open(&data_dir.join("legion.db")) {
+                Ok(db) => db,
+                Err(e) => {
+                    eprintln!("[legion] schedule firing: failed to open db: {e}");
+                    continue;
+                }
+            };
+            let index = match SearchIndex::open(&data_dir.join("index")) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("[legion] schedule firing: failed to open index: {e}");
+                    continue;
+                }
+            };
+            if fire_due_schedules(&db, &index) > 0 {
+                // Best-effort wake; no SSE listeners is not an error.
+                let _ = tx.send(ChannelEvent::Feed);
+            }
+        }
+    })
+}
+
+/// Fire every due schedule once: post the command text to the bullpen
+/// through `board::post_from_text_with_meta` (the single owner of the
+/// write+index invariant) and mark the schedule run regardless of post
+/// success so a permanently failing schedule cannot retry-loop forever.
+/// Returns the number of successful posts.
+fn fire_due_schedules(db: &Database, index: &SearchIndex) -> usize {
+    let due = match db.get_due_schedules() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[legion] schedule firing: due query failed: {e}");
+            return 0;
+        }
+    };
+    let mut fired: usize = 0;
+    for schedule in &due {
+        match board::post_from_text_with_meta(
+            db,
+            index,
+            &schedule.repo,
+            &schedule.command,
+            &ReflectionMeta::default(),
+        ) {
+            Ok(_) => {
+                eprintln!("[legion] schedule fired: {}", schedule.name);
+                fired += 1;
+            }
+            Err(e) => {
+                eprintln!("[legion] schedule post failed for {}: {e}", schedule.name);
+            }
+        }
+        // Mark as run regardless of post success to avoid infinite retries.
+        if let Err(e) = db.mark_schedule_run(&schedule.id) {
+            eprintln!("[legion] failed to mark schedule run: {e}");
+        }
+    }
+    fired
+}
+
 /// SSE handler -- streams feed, tasks, and ping events to subscribers.
 ///
 /// Opens the database once at stream start and holds it for the stream's
@@ -491,6 +595,76 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
         assert!(parsed.is_array());
         assert_eq!(parsed.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fire_due_schedules_posts_and_advances() {
+        let (db, index, _dir) = test_storage();
+
+        let id = db
+            .insert_schedule("standup", "*/30m", "post the standup", "legion", None, None)
+            .expect("insert schedule");
+
+        // Freshly inserted: next_run is in the future, nothing fires.
+        assert_eq!(fire_due_schedules(&db, &index), 0, "not due yet");
+
+        db.force_schedule_due(&id).expect("force due");
+        assert_eq!(fire_due_schedules(&db, &index), 1, "due schedule fires");
+
+        let posts = db.get_board_posts().expect("posts");
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].text, "post the standup");
+        assert_eq!(posts[0].repo, "legion");
+
+        // mark_schedule_run advanced next_run, so an immediate re-check
+        // must NOT double-fire -- the old per-SSE-connection loop did.
+        assert_eq!(fire_due_schedules(&db, &index), 0, "no double fire");
+        assert_eq!(db.get_board_posts().expect("posts").len(), 1);
+    }
+
+    /// AC (#613): schedules fire with zero SSE clients connected. The real
+    /// background task is spawned with no subscriber anywhere -- no /sse
+    /// stream, no broadcast receiver kept -- and the post still lands.
+    #[tokio::test]
+    async fn schedules_fire_with_zero_sse_clients() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+
+        // The task opens data_dir/legion.db and data_dir/index, the same
+        // paths run_server and run_daemon_async hand it.
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let _index = SearchIndex::open(&data_dir.join("index")).expect("open index");
+        let id = db
+            .insert_schedule(
+                "nightly",
+                "*/30m",
+                "fire without clients",
+                "legion",
+                None,
+                None,
+            )
+            .expect("insert schedule");
+        db.force_schedule_due(&id).expect("force due");
+
+        let (tx, _rx) = new_broadcast();
+        drop(_rx); // zero subscribers: firing must not depend on listeners
+        let handle =
+            spawn_schedule_firing_with_interval(data_dir.clone(), tx, Duration::from_millis(20));
+
+        // Poll for the fired post instead of a fixed sleep.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let posts = db.get_board_posts().expect("posts");
+            if posts.iter().any(|p| p.text == "fire without clients") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "schedule did not fire within 5s with zero SSE clients"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        handle.abort();
     }
 
     #[test]
