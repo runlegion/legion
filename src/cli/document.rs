@@ -11,9 +11,11 @@ use crate::{db, documents, error};
 pub(crate) enum DocumentAction {
     /// Insert a new document. Payload is read from --from (file path)
     /// or stdin when --from is omitted. Meta fields are passed
-    /// explicitly to keep the storage layer type-agnostic; the schema
-    /// registry (sibling child of #455) will validate payloads against
-    /// the meta.type's schema once it ships.
+    /// explicitly to keep the storage layer type-agnostic. Payloads
+    /// with doc_type=schema are validated structurally at create (must
+    /// be a valid JSON Schema object with $schema, title, type:object,
+    /// and non-empty properties). Other document types are checked
+    /// against a landed schema via `legion document validate --schema <id>`.
     Create {
         /// Document type (e.g. "requirement", "nfr", "persona").
         #[arg(long, value_name = "TYPE")]
@@ -47,12 +49,16 @@ pub(crate) enum DocumentAction {
     },
     /// List documents, optionally filtered.
     List {
+        /// Filter by document type (e.g. "requirement", "schema", "persona").
         #[arg(long, value_name = "TYPE")]
         doc_type: Option<String>,
+        /// Filter by functional surface (matches the surface field on the document).
         #[arg(long)]
         surface: Option<String>,
+        /// Filter by lifecycle status (e.g. "draft", "active", "archived").
         #[arg(long)]
         status: Option<String>,
+        /// Filter by owning agent id.
         #[arg(long)]
         owner: Option<String>,
         /// Include archived documents (default: hot only).

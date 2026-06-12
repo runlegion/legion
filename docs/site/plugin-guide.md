@@ -168,11 +168,13 @@ Runs `legion consult --context '<arguments>'`. Searches across ALL repos/agents.
 
 Runs `legion surface --repo $(basename $PWD)`. Shows recent bullpen posts, high-value reflections, and learning chain extensions.
 
-### /snooze
+### /checkpoint
 
 ```
-/snooze
+/checkpoint
 ```
+
+Save a structured resume-anchor and consolidate team memory. Renamed from `/snooze` in v0.16.3 (the word primed agents to go dormant; a checkpoint is a waypoint you cross and keep moving).
 
 Full session wind-down with six phases:
 
