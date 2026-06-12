@@ -238,6 +238,29 @@ pub(crate) enum KanbanAction {
         id: String,
     },
 
+    /// Bind a spec document to a card.
+    ///
+    /// Creates the card<->document link by setting `tasks.document_id`.
+    /// Once bound, `legion verify` reads acceptance criteria from
+    /// the document's `verification.acceptance` block (when present)
+    /// instead of `tasks.acceptance`. Status transitions that map to
+    /// spec statuses (accepted, in-review, done, cancelled) also update
+    /// the document's `meta.status` transactionally.
+    ///
+    /// Errors when:
+    /// - The card is already bound to a document.
+    /// - The document does not exist or is archived.
+    /// - Another live (non-cancelled) card is already bound to the document.
+    Bind {
+        /// Card ID to bind
+        #[arg(long)]
+        id: String,
+
+        /// Document ID to bind to the card
+        #[arg(long)]
+        document: String,
+    },
+
     /// Reconcile kanban cards with their linked GitHub issue state.
     ///
     /// Detects two drift directions:
@@ -750,6 +773,10 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
                     }
                 }
             }
+        }
+        KanbanAction::Bind { id, document } => {
+            kanban::bind_document(&database, &id, &document)?;
+            println!("{id}");
         }
         KanbanAction::Assign { id, to } => {
             database.assign_card(&id, &to)?;
