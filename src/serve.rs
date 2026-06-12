@@ -974,6 +974,12 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "67890");
     }
 
+    // Unix-only: liveness goes through watch::process_alive (`kill`-based,
+    // always false on other platforms), so on Windows live_daemon_pid is
+    // None by construction and the bare-error path below is the correct
+    // behavior -- pinned cross-platform by
+    // serve_bind_failure_without_daemon_stays_bare.
+    #[cfg(unix)]
     #[test]
     fn serve_refuses_port_held_by_live_daemon_with_pointer() {
         let dir = tempfile::tempdir().unwrap();
