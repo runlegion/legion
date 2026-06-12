@@ -60,7 +60,11 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
     Ok(())
 }
 
-/// Resolve acceptance criteria for a card, with spec-document precedence (#528).
+/// Resolve acceptance criteria for a card, with spec-document precedence (#528, #644).
+///
+/// Shared by `handle_verify` and `handle_done` so both gates key on the same
+/// AC source: spec-bound cards gate on the bound document's
+/// `verification.acceptance`, not `tasks.acceptance`.
 ///
 /// Returns `(criteria, source_label)`.
 ///
@@ -77,7 +81,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
 ///    `verification.acceptance` array is empty, or the payload cannot be parsed
 ///    (corrupt doc), falls back to `tasks.acceptance` with source `"card"`.
 /// 4. When the card has no `document_id`: `tasks.acceptance`. Source `"card"`.
-fn resolve_acceptance_criteria(
+pub(crate) fn resolve_acceptance_criteria(
     database: &crate::db::Database,
     card: &kanban::Card,
 ) -> error::Result<(Vec<String>, String)> {
