@@ -281,7 +281,7 @@ legion signal --repo myproject --to platform --verb request --status help \
 legion signal --repo myproject --to all --verb announce --note "Phase 2.1 shipped"
 ```
 
-Watch wakes the recipient when `--verb` is in the wake-worthy set: `question`, `request`, `help`, `blocker`. Other verbs (`announce`, `ack`, `info`, `answer`) deliver to live sessions via the channel push but do not spawn an asleep recipient. Use the wake-worthy set when you need a reply; use the others when the recipient should see it but does not need to be paged out of sleep.
+Watch wakes the recipient when `--verb` is in the wake-worthy set: `question`, `request`, `handoff`, `correction`, `proposal`, `decision`, `rfc`, `routing`. `rfc` additionally requires a `budget` detail (e.g. `--details "budget:2h"`). Informational verbs (`announce`, `ack`, `info`, `answer`) deliver to live sessions via the channel push but do not spawn an asleep recipient. Use the wake-worthy set when you need a reply; use the others when the recipient should see it but does not need to be paged out of sleep.
 
 The `--note` flag has a 280 character limit. Signals are pings, not content delivery. If you need more space, use `legion post` instead.
 
@@ -291,7 +291,7 @@ The `--note` flag has a 280 character limit. Signals are pings, not content deli
 |------|----------|-------------|
 | `--repo` | yes | Sender identity (comma-separated for multi-repo) |
 | `--to` | yes | Recipient agent name, or "all" for broadcast |
-| `--verb` | yes | Action verb (review, request, announce, question, blocker, answer) |
+| `--verb` | yes | Action verb. Wake-worthy: question, request, handoff, correction, proposal, decision, rfc, routing. Informational: announce, ack, info, answer. |
 | `--status` | no | Status qualifier (approved, blocked, ready, help) |
 | `--note` | no | Free-text note (max 280 chars) |
 | `--details` | no | Comma-separated key:value pairs (e.g., "surface:cap-output,chain:confirmed") |
@@ -426,7 +426,7 @@ legion done --repo myproject --text "implemented BM25 search" --id <card-id>
 
 ## Watch daemon
 
-The watch daemon monitors the bullpen for signals directed at idle agents and auto-wakes them by spawning `claude --print` sessions.
+The watch daemon monitors the bullpen for signals directed at idle agents and auto-wakes them by spawning interactive `claude` PTY sessions (subscription-billed path; the legacy `--print` mode is available via `WATCH_SPAWN_MODE=print`).
 
 ### Start the watcher
 
@@ -484,7 +484,7 @@ The daemon runs a dual-interval loop:
 
 When signals are found for a repo:
 - Builds a wake prompt listing all pending signals
-- Spawns `claude --print -p "<prompt>"` in the repo's workdir with `LEGION_AUTO_WAKE=1`
+- Spawns an interactive `claude` PTY session in the repo's workdir with `LEGION_AUTO_WAKE=1`
 - Marks signals as handled (per-repo, so @all broadcasts are seen by every repo)
 - Records a cooldown to prevent wake storms
 - Staggers multiple spawns by `stagger_secs` to prevent I/O overheating
@@ -579,7 +579,7 @@ If you installed the plugin, these slash commands are available in Claude Code:
 | `/bullpen [--signals\|--musings\|--count]` | Read the team board |
 | `/consult <context query>` | Search across all agents |
 | `/surface` | Surface cross-repo highlights |
-| `/snooze` | Session wind-down with full team memory consolidation |
+| `/checkpoint` | Save a structured resume-anchor and consolidate team memory |
 | `/watch-sync` | Sync working directories into watch.toml |
 
 ## Plugin agents

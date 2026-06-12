@@ -80,16 +80,48 @@ CREATE TABLE tasks (
     assigned_at TEXT,                                   -- when card was assigned to an agent
     started_at TEXT,                                    -- when agent accepted the card
     completed_at TEXT,                                  -- when card reached done/cancelled
-    deleted_at TEXT                                     -- tombstone for multi-node sync (nullable)
+    deleted_at TEXT,                                    -- tombstone for multi-node sync (nullable)
+    problem TEXT,                                       -- parsed problem statement from issue body
+    solution TEXT,                                      -- parsed solution statement from issue body
+    acceptance TEXT,                                    -- newline-separated acceptance criteria
+    document_id TEXT                                    -- bound spec document (nullable, #528)
 );
 
 CREATE INDEX idx_tasks_to ON tasks(to_repo, status);
 CREATE INDEX idx_tasks_from ON tasks(from_repo, status);
 CREATE INDEX idx_tasks_parent ON tasks(parent_card_id);
 CREATE INDEX idx_tasks_status_sort ON tasks(status, sort_order, created_at);
+CREATE INDEX idx_tasks_document_id ON tasks(document_id) WHERE document_id IS NOT NULL;
 ```
 
 `tasks.updated_at` already existed pre-sync and is reused for LWW.
+
+### documents
+
+Coordination substrate for specs, NFRs, blueprints, personas, journeys, and schemas (#456, #526). Type-agnostic at the storage layer -- the payload is validated JSON; the meta columns (type, surface, status, priority, owner) are hoisted out of the payload and indexed so SQL can filter without parsing JSON. Hot/cold tiered: `archived_at` is null for hot documents and populated when work referencing the doc completes.
+
+```sql
+CREATE TABLE documents (
+    id TEXT PRIMARY KEY,                               -- UUIDv7 or caller-supplied typed id
+    type TEXT NOT NULL,                                 -- doc_type: requirement, schema, persona, etc.
+    surface TEXT,                                       -- functional surface (optional)
+    status TEXT NOT NULL DEFAULT 'draft',               -- lifecycle status
+    priority TEXT,                                      -- RFC 2119 level: SHALL, SHOULD, MAY
+    owner TEXT NOT NULL,                                -- owning agent id
+    payload TEXT NOT NULL,                              -- validated JSON payload
+    archived_at TEXT,                                   -- hot/cold tier: null = hot
+    created_at TEXT NOT NULL,                           -- ISO 8601
+    updated_at TEXT NOT NULL,                           -- ISO 8601
+    deleted_at TEXT                                     -- tombstone (nullable)
+);
+
+CREATE INDEX idx_documents_type ON documents(type) WHERE archived_at IS NULL AND deleted_at IS NULL;
+CREATE INDEX idx_documents_surface ON documents(surface) WHERE archived_at IS NULL AND deleted_at IS NULL;
+CREATE INDEX idx_documents_owner ON documents(owner) WHERE archived_at IS NULL AND deleted_at IS NULL;
+CREATE INDEX idx_documents_status ON documents(status) WHERE archived_at IS NULL AND deleted_at IS NULL;
+```
+
+Schema documents (`doc_type=schema`) are validated structurally at insert: the payload must be a valid JSON Schema with `$schema`, `title`, `type:object`, and non-empty `properties`. Invalid schema payloads are rejected at create time. A dual-write pointer reflection (`domain=schema`) is stored so `legion recall --domain schema` surfaces every landed schema with its document id. `legion document archive` is idempotent: re-archiving preserves the original `archived_at` timestamp via COALESCE.
 
 ### schedules
 
@@ -182,6 +214,13 @@ The `init_schema` function applies migrations incrementally using `has_column` c
 | 13 | Soft delete support for multi-node sync: add deleted_at on reflections, tasks, schedules (#245) |
 | 14 | LWW conflict resolution: add updated_at on reflections and schedules (#255) |
 | 15 | Partial indexes that skip soft-deleted rows (#256) |
+| 16 | Card-spec binding: add document_id to tasks, partial index on document_id (#528) |
+| 21 | Documents table for the coordination substrate (#456) |
+| 22 | Uncertainty engine: uncertainty_prediction + uncertainty_calibration_snapshot tables (#355) |
+| 23 | wake_attempts table -- per-wake lifecycle FSM for PTY spawn tracking (#487) |
+| 24 | watch_heartbeat table -- daemon liveness heartbeat (#581) |
+
+Migration numbers above 15 are applied in the domain modules that own the corresponding DDL, not in the reflections/kanban/schedules patch sequence. All migrations are idempotent: `CREATE TABLE IF NOT EXISTS` for new tables, `has_column` guards for `ALTER TABLE` column additions.
 
 On a fully-migrated database, `init_schema` does minimal work: `CREATE IF NOT EXISTS` checks and a few `PRAGMA table_info` queries.
 
@@ -362,6 +401,25 @@ Invalid transitions return `InvalidCardTransition` with the current state and at
 | assigned_at | TEXT | When assigned (nullable) |
 | started_at | TEXT | When accepted (nullable) |
 | completed_at | TEXT | When done/cancelled (nullable) |
+| problem | TEXT | Problem statement parsed from issue body (nullable) |
+| solution | TEXT | Solution statement parsed from issue body (nullable) |
+| acceptance | TEXT | Newline-separated acceptance criteria parsed from issue body (nullable) |
+| document_id | TEXT | Bound spec document id (nullable, #528) |
+
+### Transactional status sync
+
+When a card has a `document_id`, status transitions are synchronized to the bound document's `status` field in the same transaction. The mapping is:
+
+| Card status reached | Document status set |
+|--------------------|---------------------|
+| accepted | accepted |
+| in-review | implemented |
+| done | verified |
+| cancelled | cancelled |
+
+Only the four terminal/review statuses trigger a sync write. Other transitions (pending, blocked, needs-input, resume) leave the document status unchanged.
+
+If the bound document does not exist or the payload cannot be parsed as the expected spec shape, the transition fails and the card status is not changed. A dangling `document_id` is a hard error, not a silent no-op.
 
 ## Watch daemon
 
@@ -432,7 +490,7 @@ claude --print -p "<wake prompt>"
 
 In the repo's `workdir`, with `LEGION_AUTO_WAKE=1` in the environment. Stdout and stderr are redirected to `/dev/null`.
 
-A wake fires only for signals whose `--verb` is in the wake-worthy set: `question`, `request`, `help`, `blocker`. Signals with other verbs (`announce`, `ack`, `info`, `answer`) deliver to live sessions via channel push but do not spawn an asleep recipient. Posts never wake -- posts are broadcast, not direction.
+A wake fires only for signals whose `--verb` is in the wake-worthy set: `question`, `request`, `handoff`, `correction`, `proposal`, `decision`, `rfc`, `routing`. Signals with other verbs (`announce`, `ack`, `info`, `answer`) deliver to live sessions via channel push but do not spawn an asleep recipient. Posts never wake -- posts are broadcast, not direction.
 
 When a wake fires, `build_wake_prompt` in `src/watch.rs` groups pending signals into two sections matching the same verb cut:
 
@@ -637,6 +695,93 @@ Output format:
 ```
 
 Returns an empty string when there is nothing to surface.
+
+## Coordination substrate
+
+### Document storage
+
+The `documents` table (migration 21) is the persistence layer for the coordination substrate. Documents are type-agnostic at the storage layer: any document whose payload is well-formed JSON can be inserted. Meta columns (`type`, `surface`, `status`, `priority`, `owner`) are caller-supplied at insert time and indexed via partial indexes scoped to the hot pool (`archived_at IS NULL AND deleted_at IS NULL`).
+
+Hot/cold tiering mirrors the reflections model. `legion document list` returns only hot (non-archived) documents by default. `--archived` returns only the cold partition. Archiving is idempotent: `archive_document` uses `COALESCE(archived_at, now)` so re-archiving preserves the original timestamp.
+
+### Schema registry
+
+Documents with `doc_type=schema` are the schema registry. They serve two roles:
+
+1. **Structural gate at insert** -- `legion document create --doc-type schema` validates the payload before storage. The dependency-free check requires: `$schema` field, `title`, `type: object`, and at least one property in `properties`. `required` must reference only defined properties. A payload failing this check is rejected with a descriptive error; the document is not stored.
+
+2. **Instance validation** -- `legion document validate --schema <id> --file <path>` loads a landed schema document and validates the instance against it. The validator covers: `type` (including nullable arrays), `required`, `properties`, `items`, `enum`. Each violation produces one JSON-path error; exits non-zero when there are violations.
+
+When a schema document is created successfully, a pointer reflection is dual-written on `domain=schema` so `legion recall --domain schema` surfaces every landed schema with its document id and a human-readable summary. The canonical payload lives in the document; the reflection is the searchable pointer.
+
+### Spec-gen pipeline
+
+`legion spec-gen --repo <surface>` derives requirement documents from service-design inputs (#527). The `--repo` argument is the `surface` field on the source documents (e.g. "payments"), not a git repository name.
+
+Input types: `persona`, `journey`, `blueprint`, `painmatrix`, `ecosystem` -- all non-archived documents on the specified surface. One requirement candidate is derived per `moment_of_truth` entry across all inputs. Each candidate is validated against the `requirement` schema before storage.
+
+Idempotency key: `(traces_to, surface)`. A candidate whose `traces_to` value already exists for the surface is skipped. Re-running on unchanged input is always safe.
+
+`traces_to` convention: `<doc_id>#moment_of_truth[.n]` where `n` is the index within the source document's `moments_of_truth` array (zero-based). Each born card is born in `Backlog` status.
+
+Rejection classes: schema validation failure, source document not found, duplicate `(traces_to, surface)` pair.
+
+### Card-spec binding and bind guards
+
+`tasks.document_id` binds a kanban card to a spec document (#528). The binding is application-layer unique: `bind_card_to_document` enforces that a given `document_id` is held by at most one non-cancelled card. Attempting to bind a document already bound to another card returns a hard error.
+
+Status transitions for bound cards are synchronized to the document's `status` field in the same transaction (see "Transactional status sync" above). A dangling `document_id` (pointing to a non-existent document) is a hard error on any transition that triggers a sync write.
+
+### Verify AC precedence
+
+`legion verify` determines acceptance criteria in this order:
+
+1. If the card has a `document_id`, load the bound document and read `spec.verification.acceptance` from the payload. If that key is present and non-empty, it is used.
+2. Otherwise, use `tasks.acceptance` (the newline-separated criteria parsed from the issue body at sync time).
+
+A card with `document_id` pointing to a document that does not exist, or a document whose payload does not parse as a spec, is a hard error -- `verify` exits non-zero rather than silently falling back to `tasks.acceptance`.
+
+## Quality-gate chain
+
+### GateResult enum
+
+`GateResult { Clean, Issues }` is the canonical result type stored in the `quality_gates` table. Stored as lowercase strings (`"clean"`, `"issues"`) for SQL readability. `Display` and `FromStr` are symmetric. The enum is defined in `src/verify.rs` alongside the verify decision logic.
+
+### The four skills
+
+The full quality pipeline for a branch is:
+
+1. `/legion-simplify` -- review for code quality (duplication, unnecessary abstraction, stringly-typed state). Records a `simplify` gate via `legion quality-gate record`.
+2. `/legion-pr-write` -- compose the PR body mapping each acceptance criterion to the change that satisfies it, with evidence. Validates the body is non-empty and non-boilerplate via `legion pr write-check`. Records a `legion-pr-write` gate.
+3. `/legion-review` -- parallel dimension review (spec, correctness, quality, security) with adversarial refutation of HIGH/MED findings. Records a `legion-review` gate.
+4. `/legion-verify` -- per-criterion verdict (pass/fail/uncertain + evidence). Records a `legion-verify:<card>` gate.
+
+### PR create gate requirements
+
+`legion pr create` requires a clean `simplify` gate AND a clean `legion-pr-write` gate on HEAD before a PR may be opened. Both forcing functions must have run. `--skip-gates` bypasses both with an audit row.
+
+### Done verify gate
+
+`legion done --id <card>` checks for a clean `legion-verify:<card>` gate when the card has acceptance criteria. Cards with no acceptance criteria are not gated. The gate key is constructed by `verify_gate_key(card_id)` in `src/verify.rs` -- the single source of truth for both the writer (`cli::verify::handle_verify`) and the reader (`cli::kanban::handle_done`).
+
+### ExitWith typed exits
+
+The binary uses `LegionError::ExitWith(code)` for controlled non-zero exits. `main()` is the only site that calls `std::process::exit`; all handler code returns `Result<T>` and propagates errors up. This allows handlers to be tested without spawning a subprocess and prevents `process::exit` from bypassing destructors in test contexts.
+
+## Source layout
+
+The source tree is organized into carved domain modules. File counts reflect the state at 0.18.0.
+
+| Tree | Files | Owns |
+|------|-------|------|
+| `src/cli/` | 17 | clap `Commands` enum + per-domain handler modules |
+| `src/db/` | 19 | SQLite layer: `Database` handle, `init_schema` dispatcher, per-domain `impl` blocks + DDL |
+| `src/watch/` | 7 | Watch daemon: config, locks, signals, spawn, tracker, gates, mod |
+| `src/mcp/` | 4 | MCP stdio server: log, tools, notifier, mod |
+| `src/kanban/` | 3 | Kanban FSM and card parsing |
+| `src/worksource/` | 3 | Work source plugin bridge (issues, PRs, mod) |
+
+Other top-level modules in `src/` are single-file (e.g. `documents.rs`, `verify.rs`, `signal.rs`, `verbs.rs`, `spec_gen.rs`). Tests live alongside the code they test in `#[cfg(test)] mod tests` blocks. Integration tests are split across `tests/integration/` (one file per domain).
 
 ## File descriptor limit
 
