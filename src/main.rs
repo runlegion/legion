@@ -72,17 +72,29 @@ mod cli;
 pub(crate) use cli::datadir::data_dir;
 pub(crate) use cli::ops::ClusterAction;
 
-fn main() -> error::Result<()> {
+fn main() {
     // Windows default stack (1MB) is too small for clap + Tantivy init.
     // Spawn with 8MB stack to match macOS/Linux defaults.
     const STACK_SIZE: usize = 8 * 1024 * 1024;
     let builder = std::thread::Builder::new().stack_size(STACK_SIZE);
-    let handler = builder.spawn(run).map_err(error::LegionError::Io)?;
-    handler.join().unwrap_or_else(|_| {
-        Err(error::LegionError::Io(std::io::Error::other(
-            "thread panicked",
-        )))
-    })
+    let result: error::Result<()> = match builder.spawn(run) {
+        Err(e) => Err(error::LegionError::Io(e)),
+        Ok(handle) => handle.join().unwrap_or_else(|_| {
+            Err(error::LegionError::Io(std::io::Error::other(
+                "thread panicked",
+            )))
+        }),
+    };
+    match result {
+        Ok(()) => {}
+        // ExitWith: the handler already printed the user-facing message;
+        // propagate the exit code without printing again.
+        Err(error::LegionError::ExitWith(code)) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn run() -> error::Result<()> {

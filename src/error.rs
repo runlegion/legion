@@ -160,6 +160,19 @@ pub enum LegionError {
 
     #[error("wake attempt state decode error: {0}")]
     WakeAttemptStateDecodeError(String),
+
+    #[error("invalid gate result: '{0}' (expected 'clean' or 'issues')")]
+    InvalidGateResult(String),
+
+    /// Signals that the process should exit with a specific non-zero code.
+    ///
+    /// Used by CLI handlers that have already printed a user-facing message
+    /// and need to propagate a specific exit code back to `main()` without
+    /// calling `std::process::exit` at the call site. `main()` intercepts
+    /// this variant and calls `std::process::exit(code)` -- the only
+    /// legitimate use of `process::exit` in the binary.
+    #[error("")]
+    ExitWith(i32),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
@@ -229,5 +242,24 @@ mod tests {
 
         let err: Result<i32> = Err(LegionError::NoHomeDir);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn exit_with_carries_code() {
+        // ExitWith must preserve the exact code so callers that differ by code
+        // (e.g. exit(2) for bad --kind vs exit(1) for gate failures) are not collapsed.
+        let err = LegionError::ExitWith(2);
+        assert!(matches!(err, LegionError::ExitWith(2)));
+
+        let err1 = LegionError::ExitWith(1);
+        assert!(matches!(err1, LegionError::ExitWith(1)));
+    }
+
+    #[test]
+    fn invalid_gate_result_display() {
+        let err = LegionError::InvalidGateResult("bad".to_string());
+        assert!(err.to_string().contains("bad"));
+        assert!(err.to_string().contains("clean"));
+        assert!(err.to_string().contains("issues"));
     }
 }
