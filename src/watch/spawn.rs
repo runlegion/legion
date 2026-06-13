@@ -12,6 +12,28 @@ use super::locks::SessionLockTracker;
 
 // -- Agent Spawning ----------------------------------------------------------
 
+/// Bracketed-paste start marker (`ESC [ 200 ~`). Wrapping the wake prompt
+/// in bracketed paste keeps embedded newlines literal so a multi-line
+/// prompt is not fragmented into multiple submits (#649).
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+/// Bracketed-paste end marker (`ESC [ 201 ~`).
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+/// The submit keystroke retried by the confirmed-submit protocol (#649).
+/// `\r` submits on every shipped Claude Code surface; `\n` does not.
+pub const SUBMIT_KEY: &[u8] = b"\r";
+
+/// Wrap a prompt in bracketed-paste markers with NO trailing submit (#649).
+/// Pulled out as a pure helper so the exact wire bytes are unit-testable
+/// without a live `claude` PTY.
+fn wrap_bracketed_paste(prompt: &str) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(prompt.len() + BRACKETED_PASTE_START.len() + BRACKETED_PASTE_END.len());
+    out.extend_from_slice(BRACKETED_PASTE_START);
+    out.extend_from_slice(prompt.as_bytes());
+    out.extend_from_slice(BRACKETED_PASTE_END);
+    out
+}
+
 /// Selects which spawn implementation `spawn_agent` dispatches to.
 ///
 /// `Print` is the current `claude --print -p <prompt>` path. `Pty` is the
@@ -191,13 +213,22 @@ impl SpawnedChild {
     /// stdin -- `claude --print -p` consumed its prompt as an argv -- so
     /// it returns `PtyControlUnsupported` rather than silently no-op'ing,
     /// which would mask a spawn-mode mismatch at the call site.
-    // Wired into the watch loop by the confirmed-submit protocol (#649);
-    // dead from main's perspective until then, exercised by tests now.
-    #[allow(dead_code)]
     pub fn send_keys(&mut self, bytes: &[u8]) -> Result<()> {
         match self {
             SpawnedChild::Print(_) => Err(LegionError::PtyControlUnsupported),
             SpawnedChild::Pty(s) => s.write(bytes),
+        }
+    }
+
+    /// Has a Claude turn started in this child's session? The
+    /// confirmed-submit protocol (#649) gates its retry loop on this.
+    /// `Print` children never enter that loop (they submit their prompt
+    /// as an argv at spawn), so the variant returns `false`; the only
+    /// caller skips non-`Pty` children anyway.
+    pub fn turn_started(&self) -> bool {
+        match self {
+            SpawnedChild::Print(_) => false,
+            SpawnedChild::Pty(s) => s.saw_turn_start(),
         }
     }
 }
@@ -248,15 +279,22 @@ pub fn spawn_agent(
             let mut opts = crate::pty::PtySpawnOptions::new("claude", &[], cwd);
             opts.env = &env;
             let mut session = crate::pty::PtySession::spawn(opts)?;
-            // Inject the prompt as keystrokes. The trailing carriage
-            // return submits the prompt; \n alone is not interpreted as
-            // submit by every Claude Code interactive surface, but \r
-            // works on every shipped version.
-            let mut keystrokes = Vec::with_capacity(prompt.len() + 1);
-            keystrokes.extend_from_slice(prompt.as_bytes());
-            keystrokes.push(b'\r');
+            // Inject the prompt as a BRACKETED PASTE, with NO trailing
+            // submit keystroke (#649). Two empirical reasons:
+            //   1. The wake prompt is multi-line; a raw multi-line write
+            //      lets the TUI submit on the first embedded newline,
+            //      fragmenting the prompt. Wrapping it in the bracketed
+            //      paste markers (ESC[200~ ... ESC[201~) keeps every
+            //      newline literal until one explicit Enter submits.
+            //   2. A `\r` written here, before the TUI input pipeline is
+            //      interactive (~15-22s in plugin-heavy repos), is
+            //      swallowed -- the old fire-and-forget submit. The
+            //      confirmed-submit protocol sends Enter from the health
+            //      tick instead, retrying until the ring buffer shows a
+            //      turn started.
+            let keystrokes = wrap_bracketed_paste(prompt);
             if let Err(e) = session.write(&keystrokes) {
-                eprintln!("[legion watch] PTY prompt write failed: {}", e);
+                eprintln!("[legion watch] PTY prompt paste failed: {}", e);
                 // Best-effort kill so we do not leak a half-started
                 // child; the spawn-failure path in poll_cycle releases
                 // any leases we acquired.
@@ -331,5 +369,41 @@ mod tests {
         assert!(matches!(err, LegionError::PtyControlUnsupported));
 
         let _ = spawned.kill();
+    }
+
+    // -- bracketed paste (#649) ---------------------------------------------
+
+    #[test]
+    fn wrap_bracketed_paste_wraps_exactly_with_no_submit() {
+        // The wire bytes must be START + prompt + END, with NO trailing \r:
+        // the submit keystroke is sent later by the confirmation loop, and a
+        // multi-line prompt must stay inside one paste so embedded newlines
+        // do not fragment into multiple submits.
+        let wrapped = wrap_bracketed_paste("line one\nline two");
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"\x1b[200~");
+        expected.extend_from_slice(b"line one\nline two");
+        expected.extend_from_slice(b"\x1b[201~");
+        assert_eq!(wrapped, expected);
+        assert!(
+            !wrapped.ends_with(b"\r"),
+            "bracketed paste must not carry a submit keystroke"
+        );
+    }
+
+    #[test]
+    fn turn_started_is_false_for_print_child() {
+        // Print children never enter the confirmation loop; the accessor
+        // must report no turn so a stray call cannot mis-confirm them.
+        #[cfg(unix)]
+        {
+            let child = std::process::Command::new("sleep")
+                .arg("9999")
+                .spawn()
+                .expect("spawn sleep");
+            let mut spawned = SpawnedChild::Print(child);
+            assert!(!spawned.turn_started());
+            let _ = spawned.kill();
+        }
     }
 }

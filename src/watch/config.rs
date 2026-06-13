@@ -183,6 +183,31 @@ pub struct WatchConfig {
     #[serde(default = "default_max_concurrent_wakes")]
     pub max_concurrent_wakes: u32,
 
+    /// Max submit-keystroke retries for a PTY wake before giving up (#649).
+    /// The Claude TUI input pipeline becomes submit-ready asynchronously
+    /// (~15-22s in plugin-heavy repos) with no deterministic ready marker,
+    /// so `drive_submit_confirmation` re-sends Enter each health tick until
+    /// the ring buffer shows a turn started. After this many tries with no
+    /// confirmation the attempt fails closed (`Spawning -> Failed`, outcome
+    /// `submit_not_confirmed`) rather than orphaning an idle REPL. Default 12.
+    #[serde(default = "default_submit_retry_max")]
+    pub submit_retry_max: u32,
+
+    /// Minimum seconds between submit-keystroke retries for a PTY wake (#649).
+    /// A floor, not a timer: `drive_submit_confirmation` runs on the health
+    /// tick (`health_poll_secs`) and skips a child whose last Enter was more
+    /// recent than this, so a small `health_poll_secs` cannot machine-gun
+    /// Enter at the TUI. Default 4.
+    #[serde(default = "default_submit_retry_interval_secs")]
+    pub submit_retry_interval_secs: u64,
+
+    /// Hard wall-clock cap (seconds) on the submit-confirmation window for a
+    /// PTY wake (#649). Independent of `submit_retry_max`: whichever bound
+    /// trips first fails the attempt closed. Guards against a child that
+    /// accepts keystrokes but never starts a turn. Default 60.
+    #[serde(default = "default_submit_confirm_budget_secs")]
+    pub submit_confirm_budget_secs: u64,
+
     /// Whether this node serves the web dashboard.
     /// Only one node per network should have this set to true.
     #[serde(default)]
@@ -252,6 +277,18 @@ fn default_max_concurrent_wakes() -> u32 {
     4
 }
 
+fn default_submit_retry_max() -> u32 {
+    12
+}
+
+fn default_submit_retry_interval_secs() -> u64 {
+    4
+}
+
+fn default_submit_confirm_budget_secs() -> u64 {
+    60
+}
+
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
@@ -268,6 +305,9 @@ impl Default for WatchConfig {
             persona_lease_ttl_secs: default_persona_lease_ttl_secs(),
             quota_panic_threshold_pct: default_quota_panic_threshold_pct(),
             max_concurrent_wakes: default_max_concurrent_wakes(),
+            submit_retry_max: default_submit_retry_max(),
+            submit_retry_interval_secs: default_submit_retry_interval_secs(),
+            submit_confirm_budget_secs: default_submit_confirm_budget_secs(),
             serve: false,
             cluster: None,
             repos: Vec::new(),
@@ -516,6 +556,27 @@ workdir = "/tmp"
         assert_eq!(config.poll_interval_secs, 30);
         assert_eq!(config.cooldown_secs, 300);
         assert_eq!(config.max_concurrent_wakes, 4);
+        // #649 submit-confirmation knobs default without being named.
+        assert_eq!(config.submit_retry_max, 12);
+        assert_eq!(config.submit_retry_interval_secs, 4);
+        assert_eq!(config.submit_confirm_budget_secs, 60);
+    }
+
+    #[test]
+    fn parse_config_submit_knobs_explicit() {
+        let toml_str = r#"
+submit_retry_max = 20
+submit_retry_interval_secs = 2
+submit_confirm_budget_secs = 90
+
+[[repos]]
+name = "test"
+workdir = "/tmp"
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("parse config");
+        assert_eq!(config.submit_retry_max, 20);
+        assert_eq!(config.submit_retry_interval_secs, 2);
+        assert_eq!(config.submit_confirm_budget_secs, 90);
     }
 
     #[test]

@@ -299,7 +299,14 @@ pub fn poll_cycle(
                     if let Err(e) = db.transition_wake_attempt(aid, Claimed, Spawning) {
                         eprintln!("[legion watch] transition Claimed->Spawning {}: {}", aid, e);
                     }
-                    if let Err(e) = db.transition_wake_attempt(aid, Spawning, Running) {
+                    // Print submits its prompt as an argv, so the turn is
+                    // already underway -- advance to Running now. Pty defers
+                    // Spawning->Running to drive_submit_confirmation (#649),
+                    // which fires it only once the ring buffer confirms the
+                    // bracketed-paste prompt actually submitted.
+                    if spawn_mode == SpawnMode::Print
+                        && let Err(e) = db.transition_wake_attempt(aid, Spawning, Running)
+                    {
                         eprintln!("[legion watch] transition Spawning->Running {}: {}", aid, e);
                     }
                 }
