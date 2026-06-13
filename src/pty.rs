@@ -256,15 +256,28 @@ impl PtySession {
     }
 }
 
-/// The live token-counter marker Claude renders only while a turn is
-/// processing (#649). Pulled out as a free function so the scan is
-/// unit-testable without a live PTY.
-const TURN_START_MARKER: &[u8] = b"tokens";
-
+/// Detect the live token counter Claude renders only while a turn is
+/// processing (#649). The counter is always `<digits> tokens` (e.g.
+/// `103 tokens`), so the scan requires a digit immediately before
+/// ` tokens` -- a bare `tokens` is NOT enough.
+///
+/// This precision is load-bearing, not cosmetic: the wake prompt itself
+/// contains the prose `waste tokens` (it warns against empty acks), and
+/// the TUI echoes the pasted prompt into the input box. A bare-`tokens`
+/// match would fire on that echo BEFORE any submit, confirming a turn
+/// that never started and hanging the wake. Requiring the leading digit
+/// separates the counter (`1 tokens`) from the prose (`waste tokens`).
+///
+/// Pulled out as a free function so the scan is unit-testable without a
+/// live PTY.
 fn has_turn_start_marker(bytes: &[u8]) -> bool {
+    const NEEDLE: &[u8] = b" tokens";
+    // For each ` tokens` occurrence, require the byte before the space to
+    // be an ASCII digit -- the counter's `<N> tokens` shape.
     bytes
-        .windows(TURN_START_MARKER.len())
-        .any(|w| w == TURN_START_MARKER)
+        .windows(NEEDLE.len())
+        .enumerate()
+        .any(|(i, w)| w == NEEDLE && i > 0 && bytes[i - 1].is_ascii_digit())
 }
 
 impl Drop for PtySession {
@@ -351,8 +364,9 @@ mod tests {
 
     #[test]
     fn turn_start_marker_detects_token_counter_only() {
-        // The live token counter is the turn-start signal; the idle input
-        // screen never renders it, so a miss keeps the retry loop going.
+        // The live token counter (<digits> tokens) is the turn-start signal;
+        // the idle input screen never renders it, so a miss keeps the retry
+        // loop going.
         assert!(has_turn_start_marker(b"Transmuting... (4s | 103 tokens)"));
         assert!(has_turn_start_marker(
             b"running stop hooks... 0/3 | 1 tokens"
@@ -361,6 +375,19 @@ mod tests {
             b"? for shortcuts   accept edits on (shift+tab to cycle)"
         ));
         assert!(!has_turn_start_marker(b""));
+    }
+
+    #[test]
+    fn turn_start_marker_ignores_prose_tokens_in_echoed_prompt() {
+        // The wake prompt warns that empty acks "waste tokens"; the TUI
+        // echoes the pasted prompt into the input box. A bare-`tokens`
+        // match would false-confirm on that echo before any submit. The
+        // leading-digit requirement must reject prose.
+        assert!(!has_turn_start_marker(
+            b"empty acknowledgments waste tokens and trigger wake storms"
+        ));
+        assert!(!has_turn_start_marker(b"tokens"));
+        assert!(!has_turn_start_marker(b" tokens"));
     }
 
     fn run_until<F: FnMut() -> bool>(deadline_ms: u64, mut f: F) -> bool {
