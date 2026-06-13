@@ -1,5 +1,17 @@
 # Legion Changelog
 
+## 0.18.1
+
+The PTY wake reliability release. Auto-wake's default PTY spawn mode submitted the wake prompt with a single carriage return fired immediately after fork -- before the Claude TUI input pipeline is interactive -- so the submit was swallowed and the wake attempt aged silently to `abandoned`. Directed signals went unanswered. This release replaces fire-and-forget with a feedback-driven confirmed-submit protocol, validated empirically (six PTY experiments) before implementation. Patch release: a reliability fix within the existing watch surface, no wire-format change, no schema migration.
+
+### Fixed
+
+- **PTY wake prompts reliably submit** (PR #652, #649; PR #650, #648): the watch PTY spawn wrote the prompt plus an immediate `\r` right after fork, but the TUI input pipeline does not become submit-ready for ~15-22s in plugin-heavy repos, so the carriage return was swallowed and the wake sat at an empty REPL until it aged to `abandoned`. The prompt is now bracketed-pasted (so a multi-line prompt cannot fragment into partial submits) with no submit keystroke at spawn; `drive_submit_confirmation` runs on the health tick and re-sends Enter -- throttled to `submit_retry_interval_secs` (default 4) -- until the PTY ring buffer shows a turn started, then advances the wake_attempt `Spawning -> Running`. After `submit_retry_max` (default 12) Enters or `submit_confirm_budget_secs` (default 60) wall-clock with no turn, the attempt fails closed: `Spawning -> Failed` with outcome `submit_not_confirmed`, killed and reaped the same tick. A swallowed submit is now a first-class, queryable wake_attempts outcome instead of a generic abandon. `SpawnedChild::send_keys` (#648) is the sanctioned post-spawn write path. The turn-start marker requires a digit before `tokens` so the prose `waste tokens` in the wake prompt -- echoed into the input box -- cannot false-confirm; bracketed-paste content is stripped of ESC bytes so agent-authored signal text cannot close the paste early and inject keystrokes.
+
+### Config
+
+- **Three submit-confirmation knobs in `watch.toml`** (#649): `submit_retry_max` (default 12), `submit_retry_interval_secs` (default 4), `submit_confirm_budget_secs` (default 60). Print mode is unaffected and remains the `LEGION_SPAWN_MODE=print` fallback.
+
 ## 0.18.0
 
 The refactor release. Six streams of structural work deliver a codebase that is split by domain, observable, and covered. The god files (per the June audit: db.rs 8,815 lines; main.rs 8,130 lines; watch.rs 4,767 lines) are carved into 50+ focused modules. Three live defects are fixed alongside the structural work. The coordination substrate gains spec binding, spec-gen, and a verify gate that reads bound-spec AC. The quality-gate chain ships end to end. Minor release: structural refactor plus additive features and one additive schema migration (tasks.document_id); no wire-format change.
