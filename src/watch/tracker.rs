@@ -274,6 +274,21 @@ impl AgentTracker {
     pub fn active_count(&self) -> i32 {
         self.children.len() as i32
     }
+
+    /// Mutable access to a tracked child by wake-attempt id, for post-spawn
+    /// keystroke injection by the confirmed-submit protocol (#649). Returns
+    /// the first tracked child whose `attempt_id` matches; `None` when no
+    /// tracked child carries that id (e.g. the spawn predated the
+    /// wake_attempts substrate, or it has already been reaped).
+    // Wired into the watch loop by the confirmed-submit protocol (#649);
+    // dead from main's perspective until then, exercised by tests now.
+    #[allow(dead_code)]
+    pub fn child_by_attempt_mut(&mut self, attempt_id: &str) -> Option<&mut SpawnedChild> {
+        self.children
+            .iter_mut()
+            .find(|t| t.attempt_id.as_deref() == Some(attempt_id))
+            .map(|t| &mut t.child)
+    }
 }
 
 #[cfg(test)]
@@ -423,6 +438,64 @@ mod tests {
         );
 
         // Clean up the long-running child so we don't leak it in the test suite.
+        tracker.children.iter_mut().for_each(|t| {
+            let _ = t.child.kill();
+        });
+    }
+
+    // -- child_by_attempt_mut (#648) ------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn child_by_attempt_mut_finds_match_and_misses_unknown() {
+        // A tracked child must be reachable by its attempt_id for the
+        // confirmed-submit protocol to inject keystrokes; an unknown id and
+        // an attemptless child must both miss.
+        let mut tracker = AgentTracker::new();
+
+        // Child A: carries a known attempt_id.
+        let child_a = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep a");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        tracker.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_a),
+            Vec::new(),
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            Vec::new(),
+            Some(attempt_id.clone()),
+        );
+
+        // Child B: attemptless -- must never match a lookup.
+        let child_b = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep b");
+        tracker.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_b),
+            Vec::new(),
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            Vec::new(),
+            None,
+        );
+
+        assert!(
+            tracker.child_by_attempt_mut(&attempt_id).is_some(),
+            "must find the tracked child by its attempt_id"
+        );
+        assert!(
+            tracker.child_by_attempt_mut("no-such-attempt").is_none(),
+            "an unknown attempt_id must miss even with attemptless children tracked"
+        );
+
+        // Clean up both long-lived children.
         tracker.children.iter_mut().for_each(|t| {
             let _ = t.child.kill();
         });

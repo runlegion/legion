@@ -145,6 +145,9 @@ pub enum LegionError {
     #[error("pty wait failed: {0}")]
     PtyWaitFailed(String),
 
+    #[error("cannot send keystrokes to a non-interactive (print-mode) child")]
+    PtyControlUnsupported,
+
     #[error(
         "illegal wake attempt transition for {attempt_id}: {from} -> {to} (current state: {current})"
     )]
