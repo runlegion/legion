@@ -25,11 +25,18 @@ pub const SUBMIT_KEY: &[u8] = b"\r";
 /// Wrap a prompt in bracketed-paste markers with NO trailing submit (#649).
 /// Pulled out as a pure helper so the exact wire bytes are unit-testable
 /// without a live `claude` PTY.
+///
+/// The prompt is stripped of ESC (0x1b) bytes before wrapping. The wake
+/// prompt bundles signal text authored by other agents/repos; a stray or
+/// hostile `ESC[201~` in that content would close the bracketed paste
+/// early and turn the remaining bytes into raw TUI keystrokes -- a
+/// keystroke-injection seam. Wake prompts are plain text, so dropping ESC
+/// is lossless and closes the seam regardless of how the call site widens.
 fn wrap_bracketed_paste(prompt: &str) -> Vec<u8> {
     let mut out =
         Vec::with_capacity(prompt.len() + BRACKETED_PASTE_START.len() + BRACKETED_PASTE_END.len());
     out.extend_from_slice(BRACKETED_PASTE_START);
-    out.extend_from_slice(prompt.as_bytes());
+    out.extend(prompt.bytes().filter(|&b| b != 0x1b));
     out.extend_from_slice(BRACKETED_PASTE_END);
     out
 }
@@ -389,6 +396,23 @@ mod tests {
             !wrapped.ends_with(b"\r"),
             "bracketed paste must not carry a submit keystroke"
         );
+    }
+
+    #[test]
+    fn wrap_bracketed_paste_strips_esc_to_close_injection_seam() {
+        // An embedded ESC[201~ in prompt content must not survive -- it
+        // would close the paste early and inject raw TUI keystrokes. ESC
+        // bytes are dropped; the surrounding plain text is preserved.
+        let hostile = "before\x1b[201~rm -rf\x1b after";
+        let wrapped = wrap_bracketed_paste(hostile);
+        // No interior ESC byte remains (the only ESC bytes are inside the
+        // start/end markers we control).
+        let body = &wrapped[BRACKETED_PASTE_START.len()..wrapped.len() - BRACKETED_PASTE_END.len()];
+        assert!(
+            !body.contains(&0x1b),
+            "ESC bytes must be stripped from pasted content"
+        );
+        assert_eq!(body, b"before[201~rm -rf after");
     }
 
     #[test]
