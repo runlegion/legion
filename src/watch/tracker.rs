@@ -358,25 +358,6 @@ impl AgentTracker {
         self.children.len() as i32
     }
 
-    /// Mutable access to a tracked child by wake-attempt id. Returns the
-    /// first tracked child whose `attempt_id` matches; `None` when no
-    /// tracked child carries that id (e.g. the spawn predated the
-    /// wake_attempts substrate, or it has already been reaped).
-    //
-    // Targeted accessor for post-spawn keystroke injection. The in-tree
-    // consumer (`drive_submit_confirmation`) iterates `TrackedChild` in
-    // place because it needs the wrapper's submit-state, not just the
-    // child -- so this stays a foundation for future callers that key on
-    // attempt_id alone. Same allow-dead-code convention as
-    // `RecipientSpec::parse`. Exercised by tests.
-    #[allow(dead_code)]
-    pub fn child_by_attempt_mut(&mut self, attempt_id: &str) -> Option<&mut SpawnedChild> {
-        self.children
-            .iter_mut()
-            .find(|t| t.attempt_id.as_deref() == Some(attempt_id))
-            .map(|t| &mut t.child)
-    }
-
     /// Drive the submit-confirmation protocol one tick (#649).
     ///
     /// Runs on the health tick, before `reap_finished`. For each PTY child
@@ -455,16 +436,32 @@ impl AgentTracker {
                         );
                     }
                 }
-                SubmitAction::Send => {
-                    if let Err(e) = tracked.child.send_keys(SUBMIT_KEY) {
+                SubmitAction::Send => match tracked.child.send_keys(SUBMIT_KEY) {
+                    Ok(()) => {
+                        tracked.submit_retries += 1;
+                        tracked.last_submit_enter = Some(Instant::now());
+                    }
+                    Err(e) => {
+                        // A failed PTY write means the child's input is
+                        // broken -- retrying cannot help. Fail closed rather
+                        // than counting a phantom Enter against the budget or
+                        // logging an Enter that never reached the TUI.
                         eprintln!(
-                            "[legion watch] submit keystroke for {} failed: {}",
+                            "[legion watch] submit keystroke for {} failed -- failing: {}",
                             tracked.repo, e
                         );
+                        tracked.submit_failed_reason = Some(format!(
+                            "submit_send_failed (retries={})",
+                            tracked.submit_retries
+                        ));
+                        if let Err(ke) = tracked.child.kill() {
+                            eprintln!(
+                                "[legion watch] kill after send failure for {} failed: {}",
+                                tracked.repo, ke
+                            );
+                        }
                     }
-                    tracked.submit_retries += 1;
-                    tracked.last_submit_enter = Some(Instant::now());
-                }
+                },
                 SubmitAction::Wait => {}
             }
         }
@@ -623,64 +620,6 @@ mod tests {
         });
     }
 
-    // -- child_by_attempt_mut (#648) ------------------------------------------
-
-    #[cfg(unix)]
-    #[test]
-    fn child_by_attempt_mut_finds_match_and_misses_unknown() {
-        // A tracked child must be reachable by its attempt_id for the
-        // confirmed-submit protocol to inject keystrokes; an unknown id and
-        // an attemptless child must both miss.
-        let mut tracker = AgentTracker::new();
-
-        // Child A: carries a known attempt_id.
-        let child_a = std::process::Command::new("sleep")
-            .arg("9999")
-            .spawn()
-            .expect("spawn sleep a");
-        let attempt_id = uuid::Uuid::now_v7().to_string();
-        tracker.track(
-            "legion".to_string(),
-            SpawnedChild::Print(child_a),
-            Vec::new(),
-            "test-host".to_string(),
-            uuid::Uuid::now_v7().to_string(),
-            chrono::Utc::now().to_rfc3339(),
-            Vec::new(),
-            Some(attempt_id.clone()),
-        );
-
-        // Child B: attemptless -- must never match a lookup.
-        let child_b = std::process::Command::new("sleep")
-            .arg("9999")
-            .spawn()
-            .expect("spawn sleep b");
-        tracker.track(
-            "legion".to_string(),
-            SpawnedChild::Print(child_b),
-            Vec::new(),
-            "test-host".to_string(),
-            uuid::Uuid::now_v7().to_string(),
-            chrono::Utc::now().to_rfc3339(),
-            Vec::new(),
-            None,
-        );
-
-        assert!(
-            tracker.child_by_attempt_mut(&attempt_id).is_some(),
-            "must find the tracked child by its attempt_id"
-        );
-        assert!(
-            tracker.child_by_attempt_mut("no-such-attempt").is_none(),
-            "an unknown attempt_id must miss even with attemptless children tracked"
-        );
-
-        // Clean up both long-lived children.
-        tracker.children.iter_mut().for_each(|t| {
-            let _ = t.child.kill();
-        });
-    }
-
     // -- submit_action policy (#649) ------------------------------------------
 
     #[test]
@@ -820,6 +759,11 @@ mod tests {
             Vec::new(),
             Some(attempt_id.clone()),
         );
+        assert!(
+            locks.active_pid("legion").is_some(),
+            "precondition: session lock is held before reap"
+        );
+
         // Mark it as the submit loop would on give-up.
         tracker.children[0].submit_failed_reason =
             Some("submit_not_confirmed (retries=12)".to_string());
@@ -836,6 +780,12 @@ mod tests {
             row.outcome.as_deref(),
             Some("submit_not_confirmed (retries=12)"),
             "the distinct submit-failure reason must land on the row"
+        );
+        // The submit-failure path must release the session lock like any
+        // other reap, so the per-repo wake gate reopens.
+        assert!(
+            locks.active_pid("legion").is_none(),
+            "session lock must be released after a submit-failure reap"
         );
     }
 }
