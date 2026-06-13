@@ -136,8 +136,13 @@ pub fn record_session_end(db: &Database, attempt_id: &str, data_dir: &Path) -> R
 /// Implements the minimal subset of operations the watch reaper +
 /// lease release path actually need: `pid` for liveness + log lines,
 /// `try_wait` for non-blocking exit detection, `kill` for shutdown.
-/// Direct stdin/stdout streams are NOT exposed -- the PTY ring buffer
-/// is for diagnostics, not control flow.
+///
+/// `send_keys` is the one sanctioned WRITE control path: the
+/// confirmed-submit protocol (#649) injects the prompt paste and retry
+/// submit keystrokes through it after spawn. Reading the other
+/// direction stays off-limits -- the PTY ring buffer (`output_tail`) is
+/// for diagnostics, not control flow; submit confirmation is the
+/// filesystem oracle, not output scraping.
 pub enum SpawnedChild {
     Print(Child),
     Pty(crate::pty::PtySession),
@@ -175,6 +180,24 @@ impl SpawnedChild {
         match self {
             SpawnedChild::Print(c) => c.kill().map_err(LegionError::Io),
             SpawnedChild::Pty(s) => s.kill(),
+        }
+    }
+
+    /// Send raw bytes to the child's interactive input after spawn.
+    ///
+    /// The confirmed-submit protocol (#649) uses this to bracketed-paste
+    /// the wake prompt and to retry the submit keystroke until the TUI
+    /// input pipeline is ready. The `Print` variant has no interactive
+    /// stdin -- `claude --print -p` consumed its prompt as an argv -- so
+    /// it returns `PtyControlUnsupported` rather than silently no-op'ing,
+    /// which would mask a spawn-mode mismatch at the call site.
+    // Wired into the watch loop by the confirmed-submit protocol (#649);
+    // dead from main's perspective until then, exercised by tests now.
+    #[allow(dead_code)]
+    pub fn send_keys(&mut self, bytes: &[u8]) -> Result<()> {
+        match self {
+            SpawnedChild::Print(_) => Err(LegionError::PtyControlUnsupported),
+            SpawnedChild::Pty(s) => s.write(bytes),
         }
     }
 }
@@ -286,5 +309,27 @@ mod tests {
     fn spawn_mode_as_str_matches_env_values() {
         assert_eq!(SpawnMode::Print.as_str(), "print");
         assert_eq!(SpawnMode::Pty.as_str(), "pty");
+    }
+
+    // -- send_keys (#648) ---------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn send_keys_on_print_child_is_unsupported() {
+        // The Print variant has no interactive stdin -- send_keys must
+        // surface a typed error, not silently swallow the keystrokes,
+        // so a spawn-mode mismatch is visible at the call site.
+        let child = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep");
+        let mut spawned = SpawnedChild::Print(child);
+
+        let err = spawned
+            .send_keys(b"\r")
+            .expect_err("send_keys on a print child must error");
+        assert!(matches!(err, LegionError::PtyControlUnsupported));
+
+        let _ = spawned.kill();
     }
 }
