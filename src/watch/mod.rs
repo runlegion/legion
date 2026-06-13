@@ -238,6 +238,12 @@ impl WatchLoop {
     /// `legion watch status` can observe either mode.
     pub fn tick_health(&mut self) {
         self.sampler.sample();
+        // #649: drive the submit-confirmation protocol BEFORE reaping. A
+        // PTY wake's prompt is bracketed-pasted at spawn but not submitted
+        // until this loop retries Enter and observes a turn start; a child
+        // that never confirms is failed here and reaped on the same tick.
+        self.tracker
+            .drive_submit_confirmation(&self.db, &self.config);
         self.tracker
             .reap_finished(Some(&self.db), Some(&self.session_locks));
         if let Err(e) = self.db.heartbeat_persona_leases(&self.host, self.lease_ttl) {

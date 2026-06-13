@@ -230,6 +230,41 @@ impl PtySession {
             Err(poisoned) => poisoned.into_inner().snapshot(),
         }
     }
+
+    /// Has a Claude turn started in this session's output?
+    ///
+    /// The confirmed-submit protocol (#649) uses this to decide when to
+    /// STOP re-sending the submit keystroke: once a turn is running, the
+    /// prompt landed and further Enters would queue stray empty turns.
+    ///
+    /// The signal is the live token counter -- Claude renders `N tokens`
+    /// in the working spinner only while a turn is processing, never on
+    /// the idle input screen. This was chosen over the session-transcript
+    /// file (the original #649 plan) because that file is buffered and
+    /// written on clean exit, not incrementally -- empirically it never
+    /// appears for a live or killed wake (oracle2, 2026-06-13), so it
+    /// cannot confirm a turn-start. Scanning the ring buffer crosses the
+    /// "diagnostics, not control flow" line deliberately: turn-start
+    /// detection is the one sanctioned control-flow read.
+    ///
+    /// The marker is TUI-version-sensitive (the older `esc to interrupt`
+    /// string vanished by 2.1.176), but a miss fails CLOSED -- the wake
+    /// ends in `Spawning -> Failed` with a visible reason rather than a
+    /// silent hang.
+    pub fn saw_turn_start(&self) -> bool {
+        has_turn_start_marker(&self.output_tail())
+    }
+}
+
+/// The live token-counter marker Claude renders only while a turn is
+/// processing (#649). Pulled out as a free function so the scan is
+/// unit-testable without a live PTY.
+const TURN_START_MARKER: &[u8] = b"tokens";
+
+fn has_turn_start_marker(bytes: &[u8]) -> bool {
+    bytes
+        .windows(TURN_START_MARKER.len())
+        .any(|w| w == TURN_START_MARKER)
 }
 
 impl Drop for PtySession {
@@ -313,6 +348,20 @@ fn into_exit_status(status: portable_pty::ExitStatus) -> ExitStatus {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn turn_start_marker_detects_token_counter_only() {
+        // The live token counter is the turn-start signal; the idle input
+        // screen never renders it, so a miss keeps the retry loop going.
+        assert!(has_turn_start_marker(b"Transmuting... (4s | 103 tokens)"));
+        assert!(has_turn_start_marker(
+            b"running stop hooks... 0/3 | 1 tokens"
+        ));
+        assert!(!has_turn_start_marker(
+            b"? for shortcuts   accept edits on (shift+tab to cycle)"
+        ));
+        assert!(!has_turn_start_marker(b""));
+    }
 
     fn run_until<F: FnMut() -> bool>(deadline_ms: u64, mut f: F) -> bool {
         let deadline = Instant::now() + Duration::from_millis(deadline_ms);
