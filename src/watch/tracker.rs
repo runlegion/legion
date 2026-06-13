@@ -1,10 +1,55 @@
 //! Tracking of spawned children: reaping, persona lease release, and
 //! session outcome classification.
 
+use std::time::{Duration, Instant};
+
 use crate::db::Database;
 
+use super::config::WatchConfig;
 use super::locks::SessionLockTracker;
-use super::spawn::SpawnedChild;
+use super::spawn::{SUBMIT_KEY, SpawnedChild};
+
+/// What the submit-confirmation loop should do with one PTY child this tick
+/// (#649). Pulled out as a pure decision so the policy is unit-testable
+/// without a live PTY -- `drive_submit_confirmation` performs the I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmitAction {
+    /// A turn started -- the prompt submitted; advance Spawning -> Running.
+    Confirm,
+    /// Out of retries or budget -- fail closed (Spawning -> Failed).
+    Fail,
+    /// Send another Enter this tick.
+    Send,
+    /// Within the retry interval -- wait for the next tick.
+    Wait,
+}
+
+/// Pure submit-confirmation policy. `turn_started` short-circuits to
+/// `Confirm`; exhausting either `retries >= max` or `spawn_elapsed >=
+/// budget` yields `Fail`; otherwise an Enter is due when no prior Enter
+/// has been sent or the last one is older than `interval`.
+fn submit_action(
+    turn_started: bool,
+    retries: u32,
+    max: u32,
+    spawn_elapsed: Duration,
+    budget: Duration,
+    last_enter_elapsed: Option<Duration>,
+    interval: Duration,
+) -> SubmitAction {
+    if turn_started {
+        return SubmitAction::Confirm;
+    }
+    if retries >= max || spawn_elapsed >= budget {
+        return SubmitAction::Fail;
+    }
+    let due = last_enter_elapsed.map(|e| e >= interval).unwrap_or(true);
+    if due {
+        SubmitAction::Send
+    } else {
+        SubmitAction::Wait
+    }
+}
 
 // -- Agent Tracker -----------------------------------------------------------
 
@@ -33,6 +78,22 @@ pub struct TrackedChild {
     /// spawn predates the wake_attempts substrate or the enqueue
     /// failed; reap then skips the outcome recording.
     pub attempt_id: Option<String>,
+    /// Monotonic spawn instant, for the submit-confirmation budget (#649).
+    /// In-memory only -- the persisted `spawned_at` is RFC3339 wall-clock.
+    pub spawn_instant: Instant,
+    /// When the last submit keystroke was sent, for interval throttling
+    /// (#649). `None` until the first Enter goes out.
+    pub last_submit_enter: Option<Instant>,
+    /// Count of submit keystrokes sent so far (#649). Bounds the retry
+    /// loop and is reported in the failure outcome.
+    pub submit_retries: u32,
+    /// True once a turn was observed to start -- the prompt submitted and
+    /// the FSM advanced `Spawning -> Running` (#649). Stops further Enters.
+    pub submit_confirmed: bool,
+    /// Set when the submit-confirmation loop gave up (#649). Carries the
+    /// `outcome` reason so `reap_finished` records `submit_not_confirmed`
+    /// on the wake_attempts row instead of a generic abandon.
+    pub submit_failed_reason: Option<String>,
 }
 
 pub struct AgentTracker {
@@ -69,6 +130,11 @@ impl AgentTracker {
             spawn_at,
             signal_ids,
             attempt_id,
+            spawn_instant: Instant::now(),
+            last_submit_enter: None,
+            submit_retries: 0,
+            submit_confirmed: false,
+            submit_failed_reason: None,
         });
     }
 
@@ -209,6 +275,23 @@ impl AgentTracker {
                     }
                 }
 
+                // #649: a child the submit-confirmation loop gave up on
+                // never ran a turn -- there is no session to classify. Record
+                // the wake_attempt outcome with the distinct reason so the
+                // metric trail shows "prompt never submitted" instead of a
+                // generic abandon, and skip the session-outcome row.
+                if let Some(reason) = &tracked.submit_failed_reason {
+                    if let Some(ref attempt_id) = tracked.attempt_id
+                        && let Err(e) = db.record_wake_attempt_outcome(attempt_id, "error", reason)
+                    {
+                        eprintln!(
+                            "[legion watch] failed to record submit-failure outcome {}: {}",
+                            attempt_id, e
+                        );
+                    }
+                    return false; // remove from tracking list
+                }
+
                 // #389: classify and persist the session outcome.
                 // Defensive: errors here log to stderr but never break
                 // the reap loop -- a missed log row is recoverable, a
@@ -275,19 +358,116 @@ impl AgentTracker {
         self.children.len() as i32
     }
 
-    /// Mutable access to a tracked child by wake-attempt id, for post-spawn
-    /// keystroke injection by the confirmed-submit protocol (#649). Returns
-    /// the first tracked child whose `attempt_id` matches; `None` when no
+    /// Mutable access to a tracked child by wake-attempt id. Returns the
+    /// first tracked child whose `attempt_id` matches; `None` when no
     /// tracked child carries that id (e.g. the spawn predated the
     /// wake_attempts substrate, or it has already been reaped).
-    // Wired into the watch loop by the confirmed-submit protocol (#649);
-    // dead from main's perspective until then, exercised by tests now.
+    //
+    // Targeted accessor for post-spawn keystroke injection. The in-tree
+    // consumer (`drive_submit_confirmation`) iterates `TrackedChild` in
+    // place because it needs the wrapper's submit-state, not just the
+    // child -- so this stays a foundation for future callers that key on
+    // attempt_id alone. Same allow-dead-code convention as
+    // `RecipientSpec::parse`. Exercised by tests.
     #[allow(dead_code)]
     pub fn child_by_attempt_mut(&mut self, attempt_id: &str) -> Option<&mut SpawnedChild> {
         self.children
             .iter_mut()
             .find(|t| t.attempt_id.as_deref() == Some(attempt_id))
             .map(|t| &mut t.child)
+    }
+
+    /// Drive the submit-confirmation protocol one tick (#649).
+    ///
+    /// Runs on the health tick, before `reap_finished`. For each PTY child
+    /// whose prompt has not yet been confirmed-submitted, this either:
+    ///   - observes a turn-start in the ring buffer and advances the FSM
+    ///     `Spawning -> Running` (submit landed); or
+    ///   - re-sends the submit keystroke (Enter), throttled to at most one
+    ///     per `submit_retry_interval_secs`; or
+    ///   - gives up once `submit_retry_max` Enters or
+    ///     `submit_confirm_budget_secs` wall-clock elapse, marking the child
+    ///     so `reap_finished` records `submit_not_confirmed` and tears it
+    ///     down (the kill here makes `try_wait` reap it the same tick).
+    ///
+    /// Print children never enter this loop -- they submit their prompt as
+    /// an argv at spawn and are advanced to `Running` by `poll_cycle`.
+    pub fn drive_submit_confirmation(&mut self, db: &Database, config: &WatchConfig) {
+        use crate::wake_attempts::WakeAttemptState::{Running, Spawning};
+
+        let budget = Duration::from_secs(config.submit_confirm_budget_secs);
+        let interval = Duration::from_secs(config.submit_retry_interval_secs);
+
+        for tracked in self.children.iter_mut() {
+            // Only PTY children that are still unconfirmed and carry an
+            // attempt row are eligible. `turn_started()` is false for Print,
+            // but skipping by variant avoids send_keys returning the
+            // unsupported error every tick.
+            if tracked.submit_confirmed
+                || tracked.submit_failed_reason.is_some()
+                || !matches!(tracked.child, SpawnedChild::Pty(_))
+            {
+                continue;
+            }
+            let Some(attempt_id) = tracked.attempt_id.clone() else {
+                continue;
+            };
+
+            let action = submit_action(
+                tracked.child.turn_started(),
+                tracked.submit_retries,
+                config.submit_retry_max,
+                tracked.spawn_instant.elapsed(),
+                budget,
+                tracked.last_submit_enter.map(|t| t.elapsed()),
+                interval,
+            );
+
+            match action {
+                SubmitAction::Confirm => {
+                    tracked.submit_confirmed = true;
+                    if let Err(e) = db.transition_wake_attempt(&attempt_id, Spawning, Running) {
+                        eprintln!(
+                            "[legion watch] transition Spawning->Running for {} ({}): {}",
+                            tracked.repo, attempt_id, e
+                        );
+                    }
+                    eprintln!(
+                        "[legion watch] submit confirmed for {} after {} enter(s)",
+                        tracked.repo, tracked.submit_retries
+                    );
+                }
+                SubmitAction::Fail => {
+                    eprintln!(
+                        "[legion watch] submit NOT confirmed for {} after {} enter(s) -- failing",
+                        tracked.repo, tracked.submit_retries
+                    );
+                    tracked.submit_failed_reason = Some(format!(
+                        "submit_not_confirmed (retries={})",
+                        tracked.submit_retries
+                    ));
+                    // Kill so reap_finished reaps it this tick; the reason
+                    // field routes the terminal outcome to submit_not_confirmed.
+                    if let Err(e) = tracked.child.kill() {
+                        eprintln!(
+                            "[legion watch] kill of unconfirmed child for {} failed: {}",
+                            tracked.repo, e
+                        );
+                    }
+                }
+                SubmitAction::Send => {
+                    if let Err(e) = tracked.child.send_keys(SUBMIT_KEY) {
+                        eprintln!(
+                            "[legion watch] submit keystroke for {} failed: {}",
+                            tracked.repo, e
+                        );
+                    }
+                    tracked.submit_retries += 1;
+                    tracked.last_submit_enter = Some(Instant::now());
+                }
+                SubmitAction::Wait => {}
+            }
+        }
     }
 }
 
@@ -499,5 +679,163 @@ mod tests {
         tracker.children.iter_mut().for_each(|t| {
             let _ = t.child.kill();
         });
+    }
+
+    // -- submit_action policy (#649) ------------------------------------------
+
+    #[test]
+    fn submit_action_confirms_on_turn_start() {
+        // turn_started short-circuits everything else, even past the budget.
+        let a = submit_action(
+            true,
+            99,
+            12,
+            Duration::from_secs(999),
+            Duration::from_secs(60),
+            None,
+            Duration::from_secs(4),
+        );
+        assert_eq!(a, SubmitAction::Confirm);
+    }
+
+    #[test]
+    fn submit_action_fails_on_exhausted_retries_or_budget() {
+        // Retry cap reached.
+        assert_eq!(
+            submit_action(
+                false,
+                12,
+                12,
+                Duration::from_secs(1),
+                Duration::from_secs(60),
+                Some(Duration::from_secs(10)),
+                Duration::from_secs(4),
+            ),
+            SubmitAction::Fail
+        );
+        // Wall-clock budget reached even with retries left.
+        assert_eq!(
+            submit_action(
+                false,
+                3,
+                12,
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+                Some(Duration::from_secs(10)),
+                Duration::from_secs(4),
+            ),
+            SubmitAction::Fail
+        );
+    }
+
+    #[test]
+    fn submit_action_sends_then_waits_within_interval() {
+        // No prior Enter -> send immediately.
+        assert_eq!(
+            submit_action(
+                false,
+                0,
+                12,
+                Duration::from_secs(1),
+                Duration::from_secs(60),
+                None,
+                Duration::from_secs(4),
+            ),
+            SubmitAction::Send
+        );
+        // Last Enter older than interval -> send again.
+        assert_eq!(
+            submit_action(
+                false,
+                1,
+                12,
+                Duration::from_secs(6),
+                Duration::from_secs(60),
+                Some(Duration::from_secs(5)),
+                Duration::from_secs(4),
+            ),
+            SubmitAction::Send
+        );
+        // Last Enter within interval -> wait.
+        assert_eq!(
+            submit_action(
+                false,
+                1,
+                12,
+                Duration::from_secs(2),
+                Duration::from_secs(60),
+                Some(Duration::from_secs(1)),
+                Duration::from_secs(4),
+            ),
+            SubmitAction::Wait
+        );
+    }
+
+    // -- reap routing for submit failures (#649) ------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_records_submit_not_confirmed_outcome() {
+        // A child the submit loop gave up on (submit_failed_reason set, then
+        // killed) must reap to a Failed wake_attempt with the distinct
+        // submit_not_confirmed outcome -- not a generic abandon -- and must
+        // release its leases.
+        let (db, _index, data_dir) = test_storage();
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+
+        // Spawn + immediately kill a child so try_wait reports exited.
+        let mut child_proc = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep");
+        let child_pid = child_proc.id();
+        child_proc.kill().expect("kill child");
+
+        // wake_attempts row driven to Spawning (where the submit loop fails).
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let signal_id = db
+            .insert_reflection("kelex", "@legion question:submit-fail", "team")
+            .expect("insert signal")
+            .id;
+        db.enqueue_wake_attempt(&attempt_id, "legion", "legion", &[signal_id])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        use crate::wake_attempts::WakeAttemptState::{Claimed, Spawning};
+        db.transition_wake_attempt(&attempt_id, Claimed, Spawning)
+            .expect("Claimed->Spawning");
+
+        locks
+            .record_spawn("legion", child_pid)
+            .expect("record spawn");
+
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_proc),
+            Vec::new(),
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            Vec::new(),
+            Some(attempt_id.clone()),
+        );
+        // Mark it as the submit loop would on give-up.
+        tracker.children[0].submit_failed_reason =
+            Some("submit_not_confirmed (retries=12)".to_string());
+
+        tracker.reap_finished(Some(&db), Some(&locks));
+
+        assert_eq!(tracker.active_count(), 0, "failed child must be reaped");
+        let row = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get attempt")
+            .expect("row exists");
+        assert_eq!(row.state, crate::wake_attempts::WakeAttemptState::Failed);
+        assert_eq!(
+            row.outcome.as_deref(),
+            Some("submit_not_confirmed (retries=12)"),
+            "the distinct submit-failure reason must land on the row"
+        );
     }
 }
