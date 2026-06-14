@@ -46,13 +46,26 @@ no "semver long"        is_semver 1.2.3.4
 no "semver nonnum"      is_semver 1.2.x
 no "semver empty"       is_semver ""
 
-# is_strictly_greater
+# is_strictly_greater (numeric, not lexical -- 0.19.0 > 0.18.9, 0.18.10 > 0.18.9)
 ok "gt patch"   is_strictly_greater 0.18.3 0.18.2
 no "gt noop"    is_strictly_greater 0.18.2 0.18.2
 no "gt down"    is_strictly_greater 0.18.1 0.18.2
-ok "gt sortV"   is_strictly_greater 0.19.0 0.18.9
+ok "gt numeric" is_strictly_greater 0.19.0 0.18.9
+ok "gt twodigit" is_strictly_greater 0.18.10 0.18.9
 ok "gt major"   is_strictly_greater 1.0.0 0.18.2
 no "gt majdown" is_strictly_greater 0.18.2 1.0.0
+
+# non_changelog_dirty: only plugin/CHANGELOG.md is allowed dirty; anything else
+# (including a rename whose destination is not CHANGELOG) is "other dirty".
+eq "dirty: changelog only allowed" "" \
+  "$(printf ' M plugin/CHANGELOG.md\n' | non_changelog_dirty)"
+eq "dirty: other file flagged" " M src/main.rs" \
+  "$(printf ' M plugin/CHANGELOG.md\n M src/main.rs\n' | non_changelog_dirty)"
+eq "dirty: suffix lookalike flagged" " M docs/plugin/CHANGELOG.md" \
+  "$(printf ' M docs/plugin/CHANGELOG.md\n' | non_changelog_dirty)"
+eq "dirty: rename dest to changelog allowed" "" \
+  "$(printf 'R  old.md -> plugin/CHANGELOG.md\n' | non_changelog_dirty)"
+eq "dirty: empty tree is clean" "" "$(printf '' | non_changelog_dirty)"
 
 printf '\n[test-release] %d passed, %d failed\n' "$PASS" "$FAIL" >&2
 [ "$FAIL" -eq 0 ]
