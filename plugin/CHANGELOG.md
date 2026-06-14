@@ -1,5 +1,17 @@
 # Legion Changelog
 
+## 0.18.2
+
+The kanban reconcile release. Cards minted from GitHub issues never moved to a terminal state when the linked issue closed, so a board accumulated "shipped-pending" zombies -- active-local cards whose linked issue is already CLOSED or MERGED -- until someone ran `legion kanban reconcile` by hand. A woken agent grooming that board acted on closed work (observed on rafters: 65 of 86 "open" cards were already shipped). The watch daemon now runs the safe reconcile direction on its own slow timer. Patch release: additive behavior within the existing watch surface, no wire-format change, no schema migration.
+
+### New
+
+- **Daemon auto-reconciles shipped-pending kanban cards** (PR #655, #654): `WatchLoop::tick_reconcile` scans the board for active-local cards whose linked GitHub issue is already CLOSED or MERGED and cancels them locally, so the board a woken agent grooms reflects GitHub reality without a manual `legion kanban reconcile`. Only the safe, purely-local cancel-shipped direction is automated; `--close-stale` (which closes live GitHub issues) stays a manual CLI action and is structurally unreachable from the daemon path. Per-card and per-repo work-source failures are logged and skipped, never aborting the pass. The reconcile scan and both actions were extracted from the CLI handler into a shared `kanban::reconcile` module so the daemon and the CLI run identical logic (the CLI arm shed ~280 lines of duplicated scan/action code).
+
+### Config
+
+- **`reconcile_interval_secs` in `watch.toml`** (#654): seconds between automatic shipped-pending reconcile passes. Default 3600 (hourly); `0` disables auto-reconcile entirely. Each card with a linked issue costs one work-source probe, so the cadence is deliberately slow, and the first pass fires one full interval after startup to avoid a probe storm on every daemon restart.
+
 ## 0.18.1
 
 The PTY wake reliability release. Auto-wake's default PTY spawn mode submitted the wake prompt with a single carriage return fired immediately after fork -- before the Claude TUI input pipeline is interactive -- so the submit was swallowed and the wake attempt aged silently to `abandoned`. Directed signals went unanswered. This release replaces fire-and-forget with a feedback-driven confirmed-submit protocol, validated empirically (six PTY experiments) before implementation. Patch release: a reliability fix within the existing watch surface, no wire-format change, no schema migration.
