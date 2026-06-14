@@ -38,6 +38,13 @@ cargo clippy --all-targets -- -D warnings || fail "clippy"
 step "cargo test"
 cargo test || fail "tests"
 
+step "shell-script tests"
+for t in test-release.sh test-sync-version.sh; do
+  if [ -f "${REPO_ROOT}/scripts/${t}" ]; then
+    bash "${REPO_ROOT}/scripts/${t}" || fail "scripts/${t}"
+  fi
+done
+
 if [ "${SKIP_SCIP:-0}" = "1" ]; then
   printf '\n[preflight] SCIP regen skipped (SKIP_SCIP=1)\n' >&2
 else
