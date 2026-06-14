@@ -143,6 +143,18 @@ pub struct WatchConfig {
     #[serde(default = "default_health_poll_secs")]
     pub health_poll_secs: u64,
 
+    /// Seconds between automatic shipped-pending reconcile passes (#654). On
+    /// each pass the daemon scans the board for cards whose linked GitHub
+    /// issue is already CLOSED/MERGED and cancels them locally, so a board
+    /// groomed by an agent reflects GitHub reality without a manual
+    /// `legion kanban reconcile`. Every card with a linked issue costs one
+    /// work-source probe, so this runs on a slow cadence -- default 3600 (one
+    /// hour). Set to `0` to disable auto-reconcile. Only the safe direction
+    /// (cancel-shipped, purely local) is automated; close-stale, which closes
+    /// live GitHub issues, stays a manual CLI action.
+    #[serde(default = "default_reconcile_interval_secs")]
+    pub reconcile_interval_secs: u64,
+
     /// Number of samples in the rolling pressure window.
     #[serde(default = "default_health_window_size")]
     pub health_window_size: usize,
@@ -248,6 +260,10 @@ fn default_health_poll_secs() -> u64 {
     5
 }
 
+fn default_reconcile_interval_secs() -> u64 {
+    3600
+}
+
 fn default_health_window_size() -> usize {
     6
 }
@@ -299,6 +315,7 @@ impl Default for WatchConfig {
             work_hours_end: None,
             health_threshold_pct: default_health_threshold(),
             health_poll_secs: default_health_poll_secs(),
+            reconcile_interval_secs: default_reconcile_interval_secs(),
             health_window_size: default_health_window_size(),
             retention_days: default_retention_days(),
             session_lock_ttl_secs: default_session_lock_ttl_secs(),
@@ -560,6 +577,22 @@ workdir = "/tmp"
         assert_eq!(config.submit_retry_max, 12);
         assert_eq!(config.submit_retry_interval_secs, 4);
         assert_eq!(config.submit_confirm_budget_secs, 60);
+        // #654 auto-reconcile defaults to hourly when the key is absent.
+        assert_eq!(config.reconcile_interval_secs, 3600);
+    }
+
+    #[test]
+    fn parse_config_reconcile_interval_explicit() {
+        // An operator can lengthen the cadence or disable it with 0.
+        let toml_str = r#"
+reconcile_interval_secs = 0
+
+[[repos]]
+name = "test"
+workdir = "/tmp"
+"#;
+        let config: WatchConfig = toml::from_str(toml_str).expect("parse config");
+        assert_eq!(config.reconcile_interval_secs, 0);
     }
 
     #[test]

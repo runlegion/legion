@@ -480,6 +480,8 @@ async fn run_watch_task(data_dir: &Path) {
     // Timer intervals are read from the loop-owned config.
     let poll_interval = std::time::Duration::from_secs(state.config.poll_interval_secs);
     let health_interval = std::time::Duration::from_secs(state.config.health_poll_secs);
+    // Auto-reconcile (#654) runs on a slow cadence; 0 disables it entirely.
+    let reconcile_interval = std::time::Duration::from_secs(state.config.reconcile_interval_secs);
 
     let mut poll_timer = tokio::time::Instant::now()
         .checked_sub(poll_interval)
@@ -487,6 +489,12 @@ async fn run_watch_task(data_dir: &Path) {
     let mut health_timer = tokio::time::Instant::now()
         .checked_sub(health_interval)
         .unwrap_or_else(tokio::time::Instant::now);
+    // Unlike poll/health, the reconcile timer starts at `now` (not
+    // now - interval) so the first pass fires one full interval after
+    // startup. Reconcile probes the work source once per linked card, so
+    // firing it immediately on every daemon bounce would storm `gh`; one
+    // interval of staleness after a restart is the cheaper tradeoff.
+    let mut reconcile_timer = tokio::time::Instant::now();
 
     loop {
         // Yield to tokio scheduler each iteration.
@@ -500,6 +508,13 @@ async fn run_watch_task(data_dir: &Path) {
         if poll_timer.elapsed() >= poll_interval {
             state.tick_poll();
             poll_timer = tokio::time::Instant::now();
+        }
+
+        if state.config.reconcile_interval_secs > 0
+            && reconcile_timer.elapsed() >= reconcile_interval
+        {
+            state.tick_reconcile();
+            reconcile_timer = tokio::time::Instant::now();
         }
     }
 }

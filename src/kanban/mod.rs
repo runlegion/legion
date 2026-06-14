@@ -4,6 +4,7 @@
 //! this file keeps the Card type, row mapping, and CRUD wrappers.
 
 mod format;
+pub mod reconcile;
 mod state;
 
 pub use format::*;
