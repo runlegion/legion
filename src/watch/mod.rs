@@ -346,6 +346,44 @@ impl WatchLoop {
             eprintln!("{} watch_handled prune error: {e}", self.log_prefix);
         }
     }
+
+    /// Run one auto-reconcile tick (#654): scan the whole board for
+    /// shipped-pending drift (active-local cards whose linked GitHub issue is
+    /// already CLOSED/MERGED) and cancel those cards locally so the board a
+    /// woken agent grooms reflects GitHub reality instead of stale `pending`
+    /// rows.
+    ///
+    /// Only this safe, purely-local direction is automated. The destructive
+    /// direction (close-stale, which closes live GitHub issues from local
+    /// state) is never run here -- it stays a manual `legion kanban reconcile
+    /// --close-stale` action. A scan error or per-card cancel failure is
+    /// logged and the tick returns; it never aborts the loop.
+    ///
+    /// The caller gates the cadence on `config.reconcile_interval_secs` and
+    /// only invokes this when that interval is non-zero.
+    pub fn tick_reconcile(&mut self) {
+        let report = match crate::kanban::reconcile::scan_drift(&self.db, None, self.log_prefix) {
+            Ok(report) => report,
+            Err(e) => {
+                eprintln!("{} reconcile scan error: {e}", self.log_prefix);
+                return;
+            }
+        };
+
+        if report.shipped_pending.is_empty() {
+            return;
+        }
+
+        let (cancelled, failed) = crate::kanban::reconcile::cancel_shipped_pending(
+            &self.db,
+            &report.shipped_pending,
+            self.log_prefix,
+        );
+        eprintln!(
+            "{} reconcile: auto-cancelled {cancelled} shipped-pending card(s), {failed} failed",
+            self.log_prefix
+        );
+    }
 }
 
 /// Outcome of evaluating the per-poll spawn gates. Shared by `watch::run` and
@@ -438,6 +476,8 @@ pub fn run(data_dir: &Path) -> Result<()> {
     // Timer intervals are read from the loop-owned config.
     let poll_interval: Duration = Duration::from_secs(state.config.poll_interval_secs);
     let health_interval: Duration = Duration::from_secs(state.config.health_poll_secs);
+    // Auto-reconcile (#654) runs on a slow cadence; 0 disables it entirely.
+    let reconcile_interval: Duration = Duration::from_secs(state.config.reconcile_interval_secs);
 
     // Use checked_sub so a near-zero system clock cannot overflow and panic.
     let mut poll_timer: Instant = Instant::now()
@@ -446,6 +486,9 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let mut health_timer: Instant = Instant::now()
         .checked_sub(health_interval)
         .unwrap_or_else(Instant::now);
+    // Reconcile starts at `now` so the first pass fires one full interval
+    // after startup -- see the daemon driver for the probe-storm rationale.
+    let mut reconcile_timer: Instant = Instant::now();
 
     eprintln!(
         "[legion watch] watching repos: {}",
@@ -469,6 +512,14 @@ pub fn run(data_dir: &Path) -> Result<()> {
         if poll_timer.elapsed() >= poll_interval {
             state.tick_poll();
             poll_timer = Instant::now();
+        }
+
+        // Auto-reconcile on its own slow interval (0 disables).
+        if state.config.reconcile_interval_secs > 0
+            && reconcile_timer.elapsed() >= reconcile_interval
+        {
+            state.tick_reconcile();
+            reconcile_timer = Instant::now();
         }
 
         std::thread::sleep(Duration::from_secs(1));
@@ -643,6 +694,26 @@ mod tests {
         assert!(
             after.is_empty(),
             "informational signal should be handled after tick_poll with Proceed gate"
+        );
+    }
+
+    /// `tick_reconcile` on a board with no cards is a quiet no-op (#654).
+    ///
+    /// The scan finds nothing to probe (no cards have a linked issue), so it
+    /// returns an empty report and cancels nothing. This proves the daemon's
+    /// auto-reconcile wiring is safe to fire on an idle board without a live
+    /// work source -- the real cancel path is covered in
+    /// `kanban::reconcile::tests`.
+    #[test]
+    fn watch_loop_tick_reconcile_empty_board_is_noop() {
+        let (db, _index, _dir) = test_storage();
+        let mut state = test_watch_loop(db, "[legion test]");
+        // Must not panic and must leave the (empty) board untouched.
+        state.tick_reconcile();
+        let cards = crate::kanban::board_cards(&state.db).expect("board cards");
+        assert!(
+            cards.is_empty(),
+            "no cards should exist after reconcile no-op"
         );
     }
 

@@ -327,6 +327,32 @@ enum PropagateOutcome {
     Failed,
 }
 
+/// Print one drift bucket of a `legion kanban reconcile` scan to stdout: the
+/// empty-state line when nothing drifted, otherwise the count line followed by
+/// one row per card. Keeps the operator-facing report in the CLI while the
+/// scan/action logic lives in `kanban::reconcile`.
+fn print_drift_bucket(
+    drifts: &[kanban::reconcile::Drift],
+    plural_label: &str,
+    empty_message: &str,
+) {
+    if drifts.is_empty() {
+        println!("[legion] reconcile: {empty_message}");
+        return;
+    }
+    println!("[legion] reconcile: {} {plural_label} found", drifts.len());
+    for drift in drifts {
+        println!(
+            "  card={} status={} source={}#{} to_repo={}",
+            drift.card.id,
+            drift.card.status.label(),
+            drift.source_repo,
+            drift.number,
+            drift.card.to_repo
+        );
+    }
+}
+
 /// Close the GitHub issue linked to a kanban card via the work source
 /// plugin, and write an audit entry describing the propagation. Called by
 /// `legion kanban cancel` and `legion done --id` (#610 folded the Done
@@ -854,305 +880,54 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
             let close_stale = close_stale || apply;
             let cancel_shipped = cancel_shipped || apply;
 
-            // One pass over the board, partitioning by drift
-            // direction. Each card with a `source_url` triggers
-            // exactly one `view_issue` probe; the resulting state
-            // determines which (if any) bucket it lands in.
-            let cards = kanban::board_cards(&database)?;
-            let mut stale: Vec<(kanban::Card, u64, String)> = Vec::new();
-            let mut shipped_pending: Vec<(kanban::Card, u64, String)> = Vec::new();
+            // One pass over the board, partitioning by drift direction. The
+            // scan, the close-stale action, and the cancel-shipped action all
+            // live in `kanban::reconcile` so the daemon's auto-reconcile tick
+            // (#654) shares exactly this logic; this arm owns only the
+            // operator-facing stdout report and the dry-run hints.
+            let report = kanban::reconcile::scan_drift(&database, repo.as_deref(), "[legion]")?;
 
-            for card in cards {
-                // Active vs. terminal: terminal cards (done /
-                // cancelled) are direction-1 candidates;
-                // anything else (pending, in-progress, blocked,
-                // ...) is direction-2.
-                let is_terminal = matches!(
-                    card.status,
-                    kanban::CardStatus::Done | kanban::CardStatus::Cancelled
-                );
+            print_drift_bucket(
+                &report.stale_open,
+                "stale-open issue(s)",
+                "no stale-open issues found",
+            );
+            print_drift_bucket(
+                &report.shipped_pending,
+                "shipped-pending card(s)",
+                "no shipped-pending cards found",
+            );
 
-                if let Some(ref filter) = repo
-                    && card.to_repo != *filter
-                {
-                    continue;
-                }
-
-                let Some(ref source_url) = card.source_url else {
-                    continue;
-                };
-                let Some(number) = worksource::extract_issue_number(source_url) else {
-                    continue;
-                };
-                let Some(source) = card.source_type.as_deref() else {
-                    continue;
-                };
-                let Some((_, source_repo, _)) = worksource::resolve_config(&card.to_repo) else {
-                    eprintln!(
-                        "[legion] reconcile: skipping card {} -- to_repo '{}' has no work source configured",
-                        card.id, card.to_repo
-                    );
-                    continue;
-                };
-
-                // Query the live issue state. view_issue returns
-                // ExternalIssue with a `state` field that is
-                // "OPEN" or "CLOSED" for GitHub. Any other
-                // value is treated as "unknown" and skipped
-                // with a warning so a plugin that returns a
-                // non-standard state does not silently get
-                // reported as stale-open.
-                let state = match worksource::view_issue(source, &source_repo, number) {
-                    Ok(issue) => issue.state,
-                    Err(e) => {
-                        eprintln!(
-                            "[legion] reconcile: failed to view {} issue #{}: {}",
-                            source_repo, number, e
-                        );
-                        continue;
-                    }
-                };
-
-                // Direction 1: terminal-local + open-on-GH.
-                // Direction 2: active-local + closed/merged-on-GH.
-                // GitHub PR-merge events report state="CLOSED" with
-                // a separate stateReason or pr metadata; treat
-                // anything in the closed-family as "shipped" for
-                // direction 2 purposes.
-                let upper = state.to_uppercase();
-                match (is_terminal, upper.as_str()) {
-                    (true, "OPEN") => {
-                        stale.push((card.clone(), number, source_repo.clone()));
-                    }
-                    (false, "CLOSED" | "MERGED") => {
-                        shipped_pending.push((card.clone(), number, source_repo.clone()));
-                    }
-                    _ => {}
-                }
-            }
-
-            if stale.is_empty() {
-                println!("[legion] reconcile: no stale-open issues found");
-            } else {
+            if close_stale && !report.stale_open.is_empty() {
                 println!(
-                    "[legion] reconcile: {} stale-open issue(s) found",
-                    stale.len()
+                    "[legion] reconcile: closing {} stale issue(s)",
+                    report.stale_open.len()
                 );
-                for (card, number, source_repo) in &stale {
-                    println!(
-                        "  card={} status={} source={}#{} to_repo={}",
-                        card.id,
-                        card.status.label(),
-                        source_repo,
-                        number,
-                        card.to_repo
-                    );
-                }
-            }
-
-            if shipped_pending.is_empty() {
-                println!("[legion] reconcile: no shipped-pending cards found");
-            } else {
-                println!(
-                    "[legion] reconcile: {} shipped-pending card(s) found",
-                    shipped_pending.len()
-                );
-                for (card, number, source_repo) in &shipped_pending {
-                    println!(
-                        "  card={} status={} source={}#{} to_repo={}",
-                        card.id,
-                        card.status.label(),
-                        source_repo,
-                        number,
-                        card.to_repo
-                    );
-                }
-            }
-
-            if close_stale && !stale.is_empty() {
-                println!("[legion] reconcile: closing {} stale issue(s)", stale.len());
-                let mut closed = 0_u64;
-                let mut failed = 0_u64;
-                for (card, number, source_repo) in &stale {
-                    let Some(source) = card.source_type.as_deref() else {
-                        continue;
-                    };
-                    let reconcile_comment = format!(
-                        "Closed by legion reconcile: local card {} is {} but this issue was left open. Reconciling to match the local state.",
-                        card.id,
-                        card.status.label()
-                    );
-                    match worksource::close_issue(
-                        source,
-                        source_repo,
-                        *number,
-                        Some(&reconcile_comment),
-                    ) {
-                        Ok(()) => {
-                            closed += 1;
-                            eprintln!(
-                                "[legion] reconcile: closed {} issue #{}",
-                                source_repo, number
-                            );
-                            let details = serde_json::json!({
-                                "card_id": card.id,
-                                "propagation": "reconcile",
-                            });
-                            let details_str = details.to_string();
-                            audit(
-                                &database,
-                                &db::AuditInput {
-                                    agent: &card.to_repo,
-                                    action: "close-issue",
-                                    target_type: "issue",
-                                    target_ref: &number.to_string(),
-                                    task_id: Some(&card.id),
-                                    source_type: source,
-                                    details: Some(&details_str),
-                                    outcome: "success",
-                                },
-                            );
-                        }
-                        Err(e) => {
-                            failed += 1;
-                            eprintln!(
-                                "[legion] reconcile: failed to close {} issue #{}: {}",
-                                source_repo, number, e
-                            );
-                            // Record the failure in the audit log
-                            // so a human operator running
-                            // `legion audit --action close-issue`
-                            // can see exactly which stale issues
-                            // reconcile could not close. Without
-                            // this, a reconcile run that fails
-                            // on 3 of 10 issues leaves no durable
-                            // record of which 3 -- same class of
-                            // invisibility the PR is fixing for
-                            // the direct cancel path.
-                            let err_msg = e.to_string();
-                            let details = serde_json::json!({
-                                "card_id": card.id,
-                                "propagation": "reconcile",
-                                "error": err_msg,
-                            });
-                            let details_str = details.to_string();
-                            audit(
-                                &database,
-                                &db::AuditInput {
-                                    agent: &card.to_repo,
-                                    action: "close-issue",
-                                    target_type: "issue",
-                                    target_ref: &number.to_string(),
-                                    task_id: Some(&card.id),
-                                    source_type: source,
-                                    details: Some(&details_str),
-                                    outcome: "failure",
-                                },
-                            );
-                        }
-                    }
-                }
-                println!("[legion] reconcile: {} closed, {} failed", closed, failed);
+                let (closed, failed) =
+                    kanban::reconcile::close_stale_open(&database, &report.stale_open, "[legion]");
+                println!("[legion] reconcile: {closed} closed, {failed} failed");
             } else if close_stale {
                 println!("[legion] reconcile: nothing to close");
-            } else if !stale.is_empty() {
+            } else if !report.stale_open.is_empty() {
                 println!(
                     "[legion] reconcile: dry-run -- pass --close-stale to actually close these issues"
                 );
             }
 
-            // Direction 2 action: cancel shipped-pending cards
-            // locally with --no-propagate semantics. The linked
-            // GitHub issue is already CLOSED/MERGED, so calling
-            // worksource::close_issue would either no-op or
-            // double-touch the audit log.
-            if cancel_shipped && !shipped_pending.is_empty() {
+            if cancel_shipped && !report.shipped_pending.is_empty() {
                 println!(
                     "[legion] reconcile: cancelling {} shipped-pending card(s) locally",
-                    shipped_pending.len()
+                    report.shipped_pending.len()
                 );
-                let mut cancelled = 0_u64;
-                let mut failed = 0_u64;
-                for (card, number, source_repo) in &shipped_pending {
-                    // The partition above only enqueued cards
-                    // whose source_type was Some; defensively
-                    // re-check to avoid a misleading audit row
-                    // if a future refactor moves the guard.
-                    let Some(source_type) = card.source_type.as_deref() else {
-                        continue;
-                    };
-                    let note = format!(
-                        "reconcile: linked {}#{} already closed on GitHub",
-                        source_repo, number
-                    );
-                    match kanban::transition_card(
-                        &database,
-                        &card.id,
-                        kanban::Action::Cancel,
-                        Some(&note),
-                    ) {
-                        Ok(_) => {
-                            cancelled += 1;
-                            eprintln!(
-                                "[legion] reconcile: cancelled card {} ({}#{})",
-                                card.id, source_repo, number
-                            );
-                            let details = serde_json::json!({
-                                "card_id": card.id,
-                                "propagation": "reconcile-shipped",
-                                "external_number": number,
-                            });
-                            let details_str = details.to_string();
-                            audit(
-                                &database,
-                                &db::AuditInput {
-                                    agent: &card.to_repo,
-                                    action: "cancel-card",
-                                    target_type: "card",
-                                    target_ref: &card.id,
-                                    task_id: Some(&card.id),
-                                    source_type,
-                                    details: Some(&details_str),
-                                    outcome: "success",
-                                },
-                            );
-                        }
-                        Err(e) => {
-                            failed += 1;
-                            eprintln!(
-                                "[legion] reconcile: failed to cancel card {}: {}",
-                                card.id, e
-                            );
-                            let err_msg = e.to_string();
-                            let details = serde_json::json!({
-                                "card_id": card.id,
-                                "propagation": "reconcile-shipped",
-                                "error": err_msg,
-                            });
-                            let details_str = details.to_string();
-                            audit(
-                                &database,
-                                &db::AuditInput {
-                                    agent: &card.to_repo,
-                                    action: "cancel-card",
-                                    target_type: "card",
-                                    target_ref: &card.id,
-                                    task_id: Some(&card.id),
-                                    source_type,
-                                    details: Some(&details_str),
-                                    outcome: "failure",
-                                },
-                            );
-                        }
-                    }
-                }
-                println!(
-                    "[legion] reconcile: {} cancelled, {} failed",
-                    cancelled, failed
+                let (cancelled, failed) = kanban::reconcile::cancel_shipped_pending(
+                    &database,
+                    &report.shipped_pending,
+                    "[legion]",
                 );
+                println!("[legion] reconcile: {cancelled} cancelled, {failed} failed");
             } else if cancel_shipped {
                 println!("[legion] reconcile: nothing to cancel");
-            } else if !shipped_pending.is_empty() {
+            } else if !report.shipped_pending.is_empty() {
                 println!(
                     "[legion] reconcile: dry-run -- pass --cancel-shipped to actually cancel these cards"
                 );
