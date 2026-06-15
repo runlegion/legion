@@ -27,8 +27,12 @@ A pure `document_transition(current, action)` in a new `src/documents/state.rs`,
 
 `Draft -> Proposed -> Adopted`; `Proposed -> Rejected`; `Adopted -> Superseded`; `Rejected/Proposed -> Draft`. `Adopt` is the operator-only release (the `Resume`-equivalent). Unlisted pairs return `Err(InvalidDocumentTransition)` before any DB write. Exhaustively unit-tested, same shape as kanban.
 
+**`Superseded` trigger (vault refinement):** `Superseded` means *replaced by a different document* (a new id), NOT in-place content revision. id-stable `update` keeps the id and status; routing a revision through `Superseded` would re-introduce the id churn this RFC kills. Supersede only when a genuinely new document replaces an adopted one.
+
 ### 2. Disjoint authority -- no dual-writer
 `transition_card_status_with_sync` (`src/db/kanban.rs:684-688`) is today the sole post-insert writer of `documents.status` (requirement docs, card-driven). The governance machine must not become a second writer. Resolution: **the two authorities never touch the same document.** Requirement docs are card-bound and stay card-driven; the governance machine governs only unbound canon/definition docs (schema, nfr, charter, blueprint, persona, journey, ecosystem, painmatrix, research). `transition_document` refuses when the document has a live bound card (reuse `live_card_bound_to_document`, `src/db/kanban.rs:789`). Disjoint doc-sets, one `status` column, no conflict.
+
+The split is **dynamic, not by doc-type** (vault refinement): an NFR can be card-bound (verifiable, like a requirement) or unbound (canon). The live-bound-card check resolves it per-document -- unbound NFR = governance-driven, card-bound NFR = card-driven -- so the same rule covers requirements and NFRs without enumerating types.
 
 ### 3. id-stable update (#658)
 `update_document` mutates payload content in place -- id, doc_type, created_at immutable -- writing the hoisted `documents.status` column and `payload.meta` atomically in one `unchecked_transaction()` (the established primitive). Status changes go through `transition`, not `update`. Consumers resolve canon by type+title with adoption-status as the pointer, never a hardcoded id (`019ebd18`) -- id-stable update is what makes that convention coherent.
@@ -40,6 +44,10 @@ The human gate ports onto two mechanisms that already exist:
 - **Hard enforcement = the spawn marker.** The PTY spawn stamps every watch-spawned agent with `LEGION_AUTO_WAKE=1` / `LEGION_SPAWN_SOURCE=watch-pty` (`src/watch/spawn.rs:276-279`). A prime-owned pre-bash hook blocks `create --status adopted`, `transition <id> adopt`, and `document adopt <id>` when `LEGION_AUTO_WAKE` is present (agent); allows when absent (operator). The hook reads the session env the agent cannot rewrite for it -- the `pre-bash-grep` contract; bypass logs to `bypass.jsonl`.
 
 Two enforcement points close the hole: `create` rejects `--status adopted` under the marker; the `Adopt` action is agent-blocked. Agents are capped at `draft<->proposed`.
+
+**Re-gate on content change (vault, load-bearing -- fold into #660 before it lands).** The gate guards the *status transition* to `Adopted`, but `update_document` (#658) mutates payload IN PLACE independent of status. Without a rule, an agent adopts (operator-gated) and then `update`s the now-adopted content freely -- canon mutates ungated; the hole just moved one call over. Fix: a content `update` to an `Adopted` document **auto-transitions it `Adopted -> Proposed`** (and emits the `proposal:review` signal), so every canon change re-enters the same gate as the first adoption. `update` on a non-adopted doc is unaffected. This couples #658 and #660: `update_document` must be status-aware.
+
+**What "operator-validated" actually means (vault).** `LEGION_AUTO_WAKE`-absent proves the session is NOT watch-spawned (autonomy-absent) -- it does not cryptographically prove human-ness; a non-watch-spawned interactive agent session would also pass. Per the no-crypto-auth non-goal this is acceptable (strong-by-default + audited via `bypass.jsonl`), but consumers MUST NOT over-trust `adopted` as unforgeable. `adopted` = blessed in a human-present, audited session. The vault-held adoption secret remains the future hardening if the threat model tightens.
 
 ## Non-goals (do not revisit)
 
