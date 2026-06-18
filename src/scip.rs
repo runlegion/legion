@@ -326,11 +326,12 @@ fn run_scip_go(repo_path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Run a SCIP indexer binary against `repo_path`. Returns the bytes of the
-/// `index.scip` protobuf written into the repo root, or a typed error
-/// describing the failure mode (binary not on PATH, subprocess exited
+/// `index.scip` protobuf the binary writes into the repo root, or a typed
+/// error describing the failure mode (binary not on PATH, subprocess exited
 /// non-zero, output file unreadable). The `lang` is carried into error
 /// variants so callers see which language failed even when several share
-/// this helper.
+/// this helper. The on-disk `index.scip` is removed once its bytes are read
+/// (best-effort) -- it is a transient artifact, never read again after ingest.
 fn run_indexer_binary(
     lang: &str,
     binary: &str,
@@ -362,6 +363,14 @@ fn run_indexer_binary(
 
     let scip_path = repo_path.join("index.scip");
     let bytes = std::fs::read(&scip_path)?;
+    // The protobuf is transient: the caller ingests these bytes into the
+    // SQLite scip_indexes column, and no regen ever reads the prior file as
+    // input -- each run regenerates it from source. Left in the repo root it
+    // reads as a stray artifact that agents repeatedly try to delete, so
+    // remove it once the bytes are captured. Best-effort by design: the bytes
+    // are already in hand, so a failed removal must not fail the index. The
+    // `/index.scip` gitignore entry remains as a safety net for that edge.
+    let _ = std::fs::remove_file(&scip_path);
     Ok(bytes)
 }
 
@@ -985,6 +994,12 @@ mod tests {
         }
         let bytes = bytes_result.expect("rust-analyzer fallback should succeed");
         assert_eq!(bytes, b"fake-scip-bytes");
+        // The transient protobuf is removed once its bytes are captured, so a
+        // successful index leaves no stray index.scip in the repo root.
+        assert!(
+            !repo.path().join("index.scip").exists(),
+            "index.scip should be removed from repo root after ingest"
+        );
         drop(shim_dir);
 
         // Phase 2: empty PATH (no binaries) -> IndexerNotFound naming both.
