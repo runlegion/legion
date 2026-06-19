@@ -1,5 +1,13 @@
 # Legion Changelog
 
+## 0.18.3
+
+The stray-artifact release. `legion index` left a multi-megabyte `index.scip` protobuf in the root of every indexed repo. Because gitignored files are still visible in the working tree, agents grooming a repo read it as junk and repeatedly tried to delete it. The file is purely transient -- its bytes are ingested into the SQLite `scip_indexes` column the moment they are read, and no regen ever consults the prior file (each run rebuilds it from source) -- so legion now removes it as soon as the bytes are captured. Patch release: a behavior fix within the existing index surface, no wire-format change, no schema migration.
+
+### Fixed
+
+- **`index.scip` no longer lingers in the repo root** (PR #664, #663): `run_indexer_binary` deletes the on-disk protobuf immediately after reading its bytes into memory, in the single shared path that backs all nine language indexers, so the stray artifact stops appearing across every language and every indexed repo. Removal is best-effort by design -- the bytes are already captured and stored before the unlink, so a failed removal does not fail the index, and the `/index.scip` gitignore entry is retained as a safety net for that edge. `fs::read` remains a hard error: no bytes still means no index.
+
 ## 0.18.2
 
 The kanban reconcile release. Cards minted from GitHub issues never moved to a terminal state when the linked issue closed, so a board accumulated "shipped-pending" zombies -- active-local cards whose linked issue is already CLOSED or MERGED -- until someone ran `legion kanban reconcile` by hand. A woken agent grooming that board acted on closed work (observed on rafters: 65 of 86 "open" cards were already shipped). The watch daemon now runs the safe reconcile direction on its own slow timer. Patch release: additive behavior within the existing watch surface, no wire-format change, no schema migration.
