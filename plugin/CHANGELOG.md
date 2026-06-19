@@ -1,5 +1,17 @@
 # Legion Changelog
 
+## 0.18.4
+
+The rubberstamp-killer release. An audit of the quality-gate corpus found legion-simplify was clearing 99.3% of runs as "clean" -- a 0.66% catch rate against 23.5% for `pr write-check`, the same self-review-your-own-diff structure but with validated prose. Two changes close the gap. The gate corpus becomes auditable through the binary, and the simplify gate is rebuilt from a yes/no record into an articulation forcing-function so a clean result means a per-file review actually happened. Patch release: additive subcommands within the existing quality-gate surface plus a skill rewrite; no wire-format change, no schema migration.
+
+### New
+
+- **`legion quality-gate list` and `legion quality-gate stats`** (PR #667, #666): read subcommands over the `quality_gates` table, which was record-only until now. `list` returns gate rows newest-first, filterable by skill/result/branch/since, as a human table or `--json` array. `stats` reports per-skill runs, clean and issues counts, catch rate (issues/runs), and total/max findings -- the rubberstamp tripwire that turns a near-zero catch rate into a one-line query instead of a manual SQL dig. Both are strictly read-only; no new write path. Caveat: catch rate is a meaningful rubberstamp signal only for gates that record a first-pass `issues` row before fixing (simplify, pr-write); legion-review records `clean` for approved even after fixing findings, so read its `details` not its `result`.
+
+### Changed
+
+- **legion-simplify is now an articulation forcing-function** (PR #668, #665): the skill records its gate only through `legion quality-gate check --skill legion-simplify --result <clean|issues> --articulation-file <f>`, which resolves the changed-file set from `git -c core.quotePath=false diff --name-only main...HEAD` (three-dot merge-base range) and refuses unless every changed file has a substantive, non-boilerplate `### <path>` articulation entry. A failed articulation exits non-zero before any DB write, so no gate row is recorded and `legion pr create` stays blocked. A clean gate now means an accepted per-file review exists, not that an agent typed "clean". The substance threshold (`MIN_MAPPING_WORDS`) and the line-stripper are shared with `pr write-check` so both gates use one bar. The base-ref resolution hard-errors when it cannot determine a base (shallow clone, non-`main` default, detached checkout) rather than vacuously passing -- a git failure can no longer silently disable the gate.
+
 ## 0.18.3
 
 The stray-artifact release. `legion index` left a multi-megabyte `index.scip` protobuf in the root of every indexed repo. Because gitignored files are still visible in the working tree, agents grooming a repo read it as junk and repeatedly tried to delete it. The file is purely transient -- its bytes are ingested into the SQLite `scip_indexes` column the moment they are read, and no regen ever consults the prior file (each run rebuilds it from source) -- so legion now removes it as soon as the bytes are captured. Patch release: a behavior fix within the existing index surface, no wire-format change, no schema migration.
