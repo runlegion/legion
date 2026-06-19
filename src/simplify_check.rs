@@ -127,6 +127,9 @@ pub fn validate_articulation(
     }
 
     // Substance check: each entry must have enough prose.
+    // strip_evidence_lines already drops `### ` heading lines (they start with
+    // "### "), so the heading path tokens do not count toward the word
+    // threshold -- only the body prose does.
     for entry in &entries {
         let prose = strip_evidence_lines(&entry.raw);
         let words = prose.split_whitespace().count();

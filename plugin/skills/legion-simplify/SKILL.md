@@ -26,7 +26,9 @@ file by file, the reasoning that says clean.
 
 ## What to Review
 
-Inspect `git diff main..HEAD` (or `git diff origin/main..HEAD`). For each changed file, look for:
+Inspect `git diff main...HEAD` (or `git diff origin/main...HEAD`). Use the three-dot form
+(`...`) -- it diffs against the merge base, so files changed only on main since your branch
+point do not appear in your coverage list. The validator uses the same three-dot range. For each changed file, look for:
 
 - **Duplicate logic** -- same transformation or check written twice; extract a shared helper
 - **Unnecessary abstraction** -- a wrapper or trait that adds indirection without buying
@@ -66,7 +68,11 @@ Error paths propagate via `?`. No stringly-typed state. Verdict: clean.
 
 ## Procedure
 
-1. `git diff --name-only main..HEAD` (fall back to `origin/main..HEAD`) -- this is your coverage list.
+1. `git -c core.quotePath=false diff --name-only main...HEAD` (fall back to
+   `origin/main...HEAD`) -- this is your coverage list. The `-c core.quotePath=false` flag
+   ensures paths with non-ASCII characters are returned unescaped, matching the headings you
+   write in step 2. Use `### <path>` headings that are repo-root-relative paths exactly as
+   git reports them (e.g. `### src/café.rs`, not an escaped or shortened form).
 2. For EACH changed file: read it, review its hunks against the categories above, and write its
    `### <path>` entry with real reasoning.
 3. Write the articulation to a file (e.g. `/tmp/simplify-<branch>.md`).

@@ -229,6 +229,9 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // Articulation is valid. Record the gate under HEAD.
             // findings_count is the skill's own count (real simplify findings),
             // not the validator's gap count (which is 0 when we reach here).
+            // It is valid for --result issues to carry --findings-count 0: the
+            // flag is informational, and the skill runner may not always surface
+            // a count. The gate result is what matters for `legion pr create`.
             let (commit_hash, branch) = git_head_commit_and_branch()?;
             let details = serde_json::json!({
                 "skill": skill,
