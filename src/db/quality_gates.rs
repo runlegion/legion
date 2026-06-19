@@ -200,7 +200,7 @@ pub struct QualityGateFilter {
 }
 
 /// Aggregate stats for a single skill across matching rows.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct QualityGateStats {
     pub skill: String,
     /// Total number of gate runs recorded for this skill.
@@ -557,6 +557,10 @@ mod tests {
             None,
         )
         .unwrap();
+        // Force a strictly later timestamp so ORDER BY created_at DESC is
+        // deterministic; two back-to-back inserts can otherwise land in the
+        // same sub-second RFC3339 bucket (same fix as the filter_by_since test).
+        std::thread::sleep(std::time::Duration::from_millis(1));
         db.record_quality_gate(
             "main",
             "hash-b",

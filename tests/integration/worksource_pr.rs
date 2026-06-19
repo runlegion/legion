@@ -1003,12 +1003,17 @@ fn quality_gate_list_filter_by_result() {
 
     let stdout =
         run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--result", "issues"]));
-    // There should be exactly one row (issues). The clean row should be absent.
-    // We check the findings count column since "issues" appears in both result
-    // and the header word "ISSUES".
+    // Exactly one row (issues); the clean row must be filtered out. Assert both
+    // that the issues row is present (findings_count=2) AND that the clean row is
+    // absent -- "clean" appears nowhere in the header or the issues row, so its
+    // absence confirms the filter where contains("2") alone could not.
     assert!(
         stdout.contains("2"),
         "expected findings_count=2 in the issues row, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("clean"),
+        "expected the clean row to be filtered out, got: {stdout}"
     );
 }
 
