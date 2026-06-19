@@ -183,6 +183,209 @@ impl Database {
     }
 }
 
+/// Filter parameters for `list_quality_gates`.
+///
+/// All fields are optional; `None` means "no filter on this dimension".
+/// Results are ordered newest-first.
+#[derive(Debug, Default)]
+pub struct QualityGateFilter {
+    /// Restrict to rows whose `skill` equals this value.
+    pub skill: Option<String>,
+    /// Restrict to rows whose `result` equals this value.
+    pub result: Option<GateResult>,
+    /// Restrict to rows whose `branch` equals this value.
+    pub branch: Option<String>,
+    /// Restrict to rows whose `created_at` is >= this RFC3339 timestamp.
+    pub since: Option<String>,
+}
+
+/// Aggregate stats for a single skill across matching rows.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QualityGateStats {
+    pub skill: String,
+    /// Total number of gate runs recorded for this skill.
+    pub runs: u64,
+    /// Runs whose result was "clean".
+    pub clean: u64,
+    /// Runs whose result was "issues".
+    pub issues: u64,
+    /// Fraction of runs that found issues: `issues / runs`.
+    /// Zero when `runs == 0` (unreachable in practice since the row
+    /// only appears when there is at least one run).
+    pub catch_rate: f64,
+    /// Sum of `findings_count` across all matching rows.
+    pub total_findings: u64,
+    /// Maximum `findings_count` across all matching rows.
+    pub max_findings: u64,
+}
+
+impl Database {
+    /// Return gate rows matching `filter`, newest first.
+    ///
+    /// An empty result set is not an error; the caller decides how to
+    /// present it. All filter fields are applied with AND semantics.
+    pub fn list_quality_gates(&self, filter: &QualityGateFilter) -> Result<Vec<QualityGateRow>> {
+        // Build the WHERE clause dynamically so we only push predicates that
+        // were actually requested. The param vec is built in the same order.
+        let mut predicates: Vec<&str> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if filter.skill.is_some() {
+            predicates.push("skill = ?");
+        }
+        if filter.result.is_some() {
+            predicates.push("result = ?");
+        }
+        if filter.branch.is_some() {
+            predicates.push("branch = ?");
+        }
+        if filter.since.is_some() {
+            predicates.push("created_at >= ?");
+        }
+
+        let where_clause = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", predicates.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at \
+             FROM quality_gates \
+             {where_clause} \
+             ORDER BY created_at DESC"
+        );
+
+        // Push param values in the same order as the predicates.
+        if let Some(ref s) = filter.skill {
+            params.push(Box::new(s.clone()));
+        }
+        if let Some(ref r) = filter.result {
+            params.push(Box::new(r.as_str().to_owned()));
+        }
+        if let Some(ref b) = filter.branch {
+            params.push(Box::new(b.clone()));
+        }
+        if let Some(ref ts) = filter.since {
+            params.push(Box::new(ts.clone()));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |row| {
+                let result_str: String = row.get(4)?;
+                let findings_count_i64: i64 = row.get(5)?;
+                Ok(QualityGateRow {
+                    id: row.get(0)?,
+                    branch: row.get(1)?,
+                    commit_hash: row.get(2)?,
+                    skill: row.get(3)?,
+                    result: parse_result_from_db(result_str)?,
+                    findings_count: findings_count_i64.unsigned_abs(),
+                    details: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        )?;
+
+        let mut out: Vec<QualityGateRow> = Vec::new();
+        for row in rows {
+            out.push(row.map_err(LegionError::Database)?);
+        }
+        Ok(out)
+    }
+
+    /// Return per-skill aggregate statistics, optionally filtered by `skill`
+    /// and/or `since`.
+    ///
+    /// The aggregation runs in SQLite (SUM/COUNT/MAX), then `catch_rate` is
+    /// computed in Rust from the returned counts so no floating-point SQL
+    /// functions are needed. Results are ordered by skill name ascending.
+    pub fn quality_gate_stats(
+        &self,
+        skill: Option<&str>,
+        since: Option<&str>,
+    ) -> Result<Vec<QualityGateStats>> {
+        let mut predicates: Vec<&str> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if skill.is_some() {
+            predicates.push("skill = ?");
+        }
+        if since.is_some() {
+            predicates.push("created_at >= ?");
+        }
+
+        let where_clause = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", predicates.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT \
+               skill, \
+               COUNT(*) AS runs, \
+               SUM(CASE WHEN result = 'clean'  THEN 1 ELSE 0 END) AS clean, \
+               SUM(CASE WHEN result = 'issues' THEN 1 ELSE 0 END) AS issues, \
+               SUM(findings_count) AS total_findings, \
+               MAX(findings_count) AS max_findings \
+             FROM quality_gates \
+             {where_clause} \
+             GROUP BY skill \
+             ORDER BY skill ASC"
+        );
+
+        if let Some(s) = skill {
+            params.push(Box::new(s.to_owned()));
+        }
+        if let Some(ts) = since {
+            params.push(Box::new(ts.to_owned()));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |row| {
+                let skill_str: String = row.get(0)?;
+                let runs_i64: i64 = row.get(1)?;
+                let clean_i64: i64 = row.get(2)?;
+                let issues_i64: i64 = row.get(3)?;
+                let total_i64: i64 = row.get(4)?;
+                let max_i64: i64 = row.get(5)?;
+                Ok((
+                    skill_str, runs_i64, clean_i64, issues_i64, total_i64, max_i64,
+                ))
+            },
+        )?;
+
+        let mut out: Vec<QualityGateStats> = Vec::new();
+        for row in rows {
+            let (skill_str, runs_i64, clean_i64, issues_i64, total_i64, max_i64) =
+                row.map_err(LegionError::Database)?;
+            let runs = runs_i64.unsigned_abs();
+            let clean = clean_i64.unsigned_abs();
+            let issues = issues_i64.unsigned_abs();
+            let catch_rate = if runs == 0 {
+                0.0
+            } else {
+                issues as f64 / runs as f64
+            };
+            out.push(QualityGateStats {
+                skill: skill_str,
+                runs,
+                clean,
+                issues,
+                catch_rate,
+                total_findings: total_i64.unsigned_abs(),
+                max_findings: max_i64.unsigned_abs(),
+            });
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::db::testutil::test_db;
@@ -348,5 +551,234 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    // --- list_quality_gates tests ---
+
+    #[test]
+    fn list_quality_gates_empty_returns_empty_vec() {
+        use crate::db::quality_gates::QualityGateFilter;
+        let db = test_db();
+        let rows = db
+            .list_quality_gates(&QualityGateFilter::default())
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn list_quality_gates_newest_first() {
+        use crate::db::quality_gates::QualityGateFilter;
+        let db = test_db();
+        db.record_quality_gate(
+            "main",
+            "hash-a",
+            "legion-simplify",
+            GateResult::Clean,
+            0,
+            None,
+        )
+        .unwrap();
+        db.record_quality_gate(
+            "main",
+            "hash-b",
+            "legion-simplify",
+            GateResult::Issues,
+            2,
+            None,
+        )
+        .unwrap();
+
+        let rows = db
+            .list_quality_gates(&QualityGateFilter::default())
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        // Second insert is more recent; it must appear first.
+        assert_eq!(rows[0].commit_hash, "hash-b");
+        assert_eq!(rows[1].commit_hash, "hash-a");
+    }
+
+    #[test]
+    fn list_quality_gates_filter_by_skill() {
+        use crate::db::quality_gates::QualityGateFilter;
+        let db = test_db();
+        db.record_quality_gate("main", "h1", "legion-simplify", GateResult::Clean, 0, None)
+            .unwrap();
+        db.record_quality_gate("main", "h2", "legion-review", GateResult::Issues, 1, None)
+            .unwrap();
+
+        let rows = db
+            .list_quality_gates(&QualityGateFilter {
+                skill: Some("legion-simplify".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].skill, "legion-simplify");
+    }
+
+    #[test]
+    fn list_quality_gates_filter_by_result() {
+        use crate::db::quality_gates::QualityGateFilter;
+        let db = test_db();
+        db.record_quality_gate("main", "h1", "legion-simplify", GateResult::Clean, 0, None)
+            .unwrap();
+        db.record_quality_gate("main", "h2", "legion-simplify", GateResult::Issues, 3, None)
+            .unwrap();
+        db.record_quality_gate("main", "h3", "legion-review", GateResult::Clean, 0, None)
+            .unwrap();
+
+        let rows = db
+            .list_quality_gates(&QualityGateFilter {
+                result: Some(GateResult::Issues),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result, GateResult::Issues);
+        assert_eq!(rows[0].commit_hash, "h2");
+    }
+
+    #[test]
+    fn list_quality_gates_filter_by_branch() {
+        use crate::db::quality_gates::QualityGateFilter;
+        let db = test_db();
+        db.record_quality_gate("feat/foo", "h1", "s", GateResult::Clean, 0, None)
+            .unwrap();
+        db.record_quality_gate("main", "h2", "s", GateResult::Clean, 0, None)
+            .unwrap();
+
+        let rows = db
+            .list_quality_gates(&QualityGateFilter {
+                branch: Some("feat/foo".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].branch, "feat/foo");
+    }
+
+    #[test]
+    fn list_quality_gates_filter_by_since() {
+        use crate::db::quality_gates::QualityGateFilter;
+        let db = test_db();
+        // Insert two rows then filter by a timestamp that falls between them.
+        // We control created_at by inserting rows with a known sleep order;
+        // since the DB stores RFC3339 strings and sorts lexicographically we can
+        // insert rows and capture their timestamps to build the filter.
+        let row_a = db
+            .record_quality_gate("main", "h-old", "s", GateResult::Clean, 0, None)
+            .unwrap();
+        // Sleep briefly so the second row has a strictly later timestamp.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let row_b = db
+            .record_quality_gate("main", "h-new", "s", GateResult::Issues, 1, None)
+            .unwrap();
+
+        // Filter with since = row_b.created_at -- only row_b should match.
+        let rows = db
+            .list_quality_gates(&QualityGateFilter {
+                since: Some(row_b.created_at.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "expected only the newer row");
+        assert_eq!(rows[0].commit_hash, "h-new");
+        // row_a is before the cutoff.
+        assert!(rows.iter().all(|r| r.commit_hash != row_a.commit_hash));
+    }
+
+    // --- quality_gate_stats tests ---
+
+    #[test]
+    fn quality_gate_stats_empty_returns_empty_vec() {
+        let db = test_db();
+        let stats = db.quality_gate_stats(None, None).unwrap();
+        assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn quality_gate_stats_counts_and_catch_rate() {
+        let db = test_db();
+        // 3 runs for legion-simplify: 1 clean, 2 issues.
+        db.record_quality_gate("main", "h1", "legion-simplify", GateResult::Clean, 0, None)
+            .unwrap();
+        db.record_quality_gate("main", "h2", "legion-simplify", GateResult::Issues, 5, None)
+            .unwrap();
+        db.record_quality_gate("main", "h3", "legion-simplify", GateResult::Issues, 3, None)
+            .unwrap();
+        // 1 run for legion-review: 1 clean, findings = 0.
+        db.record_quality_gate("main", "h4", "legion-review", GateResult::Clean, 0, None)
+            .unwrap();
+
+        let stats = db.quality_gate_stats(None, None).unwrap();
+        assert_eq!(stats.len(), 2, "expected two skill rows");
+
+        // Results are skill-ordered ASC: legion-review first.
+        let review = &stats[0];
+        assert_eq!(review.skill, "legion-review");
+        assert_eq!(review.runs, 1);
+        assert_eq!(review.clean, 1);
+        assert_eq!(review.issues, 0);
+        assert!((review.catch_rate - 0.0).abs() < f64::EPSILON);
+        assert_eq!(review.total_findings, 0);
+        assert_eq!(review.max_findings, 0);
+
+        let simplify = &stats[1];
+        assert_eq!(simplify.skill, "legion-simplify");
+        assert_eq!(simplify.runs, 3);
+        assert_eq!(simplify.clean, 1);
+        assert_eq!(simplify.issues, 2);
+        // catch_rate = issues / runs = 2/3
+        let expected_rate = 2.0_f64 / 3.0_f64;
+        assert!(
+            (simplify.catch_rate - expected_rate).abs() < 1e-10,
+            "catch_rate mismatch: {} vs {}",
+            simplify.catch_rate,
+            expected_rate
+        );
+        assert_eq!(simplify.total_findings, 8); // 0 + 5 + 3
+        assert_eq!(simplify.max_findings, 5);
+    }
+
+    #[test]
+    fn quality_gate_stats_filter_by_skill() {
+        let db = test_db();
+        db.record_quality_gate("main", "h1", "legion-simplify", GateResult::Issues, 2, None)
+            .unwrap();
+        db.record_quality_gate("main", "h2", "legion-review", GateResult::Clean, 0, None)
+            .unwrap();
+
+        let stats = db
+            .quality_gate_stats(Some("legion-simplify"), None)
+            .unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].skill, "legion-simplify");
+        assert_eq!(stats[0].issues, 1);
+    }
+
+    #[test]
+    fn quality_gate_stats_catch_rate_all_clean() {
+        let db = test_db();
+        db.record_quality_gate("main", "h1", "s", GateResult::Clean, 0, None)
+            .unwrap();
+        db.record_quality_gate("main", "h2", "s", GateResult::Clean, 0, None)
+            .unwrap();
+
+        let stats = db.quality_gate_stats(None, None).unwrap();
+        assert_eq!(stats.len(), 1);
+        assert!((stats[0].catch_rate - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn quality_gate_stats_catch_rate_all_issues() {
+        let db = test_db();
+        db.record_quality_gate("main", "h1", "s", GateResult::Issues, 1, None)
+            .unwrap();
+        db.record_quality_gate("main", "h2", "s", GateResult::Issues, 1, None)
+            .unwrap();
+
+        let stats = db.quality_gate_stats(None, None).unwrap();
+        assert_eq!(stats.len(), 1);
+        assert!((stats[0].catch_rate - 1.0).abs() < f64::EPSILON);
     }
 }

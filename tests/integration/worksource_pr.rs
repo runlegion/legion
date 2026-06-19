@@ -873,3 +873,333 @@ fn done_propagation_failure_warns_on_stdout() {
         "expected the stdout partial-failure warning, got: {stdout}"
     );
 }
+
+// --- quality-gate list + stats integration tests (#666) ---
+
+/// `legion quality-gate list` with no rows prints nothing and exits 0.
+#[test]
+fn quality_gate_list_empty_exits_zero_with_no_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list"]));
+    assert!(
+        stdout.is_empty(),
+        "expected no output for empty gate corpus, got: {stdout}"
+    );
+}
+
+/// `legion quality-gate list --json` with no rows prints `[]` and exits 0.
+#[test]
+fn quality_gate_list_empty_json_prints_empty_array() {
+    let dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
+    assert_eq!(
+        stdout.trim(),
+        "[]",
+        "expected [] for empty gate corpus with --json, got: {stdout}"
+    );
+}
+
+/// `legion quality-gate list` shows recorded rows in the human table.
+#[test]
+fn quality_gate_list_shows_recorded_rows() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Seed two rows with different skills.
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+    ]));
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "issues",
+        "--findings-count",
+        "3",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list"]));
+    assert!(
+        stdout.contains("legion-simplify"),
+        "expected simplify row in list output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("legion-review"),
+        "expected review row in list output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("clean"),
+        "expected 'clean' result in list output, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("issues"),
+        "expected 'issues' result in list output, got: {stdout}"
+    );
+}
+
+/// `legion quality-gate list --skill` filters to the named skill only.
+#[test]
+fn quality_gate_list_filter_by_skill() {
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+    ]));
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "issues",
+    ]));
+
+    let stdout =
+        run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--skill", "legion-review"]));
+    assert!(
+        stdout.contains("legion-review"),
+        "expected review row, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("legion-simplify"),
+        "simplify row should be filtered out, got: {stdout}"
+    );
+}
+
+/// `legion quality-gate list --result issues` filters to issues-only rows.
+#[test]
+fn quality_gate_list_filter_by_result() {
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "s",
+        "--result",
+        "clean",
+    ]));
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "s",
+        "--result",
+        "issues",
+        "--findings-count",
+        "2",
+    ]));
+
+    let stdout =
+        run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--result", "issues"]));
+    // There should be exactly one row (issues). The clean row should be absent.
+    // We check the findings count column since "issues" appears in both result
+    // and the header word "ISSUES".
+    assert!(
+        stdout.contains("2"),
+        "expected findings_count=2 in the issues row, got: {stdout}"
+    );
+}
+
+/// `legion quality-gate list --result bad-value` exits non-zero with a typed error.
+#[test]
+fn quality_gate_list_invalid_result_value_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    // clap value_parser rejects unknown values before the handler runs.
+    let (_stdout, stderr) =
+        run_fail(legion_cmd(dir.path()).args(["quality-gate", "list", "--result", "bad-value"]));
+    // clap emits an error mentioning the bad value or the possible values.
+    assert!(
+        stderr.contains("bad-value") || stderr.contains("possible values"),
+        "expected error about invalid result value, got: {stderr}"
+    );
+}
+
+/// `legion quality-gate list --json` emits a JSON array with all fields including details.
+#[test]
+fn quality_gate_list_json_emits_array_with_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let details = r#"{"findings":[]}"#;
+
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "issues",
+        "--findings-count",
+        "1",
+        "--details-json",
+        details,
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("expected valid JSON array");
+    let arr = parsed.as_array().expect("expected a JSON array");
+    assert_eq!(arr.len(), 1, "expected one row");
+
+    let row = &arr[0];
+    assert_eq!(row["skill"].as_str().unwrap(), "legion-simplify");
+    assert_eq!(row["result"].as_str().unwrap(), "issues");
+    assert_eq!(row["findings_count"].as_u64().unwrap(), 1);
+    // details field must be present in JSON output.
+    assert!(
+        row["details"].is_string() || row["details"].is_null(),
+        "expected details field in JSON row"
+    );
+}
+
+/// `legion quality-gate stats` with no rows prints nothing and exits 0.
+#[test]
+fn quality_gate_stats_empty_exits_zero_with_no_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "stats"]));
+    assert!(
+        stdout.is_empty(),
+        "expected no output for empty gate corpus, got: {stdout}"
+    );
+}
+
+/// `legion quality-gate stats --json` with no rows prints `[]`.
+#[test]
+fn quality_gate_stats_empty_json_prints_empty_array() {
+    let dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "stats", "--json"]));
+    assert_eq!(
+        stdout.trim(),
+        "[]",
+        "expected [] for empty stats with --json, got: {stdout}"
+    );
+}
+
+/// `legion quality-gate stats` shows per-skill aggregates in the human table.
+#[test]
+fn quality_gate_stats_shows_per_skill_aggregates() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // 2 runs for legion-simplify: 1 clean, 1 issues (1 finding).
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+    ]));
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "issues",
+        "--findings-count",
+        "1",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "stats"]));
+    assert!(
+        stdout.contains("legion-simplify"),
+        "expected skill row in stats output, got: {stdout}"
+    );
+    // 2 runs total.
+    assert!(
+        stdout.contains('2'),
+        "expected run count of 2, got: {stdout}"
+    );
+}
+
+/// `legion quality-gate stats --json` returns a JSON array with catch_rate field.
+#[test]
+fn quality_gate_stats_json_shape() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // 3 runs: 1 clean, 2 issues.
+    for _ in 0..2 {
+        run_ok(legion_cmd(dir.path()).args([
+            "quality-gate",
+            "record",
+            "--skill",
+            "s",
+            "--result",
+            "issues",
+            "--findings-count",
+            "1",
+        ]));
+    }
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "s",
+        "--result",
+        "clean",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "stats", "--json"]));
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("expected valid JSON array");
+    let arr = parsed.as_array().expect("expected a JSON array");
+    assert_eq!(arr.len(), 1);
+
+    let row = &arr[0];
+    assert_eq!(row["skill"].as_str().unwrap(), "s");
+    assert_eq!(row["runs"].as_u64().unwrap(), 3);
+    assert_eq!(row["clean"].as_u64().unwrap(), 1);
+    assert_eq!(row["issues"].as_u64().unwrap(), 2);
+    // catch_rate = 2/3 ~= 0.6667
+    let catch_rate = row["catch_rate"].as_f64().unwrap();
+    assert!(
+        (catch_rate - 2.0 / 3.0).abs() < 1e-6,
+        "catch_rate should be ~0.6667, got: {catch_rate}"
+    );
+    assert_eq!(row["total_findings"].as_u64().unwrap(), 2);
+    assert_eq!(row["max_findings"].as_u64().unwrap(), 1);
+}
+
+/// `legion quality-gate stats --skill` filters the aggregate to that skill only.
+#[test]
+fn quality_gate_stats_filter_by_skill() {
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+    ]));
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "issues",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "stats",
+        "--skill",
+        "legion-simplify",
+        "--json",
+    ]));
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&stdout).expect("expected JSON array");
+    assert_eq!(arr.len(), 1, "expected only one skill row");
+    assert_eq!(arr[0]["skill"].as_str().unwrap(), "legion-simplify");
+}
