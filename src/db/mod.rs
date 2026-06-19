@@ -13,7 +13,7 @@ mod documents;
 mod health;
 mod heartbeat;
 mod kanban;
-mod quality_gates;
+pub(crate) mod quality_gates;
 mod reflections;
 mod schedules;
 mod scip;

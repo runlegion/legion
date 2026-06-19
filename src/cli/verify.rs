@@ -5,6 +5,7 @@ use std::str::FromStr;
 use clap::Subcommand;
 
 use crate::cli::util::{git_head_commit_and_branch, open_db, read_file_or_stdin};
+use crate::db::quality_gates::{QualityGateFilter, QualityGateRow, QualityGateStats};
 use crate::verify::GateResult;
 use crate::{error, kanban, verify};
 
@@ -32,6 +33,53 @@ pub(crate) enum QualityGateAction {
         #[arg(long)]
         details_json: Option<String>,
     },
+
+    /// List recorded quality gate rows, newest first.
+    ///
+    /// Filterable by skill, result, branch, and a since timestamp.
+    /// Default output is a human-readable table; --json emits an array
+    /// of objects that includes the details field.
+    List {
+        /// Restrict to rows for this skill name.
+        #[arg(long)]
+        skill: Option<String>,
+
+        /// Restrict to rows with this result value: "clean" or "issues".
+        #[arg(long, value_parser = ["clean", "issues"])]
+        result: Option<String>,
+
+        /// Restrict to rows on this branch.
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Restrict to rows recorded at or after this RFC3339 timestamp.
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Emit JSON array instead of a human table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show per-skill aggregate statistics.
+    ///
+    /// Prints runs, clean count, issues count, catch rate (issues/runs),
+    /// total findings, and max findings for each skill. The catch rate is
+    /// the rubberstamp tripwire: a rate near zero means the gate is not
+    /// catching anything. --json emits structured rows.
+    Stats {
+        /// Restrict to this skill name.
+        #[arg(long)]
+        skill: Option<String>,
+
+        /// Restrict to rows recorded at or after this RFC3339 timestamp.
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Emit JSON array instead of a human table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()> {
@@ -56,8 +104,107 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             )?;
             println!("{}", row.id);
         }
+
+        QualityGateAction::List {
+            skill,
+            result,
+            branch,
+            since,
+            json,
+        } => {
+            // Parse the optional --result flag into a typed GateResult so an
+            // invalid value surfaces a descriptive error before we touch the DB.
+            let gate_result: Option<GateResult> = match result.as_deref() {
+                Some(r) => Some(GateResult::from_str(r)?),
+                None => None,
+            };
+
+            let database = open_db()?;
+            let rows: Vec<QualityGateRow> = database.list_quality_gates(&QualityGateFilter {
+                skill,
+                result: gate_result,
+                branch,
+                since,
+            })?;
+
+            if json {
+                println!("{}", serde_json::to_string(&rows)?);
+            } else {
+                print_gate_table(&rows);
+            }
+        }
+
+        QualityGateAction::Stats { skill, since, json } => {
+            let database = open_db()?;
+            let stats: Vec<QualityGateStats> =
+                database.quality_gate_stats(skill.as_deref(), since.as_deref())?;
+
+            if json {
+                println!("{}", serde_json::to_string(&stats)?);
+            } else {
+                print_stats_table(&stats);
+            }
+        }
     }
     Ok(())
+}
+
+/// Print gate rows as a human-readable table to stdout.
+///
+/// Columns: id (first 8 chars), branch, commit (first 8 chars), skill,
+/// result, findings, created_at. An empty slice prints nothing.
+fn print_gate_table(rows: &[QualityGateRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    println!(
+        "{:<8}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  CREATED",
+        "ID", "BRANCH", "COMMIT", "SKILL", "RESULT", "FINDINGS"
+    );
+    println!("{}", "-".repeat(100));
+    for row in rows {
+        let id_short: String = row.id.chars().take(8).collect();
+        let branch_trunc: String = row.branch.chars().take(20).collect();
+        let commit_short: String = row.commit_hash.chars().take(8).collect();
+        let skill_trunc: String = row.skill.chars().take(22).collect();
+        println!(
+            "{:<8}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {}",
+            id_short,
+            branch_trunc,
+            commit_short,
+            skill_trunc,
+            row.result.as_str(),
+            row.findings_count,
+            row.created_at,
+        );
+    }
+}
+
+/// Print per-skill stats as a human-readable table to stdout.
+///
+/// Columns: skill, runs, clean, issues, catch_rate (%), total_findings,
+/// max_findings. An empty slice prints nothing.
+fn print_stats_table(stats: &[QualityGateStats]) {
+    if stats.is_empty() {
+        return;
+    }
+    println!(
+        "{:<25}  {:>5}  {:>5}  {:>6}  {:>10}  {:>14}  {:>12}",
+        "SKILL", "RUNS", "CLEAN", "ISSUES", "CATCH_RATE", "TOTAL_FINDINGS", "MAX_FINDINGS"
+    );
+    println!("{}", "-".repeat(88));
+    for s in stats {
+        println!(
+            "{:<25}  {:>5}  {:>5}  {:>6}  {:>9.1}%  {:>14}  {:>12}",
+            s.skill,
+            s.runs,
+            s.clean,
+            s.issues,
+            s.catch_rate * 100.0,
+            s.total_findings,
+            s.max_findings,
+        );
+    }
 }
 
 /// Resolve acceptance criteria for a card, with spec-document precedence (#528, #644).
