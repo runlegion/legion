@@ -24,6 +24,7 @@ mod scip;
 mod search;
 mod serve;
 mod signal;
+mod simplify_check;
 mod spec_gen;
 mod stats;
 mod status;

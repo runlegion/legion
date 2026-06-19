@@ -4,10 +4,12 @@ use std::str::FromStr;
 
 use clap::Subcommand;
 
-use crate::cli::util::{git_head_commit_and_branch, open_db, read_file_or_stdin};
+use crate::cli::util::{
+    git_changed_files, git_head_commit_and_branch, open_db, read_file_or_stdin,
+};
 use crate::db::quality_gates::{QualityGateFilter, QualityGateRow, QualityGateStats};
 use crate::verify::GateResult;
-use crate::{error, kanban, verify};
+use crate::{error, kanban, simplify_check, verify};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum QualityGateAction {
@@ -80,6 +82,44 @@ pub(crate) enum QualityGateAction {
         #[arg(long)]
         json: bool,
     },
+
+    /// Validate a simplify articulation file before recording the gate (#665).
+    ///
+    /// Resolves the changed-file set from `git diff --name-only main..HEAD`
+    /// (falls back to origin/main..HEAD when main is absent locally). Parses
+    /// the articulation file -- markdown with one `### <path>` heading per
+    /// changed file followed by prose -- and refuses when:
+    ///   - Coverage gap: a changed file has no `### <path>` entry (reports
+    ///     which files are unaddressed).
+    ///   - Boilerplate / thin: an entry's prose is below the substance threshold
+    ///     (reuses the same word-count heuristic as `pr write-check`).
+    ///
+    /// On pass: records a quality gate for HEAD under `--skill` with
+    /// `--result` as the gate outcome. On failure: lists each gap and exits
+    /// non-zero without recording a gate.
+    ///
+    /// Mirror of `legion pr write-check` for the simplify gate. The
+    /// `--result` flag carries the skill's own verdict (clean = no findings;
+    /// issues = real simplify findings were found). The validator gates on
+    /// articulation completeness and substance independently of that verdict:
+    /// a clean result still requires a complete articulation.
+    Check {
+        /// Skill name to record the gate under (e.g. "legion-simplify").
+        #[arg(long)]
+        skill: String,
+
+        /// Gate result from the skill run: "clean" or "issues".
+        #[arg(long, value_parser = ["clean", "issues"])]
+        result: String,
+
+        /// Path to the markdown articulation file. Reads stdin when omitted.
+        #[arg(long)]
+        articulation_file: Option<String>,
+
+        /// Number of skill findings (default 0; used when --result is "issues").
+        #[arg(long, default_value = "0")]
+        findings_count: u64,
+    },
 }
 
 pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()> {
@@ -144,6 +184,76 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             } else {
                 print_stats_table(&stats);
             }
+        }
+
+        QualityGateAction::Check {
+            skill,
+            result,
+            articulation_file,
+            findings_count,
+        } => {
+            // Parse and validate the result flag before touching the FS.
+            let gate_result: GateResult = GateResult::from_str(&result)?;
+
+            // Resolve the changed-file set from git. Falls back gracefully
+            // when main is not present locally.
+            let changed_files = git_changed_files()?;
+
+            // Read the articulation from --articulation-file or stdin.
+            let articulation =
+                read_file_or_stdin(articulation_file.as_deref(), "--articulation-file")?;
+
+            let report = simplify_check::validate_articulation(&changed_files, &articulation);
+
+            // The gate is only recorded when the articulation passes the
+            // structural validator. A failed articulation exits non-zero
+            // without recording so the gate on HEAD stays absent (pr create
+            // will refuse until a valid articulation is submitted).
+            if !report.ok {
+                let gap_count = report.findings.len();
+                eprintln!(
+                    "[legion] simplify-check FAILED for skill '{skill}' -- {gap_count} gap(s):"
+                );
+                for f in &report.findings {
+                    eprintln!("  - {f}");
+                }
+                eprintln!(
+                    "\nThe articulation must have one `### <path>` entry per changed file, \
+                     each with composed prose explaining which simplify checks were applied \
+                     and the reasoning for the clean-or-finding verdict. Fix the articulation \
+                     and re-run."
+                );
+                return Err(error::LegionError::ExitWith(1));
+            }
+
+            // Articulation is valid. Record the gate under HEAD.
+            // findings_count is the skill's own count (real simplify findings),
+            // not the validator's gap count (which is 0 when we reach here).
+            let (commit_hash, branch) = git_head_commit_and_branch()?;
+            let details = serde_json::json!({
+                "skill": skill,
+                "result": result,
+                "entry_count": report.entry_count,
+                "findings_count": findings_count,
+                "articulation": articulation,
+            })
+            .to_string();
+
+            let database = open_db()?;
+            let row = database.record_quality_gate(
+                &branch,
+                &commit_hash,
+                &skill,
+                gate_result,
+                findings_count,
+                Some(&details),
+            )?;
+
+            println!(
+                "[legion] simplify-check gate clean for skill '{skill}' ({} file entries, \
+                 {findings_count} skill findings). Gate id: {}",
+                report.entry_count, row.id,
+            );
         }
     }
     Ok(())
@@ -553,6 +663,139 @@ mod tests {
         assert!(
             err.to_string().contains("nonexistent-doc-id"),
             "error must name the missing document id, got: {err}"
+        );
+    }
+
+    // --- simplify-check gate tests (#665) ---
+
+    /// A valid articulation covering all changed files records a clean gate
+    /// in the quality_gates table under the given skill + commit.
+    #[test]
+    fn simplify_check_gate_recorded_on_valid_articulation() {
+        use std::collections::HashSet;
+
+        use crate::simplify_check::validate_articulation;
+        use crate::verify::GateResult;
+
+        let db = test_db();
+        let changed: HashSet<String> = ["src/foo.rs", "src/bar.rs"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let articulation = "### src/foo.rs\n\
+             Checked all six categories. No duplicate logic found: each function \
+             handles exactly one concern. No stringly-typed state; enums used \
+             throughout. Error handling propagates via the ? operator.\n\
+             ### src/bar.rs\n\
+             Reviewed for unnecessary abstraction and copy-paste variation. \
+             The single trait bound on this module is load-bearing -- removing \
+             it would require duplicating the impl block in three callers. \
+             Clean verdict: no simplify findings.\n";
+
+        let report = validate_articulation(&changed, articulation);
+        assert!(
+            report.ok,
+            "expected valid articulation, got {:?}",
+            report.findings
+        );
+
+        // Simulate what the handler does: record the gate.
+        let row = db
+            .record_quality_gate(
+                "feat/665-simplify-articulation",
+                "deadbeefdeadbeef",
+                "legion-simplify",
+                GateResult::Clean,
+                0,
+                Some(&serde_json::json!({"articulation": articulation}).to_string()),
+            )
+            .expect("record_quality_gate failed");
+        assert!(!row.id.is_empty());
+
+        // Verify it can be retrieved by the commit + skill pair.
+        let fetched = db
+            .get_quality_gate("deadbeefdeadbeef", "legion-simplify")
+            .expect("get_quality_gate failed")
+            .expect("expected Some gate row");
+        assert_eq!(fetched.result, GateResult::Clean);
+        assert_eq!(fetched.skill, "legion-simplify");
+    }
+
+    /// A missing-coverage gap causes the validator to refuse. The gate should
+    /// NOT be recorded (the handler exits non-zero before touching the DB).
+    #[test]
+    fn simplify_check_refuses_missing_coverage() {
+        use std::collections::HashSet;
+
+        use crate::simplify_check::validate_articulation;
+
+        let changed: HashSet<String> = ["src/foo.rs", "src/missing.rs"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let articulation = "### src/foo.rs\n\
+             Checked all six simplify categories. No findings: each function \
+             is focused on a single concern, types are explicit, error handling \
+             propagates via ? throughout the module.\n";
+
+        let report = validate_articulation(&changed, articulation);
+        assert!(!report.ok, "expected refusal for missing coverage");
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.contains("src/missing.rs") && f.contains("missing coverage")),
+            "expected a missing-coverage finding naming src/missing.rs, got {:?}",
+            report.findings
+        );
+    }
+
+    /// A boilerplate entry (restates category names without reasoning, under
+    /// the word threshold) causes the validator to refuse.
+    #[test]
+    fn simplify_check_refuses_boilerplate_entry() {
+        use std::collections::HashSet;
+
+        use crate::simplify_check::validate_articulation;
+
+        let changed: HashSet<String> = ["src/foo.rs"].iter().map(|s| s.to_string()).collect();
+        // Entry only lists the check names -- not enough words or reasoning.
+        let articulation = "### src/foo.rs\nClean. No issues.\n";
+
+        let report = validate_articulation(&changed, articulation);
+        assert!(!report.ok, "expected refusal for thin entry");
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.contains("too thin") && f.contains("src/foo.rs")),
+            "expected a thin-entry finding, got {:?}",
+            report.findings
+        );
+    }
+
+    /// An articulation with real findings (issues result) still passes the
+    /// structural validator if coverage and substance are present.
+    #[test]
+    fn simplify_check_accepts_issues_result_with_substantive_articulation() {
+        use std::collections::HashSet;
+
+        use crate::simplify_check::validate_articulation;
+
+        let changed: HashSet<String> = ["src/foo.rs"].iter().map(|s| s.to_string()).collect();
+        let articulation = "### src/foo.rs\n\
+             Checked for duplicate logic: found two match arms at lines 47 and \
+             62 that share an identical body. Extracted into a helper \
+             `fn apply_default` to remove the copy-paste variation. No other \
+             issues found: stringly-typed state is absent, error handling uses \
+             ? throughout, no hand-rolled standard library duplication.\n";
+
+        let report = validate_articulation(&changed, articulation);
+        assert!(
+            report.ok,
+            "issues result with substantive articulation should pass the structural validator, \
+             got {:?}",
+            report.findings
         );
     }
 }

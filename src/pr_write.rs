@@ -171,7 +171,10 @@ fn split_entries(mapping: &str) -> Vec<String> {
 /// leaving the explanatory prose to be word-counted. The heading restates the
 /// criterion and the evidence line is checked separately, so neither should
 /// count toward the substance threshold.
-fn strip_evidence_lines(entry: &str) -> String {
+///
+/// Shared with `simplify_check`, which uses the same strip-then-count logic
+/// to validate per-file simplify articulation entries.
+pub(crate) fn strip_evidence_lines(entry: &str) -> String {
     entry
         .lines()
         .filter(|l| {

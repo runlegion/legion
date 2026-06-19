@@ -102,6 +102,39 @@ pub(crate) fn read_file_or_stdin(
     }
 }
 
+/// List files changed between main (or origin/main) and HEAD.
+///
+/// Runs `git diff --name-only main..HEAD`. When `main` is not present locally
+/// (e.g. on a freshly checked-out feature branch in CI), falls back to
+/// `origin/main..HEAD`. Returns one path per line, trimmed, with blank lines
+/// discarded.
+///
+/// Used by `legion quality-gate check` to build the coverage set the
+/// articulation must address.
+pub(crate) fn git_changed_files() -> Result<std::collections::HashSet<String>, error::LegionError> {
+    // Try `main` first, fall back to `origin/main`.
+    let refs: [&str; 2] = ["main..HEAD", "origin/main..HEAD"];
+    for refspec in refs {
+        let out = std::process::Command::new("git")
+            .args(["diff", "--name-only", refspec])
+            .output()
+            .map_err(|e| error::LegionError::WorkSource(format!("failed to run git diff: {e}")))?;
+        if out.status.success() {
+            let set = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect();
+            return Ok(set);
+        }
+    }
+    // Both attempts failed. Return an empty set rather than hard-erroring so
+    // the validator can still run (it will vacuously pass with no files, which
+    // is correct for an initial commit with no base branch).
+    Ok(std::collections::HashSet::new())
+}
+
 pub(crate) fn format_age(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
