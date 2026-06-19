@@ -219,35 +219,40 @@ pub struct QualityGateStats {
     pub max_findings: u64,
 }
 
+/// Join predicate fragments into a SQL `WHERE` clause, combining them with
+/// `AND`, or the empty string when there are no predicates.
+fn where_and(predicates: &[&str]) -> String {
+    if predicates.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", predicates.join(" AND "))
+    }
+}
+
 impl Database {
     /// Return gate rows matching `filter`, newest first.
     ///
     /// An empty result set is not an error; the caller decides how to
     /// present it. All filter fields are applied with AND semantics.
     pub fn list_quality_gates(&self, filter: &QualityGateFilter) -> Result<Vec<QualityGateRow>> {
-        // Build the WHERE clause dynamically so we only push predicates that
-        // were actually requested. The param vec is built in the same order.
-        let mut predicates: Vec<&str> = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-        if filter.skill.is_some() {
-            predicates.push("skill = ?");
+        // Build (predicate, param) pairs together so a SQL fragment and its
+        // bound value can never drift out of order.
+        let mut clauses: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
+        if let Some(ref s) = filter.skill {
+            clauses.push(("skill = ?", Box::new(s.clone())));
         }
-        if filter.result.is_some() {
-            predicates.push("result = ?");
+        if let Some(ref r) = filter.result {
+            clauses.push(("result = ?", Box::new(r.as_str().to_owned())));
         }
-        if filter.branch.is_some() {
-            predicates.push("branch = ?");
+        if let Some(ref b) = filter.branch {
+            clauses.push(("branch = ?", Box::new(b.clone())));
         }
-        if filter.since.is_some() {
-            predicates.push("created_at >= ?");
+        if let Some(ref ts) = filter.since {
+            clauses.push(("created_at >= ?", Box::new(ts.clone())));
         }
 
-        let where_clause = if predicates.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", predicates.join(" AND "))
-        };
+        let predicates: Vec<&str> = clauses.iter().map(|(p, _)| *p).collect();
+        let where_clause = where_and(&predicates);
 
         let sql = format!(
             "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at \
@@ -256,23 +261,9 @@ impl Database {
              ORDER BY created_at DESC"
         );
 
-        // Push param values in the same order as the predicates.
-        if let Some(ref s) = filter.skill {
-            params.push(Box::new(s.clone()));
-        }
-        if let Some(ref r) = filter.result {
-            params.push(Box::new(r.as_str().to_owned()));
-        }
-        if let Some(ref b) = filter.branch {
-            params.push(Box::new(b.clone()));
-        }
-        if let Some(ref ts) = filter.since {
-            params.push(Box::new(ts.clone()));
-        }
-
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            rusqlite::params_from_iter(clauses.iter().map(|(_, v)| v.as_ref())),
             |row| {
                 let result_str: String = row.get(4)?;
                 let findings_count_i64: i64 = row.get(5)?;
@@ -307,21 +298,16 @@ impl Database {
         skill: Option<&str>,
         since: Option<&str>,
     ) -> Result<Vec<QualityGateStats>> {
-        let mut predicates: Vec<&str> = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-        if skill.is_some() {
-            predicates.push("skill = ?");
+        let mut clauses: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
+        if let Some(s) = skill {
+            clauses.push(("skill = ?", Box::new(s.to_owned())));
         }
-        if since.is_some() {
-            predicates.push("created_at >= ?");
+        if let Some(ts) = since {
+            clauses.push(("created_at >= ?", Box::new(ts.to_owned())));
         }
 
-        let where_clause = if predicates.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", predicates.join(" AND "))
-        };
+        let predicates: Vec<&str> = clauses.iter().map(|(p, _)| *p).collect();
+        let where_clause = where_and(&predicates);
 
         let sql = format!(
             "SELECT \
@@ -337,16 +323,9 @@ impl Database {
              ORDER BY skill ASC"
         );
 
-        if let Some(s) = skill {
-            params.push(Box::new(s.to_owned()));
-        }
-        if let Some(ts) = since {
-            params.push(Box::new(ts.to_owned()));
-        }
-
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            rusqlite::params_from_iter(clauses.iter().map(|(_, v)| v.as_ref())),
             |row| {
                 let skill_str: String = row.get(0)?;
                 let runs_i64: i64 = row.get(1)?;
