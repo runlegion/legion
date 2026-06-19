@@ -2,118 +2,94 @@
 name: legion-simplify
 description: |
   Review the current branch diff for code quality issues: duplicate logic, unnecessary
-  abstraction, stringly-typed state, and other structural problems. Produces structured
-  JSON output and records the result via `legion quality-gate record` so `legion pr create`
-  can verify clean state before opening a PR. Run this on every feature branch before
-  creating a PR.
-version: 1.0.0
+  abstraction, stringly-typed state, and other structural problems. Articulate, per changed
+  file, what you checked and why the verdict holds; `legion quality-gate check` validates the
+  articulation (coverage + non-boilerplate) and records the gate so `legion pr create` can
+  verify clean state before opening a PR. Run this on every feature branch before a PR.
+version: 2.0.0
 user-invocable: true
 allowed-tools: Bash, Read
 ---
 
 # Legion Simplify
 
-Review the git diff on this branch for structural quality issues. Record the result
-via `legion quality-gate record` so `legion pr create` can gate on it.
+Review the git diff on this branch for structural quality issues, and write down -- per
+changed file -- what you checked and the reasoning behind your verdict. `legion quality-gate
+check` refuses the gate unless every changed file is addressed with real prose, then records
+it so `legion pr create` can gate on it.
+
+This is a forcing function, not a checkbox. The old version of this skill let you record
+`"clean"` without reading the diff, and the corpus proved it: simplify caught structural
+issues 0.7% of the time while `pr write-check` -- the same self-review, but with validated
+prose -- caught 24%. You cannot clear this gate by typing "clean". You clear it by showing,
+file by file, the reasoning that says clean.
 
 ## What to Review
 
-Inspect the output of `git diff main..HEAD` (or `git diff origin/main..HEAD`).
+Inspect `git diff main..HEAD` (or `git diff origin/main..HEAD`). For each changed file, look for:
 
-Look for:
-
-- **Duplicate logic** -- same transformation or check written twice in different places;
-  could be extracted to a shared helper
+- **Duplicate logic** -- same transformation or check written twice; extract a shared helper
 - **Unnecessary abstraction** -- a wrapper or trait that adds indirection without buying
   extensibility; flatten it
-- **Stringly-typed state** -- `status: String` where `"pending" | "done"` would be an enum;
-  suggest the enum
-- **Hand-rolled helpers** -- functions that duplicate something already in `std` or an
-  existing module helper
-- **Unnecessary new parameters** -- a parameter that is always the same value at every
-  call site
-- **Copy-paste variations** -- two near-identical blocks that differ by one variable;
-  could be a loop or a shared function with a parameter
+- **Stringly-typed state** -- `status: String` where `"pending" | "done"` would be an enum
+- **Hand-rolled helpers** -- functions duplicating something already in `std` or a module helper
+- **Unnecessary new parameters** -- a parameter that is the same value at every call site
+- **Copy-paste variations** -- two near-identical blocks differing by one variable; loop or parametrize
 - **Error swallowing** -- `.unwrap_or(())` or `let _ =` on a result that should propagate
-- **Unused comments that narrate the change** -- comments that say what the diff did rather
-  than why the code exists
+- **Change-narrating comments** -- comments saying what the diff did rather than why the code exists
 
-Do NOT flag:
-- Style preferences (naming, ordering) unless they violate project conventions
-- Things that are outside the diff (pre-existing issues)
-- Hypothetical future improvements unrelated to the changed code
+Do NOT flag: style preferences (naming, ordering) unless they violate project conventions;
+pre-existing issues outside the diff; hypothetical future improvements.
 
-## Output Format
+## Output: the articulation file
 
-Produce a JSON object:
+Write a markdown file with one `### <path>` entry per changed file in the diff. Every changed
+file must have an entry -- the validator refuses on any gap. Each entry is composed prose, not
+a checklist: name the categories you actually checked against this file's hunks and give the
+reasoning for the verdict. Entries under ~12 words are rejected as boilerplate, so a bare
+"clean" or a restated category list will not pass. A `clean` verdict still requires the
+reasoning -- "I read X, the duplicated-looking Y is justified because Z." A finding states the
+problem, the file:line, and the fix.
 
-```json
-{
-  "result": "clean",
-  "findings_count": 0,
-  "findings": []
-}
+```markdown
+### src/db/foo.rs
+Checked for duplicate logic and stringly-typed state across the two new query methods. The
+WHERE-clause construction is identical in both (lines 40 and 92) -- duplicate logic, extractable
+to a helper. State uses the GateResult enum, not strings -- clean there. No new abstraction.
+Verdict: finding (duplication, MED).
+
+### src/cli/bar.rs
+Two table-printer fns look copy-pasted but diverge in columns and alignment; merging them would
+need a generic table abstraction that costs more than the duplication saves -- intentionally left.
+Error paths propagate via `?`. No stringly-typed state. Verdict: clean.
 ```
-
-Or with findings:
-
-```json
-{
-  "result": "issues",
-  "findings_count": 2,
-  "findings": [
-    {
-      "severity": "HIGH",
-      "file": "src/db.rs",
-      "line": 142,
-      "issue": "same date-formatting logic duplicated from format_date helper on line 13",
-      "suggestion": "call format_date() instead"
-    },
-    {
-      "severity": "MED",
-      "file": "src/main.rs",
-      "line": 310,
-      "issue": "status field is String but only ever 'pending' or 'done'",
-      "suggestion": "introduce a Status enum with Pending and Done variants"
-    }
-  ]
-}
-```
-
-Severity is `HIGH` (structural problem that will compound) or `MED` (worth fixing but
-not blocking).
-
-## Recording the Result
-
-After producing the JSON, record it via:
-
-```bash
-legion quality-gate record \
-  --skill legion-simplify \
-  --result <clean|issues> \
-  --findings-count <N> \
-  --details-json '<full JSON>'
-```
-
-The command reads `git rev-parse HEAD` and `git rev-parse --abbrev-ref HEAD` automatically.
-It prints the gate row ID on success.
 
 ## Procedure
 
-1. Run `git diff main..HEAD` (fall back to `git diff origin/main..HEAD` if main is not local).
-2. Read the changed files named in the diff to understand context.
-3. Review each changed hunk for the issues listed above.
-4. Produce the JSON result.
-5. Call `legion quality-gate record` to persist it.
-6. Print the JSON so the caller can see the findings.
+1. `git diff --name-only main..HEAD` (fall back to `origin/main..HEAD`) -- this is your coverage list.
+2. For EACH changed file: read it, review its hunks against the categories above, and write its
+   `### <path>` entry with real reasoning.
+3. Write the articulation to a file (e.g. `/tmp/simplify-<branch>.md`).
+4. Validate and record:
+   ```bash
+   legion quality-gate check \
+     --skill legion-simplify \
+     --result <clean|issues> \
+     --findings-count <N> \
+     --articulation-file /tmp/simplify-<branch>.md
+   ```
+   `--findings-count` is the number of real structural findings you recorded (0 for a clean
+   verdict). The validator resolves the changed-file set from git, checks every file has a
+   non-boilerplate entry, then records the gate for HEAD.
+   - Clean -> the gate is recorded; proceed to pr-write.
+   - Refused -> the output names the gap (an unaddressed file, a boilerplate entry). Fix it by
+     actually reading that file and writing real reasoning -- do not pad to clear the check. Re-run.
+5. If your verdict is `issues`, fix the findings, then re-run from step 1 on the new HEAD (the
+   gate is HEAD-keyed) until the articulation is clean.
 
 ## Pass Criteria for `legion pr create`
 
-`legion pr create` calls `legion quality-gate record` implicitly by checking the DB before
-opening the PR. The gate passes only when:
-
-- A gate row exists for the current HEAD commit hash
-- The row's `result` is `"clean"`
-
-If you find issues, fix them (or note them as acceptable with a rationale), then re-run
-this skill. The most recent gate row for the commit wins.
+`legion pr create` checks the DB before opening the PR. The gate passes only when a gate row
+exists for the current HEAD commit hash with `result = "clean"`. Because the gate is recorded
+only by `legion quality-gate check`, a clean row now means an accepted per-file articulation
+exists -- not merely that someone typed "clean".
