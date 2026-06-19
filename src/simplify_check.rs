@@ -18,13 +18,13 @@
 
 use std::collections::HashSet;
 
-use crate::pr_write::strip_evidence_lines;
+use crate::pr_write::{MIN_MAPPING_WORDS, strip_evidence_lines};
 
 /// Minimum words of prose per file entry, after the heading is stripped.
-/// Matches the `MIN_MAPPING_WORDS` threshold in `pr_write` so the two gates
-/// use the same substance bar. A genuine per-file analysis clears this easily;
-/// a verbatim restatement of category names does not.
-const MIN_ENTRY_WORDS: usize = 12;
+/// Aliased to `pr_write::MIN_MAPPING_WORDS` so both gates share a single
+/// source of truth for the substance bar and cannot silently drift. A genuine
+/// per-file analysis clears this easily; a restatement of category names does not.
+const MIN_ENTRY_WORDS: usize = MIN_MAPPING_WORDS;
 
 /// A parsed entry from a simplify articulation document.
 #[derive(Debug, Clone)]

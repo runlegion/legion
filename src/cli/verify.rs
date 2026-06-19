@@ -250,8 +250,9 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             )?;
 
             println!(
-                "[legion] simplify-check gate clean for skill '{skill}' ({} file entries, \
-                 {findings_count} skill findings). Gate id: {}",
+                "[legion] simplify-check articulation accepted for skill '{skill}' \
+                 (result '{result}', {} file entries, {findings_count} skill findings). \
+                 Gate id: {}",
                 report.entry_count, row.id,
             );
         }

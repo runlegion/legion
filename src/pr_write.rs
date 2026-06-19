@@ -21,7 +21,7 @@ use crate::card_parse::parse_issue_body;
 /// heading and the evidence line are stripped. A genuine "this change
 /// satisfies it because..." explanation clears this easily; a verbatim
 /// restatement of a short criterion does not.
-const MIN_MAPPING_WORDS: usize = 12;
+pub(crate) const MIN_MAPPING_WORDS: usize = 12;
 
 /// Finding emitted when the body has no "Not done" section. Shared by the
 /// early-return (no mapping) path and the main flow so the two cannot drift.

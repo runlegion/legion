@@ -129,9 +129,15 @@ pub(crate) fn git_changed_files() -> Result<std::collections::HashSet<String>, e
             return Ok(set);
         }
     }
-    // Both attempts failed. Return an empty set rather than hard-erroring so
-    // the validator can still run (it will vacuously pass with no files, which
-    // is correct for an initial commit with no base branch).
+    // Both attempts failed. This is expected for an initial commit with no
+    // base branch (the validator then vacuously passes). But it can also mean
+    // git itself failed -- warn so a misconfigured environment does not
+    // silently disable the gate by reporting zero changed files.
+    eprintln!(
+        "[legion] warning: could not resolve changed files from main..HEAD or \
+         origin/main..HEAD; simplify-check will see an empty changed-set. If this \
+         branch has a base, the gate may pass without checking coverage."
+    );
     Ok(std::collections::HashSet::new())
 }
 
