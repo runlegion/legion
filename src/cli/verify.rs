@@ -85,8 +85,11 @@ pub(crate) enum QualityGateAction {
 
     /// Validate a simplify articulation file before recording the gate (#665).
     ///
-    /// Resolves the changed-file set from `git diff --name-only main..HEAD`
-    /// (falls back to origin/main..HEAD when main is absent locally). Parses
+    /// Resolves the changed-file set from
+    /// `git -c core.quotePath=false diff --name-only main...HEAD` (three-dot
+    /// merge-base range; falls back to origin/main...HEAD when main is absent).
+    /// If no base ref resolves and HEAD has a parent commit, this hard-errors
+    /// rather than recording a gate against an empty set. Parses
     /// the articulation file -- markdown with one `### <path>` heading per
     /// changed file followed by prose -- and refuses when:
     ///   - Coverage gap: a changed file has no `### <path>` entry (reports

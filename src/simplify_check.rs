@@ -86,7 +86,8 @@ pub fn parse_articulation(articulation: &str) -> Vec<ArticulationEntry> {
 
 /// Validate a simplify articulation against the set of changed files.
 ///
-/// `changed_files` is the set of paths from `git diff --name-only main..HEAD`.
+/// `changed_files` is the set of paths from
+/// `git -c core.quotePath=false diff --name-only main...HEAD`.
 /// `articulation` is the markdown text produced by the skill. Returns a
 /// `SimplifyCheckReport` that names every coverage and substance gap found.
 ///
