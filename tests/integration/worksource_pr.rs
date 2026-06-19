@@ -1208,3 +1208,358 @@ fn quality_gate_stats_filter_by_skill() {
     assert_eq!(arr.len(), 1, "expected only one skill row");
     assert_eq!(arr[0]["skill"].as_str().unwrap(), "legion-simplify");
 }
+
+// ---------------------------------------------------------------------------
+// quality-gate check end-to-end tests (#665).
+//
+// These tests require a real git repo so `git_changed_files` can probe base
+// refs and run `git diff`. Each test creates a temp repo with a `main` branch
+// and a feature branch, writes an articulation file to a second tempdir, and
+// runs `legion quality-gate check` via `legion_cmd` against a separate data dir.
+// ---------------------------------------------------------------------------
+
+/// Set up a minimal git repo with a `main` branch (one seed commit) and a
+/// feature branch with one changed file (`src/foo.rs`). Returns the repo dir.
+///
+/// The repo uses a dummy user identity so CI environments without a global
+/// git config do not fail the commit step.
+fn setup_git_repo_with_feature_branch() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    let rp = repo.path();
+
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(rp)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} exited non-zero\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.name", "Test"]);
+
+    // Seed commit on main so `main` resolves as a real ref.
+    std::fs::write(rp.join("README.md"), "seed\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-m", "seed"]);
+
+    // Feature branch: add one changed file.
+    git(&["checkout", "-b", "feat/test"]);
+    std::fs::create_dir_all(rp.join("src")).unwrap();
+    std::fs::write(rp.join("src/foo.rs"), "// changed\n").unwrap();
+    git(&["add", "src/foo.rs"]);
+    git(&["commit", "-m", "add foo"]);
+
+    repo
+}
+
+/// Build a substantive articulation that covers `src/foo.rs` with enough prose
+/// to clear the word-count threshold.
+fn good_articulation_for_foo() -> String {
+    "# Simplify articulation\n\n\
+     ### src/foo.rs\n\
+     Checked for duplicate logic, unnecessary abstraction, stringly-typed state, \
+     hand-rolled standard library dupes, copy-paste variation, and error swallowing. \
+     No issues found: the module is focused and each function has a single \
+     responsibility. The error handling propagates via the `?` operator throughout.\n"
+        .to_string()
+}
+
+/// quality-gate check: a valid articulation passes, records exactly one gate
+/// row for HEAD, and the row is visible via `quality-gate list --json`.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_passing_articulation_records_gate_row() {
+    let repo = setup_git_repo_with_feature_branch();
+    let data_dir = tempfile::tempdir().unwrap();
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), good_articulation_for_foo()).unwrap();
+
+    let stdout = run_ok(legion_cmd(data_dir.path()).current_dir(repo.path()).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+    ]));
+    assert!(
+        stdout.contains("accepted"),
+        "expected acceptance message, got: {stdout}"
+    );
+
+    // Exactly one gate row must be recorded.
+    let list_out = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-simplify",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
+    let arr = rows.as_array().expect("expected array");
+    assert_eq!(
+        arr.len(),
+        1,
+        "expected exactly one gate row, got: {list_out}"
+    );
+    assert_eq!(arr[0]["result"].as_str().unwrap(), "clean");
+}
+
+/// quality-gate check: a failing articulation (missing coverage) exits non-zero
+/// AND records NO gate row. This is the security-relevant path: the absence of
+/// a row is what blocks `legion pr create` from proceeding.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_failing_articulation_exits_nonzero_and_records_no_row() {
+    let repo = setup_git_repo_with_feature_branch();
+    let data_dir = tempfile::tempdir().unwrap();
+    // Articulation is empty -- no entries at all, so src/foo.rs is uncovered.
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), "# No entries\n").unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(data_dir.path()).current_dir(repo.path()).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("FAILED") || stderr.contains("missing coverage"),
+        "expected failure message in stderr, got: {stderr}"
+    );
+
+    // No row must have been recorded -- the gate on HEAD is absent.
+    let list_out = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-simplify",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
+    let arr = rows.as_array().expect("expected array");
+    assert_eq!(
+        arr.len(),
+        0,
+        "expected zero gate rows after articulation refusal, got: {list_out}"
+    );
+}
+
+/// quality-gate check: when run outside a git repo, git_changed_files returns
+/// a hard error and the command exits non-zero without recording a gate row.
+/// This exercises the "git not in work tree" branch introduced in #665.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_outside_git_repo_exits_nonzero() {
+    // /tmp is never inside a git repo.
+    let outside_git = std::path::PathBuf::from("/tmp");
+    let data_dir = tempfile::tempdir().unwrap();
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), good_articulation_for_foo()).unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(data_dir.path()).current_dir(&outside_git).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+    ]));
+    // The error must name git or the work-tree context.
+    assert!(
+        stderr.contains("git") || stderr.contains("work-tree") || stderr.contains("repo"),
+        "expected a git/repo error for non-git directory, got: {stderr}"
+    );
+
+    // No gate row must have been recorded.
+    let list_out = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-simplify",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
+    assert_eq!(
+        rows.as_array().unwrap().len(),
+        0,
+        "expected zero gate rows after git failure, got: {list_out}"
+    );
+}
+
+/// quality-gate check: when run in a git repo that has no main/origin/main ref
+/// AND HEAD has a parent commit, the command exits non-zero with a descriptive
+/// error. This exercises the "base ref missing but HEAD has parent" hard-error
+/// branch -- the path that previously passed vacuously.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_no_base_ref_with_parent_commit_exits_nonzero() {
+    let repo = tempfile::tempdir().unwrap();
+    let rp = repo.path();
+
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(rp)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} exited non-zero\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // Use a non-standard default branch name so neither `main` nor
+    // `origin/main` is present. The repo has two commits (seed + feature),
+    // so HEAD does have a parent.
+    git(&["init", "-b", "trunk"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.name", "Test"]);
+    std::fs::write(rp.join("README.md"), "seed\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-m", "seed"]);
+    std::fs::write(rp.join("change.rs"), "// changed\n").unwrap();
+    git(&["add", "change.rs"]);
+    git(&["commit", "-m", "feature"]);
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), good_articulation_for_foo()).unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(data_dir.path()).current_dir(rp).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("main") || stderr.contains("base ref"),
+        "expected error about missing base ref, got: {stderr}"
+    );
+
+    // No gate row recorded.
+    let list_out = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-simplify",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
+    assert_eq!(
+        rows.as_array().unwrap().len(),
+        0,
+        "expected zero gate rows after base-ref-missing error, got: {list_out}"
+    );
+}
+
+/// quality-gate check: non-ASCII file paths with core.quotePath are handled
+/// correctly. The path returned by git (unescaped, with core.quotePath=false)
+/// must match the `### <path>` heading, and the articulation must pass.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_non_ascii_path_roundtrips_correctly() {
+    let repo = tempfile::tempdir().unwrap();
+    let rp = repo.path();
+
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(rp)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} exited non-zero\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.name", "Test"]);
+    // Seed commit on main.
+    std::fs::write(rp.join("README.md"), "seed\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-m", "seed"]);
+
+    // Feature branch: add a file with a non-ASCII name.
+    git(&["checkout", "-b", "feat/nonascii"]);
+    std::fs::create_dir_all(rp.join("src")).unwrap();
+    // Use a UTF-8 filename. The file system must support this; macOS and
+    // Linux UTF-8 locales both do.
+    let nonascii_name = "src/cafe\u{0301}.rs"; // NFC: src/café.rs (combining acute)
+    std::fs::write(rp.join(nonascii_name), "// non-ascii\n").unwrap();
+    git(&["add", nonascii_name]);
+    git(&["commit", "-m", "add non-ascii file"]);
+
+    // Ask git what name it reports (with core.quotePath=false).
+    let diff_out = Command::new("git")
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-only",
+            "main...HEAD",
+        ])
+        .current_dir(rp)
+        .output()
+        .expect("git diff failed");
+    let reported_path = String::from_utf8_lossy(&diff_out.stdout).trim().to_string();
+    // The path must be non-empty and not octal-quoted.
+    assert!(
+        !reported_path.is_empty(),
+        "expected a path from git diff, got empty output"
+    );
+    assert!(
+        !reported_path.starts_with('"'),
+        "expected unquoted path, got: {reported_path}"
+    );
+
+    // Build an articulation that uses exactly the path git reported.
+    let articulation = format!(
+        "### {reported_path}\n\
+         Checked for duplicate logic, unnecessary abstraction, stringly-typed state, \
+         hand-rolled standard library dupes, copy-paste variation, and error swallowing. \
+         No issues found: a single trivial file with no structure. Verdict: clean.\n"
+    );
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), &articulation).unwrap();
+
+    let stdout = run_ok(legion_cmd(data_dir.path()).current_dir(rp).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+    ]));
+    assert!(
+        stdout.contains("accepted"),
+        "expected acceptance for non-ASCII path, got: {stdout}"
+    );
+}

@@ -102,6 +102,110 @@ pub(crate) fn read_file_or_stdin(
     }
 }
 
+/// List files changed between main (or origin/main) and HEAD.
+///
+/// Uses `git diff -c core.quotePath=false --name-only main...HEAD` (three-dot
+/// merge-base range) so that files changed only on main since the branch point
+/// do not appear in the set. Falls back to `origin/main...HEAD` when `main` is
+/// absent locally.
+///
+/// Before trying the diff, each candidate base ref is probed with
+/// `git rev-parse --verify <ref>`. When a ref resolves but the diff command
+/// still fails, that is a hard error (the environment is broken, not a
+/// legitimate no-base situation). When neither ref resolves AND HEAD has no
+/// parent commit (initial commit), an empty set is returned so the gate passes
+/// vacuously. In any other failure mode this function returns `Err` so the
+/// caller can refuse to record a gate rather than silently accepting vacuous
+/// coverage.
+///
+/// Used by `legion quality-gate check` to build the coverage set the
+/// articulation must address.
+pub(crate) fn git_changed_files() -> Result<std::collections::HashSet<String>, error::LegionError> {
+    // Probe whether git is available at all first.
+    let probe = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map_err(|e| {
+            error::LegionError::WorkSource(format!("failed to run git (is it installed?): {e}"))
+        })?;
+    if !probe.status.success() {
+        return Err(error::LegionError::WorkSource(
+            "git rev-parse --is-inside-work-tree failed -- not inside a git repo".to_owned(),
+        ));
+    }
+
+    // Probe each candidate base ref. Collect the ones that resolve.
+    let candidates: [&str; 2] = ["main", "origin/main"];
+    let mut resolved_base: Option<&str> = None;
+    for candidate in candidates {
+        let verify = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", candidate])
+            .output()
+            .map_err(|e| {
+                error::LegionError::WorkSource(format!(
+                    "failed to probe git ref '{candidate}': {e}"
+                ))
+            })?;
+        if verify.status.success() {
+            resolved_base = Some(candidate);
+            break;
+        }
+    }
+
+    let Some(base_ref) = resolved_base else {
+        // Neither main nor origin/main exists. This is legitimate only when
+        // HEAD itself has no parent (initial commit / orphan branch). Probe
+        // for a parent commit; if there is one, the branch just has an unusual
+        // base-ref name, which is a hard error rather than vacuous-pass.
+        let parent = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD~1"])
+            .output()
+            .map_err(|e| error::LegionError::WorkSource(format!("failed to probe HEAD~1: {e}")))?;
+        if parent.status.success() {
+            // HEAD has a parent but no known base ref -- refuse rather than
+            // vacuously pass. An agent running on an unusual default branch
+            // (master, develop, etc.) must configure the base ref.
+            return Err(error::LegionError::WorkSource(
+                "could not find base ref 'main' or 'origin/main' and HEAD has a parent commit; \
+                 the simplify gate cannot determine the changed-file set. \
+                 Ensure 'main' or 'origin/main' exists in this repo."
+                    .to_owned(),
+            ));
+        }
+        // HEAD has no parent: genuine initial commit, vacuously valid.
+        return Ok(std::collections::HashSet::new());
+    };
+
+    // Run the three-dot diff with core.quotePath=false so non-ASCII paths
+    // are returned as-is (no octal escaping) and match heading paths exactly.
+    let refspec = format!("{base_ref}...HEAD");
+    let out = std::process::Command::new("git")
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-only",
+            &refspec,
+        ])
+        .output()
+        .map_err(|e| error::LegionError::WorkSource(format!("failed to run git diff: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(error::LegionError::WorkSource(format!(
+            "git diff --name-only {refspec} failed (base ref '{base_ref}' resolved \
+             but diff did not): {stderr}"
+        )));
+    }
+
+    let set: std::collections::HashSet<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Ok(set)
+}
+
 pub(crate) fn format_age(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {

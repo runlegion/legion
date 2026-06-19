@@ -21,7 +21,7 @@ use crate::card_parse::parse_issue_body;
 /// heading and the evidence line are stripped. A genuine "this change
 /// satisfies it because..." explanation clears this easily; a verbatim
 /// restatement of a short criterion does not.
-const MIN_MAPPING_WORDS: usize = 12;
+pub(crate) const MIN_MAPPING_WORDS: usize = 12;
 
 /// Finding emitted when the body has no "Not done" section. Shared by the
 /// early-return (no mapping) path and the main flow so the two cannot drift.
@@ -171,7 +171,10 @@ fn split_entries(mapping: &str) -> Vec<String> {
 /// leaving the explanatory prose to be word-counted. The heading restates the
 /// criterion and the evidence line is checked separately, so neither should
 /// count toward the substance threshold.
-fn strip_evidence_lines(entry: &str) -> String {
+///
+/// Shared with `simplify_check`, which uses the same strip-then-count logic
+/// to validate per-file simplify articulation entries.
+pub(crate) fn strip_evidence_lines(entry: &str) -> String {
     entry
         .lines()
         .filter(|l| {
