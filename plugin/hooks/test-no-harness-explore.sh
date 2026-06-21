@@ -44,6 +44,13 @@ assert_blocked "uppercase EXPLORE" '"EXPLORE"'
 echo "==> the denial redirects to legion:legion-explore"
 assert_contains "names the replacement agent" "$(run_hook '"Explore"')" 'legion:legion-explore'
 
+echo "==> the deny output is structurally valid JSON (not just a matching substring)"
+# The reason text carries backticks, em-dashes, and embedded newlines; assert
+# jq can parse the payload and read the decision field, so a malformed-but-
+# substring-present blob cannot pass.
+decision="$(run_hook '"Explore"' | jq -r '.hookSpecificOutput.permissionDecision' 2>/dev/null)"
+assert_contains "parses as JSON with permissionDecision=deny" "$decision" "deny"
+
 echo "==> passes through the redirect target and other agents (exact match, not substring)"
 assert_allowed "legion-explore"                   '"legion-explore"'
 assert_allowed "namespaced legion:legion-explore" '"legion:legion-explore"'
