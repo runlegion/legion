@@ -1,5 +1,13 @@
 # Legion Changelog
 
+## 0.18.5
+
+The explore-redirect release. The harness built-in `Explore` subagent greps and reads raw files; on a legion-covered repo that is the wrong instrument, because `legion:legion-explore` answers the same orientation questions from the SCIP index (def/refs/impl/hover) and the reflection corpus, returning conclusions with file:line evidence instead of file dumps. Patch release: an additive enforcement hook within the existing plugin-hooks surface, no wire-format change, no schema migration.
+
+### New
+
+- **Built-in `Explore` subagent is blocked and redirected to `legion:legion-explore`** (PR #671, #670): a PreToolUse hook (`no-harness-explore.sh`, wired to the `Agent` and `Task` spawn matchers) denies a `subagent_type` of `Explore` -- an exact lowercased match, so `legion-explore` and `code-explorer` pass through -- and tells the model to re-issue the call with `legion:legion-explore`, which orients through SCIP sym queries and recall/consult instead of grep/find. Gated on legion coverage, consistent with the sym/grep/read enforcement hooks. SubagentStart cannot block a spawn (it is context-only), so the redirect runs at PreToolUse, before the spawn.
+
 ## 0.18.4
 
 The rubberstamp-killer release. An audit of the quality-gate corpus found legion-simplify was clearing 99.3% of runs as "clean" -- a 0.66% catch rate against 23.5% for `pr write-check`, the same self-review-your-own-diff structure but with validated prose. Two changes close the gap. The gate corpus becomes auditable through the binary, and the simplify gate is rebuilt from a yes/no record into an articulation forcing-function so a clean result means a per-file review actually happened. Patch release: additive subcommands within the existing quality-gate surface plus a skill rewrite; no wire-format change, no schema migration.
