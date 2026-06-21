@@ -1,5 +1,16 @@
 # Legion Changelog
 
+## 0.18.6
+
+The wake-robustness release. An apparent "auto-wake has been dead for six days" turned out to be a test error -- a signal sent `--repo X --to X`, which the poll query self-excludes (a repo cannot wake itself from its own post) -- and the wake path is in fact healthy end to end. Investigating it surfaced four genuine defects, fixed here. Patch release: additive guards and hygiene within the existing signal/watch/daemon surfaces, no wire-format change, no schema migration.
+
+### Fixed
+
+- **`legion signal --repo X --to X` is refused instead of silently dropped** (PR #674, #673): `--repo` is the authoring context and `--to` the routing target; when they match, the watch poll query (`AND r.repo != ?`) drops the signal and it wakes nobody, with no error. A shared `is_self_address` guard (broadcast-exempt, leading-`@` tolerant) now refuses the call in both the CLI and the MCP `legion_signal` tool, naming the correct usage. This is the exact trap that produced the false alarm.
+- **The interactive `.session` lock is cleared on session end** (PR #674, #673): a new `SessionEnd` hook removes the lock the moment a session terminates (the correct event -- `Stop` fires per turn), instead of waiting for the daemon to passively reap a dead pid, closing the window where a recycled pid reads as a false active-session and suppresses a wake. The wake-spawned path is careful never to delete a concurrent interactive lock.
+- **`legion daemon-restart` recovers a wedged daemon** (PR #674, #673): when the pidfile is stale but the daemon port is still held, restart now identifies and kills the holder -- but only when it is structurally confirmed to be a legion daemon (`argv[0]` basename `legion` + a `daemon`/`serve` subcommand), so an unrelated process on the port is never touched. Previously this required a manual `kill`.
+- **Orphaned `running` wake_attempts with a dead pid are reaped** (PR #674, #673): rows whose backing process is gone (e.g. after a crash) are marked failed each health tick instead of persisting indefinitely.
+
 ## 0.18.5
 
 The explore-redirect release. The harness built-in `Explore` subagent greps and reads raw files; on a legion-covered repo that is the wrong instrument, because `legion:legion-explore` answers the same orientation questions from the SCIP index (def/refs/impl/hover) and the reflection corpus, returning conclusions with file:line evidence instead of file dumps. Patch release: an additive enforcement hook within the existing plugin-hooks surface, no wire-format change, no schema migration.
