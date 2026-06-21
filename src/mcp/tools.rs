@@ -272,6 +272,20 @@ pub(super) fn handle_tool_call(
             let note = get_str("note");
             let details_str = get_str("details");
 
+            // Guard: repo is the authoring context; to is the routing target.
+            // When they are the same (case-insensitive) the signal is silently
+            // dropped by the poll query, so reject it here the same way the
+            // CLI arm does (#673 fix 1). Broadcasts are exempt.
+            let to_lower = to.to_lowercase();
+            let is_broadcast = matches!(to_lower.as_str(), "all" | "everyone");
+            if !is_broadcast && repo.to_lowercase() == to_lower {
+                return Err(LegionError::McpInvalidArgument(format!(
+                    "--repo and --to must differ: '{}' is the authoring repo context, not the \
+                     recipient. To signal {}, use a different --repo value.",
+                    repo, repo
+                )));
+            }
+
             // One compose/validate entry point shared with the CLI signal
             // arm (#612): details wire parsing, the #587 required-fields
             // gate, and the note length cap all live in signal::compose.

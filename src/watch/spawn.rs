@@ -110,13 +110,35 @@ impl SpawnMode {
 /// Idempotent: missing rows return `Ok(())` because the hook may fire
 /// for operator-attended sessions that watch never spawned (no wake row
 /// -> still Ok; no lock -> release is a no-op).
-pub fn record_session_end(db: &Database, attempt_id: &str, data_dir: &Path) -> Result<()> {
+///
+/// `repo_hint` is used on the interactive path (#673 fix 2): when no
+/// wake_attempts row exists for `attempt_id` (interactive / operator
+/// session), the `.session` file for `repo_hint` is removed so the
+/// active-session gate is cleared. Ignored when the row is found
+/// (the repo is resolved from the row instead).
+pub fn record_session_end(
+    db: &Database,
+    attempt_id: &str,
+    repo_hint: Option<&str>,
+    data_dir: &Path,
+) -> Result<()> {
     match db.mark_wake_attempt_exit_observed(attempt_id) {
         Ok(()) => {}
         Err(LegionError::WakeAttemptNotFound(_)) => {
-            // No wake row for this attempt_id -- operator-attended session
-            // or a hook firing before the daemon wrote the row. Nothing to
-            // release; return Ok so the stop hook never blocks Claude Code.
+            // No wake row for this attempt_id -- operator-attended (interactive)
+            // session or a hook firing before the daemon wrote the row.
+            // Still clean up the .session file if the caller provided a repo
+            // name, so the gate is cleared for the next wake cycle (#673 fix 2).
+            if let Some(repo) = repo_hint {
+                let session_locks =
+                    SessionLockTracker::new(data_dir, default_session_lock_ttl_secs());
+                if let Err(e) = session_locks.release_interactive(repo) {
+                    eprintln!(
+                        "[legion watch] session-end: failed to release .session for {}: {}",
+                        repo, e
+                    );
+                }
+            }
             return Ok(());
         }
         Err(e) => return Err(e),
@@ -134,6 +156,18 @@ pub fn record_session_end(db: &Database, attempt_id: &str, data_dir: &Path) -> R
             if let Err(e) = session_locks.release(&attempt.repo_name) {
                 eprintln!(
                     "[legion watch] session-end: failed to release lock for {}: {}",
+                    attempt.repo_name, e
+                );
+            }
+            // Remove the interactive .session file as well (#673 fix 2).
+            // The wake-spawned path does not write a .session file (only
+            // interactive sessions do), but releasing it here is idempotent
+            // -- missing file is not an error. This closes the gap where a
+            // wake-spawned session that also happens to have an operator-held
+            // .session could leave a stale file behind.
+            if let Err(e) = session_locks.release_interactive(&attempt.repo_name) {
+                eprintln!(
+                    "[legion watch] session-end: failed to release .session for {}: {}",
                     attempt.repo_name, e
                 );
             }
@@ -429,5 +463,60 @@ mod tests {
             assert!(!spawned.turn_started());
             let _ = spawned.kill();
         }
+    }
+
+    // -- record_session_end (#673 fix 2) ------------------------------------
+
+    /// `record_session_end` with a repo_hint and no wake_attempts row
+    /// (interactive/operator path) must remove the `.session` file.
+    #[test]
+    fn session_end_removes_session_file_on_interactive_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path();
+
+        // Write a .session file to simulate an active interactive session.
+        let locks = SessionLockTracker::new(data_dir, default_session_lock_ttl_secs());
+        locks
+            .record_interactive("myrepo", std::process::id())
+            .expect("record_interactive");
+
+        // Verify the .session file exists before the call.
+        let session_file = data_dir.join("sessions").join("myrepo.session");
+        assert!(
+            session_file.exists(),
+            "precondition: .session file must exist before session-end"
+        );
+
+        // Open a fresh DB -- no wake_attempts row exists.
+        let db_path = data_dir.join("legion.db");
+        let db = crate::db::Database::open(&db_path).expect("open db");
+
+        // Call with an attempt_id that has no matching row and a repo_hint.
+        let result = record_session_end(&db, "nonexistent-attempt-id", Some("myrepo"), data_dir);
+        assert!(
+            result.is_ok(),
+            "record_session_end must return Ok on missing wake attempt"
+        );
+
+        // The .session file must be gone.
+        assert!(
+            !session_file.exists(),
+            ".session file must be removed on the interactive path when repo_hint is provided"
+        );
+    }
+
+    /// When no wake_attempts row exists AND no repo_hint is provided,
+    /// `record_session_end` returns Ok but does not crash.
+    #[test]
+    fn session_end_no_repo_hint_is_ok_with_no_wake_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("legion.db");
+        let db = crate::db::Database::open(&db_path).expect("open db");
+
+        let result = record_session_end(&db, "nonexistent-attempt-id", None, dir.path());
+        assert!(
+            result.is_ok(),
+            "record_session_end must return Ok even with no row and no repo_hint"
+        );
     }
 }

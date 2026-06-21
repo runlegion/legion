@@ -82,6 +82,22 @@ pub(crate) fn handle_signal(
     domain: Option<String>,
     tags: Option<String>,
 ) -> error::Result<()> {
+    // Guard: --repo is the authoring context; --to is the routing target.
+    // Sending a signal where author == recipient is silently dropped by the
+    // poll query (src/db/board.rs: `AND r.repo != ?{repo_param}`), so the
+    // daemon never sees it. Broadcasts (@all, @everyone) are exempt -- they
+    // route through a separate fan-out path that ignores the author filter.
+    // `is_self_address` handles case normalization.
+    if is_self_address(&repo, &to) {
+        // Find the matching author to name it in the error.
+        let matched = repo
+            .iter()
+            .find(|r| r.to_lowercase() == to.to_lowercase())
+            .cloned()
+            .unwrap_or_else(|| to.clone());
+        return Err(error::LegionError::SignalSelfAddressed { repo: matched });
+    }
+
     let (database, index) = open_db_and_index()?;
 
     // One compose/validate entry point shared with the MCP legion_signal
@@ -226,4 +242,103 @@ pub(crate) fn handle_bullpen(
         }
     }
     Ok(())
+}
+
+/// Pure helper: decide whether a signal address is a self-address collision.
+///
+/// Returns `true` when `to` equals any entry in `repos` (case-insensitive)
+/// AND is not a broadcast sentinel ("all" / "everyone"). Extracted so the
+/// guard logic is unit-testable without a live DB.
+fn is_self_address(repos: &[String], to: &str) -> bool {
+    let to_lower = to.to_lowercase();
+    let is_broadcast = matches!(to_lower.as_str(), "all" | "everyone");
+    if is_broadcast {
+        return false;
+    }
+    repos.iter().any(|r| r.to_lowercase() == to_lower)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- FIX 1: self-address guard ------------------------------------------
+
+    #[test]
+    fn self_address_guard_rejects_same_repo() {
+        // Exact match: author repo equals recipient.
+        assert!(
+            is_self_address(&["legion".to_string()], "legion"),
+            "legion -> legion must be detected as self-address"
+        );
+    }
+
+    #[test]
+    fn self_address_guard_rejects_case_insensitive() {
+        // Case normalization: "Legion" and "legion" are the same.
+        assert!(
+            is_self_address(&["legion".to_string()], "Legion"),
+            "case mismatch must still be caught as self-address"
+        );
+        assert!(
+            is_self_address(&["Legion".to_string()], "legion"),
+            "repo-side case mismatch must still be caught"
+        );
+    }
+
+    #[test]
+    fn self_address_guard_allows_different_repo() {
+        // Different repos: author=legion, recipient=huttspawn -- this is fine.
+        assert!(
+            !is_self_address(&["legion".to_string()], "huttspawn"),
+            "a signal to a different repo must not be flagged"
+        );
+    }
+
+    #[test]
+    fn self_address_guard_allows_broadcast_all() {
+        // Broadcasts are always permitted regardless of author.
+        assert!(
+            !is_self_address(&["legion".to_string()], "all"),
+            "broadcast 'all' must never be flagged as self-address"
+        );
+        assert!(
+            !is_self_address(&["legion".to_string()], "everyone"),
+            "broadcast 'everyone' must never be flagged as self-address"
+        );
+    }
+
+    #[test]
+    fn self_address_guard_allows_broadcast_case_insensitive() {
+        // Broadcasts with different case must also pass.
+        assert!(
+            !is_self_address(&["legion".to_string()], "ALL"),
+            "broadcast 'ALL' must never be flagged"
+        );
+        assert!(
+            !is_self_address(&["legion".to_string()], "Everyone"),
+            "broadcast 'Everyone' must never be flagged"
+        );
+    }
+
+    #[test]
+    fn self_address_error_variant_names_the_repo() {
+        // Verify the error variant carries the repo name so the message is useful.
+        let err = error::LegionError::SignalSelfAddressed {
+            repo: "legion".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legion"),
+            "error message must name the repo: {msg}"
+        );
+        assert!(
+            msg.contains("--repo"),
+            "error message must reference --repo flag: {msg}"
+        );
+        assert!(
+            msg.contains("--to"),
+            "error message must reference --to flag: {msg}"
+        );
+    }
 }

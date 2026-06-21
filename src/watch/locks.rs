@@ -195,9 +195,15 @@ impl SessionLockTracker {
     /// Idempotent: a missing file is not an error. Removes only the
     /// `.session` file; the `.lock` file (watch-spawned) is untouched.
     ///
-    /// Available for explicit cleanup; the passive path is `active_pid`
-    /// deleting stale files opportunistically when it reads a dead PID.
-    #[allow(dead_code)] // public API completion -- no production call site yet
+    /// Called from two sites:
+    /// - `record_session_end` (stop-hook fast path) when a wake-attempt row
+    ///   exists for the ending session -- the repo name is resolved from the
+    ///   row so the right `.session` file is removed.
+    /// - `legion watch session-end` (interactive path) when no wake-attempt
+    ///   row exists -- the repo is passed directly from the CLI argument.
+    ///
+    /// The passive path is `active_pid` deleting stale files opportunistically
+    /// when it reads a dead PID.
     pub fn release_interactive(&self, repo: &str) -> Result<()> {
         let path = self.session_path(repo);
         match std::fs::remove_file(&path) {

@@ -83,6 +83,12 @@ pub enum LegionError {
     )]
     SignalNoteTooLong { len: usize, max: usize },
 
+    #[error(
+        "--repo and --to must differ: '{repo}' is the authoring repo context, not the recipient. \
+         To signal {repo}, use: legion signal --repo <your-repo> --to {repo} ..."
+    )]
+    SignalSelfAddressed { repo: String },
+
     #[error("watch config error: {0}")]
     WatchConfig(String),
 
