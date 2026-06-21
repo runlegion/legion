@@ -272,6 +272,20 @@ pub(super) fn handle_tool_call(
             let note = get_str("note");
             let details_str = get_str("details");
 
+            // Guard: repo is the authoring context; to is the routing target.
+            // When they are the same (case-insensitive) the signal is silently
+            // dropped by the poll query, so reject it here the same way the
+            // CLI arm does (#673 fix 1). Broadcasts (bare "all", "everyone",
+            // or @-prefixed forms) are exempt. is_self_address is shared with
+            // the CLI guard so the sentinel set cannot drift.
+            if crate::signal::is_self_address(std::slice::from_ref(&repo), &to) {
+                return Err(LegionError::McpInvalidArgument(format!(
+                    "--repo and --to must differ: '{}' is the authoring repo context, not the \
+                     recipient. To signal {}, use a different --repo value.",
+                    repo, repo
+                )));
+            }
+
             // One compose/validate entry point shared with the CLI signal
             // arm (#612): details wire parsing, the #587 required-fields
             // gate, and the note length cap all live in signal::compose.
@@ -636,6 +650,73 @@ mod tests {
         assert!(
             text.contains("repo is required"),
             "expected 'repo is required' in error text, got: {text}"
+        );
+    }
+
+    #[test]
+    fn legion_signal_rejects_self_address_via_shared_guard() {
+        // The MCP guard now calls crate::signal::is_self_address (same as the
+        // CLI guard). Sending repo="legion" to="legion" must be rejected.
+        let (db, dir) = mcp_test_dir();
+        drop(db);
+
+        let tx = make_tx();
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "legion_signal",
+                "arguments": {
+                    "repo": "legion",
+                    "to": "legion",
+                    "verb": "review",
+                    "status": "approved"
+                }
+            })),
+        );
+
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        assert_eq!(
+            resp["result"]["isError"], true,
+            "self-address signal must be rejected"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("legion"),
+            "error must name the conflicting repo: {text}"
+        );
+    }
+
+    #[test]
+    fn legion_signal_allows_broadcast_with_at_prefix() {
+        // "@all" with a leading @ must be treated as a broadcast, not a
+        // self-address, by the shared is_self_address guard.
+        let (db, dir) = mcp_test_dir();
+        drop(db);
+
+        let tx = make_tx();
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "legion_signal",
+                "arguments": {
+                    "repo": "legion",
+                    "to": "@all",
+                    "verb": "announce",
+                    "note": "broadcast test"
+                }
+            })),
+        );
+
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        // The signal itself should succeed (not be rejected as self-address).
+        // It may fail for other reasons (e.g., missing required fields on the
+        // verb) but must NOT fail with a self-address error.
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        let is_self_address_error =
+            text.contains("authoring repo context") || text.contains("--repo and --to must differ");
+        assert!(
+            !is_self_address_error,
+            "@all broadcast must not be rejected as a self-address: {text}"
         );
     }
 

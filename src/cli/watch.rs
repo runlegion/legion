@@ -64,10 +64,21 @@ pub(crate) enum WatchAction {
     /// skip a poll cycle. PTY EOF + PID-poll remain authoritative; this
     /// is a speed-up only. Idempotent; exits 0 on a missing row so a
     /// hook failure cannot block Claude Code's Stop.
+    ///
+    /// For interactive (human-started) sessions, `$LEGION_WAKE_ATTEMPT_ID`
+    /// is empty; pass `--repo <name>` so the `.session` file is still
+    /// cleaned up even when no wake_attempts row exists (#673 fix 2).
     SessionEnd {
         /// UUIDv7 attempt id, sourced from $LEGION_WAKE_ATTEMPT_ID.
         #[arg(long)]
         attempt_id: String,
+
+        /// Repo name for interactive sessions that have no wake_attempts row.
+        /// When provided and the attempt-id lookup finds no row, this repo's
+        /// `.session` file is removed. Idempotent; ignored when the row exists
+        /// (the repo is resolved from the row instead).
+        #[arg(long)]
+        repo: Option<String>,
     },
 
     /// Show whether the watch daemon is alive, stale, or absent (#581).
@@ -386,9 +397,9 @@ pub(crate) fn handle(action: Option<WatchAction>) -> error::Result<()> {
                 );
             }
         }
-        Some(WatchAction::SessionEnd { attempt_id }) => {
+        Some(WatchAction::SessionEnd { attempt_id, repo }) => {
             let db = open_db()?;
-            watch::record_session_end(&db, &attempt_id, &base)?;
+            watch::record_session_end(&db, &attempt_id, repo.as_deref(), &base)?;
         }
         Some(WatchAction::Status {
             recent,

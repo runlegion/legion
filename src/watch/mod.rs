@@ -246,6 +246,11 @@ impl WatchLoop {
             .drive_submit_confirmation(&self.db, &self.config);
         self.tracker
             .reap_finished(Some(&self.db), Some(&self.session_locks));
+        // #673 fix 4: reap `running` wake_attempts whose backing pid is dead.
+        // These rows accumulate after crash/restart (pid-alive check only runs
+        // on the AgentTracker's live children; a row whose pid was never
+        // tracked by *this* daemon instance is invisible to the tracker).
+        reap_dead_pid_attempts(&self.db, &self.host, self.log_prefix);
         if let Err(e) = self.db.heartbeat_persona_leases(&self.host, self.lease_ttl) {
             eprintln!("{} lease heartbeat error: {e}", self.log_prefix);
         }
@@ -383,6 +388,57 @@ impl WatchLoop {
             "{} reconcile: auto-cancelled {cancelled} shipped-pending card(s), {failed} failed",
             self.log_prefix
         );
+    }
+}
+
+/// Reap `running` wake_attempts whose backing pid is dead (#673 fix 4).
+///
+/// `list_local_orphans` returns every in-flight row owned by this host.
+/// For each one that has a `spawned_pid`, we probe liveness with
+/// `process_alive`. A dead pid means the agent exited without the stop
+/// hook firing (crash, OOM, operator kill) -- mark the row `failed` via
+/// `record_wake_attempt_outcome` so it does not persist indefinitely.
+///
+/// Rows without a `spawned_pid` (queued/claimed/spawning without a
+/// recorded pid yet) are left alone -- they are still transitioning and
+/// the pid has not been stamped yet.
+///
+/// An error from the DB scan is logged and swallowed; the reaper must
+/// never abort the health tick.
+fn reap_dead_pid_attempts(db: &Database, host: &str, log_prefix: &str) {
+    let orphans = match db.list_local_orphans(host) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{log_prefix} dead-pid reaper: scan error: {e}");
+            return;
+        }
+    };
+
+    for attempt in orphans {
+        let pid = match attempt.spawned_pid {
+            Some(p) => p,
+            None => continue, // no pid yet; skip
+        };
+
+        if process_alive(pid) {
+            continue; // still running; leave it alone
+        }
+
+        eprintln!(
+            "{log_prefix} dead-pid reaper: attempt {} (repo {}, pid {}) is not alive -- marking failed",
+            attempt.attempt_id, attempt.repo_name, pid
+        );
+
+        if let Err(e) = db.record_wake_attempt_outcome(
+            &attempt.attempt_id,
+            "error",
+            "dead-pid: process not found at reaper scan",
+        ) {
+            eprintln!(
+                "{log_prefix} dead-pid reaper: failed to mark {} as failed: {e}",
+                attempt.attempt_id
+            );
+        }
     }
 }
 
@@ -900,6 +956,134 @@ mod tests {
         assert!(
             !pid_path.exists(),
             "dropping the guard must release the pid lock"
+        );
+    }
+
+    // -- FIX 4: dead-pid reaper (#673) ----------------------------------------
+
+    /// A `running` wake_attempt with a dead pid is marked failed by
+    /// `reap_dead_pid_attempts`. A live-pid row is left alone.
+    #[cfg(unix)]
+    #[test]
+    fn reap_dead_pid_attempts_marks_dead_pid_failed_and_leaves_live_pid() {
+        let (db, _index, _dir) = test_storage();
+
+        // Spawn a real process, record its pid, then wait for it to die.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let dead_pid = child.id();
+        child.wait().expect("wait for child");
+
+        // Insert a running attempt with the dead pid.
+        let dead_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&dead_id, "test-persona", "test-repo", &[])
+            .expect("enqueue dead-pid attempt");
+        db.try_claim_wake_attempt(&dead_id, "test-host")
+            .expect("claim dead-pid attempt");
+        db.transition_wake_attempt(
+            &dead_id,
+            crate::wake_attempts::WakeAttemptState::Claimed,
+            crate::wake_attempts::WakeAttemptState::Spawning,
+        )
+        .expect("spawning");
+        db.set_wake_attempt_pid(&dead_id, dead_pid)
+            .expect("set dead pid");
+        db.transition_wake_attempt(
+            &dead_id,
+            crate::wake_attempts::WakeAttemptState::Spawning,
+            crate::wake_attempts::WakeAttemptState::Running,
+        )
+        .expect("running");
+
+        // Insert a second running attempt with our own (live) pid.
+        let live_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&live_id, "test-persona", "test-repo", &[])
+            .expect("enqueue live-pid attempt");
+        db.try_claim_wake_attempt(&live_id, "test-host")
+            .expect("claim live-pid attempt");
+        db.transition_wake_attempt(
+            &live_id,
+            crate::wake_attempts::WakeAttemptState::Claimed,
+            crate::wake_attempts::WakeAttemptState::Spawning,
+        )
+        .expect("spawning live");
+        db.set_wake_attempt_pid(&live_id, std::process::id())
+            .expect("set live pid");
+        db.transition_wake_attempt(
+            &live_id,
+            crate::wake_attempts::WakeAttemptState::Spawning,
+            crate::wake_attempts::WakeAttemptState::Running,
+        )
+        .expect("running live");
+
+        // Run the reaper.
+        reap_dead_pid_attempts(&db, "test-host", "[test]");
+
+        // Dead-pid row must be in a terminal (failed) state.
+        let dead_row = db
+            .get_wake_attempt(&dead_id)
+            .expect("get dead row")
+            .expect("row exists");
+        assert_eq!(
+            dead_row.state.as_str(),
+            "failed",
+            "dead-pid attempt must be marked failed; got state: {}",
+            dead_row.state.as_str()
+        );
+
+        // Live-pid row must still be running.
+        let live_row = db
+            .get_wake_attempt(&live_id)
+            .expect("get live row")
+            .expect("row exists");
+        assert_eq!(
+            live_row.state.as_str(),
+            "running",
+            "live-pid attempt must remain in running state; got: {}",
+            live_row.state.as_str()
+        );
+    }
+
+    /// A `running` wake_attempt with no spawned_pid is left alone by the reaper
+    /// (it is still transitioning and has not been assigned a pid yet).
+    #[test]
+    fn reap_dead_pid_attempts_skips_rows_without_pid() {
+        let (db, _index, _dir) = test_storage();
+
+        // Insert a running attempt without calling set_wake_attempt_pid.
+        // Use direct SQL to get to running without a pid (rare in practice,
+        // but the reaper must handle it defensively).
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "test-persona", "test-repo", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        // Transition to spawning and then running without setting a pid.
+        db.transition_wake_attempt(
+            &attempt_id,
+            crate::wake_attempts::WakeAttemptState::Claimed,
+            crate::wake_attempts::WakeAttemptState::Spawning,
+        )
+        .expect("spawning");
+        db.transition_wake_attempt(
+            &attempt_id,
+            crate::wake_attempts::WakeAttemptState::Spawning,
+            crate::wake_attempts::WakeAttemptState::Running,
+        )
+        .expect("running");
+
+        // Run the reaper -- must not crash and must leave the row alone.
+        reap_dead_pid_attempts(&db, "test-host", "[test]");
+
+        let row = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get row")
+            .expect("row exists");
+        assert_eq!(
+            row.state.as_str(),
+            "running",
+            "no-pid running row must be left in running state"
         );
     }
 }
