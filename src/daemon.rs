@@ -314,26 +314,36 @@ fn process_cmdline(pid: u32) -> Option<String> {
     }
 }
 
-/// Return true when the command-line string looks like a legion daemon process.
+/// Return true when the command-line string is a legion daemon process.
 ///
-/// A process is considered a legion daemon when its command line contains the
-/// word "legion" and either "daemon" or "serve" as a subcommand. This is
-/// intentionally conservative: if the binary name or args cannot be confirmed
-/// to match, `kill_orphaned_daemon_on_port` refuses to kill the holder.
+/// This is the safety boundary for SIGKILL, so the match is structural, not a
+/// free-text scan: `argv[0]`'s basename must be exactly `legion`, and its first
+/// argument must be the `daemon` (or legacy `serve`) subcommand. A substring
+/// scan over the whole cmdline is too loose for a kill decision -- e.g.
+/// `node serve --legion-mode` contains both "legion" and "serve" but is not a
+/// legion daemon and must never be killed.
 ///
-/// The " serve" match is intentional: `legion serve` is the legacy daemon form
-/// (pre-daemon-spawn split) and is harmless to include because only the
-/// daemon-port holder is ever examined -- a non-port-holding `legion serve`
-/// would never reach this check.
+/// The `serve` subcommand is intentionally accepted: `legion serve` is the
+/// legacy daemon form (pre-daemon-spawn split) and is harmless because only the
+/// daemon-port holder is ever examined. `daemon-spawn`/`daemon-restart` do NOT
+/// match (they are short-lived CLI calls, never the port holder), and neither
+/// do other legion subcommands (`recall`, `post`, ...).
 fn cmdline_is_legion_daemon(cmdline: &str) -> bool {
-    // Lower-case once so the check is case-insensitive across platforms.
-    let lower = cmdline.to_lowercase();
-    // Must contain the binary name "legion" and one of the daemon subcommands.
-    // "legion daemon", "legion serve" (legacy), and the built path
-    // "/path/to/legion daemon" all pass; unrelated processes named "legion"
-    // without a daemon arg do not.
-    lower.contains("legion")
-        && (lower.contains(" daemon") || lower.contains("/daemon") || lower.contains(" serve"))
+    let mut tokens = cmdline.split_whitespace();
+    // argv[0]: the program. Its basename must be exactly "legion".
+    let prog = match tokens.next() {
+        Some(p) => p,
+        None => return false,
+    };
+    let base = prog.rsplit('/').next().unwrap_or(prog);
+    if !base.eq_ignore_ascii_case("legion") {
+        return false;
+    }
+    // argv[1]: the subcommand must be exactly "daemon" or "serve".
+    match tokens.next() {
+        Some(sub) => sub.eq_ignore_ascii_case("daemon") || sub.eq_ignore_ascii_case("serve"),
+        None => false,
+    }
 }
 
 /// Decide whether a port holder should be killed.
@@ -906,6 +916,23 @@ mod tests {
         assert!(
             !cmdline_is_legion_daemon("legion post --repo legion"),
             "legion post must not be identified as a daemon"
+        );
+        // Substring-match false positive that the structural argv[0]+subcommand
+        // check must reject: contains both "legion" and "serve" but argv[0] is
+        // node, not legion. This was the pre-push review's HIGH-1 example.
+        assert!(
+            !cmdline_is_legion_daemon("node serve --legion-mode"),
+            "a non-legion argv[0] must never match, even if later args mention legion/serve"
+        );
+        // daemon-spawn / daemon-restart are short-lived CLI calls, never the
+        // port holder; the exact-subcommand match must not treat them as the daemon.
+        assert!(
+            !cmdline_is_legion_daemon("legion daemon-spawn"),
+            "daemon-spawn is a CLI call, not the daemon"
+        );
+        assert!(
+            !cmdline_is_legion_daemon("legion daemon-restart"),
+            "daemon-restart is a CLI call, not the daemon"
         );
     }
 
