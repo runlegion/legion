@@ -320,6 +320,11 @@ fn process_cmdline(pid: u32) -> Option<String> {
 /// word "legion" and either "daemon" or "serve" as a subcommand. This is
 /// intentionally conservative: if the binary name or args cannot be confirmed
 /// to match, `kill_orphaned_daemon_on_port` refuses to kill the holder.
+///
+/// The " serve" match is intentional: `legion serve` is the legacy daemon form
+/// (pre-daemon-spawn split) and is harmless to include because only the
+/// daemon-port holder is ever examined -- a non-port-holding `legion serve`
+/// would never reach this check.
 fn cmdline_is_legion_daemon(cmdline: &str) -> bool {
     // Lower-case once so the check is case-insensitive across platforms.
     let lower = cmdline.to_lowercase();
@@ -329,6 +334,22 @@ fn cmdline_is_legion_daemon(cmdline: &str) -> bool {
     // without a daemon arg do not.
     lower.contains("legion")
         && (lower.contains(" daemon") || lower.contains("/daemon") || lower.contains(" serve"))
+}
+
+/// Decide whether a port holder should be killed.
+///
+/// Returns `true` only when `cmdline` is `Some` and identifies a legion daemon
+/// process. `None` (cmdline unreadable) and any non-legion cmdline return
+/// `false` -- the safety invariant is "refuse to kill an unidentified or
+/// non-legion process".
+///
+/// Extracted from `kill_orphaned_daemon_on_port` so this safety contract is
+/// independently testable without spawning real processes.
+pub(crate) fn should_kill_port_holder(cmdline: Option<&str>) -> bool {
+    match cmdline {
+        Some(c) => cmdline_is_legion_daemon(c),
+        None => false,
+    }
 }
 
 /// Kill an orphaned daemon holding `port` when we can confirm it is a legion
@@ -346,23 +367,19 @@ fn kill_orphaned_daemon_on_port(port: u16) -> bool {
 
     let mut killed_any = false;
     for pid in pids {
-        let cmdline = match process_cmdline(pid) {
-            Some(c) => c,
-            None => {
-                eprintln!(
+        let cmdline: Option<String> = process_cmdline(pid);
+        if !should_kill_port_holder(cmdline.as_deref()) {
+            match &cmdline {
+                None => eprintln!(
                     "[legion] daemon-restart: cannot read cmdline for port-holder pid {pid} -- \
                      refusing to kill an unidentified process"
-                );
-                continue;
+                ),
+                Some(c) => eprintln!(
+                    "[legion] daemon-restart: port {port} is held by pid {pid} ({c:?}), \
+                     which does not look like a legion daemon -- refusing to kill it. \
+                     Stop it manually, then retry."
+                ),
             }
-        };
-
-        if !cmdline_is_legion_daemon(&cmdline) {
-            eprintln!(
-                "[legion] daemon-restart: port {port} is held by pid {pid} ({cmdline:?}), \
-                 which does not look like a legion daemon -- refusing to kill it. \
-                 Stop it manually, then retry."
-            );
             continue;
         }
 
@@ -898,6 +915,55 @@ mod tests {
         assert!(
             cmdline_is_legion_daemon("Legion Daemon"),
             "uppercase forms must also match"
+        );
+    }
+
+    // -- should_kill_port_holder (#673 review fix) ---------------------------
+    //
+    // Tests lock in the safety invariant: never kill an unidentified process
+    // (None cmdline) or a non-legion process, only a confirmed legion daemon.
+
+    #[test]
+    fn should_kill_port_holder_refuses_unidentified_process() {
+        // None: cmdline could not be read (permission error, proc gone, etc.).
+        // Safety: refuse -- we cannot identify the holder.
+        assert!(
+            !should_kill_port_holder(None),
+            "None cmdline must return false (refuse to kill unidentified process)"
+        );
+    }
+
+    #[test]
+    fn should_kill_port_holder_refuses_non_legion_process() {
+        // A real process holding the port that is NOT a legion daemon.
+        assert!(
+            !should_kill_port_holder(Some("node server.js")),
+            "node server must not be killed"
+        );
+        assert!(
+            !should_kill_port_holder(Some("python -m http.server 3131")),
+            "python server must not be killed"
+        );
+        assert!(
+            !should_kill_port_holder(Some("legion recall --repo foo")),
+            "legion non-daemon CLI invocation must not be killed"
+        );
+    }
+
+    #[test]
+    fn should_kill_port_holder_approves_legion_daemon() {
+        // A confirmed legion daemon process should be killed.
+        assert!(
+            should_kill_port_holder(Some("legion daemon --port 3131")),
+            "legion daemon must be approved for kill"
+        );
+        assert!(
+            should_kill_port_holder(Some("/usr/local/bin/legion daemon")),
+            "absolute-path legion daemon must be approved"
+        );
+        assert!(
+            should_kill_port_holder(Some("legion serve")),
+            "legacy 'legion serve' form must be approved"
         );
     }
 }

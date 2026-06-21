@@ -153,21 +153,13 @@ pub fn record_session_end(
 
     match db.get_wake_attempt(attempt_id) {
         Ok(Some(attempt)) => {
+            // Wake-spawned path: release the .lock file so the wake gate clears.
+            // Do NOT call release_interactive here -- the wake-spawned path never
+            // writes a .session file, so deleting one here would remove a live
+            // interactive session's lock, reopening the #583 duplicate-wake window.
             if let Err(e) = session_locks.release(&attempt.repo_name) {
                 eprintln!(
                     "[legion watch] session-end: failed to release lock for {}: {}",
-                    attempt.repo_name, e
-                );
-            }
-            // Remove the interactive .session file as well (#673 fix 2).
-            // The wake-spawned path does not write a .session file (only
-            // interactive sessions do), but releasing it here is idempotent
-            // -- missing file is not an error. This closes the gap where a
-            // wake-spawned session that also happens to have an operator-held
-            // .session could leave a stale file behind.
-            if let Err(e) = session_locks.release_interactive(&attempt.repo_name) {
-                eprintln!(
-                    "[legion watch] session-end: failed to release .session for {}: {}",
                     attempt.repo_name, e
                 );
             }
@@ -517,6 +509,57 @@ mod tests {
         assert!(
             result.is_ok(),
             "record_session_end must return Ok even with no row and no repo_hint"
+        );
+    }
+
+    /// The wake-spawned branch (found-row path) must NOT delete an existing
+    /// `.session` file for the same repo. The wake daemon never writes a
+    /// `.session`; deleting one here would evict a live interactive session's
+    /// lock, reopening the #583 duplicate-wake window.
+    ///
+    /// Simulates: watch spawned a session (wake_attempts row written by the DB
+    /// migration seed below), an interactive session is also open (.session
+    /// file written), stop-hook fires via `record_session_end`. After the call
+    /// the `.session` must still exist.
+    #[test]
+    fn session_end_found_row_does_not_delete_interactive_session_file() {
+        use crate::db::Database;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path();
+
+        // Write an interactive .session file to simulate an operator-attended
+        // session for "myrepo" that is open concurrently with a wake-spawned
+        // session.
+        let locks = SessionLockTracker::new(data_dir, default_session_lock_ttl_secs());
+        locks
+            .record_interactive("myrepo", std::process::id())
+            .expect("record_interactive");
+
+        let session_file = data_dir.join("sessions").join("myrepo.session");
+        assert!(
+            session_file.exists(),
+            "precondition: .session file must exist before the test"
+        );
+
+        // Insert a wake_attempts row so record_session_end takes the
+        // found-row (wake-spawned) path.
+        let db_path = data_dir.join("legion.db");
+        let db = Database::open(&db_path).expect("open db");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "myrepo-persona", "myrepo", &[])
+            .expect("enqueue wake attempt");
+
+        let result = record_session_end(&db, &attempt_id, Some("myrepo"), data_dir);
+        assert!(
+            result.is_ok(),
+            "record_session_end must return Ok on the found-row path"
+        );
+
+        // The .session file for the interactive session must be untouched.
+        assert!(
+            session_file.exists(),
+            "the wake-spawned path must NOT delete the interactive .session file"
         );
     }
 }

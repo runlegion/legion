@@ -16,6 +16,28 @@ pub fn validate_note(note: &str) -> error::Result<()> {
     Ok(())
 }
 
+/// Decide whether a signal address is a self-address collision.
+///
+/// Returns `true` when `to` names any of the authoring repos (case-insensitive)
+/// AND is not a broadcast sentinel ("all" / "everyone"). Broadcast sentinels are
+/// always exempt -- they route through a fan-out path that ignores the author
+/// filter. A single leading `@` is stripped from `to` before comparison so a
+/// caller passing "@all" or "@legion" is handled the same as the bare forms.
+///
+/// Shared by both the CLI (`cli/signal.rs`) and MCP (`mcp/tools.rs`) signal
+/// guards so the sentinel set and stripping logic cannot drift between surfaces.
+pub(crate) fn is_self_address(repos: &[String], to: &str) -> bool {
+    // Strip one leading '@' so callers passing "@all" or "@legion" are
+    // handled identically to the bare "all" / "legion" forms.
+    let bare = to.strip_prefix('@').unwrap_or(to);
+    let lower = bare.to_lowercase();
+    // Broadcast sentinels are never self-addresses; they fan out to everyone.
+    if matches!(lower.as_str(), "all" | "everyone") {
+        return false;
+    }
+    repos.iter().any(|r| r.to_lowercase() == lower)
+}
+
 /// A parsed signal from a bullpen post.
 ///
 /// Signals follow the format: `@recipient verb:status {key: value, key: value}`
@@ -653,6 +675,83 @@ mod tests {
     fn validate_note_accepts_short_notes() {
         assert!(validate_note("short note").is_ok());
         assert!(validate_note(&"a".repeat(MAX_SIGNAL_NOTE_LENGTH)).is_ok());
+    }
+
+    // -- is_self_address (shared CLI + MCP guard) ---------------------------
+
+    #[test]
+    fn is_self_address_rejects_same_repo() {
+        assert!(
+            is_self_address(&["legion".to_string()], "legion"),
+            "exact match must be detected as self-address"
+        );
+    }
+
+    #[test]
+    fn is_self_address_rejects_case_insensitive() {
+        assert!(
+            is_self_address(&["legion".to_string()], "Legion"),
+            "case mismatch must still be caught"
+        );
+        assert!(
+            is_self_address(&["Legion".to_string()], "legion"),
+            "repo-side case mismatch must still be caught"
+        );
+    }
+
+    #[test]
+    fn is_self_address_allows_different_repo() {
+        assert!(
+            !is_self_address(&["legion".to_string()], "huttspawn"),
+            "a signal to a different repo must not be flagged"
+        );
+    }
+
+    #[test]
+    fn is_self_address_allows_broadcast_all() {
+        assert!(
+            !is_self_address(&["legion".to_string()], "all"),
+            "broadcast 'all' must never be flagged"
+        );
+        assert!(
+            !is_self_address(&["legion".to_string()], "everyone"),
+            "broadcast 'everyone' must never be flagged"
+        );
+    }
+
+    #[test]
+    fn is_self_address_allows_broadcast_case_insensitive() {
+        assert!(
+            !is_self_address(&["legion".to_string()], "ALL"),
+            "broadcast 'ALL' must never be flagged"
+        );
+        assert!(
+            !is_self_address(&["legion".to_string()], "Everyone"),
+            "broadcast 'Everyone' must never be flagged"
+        );
+    }
+
+    #[test]
+    fn is_self_address_strips_leading_at_for_broadcast() {
+        // Callers passing "@all" or "@everyone" must be treated as broadcasts,
+        // not self-addresses. The leading '@' is stripped before comparison.
+        assert!(
+            !is_self_address(&["legion".to_string()], "@all"),
+            "@all with leading @ must be treated as a broadcast"
+        );
+        assert!(
+            !is_self_address(&["legion".to_string()], "@everyone"),
+            "@everyone with leading @ must be treated as a broadcast"
+        );
+    }
+
+    #[test]
+    fn is_self_address_strips_leading_at_for_self_check() {
+        // A caller passing "@legion" is the same as passing "legion".
+        assert!(
+            is_self_address(&["legion".to_string()], "@legion"),
+            "@legion with leading @ must still be caught as self-address"
+        );
     }
 
     #[test]

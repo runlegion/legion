@@ -85,16 +85,20 @@ pub(crate) fn handle_signal(
     // Guard: --repo is the authoring context; --to is the routing target.
     // Sending a signal where author == recipient is silently dropped by the
     // poll query (src/db/board.rs: `AND r.repo != ?{repo_param}`), so the
-    // daemon never sees it. Broadcasts (@all, @everyone) are exempt -- they
-    // route through a separate fan-out path that ignores the author filter.
-    // `is_self_address` handles case normalization.
-    if is_self_address(&repo, &to) {
-        // Find the matching author to name it in the error.
+    // daemon never sees it. Broadcasts (bare "all", "everyone", or the
+    // "@"-prefixed forms) are exempt -- they route through a separate fan-out
+    // path that ignores the author filter. `signal::is_self_address` handles
+    // case normalization and the leading-@ strip.
+    if crate::signal::is_self_address(&repo, &to) {
+        // Find the matching author to name it in the error. Strip a leading '@'
+        // from `to` before comparison so "@legion" matches "legion" in the repo
+        // list -- matching is_self_address's own normalization.
+        let bare_to = to.strip_prefix('@').unwrap_or(&to);
         let matched = repo
             .iter()
-            .find(|r| r.to_lowercase() == to.to_lowercase())
+            .find(|r| r.to_lowercase() == bare_to.to_lowercase())
             .cloned()
-            .unwrap_or_else(|| to.clone());
+            .unwrap_or_else(|| bare_to.to_string());
         return Err(error::LegionError::SignalSelfAddressed { repo: matched });
     }
 
@@ -244,80 +248,39 @@ pub(crate) fn handle_bullpen(
     Ok(())
 }
 
-/// Pure helper: decide whether a signal address is a self-address collision.
-///
-/// Returns `true` when `to` equals any entry in `repos` (case-insensitive)
-/// AND is not a broadcast sentinel ("all" / "everyone"). Extracted so the
-/// guard logic is unit-testable without a live DB.
-fn is_self_address(repos: &[String], to: &str) -> bool {
-    let to_lower = to.to_lowercase();
-    let is_broadcast = matches!(to_lower.as_str(), "all" | "everyone");
-    if is_broadcast {
-        return false;
-    }
-    repos.iter().any(|r| r.to_lowercase() == to_lower)
-}
+// is_self_address was extracted from this module and now lives in
+// crate::signal (src/signal.rs) so both the CLI and MCP signal guards
+// share one implementation. See that module's tests for the full suite.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // -- FIX 1: self-address guard ------------------------------------------
+    // -- self-address guard (delegates to crate::signal::is_self_address) ---
+    //
+    // These tests exercise the shared guard from the CLI surface's perspective.
+    // The full sentinel + case + @-strip coverage lives in signal::tests.
 
     #[test]
     fn self_address_guard_rejects_same_repo() {
-        // Exact match: author repo equals recipient.
         assert!(
-            is_self_address(&["legion".to_string()], "legion"),
-            "legion -> legion must be detected as self-address"
-        );
-    }
-
-    #[test]
-    fn self_address_guard_rejects_case_insensitive() {
-        // Case normalization: "Legion" and "legion" are the same.
-        assert!(
-            is_self_address(&["legion".to_string()], "Legion"),
-            "case mismatch must still be caught as self-address"
-        );
-        assert!(
-            is_self_address(&["Legion".to_string()], "legion"),
-            "repo-side case mismatch must still be caught"
-        );
-    }
-
-    #[test]
-    fn self_address_guard_allows_different_repo() {
-        // Different repos: author=legion, recipient=huttspawn -- this is fine.
-        assert!(
-            !is_self_address(&["legion".to_string()], "huttspawn"),
-            "a signal to a different repo must not be flagged"
+            crate::signal::is_self_address(&["legion".to_string()], "legion"),
+            "exact match must be detected as self-address"
         );
     }
 
     #[test]
     fn self_address_guard_allows_broadcast_all() {
-        // Broadcasts are always permitted regardless of author.
+        // Bare broadcast sentinels.
         assert!(
-            !is_self_address(&["legion".to_string()], "all"),
+            !crate::signal::is_self_address(&["legion".to_string()], "all"),
             "broadcast 'all' must never be flagged as self-address"
         );
+        // @-prefixed broadcast: callers passing "@all" must be treated as a
+        // broadcast, not a self-address, after the leading-@ strip.
         assert!(
-            !is_self_address(&["legion".to_string()], "everyone"),
-            "broadcast 'everyone' must never be flagged as self-address"
-        );
-    }
-
-    #[test]
-    fn self_address_guard_allows_broadcast_case_insensitive() {
-        // Broadcasts with different case must also pass.
-        assert!(
-            !is_self_address(&["legion".to_string()], "ALL"),
-            "broadcast 'ALL' must never be flagged"
-        );
-        assert!(
-            !is_self_address(&["legion".to_string()], "Everyone"),
-            "broadcast 'Everyone' must never be flagged"
+            !crate::signal::is_self_address(&["legion".to_string()], "@all"),
+            "@all with leading @ must be treated as a broadcast"
         );
     }
 
