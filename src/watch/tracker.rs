@@ -94,6 +94,11 @@ pub struct TrackedChild {
     /// `outcome` reason so `reap_finished` records `submit_not_confirmed`
     /// on the wake_attempts row instead of a generic abandon.
     pub submit_failed_reason: Option<String>,
+    /// Set when `reap_finished` force-reaps a session that outlived the
+    /// session budget with no completion signal (#677). Carries the
+    /// `session_budget_exceeded` outcome reason so the wedge is recorded
+    /// distinctly from a submit failure or a generic error.
+    pub budget_exceeded_reason: Option<String>,
 }
 
 pub struct AgentTracker {
@@ -135,6 +140,7 @@ impl AgentTracker {
             submit_retries: 0,
             submit_confirmed: false,
             submit_failed_reason: None,
+            budget_exceeded_reason: None,
         });
     }
 
@@ -152,10 +158,18 @@ impl AgentTracker {
     /// turn is considered complete: the child is killed best-effort and the full
     /// reap path runs. The session lock is released in both cases so the per-repo
     /// wake gate opens immediately rather than waiting for the TTL.
+    ///
+    /// `session_budget` is the wedge backstop (#677): a child that is still
+    /// alive with no completion signal but has outlived this budget (measured
+    /// from spawn) is force-reaped -- killed and run through the full reap path
+    /// with a `session_budget_exceeded` outcome -- so a turn that blocks
+    /// indefinitely cannot leak the process or hold its persona lease forever.
+    /// A zero budget disables the backstop.
     pub fn reap_finished(
         &mut self,
         db: Option<&Database>,
         session_locks: Option<&SessionLockTracker>,
+        session_budget: Duration,
     ) {
         self.children.retain_mut(|tracked| {
             // Determine whether this child should be reaped.
@@ -234,8 +248,46 @@ impl AgentTracker {
                                 return true; // keep tracking; do not leak or open the gate
                             }
                         }
+                    } else if !session_budget.is_zero()
+                        && tracked.spawn_instant.elapsed() >= session_budget
+                    {
+                        // #677: wedge backstop. The child is alive and mid-turn
+                        // but its stop hook never fired (no exit_observed_at)
+                        // within the budget -- the turn is blocked indefinitely.
+                        // The dead-pid reaper (#673) cannot help: the pid is
+                        // still alive. Force-reap so neither the process (nor its
+                        // MCP children) leaks and the persona lease is released.
+                        eprintln!(
+                            "[legion watch] agent for {} exceeded session budget ({}s) with no turn completion -- reaping wedged session",
+                            tracked.repo,
+                            session_budget.as_secs()
+                        );
+                        match tracked.child.kill() {
+                            Ok(()) => {
+                                // Killed: route the outcome to the distinct
+                                // session_budget_exceeded reason and classify as
+                                // error (a wedged turn produced nothing).
+                                tracked.budget_exceeded_reason = Some(format!(
+                                    "session_budget_exceeded ({}s)",
+                                    session_budget.as_secs()
+                                ));
+                                Some(false)
+                            }
+                            Err(e) => {
+                                // Kill failed: the session is STILL ALIVE. Keep it
+                                // tracked and retry next poll rather than dropping
+                                // it -- same reasoning as the idle-REPL path: a
+                                // dropped-but-alive child leaks AND opens the gate.
+                                eprintln!(
+                                    "[legion watch] kill of wedged session for {} failed -- keeping tracked for retry: {}",
+                                    tracked.repo, e
+                                );
+                                return true; // keep tracking; do not leak or open the gate
+                            }
+                        }
                     } else {
-                        // Still genuinely running and no completion signal yet.
+                        // Still genuinely running, within budget, no completion
+                        // signal yet.
                         return true; // keep tracking
                     }
                 }
@@ -275,17 +327,23 @@ impl AgentTracker {
                     }
                 }
 
-                // #649: a child the submit-confirmation loop gave up on
-                // never ran a turn -- there is no session to classify. Record
-                // the wake_attempt outcome with the distinct reason so the
-                // metric trail shows "prompt never submitted" instead of a
-                // generic abandon, and skip the session-outcome row.
-                if let Some(reason) = &tracked.submit_failed_reason {
+                // A child the submit-confirmation loop gave up on (#649,
+                // submit_failed_reason) or one force-reaped past the session
+                // budget (#677, budget_exceeded_reason) produced no real session to
+                // classify. Record the wake_attempt outcome with the distinct
+                // reason so the metric trail shows the specific failure
+                // ("prompt never submitted" / "session_budget_exceeded")
+                // instead of a generic abandon, and skip the session-outcome row.
+                if let Some(reason) = tracked
+                    .submit_failed_reason
+                    .as_ref()
+                    .or(tracked.budget_exceeded_reason.as_ref())
+                {
                     if let Some(ref attempt_id) = tracked.attempt_id
                         && let Err(e) = db.record_wake_attempt_outcome(attempt_id, "error", reason)
                     {
                         eprintln!(
-                            "[legion watch] failed to record submit-failure outcome {}: {}",
+                            "[legion watch] failed to record terminal outcome {}: {}",
                             attempt_id, e
                         );
                     }
@@ -535,7 +593,7 @@ mod tests {
         assert_eq!(tracker.active_count(), 1, "precondition: child is tracked");
 
         // Run the reaper with session_locks provided.
-        tracker.reap_finished(Some(&db), Some(&locks));
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600));
 
         // The child must have been reaped (removed from tracking).
         assert_eq!(
@@ -599,7 +657,7 @@ mod tests {
         assert_eq!(tracker.active_count(), 1, "precondition: child tracked");
 
         // Reaper: child is live and exit_observed_at is NOT set.
-        tracker.reap_finished(Some(&db), Some(&locks));
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600));
 
         // Child must still be tracked -- the turn is genuinely in progress.
         assert_eq!(
@@ -615,6 +673,164 @@ mod tests {
         );
 
         // Clean up the long-running child so we don't leak it in the test suite.
+        tracker.children.iter_mut().for_each(|t| {
+            let _ = t.child.kill();
+        });
+    }
+
+    // -- reap_finished: session-budget wedge backstop (#677) ------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_finished_reaps_wedged_session_past_budget() {
+        // A live child (sleep) that is mid-turn (Running) with NO
+        // exit_observed_at, alive past the session budget, is a wedged session:
+        // it must be force-reaped, its session lock and persona lease released,
+        // and its wake_attempt settled to Failed with the session_budget_exceeded
+        // outcome -- the eavesdrop case from #676 that the dead-pid reaper misses
+        // because the pid is still alive.
+        let (db, _index, data_dir) = test_storage();
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+
+        let child_proc = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep");
+        let child_pid = child_proc.id();
+
+        // wake_attempts row driven Claimed -> Spawning -> Running so the wedge is
+        // mid-turn (post-submit), exactly like a session that started its turn
+        // and then blocked.
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let signal_id = db
+            .insert_reflection("kelex", "@legion question:wedged", "team")
+            .expect("insert signal")
+            .id;
+        db.enqueue_wake_attempt(
+            &attempt_id,
+            "legion",
+            "legion",
+            std::slice::from_ref(&signal_id),
+        )
+        .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        use crate::wake_attempts::WakeAttemptState::{Claimed, Running, Spawning};
+        db.transition_wake_attempt(&attempt_id, Claimed, Spawning)
+            .expect("Claimed->Spawning");
+        db.transition_wake_attempt(&attempt_id, Spawning, Running)
+            .expect("Spawning->Running");
+
+        // Hold a persona lease under the same host the tracked child records, so
+        // we can assert the reap releases it (the load-bearing fix: a wedged
+        // session must not keep blocking future wakes of its persona).
+        assert!(
+            db.try_acquire_persona_lease(
+                "legion",
+                &signal_id,
+                "test-host",
+                Duration::from_secs(3600)
+            )
+            .expect("acquire lease"),
+            "precondition: lease acquired"
+        );
+
+        locks
+            .record_spawn("legion", child_pid)
+            .expect("record spawn");
+
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_proc),
+            vec![("legion".to_string(), signal_id.clone())],
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            vec![signal_id.clone()],
+            Some(attempt_id.clone()),
+        );
+
+        // Backdate the monotonic spawn instant so the child reads as 120s old
+        // against a 60s budget -- no sleep needed to cross the threshold.
+        tracker.children[0].spawn_instant = Instant::now() - Duration::from_secs(120);
+
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(60));
+
+        assert_eq!(
+            tracker.active_count(),
+            0,
+            "wedged session past budget must be reaped"
+        );
+        assert!(
+            locks.active_pid("legion").is_none(),
+            "session lock must be released after a wedge reap"
+        );
+        let row = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get attempt")
+            .expect("row exists");
+        assert_eq!(row.state, crate::wake_attempts::WakeAttemptState::Failed);
+        assert_eq!(
+            row.outcome.as_deref(),
+            Some("session_budget_exceeded (60s)"),
+            "the distinct wedge reason must land on the row"
+        );
+        assert!(
+            db.list_persona_leases(Some("legion"))
+                .expect("list leases")
+                .is_empty(),
+            "the wedged session's persona lease must be released"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_finished_keeps_wedged_session_when_budget_disabled() {
+        // A zero budget disables the wedge backstop: a live, mid-turn child with
+        // no exit_observed_at stays tracked no matter how old it is, so an
+        // operator who sets session_budget_secs = 0 opts out of force-reaping.
+        let (db, _index, data_dir) = test_storage();
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+
+        let child_proc = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let sig = db
+            .insert_reflection("kelex", "@legion question:no-budget", "team")
+            .expect("signal")
+            .id;
+        db.enqueue_wake_attempt(&attempt_id, "legion", "legion", &[sig])
+            .expect("enqueue");
+        locks
+            .record_spawn("legion", child_proc.id())
+            .expect("record spawn");
+
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_proc),
+            Vec::new(),
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            Vec::new(),
+            Some(attempt_id),
+        );
+        // Very old child, but budget disabled.
+        tracker.children[0].spawn_instant = Instant::now() - Duration::from_secs(99_999);
+
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::ZERO);
+
+        assert_eq!(
+            tracker.active_count(),
+            1,
+            "a zero budget must disable the wedge backstop"
+        );
+
+        // Clean up the long-running child.
         tracker.children.iter_mut().for_each(|t| {
             let _ = t.child.kill();
         });
@@ -768,7 +984,7 @@ mod tests {
         tracker.children[0].submit_failed_reason =
             Some("submit_not_confirmed (retries=12)".to_string());
 
-        tracker.reap_finished(Some(&db), Some(&locks));
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600));
 
         assert_eq!(tracker.active_count(), 0, "failed child must be reaped");
         let row = db

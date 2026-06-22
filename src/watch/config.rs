@@ -220,6 +220,22 @@ pub struct WatchConfig {
     #[serde(default = "default_submit_confirm_budget_secs")]
     pub submit_confirm_budget_secs: u64,
 
+    /// Hard wall-clock cap (seconds) on a watch-spawned session's total
+    /// lifetime, measured from spawn (#677). The stop hook normally terminates
+    /// a session when its turn completes (typically minutes); a session still
+    /// alive past this cap with no completion signal (`exit_observed_at` unset)
+    /// is wedged -- blocked mid-turn, the stop hook never fired -- and is
+    /// force-reaped: killed, its session lock and persona wake-lease released,
+    /// and its wake_attempt recorded with outcome `session_budget_exceeded`.
+    /// This is the backstop the dead-pid reaper (#673) cannot provide: that
+    /// path only fires once the pid actually exits, but a wedged session's pid
+    /// stays alive indefinitely, leaking the process (and its MCP children) and
+    /// holding the lease against future legit wakes. Must exceed any legitimate
+    /// single turn; default 1800 (30 minutes). Set to `0` to disable the cap
+    /// (not recommended -- a wedge then leaks until the daemon restarts).
+    #[serde(default = "default_session_budget_secs")]
+    pub session_budget_secs: u64,
+
     /// Whether this node serves the web dashboard.
     /// Only one node per network should have this set to true.
     #[serde(default)]
@@ -305,6 +321,10 @@ fn default_submit_confirm_budget_secs() -> u64 {
     60
 }
 
+fn default_session_budget_secs() -> u64 {
+    1800
+}
+
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
@@ -325,6 +345,7 @@ impl Default for WatchConfig {
             submit_retry_max: default_submit_retry_max(),
             submit_retry_interval_secs: default_submit_retry_interval_secs(),
             submit_confirm_budget_secs: default_submit_confirm_budget_secs(),
+            session_budget_secs: default_session_budget_secs(),
             serve: false,
             cluster: None,
             repos: Vec::new(),
