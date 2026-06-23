@@ -13,10 +13,16 @@ pub use prs::*;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
+// `Child` and `Instant` are used only by the unix-only ETXTBSY retry helper;
+// importing them unconditionally would warn as unused on non-unix targets.
+#[cfg(unix)]
+use std::process::Child;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use wait_timeout::ChildExt;
 
@@ -174,16 +180,21 @@ fn call_plugin(plugin_path: &Path, args: &[&str], env: &[(&str, &str)]) -> Resul
 }
 
 /// The exec-time errno returned when the target file is open for writing by any
-/// process: `ETXTBSY`, which is 26 on both Linux and macOS -- the only platforms
-/// this exec path runs on.
+/// process: `ETXTBSY`, which is 26 on both Linux and macOS. `unix`-only: this is
+/// a POSIX `errno`. On Windows `raw_os_error()` returns Win32 codes where 26 is
+/// `ERROR_SHARING_VIOLATION`, an unrelated condition, so the retry must never run
+/// there -- the helper and its call site are `#[cfg(unix)]`.
+#[cfg(unix)]
 const ETXTBSY: i32 = 26;
 
 /// Hard wall-clock cap on `ETXTBSY` spawn retries. The condition clears in
 /// milliseconds in practice, so this bound exists only to guarantee the retry
 /// loop cannot hang on a genuinely stuck writer.
+#[cfg(unix)]
 const ETXTBSY_RETRY_BUDGET: Duration = Duration::from_secs(2);
 
 /// Backoff between `ETXTBSY` spawn retries.
+#[cfg(unix)]
 const ETXTBSY_RETRY_BACKOFF: Duration = Duration::from_millis(20);
 
 /// Spawn `cmd`, retrying on `ETXTBSY` within a bounded budget.
@@ -193,7 +204,9 @@ const ETXTBSY_RETRY_BACKOFF: Duration = Duration::from_millis(20);
 /// under parallel test execution, a sibling process that inherited the write fd
 /// in its fork/exec window. The condition is transient, so a bounded retry
 /// succeeds where a single attempt spuriously fails. Any non-`ETXTBSY` spawn
-/// error returns immediately.
+/// error returns immediately. `unix`-only: `ETXTBSY` is a POSIX errno (see the
+/// const); the call site uses a plain `spawn()` on non-unix targets.
+#[cfg(unix)]
 fn spawn_with_etxtbsy_retry(cmd: &mut Command) -> std::io::Result<Child> {
     let deadline = Instant::now() + ETXTBSY_RETRY_BUDGET;
     let mut logged = false;
@@ -243,8 +256,14 @@ fn call_plugin_inner(
         cmd.process_group(0);
     }
 
-    let mut child = spawn_with_etxtbsy_retry(&mut cmd)
-        .map_err(|e| LegionError::WorkSource(format!("failed to run plugin: {e}")))?;
+    // ETXTBSY is a POSIX errno, so the retry is unix-only; other targets spawn
+    // directly (matching the `process_group` cfg split above).
+    #[cfg(unix)]
+    let spawn_result = spawn_with_etxtbsy_retry(&mut cmd);
+    #[cfg(not(unix))]
+    let spawn_result = cmd.spawn();
+    let mut child =
+        spawn_result.map_err(|e| LegionError::WorkSource(format!("failed to run plugin: {e}")))?;
 
     // Reader threads must be spawned BEFORE we wait. If the plugin emits
     // more than a pipe buffer of output and nothing is draining, the
@@ -548,6 +567,14 @@ mod tests {
             assert_eq!(out, "hello\n");
         }
 
+        // Linux-only: this test is load-bearing only where `execve` actually
+        // raises ETXTBSY for a file open for writing. Linux does so for the
+        // shebang script; Darwin raises ETXTBSY only for native Mach-O binaries,
+        // not shebang-interpreted scripts, so on macOS the first spawn would
+        // succeed immediately and the test would pass vacuously (the retry path
+        // never runs). On Linux the `.expect()` below is real: without the retry
+        // the first spawn fails with ETXTBSY and the test panics.
+        #[cfg(target_os = "linux")]
         #[test]
         fn retries_past_etxtbsy_until_writer_closes() {
             // Holding a writable fd open to the stub makes execve() of it return
