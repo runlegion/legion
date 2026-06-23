@@ -121,10 +121,16 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
     };
 
     append_section(
-        "REQUIRES A REPLY -- these are directed questions or requests. \
-         You MUST reply to each one, even if the reply is \"no\", \"can't help\", \
-         or \"handing to X\". Silence on a directed question is ghosting, not \
-         acknowledgment. A short refusal is a valid reply; no reply is not.",
+        "REQUIRES A REPLY -- these are directed questions and requests. Each one \
+         needs a real response before you stop, not just an acknowledgment. \
+         If it ASKS something, answer it -- a short answer or a clear \"no\" / \
+         \"can't help\" / \"handing to X\" is fine. If it asks you to DO something \
+         (a task, request, or handoff with a deliverable), COMPLETE the work and \
+         report the result; or, if you cannot, reply explicitly with the blocker \
+         or a decline and the reason. A bare \"received\" / \"on it\" / \"ack\" that \
+         stops without doing the asked work is ghosting, not a reply -- and so is \
+         silence. Do not end your turn until each item below is either \
+         done-and-reported or explicitly declined/blocked.",
         &must_reply,
         PENDING_REPLY_CAP,
     );
@@ -335,6 +341,38 @@ mod tests {
         assert!(prompt.contains("@all announce: shipped"));
         assert!(prompt.contains("from kelex"));
         assert!(prompt.contains("from rafters"));
+    }
+
+    #[test]
+    fn build_wake_prompt_frames_requests_as_must_complete() {
+        // #678: a request that asks for a deliverable must be framed as
+        // do-the-work-before-you-stop, not just reply -- otherwise a woken
+        // agent satisfies the prompt with a bare ack and stops without
+        // producing the deliverable (the kessel/veneer ack-and-stop seen in
+        // the #676 coordination test).
+        let signals = vec![(
+            "id-req".to_string(),
+            "@kessel request:open -- read your repo and post your conventions".to_string(),
+            "legion".to_string(),
+        )];
+
+        let prompt = build_wake_prompt("kessel", &signals);
+
+        // The reply-required section must spell out the do-the-work path and
+        // forbid ack-and-stop, so the framing survives prompt edits.
+        assert!(prompt.contains("REQUIRES A REPLY"));
+        assert!(
+            prompt.contains("COMPLETE the work"),
+            "request framing must tell the agent to complete the work, not just reply"
+        );
+        assert!(
+            prompt.contains("done-and-reported or explicitly declined/blocked"),
+            "framing must require a real outcome before the turn ends"
+        );
+        assert!(
+            prompt.contains("ghosting"),
+            "a bare ack that stops must be named as ghosting"
+        );
     }
 
     #[test]
