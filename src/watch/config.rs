@@ -598,6 +598,8 @@ workdir = "/tmp"
         assert_eq!(config.submit_retry_max, 12);
         assert_eq!(config.submit_retry_interval_secs, 4);
         assert_eq!(config.submit_confirm_budget_secs, 60);
+        // #677 wedge-backstop budget defaults to 30 minutes when absent.
+        assert_eq!(config.session_budget_secs, 1800);
         // #654 auto-reconcile defaults to hourly when the key is absent.
         assert_eq!(config.reconcile_interval_secs, 3600);
     }

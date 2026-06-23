@@ -342,9 +342,14 @@ impl AgentTracker {
                     if let Some(ref attempt_id) = tracked.attempt_id
                         && let Err(e) = db.record_wake_attempt_outcome(attempt_id, "error", reason)
                     {
+                        // Name the reason here: on a write failure the row stays
+                        // in-flight, so the same-tick dead-pid reaper settles it
+                        // with a generic "dead-pid" reason instead. Logging the
+                        // specific reason keeps the wedge/submit cause recoverable
+                        // from stderr even when it never reaches the row.
                         eprintln!(
-                            "[legion watch] failed to record terminal outcome {}: {}",
-                            attempt_id, e
+                            "[legion watch] failed to record terminal outcome {} ({}): {}",
+                            attempt_id, reason, e
                         );
                     }
                     return false; // remove from tracking list
@@ -687,8 +692,9 @@ mod tests {
         // exit_observed_at, alive past the session budget, is a wedged session:
         // it must be force-reaped, its session lock and persona lease released,
         // and its wake_attempt settled to Failed with the session_budget_exceeded
-        // outcome -- the eavesdrop case from #676 that the dead-pid reaper misses
-        // because the pid is still alive.
+        // outcome -- the eavesdrop wedge surfaced by the #676 coordination test,
+        // fixed here under #677, that the dead-pid reaper misses because the pid
+        // is still alive.
         let (db, _index, data_dir) = test_storage();
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
 
