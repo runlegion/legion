@@ -244,8 +244,11 @@ impl WatchLoop {
         // that never confirms is failed here and reaped on the same tick.
         self.tracker
             .drive_submit_confirmation(&self.db, &self.config);
-        self.tracker
-            .reap_finished(Some(&self.db), Some(&self.session_locks));
+        self.tracker.reap_finished(
+            Some(&self.db),
+            Some(&self.session_locks),
+            Duration::from_secs(self.config.session_budget_secs),
+        );
         // #673 fix 4: reap `running` wake_attempts whose backing pid is dead.
         // These rows accumulate after crash/restart (pid-alive check only runs
         // on the AgentTracker's live children; a row whose pid was never

@@ -230,10 +230,23 @@ impl SpawnedChild {
     }
 
     /// Terminate the child. Used by `reap_finished` to tear down an idle PTY
-    /// REPL whose turn is complete, and by the spawn-failure cleanup path.
+    /// REPL whose turn is complete, the wedge backstop (#677), and the
+    /// spawn-failure cleanup path.
+    ///
+    /// Both variants reap the killed process so it does not linger as a zombie
+    /// once dropped from tracking: `PtySession` reaps in its `Drop`, and the
+    /// `Print` arm waits here (SIGKILL cannot be caught, so `wait` returns
+    /// promptly). Without the `Print` wait a force-reaped print-mode child would
+    /// leak a zombie for the daemon's lifetime.
     pub fn kill(&mut self) -> Result<()> {
         match self {
-            SpawnedChild::Print(c) => c.kill().map_err(LegionError::Io),
+            SpawnedChild::Print(c) => {
+                c.kill().map_err(LegionError::Io)?;
+                // Reap the just-killed child. Best-effort: a wait error here
+                // does not change that the kill succeeded.
+                let _ = c.wait();
+                Ok(())
+            }
             SpawnedChild::Pty(s) => s.kill(),
         }
     }
