@@ -13,10 +13,10 @@ pub use prs::*;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use wait_timeout::ChildExt;
 
@@ -173,51 +173,6 @@ fn call_plugin(plugin_path: &Path, args: &[&str], env: &[(&str, &str)]) -> Resul
     call_plugin_inner(plugin_path, args, env, resolve_plugin_timeout())
 }
 
-/// The exec-time errno returned when the target file is open for writing by any
-/// process: `ETXTBSY`, which is 26 on both Linux and macOS -- the only platforms
-/// this exec path runs on.
-const ETXTBSY: i32 = 26;
-
-/// Hard wall-clock cap on `ETXTBSY` spawn retries. The condition clears in
-/// milliseconds in practice, so this bound exists only to guarantee the retry
-/// loop cannot hang on a genuinely stuck writer.
-const ETXTBSY_RETRY_BUDGET: Duration = Duration::from_secs(2);
-
-/// Backoff between `ETXTBSY` spawn retries.
-const ETXTBSY_RETRY_BACKOFF: Duration = Duration::from_millis(20);
-
-/// Spawn `cmd`, retrying on `ETXTBSY` within a bounded budget.
-///
-/// `execve` returns `ETXTBSY` when the binary is open for writing anywhere --
-/// e.g. a plugin just written or updated while a writer still holds the fd, or,
-/// under parallel test execution, a sibling process that inherited the write fd
-/// in its fork/exec window. The condition is transient, so a bounded retry
-/// succeeds where a single attempt spuriously fails. Any non-`ETXTBSY` spawn
-/// error returns immediately.
-fn spawn_with_etxtbsy_retry(cmd: &mut Command) -> std::io::Result<Child> {
-    let deadline = Instant::now() + ETXTBSY_RETRY_BUDGET;
-    let mut logged = false;
-    loop {
-        match cmd.spawn() {
-            Ok(child) => return Ok(child),
-            Err(e) if e.raw_os_error() == Some(ETXTBSY) && Instant::now() < deadline => {
-                // Log once: a plugin that genuinely needs retries to spawn is a
-                // signal worth seeing, but the per-iteration retry is silent so a
-                // tight backoff cannot flood stderr.
-                if !logged {
-                    eprintln!(
-                        "[legion worksource] plugin spawn hit ETXTBSY (file busy) -- retrying for up to {}s",
-                        ETXTBSY_RETRY_BUDGET.as_secs()
-                    );
-                    logged = true;
-                }
-                thread::sleep(ETXTBSY_RETRY_BACKOFF);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
 fn call_plugin_inner(
     plugin_path: &Path,
     args: &[&str],
@@ -243,7 +198,8 @@ fn call_plugin_inner(
         cmd.process_group(0);
     }
 
-    let mut child = spawn_with_etxtbsy_retry(&mut cmd)
+    let mut child = cmd
+        .spawn()
         .map_err(|e| LegionError::WorkSource(format!("failed to run plugin: {e}")))?;
 
     // Reader threads must be spawned BEFORE we wait. If the plugin emits
@@ -545,39 +501,6 @@ mod tests {
             let (_tmp, path) = write_stub("#!/bin/bash\necho hello\n");
             let out = call_plugin_inner(&path, &[], &[], Some(Duration::from_secs(2)))
                 .expect("stub should succeed");
-            assert_eq!(out, "hello\n");
-        }
-
-        #[test]
-        fn retries_past_etxtbsy_until_writer_closes() {
-            // Holding a writable fd open to the stub makes execve() of it return
-            // ETXTBSY -- the exact transient condition that flaked CI. A single
-            // spawn would fail; the bounded retry must succeed once the writer
-            // releases the fd. A background thread closes it after a short delay.
-            use std::fs::OpenOptions;
-            use std::sync::{Arc, Mutex};
-
-            let (_tmp, path) = write_stub("#!/bin/bash\necho hello\n");
-            let writer = OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .expect("open stub for writing");
-            let writer = Arc::new(Mutex::new(Some(writer)));
-
-            let releaser = {
-                let writer = Arc::clone(&writer);
-                thread::spawn(move || {
-                    // 120ms sits well inside the 2s retry budget and 3s call
-                    // timeout, so the retry has ample room to outlast the hold.
-                    thread::sleep(Duration::from_millis(120));
-                    // Drop the File, closing the writable fd so exec can proceed.
-                    *writer.lock().expect("lock writer") = None;
-                })
-            };
-
-            let out = call_plugin_inner(&path, &[], &[], Some(Duration::from_secs(3)))
-                .expect("must retry past ETXTBSY and succeed once the writer closes");
-            releaser.join().expect("join releaser");
             assert_eq!(out, "hello\n");
         }
 
