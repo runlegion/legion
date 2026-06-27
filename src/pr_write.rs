@@ -253,14 +253,21 @@ fn has_source_path(entry: &str) -> bool {
     })
 }
 
-/// True when the entry mentions a source path WITH a line suffix (`bar.ts:42`).
-/// A bare filename does not match -- this is the within-file half of the path
-/// check, used by the stricter simplify locator.
+/// True when the entry mentions a source path WITH a real line number
+/// (`bar.ts:42`). A bare filename (`bar.ts`) and an empty line suffix
+/// (`bar.ts:`) both fail -- the colon must be followed by a digit. This is the
+/// within-file half of the path check, used by the stricter simplify locator.
 fn has_source_path_with_line(entry: &str) -> bool {
     source_tokens(entry).any(|tok| {
-        SOURCE_EXTS
-            .iter()
-            .any(|ext| tok.contains(&format!("{ext}:")))
+        SOURCE_EXTS.iter().any(|ext| {
+            let needle = format!("{ext}:");
+            tok.match_indices(&needle).any(|(i, _)| {
+                tok[i + needle.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit())
+            })
+        })
     })
 }
 
@@ -392,8 +399,9 @@ mod tests {
         assert!(has_within_file_locator("added fn validate_thing"));
         assert!(has_within_file_locator("Evidence: the lone match arm"));
         // NOT a within-file locator: a bare filename (which just repeats the
-        // simplify heading) or a behavioral cue word.
+        // simplify heading), an empty line suffix, or a behavioral cue word.
         assert!(!has_within_file_locator("src/foo.rs reads cleanly"));
+        assert!(!has_within_file_locator("src/foo.rs: reads cleanly"));
         assert!(!has_within_file_locator(
             "the observable behavior is unchanged"
         ));
