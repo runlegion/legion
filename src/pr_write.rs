@@ -189,7 +189,13 @@ pub(crate) fn strip_evidence_lines(entry: &str) -> String {
 /// function, a source path, or an issue/PR reference. Deliberately generous --
 /// the goal is to confirm the agent pointed at something checkable, not to
 /// validate the citation itself (that is the verify gate's job).
-fn has_evidence(entry: &str) -> bool {
+///
+/// Shared with `simplify_check`, which applies the same located-evidence bar
+/// to per-file articulation entries (reading the body only, since the `### `
+/// heading restates the file path and would trivially satisfy the source-path
+/// check). Promoted to `pub(crate)` so both gates use one detector and cannot
+/// silently drift.
+pub(crate) fn has_evidence(entry: &str) -> bool {
     let lower = entry.to_lowercase();
     if lower.contains("evidence:") {
         return true;

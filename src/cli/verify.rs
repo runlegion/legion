@@ -690,13 +690,13 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         let articulation = "### src/foo.rs\n\
-             Checked all six categories. No duplicate logic found: each function \
-             handles exactly one concern. No stringly-typed state; enums used \
-             throughout. Error handling propagates via the ? operator.\n\
+             Checked all six categories. No duplicate logic found: `fn handle_foo` \
+             at src/foo.rs:30 handles exactly one concern. No stringly-typed state; \
+             enums used throughout. Error handling propagates via the ? operator.\n\
              ### src/bar.rs\n\
-             Reviewed for unnecessary abstraction and copy-paste variation. \
-             The single trait bound on this module is load-bearing -- removing \
-             it would require duplicating the impl block in three callers. \
+             Reviewed for unnecessary abstraction and copy-paste variation. The \
+             single trait bound on `fn render` at src/bar.rs:88 is load-bearing -- \
+             removing it would require duplicating the impl block in three callers. \
              Clean verdict: no simplify findings.\n";
 
         let report = validate_articulation(&changed, articulation);

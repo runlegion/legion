@@ -4,9 +4,9 @@ description: |
   Review the current branch diff for code quality issues: duplicate logic, unnecessary
   abstraction, stringly-typed state, and other structural problems. Articulate, per changed
   file, what you checked and why the verdict holds; `legion quality-gate check` validates the
-  articulation (coverage + non-boilerplate) and records the gate so `legion pr create` can
-  verify clean state before opening a PR. Run this on every feature branch before a PR.
-version: 2.0.0
+  articulation (coverage + non-boilerplate + located evidence) and records the gate so `legion
+  pr create` can verify clean state before opening a PR. Run this on every feature branch before a PR.
+version: 2.1.0
 user-invocable: true
 allowed-tools: Bash, Read
 ---
@@ -52,6 +52,12 @@ reasoning for the verdict. Entries under ~12 words are rejected as boilerplate, 
 "clean" or a restated category list will not pass. A `clean` verdict still requires the
 reasoning -- "I read X, the duplicated-looking Y is justified because Z." A finding states the
 problem, the file:line, and the fix.
+
+Every entry -- clean or finding -- must cite a **located construct** in its body: a `file:line`,
+a symbol (`fn name` / `Type::method`), or an `Evidence:` line. The `### <path>` heading does NOT
+count -- it just restates the file name. Point at the specific line or symbol you actually read.
+An entry whose prose is substantive but cites nothing locatable is refused: "I checked it, looks
+clean" with no anchor is precisely the rubber-stamp this gate exists to stop.
 
 ```markdown
 ### src/db/foo.rs

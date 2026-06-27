@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use crate::pr_write::{MIN_MAPPING_WORDS, strip_evidence_lines};
+use crate::pr_write::{MIN_MAPPING_WORDS, has_evidence, strip_evidence_lines};
 
 /// Minimum words of prose per file entry, after the heading is stripped.
 /// Aliased to `pr_write::MIN_MAPPING_WORDS` so both gates share a single
@@ -84,6 +84,18 @@ pub fn parse_articulation(articulation: &str) -> Vec<ArticulationEntry> {
     entries
 }
 
+/// Strip the `### <path>` heading line(s) from an articulation entry, leaving
+/// the body for the located-evidence check. Unlike `strip_evidence_lines` this
+/// KEEPS any `Evidence:` line (so an explicit citation counts) and removes only
+/// the heading -- the heading restates the file path and would otherwise
+/// satisfy `has_evidence`'s source-path test for free.
+fn entry_body(raw: &str) -> String {
+    raw.lines()
+        .filter(|l| !l.trim_start().starts_with("### "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Validate a simplify articulation against the set of changed files.
 ///
 /// `changed_files` is the set of paths from
@@ -98,9 +110,15 @@ pub fn parse_articulation(articulation: &str) -> Vec<ArticulationEntry> {
 ///    contain at least `MIN_ENTRY_WORDS` words. A thin entry that only
 ///    restates the category list is refused.
 /// 3. No boilerplate: entries that just list the check categories without
-///    reasoning are refused by the word threshold. No evidence requirement is
-///    enforced here (unlike pr-write) because the simplify analysis is
-///    prose-in, prose-out -- there is no test name or file:line to cite.
+///    reasoning are refused by the word threshold.
+/// 4. Located evidence: each entry must point at the construct it examined --
+///    a file:line, a symbol (`fn name` / `::path`), or an `Evidence:` line --
+///    using `pr_write::has_evidence`, the same detector the pr-write gate uses.
+///    The check reads the entry body only: the `### <path>` heading restates
+///    the file path and would otherwise satisfy the source-path test for free.
+///    A vague "looks clean" with no citation is exactly the rubber-stamp this
+///    closes (legion-simplify caught 0.9% vs pr-write's 21.3%, the lone
+///    structural difference being pr-write's evidence requirement).
 pub fn validate_articulation(
     changed_files: &HashSet<String>,
     articulation: &str,
@@ -142,6 +160,19 @@ pub fn validate_articulation(
                 entry.file_path, words,
             ));
         }
+
+        // Located-evidence check. Read the body only -- the `### <path>`
+        // heading always contains the file path and would satisfy the
+        // source-path test for free, defeating the requirement. Reuses
+        // pr_write::has_evidence so both gates share one detector.
+        if !has_evidence(&entry_body(&entry.raw)) {
+            findings.push(format!(
+                "entry '{}' cites no located evidence -- point at the construct \
+                 you examined (a file:line, a `fn`/`::` symbol, or an \
+                 `Evidence:` line), not just the file name.",
+                entry.file_path,
+            ));
+        }
     }
 
     // When there are no changed files and no entries, the articulation is
@@ -167,8 +198,8 @@ mod tests {
          ### src/foo.rs\n\
          Checked for duplicate logic, unnecessary abstraction, stringly-typed state, \
          hand-rolled standard library dupes, copy-paste variation, and error swallowing. \
-         No issues found: the module is focused and each function has a single \
-         responsibility. The error handling propagates via the `?` operator throughout.\n\n\
+         No issues found: `fn parse_foo` at src/foo.rs:30 has a single responsibility and \
+         propagates errors via the `?` operator throughout, so there is nothing to extract.\n\n\
          ### src/bar.rs\n\
          Reviewed for duplicate logic clusters and abstraction altitude. Found one \
          instance where two adjacent match arms share a body -- extracted into a helper \
@@ -214,6 +245,44 @@ mod tests {
             "expected a thin-entry finding, got {:?}",
             report.findings
         );
+    }
+
+    #[test]
+    fn refuses_entry_without_located_evidence() {
+        // Plenty of prose, but a vague "looks clean" with no file:line or
+        // symbol -- exactly the rubber-stamp this gate now catches.
+        let files = changed(&["src/foo.rs"]);
+        let vague = "### src/foo.rs\n\
+             Checked for duplicate logic, unnecessary abstraction, stringly-typed state, \
+             hand-rolled stdlib dupes, copy-paste variation, and error swallowing. \
+             Everything reads cleanly and there is nothing worth extracting or simplifying.\n";
+        let report = validate_articulation(&files, vague);
+        assert!(!report.ok);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.contains("no located evidence") && f.contains("src/foo.rs")),
+            "expected a located-evidence finding for src/foo.rs, got {:?}",
+            report.findings
+        );
+        // The body clears the word threshold -- the failure is evidence, not thinness.
+        assert!(
+            !report.findings.iter().any(|f| f.contains("too thin")),
+            "evidence test should not also trip the thinness check: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn accepts_entry_with_explicit_evidence_line() {
+        let files = changed(&["src/foo.rs"]);
+        let body = "### src/foo.rs\n\
+             Reviewed all six simplify categories across the module and found the logic \
+             focused, with no duplication or abstraction-altitude problems worth changing.\n\
+             Evidence: src/foo.rs:12 the single match in handle_event\n";
+        let report = validate_articulation(&files, body);
+        assert!(report.ok, "expected clean, got {:?}", report.findings);
     }
 
     #[test]
