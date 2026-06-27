@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use crate::pr_write::{MIN_MAPPING_WORDS, has_located_evidence, strip_evidence_lines};
+use crate::pr_write::{MIN_MAPPING_WORDS, has_within_file_locator, strip_evidence_lines};
 
 /// Minimum words of prose per file entry, after the heading is stripped.
 /// Aliased to `pr_write::MIN_MAPPING_WORDS` so both gates share a single
@@ -112,11 +112,11 @@ fn entry_body(raw: &str) -> String {
 /// 3. No boilerplate: entries that just list the check categories without
 ///    reasoning are refused by the word threshold.
 /// 4. Located evidence: each entry must point at the construct it examined --
-///    a file:line, a symbol (`fn name` / `::path`), or an `Evidence:` line --
-///    via `pr_write::has_located_evidence` (the structural subset shared with
-///    the pr-write gate; a bare behavioral cue word does NOT clear this bar).
-///    The check reads the entry body only: the `### <path>` heading restates
-///    the file path and would otherwise satisfy the source-path test for free.
+///    a symbol (`fn name` / `::path`), a `file:line`, or an `Evidence:` line --
+///    via `pr_write::has_within_file_locator`. Neither a behavioral cue word
+///    nor a bare filename clears this bar (the bare filename just repeats the
+///    heading). The check reads the entry body only: the `### <path>` heading
+///    restates the file path and would otherwise satisfy the check for free.
 ///    A vague "looks clean" with no citation is exactly the rubber-stamp this
 ///    closes (legion-simplify caught 0.9% vs pr-write's 21.3%, the lone
 ///    structural difference being pr-write's evidence requirement).
@@ -165,10 +165,10 @@ pub fn validate_articulation(
         // Located-evidence check. Read the body only -- the `### <path>`
         // heading always contains the file path and would satisfy the
         // source-path test for free, defeating the requirement. Uses the
-        // strict `has_located_evidence` (file:line / symbol / Evidence: line),
-        // NOT the generous `has_evidence` -- a behavioral cue word is not a
-        // located construct, so it must not clear this structural gate.
-        if !has_located_evidence(&entry_body(&entry.raw)) {
+        // strict `has_within_file_locator` (symbol / file:line / Evidence:
+        // line) -- neither a behavioral cue word nor a BARE filename (which
+        // just repeats the heading) clears this structural gate.
+        if !has_within_file_locator(&entry_body(&entry.raw)) {
             findings.push(format!(
                 "entry '{}' cites no located evidence -- point at the construct \
                  you examined (a file:line, a `fn`/`::` symbol, or an \
@@ -295,6 +295,27 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("no located evidence")),
             "behavioral cue must not satisfy the located-evidence bar, got {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn refuses_entry_with_only_bare_path() {
+        // The `### <path>` heading already names the file; restating the bare
+        // path in prose is not a within-file locator. (Pre-push review HIGH,
+        // round 2 -- a bare filename must not clear the gate.)
+        let files = changed(&["src/foo.rs"]);
+        let body = "### src/foo.rs\n\
+             Reviewed all six categories; src/foo.rs reads cleanly with focused, \
+             single-purpose helpers and no duplication or stringly-typed state worth changing.\n";
+        let report = validate_articulation(&files, body);
+        assert!(!report.ok);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.contains("no located evidence")),
+            "a bare filename must not satisfy the within-file locator, got {:?}",
             report.findings
         );
     }

@@ -185,37 +185,24 @@ pub(crate) fn strip_evidence_lines(entry: &str) -> String {
         .join(" ")
 }
 
-/// True when an entry cites a **located construct**: an explicit `Evidence:`
-/// line, a `fn`/`::` symbol, or a source path (`foo.rs` / `bar.ts:42`). This is
-/// the strict, structural subset of evidence -- it requires the agent to point
-/// at a specific place in the code, not merely use a behavioral cue word.
-///
-/// Shared with `simplify_check`: the simplify gate requires exactly this bar
-/// (read against the entry body, since the `### ` heading restates the file
-/// path and would satisfy the source-path test for free). `pub(crate)` so both
-/// gates share one definition of "located" and cannot silently drift.
-pub(crate) fn has_located_evidence(entry: &str) -> bool {
-    let lower = entry.to_lowercase();
-    if lower.contains("evidence:") {
-        return true;
-    }
-    entry.contains("::") || entry.contains("fn ") || has_source_path(entry)
-}
-
 /// True when a PR mapping entry cites evidence. Deliberately generous: a located
-/// construct (see `has_located_evidence`) OR a behavioral cue word, since a PR
-/// mapping may legitimately cite "observable behavior changed" as evidence that
-/// an acceptance criterion is met. The simplify gate does NOT use this -- it
-/// uses `has_located_evidence`, because a behavior word is not a place in the
-/// code. The goal here is to confirm the agent pointed at something checkable,
-/// not to validate the citation itself (that is the verify gate's job).
+/// construct (`Evidence:` line, `fn`/`::` symbol, or a source path -- bare or
+/// with a line) OR a behavioral cue word, since a PR mapping may legitimately
+/// cite "observable behavior changed" as evidence that an acceptance criterion
+/// is met. The goal is to confirm the agent pointed at something checkable, not
+/// to validate the citation itself (that is the verify gate's job). The simplify
+/// gate does NOT use this -- it uses the stricter `has_within_file_locator`.
 pub(crate) fn has_evidence(entry: &str) -> bool {
-    if has_located_evidence(entry) {
+    let lower = entry.to_lowercase();
+    if lower.contains("evidence:")
+        || entry.contains("::")
+        || entry.contains("fn ")
+        || has_source_path(entry)
+    {
         return true;
     }
     // Behavioral cues, matched as whole words so "latest"/"fastest" don't
     // count as "test" and a stray "testing" prose word doesn't slip through.
-    let lower = entry.to_lowercase();
     lower.split(|c: char| !c.is_alphanumeric()).any(|w| {
         matches!(
             w,
@@ -224,18 +211,56 @@ pub(crate) fn has_evidence(entry: &str) -> bool {
     })
 }
 
+/// True when an entry cites a **within-file locator**: an explicit `Evidence:`
+/// line, a `fn`/`::` symbol, or a source path carrying a line number
+/// (`foo.rs:42`). Stricter than `has_evidence`'s located branch in two ways: a
+/// behavioral cue word does not count, and a BARE filename does not count.
+///
+/// The simplify gate uses this (read against the entry body). The `### <path>`
+/// heading already names the file, so restating "src/foo.rs reads cleanly" in
+/// prose is not a locator -- the agent must point at a line or a symbol it
+/// actually read. `pub(crate)` so the two gates share one tokenizer and the
+/// strict bar cannot silently drift from the generous one.
+pub(crate) fn has_within_file_locator(entry: &str) -> bool {
+    let lower = entry.to_lowercase();
+    if lower.contains("evidence:") {
+        return true;
+    }
+    entry.contains("::") || entry.contains("fn ") || has_source_path_with_line(entry)
+}
+
+/// Source-file extensions recognized in evidence prose.
+const SOURCE_EXTS: [&str; 12] = [
+    ".rs", ".ts", ".tsx", ".js", ".py", ".go", ".sh", ".md", ".toml", ".json", ".sql", ".rb",
+];
+
+/// Whitespace tokens with trailing punctuation stripped, so "src/foo.rs." and
+/// "(bar.ts:42)" still match. Shared by the path detectors.
+fn source_tokens(entry: &str) -> impl Iterator<Item = &str> {
+    entry
+        .split_whitespace()
+        .map(|raw| raw.trim_end_matches([',', '.', ';', ')', ']']))
+}
+
 /// True when the entry mentions a file with a recognized source extension --
 /// the token ends with the extension (`foo.rs`) or carries a line suffix
 /// (`bar.ts:42`). A bare substring match would fire on prose like "command".
 fn has_source_path(entry: &str) -> bool {
-    const EXTS: [&str; 12] = [
-        ".rs", ".ts", ".tsx", ".js", ".py", ".go", ".sh", ".md", ".toml", ".json", ".sql", ".rb",
-    ];
-    entry.split_whitespace().any(|raw| {
-        // Strip trailing punctuation so "src/pr_write.rs." still matches.
-        let tok = raw.trim_end_matches([',', '.', ';', ')', ']']);
-        EXTS.iter()
+    source_tokens(entry).any(|tok| {
+        SOURCE_EXTS
+            .iter()
             .any(|ext| tok.ends_with(ext) || tok.contains(&format!("{ext}:")))
+    })
+}
+
+/// True when the entry mentions a source path WITH a line suffix (`bar.ts:42`).
+/// A bare filename does not match -- this is the within-file half of the path
+/// check, used by the stricter simplify locator.
+fn has_source_path_with_line(entry: &str) -> bool {
+    source_tokens(entry).any(|tok| {
+        SOURCE_EXTS
+            .iter()
+            .any(|ext| tok.contains(&format!("{ext}:")))
     })
 }
 
@@ -360,19 +385,22 @@ mod tests {
     }
 
     #[test]
-    fn located_evidence_is_the_structural_subset() {
-        // Located: a place in the code.
-        assert!(has_located_evidence("see src/foo.rs:12"));
-        assert!(has_located_evidence("covered by foo::bar"));
-        assert!(has_located_evidence("added fn validate_thing"));
-        assert!(has_located_evidence("Evidence: the lone match arm"));
-        // NOT located: a behavioral cue word is evidence for pr-write but not a
-        // located construct -- the simplify gate must reject these.
-        assert!(!has_located_evidence(
+    fn within_file_locator_excludes_bare_path_and_behavioral() {
+        // Within-file locators: symbol, path:line, or an Evidence: line.
+        assert!(has_within_file_locator("see src/foo.rs:12"));
+        assert!(has_within_file_locator("covered by foo::bar"));
+        assert!(has_within_file_locator("added fn validate_thing"));
+        assert!(has_within_file_locator("Evidence: the lone match arm"));
+        // NOT a within-file locator: a bare filename (which just repeats the
+        // simplify heading) or a behavioral cue word.
+        assert!(!has_within_file_locator("src/foo.rs reads cleanly"));
+        assert!(!has_within_file_locator(
             "the observable behavior is unchanged"
         ));
-        assert!(!has_located_evidence("tested manually, looks clean"));
-        // has_evidence stays generous: behavioral cues still count for pr-write.
+        assert!(!has_within_file_locator("tested manually, looks clean"));
+        // has_evidence stays generous for pr-write: a bare path and a
+        // behavioral cue both still count.
+        assert!(has_evidence("src/foo.rs reads cleanly"));
         assert!(has_evidence("the observable behavior is unchanged"));
     }
 }
