@@ -53,11 +53,12 @@ reasoning for the verdict. Entries under ~12 words are rejected as boilerplate, 
 reasoning -- "I read X, the duplicated-looking Y is justified because Z." A finding states the
 problem, the file:line, and the fix.
 
-Every entry -- clean or finding -- must cite a **within-file locator** in its body: a `file:line`,
-a symbol (`fn name` / `Type::method`), or an `Evidence:` line. Neither the `### <path>` heading nor
-a bare filename in prose counts -- both just restate the file name. Point at the specific line or
-symbol you actually read. An entry whose prose is substantive but cites nothing locatable is
-refused: "I checked it, looks clean" with no anchor is precisely the rubber-stamp this gate stops.
+Every entry -- clean or finding -- must cite a **within-file locator** in its body: a `file:line`
+(e.g. `foo.rs:42`), a bare line reference (`line 42`, `lines 40 and 92`), a symbol (`fn name` /
+`Type::method`), or an `Evidence:` line. Neither the `### <path>` heading nor a bare filename in
+prose counts -- both just restate the file name. Point at the specific line or symbol you actually
+read. An entry whose prose is substantive but cites nothing locatable is refused: "I checked it,
+looks clean" with no anchor is precisely the rubber-stamp this gate stops.
 
 ```markdown
 ### src/db/foo.rs
