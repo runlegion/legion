@@ -185,27 +185,37 @@ pub(crate) fn strip_evidence_lines(entry: &str) -> String {
         .join(" ")
 }
 
-/// True when an entry cites evidence: an explicit `Evidence:` line, a test
-/// function, a source path, or an issue/PR reference. Deliberately generous --
-/// the goal is to confirm the agent pointed at something checkable, not to
-/// validate the citation itself (that is the verify gate's job).
+/// True when an entry cites a **located construct**: an explicit `Evidence:`
+/// line, a `fn`/`::` symbol, or a source path (`foo.rs` / `bar.ts:42`). This is
+/// the strict, structural subset of evidence -- it requires the agent to point
+/// at a specific place in the code, not merely use a behavioral cue word.
 ///
-/// Shared with `simplify_check`, which applies the same located-evidence bar
-/// to per-file articulation entries (reading the body only, since the `### `
-/// heading restates the file path and would trivially satisfy the source-path
-/// check). Promoted to `pub(crate)` so both gates use one detector and cannot
-/// silently drift.
-pub(crate) fn has_evidence(entry: &str) -> bool {
+/// Shared with `simplify_check`: the simplify gate requires exactly this bar
+/// (read against the entry body, since the `### ` heading restates the file
+/// path and would satisfy the source-path test for free). `pub(crate)` so both
+/// gates share one definition of "located" and cannot silently drift.
+pub(crate) fn has_located_evidence(entry: &str) -> bool {
     let lower = entry.to_lowercase();
     if lower.contains("evidence:") {
         return true;
     }
-    // A test/fn marker or a source path.
-    if entry.contains("::") || entry.contains("fn ") || has_source_path(entry) {
+    entry.contains("::") || entry.contains("fn ") || has_source_path(entry)
+}
+
+/// True when a PR mapping entry cites evidence. Deliberately generous: a located
+/// construct (see `has_located_evidence`) OR a behavioral cue word, since a PR
+/// mapping may legitimately cite "observable behavior changed" as evidence that
+/// an acceptance criterion is met. The simplify gate does NOT use this -- it
+/// uses `has_located_evidence`, because a behavior word is not a place in the
+/// code. The goal here is to confirm the agent pointed at something checkable,
+/// not to validate the citation itself (that is the verify gate's job).
+pub(crate) fn has_evidence(entry: &str) -> bool {
+    if has_located_evidence(entry) {
         return true;
     }
     // Behavioral cues, matched as whole words so "latest"/"fastest" don't
     // count as "test" and a stray "testing" prose word doesn't slip through.
+    let lower = entry.to_lowercase();
     lower.split(|c: char| !c.is_alphanumeric()).any(|w| {
         matches!(
             w,
@@ -347,5 +357,22 @@ mod tests {
         ));
         assert!(has_evidence("see src/pr_write.rs."));
         assert!(has_evidence("the change at main.rs:5763 wires both gates"));
+    }
+
+    #[test]
+    fn located_evidence_is_the_structural_subset() {
+        // Located: a place in the code.
+        assert!(has_located_evidence("see src/foo.rs:12"));
+        assert!(has_located_evidence("covered by foo::bar"));
+        assert!(has_located_evidence("added fn validate_thing"));
+        assert!(has_located_evidence("Evidence: the lone match arm"));
+        // NOT located: a behavioral cue word is evidence for pr-write but not a
+        // located construct -- the simplify gate must reject these.
+        assert!(!has_located_evidence(
+            "the observable behavior is unchanged"
+        ));
+        assert!(!has_located_evidence("tested manually, looks clean"));
+        // has_evidence stays generous: behavioral cues still count for pr-write.
+        assert!(has_evidence("the observable behavior is unchanged"));
     }
 }

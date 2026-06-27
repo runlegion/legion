@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use crate::pr_write::{MIN_MAPPING_WORDS, has_evidence, strip_evidence_lines};
+use crate::pr_write::{MIN_MAPPING_WORDS, has_located_evidence, strip_evidence_lines};
 
 /// Minimum words of prose per file entry, after the heading is stripped.
 /// Aliased to `pr_write::MIN_MAPPING_WORDS` so both gates share a single
@@ -113,7 +113,8 @@ fn entry_body(raw: &str) -> String {
 ///    reasoning are refused by the word threshold.
 /// 4. Located evidence: each entry must point at the construct it examined --
 ///    a file:line, a symbol (`fn name` / `::path`), or an `Evidence:` line --
-///    using `pr_write::has_evidence`, the same detector the pr-write gate uses.
+///    via `pr_write::has_located_evidence` (the structural subset shared with
+///    the pr-write gate; a bare behavioral cue word does NOT clear this bar).
 ///    The check reads the entry body only: the `### <path>` heading restates
 ///    the file path and would otherwise satisfy the source-path test for free.
 ///    A vague "looks clean" with no citation is exactly the rubber-stamp this
@@ -163,9 +164,11 @@ pub fn validate_articulation(
 
         // Located-evidence check. Read the body only -- the `### <path>`
         // heading always contains the file path and would satisfy the
-        // source-path test for free, defeating the requirement. Reuses
-        // pr_write::has_evidence so both gates share one detector.
-        if !has_evidence(&entry_body(&entry.raw)) {
+        // source-path test for free, defeating the requirement. Uses the
+        // strict `has_located_evidence` (file:line / symbol / Evidence: line),
+        // NOT the generous `has_evidence` -- a behavioral cue word is not a
+        // located construct, so it must not clear this structural gate.
+        if !has_located_evidence(&entry_body(&entry.raw)) {
             findings.push(format!(
                 "entry '{}' cites no located evidence -- point at the construct \
                  you examined (a file:line, a `fn`/`::` symbol, or an \
@@ -270,6 +273,28 @@ mod tests {
         assert!(
             !report.findings.iter().any(|f| f.contains("too thin")),
             "evidence test should not also trip the thinness check: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn refuses_entry_with_only_behavioral_cue() {
+        // "behavior" is evidence for pr-write but NOT a located construct, so
+        // the simplify gate must reject an entry whose only anchor is a cue
+        // word. Regression guard for the HIGH the pre-push review caught: the
+        // gate must enforce the located construct it advertises.
+        let files = changed(&["src/foo.rs"]);
+        let body = "### src/foo.rs\n\
+             Reviewed all six categories across the module; the observable behavior is \
+             unchanged and the structure reads cleanly with nothing worth extracting here.\n";
+        let report = validate_articulation(&files, body);
+        assert!(!report.ok);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.contains("no located evidence")),
+            "behavioral cue must not satisfy the located-evidence bar, got {:?}",
             report.findings
         );
     }
