@@ -524,7 +524,7 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
             .to_string();
 
             let database = open_db()?;
-            database.record_quality_gate(
+            let row = database.record_quality_gate(
                 &branch,
                 &commit_hash,
                 "legion-pr-write",
@@ -532,6 +532,7 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 report.findings.len() as u64,
                 Some(&details),
             )?;
+            crate::gate_trust::emit_gate_trust(&database, &row);
 
             if report.ok {
                 println!(

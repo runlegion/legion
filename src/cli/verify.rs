@@ -8,6 +8,7 @@ use crate::cli::util::{
     git_changed_files, git_head_commit_and_branch, open_db, read_file_or_stdin,
 };
 use crate::db::quality_gates::{QualityGateFilter, QualityGateRow, QualityGateStats};
+use crate::gate_trust::emit_gate_trust;
 use crate::verify::GateResult;
 use crate::{error, kanban, simplify_check, verify};
 
@@ -145,6 +146,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 findings_count,
                 details_json.as_deref(),
             )?;
+            emit_gate_trust(&database, &row);
             println!("{}", row.id);
         }
 
@@ -254,6 +256,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 findings_count,
                 Some(&details),
             )?;
+            emit_gate_trust(&database, &row);
 
             println!(
                 "[legion] simplify-check articulation accepted for skill '{skill}' \

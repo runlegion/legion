@@ -8,6 +8,7 @@ mod db;
 mod documents;
 mod embed;
 mod error;
+mod gate_trust;
 mod health;
 mod init;
 #[allow(dead_code)] // Items used by tests + pending surface/status/serve migration
