@@ -49,7 +49,18 @@ const ISSUES_CONFIDENCE: f64 = 0.05;
 /// short slug), so a plain join is a sufficient lookup key -- the Phase 2b
 /// witness recomputes it to find this prediction. No hashing is needed; hashing
 /// would only obscure an already-unique key.
+///
+/// PRECONDITION: `skill` contains no `:`. Gate skill names are colon-free slugs
+/// (`legion-simplify`, `legion-review`, `legion-pr-write`) and commit hashes are
+/// hex, so the join is unambiguous. The fingerprint is treated as an OPAQUE key
+/// (recomputed and compared, never parsed back into parts), so a stray colon
+/// would only risk a (vanishingly unlikely) collision between two distinct
+/// (skill, commit) pairs, never a parse error.
 pub fn gate_fingerprint(skill: &str, commit_hash: &str) -> String {
+    debug_assert!(
+        !skill.contains(':'),
+        "gate skill names must be colon-free for an unambiguous fingerprint, got {skill:?}"
+    );
     format!("{skill}:{commit_hash}")
 }
 
@@ -184,18 +195,18 @@ mod tests {
     #[test]
     fn emit_gate_trust_wrapper_runs_and_emits() {
         // Exercise the non-blocking call-site entry (not just the inner Result
-        // fn). It returns () and, on a valid db, emits an Emitted (non-orphan)
-        // legion.gate prediction. The Err branch is a single non-propagating
-        // eprintln -- forcing it needs a corrupted-db fixture and is left as a
-        // documented coverage gap, since the branch cannot propagate by
-        // construction.
+        // fn) and prove it actually emitted: exactly one Emitted legion.gate row
+        // afterward (this would fail if the wrapper silently no-op'd). The Err
+        // branch is a single non-propagating eprintln -- forcing it needs a
+        // corrupted-db fixture and is left as a documented coverage gap, since
+        // the branch cannot propagate by construction.
+        use crate::uncertainty::types::PredictionState;
         let db = test_db();
         emit_gate_trust(&db, &gate_row("legion-simplify", GateResult::Clean, 0));
-        let orphans = db.count_orphans_by_surface(Some("legion.gate")).unwrap();
-        assert!(
-            orphans.is_empty(),
-            "a freshly emitted prediction is Emitted, not orphaned: {orphans:?}"
-        );
+        let emitted = db
+            .count_predictions_by_surface_state("legion.gate", PredictionState::Emitted)
+            .unwrap();
+        assert_eq!(emitted, 1, "the wrapper must emit exactly one Emitted row");
     }
 
     #[test]
