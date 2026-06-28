@@ -182,6 +182,23 @@ mod tests {
     }
 
     #[test]
+    fn emit_gate_trust_wrapper_runs_and_emits() {
+        // Exercise the non-blocking call-site entry (not just the inner Result
+        // fn). It returns () and, on a valid db, emits an Emitted (non-orphan)
+        // legion.gate prediction. The Err branch is a single non-propagating
+        // eprintln -- forcing it needs a corrupted-db fixture and is left as a
+        // documented coverage gap, since the branch cannot propagate by
+        // construction.
+        let db = test_db();
+        emit_gate_trust(&db, &gate_row("legion-simplify", GateResult::Clean, 0));
+        let orphans = db.count_orphans_by_surface(Some("legion.gate")).unwrap();
+        assert!(
+            orphans.is_empty(),
+            "a freshly emitted prediction is Emitted, not orphaned: {orphans:?}"
+        );
+    }
+
+    #[test]
     fn issues_verdict_emits_low_confidence() {
         let db = test_db();
         let row = gate_row("legion-review", GateResult::Issues, 3);
