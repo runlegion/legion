@@ -143,6 +143,19 @@ pub fn witness_simplify_from_review(
     let Some(mut prediction) = db.latest_emitted_by_fingerprint(GATE_SURFACE, &fingerprint)? else {
         return Ok(false);
     };
+    // Only a CLEAN simplify verdict is a rubber-stamp candidate. If simplify
+    // already flagged issues, it was not rubber-stamping, so a downstream review
+    // catch does not falsify it -- witnessing it would pollute the
+    // P(buggy | said-clean) signal. Skip non-clean predictions (e.g. a gate
+    // recorded out of pipeline order).
+    let was_clean = prediction
+        .prediction_payload
+        .get("result")
+        .and_then(|v| v.as_str())
+        == Some("clean");
+    if !was_clean {
+        return Ok(false);
+    }
     let (label, correctness) = if review_found_issues {
         (OutcomeLabel::Escalated, 0.0)
     } else {
@@ -300,6 +313,22 @@ mod tests {
         let fetched = db.get_prediction(&id).unwrap().unwrap();
         assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(1.0));
         assert_eq!(fetched.outcome_label, Some(OutcomeLabel::Shipped));
+    }
+
+    #[test]
+    fn witness_skips_a_non_clean_simplify_prediction() {
+        use crate::uncertainty::types::PredictionState;
+        let db = test_db();
+        // Simplify recorded ISSUES -> it flagged something, not a rubber-stamp
+        // candidate. The witness must skip it even when review finds issues.
+        let id = emit_gate_prediction(&db, &gate_row("legion-simplify", GateResult::Issues, 1))
+            .unwrap();
+        let witnessed = witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap();
+        assert!(!witnessed, "an issues-verdict prediction must not be witnessed");
+        assert_eq!(
+            db.get_prediction(&id).unwrap().unwrap().state,
+            PredictionState::Emitted
+        );
     }
 
     #[test]
