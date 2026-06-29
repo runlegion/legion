@@ -19,6 +19,23 @@
 //! duplicates simply orphan out after the TTL and are excluded from
 //! calibration. The fingerprint identifies the (skill, commit) cohort run, not a
 //! unique row.
+//!
+//! WITNESS LIMITATIONS (the in-pipeline signal is an MVP; the trustworthy signal
+//! is the review-CAUGHT path):
+//!  1. Exact-commit keying: the witness matches `legion-simplify:<commit>`. In
+//!     the normal pipeline `pr create` requires a clean simplify gate on HEAD, so
+//!     simplify and review land on the same commit and the lookup hits. But if a
+//!     fix commit lands between simplify and review without simplify re-running,
+//!     the lookup no-ops -- silently UNDERCOUNTING (it misses a clean verdict that
+//!     was later fixed, exactly a rubber-stamp).
+//!  2. Weak positive: a clean review corroborates at correctness 1.0, but
+//!     legion-review records clean-on-approve, so the witnessed-correct population
+//!     skews optimistic. The `Escalated`/0.0 review-CAUGHT path is the only fully
+//!     trustworthy signal; read clean-corroboration as a lower bound on the
+//!     rubber-stamp rate, not a measurement of it.
+//! Closing both needs a stronger, decorrelated witness source (an independent
+//! reviewer on a different model; revert / post-merge-bug detection) -- tracked
+//! as a follow-up, not this MVP.
 
 use crate::db::Database;
 use crate::db::quality_gates::QualityGateRow;
