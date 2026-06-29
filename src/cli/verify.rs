@@ -150,7 +150,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // Phase 2b: a downstream legion-review verdict witnesses the
             // upstream legion-simplify gate prediction for this commit -- review
             // catching issues means simplify's clean verdict was wrong.
-            crate::gate_trust::maybe_witness_from_review(&database, &row, &commit_hash);
+            crate::gate_trust::maybe_witness_from_review(&database, &row);
             println!("{}", row.id);
         }
 
