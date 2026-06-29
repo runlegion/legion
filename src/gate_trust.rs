@@ -24,7 +24,9 @@ use crate::db::Database;
 use crate::db::quality_gates::QualityGateRow;
 use crate::uncertainty::error::Result as UncertaintyResult;
 use crate::uncertainty::storage::orphan_after_from_ttl;
-use crate::uncertainty::types::{Confidence, Prediction, PredictionInput};
+use crate::uncertainty::types::{
+    Confidence, Correctness, OutcomeLabel, Prediction, PredictionInput,
+};
 use crate::verify::GateResult;
 
 /// The uncertainty surface all gate verdicts emit under.
@@ -122,6 +124,52 @@ pub fn emit_gate_trust(db: &Database, row: &QualityGateRow) {
     }
 }
 
+/// Witness the legion-simplify gate prediction for `commit_hash` from the
+/// downstream review verdict (Phase 2b). `review_found_issues` true means the
+/// review caught what the simplify gate passed clean -- the clean verdict was
+/// wrong (correctness 0.0, Escalated). false corroborates it (correctness 1.0,
+/// Shipped) -- a weak positive, since legion-review records clean-on-approve.
+///
+/// Resolves the prediction by the deterministic fingerprint, taking the LATEST
+/// Emitted row (the re-run contract). Returns true if one was witnessed, false
+/// if no matching Emitted prediction exists (a clean no-op -- e.g. the simplify
+/// gate was never run, or it already witnessed/orphaned).
+pub fn witness_simplify_from_review(
+    db: &Database,
+    commit_hash: &str,
+    review_found_issues: bool,
+) -> UncertaintyResult<bool> {
+    let fingerprint = gate_fingerprint("legion-simplify", commit_hash);
+    let Some(mut prediction) = db.latest_emitted_by_fingerprint(GATE_SURFACE, &fingerprint)? else {
+        return Ok(false);
+    };
+    let (label, correctness) = if review_found_issues {
+        (OutcomeLabel::Escalated, 0.0)
+    } else {
+        (OutcomeLabel::Shipped, 1.0)
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let payload = serde_json::json!({
+        "witnessed_by": "legion-review",
+        "review_found_issues": review_found_issues,
+    });
+    prediction.witness(label, payload, Correctness::from_f64(correctness)?, &now)?;
+    db.update_prediction(&prediction)?;
+    Ok(true)
+}
+
+/// Non-blocking witness for the gate-record handler: log on failure, never
+/// propagate. Like emit, a witness problem must not break gate recording.
+pub fn witness_simplify_from_review_nonblocking(
+    db: &Database,
+    commit_hash: &str,
+    review_found_issues: bool,
+) {
+    if let Err(e) = witness_simplify_from_review(db, commit_hash, review_found_issues) {
+        eprintln!("[legion] gate-trust witness failed (non-fatal): {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +255,63 @@ mod tests {
             .count_predictions_by_surface_state("legion.gate", PredictionState::Emitted)
             .unwrap();
         assert_eq!(emitted, 1, "the wrapper must emit exactly one Emitted row");
+    }
+
+    #[test]
+    fn witness_issues_marks_simplify_prediction_wrong() {
+        let db = test_db();
+        let row = gate_row("legion-simplify", GateResult::Clean, 0);
+        let id = emit_gate_prediction(&db, &row).unwrap();
+        // Review caught issues -> the clean verdict was wrong.
+        let witnessed = witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap();
+        assert!(
+            witnessed,
+            "the emitted simplify prediction should be witnessed"
+        );
+        let fetched = db.get_prediction(&id).unwrap().unwrap();
+        use crate::uncertainty::types::PredictionState;
+        assert_eq!(fetched.state, PredictionState::Witnessed);
+        assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(0.0));
+        assert_eq!(fetched.outcome_label, Some(OutcomeLabel::Escalated));
+    }
+
+    #[test]
+    fn witness_clean_corroborates_simplify_prediction() {
+        let db = test_db();
+        let row = gate_row("legion-simplify", GateResult::Clean, 0);
+        let id = emit_gate_prediction(&db, &row).unwrap();
+        // Review clean -> corroborates (weak positive).
+        assert!(witness_simplify_from_review(&db, "deadbeefcafe", false).unwrap());
+        let fetched = db.get_prediction(&id).unwrap().unwrap();
+        assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(1.0));
+        assert_eq!(fetched.outcome_label, Some(OutcomeLabel::Shipped));
+    }
+
+    #[test]
+    fn witness_with_no_matching_prediction_is_noop() {
+        let db = test_db();
+        // No simplify prediction was emitted for this commit -- clean no-op.
+        let witnessed = witness_simplify_from_review(&db, "nosuchcommit", true).unwrap();
+        assert!(
+            !witnessed,
+            "expected a no-op when no Emitted prediction matches"
+        );
+    }
+
+    #[test]
+    fn witness_takes_the_latest_emitted_on_rerun() {
+        let db = test_db();
+        let row = gate_row("legion-simplify", GateResult::Clean, 0);
+        // Two runs of the same gate on the same commit -> two Emitted rows,
+        // same fingerprint. The witness resolves the latest and leaves the loop
+        // closeable; the second witness is a no-op (only one Emitted remains).
+        let _id1 = emit_gate_prediction(&db, &row).unwrap();
+        let _id2 = emit_gate_prediction(&db, &row).unwrap();
+        assert!(witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap());
+        // One Emitted row remains; a second witness still finds it.
+        assert!(witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap());
+        // Now none Emitted -> no-op.
+        assert!(!witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap());
     }
 
     #[test]
