@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "Legion dashboard frontend: vanilla-TS web components. Served embedded by the legion binary; rafters controls layered in via `pnpx rafters add`.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -10,18 +11,9 @@
     "lint": "oxlint .",
     "format": "oxfmt"
   },
-  "dependencies": {
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
-  },
   "devDependencies": {
-    "@types/react": "^19.1.0",
-    "@types/react-dom": "^19.1.0",
-    "@vitejs/plugin-react": "^4.5.2",
     "oxfmt": "^0.41.0",
     "oxlint": "^1.56.0",
-    "tailwindcss": "^4.1.0",
-    "@tailwindcss/vite": "^4.1.0",
     "typescript": "^5.9.3",
     "vite": "^7.0.0"
   }

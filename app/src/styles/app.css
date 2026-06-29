@@ -1,0 +1,12 @@
+/* Minimal foundation. The rafters stylesheet (via `rafters init`) takes over
+   the real visual language; this only keeps hello world legible. */
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  color: #18181b;
+}
+
+h1 {
+  padding: 2rem;
+  font-size: 1.25rem;
+}

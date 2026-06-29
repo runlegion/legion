@@ -16,8 +16,13 @@ use crate::health::HealthSample;
 use crate::signal as sig;
 use crate::status;
 
+// The dashboard frontend is built from app/ (vanilla-TS web components ->
+// vite -> app/dist) and embedded here. build.rs guarantees app/dist exists
+// so a `cargo build` without a prior `pnpm -C app build` still compiles
+// (it embeds a "not built" placeholder). The legacy hand-written dashboard
+// in static/ is retained in-tree during the migration but no longer served.
 #[derive(Embed)]
-#[folder = "static/"]
+#[folder = "app/dist/"]
 struct StaticAssets;
 
 #[derive(Clone)]

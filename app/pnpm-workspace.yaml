@@ -1,0 +1,4 @@
+# esbuild ships a platform binary via a postinstall script; vite needs it.
+# Approving it here keeps fresh `pnpm install` non-interactive.
+allowBuilds:
+  esbuild: true
