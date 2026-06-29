@@ -1266,8 +1266,8 @@ fn good_articulation_for_foo() -> String {
      ### src/foo.rs\n\
      Checked for duplicate logic, unnecessary abstraction, stringly-typed state, \
      hand-rolled standard library dupes, copy-paste variation, and error swallowing. \
-     No issues found: the module is focused and each function has a single \
-     responsibility. The error handling propagates via the `?` operator throughout.\n"
+     No issues found: `fn foo` at src/foo.rs:1 has a single responsibility and the \
+     error handling propagates via the `?` operator throughout.\n"
         .to_string()
 }
 
@@ -1541,7 +1541,8 @@ fn quality_gate_check_non_ascii_path_roundtrips_correctly() {
         "### {reported_path}\n\
          Checked for duplicate logic, unnecessary abstraction, stringly-typed state, \
          hand-rolled standard library dupes, copy-paste variation, and error swallowing. \
-         No issues found: a single trivial file with no structure. Verdict: clean.\n"
+         No issues found: a single trivial file with no structure. Verdict: clean.\n\
+         Evidence: {reported_path}:1 the lone declaration.\n"
     );
 
     let data_dir = tempfile::tempdir().unwrap();
