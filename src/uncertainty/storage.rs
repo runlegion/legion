@@ -70,6 +70,36 @@ impl Database {
         }
     }
 
+    /// Find the most recent Emitted prediction for a (surface, fingerprint).
+    /// Used by the gate-trust witness to resolve a (skill, commit) back to the
+    /// prediction to witness. Returns None if none is in the Emitted state --
+    /// the re-run contract: a re-run emits another row with the same
+    /// fingerprint, so this takes the latest; earlier duplicates may already be
+    /// witnessed or orphaned and are skipped.
+    pub fn latest_emitted_by_fingerprint(
+        &self,
+        surface: &str,
+        fingerprint: &str,
+    ) -> Result<Option<Prediction>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
+             claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
+             outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
+             orphan_after \
+             FROM uncertainty_prediction \
+             WHERE surface = ?1 AND input_fingerprint = ?2 AND state = 'emitted' \
+             AND deleted_at IS NULL \
+             ORDER BY created_at DESC \
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![surface, fingerprint])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_prediction_row(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Persist a prediction whose state has advanced (witness / calibrate /
     /// orphan / retire). UPDATE keyed by id; updated_at is taken from the
     /// in-memory row so callers control the timestamp.
@@ -407,5 +437,38 @@ mod tests {
         let db = test_db();
         let snaps = db.list_calibration_snapshots(None, None).unwrap();
         assert!(snaps.is_empty());
+    }
+
+    #[test]
+    fn latest_emitted_by_fingerprint_finds_emitted_skips_witnessed_and_unknown() {
+        let db = test_db();
+        let p = Prediction::new(fresh_input()); // surface legion.task, fingerprint fp-1
+        db.insert_prediction(&p).unwrap();
+        // Found while Emitted.
+        let found = db
+            .latest_emitted_by_fingerprint("legion.task", "fp-1")
+            .unwrap();
+        assert_eq!(found.as_ref().map(|x| x.id.as_str()), Some(p.id.as_str()));
+        // Unknown fingerprint -> None.
+        assert!(
+            db.latest_emitted_by_fingerprint("legion.task", "nope")
+                .unwrap()
+                .is_none()
+        );
+        // Once witnessed it is no longer Emitted -> the lookup skips it.
+        let mut p2 = db.get_prediction(&p.id).unwrap().unwrap();
+        p2.witness(
+            OutcomeLabel::Shipped,
+            serde_json::json!({}),
+            Correctness::from_f64(1.0).unwrap(),
+            "2026-06-29T00:00:00+00:00",
+        )
+        .unwrap();
+        db.update_prediction(&p2).unwrap();
+        assert!(
+            db.latest_emitted_by_fingerprint("legion.task", "fp-1")
+                .unwrap()
+                .is_none()
+        );
     }
 }
