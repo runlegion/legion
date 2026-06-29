@@ -168,6 +168,26 @@ impl Database {
             .map_err(UncertaintyError::Database)
     }
 
+    /// Count predictions on a surface in a given state. Read-only. Currently a
+    /// test-support accessor (the gate-trust emit test uses it to prove emission
+    /// positively); Phase 2b's witness lookup will promote it to a production
+    /// accessor, so it is `#[cfg(test)]` for now rather than carrying a
+    /// dead-code allow in the production build.
+    #[cfg(test)]
+    pub fn count_predictions_by_surface_state(
+        &self,
+        surface: &str,
+        state: PredictionState,
+    ) -> Result<i64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM uncertainty_prediction \
+             WHERE surface = ?1 AND state = ?2 AND deleted_at IS NULL",
+            params![surface, state.as_str()],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
     /// Group orphan-state predictions by surface. Optionally filtered to a
     /// single surface. Used by the dashboard + nightly digest.
     pub fn count_orphans_by_surface(&self, surface: Option<&str>) -> Result<Vec<OrphanSummaryRow>> {
