@@ -339,10 +339,13 @@ mod tests {
         let db = test_db();
         // Simplify recorded ISSUES -> it flagged something, not a rubber-stamp
         // candidate. The witness must skip it even when review finds issues.
-        let id = emit_gate_prediction(&db, &gate_row("legion-simplify", GateResult::Issues, 1))
-            .unwrap();
+        let id =
+            emit_gate_prediction(&db, &gate_row("legion-simplify", GateResult::Issues, 1)).unwrap();
         let witnessed = witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap();
-        assert!(!witnessed, "an issues-verdict prediction must not be witnessed");
+        assert!(
+            !witnessed,
+            "an issues-verdict prediction must not be witnessed"
+        );
         assert_eq!(
             db.get_prediction(&id).unwrap().unwrap().state,
             PredictionState::Emitted
