@@ -89,7 +89,7 @@ impl Database {
              FROM uncertainty_prediction \
              WHERE surface = ?1 AND input_fingerprint = ?2 AND state = 'emitted' \
              AND deleted_at IS NULL \
-             ORDER BY created_at DESC \
+             ORDER BY created_at DESC, id DESC \
              LIMIT 1",
         )?;
         let mut rows = stmt.query(params![surface, fingerprint])?;
