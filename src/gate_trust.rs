@@ -170,6 +170,21 @@ pub fn witness_simplify_from_review_nonblocking(
     }
 }
 
+/// Apply the downstream-review witness for a just-recorded gate. ONLY a
+/// `legion-review` verdict witnesses the upstream `legion-simplify` prediction;
+/// every other gate is a no-op here. This is the gate-record handler's single
+/// entry point, so the skill guard and the verdict->bool mapping live in one
+/// testable place rather than inline at the call site.
+pub fn maybe_witness_from_review(db: &Database, row: &QualityGateRow, commit_hash: &str) {
+    if row.skill == "legion-review" {
+        witness_simplify_from_review_nonblocking(
+            db,
+            commit_hash,
+            matches!(row.result, GateResult::Issues),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +327,37 @@ mod tests {
         assert!(witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap());
         // Now none Emitted -> no-op.
         assert!(!witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap());
+    }
+
+    #[test]
+    fn maybe_witness_fires_only_for_review_gate_and_maps_the_verdict() {
+        use crate::uncertainty::types::PredictionState;
+        let db = test_db();
+        let id =
+            emit_gate_prediction(&db, &gate_row("legion-simplify", GateResult::Clean, 0)).unwrap();
+
+        // A non-review gate (pr-write) must NOT witness the simplify prediction.
+        maybe_witness_from_review(
+            &db,
+            &gate_row("legion-pr-write", GateResult::Issues, 1),
+            "deadbeefcafe",
+        );
+        assert_eq!(
+            db.get_prediction(&id).unwrap().unwrap().state,
+            PredictionState::Emitted,
+            "only legion-review should trigger the witness"
+        );
+
+        // A legion-review Issues verdict witnesses it wrong (verdict -> bool maps
+        // Issues to review_found_issues=true -> correctness 0.0).
+        maybe_witness_from_review(
+            &db,
+            &gate_row("legion-review", GateResult::Issues, 2),
+            "deadbeefcafe",
+        );
+        let fetched = db.get_prediction(&id).unwrap().unwrap();
+        assert_eq!(fetched.state, PredictionState::Witnessed);
+        assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(0.0));
     }
 
     #[test]
