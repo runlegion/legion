@@ -1,6 +1,6 @@
 [package]
 name = "legion"
-version = "0.18.7"
+version = "0.18.8"
 edition = "2024"
 description = "Agent specialization through deliberate practice"
 
