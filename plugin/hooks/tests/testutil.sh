@@ -149,6 +149,8 @@ finish_tests() {
 #   FAKE_BROKEN=1            every invocation exits 1 immediately
 #   LEGION_STUB_LOG=<file>   append every invocation's argv (all commands)
 #   FAKE_VERSION             `--version` -> "legion $FAKE_VERSION" (9.9.9)
+#   FAKE_BUILD               when set, `--version` appends " (build $FAKE_BUILD)"
+#                            (the #698 build-id suffix); unset -> no suffix
 #   FAKE_WATCH               `watch list` body ("repo<TAB>/path" lines)
 #   FAKE_STATS="repo:N"      `stats --repo repo` -> "repo: N reflections (...)"
 #                            (anything else -> "no reflections stored yet")
@@ -182,7 +184,14 @@ if [ -n "${LEGION_STUB_LOG:-}" ]; then
 fi
 case "${1:-}" in
   --version)
-    echo "legion ${FAKE_VERSION:-9.9.9}"
+    # FAKE_BUILD (optional) appends the "(build <id>)" suffix the real CLI
+    # carries since #698. Unset -> bare "legion <version>" (pre-#698 shape),
+    # so harnesses that do not care about build id are unaffected.
+    if [ -n "${FAKE_BUILD:-}" ]; then
+      echo "legion ${FAKE_VERSION:-9.9.9} (build ${FAKE_BUILD})"
+    else
+      echo "legion ${FAKE_VERSION:-9.9.9}"
+    fi
     ;;
   watch)
     if [ "${2:-}" = "list" ]; then

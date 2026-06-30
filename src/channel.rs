@@ -218,6 +218,10 @@ fn build_health_body(
     serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        // Build id (git short SHA + dirty flag, or "unknown") so the
+        // supervisor can detect a same-version rebuild (#698). Baked in by
+        // build.rs via LEGION_BUILD_ID.
+        "build_id": env!("LEGION_BUILD_ID"),
         "role": role.as_str(),
         "started_at": started_at.to_rfc3339(),
         "uptime_secs": uptime_secs,
@@ -226,11 +230,13 @@ fn build_health_body(
 
 /// GET /health -- cheap daemon liveness probe (#319).
 ///
-/// Returns `{status, version, started_at, uptime_secs}` with NO database
-/// access so it can be polled aggressively by hooks, the MCP reconnect
-/// path (#320), and the SessionStart auto-spawn supervisor (#321). The
-/// `version` field is baked in at compile time from CARGO_PKG_VERSION so
-/// clients can detect protocol drift after a plugin upgrade.
+/// Returns `{status, version, build_id, role, started_at, uptime_secs}`
+/// with NO database access so it can be polled aggressively by hooks, the
+/// MCP reconnect path (#320), and the SessionStart auto-spawn supervisor
+/// (#321). The `version` field is baked in at compile time from
+/// CARGO_PKG_VERSION so clients can detect protocol drift after a plugin
+/// upgrade; `build_id` (#698) lets the supervisor catch a same-version
+/// rebuild that `version` alone cannot.
 pub async fn health_endpoint(State(state): State<ChannelState>) -> Json<serde_json::Value> {
     Json(build_health_body(
         state.role,
@@ -769,6 +775,17 @@ mod tests {
         let body = build_health_body(ServerRole::Serve, started, now);
         assert_eq!(body["status"], "ok");
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["build_id"], env!("LEGION_BUILD_ID"));
+        // build_id is always present and non-empty (build.rs falls back to
+        // "unknown" when git is unavailable), so the supervisor never sees a
+        // missing field.
+        assert!(
+            !body["build_id"]
+                .as_str()
+                .expect("build_id is a string")
+                .is_empty(),
+            "build_id must be non-empty"
+        );
         assert_eq!(body["role"], "serve");
         assert_eq!(body["started_at"], "2026-05-10T12:00:00+00:00");
         assert_eq!(body["uptime_secs"], 90);
