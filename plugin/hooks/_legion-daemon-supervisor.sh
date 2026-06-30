@@ -55,6 +55,12 @@ if [ -z "$LOCAL_VERSION" ]; then
   exit 0
 fi
 
+# Local build id (#698): the "(build <id>)" suffix that --version now carries
+# ("legion <version> (build <id>)"). Empty for a pre-#698 binary without the
+# suffix -- then the same-version build-drift check below is skipped and the
+# supervisor falls back to version-only behavior.
+LOCAL_BUILD=$("$LEGION_BIN" --version 2>/dev/null | sed -n 's/.*(build \(.*\))$/\1/p')
+
 # Spawn helper: detach via setsid (Linux) or nohup (mac). Both available
 # on macOS bash; setsid is Linux-only so we try it then fall back.
 spawn_daemon() {
@@ -90,6 +96,25 @@ kill_stale_daemon() {
   fi
 }
 
+# Restart whoever currently answers the port, choosing the remedy by role
+# (#613): a daemon is bounced in place via daemon-restart (which preserves the
+# watch loop); a serve -- or a pre-#613 binary that reports no role -- is
+# killed by pidfile and respawned as a fresh serve. Shared by the version-drift
+# and same-version build-drift (#698) paths.
+restart_by_role() {
+  local role="$1" reason="$2"
+  if [ "$role" = "daemon" ]; then
+    echo "[legion-daemon-supervisor] ${reason}; restarting daemon in place" >> "$LOG"
+    "$LEGION_BIN" daemon-restart >/dev/null 2>>"$LOG"
+  else
+    echo "[legion-daemon-supervisor] ${reason}; replacing" >> "$LOG"
+    if [ -f "$PIDFILE" ]; then
+      kill_stale_daemon "$(cat "$PIDFILE" 2>/dev/null)"
+    fi
+    spawn_daemon "$reason"
+  fi
+}
+
 # Probe /health. Short timeout (2s) since this runs in the SessionStart
 # background path -- waiting longer is just buffering before we accept
 # "not healthy" anyway.
@@ -115,29 +140,33 @@ if [ -z "$DAEMON_VERSION" ]; then
   exit 0
 fi
 
-if [ "$DAEMON_VERSION" = "$LOCAL_VERSION" ]; then
-  # Healthy + matching: silent.
-  exit 0
-fi
-
-# Version mismatch. Who answers the port decides the remedy (#613,
-# absorbed #601): the daemon owns :3131 while it runs, and replacing it
-# with a `legion serve` would silently drop the watch loop. /health now
-# reports a `role` field; a daemon gets bounced in place via
-# daemon-restart (which owns the stop/spawn dance against the daemon's
-# own pidfile). Pre-#613 binaries report no role -- they can only be a
-# `legion serve`, so the kill+spawn path below keeps working for them.
+# Role and build id drive the remedy. Parse both up front: the daemon owns
+# :3131 while it runs, so /health is the only place this info lives.
 DAEMON_ROLE=$(echo "$RESPONSE" | jq -r '.role // empty' 2>/dev/null)
-if [ "$DAEMON_ROLE" = "daemon" ]; then
-  echo "[legion-daemon-supervisor] daemon v${DAEMON_VERSION} != local v${LOCAL_VERSION}; restarting daemon in place" >> "$LOG"
-  "$LEGION_BIN" daemon-restart >/dev/null 2>>"$LOG"
+DAEMON_BUILD=$(echo "$RESPONSE" | jq -r '.build_id // empty' 2>/dev/null)
+
+if [ "$DAEMON_VERSION" = "$LOCAL_VERSION" ]; then
+  # Same version. A rebuild that did not bump Cargo.toml -- the common dev
+  # case -- keeps the version but changes the build id (#698), so version
+  # alone cannot tell the daemon is stale. Bounce when the build ids differ.
+  # Act ONLY when BOTH ids are known and concrete: an "unknown" id (git-less
+  # build) or an empty id (pre-#698 binary, or no build_id in /health) means
+  # "cannot tell" -- fall back to version-only and stay silent rather than
+  # risk a restart loop on indeterminate data.
+  if [ -n "$LOCAL_BUILD" ] && [ -n "$DAEMON_BUILD" ] \
+     && [ "$LOCAL_BUILD" != "unknown" ] && [ "$DAEMON_BUILD" != "unknown" ] \
+     && [ "$LOCAL_BUILD" != "$DAEMON_BUILD" ]; then
+    restart_by_role "$DAEMON_ROLE" \
+      "daemon build ${DAEMON_BUILD} != local build ${LOCAL_BUILD} (same version ${LOCAL_VERSION})"
+    exit 0
+  fi
+  # Same version, same or indeterminate build: healthy, silent.
   exit 0
 fi
 
-# Role "serve" (or absent): kill stale serve, spawn fresh.
-echo "[legion-daemon-supervisor] daemon v${DAEMON_VERSION} != local v${LOCAL_VERSION}; replacing" >> "$LOG"
-if [ -f "$PIDFILE" ]; then
-  kill_stale_daemon "$(cat "$PIDFILE" 2>/dev/null)"
-fi
-spawn_daemon "replaced stale v${DAEMON_VERSION} -> v${LOCAL_VERSION}"
+# Version drift (#613, absorbed #601): replacing a daemon with a `legion
+# serve` would silently drop the watch loop, so a daemon is bounced in place
+# via daemon-restart; a serve -- or a pre-#613 binary with no role -- is
+# killed by pidfile and respawned.
+restart_by_role "$DAEMON_ROLE" "daemon v${DAEMON_VERSION} != local v${LOCAL_VERSION}"
 exit 0

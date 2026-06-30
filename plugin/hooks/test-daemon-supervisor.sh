@@ -18,6 +18,9 @@ make_plugin_root _legion-daemon-supervisor.sh
 
 mkdir -p "$WORK/scratch"
 export FAKE_VERSION="9.9.9"
+# Local build id (#698): the supervisor reads it from --version's "(build <id>)"
+# suffix and compares against /health's build_id on a version match.
+export FAKE_BUILD="localbuild"
 export FAKE_SPAWN_LOG="$WORK/scratch/spawned.log"
 
 # Redirect /tmp/legion-hook-errors.log to a per-test path: copy the hook to
@@ -40,6 +43,10 @@ case "$mode" in
   refused) exit 7 ;;
   empty) exit 0 ;;
   match) echo '{"status":"ok","version":"9.9.9","role":"serve","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
+  match_build_same) echo '{"status":"ok","version":"9.9.9","build_id":"localbuild","role":"daemon","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
+  match_build_drift_daemon) echo '{"status":"ok","version":"9.9.9","build_id":"oldbuild","role":"daemon","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
+  match_build_drift_serve) echo '{"status":"ok","version":"9.9.9","build_id":"oldbuild","role":"serve","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
+  match_build_unknown) echo '{"status":"ok","version":"9.9.9","build_id":"unknown","role":"daemon","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
   mismatch) echo '{"status":"ok","version":"1.0.0","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
   mismatch_daemon) echo '{"status":"ok","version":"1.0.0","role":"daemon","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
   malformed) echo 'not json' ;;
@@ -82,6 +89,54 @@ else
   FAIL=$((FAIL + 1)); echo "  FAIL: log unexpectedly written: $(cat "$TEST_LOG")" >&2
 fi
 
+echo "==> /health version match + build_id absent -> silent no-op (fallback)"
+reset_log
+write_curl_stub match
+bash "$HOOK_PATH"
+wait
+sleep 0.3
+assert_file_absent "no spawn when daemon build_id is absent" "$FAKE_SPAWN_LOG"
+
+echo "==> /health version match + same build_id -> silent no-op"
+reset_log
+write_curl_stub match_build_same
+bash "$HOOK_PATH"
+wait
+sleep 0.3
+assert_file_absent "no spawn when build ids match" "$FAKE_SPAWN_LOG"
+if [ ! -f "$TEST_LOG" ] || [ ! -s "$TEST_LOG" ]; then
+  PASS=$((PASS + 1)); echo "  PASS: log silent on same-build match"
+else
+  FAIL=$((FAIL + 1)); echo "  FAIL: log unexpectedly written: $(cat "$TEST_LOG")" >&2
+fi
+
+echo "==> /health version match + build drift + role=daemon -> daemon-restart (#698)"
+reset_log
+write_curl_stub match_build_drift_daemon
+bash "$HOOK_PATH"
+wait
+sleep 0.3
+assert_file_contains "daemon bounced on build drift" "$FAKE_SPAWN_LOG" "daemon-restart at"
+assert_file_not_contains "no serve spawned over the daemon" "$FAKE_SPAWN_LOG" "spawned at"
+assert_file_contains "log notes build drift" "$TEST_LOG" "daemon build oldbuild != local build localbuild"
+
+echo "==> /health version match + build drift + role=serve -> replace (#698)"
+reset_log
+write_curl_stub match_build_drift_serve
+bash "$HOOK_PATH"
+wait
+sleep 0.3
+assert_file_contains "serve replaced on build drift" "$FAKE_SPAWN_LOG" "spawned at"
+assert_file_contains "log notes build drift" "$TEST_LOG" "daemon build oldbuild != local build localbuild"
+
+echo "==> /health version match + build_id unknown -> silent no-op (indeterminate)"
+reset_log
+write_curl_stub match_build_unknown
+bash "$HOOK_PATH"
+wait
+sleep 0.3
+assert_file_absent "no spawn when daemon build_id is unknown" "$FAKE_SPAWN_LOG"
+
 echo "==> /health version mismatch -> replace"
 reset_log
 write_curl_stub mismatch
@@ -89,7 +144,7 @@ bash "$HOOK_PATH"
 wait
 sleep 0.3
 assert_file_contains "spawned replacement" "$FAKE_SPAWN_LOG" "spawned at"
-assert_file_contains "log notes replacement" "$TEST_LOG" "replaced stale v1.0.0"
+assert_file_contains "log notes replacement" "$TEST_LOG" "daemon v1.0.0 != local v9.9.9"
 
 echo "==> /health version mismatch with role=daemon -> daemon-restart, never a serve spawn"
 reset_log

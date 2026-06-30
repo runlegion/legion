@@ -35,11 +35,23 @@ use self::schedule::ScheduleAction;
 use self::verify::QualityGateAction;
 use self::watch::WatchAction;
 
+/// `legion --version` output, including the build id (#698) so the value
+/// matches what the daemon reports at /health. The semver version stays the
+/// FIRST token after the program name ("legion <version> (build <id>)") so
+/// the supervisor's `legion --version | awk '{print $2}'` version parse is
+/// unaffected; the build id is parsed separately from the parenthetical.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (build ",
+    env!("LEGION_BUILD_ID"),
+    ")"
+);
+
 #[derive(Parser)]
 #[command(
     name = "legion",
     about = "Agent specialization through deliberate practice",
-    version
+    version = LONG_VERSION
 )]
 pub(crate) struct Cli {
     /// Show informational messages on stderr (quiet by default)
