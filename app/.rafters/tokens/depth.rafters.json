@@ -1,0 +1,318 @@
+{
+  "namespace": "depth",
+  "generatedAt": "2026-07-01T06:46:43.526Z",
+  "tokens": [
+    {
+      "name": "depth-base",
+      "value": "0",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Base layer - document flow elements",
+      "usageContext": [
+        "regular-content",
+        "in-flow-elements"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Let elements flow naturally",
+          "Avoid z-index unless needed"
+        ],
+        "never": [
+          "Use arbitrary z-index values",
+          "Create z-index battles between components",
+          "Skip levels without good reason"
+        ]
+      },
+      "userOverride": null,
+      "scalePosition": 0,
+      "containerQueryAware": false,
+      "description": "Z-index 0 for base layer. In document flow.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-dropdown",
+      "value": "50",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Dropdown menus and select options",
+      "usageContext": [
+        "dropdowns",
+        "select-menus",
+        "autocomplete"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use for dropdowns, select-menus, autocomplete",
+          "Ensure proper isolation"
+        ],
+        "never": [
+          "Use arbitrary z-index values",
+          "Create z-index battles between components",
+          "Skip levels without good reason"
+        ]
+      },
+      "userOverride": null,
+      "scalePosition": 1,
+      "containerQueryAware": false,
+      "description": "Z-index 50 for dropdown layer. Creates new stacking context.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-sticky",
+      "value": "20",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Sticky elements - headers, toolbars",
+      "usageContext": [
+        "sticky-header",
+        "sticky-toolbar",
+        "floating-actions"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use for sticky-header, sticky-toolbar, floating-actions",
+          "Ensure proper isolation"
+        ],
+        "never": [
+          "Use arbitrary z-index values",
+          "Create z-index battles between components",
+          "Skip levels without good reason"
+        ]
+      },
+      "userOverride": null,
+      "scalePosition": 2,
+      "containerQueryAware": false,
+      "description": "Z-index 20 for sticky layer. Creates new stacking context.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-navigation",
+      "value": "25",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Navigation panels - sidebars, slide-out nav",
+      "usageContext": [
+        "sidebar",
+        "navigation-panel",
+        "slide-out-menu"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use for sidebar, navigation-panel, slide-out-menu",
+          "Ensure proper isolation"
+        ],
+        "never": [
+          "Use arbitrary z-index values",
+          "Create z-index battles between components",
+          "Skip levels without good reason"
+        ]
+      },
+      "userOverride": null,
+      "scalePosition": 3,
+      "containerQueryAware": false,
+      "description": "Z-index 25 for navigation layer. Creates new stacking context.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-fixed",
+      "value": "30",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Fixed elements - always visible",
+      "usageContext": [
+        "fixed-header",
+        "fixed-footer",
+        "fab-buttons"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use for fixed-header, fixed-footer, fab-buttons",
+          "Ensure proper isolation"
+        ],
+        "never": [
+          "Use arbitrary z-index values",
+          "Create z-index battles between components",
+          "Skip levels without good reason"
+        ]
+      },
+      "userOverride": null,
+      "scalePosition": 4,
+      "containerQueryAware": false,
+      "description": "Z-index 30 for fixed layer. Creates new stacking context.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-modal",
+      "value": "40",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Modal dialogs - blocking overlays",
+      "usageContext": [
+        "modals",
+        "dialogs",
+        "sheets"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use for modals, dialogs, sheets",
+          "Ensure proper isolation"
+        ],
+        "never": [
+          "Use arbitrary z-index values",
+          "Create z-index battles between components",
+          "Skip levels without good reason"
+        ]
+      },
+      "userOverride": null,
+      "scalePosition": 5,
+      "containerQueryAware": false,
+      "description": "Z-index 40 for modal layer. Creates new stacking context.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-popover",
+      "value": "50",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Popovers above modals",
+      "usageContext": [
+        "popovers",
+        "nested-menus",
+        "command-palette"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use for popovers, nested-menus, command-palette",
+          "Ensure proper isolation"
+        ],
+        "never": [
+          "Use arbitrary z-index values",
+          "Create z-index battles between components",
+          "Skip levels without good reason"
+        ]
+      },
+      "userOverride": null,
+      "scalePosition": 6,
+      "containerQueryAware": false,
+      "description": "Z-index 50 for popover layer. Creates new stacking context.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-tooltip",
+      "value": "60",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Tooltips - highest common layer",
+      "usageContext": [
+        "tooltips",
+        "toast-notifications"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use for tooltips, toast-notifications",
+          "Ensure proper isolation"
+        ],
+        "never": [
+          "Use arbitrary z-index values",
+          "Create z-index battles between components",
+          "Skip levels without good reason"
+        ]
+      },
+      "userOverride": null,
+      "scalePosition": 7,
+      "containerQueryAware": false,
+      "description": "Z-index 60 for tooltip layer. Creates new stacking context.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-overlay",
+      "value": "35",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Overlay backdrops - screen-dimming layers behind modals",
+      "usageContext": [
+        "modal-backdrop",
+        "drawer-backdrop",
+        "sheet-backdrop"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use for modal-backdrop, drawer-backdrop, sheet-backdrop",
+          "Ensure proper isolation"
+        ],
+        "never": [
+          "Use arbitrary z-index values",
+          "Create z-index battles between components",
+          "Skip levels without good reason"
+        ]
+      },
+      "userOverride": null,
+      "scalePosition": 8,
+      "containerQueryAware": false,
+      "description": "Z-index 35 for overlay layer. Creates new stacking context.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-below",
+      "value": "-1",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Below base layer - backgrounds, decorative elements",
+      "usageContext": [
+        "background-decorations",
+        "behind-content"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use for decorative backgrounds",
+          "Use for pseudo-element layers"
+        ],
+        "never": [
+          "Use for interactive elements",
+          "Rely on for critical content"
+        ]
+      },
+      "userOverride": null,
+      "containerQueryAware": false,
+      "description": "Z-index -1 for elements that should appear behind base content.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-max",
+      "value": "9999",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Maximum layer - emergency overlay (e.g., dev tools)",
+      "usageContext": [
+        "debug-overlays",
+        "emergency-ui"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use only for dev/debug tools",
+          "Document why this is needed"
+        ],
+        "never": [
+          "Use in production UI",
+          "Use to \"win\" z-index conflicts",
+          "Use without questioning if the architecture is wrong"
+        ]
+      },
+      "userOverride": null,
+      "containerQueryAware": false,
+      "description": "Maximum z-index 9999 for special cases only.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    },
+    {
+      "name": "depth-scale",
+      "value": "{\"gap\":10,\"note\":\"Each level has 10-unit gaps for intermediate values\",\"levels\":{\"base\":0,\"dropdown\":50,\"sticky\":20,\"navigation\":25,\"fixed\":30,\"modal\":40,\"popover\":50,\"tooltip\":60,\"overlay\":35}}",
+      "category": "depth",
+      "namespace": "depth",
+      "semanticMeaning": "Depth scale reference",
+      "userOverride": null,
+      "containerQueryAware": false,
+      "description": "Reference for z-index scale structure. 10-unit gaps allow intermediate values.",
+      "generatedAt": "2026-07-01T06:46:43.091Z"
+    }
+  ]
+}

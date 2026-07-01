@@ -1,0 +1,34 @@
+{
+  "framework": "wc",
+  "componentTarget": "wc",
+  "componentsPath": "src/components/ui",
+  "primitivesPath": "src/lib/primitives",
+  "compositesPath": "src/composites",
+  "rulesPath": "src/lib/rules",
+  "cssPath": null,
+  "shadcn": false,
+  "exports": {
+    "tailwind": true,
+    "typescript": true,
+    "dtcg": false,
+    "compiled": false
+  },
+  "installed": {
+    "components": [
+      "badge",
+      "button",
+      "card",
+      "container",
+      "grid",
+      "typography"
+    ],
+    "primitives": [
+      "classy",
+      "fill-resolver",
+      "rafters-element",
+      "slot"
+    ],
+    "composites": [],
+    "rules": []
+  }
+}

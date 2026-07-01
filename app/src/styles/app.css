@@ -1,12 +1,309 @@
-/* Minimal foundation. The rafters stylesheet (via `rafters init`) takes over
-   the real visual language; this only keeps hello world legible. */
+/* Prototype layout for the document navigator. Hand-rolled, deliberately
+   plain: the rafters stylesheet + controls take over the real visual language
+   once the rafters WC rebuild settles. This only needs to be legible and
+   navigable while the shape is proven. */
+
+:root {
+  --bg: #ffffff;
+  --panel: #fafafa;
+  --border: #e4e4e7;
+  --fg: #18181b;
+  --muted: #71717a;
+  --accent: #2563eb;
+  --pub: #16a34a;
+  --draft: #d4d4d8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
   font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-  color: #18181b;
+  color: var(--fg);
+  background: var(--bg);
+  font-size: 14px;
 }
 
-h1 {
-  padding: 2rem;
-  font-size: 1.25rem;
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  height: 100vh;
+}
+
+.sidebar {
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  overflow-y: auto;
+}
+
+.brand {
+  padding: 1rem 1rem 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid var(--border);
+}
+
+.tree {
+  padding: 0.5rem 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+.repo-toggle {
+  padding: 0.4rem 0.75rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.repo-toggle:hover,
+.section-toggle:hover {
+  background: #f4f4f5;
+}
+
+.caret {
+  color: var(--muted);
+  font-size: 0.7rem;
+  width: 0.8rem;
+}
+
+.sections {
+  padding-left: 0.5rem;
+}
+
+.section-toggle {
+  padding: 0.35rem 0.75rem;
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+}
+
+.count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.doc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0.25rem;
+}
+
+.doc-item {
+  padding: 0.3rem 0.75rem 0.3rem 1.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.doc-item:hover {
+  background: #f4f4f5;
+}
+
+.doc-item.sel {
+  background: #eff6ff;
+  color: var(--accent);
+}
+
+.doc-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--draft);
+}
+
+.status-dot.pub {
+  background: var(--pub);
+}
+
+.content {
+  overflow-y: auto;
+  padding: 1.5rem 2rem;
+}
+
+.empty,
+.muted {
+  color: var(--muted);
+}
+
+.pad {
+  padding: 1rem;
+}
+
+.pad-sm {
+  padding: 0.3rem 0.75rem 0.5rem 1.75rem;
+  font-size: 0.85em;
+}
+
+.error {
+  color: #b91c1c;
+}
+
+.doc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.doc-meta {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.doc-id {
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+}
+
+.doc-type {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.publish {
+  width: auto;
+  padding: 0.4rem 1rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+
+.publish:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.publish.done {
+  background: var(--pub);
+}
+
+.doc-badges {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.badge {
+  font-size: 0.75em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  background: #f4f4f5;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.doc-title {
+  margin: 0.25rem 0 0.5rem;
+  font-size: 1.4rem;
+}
+
+.doc-desc {
+  color: #3f3f46;
+  line-height: 1.55;
+}
+
+.field {
+  margin-top: 1.25rem;
+}
+
+.field h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.field.inline {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  margin-top: 0.6rem;
+}
+
+.field.inline h3 {
+  margin: 0;
+}
+
+.ref {
+  font-family: ui-monospace, monospace;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.ref:hover {
+  background: #eff6ff;
+}
+
+.accept {
+  margin: 0;
+  padding-left: 1.2rem;
+  line-height: 1.6;
+}
+
+.extras {
+  margin: 0;
+}
+
+.kv {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.15rem 0;
+}
+
+.kv dt {
+  font-weight: 600;
+  min-width: 8rem;
+}
+
+.kv dd {
+  margin: 0;
+  color: #3f3f46;
+}
+
+.prose {
+  line-height: 1.6;
+  max-width: 42rem;
+}
+
+.prose code {
+  font-family: ui-monospace, monospace;
+  background: #f4f4f5;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+}
+
+.raw {
+  white-space: pre-wrap;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
 }

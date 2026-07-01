@@ -1,0 +1,7239 @@
+{
+  "namespace": "color",
+  "generatedAt": "2026-07-01T06:46:43.501Z",
+  "tokens": [
+    {
+      "name": "zinc-50",
+      "value": "oklch(0.985 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 50 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 0,
+      "containerQueryAware": true,
+      "description": "zinc color at 50 position (OKLCH L=0.985)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc-100",
+      "value": "oklch(0.967 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 100 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 1,
+      "containerQueryAware": true,
+      "description": "zinc color at 100 position (OKLCH L=0.967)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc-200",
+      "value": "oklch(0.92 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 200 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 2,
+      "containerQueryAware": true,
+      "description": "zinc color at 200 position (OKLCH L=0.92)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc-300",
+      "value": "oklch(0.869 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 300 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 3,
+      "containerQueryAware": true,
+      "description": "zinc color at 300 position (OKLCH L=0.869)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc-400",
+      "value": "oklch(0.707 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 400 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 4,
+      "containerQueryAware": true,
+      "description": "zinc color at 400 position (OKLCH L=0.707)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc-500",
+      "value": "oklch(0.552 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 500 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 5,
+      "containerQueryAware": true,
+      "description": "zinc color at 500 position (OKLCH L=0.552)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc-600",
+      "value": "oklch(0.442 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 600 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 6,
+      "containerQueryAware": true,
+      "description": "zinc color at 600 position (OKLCH L=0.442)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc-700",
+      "value": "oklch(0.37 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 700 level - dark foreground range",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 7,
+      "containerQueryAware": true,
+      "description": "zinc color at 700 position (OKLCH L=0.37)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc-800",
+      "value": "oklch(0.269 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 800 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 8,
+      "containerQueryAware": true,
+      "description": "zinc color at 800 position (OKLCH L=0.269)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc-900",
+      "value": "oklch(0.2 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 900 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 9,
+      "containerQueryAware": true,
+      "description": "zinc color at 900 position (OKLCH L=0.2)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc-950",
+      "value": "oklch(0.141 0 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "zinc shade at 950 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 10,
+      "containerQueryAware": true,
+      "description": "zinc color at 950 position (OKLCH L=0.141)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "zinc",
+      "value": {
+        "name": "zinc",
+        "scale": [
+          {
+            "l": 0.985,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.967,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.92,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.869,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.707,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.552,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.442,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.37,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.269,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.2,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.141,
+            "c": 0,
+            "h": 0,
+            "alpha": 1
+          }
+        ],
+        "token": "zinc",
+        "use": "Achromatic zinc palette. Default backing family for the neutral semantic role.",
+        "accessibility": {
+          "wcagAA": {
+            "normal": [
+              [
+                0,
+                5
+              ],
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                6
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                6
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                6
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                0
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                6,
+                1
+              ],
+              [
+                6,
+                2
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                7,
+                3
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ]
+            ],
+            "large": [
+              [
+                0,
+                5
+              ],
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                5
+              ],
+              [
+                1,
+                6
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                5
+              ],
+              [
+                2,
+                6
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                5
+              ],
+              [
+                3,
+                6
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                7
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                0
+              ],
+              [
+                5,
+                1
+              ],
+              [
+                5,
+                2
+              ],
+              [
+                5,
+                3
+              ],
+              [
+                5,
+                8
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                6,
+                1
+              ],
+              [
+                6,
+                2
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                7,
+                3
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                8,
+                5
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ]
+            ]
+          },
+          "wcagAAA": {
+            "normal": [
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                7,
+                3
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ]
+            ],
+            "large": [
+              [
+                0,
+                5
+              ],
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                6
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                6
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                6
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                0
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                6,
+                1
+              ],
+              [
+                6,
+                2
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                7,
+                3
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ]
+            ]
+          },
+          "onWhite": {
+            "wcagAA": true,
+            "wcagAAA": false,
+            "contrastRatio": 4.812173798778758,
+            "aa": [
+              5,
+              6,
+              7,
+              8,
+              9,
+              10
+            ],
+            "aaa": [
+              6,
+              7,
+              8,
+              9,
+              10
+            ]
+          },
+          "onBlack": {
+            "wcagAA": false,
+            "wcagAAA": false,
+            "contrastRatio": 4.36393216,
+            "aa": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ],
+            "aaa": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        }
+      },
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "Complete zinc color family with 11-position scale",
+      "usageContext": [
+        "backgrounds",
+        "borders",
+        "text",
+        "dividers",
+        "shadows",
+        "overlays"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use 50-200 for light mode backgrounds",
+          "Use 800-950 for dark mode backgrounds",
+          "Use 400-600 for borders and dividers",
+          "Use 900-950 for primary text in light mode",
+          "Use 50-100 for primary text in dark mode"
+        ],
+        "never": [
+          "Mix scale positions that have insufficient contrast",
+          "Use without checking accessibility against background"
+        ]
+      },
+      "userOverride": null,
+      "containerQueryAware": true,
+      "description": "Achromatic zinc palette. Default backing family for the neutral semantic role.",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-50",
+      "value": "oklch(0.95 0.036 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 50 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 0,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 50 position (OKLCH L=0.95)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-100",
+      "value": "oklch(0.896 0.12 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 100 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 1,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 100 position (OKLCH L=0.896)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-200",
+      "value": "oklch(0.839 0.12 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 200 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 2,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 200 position (OKLCH L=0.839)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-300",
+      "value": "oklch(0.78 0.12 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 300 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 3,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 300 position (OKLCH L=0.78)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-400",
+      "value": "oklch(0.716 0.12 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 400 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 4,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 400 position (OKLCH L=0.716)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-500",
+      "value": "oklch(0.645 0.12 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 500 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 5,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 500 position (OKLCH L=0.645)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-600",
+      "value": "oklch(0.55 0.12 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 600 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 6,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 600 position (OKLCH L=0.55)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-700",
+      "value": "oklch(0.425 0.12 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 700 level - dark foreground range",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 7,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 700 position (OKLCH L=0.425)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-800",
+      "value": "oklch(0.3 0.12 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 800 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 8,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 800 position (OKLCH L=0.3)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-900",
+      "value": "oklch(0.175 0.12 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 900 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 9,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 900 position (OKLCH L=0.175)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier-950",
+      "value": "oklch(0.05 0.072 180)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-glacier shade at 950 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 10,
+      "containerQueryAware": true,
+      "description": "silver-true-glacier color at 950 position (OKLCH L=0.05)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-glacier",
+      "value": {
+        "name": "silver-true-glacier",
+        "scale": [
+          {
+            "l": 0.95,
+            "c": 0.036,
+            "h": 180,
+            "alpha": 1
+          },
+          {
+            "l": 0.896,
+            "c": 0.12,
+            "h": 180,
+            "alpha": 1
+          },
+          {
+            "l": 0.839,
+            "c": 0.12,
+            "h": 180,
+            "alpha": 1
+          },
+          {
+            "l": 0.78,
+            "c": 0.12,
+            "h": 180,
+            "alpha": 1
+          },
+          {
+            "l": 0.716,
+            "c": 0.12,
+            "h": 180,
+            "alpha": 1
+          },
+          {
+            "l": 0.645,
+            "c": 0.12,
+            "h": 180,
+            "alpha": 1
+          },
+          {
+            "l": 0.55,
+            "c": 0.12,
+            "h": 180,
+            "alpha": 1
+          },
+          {
+            "l": 0.425,
+            "c": 0.12,
+            "h": 180,
+            "alpha": 1
+          },
+          {
+            "l": 0.3,
+            "c": 0.12,
+            "h": 180,
+            "alpha": 1
+          },
+          {
+            "l": 0.175,
+            "c": 0.12,
+            "h": 180,
+            "alpha": 1
+          },
+          {
+            "l": 0.05,
+            "c": 0.072,
+            "h": 180,
+            "alpha": 1
+          }
+        ],
+        "token": "silver-true-glacier",
+        "use": "Cool cyan/teal palette - serene, balanced, calming.",
+        "accessibility": {
+          "wcagAA": {
+            "normal": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ],
+              [
+                10,
+                6
+              ]
+            ],
+            "large": [
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                6
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                7
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                8
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                6,
+                1
+              ],
+              [
+                6,
+                9
+              ],
+              [
+                6,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                7,
+                3
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                8,
+                5
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                9,
+                6
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ],
+              [
+                10,
+                6
+              ]
+            ]
+          },
+          "wcagAAA": {
+            "normal": [
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ]
+            ],
+            "large": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ],
+              [
+                10,
+                6
+              ]
+            ]
+          },
+          "onWhite": {
+            "wcagAA": false,
+            "wcagAAA": false,
+            "contrastRatio": 3.1093294123196324,
+            "aa": [
+              7,
+              8,
+              9,
+              10
+            ],
+            "aaa": [
+              7,
+              8,
+              9,
+              10
+            ]
+          },
+          "onBlack": {
+            "wcagAA": true,
+            "wcagAAA": false,
+            "contrastRatio": 6.753867865139931,
+            "aa": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "aaa": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        }
+      },
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "Complete silver-true-glacier color family with 11-position scale",
+      "usageContext": [
+        "backgrounds",
+        "borders",
+        "text",
+        "dividers",
+        "shadows",
+        "overlays"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use 50-200 for light mode backgrounds",
+          "Use 800-950 for dark mode backgrounds",
+          "Use 400-600 for borders and dividers",
+          "Use 900-950 for primary text in light mode",
+          "Use 50-100 for primary text in dark mode"
+        ],
+        "never": [
+          "Mix scale positions that have insufficient contrast",
+          "Use without checking accessibility against background"
+        ]
+      },
+      "userOverride": null,
+      "containerQueryAware": true,
+      "description": "Cool cyan/teal palette - serene, balanced, calming.",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-50",
+      "value": "oklch(0.95 0.06 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 50 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 0,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 50 position (OKLCH L=0.95)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-100",
+      "value": "oklch(0.896 0.2 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 100 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 1,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 100 position (OKLCH L=0.896)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-200",
+      "value": "oklch(0.839 0.2 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 200 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 2,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 200 position (OKLCH L=0.839)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-300",
+      "value": "oklch(0.78 0.2 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 300 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 3,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 300 position (OKLCH L=0.78)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-400",
+      "value": "oklch(0.716 0.2 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 400 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 4,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 400 position (OKLCH L=0.716)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-500",
+      "value": "oklch(0.645 0.2 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 500 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 5,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 500 position (OKLCH L=0.645)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-600",
+      "value": "oklch(0.55 0.2 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 600 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 6,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 600 position (OKLCH L=0.55)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-700",
+      "value": "oklch(0.425 0.2 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 700 level - dark foreground range",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 7,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 700 position (OKLCH L=0.425)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-800",
+      "value": "oklch(0.3 0.2 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 800 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 8,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 800 position (OKLCH L=0.3)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-900",
+      "value": "oklch(0.175 0.2 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 900 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 9,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 900 position (OKLCH L=0.175)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck-950",
+      "value": "oklch(0.05 0.12 0)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-bold-fire-truck shade at 950 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 10,
+      "containerQueryAware": true,
+      "description": "silver-bold-fire-truck color at 950 position (OKLCH L=0.05)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-bold-fire-truck",
+      "value": {
+        "name": "silver-bold-fire-truck",
+        "scale": [
+          {
+            "l": 0.95,
+            "c": 0.06,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.896,
+            "c": 0.2,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.839,
+            "c": 0.2,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.78,
+            "c": 0.2,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.716,
+            "c": 0.2,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.645,
+            "c": 0.2,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.55,
+            "c": 0.2,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.425,
+            "c": 0.2,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.3,
+            "c": 0.2,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.175,
+            "c": 0.2,
+            "h": 0,
+            "alpha": 1
+          },
+          {
+            "l": 0.05,
+            "c": 0.12,
+            "h": 0,
+            "alpha": 1
+          }
+        ],
+        "token": "silver-bold-fire-truck",
+        "use": "Bold fire-truck red palette - warm, energetic, attention-grabbing.",
+        "accessibility": {
+          "wcagAA": {
+            "normal": [
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ]
+            ],
+            "large": [
+              [
+                0,
+                5
+              ],
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                6
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                6
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                7
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                0
+              ],
+              [
+                5,
+                8
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                6,
+                1
+              ],
+              [
+                6,
+                2
+              ],
+              [
+                6,
+                9
+              ],
+              [
+                6,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                7,
+                3
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                8,
+                5
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                9,
+                6
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ],
+              [
+                10,
+                6
+              ]
+            ]
+          },
+          "wcagAAA": {
+            "normal": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ]
+            ],
+            "large": [
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ]
+            ]
+          },
+          "onWhite": {
+            "wcagAA": false,
+            "wcagAAA": false,
+            "contrastRatio": 3.6588008936661223,
+            "aa": [
+              6,
+              7,
+              8,
+              9,
+              10
+            ],
+            "aaa": [
+              7,
+              8,
+              9,
+              10
+            ]
+          },
+          "onBlack": {
+            "wcagAA": true,
+            "wcagAAA": false,
+            "contrastRatio": 5.73958534785367,
+            "aa": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "aaa": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        }
+      },
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "Complete silver-bold-fire-truck color family with 11-position scale",
+      "usageContext": [
+        "backgrounds",
+        "borders",
+        "text",
+        "dividers",
+        "shadows",
+        "overlays"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use 50-200 for light mode backgrounds",
+          "Use 800-950 for dark mode backgrounds",
+          "Use 400-600 for borders and dividers",
+          "Use 900-950 for primary text in light mode",
+          "Use 50-100 for primary text in dark mode"
+        ],
+        "never": [
+          "Mix scale positions that have insufficient contrast",
+          "Use without checking accessibility against background"
+        ]
+      },
+      "userOverride": null,
+      "containerQueryAware": true,
+      "description": "Bold fire-truck red palette - warm, energetic, attention-grabbing.",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-50",
+      "value": "oklch(0.95 0.036 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 50 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 0,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 50 position (OKLCH L=0.95)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-100",
+      "value": "oklch(0.896 0.12 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 100 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 1,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 100 position (OKLCH L=0.896)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-200",
+      "value": "oklch(0.839 0.12 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 200 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 2,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 200 position (OKLCH L=0.839)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-300",
+      "value": "oklch(0.78 0.12 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 300 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 3,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 300 position (OKLCH L=0.78)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-400",
+      "value": "oklch(0.716 0.12 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 400 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 4,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 400 position (OKLCH L=0.716)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-500",
+      "value": "oklch(0.645 0.12 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 500 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 5,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 500 position (OKLCH L=0.645)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-600",
+      "value": "oklch(0.55 0.12 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 600 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 6,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 600 position (OKLCH L=0.55)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-700",
+      "value": "oklch(0.425 0.12 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 700 level - dark foreground range",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 7,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 700 position (OKLCH L=0.425)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-800",
+      "value": "oklch(0.3 0.12 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 800 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 8,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 800 position (OKLCH L=0.3)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-900",
+      "value": "oklch(0.175 0.12 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 900 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 9,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 900 position (OKLCH L=0.175)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey-950",
+      "value": "oklch(0.05 0.072 60)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-honey shade at 950 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 10,
+      "containerQueryAware": true,
+      "description": "silver-true-honey color at 950 position (OKLCH L=0.05)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-honey",
+      "value": {
+        "name": "silver-true-honey",
+        "scale": [
+          {
+            "l": 0.95,
+            "c": 0.036,
+            "h": 60,
+            "alpha": 1
+          },
+          {
+            "l": 0.896,
+            "c": 0.12,
+            "h": 60,
+            "alpha": 1
+          },
+          {
+            "l": 0.839,
+            "c": 0.12,
+            "h": 60,
+            "alpha": 1
+          },
+          {
+            "l": 0.78,
+            "c": 0.12,
+            "h": 60,
+            "alpha": 1
+          },
+          {
+            "l": 0.716,
+            "c": 0.12,
+            "h": 60,
+            "alpha": 1
+          },
+          {
+            "l": 0.645,
+            "c": 0.12,
+            "h": 60,
+            "alpha": 1
+          },
+          {
+            "l": 0.55,
+            "c": 0.12,
+            "h": 60,
+            "alpha": 1
+          },
+          {
+            "l": 0.425,
+            "c": 0.12,
+            "h": 60,
+            "alpha": 1
+          },
+          {
+            "l": 0.3,
+            "c": 0.12,
+            "h": 60,
+            "alpha": 1
+          },
+          {
+            "l": 0.175,
+            "c": 0.12,
+            "h": 60,
+            "alpha": 1
+          },
+          {
+            "l": 0.05,
+            "c": 0.072,
+            "h": 60,
+            "alpha": 1
+          }
+        ],
+        "token": "silver-true-honey",
+        "use": "Warm honey gold palette - inviting, refined, subtle warmth.",
+        "accessibility": {
+          "wcagAA": {
+            "normal": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ]
+            ],
+            "large": [
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                6
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                7
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                8
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                6,
+                1
+              ],
+              [
+                6,
+                9
+              ],
+              [
+                6,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                7,
+                3
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                8,
+                5
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                9,
+                6
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ],
+              [
+                10,
+                6
+              ]
+            ]
+          },
+          "wcagAAA": {
+            "normal": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ]
+            ],
+            "large": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ]
+            ]
+          },
+          "onWhite": {
+            "wcagAA": false,
+            "wcagAAA": false,
+            "contrastRatio": 3.4074408186480576,
+            "aa": [
+              6,
+              7,
+              8,
+              9,
+              10
+            ],
+            "aaa": [
+              7,
+              8,
+              9,
+              10
+            ]
+          },
+          "onBlack": {
+            "wcagAA": true,
+            "wcagAAA": false,
+            "contrastRatio": 6.1629830472982325,
+            "aa": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "aaa": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        }
+      },
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "Complete silver-true-honey color family with 11-position scale",
+      "usageContext": [
+        "backgrounds",
+        "borders",
+        "text",
+        "dividers",
+        "shadows",
+        "overlays"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use 50-200 for light mode backgrounds",
+          "Use 800-950 for dark mode backgrounds",
+          "Use 400-600 for borders and dividers",
+          "Use 900-950 for primary text in light mode",
+          "Use 50-100 for primary text in dark mode"
+        ],
+        "never": [
+          "Mix scale positions that have insufficient contrast",
+          "Use without checking accessibility against background"
+        ]
+      },
+      "userOverride": null,
+      "containerQueryAware": true,
+      "description": "Warm honey gold palette - inviting, refined, subtle warmth.",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-50",
+      "value": "oklch(0.95 0.036 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 50 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 0,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 50 position (OKLCH L=0.95)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-100",
+      "value": "oklch(0.896 0.12 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 100 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 1,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 100 position (OKLCH L=0.896)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-200",
+      "value": "oklch(0.839 0.12 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 200 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 2,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 200 position (OKLCH L=0.839)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-300",
+      "value": "oklch(0.78 0.12 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 300 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 3,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 300 position (OKLCH L=0.78)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-400",
+      "value": "oklch(0.716 0.12 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 400 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 4,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 400 position (OKLCH L=0.716)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-500",
+      "value": "oklch(0.645 0.12 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 500 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 5,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 500 position (OKLCH L=0.645)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-600",
+      "value": "oklch(0.55 0.12 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 600 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 6,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 600 position (OKLCH L=0.55)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-700",
+      "value": "oklch(0.425 0.12 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 700 level - dark foreground range",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 7,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 700 position (OKLCH L=0.425)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-800",
+      "value": "oklch(0.3 0.12 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 800 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 8,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 800 position (OKLCH L=0.3)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-900",
+      "value": "oklch(0.175 0.12 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 900 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 9,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 900 position (OKLCH L=0.175)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine-950",
+      "value": "oklch(0.05 0.072 90)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-citrine shade at 950 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 10,
+      "containerQueryAware": true,
+      "description": "silver-true-citrine color at 950 position (OKLCH L=0.05)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-citrine",
+      "value": {
+        "name": "silver-true-citrine",
+        "scale": [
+          {
+            "l": 0.95,
+            "c": 0.036,
+            "h": 90,
+            "alpha": 1
+          },
+          {
+            "l": 0.896,
+            "c": 0.12,
+            "h": 90,
+            "alpha": 1
+          },
+          {
+            "l": 0.839,
+            "c": 0.12,
+            "h": 90,
+            "alpha": 1
+          },
+          {
+            "l": 0.78,
+            "c": 0.12,
+            "h": 90,
+            "alpha": 1
+          },
+          {
+            "l": 0.716,
+            "c": 0.12,
+            "h": 90,
+            "alpha": 1
+          },
+          {
+            "l": 0.645,
+            "c": 0.12,
+            "h": 90,
+            "alpha": 1
+          },
+          {
+            "l": 0.55,
+            "c": 0.12,
+            "h": 90,
+            "alpha": 1
+          },
+          {
+            "l": 0.425,
+            "c": 0.12,
+            "h": 90,
+            "alpha": 1
+          },
+          {
+            "l": 0.3,
+            "c": 0.12,
+            "h": 90,
+            "alpha": 1
+          },
+          {
+            "l": 0.175,
+            "c": 0.12,
+            "h": 90,
+            "alpha": 1
+          },
+          {
+            "l": 0.05,
+            "c": 0.072,
+            "h": 90,
+            "alpha": 1
+          }
+        ],
+        "token": "silver-true-citrine",
+        "use": "Fresh citrine green palette - natural, growth, harmony.",
+        "accessibility": {
+          "wcagAA": {
+            "normal": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ]
+            ],
+            "large": [
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                6
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                7
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                8
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                6,
+                1
+              ],
+              [
+                6,
+                9
+              ],
+              [
+                6,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                7,
+                3
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                8,
+                5
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                9,
+                6
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ],
+              [
+                10,
+                6
+              ]
+            ]
+          },
+          "wcagAAA": {
+            "normal": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ]
+            ],
+            "large": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ]
+            ]
+          },
+          "onWhite": {
+            "wcagAA": false,
+            "wcagAAA": false,
+            "contrastRatio": 3.3096180174029666,
+            "aa": [
+              6,
+              7,
+              8,
+              9,
+              10
+            ],
+            "aaa": [
+              7,
+              8,
+              9,
+              10
+            ]
+          },
+          "onBlack": {
+            "wcagAA": true,
+            "wcagAAA": false,
+            "contrastRatio": 6.345143122129405,
+            "aa": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "aaa": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        }
+      },
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "Complete silver-true-citrine color family with 11-position scale",
+      "usageContext": [
+        "backgrounds",
+        "borders",
+        "text",
+        "dividers",
+        "shadows",
+        "overlays"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use 50-200 for light mode backgrounds",
+          "Use 800-950 for dark mode backgrounds",
+          "Use 400-600 for borders and dividers",
+          "Use 900-950 for primary text in light mode",
+          "Use 50-100 for primary text in dark mode"
+        ],
+        "never": [
+          "Mix scale positions that have insufficient contrast",
+          "Use without checking accessibility against background"
+        ]
+      },
+      "userOverride": null,
+      "containerQueryAware": true,
+      "description": "Fresh citrine green palette - natural, growth, harmony.",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-50",
+      "value": "oklch(0.95 0.036 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 50 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 0,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 50 position (OKLCH L=0.95)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-100",
+      "value": "oklch(0.896 0.12 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 100 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 1,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 100 position (OKLCH L=0.896)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-200",
+      "value": "oklch(0.839 0.12 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 200 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 2,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 200 position (OKLCH L=0.839)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-300",
+      "value": "oklch(0.78 0.12 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 300 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 3,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 300 position (OKLCH L=0.78)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-400",
+      "value": "oklch(0.716 0.12 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 400 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 4,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 400 position (OKLCH L=0.716)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-500",
+      "value": "oklch(0.645 0.12 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 500 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 5,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 500 position (OKLCH L=0.645)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-600",
+      "value": "oklch(0.55 0.12 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 600 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 6,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 600 position (OKLCH L=0.55)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-700",
+      "value": "oklch(0.425 0.12 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 700 level - dark foreground range",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 7,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 700 position (OKLCH L=0.425)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-800",
+      "value": "oklch(0.3 0.12 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 800 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 8,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 800 position (OKLCH L=0.3)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-900",
+      "value": "oklch(0.175 0.12 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 900 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 9,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 900 position (OKLCH L=0.175)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky-950",
+      "value": "oklch(0.05 0.072 210)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-sky shade at 950 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 10,
+      "containerQueryAware": true,
+      "description": "silver-true-sky color at 950 position (OKLCH L=0.05)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-sky",
+      "value": {
+        "name": "silver-true-sky",
+        "scale": [
+          {
+            "l": 0.95,
+            "c": 0.036,
+            "h": 210,
+            "alpha": 1
+          },
+          {
+            "l": 0.896,
+            "c": 0.12,
+            "h": 210,
+            "alpha": 1
+          },
+          {
+            "l": 0.839,
+            "c": 0.12,
+            "h": 210,
+            "alpha": 1
+          },
+          {
+            "l": 0.78,
+            "c": 0.12,
+            "h": 210,
+            "alpha": 1
+          },
+          {
+            "l": 0.716,
+            "c": 0.12,
+            "h": 210,
+            "alpha": 1
+          },
+          {
+            "l": 0.645,
+            "c": 0.12,
+            "h": 210,
+            "alpha": 1
+          },
+          {
+            "l": 0.55,
+            "c": 0.12,
+            "h": 210,
+            "alpha": 1
+          },
+          {
+            "l": 0.425,
+            "c": 0.12,
+            "h": 210,
+            "alpha": 1
+          },
+          {
+            "l": 0.3,
+            "c": 0.12,
+            "h": 210,
+            "alpha": 1
+          },
+          {
+            "l": 0.175,
+            "c": 0.12,
+            "h": 210,
+            "alpha": 1
+          },
+          {
+            "l": 0.05,
+            "c": 0.072,
+            "h": 210,
+            "alpha": 1
+          }
+        ],
+        "token": "silver-true-sky",
+        "use": "Calm sky blue palette - trustworthy, serene, reliable.",
+        "accessibility": {
+          "wcagAA": {
+            "normal": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ],
+              [
+                10,
+                6
+              ]
+            ],
+            "large": [
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                6
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                7
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                8
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                6,
+                1
+              ],
+              [
+                6,
+                9
+              ],
+              [
+                6,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                7,
+                3
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                8,
+                5
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                9,
+                6
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ],
+              [
+                10,
+                6
+              ]
+            ]
+          },
+          "wcagAAA": {
+            "normal": [
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ]
+            ],
+            "large": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ],
+              [
+                10,
+                6
+              ]
+            ]
+          },
+          "onWhite": {
+            "wcagAA": false,
+            "wcagAAA": false,
+            "contrastRatio": 3.1381175857708645,
+            "aa": [
+              6,
+              7,
+              8,
+              9,
+              10
+            ],
+            "aaa": [
+              7,
+              8,
+              9,
+              10
+            ]
+          },
+          "onBlack": {
+            "wcagAA": true,
+            "wcagAAA": false,
+            "contrastRatio": 6.691909855519782,
+            "aa": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "aaa": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        }
+      },
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "Complete silver-true-sky color family with 11-position scale",
+      "usageContext": [
+        "backgrounds",
+        "borders",
+        "text",
+        "dividers",
+        "shadows",
+        "overlays"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use 50-200 for light mode backgrounds",
+          "Use 800-950 for dark mode backgrounds",
+          "Use 400-600 for borders and dividers",
+          "Use 900-950 for primary text in light mode",
+          "Use 50-100 for primary text in dark mode"
+        ],
+        "never": [
+          "Mix scale positions that have insufficient contrast",
+          "Use without checking accessibility against background"
+        ]
+      },
+      "userOverride": null,
+      "containerQueryAware": true,
+      "description": "Calm sky blue palette - trustworthy, serene, reliable.",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-50",
+      "value": "oklch(0.95 0.036 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 50 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 0,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 50 position (OKLCH L=0.95)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-100",
+      "value": "oklch(0.896 0.12 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 100 level - light background range",
+      "usageContext": [
+        "backgrounds",
+        "cards",
+        "surfaces",
+        "light-mode-bg"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 1,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 100 position (OKLCH L=0.896)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-200",
+      "value": "oklch(0.839 0.12 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 200 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 2,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 200 position (OKLCH L=0.839)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-300",
+      "value": "oklch(0.78 0.12 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 300 level - light background range",
+      "usageContext": [
+        "secondary-backgrounds",
+        "hover-states",
+        "subtle-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 3,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 300 position (OKLCH L=0.78)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-400",
+      "value": "oklch(0.716 0.12 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 400 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 4,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 400 position (OKLCH L=0.716)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-500",
+      "value": "oklch(0.645 0.12 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 500 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "borders",
+        "dividers",
+        "disabled-states",
+        "placeholder-text"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 5,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 500 position (OKLCH L=0.645)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-600",
+      "value": "oklch(0.55 0.12 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 600 level - mid-tone for borders and secondary text",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 6,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 600 position (OKLCH L=0.55)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-700",
+      "value": "oklch(0.425 0.12 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 700 level - dark foreground range",
+      "usageContext": [
+        "secondary-text",
+        "icons",
+        "input-borders"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 7,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 700 position (OKLCH L=0.425)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-800",
+      "value": "oklch(0.3 0.12 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 800 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 8,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 800 position (OKLCH L=0.3)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-900",
+      "value": "oklch(0.175 0.12 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 900 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 9,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 900 position (OKLCH L=0.175)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet-950",
+      "value": "oklch(0.05 0.072 270)",
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "silver-true-violet shade at 950 level - dark foreground range",
+      "usageContext": [
+        "primary-text",
+        "headings",
+        "dark-mode-bg",
+        "high-contrast-elements"
+      ],
+      "userOverride": null,
+      "progressionSystem": "custom",
+      "scalePosition": 10,
+      "containerQueryAware": true,
+      "description": "silver-true-violet color at 950 position (OKLCH L=0.05)",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    },
+    {
+      "name": "silver-true-violet",
+      "value": {
+        "name": "silver-true-violet",
+        "scale": [
+          {
+            "l": 0.95,
+            "c": 0.036,
+            "h": 270,
+            "alpha": 1
+          },
+          {
+            "l": 0.896,
+            "c": 0.12,
+            "h": 270,
+            "alpha": 1
+          },
+          {
+            "l": 0.839,
+            "c": 0.12,
+            "h": 270,
+            "alpha": 1
+          },
+          {
+            "l": 0.78,
+            "c": 0.12,
+            "h": 270,
+            "alpha": 1
+          },
+          {
+            "l": 0.716,
+            "c": 0.12,
+            "h": 270,
+            "alpha": 1
+          },
+          {
+            "l": 0.645,
+            "c": 0.12,
+            "h": 270,
+            "alpha": 1
+          },
+          {
+            "l": 0.55,
+            "c": 0.12,
+            "h": 270,
+            "alpha": 1
+          },
+          {
+            "l": 0.425,
+            "c": 0.12,
+            "h": 270,
+            "alpha": 1
+          },
+          {
+            "l": 0.3,
+            "c": 0.12,
+            "h": 270,
+            "alpha": 1
+          },
+          {
+            "l": 0.175,
+            "c": 0.12,
+            "h": 270,
+            "alpha": 1
+          },
+          {
+            "l": 0.05,
+            "c": 0.072,
+            "h": 270,
+            "alpha": 1
+          }
+        ],
+        "token": "silver-true-violet",
+        "use": "Creative violet palette - luxurious, imaginative, refined.",
+        "accessibility": {
+          "wcagAA": {
+            "normal": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ]
+            ],
+            "large": [
+              [
+                0,
+                6
+              ],
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                6
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                7
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                8
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                6,
+                1
+              ],
+              [
+                6,
+                9
+              ],
+              [
+                6,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                7,
+                3
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                8,
+                5
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                9,
+                6
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ],
+              [
+                10,
+                6
+              ]
+            ]
+          },
+          "wcagAAA": {
+            "normal": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ]
+            ],
+            "large": [
+              [
+                0,
+                7
+              ],
+              [
+                0,
+                8
+              ],
+              [
+                0,
+                9
+              ],
+              [
+                0,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                10
+              ],
+              [
+                5,
+                9
+              ],
+              [
+                5,
+                10
+              ],
+              [
+                7,
+                0
+              ],
+              [
+                7,
+                1
+              ],
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                0
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                8,
+                2
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                0
+              ],
+              [
+                9,
+                1
+              ],
+              [
+                9,
+                2
+              ],
+              [
+                9,
+                3
+              ],
+              [
+                9,
+                4
+              ],
+              [
+                9,
+                5
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                10,
+                1
+              ],
+              [
+                10,
+                2
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                10,
+                4
+              ],
+              [
+                10,
+                5
+              ]
+            ]
+          },
+          "onWhite": {
+            "wcagAA": false,
+            "wcagAAA": false,
+            "contrastRatio": 3.3557491871952387,
+            "aa": [
+              6,
+              7,
+              8,
+              9,
+              10
+            ],
+            "aaa": [
+              7,
+              8,
+              9,
+              10
+            ]
+          },
+          "onBlack": {
+            "wcagAA": true,
+            "wcagAAA": false,
+            "contrastRatio": 6.257917033886538,
+            "aa": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "aaa": [
+              0,
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        }
+      },
+      "category": "color",
+      "namespace": "color",
+      "semanticMeaning": "Complete silver-true-violet color family with 11-position scale",
+      "usageContext": [
+        "backgrounds",
+        "borders",
+        "text",
+        "dividers",
+        "shadows",
+        "overlays"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Use 50-200 for light mode backgrounds",
+          "Use 800-950 for dark mode backgrounds",
+          "Use 400-600 for borders and dividers",
+          "Use 900-950 for primary text in light mode",
+          "Use 50-100 for primary text in dark mode"
+        ],
+        "never": [
+          "Mix scale positions that have insufficient contrast",
+          "Use without checking accessibility against background"
+        ]
+      },
+      "userOverride": null,
+      "containerQueryAware": true,
+      "description": "Creative violet palette - luxurious, imaginative, refined.",
+      "generatedAt": "2026-07-01T06:46:43.041Z"
+    }
+  ]
+}

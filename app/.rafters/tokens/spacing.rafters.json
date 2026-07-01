@@ -1,0 +1,833 @@
+{
+  "namespace": "spacing",
+  "generatedAt": "2026-07-01T06:46:43.524Z",
+  "tokens": [
+    {
+      "name": "spacing-base",
+      "value": "0.25rem",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Foundation spacing unit - all spacing derives from this value",
+      "usageContext": [
+        "base-unit",
+        "calculation-reference"
+      ],
+      "usagePatterns": {
+        "do": [
+          "Reference in calculations for consistent spacing",
+          "Use as the multiplier base for custom spacing"
+        ],
+        "never": [
+          "Use directly in components without scaling",
+          "Override without understanding the ripple effects"
+        ]
+      },
+      "userOverride": null,
+      "progressionSystem": "minor-third",
+      "containerQueryAware": true,
+      "description": "Base spacing unit (0.25rem / 4px at 16px root). Multiply by scale values for actual spacing.",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-0",
+      "value": "0",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Zero spacing - remove all spacing",
+      "usageContext": [
+        "reset",
+        "collapse"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 0)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 0,
+      "mathRelationship": "4 * 0",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 0 = 0rem (4px × 0)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-0.5",
+      "value": "calc(var(--rafters-spacing-base) * 0.5)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Micro spacing for tight layouts and inline elements",
+      "usageContext": [
+        "inline-spacing",
+        "icon-gaps",
+        "tight-layouts"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 0.5)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 1,
+      "mathRelationship": "4 * 0.5",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 0.5 = 0.125rem (4px × 0.5)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-1",
+      "value": "var(--rafters-spacing-base)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Micro spacing for tight layouts and inline elements",
+      "usageContext": [
+        "inline-spacing",
+        "icon-gaps",
+        "tight-layouts"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 1)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 2,
+      "mathRelationship": "4 * 1",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 1 = 0.25rem (4px × 1)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-1.5",
+      "value": "calc(var(--rafters-spacing-base) * 1.5)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Small spacing for component internals and related elements",
+      "usageContext": [
+        "component-padding",
+        "related-elements",
+        "form-fields"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 1.5)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 3,
+      "mathRelationship": "4 * 1.5",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 1.5 = 0.375rem (4px × 1.5)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-2",
+      "value": "calc(var(--rafters-spacing-base) * 2)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Small spacing for component internals and related elements",
+      "usageContext": [
+        "component-padding",
+        "related-elements",
+        "form-fields"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 2)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 4,
+      "mathRelationship": "4 * 2",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 2 = 0.5rem (4px × 2)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-2.5",
+      "value": "calc(var(--rafters-spacing-base) * 2.5)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Small spacing for component internals and related elements",
+      "usageContext": [
+        "component-padding",
+        "related-elements",
+        "form-fields"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 2.5)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 5,
+      "mathRelationship": "4 * 2.5",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 2.5 = 0.625rem (4px × 2.5)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-3",
+      "value": "calc(var(--rafters-spacing-base) * 3)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Small spacing for component internals and related elements",
+      "usageContext": [
+        "component-padding",
+        "related-elements",
+        "form-fields"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 3)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 6,
+      "mathRelationship": "4 * 3",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 3 = 0.75rem (4px × 3)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-3.5",
+      "value": "calc(var(--rafters-spacing-base) * 3.5)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Small spacing for component internals and related elements",
+      "usageContext": [
+        "component-padding",
+        "related-elements",
+        "form-fields"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 3.5)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 7,
+      "mathRelationship": "4 * 3.5",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 3.5 = 0.875rem (4px × 3.5)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-4",
+      "value": "calc(var(--rafters-spacing-base) * 4)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Small spacing for component internals and related elements",
+      "usageContext": [
+        "component-padding",
+        "related-elements",
+        "form-fields"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 4)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 8,
+      "mathRelationship": "4 * 4",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 4 = 1rem (4px × 4)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-5",
+      "value": "calc(var(--rafters-spacing-base) * 5)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Medium spacing for section separation and breathing room",
+      "usageContext": [
+        "section-padding",
+        "card-padding",
+        "list-gaps"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 5)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 9,
+      "mathRelationship": "4 * 5",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 5 = 1.25rem (4px × 5)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-6",
+      "value": "calc(var(--rafters-spacing-base) * 6)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Medium spacing for section separation and breathing room",
+      "usageContext": [
+        "section-padding",
+        "card-padding",
+        "list-gaps"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 6)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 10,
+      "mathRelationship": "4 * 6",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 6 = 1.5rem (4px × 6)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-7",
+      "value": "calc(var(--rafters-spacing-base) * 7)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Medium spacing for section separation and breathing room",
+      "usageContext": [
+        "section-padding",
+        "card-padding",
+        "list-gaps"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 7)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 11,
+      "mathRelationship": "4 * 7",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 7 = 1.75rem (4px × 7)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-8",
+      "value": "calc(var(--rafters-spacing-base) * 8)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Medium spacing for section separation and breathing room",
+      "usageContext": [
+        "section-padding",
+        "card-padding",
+        "list-gaps"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 8)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 12,
+      "mathRelationship": "4 * 8",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 8 = 2rem (4px × 8)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-9",
+      "value": "calc(var(--rafters-spacing-base) * 9)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Medium spacing for section separation and breathing room",
+      "usageContext": [
+        "section-padding",
+        "card-padding",
+        "list-gaps"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 9)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 13,
+      "mathRelationship": "4 * 9",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 9 = 2.25rem (4px × 9)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-10",
+      "value": "calc(var(--rafters-spacing-base) * 10)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Medium spacing for section separation and breathing room",
+      "usageContext": [
+        "section-padding",
+        "card-padding",
+        "list-gaps"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 10)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 14,
+      "mathRelationship": "4 * 10",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 10 = 2.5rem (4px × 10)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-11",
+      "value": "calc(var(--rafters-spacing-base) * 11)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Medium spacing for section separation and breathing room",
+      "usageContext": [
+        "section-padding",
+        "card-padding",
+        "list-gaps"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 11)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 15,
+      "mathRelationship": "4 * 11",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 11 = 2.75rem (4px × 11)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-12",
+      "value": "calc(var(--rafters-spacing-base) * 12)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Medium spacing for section separation and breathing room",
+      "usageContext": [
+        "section-padding",
+        "card-padding",
+        "list-gaps"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 12)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 16,
+      "mathRelationship": "4 * 12",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 12 = 3rem (4px × 12)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-14",
+      "value": "calc(var(--rafters-spacing-base) * 14)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Large spacing for major section breaks and layout gaps",
+      "usageContext": [
+        "layout-gaps",
+        "section-margins",
+        "page-padding"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 14)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 17,
+      "mathRelationship": "4 * 14",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 14 = 3.5rem (4px × 14)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-16",
+      "value": "calc(var(--rafters-spacing-base) * 16)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Large spacing for major section breaks and layout gaps",
+      "usageContext": [
+        "layout-gaps",
+        "section-margins",
+        "page-padding"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 16)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 18,
+      "mathRelationship": "4 * 16",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 16 = 4rem (4px × 16)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-20",
+      "value": "calc(var(--rafters-spacing-base) * 20)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Large spacing for major section breaks and layout gaps",
+      "usageContext": [
+        "layout-gaps",
+        "section-margins",
+        "page-padding"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 20)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 19,
+      "mathRelationship": "4 * 20",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 20 = 5rem (4px × 20)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-24",
+      "value": "calc(var(--rafters-spacing-base) * 24)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Large spacing for major section breaks and layout gaps",
+      "usageContext": [
+        "layout-gaps",
+        "section-margins",
+        "page-padding"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 24)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 20,
+      "mathRelationship": "4 * 24",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 24 = 6rem (4px × 24)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-28",
+      "value": "calc(var(--rafters-spacing-base) * 28)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Large spacing for major section breaks and layout gaps",
+      "usageContext": [
+        "layout-gaps",
+        "section-margins",
+        "page-padding"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 28)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 21,
+      "mathRelationship": "4 * 28",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 28 = 7rem (4px × 28)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-32",
+      "value": "calc(var(--rafters-spacing-base) * 32)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Large spacing for major section breaks and layout gaps",
+      "usageContext": [
+        "layout-gaps",
+        "section-margins",
+        "page-padding"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 32)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 22,
+      "mathRelationship": "4 * 32",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 32 = 8rem (4px × 32)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-36",
+      "value": "calc(var(--rafters-spacing-base) * 36)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 36)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 23,
+      "mathRelationship": "4 * 36",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 36 = 9rem (4px × 36)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-40",
+      "value": "calc(var(--rafters-spacing-base) * 40)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 40)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 24,
+      "mathRelationship": "4 * 40",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 40 = 10rem (4px × 40)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-44",
+      "value": "calc(var(--rafters-spacing-base) * 44)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 44)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 25,
+      "mathRelationship": "4 * 44",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 44 = 11rem (4px × 44)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-48",
+      "value": "calc(var(--rafters-spacing-base) * 48)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 48)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 26,
+      "mathRelationship": "4 * 48",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 48 = 12rem (4px × 48)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-52",
+      "value": "calc(var(--rafters-spacing-base) * 52)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 52)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 27,
+      "mathRelationship": "4 * 52",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 52 = 13rem (4px × 52)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-56",
+      "value": "calc(var(--rafters-spacing-base) * 56)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 56)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 28,
+      "mathRelationship": "4 * 56",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 56 = 14rem (4px × 56)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-60",
+      "value": "calc(var(--rafters-spacing-base) * 60)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 60)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 29,
+      "mathRelationship": "4 * 60",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 60 = 15rem (4px × 60)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-64",
+      "value": "calc(var(--rafters-spacing-base) * 64)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 64)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 30,
+      "mathRelationship": "4 * 64",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 64 = 16rem (4px × 64)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-72",
+      "value": "calc(var(--rafters-spacing-base) * 72)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 72)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 31,
+      "mathRelationship": "4 * 72",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 72 = 18rem (4px × 72)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-80",
+      "value": "calc(var(--rafters-spacing-base) * 80)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 80)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 32,
+      "mathRelationship": "4 * 80",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 80 = 20rem (4px × 80)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-96",
+      "value": "calc(var(--rafters-spacing-base) * 96)",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Extra large spacing for page-level layout and hero sections",
+      "usageContext": [
+        "hero-spacing",
+        "page-margins",
+        "major-sections"
+      ],
+      "userOverride": null,
+      "dependsOn": [
+        "spacing-base"
+      ],
+      "generationRule": "calc({spacing-base} * 96)",
+      "progressionSystem": "minor-third",
+      "scalePosition": 33,
+      "mathRelationship": "4 * 96",
+      "containerQueryAware": true,
+      "description": "Spacing at scale 96 = 24rem (4px × 96)",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    },
+    {
+      "name": "spacing-progression",
+      "value": "{\"ratio\":\"minor-third\",\"ratioValue\":1.2,\"baseUnit\":4,\"sample\":[0,4,4.8,5.76,6.91,8.29,9.95,11.94,14.33,17.2]}",
+      "category": "spacing",
+      "namespace": "spacing",
+      "semanticMeaning": "Metadata about the spacing progression system",
+      "usagePatterns": {
+        "do": [
+          "Reference when adding custom spacing values",
+          "Use ratio for deriving new consistent values"
+        ],
+        "never": [
+          "Use raw values in production CSS"
+        ]
+      },
+      "userOverride": null,
+      "containerQueryAware": false,
+      "description": "Spacing uses minor-third progression (ratio 1.2) from base 0.25rem. Sample values: 0, 4, 5, 6, 7...",
+      "generatedAt": "2026-07-01T06:46:43.089Z"
+    }
+  ]
+}
