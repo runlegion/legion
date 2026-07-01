@@ -70,6 +70,16 @@ pub(crate) enum DocumentAction {
     },
     /// Mark a document archived.
     Archive { id: String },
+    /// Set a document's lifecycle status (e.g. publish: draft -> published).
+    /// The dashboard Publish/Approve button calls this; the localhost
+    /// operator session is the human gate, so it is a direct flag set.
+    SetStatus {
+        /// Document id.
+        id: String,
+        /// New lifecycle status (e.g. "published", "draft").
+        #[arg(long)]
+        to: String,
+    },
     /// Validate a JSON instance against a landed schema document (#526).
     /// Checks the dependency-free subset: type, required, properties,
     /// items, enum. Exits non-zero with one error per violation.
@@ -230,6 +240,10 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
                 doc.id,
                 doc.archived_at.as_deref().unwrap_or("?")
             );
+        }
+        DocumentAction::SetStatus { id, to } => {
+            let doc = database.set_document_status(&id, &to)?;
+            println!("{} status -> {}", doc.id, doc.status);
         }
         DocumentAction::Validate { schema, file } => {
             let doc = database.get_document(&schema)?.ok_or_else(|| {

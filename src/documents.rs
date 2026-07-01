@@ -323,6 +323,34 @@ impl Database {
             LegionError::WorkSource(format!("document '{id}' vanished after archive"))
         })
     }
+
+    /// Set a document's lifecycle status (e.g. `draft` -> `published`).
+    /// Updates the `status` column and `updated_at`, returns the updated
+    /// Document. This is the operator publish/approve action surfaced by
+    /// the dashboard: the localhost session is the human gate, so there is
+    /// no status-machine or adoption-gate enforcement here -- it is a
+    /// direct flag set on the column the list/view read from.
+    ///
+    /// Note: the JSON payload may carry its own `meta.status` copy; this
+    /// only writes the hoisted column, which is the source of truth for
+    /// `list`/`view` filtering and the dashboard badge.
+    pub fn set_document_status(&self, id: &str, status: &str) -> Result<Document> {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE documents \
+             SET status = ?1, updated_at = ?2 \
+             WHERE id = ?3 AND deleted_at IS NULL",
+            params![status, &now, id],
+        )?;
+        if rows == 0 {
+            return Err(LegionError::WorkSource(format!(
+                "document '{id}' not found"
+            )));
+        }
+        self.get_document(id)?.ok_or_else(|| {
+            LegionError::WorkSource(format!("document '{id}' vanished after set-status"))
+        })
+    }
 }
 
 /// Summary extracted from a validated schema payload, used to compose
@@ -699,6 +727,31 @@ mod tests {
     fn archive_nonexistent_returns_error() {
         let db = test_db();
         let err = db.archive_document("FR-NOPE").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn set_document_status_flips_the_flag() {
+        let db = test_db();
+        let mut m = sample_meta("requirement", "mail");
+        m.id = Some("FR-PUB");
+        m.status = Some("draft");
+        db.insert_document(&m, "{}").unwrap();
+
+        let updated = db
+            .set_document_status("FR-PUB", "published")
+            .expect("set-status");
+        assert_eq!(updated.status, "published");
+
+        // Persisted, not just returned.
+        let fetched = db.get_document("FR-PUB").expect("get").expect("some");
+        assert_eq!(fetched.status, "published");
+    }
+
+    #[test]
+    fn set_document_status_nonexistent_returns_error() {
+        let db = test_db();
+        let err = db.set_document_status("FR-NOPE", "published").unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
