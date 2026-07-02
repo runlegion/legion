@@ -129,7 +129,10 @@ pub(crate) enum EtcShape {
         #[arg(long)]
         fixed_strings: bool,
         /// Search hidden files and directories (.github/, .claude/, dotfiles).
-        /// `.git/` stays excluded. Mirrors ripgrep's --hidden.
+        /// `.git/` stays excluded. Mirrors ripgrep's --hidden. NOTE: gitignore
+        /// is the only guard here -- a secret-bearing dotfile that is not
+        /// gitignored (e.g. an un-ignored .env) WILL be searched and its
+        /// matching lines printed.
         #[arg(long)]
         hidden: bool,
         /// Emit results as a JSON array of ContentHit objects
@@ -206,7 +209,10 @@ fn run_sym_etc(shape: EtcShape) -> error::Result<()> {
 /// `sym etc find-content` (#707): exact content search over watch.toml
 /// workdirs via the in-process ripgrep engine. Prints `path:line: text`
 /// (repo-prefixed when scanning cross-repo) or a JSON hit array; suppressed
-/// and skipped counts go to stderr so truncation is never silent.
+/// and skipped counts go to stderr so truncation is never silent. Telemetry
+/// records one row per COMPLETED search -- error exits (empty corpus,
+/// unknown repo, invalid regex) are argv failures, not zero-result events,
+/// and deliberately stay out of the epic's zero-result-rate denominator.
 fn run_etc_find_content(
     pattern: &str,
     repo: Option<String>,
@@ -226,18 +232,18 @@ fn run_etc_find_content(
                 .to_string(),
         ));
     }
-    let repos: Vec<(String, std::path::PathBuf)> = match repo.as_deref() {
+    let repos: Vec<(String, PathBuf)> = match repo.as_deref() {
         Some(name) => {
             let entry = all.iter().find(|r| r.name == name).ok_or_else(|| {
                 error::LegionError::WatchConfig(format!(
                     "repo '{name}' not in watch.toml. Add it with `legion watch add {name} <path>`."
                 ))
             })?;
-            vec![(entry.name.clone(), std::path::PathBuf::from(&entry.workdir))]
+            vec![(entry.name.clone(), PathBuf::from(&entry.workdir))]
         }
         None => all
             .iter()
-            .map(|r| (r.name.clone(), std::path::PathBuf::from(&r.workdir)))
+            .map(|r| (r.name.clone(), PathBuf::from(&r.workdir)))
             .collect(),
     };
 
@@ -732,7 +738,7 @@ fn run_index_status_banner(base: &std::path::Path, repo: Option<&str>) -> error:
             return Ok(());
         }
     };
-    let repo_path = std::path::PathBuf::from(&entry.workdir);
+    let repo_path = PathBuf::from(&entry.workdir);
     let detected = scip::detect_languages(&repo_path);
 
     let database = match db::Database::open(&base.join("legion.db")) {
@@ -1088,7 +1094,7 @@ pub(crate) fn handle_index(
             ));
         }
     };
-    let repo_path = std::path::PathBuf::from(&entry.workdir);
+    let repo_path = PathBuf::from(&entry.workdir);
 
     let langs = scip::detect_languages(&repo_path);
     if langs.is_empty() {

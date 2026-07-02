@@ -91,7 +91,14 @@ pub fn find_content(pattern: &str, scope: &ContentScope<'_>) -> Result<FindConte
         .build();
 
     let mut result = FindContentResult::default();
-    for (repo_name, workdir) in scope.repos {
+    // Scan repos in name order: the hit cap truncates in scan order while
+    // output is sorted by (repo, path, line), so an unsorted scan could
+    // leave an alphabetically-earlier repo looking empty when a later one
+    // filled the cap first. The per-repo walk is already name-sorted, so
+    // sorting the (small) repo list makes scan order equal output order.
+    let mut repos: Vec<&(String, PathBuf)> = scope.repos.iter().collect();
+    repos.sort_by(|a, b| a.0.cmp(&b.0));
+    for (repo_name, workdir) in repos {
         // require_git(false): honor .gitignore in the workdir whether or not
         // the walk starts inside a recognized git checkout (worktrees, tests).
         // sort_by_file_name: readdir order is filesystem-dependent; without a
@@ -131,6 +138,7 @@ pub fn find_content(pattern: &str, scope: &ContentScope<'_>) -> Result<FindConte
                 Ok(_) => {}
             }
             let rel = relative_path(path, workdir);
+            let hits_before = result.hits.len();
             let search = searcher.search_path(
                 &matcher,
                 path,
@@ -148,7 +156,11 @@ pub fn find_content(pattern: &str, scope: &ContentScope<'_>) -> Result<FindConte
                     Ok(true)
                 }),
             );
-            if search.is_err() {
+            // A mid-file error after hits were already emitted (mutating
+            // workdir, dropped mount) must not count the file as "skipped"
+            // -- its partial matches are in the output. Only a file that
+            // produced nothing before erroring was truly skipped.
+            if search.is_err() && result.hits.len() == hits_before {
                 result.skipped_files += 1;
             }
         }
