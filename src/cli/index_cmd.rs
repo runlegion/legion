@@ -949,9 +949,23 @@ pub(crate) fn handle_index(
     let langs = scip::detect_languages(&repo_path);
     let database = open_db()?;
 
+    // File inventory walk FIRST: enumerate every non-ignored file and persist
+    // one row per file. Ordered before the SCIP loop so inventory truly runs
+    // independent of SCIP outcomes -- including the all-indexers-failed hard
+    // error below, which must not leave the inventory stale (#705 review).
+    let entries: Vec<crate::db::inventory::FileInventoryEntry> =
+        inventory::walk_repo(&repo, &repo_path);
+    let live_paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+    database.upsert_file_inventory(&entries)?;
+    let pruned: usize = database.prune_file_inventory(&repo, &live_paths)?;
+    eprintln!(
+        "[legion] inventoried {} files for {repo} ({pruned} stale rows pruned)",
+        entries.len()
+    );
+
     // SCIP indexing runs only when language markers are present. A docs-only
-    // repo (no Cargo.toml, package.json, etc.) skips this block entirely and
-    // still gets a populated file inventory below (#705).
+    // repo (no Cargo.toml, package.json, etc.) skips this block entirely --
+    // the file inventory above already covered it (#705).
     if langs.is_empty() {
         eprintln!(
             "[legion] no SCIP-supported language detected at {}; skipping SCIP indexing. \
@@ -993,18 +1007,6 @@ pub(crate) fn handle_index(
         }
     }
 
-    // File inventory walk: enumerate every non-ignored file and persist one
-    // row per file. Runs independently of the SCIP result above -- docs-only
-    // repos still get a full inventory when the SCIP loop was skipped.
-    let entries: Vec<crate::db::inventory::FileInventoryEntry> =
-        inventory::walk_repo(&repo, &repo_path);
-    let live_paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
-    database.upsert_file_inventory(&entries)?;
-    let pruned: usize = database.prune_file_inventory(&repo, &live_paths)?;
-    eprintln!(
-        "[legion] inventoried {} files for {repo} ({pruned} stale rows pruned)",
-        entries.len()
-    );
     Ok(())
 }
 
