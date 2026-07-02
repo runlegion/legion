@@ -380,8 +380,10 @@ fn index_docs_only_repo_succeeds_and_inventories() {
     std::fs::write(
         dir.path().join("watch.toml"),
         format!(
+            // Forward slashes: backslash Windows paths are invalid TOML
+            // string escapes, and Windows path APIs accept slashes.
             "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"docsrepo\"\nworkdir = \"{}\"\n",
-            repo.path().display()
+            repo.path().display().to_string().replace('\\', "/")
         ),
     )
     .unwrap();
@@ -412,8 +414,9 @@ fn index_missing_workdir_fails_loudly_instead_of_wiping_inventory() {
     std::fs::write(
         dir.path().join("watch.toml"),
         format!(
+            // Forward slashes: see index_docs_only_repo_succeeds_and_inventories.
             "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"ghostrepo\"\nworkdir = \"{}\"\n",
-            gone_path.display()
+            gone_path.display().to_string().replace('\\', "/")
         ),
     )
     .unwrap();
