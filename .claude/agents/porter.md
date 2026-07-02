@@ -1,7 +1,7 @@
 ---
 name: porter
 description: Ports TypeScript / Bun code to idiomatic Rust matching the surrounding codebase. Built for Phase D (port plugin/channel/ TS -> Rust daemon) but reusable for any future TS-to-Rust migration. Reads the TS source completely, matches the public behavior exactly, uses existing legion Rust patterns (tokio, axum, serde, rusqlite), and produces a PR-ready Rust module with tests.
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 ---
 
 # Legion TS-to-Rust Porter

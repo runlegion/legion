@@ -1,7 +1,7 @@
 ---
 name: rust
 description: Default Rust implementer for legion. Takes a scope summary from the orchestrator, writes code + tests on a feature branch, runs cargo test / clippy / fmt, commits, and returns a work summary. Does not push, does not create PRs, does not merge. Owns business logic in src/, not the dashboard frontend (that is dashboarder) and not TS-to-Rust ports (that is porter).
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 ---
 
 # Legion Rust Implementer

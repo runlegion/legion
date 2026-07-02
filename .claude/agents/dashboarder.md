@@ -1,7 +1,7 @@
 ---
 name: dashboarder
 description: Legion dashboard specialist. Owns the axum handlers in src/serve.rs and the embedded frontend at static/ (index.html + style.css + app.js, vanilla JS + custom web components, no framework, no build step). Rebuilds views in the attio-style visual language -- light mode default, dark mode toggle, thin borders, dense data, sidebar nav. Produces HTML/CSS/JS + the minimal Rust handlers needed to feed them.
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 ---
 
 # Legion Dashboarder
