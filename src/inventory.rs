@@ -57,9 +57,9 @@ pub fn lang_for_ext(ext: &str) -> Option<&'static str> {
 /// leading slash, matching the convention used by the SCIP document paths.
 ///
 /// Note: if `metadata().modified()` is unavailable (rare on some platforms),
-/// the mtime falls back to `Utc::now()`. This makes the row look fresh on
-/// every index until the file is actually updated on a platform that supports
-/// mtime; the behavior is logged at the site in that event.
+/// the mtime falls back silently to `Utc::now()`. The row then looks fresh
+/// on every index until a platform with mtime support updates it -- an
+/// accepted inaccuracy on exotic filesystems, not worth a per-file log line.
 pub fn walk_repo(repo_name: &str, repo_path: &Path) -> Vec<FileInventoryEntry> {
     let walker = WalkBuilder::new(repo_path)
         .require_git(false)
@@ -295,17 +295,40 @@ mod tests {
         );
     }
 
-    // --- walk is idempotent (same files => same result) ---
+    // --- walk output tracks tree mutations (add + delete visible) ---
 
     #[test]
-    fn walk_is_idempotent() {
+    fn walk_reflects_tree_changes_between_runs() {
         let dir = make_tree(&["a.rs", "b.rs"]);
         let first = walk_repo("r", dir.path());
+        assert_eq!(first.len(), 2);
+
+        std::fs::remove_file(dir.path().join("b.rs")).unwrap();
+        std::fs::write(dir.path().join("c.md"), b"new").unwrap();
+
         let second = walk_repo("r", dir.path());
-        let mut first_paths: Vec<&str> = first.iter().map(|e| e.path.as_str()).collect();
         let mut second_paths: Vec<&str> = second.iter().map(|e| e.path.as_str()).collect();
-        first_paths.sort();
-        second_paths.sort();
-        assert_eq!(first_paths, second_paths);
+        second_paths.sort_unstable();
+        assert_eq!(
+            second_paths,
+            vec!["a.rs", "c.md"],
+            "walk must reflect deletions and additions, not cache"
+        );
+    }
+
+    // --- symlinks are excluded (walker does not follow links) ---
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_excluded_from_inventory() {
+        let dir = make_tree(&["real.rs"]);
+        std::os::unix::fs::symlink(dir.path().join("real.rs"), dir.path().join("link.rs")).unwrap();
+        let entries = walk_repo("r", dir.path());
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["real.rs"],
+            "symlink entries must be skipped (follow_links off + is_file guard)"
+        );
     }
 }

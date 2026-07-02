@@ -341,3 +341,37 @@ fn index_and_sym_def_refs_roundtrip_against_fixture_repo() {
     assert_eq!(refs[0]["line"], 11);
     assert_eq!(refs[1]["line"], 21);
 }
+
+/// #705: a docs-only repo (no language markers) must exit 0 from
+/// `legion index`, skip SCIP loudly, and still populate the inventory.
+/// Pins the exit-code contract flip at the CLI boundary -- the old code
+/// hard-errored on `detect_languages() == []`; walk-level unit tests
+/// cannot catch a regression here.
+#[test]
+fn index_docs_only_repo_succeeds_and_inventories() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("README.md"), "# docs only\n").unwrap();
+    std::fs::write(repo.path().join("guide.md"), "content\n").unwrap();
+
+    // Direct watch.toml seed: `watch add` would spawn a background indexer
+    // this test does not want racing it.
+    std::fs::write(
+        dir.path().join("watch.toml"),
+        format!(
+            "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"docsrepo\"\nworkdir = \"{}\"\n",
+            repo.path().display()
+        ),
+    )
+    .unwrap();
+
+    let stderr = run_ok_stderr(legion_cmd(dir.path()).args(["index", "docsrepo"]));
+    assert!(
+        stderr.contains("no SCIP-supported language detected"),
+        "expected the SCIP-skip notice, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("inventoried 2 files for docsrepo"),
+        "expected the inventory summary, got: {stderr}"
+    );
+}
