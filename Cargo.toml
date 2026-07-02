@@ -52,6 +52,9 @@ portable-pty = "0.9"
 # punctuation-heavy literals and go stale on git operations).
 grep-regex = "0.1"
 grep-searcher = "0.1"
+
+# File inventory walk (#705): gitignore-aware recursive walk over watched
+# workdirs. The same crate powers the ripgrep engine used by find-content.
 ignore = "0.4"
 
 # libc pulls in only on unix for killpg in call_plugin_inner's timeout arm.
