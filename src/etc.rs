@@ -11,8 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::sinks::Lossy;
-use grep_searcher::{BinaryDetection, SearcherBuilder};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkFinish, SinkMatch};
 use ignore::WalkBuilder;
 use serde::Serialize;
 
@@ -46,6 +45,61 @@ pub struct FindContentResult {
     pub suppressed: u64,
     /// Files skipped: unreadable, over `max_file_size`, or a walk error.
     pub skipped_files: u64,
+    /// Files skipped as binary (NUL byte found). Counted separately because
+    /// a binary quit returns Ok with no hits -- without this counter a text
+    /// file with an embedded NUL would silently vanish from the result.
+    pub binary_skipped: u64,
+    /// Repos whose root could not be walked at all: `(repo name, error)`.
+    /// A dead watch.toml workdir is a whole-corpus gap, not "one file
+    /// skipped" -- it must surface by name or a zero-hit scan lies.
+    pub failed_repos: Vec<(String, String)>,
+}
+
+/// Streaming sink that collects capped hits and, unlike the closure sinks in
+/// `grep_searcher::sinks`, observes `SinkFinish::binary_byte_offset` -- the
+/// only signal that a search quit early on binary content (the search itself
+/// returns Ok in that case).
+struct CollectSink<'a> {
+    repo: &'a str,
+    rel: &'a str,
+    max_hits: usize,
+    hits: &'a mut Vec<ContentHit>,
+    suppressed: &'a mut u64,
+    binary: bool,
+}
+
+impl Sink for CollectSink<'_> {
+    type Error = std::io::Error;
+
+    fn matched(
+        &mut self,
+        _searcher: &Searcher,
+        mat: &SinkMatch<'_>,
+    ) -> std::result::Result<bool, Self::Error> {
+        if self.hits.len() < self.max_hits {
+            let text = String::from_utf8_lossy(mat.bytes());
+            self.hits.push(ContentHit {
+                repo: self.repo.to_string(),
+                path: self.rel.to_string(),
+                // line_number(true) is set on the searcher, so this is
+                // always Some; 0 would mean a searcher misconfiguration.
+                line: mat.line_number().unwrap_or(0),
+                text: text.trim_end_matches(['\n', '\r']).to_string(),
+            });
+        } else {
+            *self.suppressed += 1;
+        }
+        Ok(true)
+    }
+
+    fn finish(
+        &mut self,
+        _searcher: &Searcher,
+        finish: &SinkFinish,
+    ) -> std::result::Result<(), Self::Error> {
+        self.binary = finish.binary_byte_offset().is_some();
+        Ok(())
+    }
 }
 
 /// Where and how to scan.
@@ -74,10 +128,14 @@ pub struct ContentScope<'a> {
 /// unless `include_hidden` is set (ripgrep's `--hidden` semantics; the
 /// `ignore` crate does NOT skip `.git/` on its own once hidden files are
 /// admitted -- verified empirically in #705's twin walk -- so `.git` is
-/// excluded explicitly), and quits on binary content. Non-UTF-8 text files
-/// are searched lossily (invalid bytes become U+FFFD) rather than skipped --
-/// grep matches them, so we must too. Per-file errors are counted and
-/// skipped, never fatal: one unreadable file must not abort orientation.
+/// excluded explicitly), and quits on binary content (a NUL byte), counting
+/// the file in `binary_skipped` -- the quit itself returns Ok, so without
+/// that counter a text file with an embedded NUL would vanish silently.
+/// Non-UTF-8 text files are searched lossily (invalid bytes become U+FFFD)
+/// rather than skipped -- grep matches them, so we must too. Per-file errors
+/// are counted and skipped, never fatal: one unreadable file must not abort
+/// orientation; a repo root that cannot be walked at all is reported by name
+/// in `failed_repos`.
 pub fn find_content(pattern: &str, scope: &ContentScope<'_>) -> Result<FindContentResult> {
     let matcher = RegexMatcherBuilder::new()
         .line_terminator(Some(b'\n'))
@@ -112,8 +170,17 @@ pub fn find_content(pattern: &str, scope: &ContentScope<'_>) -> Result<FindConte
         for entry in walker {
             let entry = match entry {
                 Ok(e) => e,
-                Err(_) => {
-                    result.skipped_files += 1;
+                Err(err) => {
+                    // depth 0 = the repo root itself failed (moved, deleted,
+                    // unreadable): a whole-corpus gap reported by name, not
+                    // folded into the per-file skip counter.
+                    if err.depth() == Some(0) {
+                        result
+                            .failed_repos
+                            .push((repo_name.clone(), err.to_string()));
+                    } else {
+                        result.skipped_files += 1;
+                    }
                     continue;
                 }
             };
@@ -139,28 +206,26 @@ pub fn find_content(pattern: &str, scope: &ContentScope<'_>) -> Result<FindConte
             }
             let rel = relative_path(path, workdir);
             let hits_before = result.hits.len();
-            let search = searcher.search_path(
-                &matcher,
-                path,
-                Lossy(|line_number, line| {
-                    if result.hits.len() < scope.max_hits {
-                        result.hits.push(ContentHit {
-                            repo: repo_name.clone(),
-                            path: rel.clone(),
-                            line: line_number,
-                            text: line.trim_end_matches(['\n', '\r']).to_string(),
-                        });
-                    } else {
-                        result.suppressed += 1;
-                    }
-                    Ok(true)
-                }),
-            );
+            let (search_failed, binary) = {
+                let mut sink = CollectSink {
+                    repo: repo_name,
+                    rel: &rel,
+                    max_hits: scope.max_hits,
+                    hits: &mut result.hits,
+                    suppressed: &mut result.suppressed,
+                    binary: false,
+                };
+                let search = searcher.search_path(&matcher, path, &mut sink);
+                (search.is_err(), sink.binary)
+            };
+            if binary {
+                result.binary_skipped += 1;
+            }
             // A mid-file error after hits were already emitted (mutating
             // workdir, dropped mount) must not count the file as "skipped"
             // -- its partial matches are in the output. Only a file that
             // produced nothing before erroring was truly skipped.
-            if search.is_err() && result.hits.len() == hits_before {
+            if search_failed && result.hits.len() == hits_before {
                 result.skipped_files += 1;
             }
         }
@@ -312,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_files_are_not_searched() {
+    fn binary_files_are_not_searched_but_are_counted() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("blob.bin"), b"needle\x00needle\n").expect("write fixture");
         write(dir.path(), "plain.txt", "needle\n");
@@ -320,6 +385,50 @@ mod tests {
         let result = find_content("needle", &scope(&repos)).expect("search");
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].path, "plain.txt");
+        assert_eq!(result.binary_skipped, 1);
+    }
+
+    /// Regression guard (#719 review, HIGH): a text file whose MATCHING lines
+    /// precede an embedded NUL is treated as binary -- the search quits with
+    /// Ok and emits nothing. Without binary_skipped that file would vanish
+    /// from hits, skipped_files, and suppressed alike: an undetectable false
+    /// negative.
+    #[test]
+    fn matches_before_embedded_nul_are_not_silently_lost() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("mixed.txt"),
+            b"needle on line one\nfiller\n\x00 trailing binary blob",
+        )
+        .expect("write fixture");
+        let repos = one_repo(dir.path());
+        let result = find_content("needle", &scope(&repos)).expect("search");
+        // The match is quit away by binary detection -- that is grep parity
+        // (rg skips binary files in a directory walk too). What must NOT
+        // happen is silence: the file is accounted for in binary_skipped.
+        assert!(result.hits.is_empty());
+        assert_eq!(result.binary_skipped, 1);
+        assert_eq!(result.skipped_files, 0);
+    }
+
+    /// Regression guard (#719 review, MED): a repo whose workdir is gone is a
+    /// whole-corpus gap reported by name, not "1 files skipped".
+    #[test]
+    fn dead_repo_root_is_reported_by_name_not_as_a_skipped_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "ok.txt", "needle\n");
+        let repos = vec![
+            ("alive".to_string(), dir.path().to_path_buf()),
+            (
+                "ghost".to_string(),
+                PathBuf::from("/nonexistent/legion-test-ghost-repo"),
+            ),
+        ];
+        let result = find_content("needle", &scope(&repos)).expect("search");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.skipped_files, 0);
+        assert_eq!(result.failed_repos.len(), 1);
+        assert_eq!(result.failed_repos[0].0, "ghost");
     }
 
     #[test]

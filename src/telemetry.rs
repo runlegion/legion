@@ -85,6 +85,12 @@ pub struct EtcUsageRecord {
     pub fixed_strings: bool,
     pub hit_count: u64,
     pub skipped_files: u64,
+    /// Error text when the invocation failed before or during the scan
+    /// (invalid regex, unknown repo, empty or unscannable corpus). `None` on
+    /// success. Lets the #704 metric separate "tool answered zero" from
+    /// "tool failed to answer"; defaulted so pre-#719 rows still parse.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Resolve the canonical etc-usage log path (sibling of `bypass.jsonl`).
@@ -302,11 +308,35 @@ mod tests {
             fixed_strings: true,
             hit_count: 3,
             skipped_files: 1,
+            error: None,
         };
         append_jsonl(&path, &rec).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         let parsed: EtcUsageRecord = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(parsed, rec);
+    }
+
+    /// Pre-#719 rows have no `error` key; the serde default must keep them
+    /// parseable, and an error row must round-trip its text.
+    #[test]
+    fn etc_usage_error_field_defaults_and_round_trips() {
+        let legacy = r#"{"ts":"2026-07-02T01:01:32Z","command":"find-content","repo":null,"pattern":"x","fixed_strings":false,"hit_count":0,"skipped_files":0}"#;
+        let parsed: EtcUsageRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.error, None);
+
+        let rec = EtcUsageRecord {
+            ts: Utc::now(),
+            command: "find-content".to_string(),
+            repo: None,
+            pattern: "(unclosed".to_string(),
+            fixed_strings: false,
+            hit_count: 0,
+            skipped_files: 0,
+            error: Some("invalid regex '(unclosed': ...".to_string()),
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: EtcUsageRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rec);
     }
 
     #[cfg(unix)]
