@@ -7,7 +7,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{open_db, open_db_and_index};
-use crate::{db, error, scip, sym, watch};
+use crate::{db, error, etc, scip, sym, telemetry, watch};
 
 #[derive(Subcommand)]
 pub(crate) enum SymAction {
@@ -77,6 +77,14 @@ pub(crate) enum SymAction {
         json: bool,
     },
 
+    /// Non-symbol answer surface (#704): query shapes over the files SCIP
+    /// does not parse (docs, configs, css, prose). `sym` answers symbol
+    /// questions; `sym etc` answers everything else.
+    Etc {
+        #[command(subcommand)]
+        shape: EtcShape,
+    },
+
     /// Enumerate the definitions in the index -- the "what functions/enums/etc.
     /// are defined here" query. Byte-cheap: names + locations, never source
     /// bodies. This is the shape `grep "fn "` was serving; use it instead.
@@ -95,6 +103,32 @@ pub(crate) enum SymAction {
         #[arg(long)]
         file: Option<String>,
         /// Emit results as a JSON array of SymbolEntry objects
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum EtcShape {
+    /// Exact, line-accurate content search over watched repos -- the
+    /// sanctioned grep (#707). Direct disk scan: always fresh, true grep
+    /// parity including regex and punctuation-heavy literals.
+    FindContent {
+        /// Pattern to search: a regex by default, a literal with --fixed-strings.
+        /// Hyphen-leading patterns (`--spacing-0.5`) are accepted as values,
+        /// not parsed as flags -- they are a headline query shape (#707).
+        #[arg(allow_hyphen_values = true)]
+        pattern: String,
+        /// Restrict to a single repo (default: every repo in watch.toml)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Restrict to files with this extension (without the dot)
+        #[arg(long)]
+        ext: Option<String>,
+        /// Treat the pattern as a literal string, not a regex
+        #[arg(long)]
+        fixed_strings: bool,
+        /// Emit results as a JSON array of ContentHit objects
         #[arg(long)]
         json: bool,
     },
@@ -146,7 +180,102 @@ fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<(
             file,
             json,
         } => run_sym_list(database, repo, lang, kind, file, json),
+        SymAction::Etc { shape } => run_sym_etc(shape),
     }
+}
+
+/// Dispatch `legion sym etc <shape>`. Unlike the symbol queries these do not
+/// read the SCIP store -- find-content scans watched workdirs directly.
+fn run_sym_etc(shape: EtcShape) -> error::Result<()> {
+    match shape {
+        EtcShape::FindContent {
+            pattern,
+            repo,
+            ext,
+            fixed_strings,
+            json,
+        } => run_etc_find_content(&pattern, repo, ext, fixed_strings, json),
+    }
+}
+
+/// `sym etc find-content` (#707): exact content search over watch.toml
+/// workdirs via the in-process ripgrep engine. Prints `path:line: text`
+/// (repo-prefixed when scanning cross-repo) or a JSON hit array; suppressed
+/// and skipped counts go to stderr so truncation is never silent.
+fn run_etc_find_content(
+    pattern: &str,
+    repo: Option<String>,
+    ext: Option<String>,
+    fixed_strings: bool,
+    json: bool,
+) -> error::Result<()> {
+    let base = data_dir()?;
+    let watch_path = base.join("watch.toml");
+    let all = watch::list_repos_in_config(&watch_path)?;
+    let repos: Vec<(String, std::path::PathBuf)> = match repo.as_deref() {
+        Some(name) => {
+            let entry = all.iter().find(|r| r.name == name).ok_or_else(|| {
+                error::LegionError::WatchConfig(format!(
+                    "repo '{name}' not in watch.toml. Add it with `legion watch add {name} <path>`."
+                ))
+            })?;
+            vec![(entry.name.clone(), std::path::PathBuf::from(&entry.workdir))]
+        }
+        None => all
+            .iter()
+            .map(|r| (r.name.clone(), std::path::PathBuf::from(&r.workdir)))
+            .collect(),
+    };
+
+    let scope = etc::ContentScope {
+        repos: &repos,
+        ext: ext.as_deref(),
+        fixed_strings,
+        max_file_size: etc::MAX_FILE_SIZE,
+        max_hits: etc::MAX_HITS,
+    };
+    let result = etc::find_content(pattern, &scope)?;
+
+    let usage = telemetry::EtcUsageRecord {
+        ts: chrono::Utc::now(),
+        command: "find-content".to_string(),
+        repo: repo.clone(),
+        pattern: pattern.to_string(),
+        fixed_strings,
+        hit_count: result.hits.len() as u64,
+        skipped_files: result.skipped_files,
+    };
+    if let Err(e) = telemetry::append_etc_usage(&usage) {
+        eprintln!("[legion] etc usage telemetry write failed: {e}");
+    }
+
+    if json {
+        println!("{}", serde_json::to_string(&result.hits)?);
+    } else {
+        let cross_repo = repo.is_none() && repos.len() > 1;
+        for hit in &result.hits {
+            if cross_repo {
+                println!("{}/{}:{}: {}", hit.repo, hit.path, hit.line, hit.text);
+            } else {
+                println!("{}:{}: {}", hit.path, hit.line, hit.text);
+            }
+        }
+    }
+    if result.suppressed > 0 {
+        eprintln!(
+            "[legion] {} more matches suppressed (cap {}); narrow with --repo/--ext or a tighter pattern",
+            result.suppressed,
+            etc::MAX_HITS
+        );
+    }
+    if result.skipped_files > 0 {
+        eprintln!(
+            "[legion] {} files skipped (unreadable or larger than {} bytes)",
+            result.skipped_files,
+            etc::MAX_FILE_SIZE
+        );
+    }
+    Ok(())
 }
 
 /// Enumerate definitions across the matching SCIP indexes (#558). Validates
