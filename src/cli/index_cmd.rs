@@ -7,7 +7,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{open_db, open_db_and_index};
-use crate::{db, error, scip, sym, watch};
+use crate::{db, error, inventory, scip, sym, watch};
 
 #[derive(Subcommand)]
 pub(crate) enum SymAction {
@@ -947,46 +947,64 @@ pub(crate) fn handle_index(
     let repo_path = std::path::PathBuf::from(&entry.workdir);
 
     let langs = scip::detect_languages(&repo_path);
+    let database = open_db()?;
+
+    // SCIP indexing runs only when language markers are present. A docs-only
+    // repo (no Cargo.toml, package.json, etc.) skips this block entirely and
+    // still gets a populated file inventory below (#705).
     if langs.is_empty() {
-        return Err(error::LegionError::WatchConfig(format!(
-            "no supported language detected at {}. Markers checked: Cargo.toml, package.json, pyproject.toml, requirements.txt, go.mod.",
+        eprintln!(
+            "[legion] no SCIP-supported language detected at {}; skipping SCIP indexing. \
+             Markers checked: Cargo.toml, package.json, pyproject.toml, requirements.txt, go.mod.",
             repo_path.display()
-        )));
+        );
+    } else {
+        let mut indexed: u32 = 0;
+        for lang in &langs {
+            let blob = match scip::run_indexer(lang, &repo_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("[legion] skipped {repo} ({lang}): {e}");
+                    continue;
+                }
+            };
+            let hash = scip::content_hash(&blob);
+            let now = chrono::Utc::now().to_rfc3339();
+            let index = scip::ScipIndex {
+                id: uuid::Uuid::now_v7().to_string(),
+                repo: repo.clone(),
+                lang: (*lang).to_string(),
+                content_hash: hash,
+                blob,
+                updated_at: now,
+                deleted_at: None,
+            };
+            let bytes_len = index.blob.len();
+            let hash_prefix = &index.content_hash[..16];
+            database.upsert_scip_index(&index)?;
+            eprintln!("[legion] indexed {repo} ({lang}): {bytes_len} bytes, hash {hash_prefix}");
+            indexed += 1;
+        }
+        if indexed == 0 {
+            return Err(error::LegionError::WatchConfig(format!(
+                "no language indexed for {repo} -- every detected language ({}) failed; see warnings above",
+                langs.join(", ")
+            )));
+        }
     }
 
-    let database = open_db()?;
-    let mut indexed: u32 = 0;
-    for lang in &langs {
-        let blob = match scip::run_indexer(lang, &repo_path) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("[legion] skipped {repo} ({lang}): {e}");
-                continue;
-            }
-        };
-        let hash = scip::content_hash(&blob);
-        let now = chrono::Utc::now().to_rfc3339();
-        let index = scip::ScipIndex {
-            id: uuid::Uuid::now_v7().to_string(),
-            repo: repo.clone(),
-            lang: (*lang).to_string(),
-            content_hash: hash,
-            blob,
-            updated_at: now,
-            deleted_at: None,
-        };
-        let bytes_len = index.blob.len();
-        let hash_prefix = &index.content_hash[..16];
-        database.upsert_scip_index(&index)?;
-        eprintln!("[legion] indexed {repo} ({lang}): {bytes_len} bytes, hash {hash_prefix}");
-        indexed += 1;
-    }
-    if indexed == 0 {
-        return Err(error::LegionError::WatchConfig(format!(
-            "no language indexed for {repo} -- every detected language ({}) failed; see warnings above",
-            langs.join(", ")
-        )));
-    }
+    // File inventory walk: enumerate every non-ignored file and persist one
+    // row per file. Runs independently of the SCIP result above -- docs-only
+    // repos still get a full inventory when the SCIP loop was skipped.
+    let entries: Vec<crate::db::inventory::FileInventoryEntry> =
+        inventory::walk_repo(&repo, &repo_path);
+    let live_paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+    database.upsert_file_inventory(&entries)?;
+    let pruned: usize = database.prune_file_inventory(&repo, &live_paths)?;
+    eprintln!(
+        "[legion] inventoried {} files for {repo} ({pruned} stale rows pruned)",
+        entries.len()
+    );
     Ok(())
 }
 
