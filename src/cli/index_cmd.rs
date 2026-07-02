@@ -128,6 +128,10 @@ pub(crate) enum EtcShape {
         /// Treat the pattern as a literal string, not a regex
         #[arg(long)]
         fixed_strings: bool,
+        /// Search hidden files and directories (.github/, .claude/, dotfiles).
+        /// `.git/` stays excluded. Mirrors ripgrep's --hidden.
+        #[arg(long)]
+        hidden: bool,
         /// Emit results as a JSON array of ContentHit objects
         #[arg(long)]
         json: bool,
@@ -193,8 +197,9 @@ fn run_sym_etc(shape: EtcShape) -> error::Result<()> {
             repo,
             ext,
             fixed_strings,
+            hidden,
             json,
-        } => run_etc_find_content(&pattern, repo, ext, fixed_strings, json),
+        } => run_etc_find_content(&pattern, repo, ext, fixed_strings, hidden, json),
     }
 }
 
@@ -207,11 +212,20 @@ fn run_etc_find_content(
     repo: Option<String>,
     ext: Option<String>,
     fixed_strings: bool,
+    hidden: bool,
     json: bool,
 ) -> error::Result<()> {
     let base = data_dir()?;
     let watch_path = base.join("watch.toml");
     let all = watch::list_repos_in_config(&watch_path)?;
+    // An empty corpus must be loud: zero hits over zero repos is
+    // indistinguishable from "the pattern is not in your code".
+    if all.is_empty() {
+        return Err(error::LegionError::WatchConfig(
+            "no repos in watch.toml -- nothing to search. Add one with `legion watch add <name> <path>`."
+                .to_string(),
+        ));
+    }
     let repos: Vec<(String, std::path::PathBuf)> = match repo.as_deref() {
         Some(name) => {
             let entry = all.iter().find(|r| r.name == name).ok_or_else(|| {
@@ -231,6 +245,7 @@ fn run_etc_find_content(
         repos: &repos,
         ext: ext.as_deref(),
         fixed_strings,
+        include_hidden: hidden,
         max_file_size: etc::MAX_FILE_SIZE,
         max_hits: etc::MAX_HITS,
     };
