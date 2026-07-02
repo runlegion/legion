@@ -251,10 +251,19 @@ fn index_and_sym_def_refs_roundtrip_against_fixture_repo() {
     let dir = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
 
-    // Fixture repo: a Cargo.toml marker so detect_languages says "rust".
+    // Fixture repo: a Cargo.toml marker so detect_languages says "rust",
+    // plus the src/lib.rs the blob's document refers to -- the inventory
+    // walk only rows files that exist on disk, and the symbol-count
+    // enrichment joins blob relative_path to inventory path (#705).
     std::fs::write(
         repo.path().join("Cargo.toml"),
         "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.path().join("src")).unwrap();
+    std::fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub struct Greeter;\npub fn hello() {}\n",
     )
     .unwrap();
 
@@ -318,6 +327,18 @@ fn index_and_sym_def_refs_roundtrip_against_fixture_repo() {
         index_stderr.contains("indexed fixture (rust)"),
         "expected index confirmation, got: {index_stderr}"
     );
+    // #705 end-to-end: the walk inventoried the fixture and the enrichment
+    // pass matched the blob's src/lib.rs document to its inventory row --
+    // "applied to 1" proves the SCIP relative_path joined the walk's
+    // repo-relative path through the real CLI + DB, not just unit halves.
+    assert!(
+        index_stderr.contains("inventoried"),
+        "expected the inventory summary, got: {index_stderr}"
+    );
+    assert!(
+        index_stderr.contains("symbol counts applied to 1 inventoried files for fixture"),
+        "expected the symbol-count enrichment line, got: {index_stderr}"
+    );
 
     // def: the single definition occurrence, 1-indexed (range line 4 -> 5).
     let defs = run_ok(
@@ -340,4 +361,130 @@ fn index_and_sym_def_refs_roundtrip_against_fixture_repo() {
     assert_eq!(refs.len(), 2, "expected two references: {refs:?}");
     assert_eq!(refs[0]["line"], 11);
     assert_eq!(refs[1]["line"], 21);
+}
+
+/// #705: a docs-only repo (no language markers) must exit 0 from
+/// `legion index`, skip SCIP loudly, and still populate the inventory.
+/// Pins the exit-code contract flip at the CLI boundary -- the old code
+/// hard-errored on `detect_languages() == []`; walk-level unit tests
+/// cannot catch a regression here.
+#[test]
+fn index_docs_only_repo_succeeds_and_inventories() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("README.md"), "# docs only\n").unwrap();
+    std::fs::write(repo.path().join("guide.md"), "content\n").unwrap();
+
+    // Direct watch.toml seed: `watch add` would spawn a background indexer
+    // this test does not want racing it.
+    std::fs::write(
+        dir.path().join("watch.toml"),
+        format!(
+            // Forward slashes: backslash Windows paths are invalid TOML
+            // string escapes, and Windows path APIs accept slashes.
+            "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"docsrepo\"\nworkdir = \"{}\"\n",
+            repo.path().display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    let stderr = run_ok_stderr(legion_cmd(dir.path()).args(["index", "docsrepo"]));
+    assert!(
+        stderr.contains("no SCIP-supported language detected"),
+        "expected the SCIP-skip notice, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("inventoried 2 files for docsrepo"),
+        "expected the inventory summary, got: {stderr}"
+    );
+}
+
+/// #705 review (PR #718): a missing or unmounted workdir must abort the
+/// index run loudly BEFORE any walk. Without the guard, walk_repo on a
+/// vanished root returns zero entries and the prune pass deletes every
+/// inventory row for the repo -- a transient mount failure silently
+/// destroying derived state.
+#[test]
+fn index_missing_workdir_fails_loudly_instead_of_wiping_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    let gone = tempfile::tempdir().unwrap();
+    let gone_path = gone.path().to_path_buf();
+    drop(gone); // the workdir existed once, then the mount vanished
+
+    std::fs::write(
+        dir.path().join("watch.toml"),
+        format!(
+            // Forward slashes: see index_docs_only_repo_succeeds_and_inventories.
+            "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"ghostrepo\"\nworkdir = \"{}\"\n",
+            gone_path.display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args(["index", "ghostrepo"]));
+    assert!(
+        stderr.contains("does not exist") && stderr.contains("ghostrepo"),
+        "expected the missing-workdir refusal naming the repo, got: {stderr}"
+    );
+}
+
+/// #705 re-review (smugglr, PR #718): a workdir that EXISTS but cannot be
+/// read (permission-mangled remount, present-but-unreadable mount point)
+/// passes the `is_dir()` guard, so the walk runs, yields a root-level error
+/// and zero entries. The prune must be refused: a transient permission
+/// failure must not evict rows for files that still exist. This is the
+/// CLI-level repro of the chmod-000 wipe demonstrated against 0bdfcb7.
+#[cfg(unix)]
+#[test]
+fn index_unreadable_workdir_skips_prune_instead_of_wiping_inventory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("README.md"), "# docs only\n").unwrap();
+    std::fs::write(repo.path().join("guide.md"), "content\n").unwrap();
+
+    std::fs::write(
+        dir.path().join("watch.toml"),
+        format!(
+            "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"permrepo\"\nworkdir = \"{}\"\n",
+            repo.path().display()
+        ),
+    )
+    .unwrap();
+
+    let stderr = run_ok_stderr(legion_cmd(dir.path()).args(["index", "permrepo"]));
+    assert!(
+        stderr.contains("inventoried 2 files for permrepo"),
+        "expected two files inventoried, got: {stderr}"
+    );
+
+    // The mount goes unreadable: the root still stats as a directory but
+    // readdir on it fails. (Assumes a non-root test runner -- root ignores
+    // mode 000 and would see a readable directory.)
+    let mut perm = std::fs::metadata(repo.path()).unwrap().permissions();
+    perm.set_mode(0o000);
+    std::fs::set_permissions(repo.path(), perm).unwrap();
+
+    let stderr = run_ok_stderr(legion_cmd(dir.path()).args(["index", "permrepo"]));
+
+    // Restore perms before asserting so the tempdir can drop even on failure.
+    let mut perm = std::fs::metadata(repo.path()).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(repo.path(), perm).unwrap();
+
+    assert!(
+        stderr.contains("prune skipped"),
+        "expected the partial-walk prune refusal, got: {stderr}"
+    );
+
+    // Row-survival proof: delete one file and re-index. Exactly one stale
+    // row gets pruned, so both rows survived the unreadable run -- a wipe
+    // would have left nothing to prune.
+    std::fs::remove_file(repo.path().join("guide.md")).unwrap();
+    let stderr = run_ok_stderr(legion_cmd(dir.path()).args(["index", "permrepo"]));
+    assert!(
+        stderr.contains("inventoried 1 files for permrepo (1 stale rows pruned)"),
+        "expected exactly one stale row pruned after the recovery run, got: {stderr}"
+    );
 }

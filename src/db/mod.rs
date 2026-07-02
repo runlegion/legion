@@ -12,6 +12,7 @@ mod board;
 mod documents;
 mod health;
 mod heartbeat;
+pub mod inventory;
 mod kanban;
 pub(crate) mod quality_gates;
 mod reflections;
@@ -117,6 +118,7 @@ impl Database {
         uncertainty::create_tables(conn)?;
         autonomy::create_tables(conn)?;
         heartbeat::create_tables(conn)?;
+        inventory::create_tables(conn)?;
         tx.commit()?;
 
         reflections::migrate(conn)?;

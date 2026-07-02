@@ -602,6 +602,25 @@ pub fn query_hover(
     Ok(None)
 }
 
+/// Per-file symbol counts for a SCIP blob: `relative_path -> number of
+/// definition occurrences in that document` (#705). Definition occurrences
+/// are the same population `query_definitions` serves, so the count agrees
+/// with what `sym def`/`sym list` would enumerate for the file. Feeds
+/// `file_inventory.symbol_count` right after `legion index` builds the blob.
+pub fn symbol_counts_per_file(blob: &[u8]) -> Result<HashMap<String, u32>> {
+    let index = parse_blob(blob)?;
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for document in &index.documents {
+        let defs = document
+            .occurrences
+            .iter()
+            .filter(|o| is_definition(o.symbol_roles))
+            .count() as u32;
+        counts.insert(document.relative_path.clone(), defs);
+    }
+    Ok(counts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,6 +647,31 @@ mod tests {
         let mut idx = Index::new();
         idx.documents = documents;
         idx.write_to_bytes().unwrap()
+    }
+
+    #[test]
+    fn symbol_counts_per_file_counts_definitions_per_document() {
+        let blob = build_index(vec![
+            doc(
+                "src/a.rs",
+                vec![
+                    occ("sym1", vec![0, 0, 3], true),
+                    occ("sym1", vec![5, 0, 3], false), // reference: not counted
+                    occ("sym2", vec![9, 0, 3], true),
+                ],
+            ),
+            doc("src/b.rs", vec![occ("sym3", vec![0, 0, 3], false)]),
+        ]);
+        let counts = symbol_counts_per_file(&blob).expect("parse");
+        assert_eq!(counts.get("src/a.rs"), Some(&2));
+        assert_eq!(counts.get("src/b.rs"), Some(&0));
+        assert_eq!(counts.len(), 2);
+    }
+
+    #[test]
+    fn symbol_counts_per_file_rejects_garbage_blob() {
+        let err = symbol_counts_per_file(&[0xff, 0xff, 0xff, 0xff]);
+        assert!(matches!(err, Err(LegionError::Search(_))));
     }
 
     #[test]

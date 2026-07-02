@@ -7,7 +7,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{open_db, open_db_and_index};
-use crate::{db, error, scip, sym, watch};
+use crate::{db, error, inventory, scip, sym, watch};
 
 #[derive(Subcommand)]
 pub(crate) enum SymAction {
@@ -946,47 +946,118 @@ pub(crate) fn handle_index(
     };
     let repo_path = std::path::PathBuf::from(&entry.workdir);
 
-    let langs = scip::detect_languages(&repo_path);
-    if langs.is_empty() {
+    // A missing workdir must fail BEFORE the walk: walk_repo on a vanished
+    // root returns an empty entry set, and pruning against it would delete
+    // every inventory row for the repo -- a transient mount failure (watched
+    // workdirs live on external volumes) silently destroying derived state
+    // (#718 review).
+    if !repo_path.is_dir() {
         return Err(error::LegionError::WatchConfig(format!(
-            "no supported language detected at {}. Markers checked: Cargo.toml, package.json, pyproject.toml, requirements.txt, go.mod.",
+            "workdir {} for repo '{repo}' does not exist or is not a directory -- \
+             refusing to index (an unmounted volume must not wipe the inventory)",
             repo_path.display()
         )));
     }
 
+    let langs = scip::detect_languages(&repo_path);
     let database = open_db()?;
-    let mut indexed: u32 = 0;
-    for lang in &langs {
-        let blob = match scip::run_indexer(lang, &repo_path) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("[legion] skipped {repo} ({lang}): {e}");
-                continue;
+
+    // File inventory walk FIRST: enumerate every non-ignored file and persist
+    // one row per file. Ordered before the SCIP loop so inventory truly runs
+    // independent of SCIP outcomes -- including the all-indexers-failed hard
+    // error below, which must not leave the inventory stale (#705 review).
+    let outcome = inventory::walk_repo(&repo, &repo_path);
+    let live_paths: Vec<&str> = outcome.entries.iter().map(|e| e.path.as_str()).collect();
+    database.upsert_file_inventory(&outcome.entries)?;
+    // Prune only on a complete walk: with walk errors the entry set may be
+    // missing files that still exist, and evicting their rows would let a
+    // transient I/O failure shrink the inventory (#718 re-review). Upserting
+    // the partial set is still correct -- fresh data is fresh.
+    let pruned: usize = if outcome.walk_errors == 0 {
+        database.prune_file_inventory(&repo, &live_paths)?
+    } else {
+        eprintln!(
+            "[legion] {} walk errors for {repo} -- stale-row prune skipped (partial walk must not evict rows)",
+            outcome.walk_errors
+        );
+        0
+    };
+    eprintln!(
+        "[legion] inventoried {} files for {repo} ({pruned} stale rows pruned)",
+        outcome.entries.len()
+    );
+
+    // SCIP indexing runs only when language markers are present. A docs-only
+    // repo (no Cargo.toml, package.json, etc.) skips this block entirely --
+    // the file inventory above already covered it (#705).
+    if langs.is_empty() {
+        eprintln!(
+            "[legion] no SCIP-supported language detected at {}; skipping SCIP indexing. \
+             Markers checked: Cargo.toml, package.json, pyproject.toml, requirements.txt, go.mod.",
+            repo_path.display()
+        );
+    } else {
+        let mut indexed: u32 = 0;
+        let mut counts_available = false;
+        let mut symbol_counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        for lang in &langs {
+            let blob = match scip::run_indexer(lang, &repo_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("[legion] skipped {repo} ({lang}): {e}");
+                    continue;
+                }
+            };
+            let hash = scip::content_hash(&blob);
+            let now = chrono::Utc::now().to_rfc3339();
+            let index = scip::ScipIndex {
+                id: uuid::Uuid::now_v7().to_string(),
+                repo: repo.clone(),
+                lang: (*lang).to_string(),
+                content_hash: hash,
+                blob,
+                updated_at: now,
+                deleted_at: None,
+            };
+            let bytes_len = index.blob.len();
+            let hash_prefix = &index.content_hash[..16];
+            database.upsert_scip_index(&index)?;
+            eprintln!("[legion] indexed {repo} ({lang}): {bytes_len} bytes, hash {hash_prefix}");
+            indexed += 1;
+            // Per-file symbol counts for the inventory (#705): a blob this
+            // run just built failing to parse is not fatal to indexing, but
+            // it must be loud -- counts silently stuck at 0 would misreport
+            // every SCIP-covered file.
+            match sym::symbol_counts_per_file(&index.blob) {
+                Ok(counts) => {
+                    counts_available = true;
+                    symbol_counts.extend(counts);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[legion] per-file symbol counts unavailable for {repo} ({lang}): {e}"
+                    )
+                }
             }
-        };
-        let hash = scip::content_hash(&blob);
-        let now = chrono::Utc::now().to_rfc3339();
-        let index = scip::ScipIndex {
-            id: uuid::Uuid::now_v7().to_string(),
-            repo: repo.clone(),
-            lang: (*lang).to_string(),
-            content_hash: hash,
-            blob,
-            updated_at: now,
-            deleted_at: None,
-        };
-        let bytes_len = index.blob.len();
-        let hash_prefix = &index.content_hash[..16];
-        database.upsert_scip_index(&index)?;
-        eprintln!("[legion] indexed {repo} ({lang}): {bytes_len} bytes, hash {hash_prefix}");
-        indexed += 1;
+        }
+        if indexed == 0 {
+            return Err(error::LegionError::WatchConfig(format!(
+                "no language indexed for {repo} -- every detected language ({}) failed; see warnings above",
+                langs.join(", ")
+            )));
+        }
+        // Gate on parse success, not on non-empty counts: a blob that parsed
+        // but yielded zero definitions (the repo's last definition was
+        // deleted) must still run the enrich pass so its reset clears the
+        // now-stale counts. A parse FAILURE skips the pass entirely,
+        // preserving prior enrichment.
+        if counts_available {
+            let updated = database.update_file_symbol_counts(&repo, &symbol_counts)?;
+            eprintln!("[legion] symbol counts applied to {updated} inventoried files for {repo}");
+        }
     }
-    if indexed == 0 {
-        return Err(error::LegionError::WatchConfig(format!(
-            "no language indexed for {repo} -- every detected language ({}) failed; see warnings above",
-            langs.join(", ")
-        )));
-    }
+
     Ok(())
 }
 

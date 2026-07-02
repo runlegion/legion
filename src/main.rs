@@ -11,6 +11,7 @@ mod error;
 mod gate_trust;
 mod health;
 mod init;
+mod inventory;
 #[allow(dead_code)] // Items used by tests + pending surface/status/serve migration
 mod kanban;
 mod mcp;
