@@ -998,6 +998,7 @@ pub(crate) fn handle_index(
         );
     } else {
         let mut indexed: u32 = 0;
+        let mut counts_available = false;
         let mut symbol_counts: std::collections::HashMap<String, u32> =
             std::collections::HashMap::new();
         for lang in &langs {
@@ -1029,7 +1030,10 @@ pub(crate) fn handle_index(
             // it must be loud -- counts silently stuck at 0 would misreport
             // every SCIP-covered file.
             match sym::symbol_counts_per_file(&index.blob) {
-                Ok(counts) => symbol_counts.extend(counts),
+                Ok(counts) => {
+                    counts_available = true;
+                    symbol_counts.extend(counts);
+                }
                 Err(e) => {
                     eprintln!(
                         "[legion] per-file symbol counts unavailable for {repo} ({lang}): {e}"
@@ -1043,7 +1047,12 @@ pub(crate) fn handle_index(
                 langs.join(", ")
             )));
         }
-        if !symbol_counts.is_empty() {
+        // Gate on parse success, not on non-empty counts: a blob that parsed
+        // but yielded zero definitions (the repo's last definition was
+        // deleted) must still run the enrich pass so its reset clears the
+        // now-stale counts. A parse FAILURE skips the pass entirely,
+        // preserving prior enrichment.
+        if counts_available {
             let updated = database.update_file_symbol_counts(&repo, &symbol_counts)?;
             eprintln!("[legion] symbol counts applied to {updated} inventoried files for {repo}");
         }

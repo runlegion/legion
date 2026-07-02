@@ -457,7 +457,8 @@ fn index_unreadable_workdir_skips_prune_instead_of_wiping_inventory() {
     );
 
     // The mount goes unreadable: the root still stats as a directory but
-    // readdir on it fails.
+    // readdir on it fails. (Assumes a non-root test runner -- root ignores
+    // mode 000 and would see a readable directory.)
     let mut perm = std::fs::metadata(repo.path()).unwrap().permissions();
     perm.set_mode(0o000);
     std::fs::set_permissions(repo.path(), perm).unwrap();
