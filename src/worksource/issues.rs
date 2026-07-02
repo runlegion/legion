@@ -16,6 +16,11 @@ pub struct ExternalIssue {
     pub number: u64,
     pub title: String,
     pub body: Option<String>,
+    /// Label list. The GitHub sub-issue GraphQL API omits this field entirely
+    /// (it returns only `number`, `url`, `title`, `state`, `body`), so we
+    /// default to an empty vec rather than failing deserialization when the
+    /// field is absent. (#714)
+    #[serde(default)]
     pub labels: Vec<serde_json::Value>,
     pub assignees: Option<Vec<serde_json::Value>>,
     pub state: String,
@@ -469,5 +474,60 @@ mod tests {
             msg.contains("at least one of title or body"),
             "expected validation error message, got: {msg}"
         );
+    }
+
+    /// Regression guard for #714: the GitHub sub-issue GraphQL API returns
+    /// `{ number, url, title, state, body }` -- it omits `labels` entirely.
+    ///
+    /// Without `#[serde(default)]`, serde fails with "missing field `labels`".
+    /// This test deserializes a representative sub-issue payload (no `labels`,
+    /// no `assignees`, no `createdAt`) and asserts that the struct populates
+    /// with sensible defaults rather than erroring.
+    #[test]
+    fn external_issue_deserializes_without_labels_field() {
+        let json = r#"{
+            "number": 705,
+            "url": "https://github.com/runlegion/legion/issues/705",
+            "title": "E1: sym index inventory",
+            "state": "OPEN",
+            "body": "Implement the E1 sub-task."
+        }"#;
+
+        let issue: ExternalIssue =
+            serde_json::from_str(json).expect("should deserialize without labels field");
+
+        assert_eq!(issue.number, 705);
+        assert_eq!(issue.url, "https://github.com/runlegion/legion/issues/705");
+        assert_eq!(issue.title, "E1: sym index inventory");
+        assert_eq!(issue.state, "OPEN");
+        assert!(
+            issue.labels.is_empty(),
+            "labels should default to empty vec, got {:?}",
+            issue.labels
+        );
+        assert!(issue.assignees.is_none());
+        assert!(issue.created_at.is_none());
+    }
+
+    /// Verify that deserialization also works when `labels` IS present (the
+    /// existing `gh issue list` path still works after the default is added).
+    #[test]
+    fn external_issue_deserializes_with_labels_field() {
+        let json = r#"{
+            "number": 42,
+            "url": "https://github.com/runlegion/legion/issues/42",
+            "title": "Some issue",
+            "state": "open",
+            "body": null,
+            "labels": [{"id": "LA_1", "name": "bug"}, {"id": "LA_2", "name": "critical"}],
+            "assignees": [],
+            "createdAt": "2026-06-01T00:00:00Z"
+        }"#;
+
+        let issue: ExternalIssue =
+            serde_json::from_str(json).expect("should deserialize with labels field");
+
+        assert_eq!(issue.labels.len(), 2);
+        assert_eq!(issue.created_at.as_deref(), Some("2026-06-01T00:00:00Z"));
     }
 }
