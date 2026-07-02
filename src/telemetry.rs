@@ -100,11 +100,23 @@ pub fn append_etc_usage(record: &EtcUsageRecord) -> Result<()> {
 
 /// Append one serializable record as a single JSONL line, creating parent
 /// dirs and the file on first use.
+///
+/// The file is tightened to 0600 on unix: these logs persist raw search
+/// patterns and query text, which can be secret-shaped (an agent grepping
+/// for a token writes the token here). Shell history and Claude transcripts
+/// -- the other places such strings land -- are 600/700; this must not be
+/// the least-protected copy. Same idiom as `cluster.rs` config saving.
 fn append_jsonl<T: Serialize>(path: &std::path::Path, record: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+    }
     let line = serde_json::to_string(record)?;
     file.write_all(line.as_bytes())?;
     file.write_all(b"\n")?;
@@ -295,6 +307,17 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         let parsed: EtcUsageRecord = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(parsed, rec);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_tightens_file_permissions_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bypass.jsonl");
+        append_jsonl(&path, &sample("legion", Utc::now())).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "telemetry logs persist raw patterns");
     }
 
     #[test]
