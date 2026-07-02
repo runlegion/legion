@@ -199,6 +199,7 @@ mod tests {
     fn sh_and_md_have_no_lang() {
         let dir = make_tree(&["deploy.sh", "README.md"]);
         let entries = walk_repo("r", dir.path());
+        assert_eq!(entries.len(), 2, "both files must be inventoried");
         for e in &entries {
             assert!(e.lang.is_none(), "{} should have lang=None", e.path);
         }

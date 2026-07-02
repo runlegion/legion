@@ -158,6 +158,35 @@ impl Database {
         Ok(rows)
     }
 
+    /// Apply per-file SCIP symbol counts to existing inventory rows (#705).
+    ///
+    /// Called after the SCIP loop in `legion index`: the inventory is
+    /// upserted (with `symbol_count = 0`) before SCIP runs so it stays
+    /// independent of indexer outcomes, then this pass enriches the rows
+    /// whose path appears in a freshly built blob. Paths in `counts` with
+    /// no inventory row (unlikely: SCIP indexed a file the walk skipped)
+    /// update nothing and are not an error. Returns the number of rows
+    /// actually updated.
+    pub fn update_file_symbol_counts(
+        &self,
+        repo: &str,
+        counts: &std::collections::HashMap<String, u32>,
+    ) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut updated: usize = 0;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE file_inventory SET symbol_count = ?3
+                 WHERE repo = ?1 AND path = ?2",
+            )?;
+            for (path, count) in counts {
+                updated += stmt.execute(rusqlite::params![repo, path, *count as i64])?;
+            }
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// Delete rows for `repo` whose path is not in `live_paths`.
     ///
     /// Call this after [`upsert_file_inventory`] to evict stale rows left
@@ -287,6 +316,37 @@ mod tests {
         assert_eq!(got.len(), 1, "re-index must not duplicate the row");
         assert_eq!(got[0].size, 9999);
         assert_eq!(got[0].mtime, "2026-07-02T00:00:00+00:00");
+    }
+
+    #[test]
+    fn update_symbol_counts_enriches_matching_rows_only() {
+        let db = test_db();
+        db.upsert_file_inventory(&[
+            entry("r", "src/a.rs", Some("rs"), Some("rust")),
+            entry("r", "src/b.rs", Some("rs"), Some("rust")),
+            entry("r", "README.md", Some("md"), None),
+        ])
+        .unwrap();
+
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("src/a.rs".to_string(), 7_u32);
+        counts.insert("src/gone.rs".to_string(), 3_u32); // no inventory row
+        let updated = db.update_file_symbol_counts("r", &counts).unwrap();
+        assert_eq!(updated, 1, "only the row that exists gets enriched");
+
+        let got = db
+            .list_file_inventory(&InventoryFilter {
+                repo: Some("r"),
+                ..Default::default()
+            })
+            .unwrap();
+        let by_path: std::collections::HashMap<&str, u32> = got
+            .iter()
+            .map(|e| (e.path.as_str(), e.symbol_count))
+            .collect();
+        assert_eq!(by_path["src/a.rs"], 7);
+        assert_eq!(by_path["src/b.rs"], 0, "uncounted files stay at 0");
+        assert_eq!(by_path["README.md"], 0);
     }
 
     #[test]

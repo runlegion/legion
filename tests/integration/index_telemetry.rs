@@ -375,3 +375,31 @@ fn index_docs_only_repo_succeeds_and_inventories() {
         "expected the inventory summary, got: {stderr}"
     );
 }
+
+/// #705 review (PR #718): a missing or unmounted workdir must abort the
+/// index run loudly BEFORE any walk. Without the guard, walk_repo on a
+/// vanished root returns zero entries and the prune pass deletes every
+/// inventory row for the repo -- a transient mount failure silently
+/// destroying derived state.
+#[test]
+fn index_missing_workdir_fails_loudly_instead_of_wiping_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    let gone = tempfile::tempdir().unwrap();
+    let gone_path = gone.path().to_path_buf();
+    drop(gone); // the workdir existed once, then the mount vanished
+
+    std::fs::write(
+        dir.path().join("watch.toml"),
+        format!(
+            "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"ghostrepo\"\nworkdir = \"{}\"\n",
+            gone_path.display()
+        ),
+    )
+    .unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args(["index", "ghostrepo"]));
+    assert!(
+        stderr.contains("does not exist") && stderr.contains("ghostrepo"),
+        "expected the missing-workdir refusal naming the repo, got: {stderr}"
+    );
+}

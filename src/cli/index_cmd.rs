@@ -946,6 +946,19 @@ pub(crate) fn handle_index(
     };
     let repo_path = std::path::PathBuf::from(&entry.workdir);
 
+    // A missing workdir must fail BEFORE the walk: walk_repo on a vanished
+    // root returns an empty entry set, and pruning against it would delete
+    // every inventory row for the repo -- a transient mount failure (watched
+    // workdirs live on external volumes) silently destroying derived state
+    // (#718 review).
+    if !repo_path.is_dir() {
+        return Err(error::LegionError::WatchConfig(format!(
+            "workdir {} for repo '{repo}' does not exist or is not a directory -- \
+             refusing to index (an unmounted volume must not wipe the inventory)",
+            repo_path.display()
+        )));
+    }
+
     let langs = scip::detect_languages(&repo_path);
     let database = open_db()?;
 
@@ -974,6 +987,8 @@ pub(crate) fn handle_index(
         );
     } else {
         let mut indexed: u32 = 0;
+        let mut symbol_counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
         for lang in &langs {
             let blob = match scip::run_indexer(lang, &repo_path) {
                 Ok(b) => b,
@@ -998,12 +1013,28 @@ pub(crate) fn handle_index(
             database.upsert_scip_index(&index)?;
             eprintln!("[legion] indexed {repo} ({lang}): {bytes_len} bytes, hash {hash_prefix}");
             indexed += 1;
+            // Per-file symbol counts for the inventory (#705): a blob this
+            // run just built failing to parse is not fatal to indexing, but
+            // it must be loud -- counts silently stuck at 0 would misreport
+            // every SCIP-covered file.
+            match sym::symbol_counts_per_file(&index.blob) {
+                Ok(counts) => symbol_counts.extend(counts),
+                Err(e) => {
+                    eprintln!(
+                        "[legion] per-file symbol counts unavailable for {repo} ({lang}): {e}"
+                    )
+                }
+            }
         }
         if indexed == 0 {
             return Err(error::LegionError::WatchConfig(format!(
                 "no language indexed for {repo} -- every detected language ({}) failed; see warnings above",
                 langs.join(", ")
             )));
+        }
+        if !symbol_counts.is_empty() {
+            let updated = database.update_file_symbol_counts(&repo, &symbol_counts)?;
+            eprintln!("[legion] symbol counts applied to {updated} inventoried files for {repo}");
         }
     }
 
