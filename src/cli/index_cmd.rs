@@ -967,7 +967,7 @@ pub(crate) fn handle_index(
     // independent of SCIP outcomes -- including the all-indexers-failed hard
     // error below, which must not leave the inventory stale (#705 review).
     let outcome = inventory::walk_repo(&repo, &repo_path);
-    let live_paths: Vec<String> = outcome.entries.iter().map(|e| e.path.clone()).collect();
+    let live_paths: Vec<&str> = outcome.entries.iter().map(|e| e.path.as_str()).collect();
     database.upsert_file_inventory(&outcome.entries)?;
     // Prune only on a complete walk: with walk errors the entry set may be
     // missing files that still exist, and evicting their rows would let a

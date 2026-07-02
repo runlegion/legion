@@ -75,6 +75,13 @@ pub struct WalkOutcome {
 /// the mtime falls back silently to `Utc::now()`. The row then looks fresh
 /// on every index until a platform with mtime support updates it -- an
 /// accepted inaccuracy on exotic filesystems, not worth a per-file log line.
+///
+/// Note: non-UTF-8 path components are lossy-converted (invalid bytes become
+/// U+FFFD), so two distinct on-disk paths can map to the same inventory path
+/// and collide on the `(repo, path)` primary key, last writer wins. Accepted
+/// silently for the same reason as the mtime fallback: non-UTF-8 filenames
+/// are vanishingly rare on the platforms legion targets, and rejecting them
+/// would drop real files from the corpus.
 pub fn walk_repo(repo_name: &str, repo_path: &Path) -> WalkOutcome {
     let walker = WalkBuilder::new(repo_path)
         .require_git(false)
@@ -121,7 +128,8 @@ pub fn walk_repo(repo_name: &str, repo_path: &Path) -> WalkOutcome {
             .unwrap_or_else(|_| Utc::now());
         let mtime_str: String = mtime.to_rfc3339();
 
-        // Repo-relative path with forward slashes.
+        // Repo-relative path with forward slashes. Non-UTF-8 components are
+        // lossy-converted; see the fn doc for the PK-collision tradeoff.
         let rel = abs_path
             .strip_prefix(repo_path)
             .unwrap_or(abs_path)

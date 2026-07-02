@@ -424,3 +424,63 @@ fn index_missing_workdir_fails_loudly_instead_of_wiping_inventory() {
         "expected the missing-workdir refusal naming the repo, got: {stderr}"
     );
 }
+
+/// #705 re-review (smugglr, PR #718): a workdir that EXISTS but cannot be
+/// read (permission-mangled remount, present-but-unreadable mount point)
+/// passes the `is_dir()` guard, so the walk runs, yields a root-level error
+/// and zero entries. The prune must be refused: a transient permission
+/// failure must not evict rows for files that still exist. This is the
+/// CLI-level repro of the chmod-000 wipe demonstrated against 0bdfcb7.
+#[cfg(unix)]
+#[test]
+fn index_unreadable_workdir_skips_prune_instead_of_wiping_inventory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("README.md"), "# docs only\n").unwrap();
+    std::fs::write(repo.path().join("guide.md"), "content\n").unwrap();
+
+    std::fs::write(
+        dir.path().join("watch.toml"),
+        format!(
+            "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"permrepo\"\nworkdir = \"{}\"\n",
+            repo.path().display()
+        ),
+    )
+    .unwrap();
+
+    let stderr = run_ok_stderr(legion_cmd(dir.path()).args(["index", "permrepo"]));
+    assert!(
+        stderr.contains("inventoried 2 files for permrepo"),
+        "expected two files inventoried, got: {stderr}"
+    );
+
+    // The mount goes unreadable: the root still stats as a directory but
+    // readdir on it fails.
+    let mut perm = std::fs::metadata(repo.path()).unwrap().permissions();
+    perm.set_mode(0o000);
+    std::fs::set_permissions(repo.path(), perm).unwrap();
+
+    let stderr = run_ok_stderr(legion_cmd(dir.path()).args(["index", "permrepo"]));
+
+    // Restore perms before asserting so the tempdir can drop even on failure.
+    let mut perm = std::fs::metadata(repo.path()).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(repo.path(), perm).unwrap();
+
+    assert!(
+        stderr.contains("prune skipped"),
+        "expected the partial-walk prune refusal, got: {stderr}"
+    );
+
+    // Row-survival proof: delete one file and re-index. Exactly one stale
+    // row gets pruned, so both rows survived the unreadable run -- a wipe
+    // would have left nothing to prune.
+    std::fs::remove_file(repo.path().join("guide.md")).unwrap();
+    let stderr = run_ok_stderr(legion_cmd(dir.path()).args(["index", "permrepo"]));
+    assert!(
+        stderr.contains("inventoried 1 files for permrepo (1 stale rows pruned)"),
+        "expected exactly one stale row pruned after the recovery run, got: {stderr}"
+    );
+}

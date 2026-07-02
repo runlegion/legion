@@ -16,9 +16,11 @@ use crate::error::Result;
 /// Paths are always repo-relative (forward-slash separated, no leading slash).
 /// `lang` is the SCIP language tag (e.g. "rust", "typescript"); `None` for
 /// files that SCIP does not index (docs, configs, scripts, etc.).
-/// `symbol_count` is written 0 by the walk, then enriched from the SCIP
-/// blob by `update_file_symbol_counts` when `legion index` builds one;
-/// files no blob covers stay at 0 (non-SCIP formats gain sources in E6/E7).
+/// `symbol_count` is written 0 by the walk on first insert, then owned by
+/// the enrich pass: `update_file_symbol_counts` fills it from the SCIP blob
+/// when `legion index` builds one, and the upsert preserves it on conflict
+/// so a failed SCIP run cannot zero prior enrichment. Files no blob covers
+/// stay at 0 (non-SCIP formats gain sources in E6/E7).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileInventoryEntry {
     pub repo: String,
@@ -52,7 +54,10 @@ pub struct InventoryFilter<'a> {
     pub lang: Option<&'a str>,
 }
 
-/// Create the `file_inventory` table and its covering indexes.
+/// Create the `file_inventory` table and its `(repo, ext)` covering index.
+///
+/// Repo-scoped lookups need no dedicated index: the `(repo, path)` primary
+/// key's prefix already covers them.
 ///
 /// Called from `init_schema` inside the schema-creation transaction.
 /// Idempotent via `IF NOT EXISTS`.
@@ -68,8 +73,6 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
             symbol_count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (repo, path)
         );
-        CREATE INDEX IF NOT EXISTS idx_file_inventory_repo
-            ON file_inventory(repo);
         CREATE INDEX IF NOT EXISTS idx_file_inventory_repo_ext
             ON file_inventory(repo, ext);",
     )?;
@@ -81,20 +84,27 @@ impl Database {
     ///
     /// Idempotent: re-indexing the same file updates its metadata in place
     /// without changing the row identity. All rows are written inside a
-    /// single transaction for throughput.
+    /// single transaction, through one prepared statement, for throughput.
+    ///
+    /// On conflict `symbol_count` is deliberately NOT overwritten: the walk
+    /// always supplies 0, and the enrich pass (`update_file_symbol_counts`)
+    /// owns that column -- letting the upsert clobber it would zero every
+    /// count whenever SCIP fails to run (missing indexer) until the next
+    /// successful index.
     pub fn upsert_file_inventory(&self, entries: &[FileInventoryEntry]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        for entry in entries {
-            tx.execute(
+        {
+            let mut stmt = tx.prepare(
                 "INSERT INTO file_inventory (repo, path, ext, lang, size, mtime, symbol_count)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(repo, path) DO UPDATE SET
-                     ext          = excluded.ext,
-                     lang         = excluded.lang,
-                     size         = excluded.size,
-                     mtime        = excluded.mtime,
-                     symbol_count = excluded.symbol_count",
-                rusqlite::params![
+                     ext   = excluded.ext,
+                     lang  = excluded.lang,
+                     size  = excluded.size,
+                     mtime = excluded.mtime",
+            )?;
+            for entry in entries {
+                stmt.execute(rusqlite::params![
                     &entry.repo,
                     &entry.path,
                     &entry.ext,
@@ -102,8 +112,8 @@ impl Database {
                     entry.size as i64,
                     &entry.mtime,
                     entry.symbol_count as i64,
-                ],
-            )?;
+                ])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -163,12 +173,21 @@ impl Database {
     /// Apply per-file SCIP symbol counts to existing inventory rows (#705).
     ///
     /// Called after the SCIP loop in `legion index`: the inventory is
-    /// upserted (with `symbol_count = 0`) before SCIP runs so it stays
-    /// independent of indexer outcomes, then this pass enriches the rows
-    /// whose path appears in a freshly built blob. Paths in `counts` with
-    /// no inventory row (unlikely: SCIP indexed a file the walk skipped)
-    /// update nothing and are not an error. Returns the number of rows
-    /// actually updated.
+    /// upserted before SCIP runs so it stays independent of indexer
+    /// outcomes, then this pass enriches the rows whose path appears in a
+    /// freshly built blob. This pass OWNS the `symbol_count` column: it
+    /// first resets the repo's counts to 0 inside the same transaction, so
+    /// a file whose definitions all vanished (and thus dropped out of the
+    /// blob) does not keep a stale count. The upsert never touches the
+    /// column, so a run where SCIP fails entirely leaves prior enrichment
+    /// intact. Tradeoff: when one of several languages fails to index, the
+    /// failed language's counts reset to 0 until it next succeeds --
+    /// accepted, since a stale-vs-absent distinction is not worth
+    /// per-language column ownership.
+    ///
+    /// Paths in `counts` with no inventory row (unlikely: SCIP indexed a
+    /// file the walk skipped) update nothing and are not an error. Returns
+    /// the number of rows enriched with a fresh count.
     pub fn update_file_symbol_counts(
         &self,
         repo: &str,
@@ -177,6 +196,10 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         let mut updated: usize = 0;
         {
+            tx.execute(
+                "UPDATE file_inventory SET symbol_count = 0 WHERE repo = ?1",
+                rusqlite::params![repo],
+            )?;
             let mut stmt = tx.prepare(
                 "UPDATE file_inventory SET symbol_count = ?3
                  WHERE repo = ?1 AND path = ?2",
@@ -196,7 +219,10 @@ impl Database {
     ///
     /// When `live_paths` is empty every row for the repo is removed (the
     /// repo's working directory became empty or was deleted).
-    pub fn prune_file_inventory(&self, repo: &str, live_paths: &[String]) -> Result<usize> {
+    ///
+    /// Takes borrowed paths: callers hold the walked entries and must not
+    /// need to clone every path `String` just to prune.
+    pub fn prune_file_inventory(&self, repo: &str, live_paths: &[&str]) -> Result<usize> {
         if live_paths.is_empty() {
             let n = self.conn.execute(
                 "DELETE FROM file_inventory WHERE repo = ?1",
@@ -352,6 +378,69 @@ mod tests {
     }
 
     #[test]
+    fn upsert_preserves_symbol_count_across_reindex() {
+        let db = test_db();
+        let e = entry("r", "src/a.rs", Some("rs"), Some("rust"));
+        db.upsert_file_inventory(std::slice::from_ref(&e)).unwrap();
+
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("src/a.rs".to_string(), 7_u32);
+        db.update_file_symbol_counts("r", &counts).unwrap();
+
+        // Re-index without SCIP (walk always supplies symbol_count = 0):
+        // the upsert must not clobber the enrichment.
+        db.upsert_file_inventory(&[e]).unwrap();
+
+        let got = db
+            .list_file_inventory(&InventoryFilter {
+                repo: Some("r"),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            got[0].symbol_count, 7,
+            "failed SCIP run must not zero counts"
+        );
+    }
+
+    #[test]
+    fn enrich_resets_counts_for_files_dropped_from_the_blob() {
+        let db = test_db();
+        db.upsert_file_inventory(&[
+            entry("r", "src/a.rs", Some("rs"), Some("rust")),
+            entry("r", "src/b.rs", Some("rs"), Some("rust")),
+        ])
+        .unwrap();
+
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("src/a.rs".to_string(), 4_u32);
+        counts.insert("src/b.rs".to_string(), 9_u32);
+        db.update_file_symbol_counts("r", &counts).unwrap();
+
+        // Next successful index: b.rs lost all its definitions and no
+        // longer appears in the blob. Its stale count must reset.
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("src/a.rs".to_string(), 5_u32);
+        db.update_file_symbol_counts("r", &counts).unwrap();
+
+        let got = db
+            .list_file_inventory(&InventoryFilter {
+                repo: Some("r"),
+                ..Default::default()
+            })
+            .unwrap();
+        let by_path: std::collections::HashMap<&str, u32> = got
+            .iter()
+            .map(|e| (e.path.as_str(), e.symbol_count))
+            .collect();
+        assert_eq!(by_path["src/a.rs"], 5);
+        assert_eq!(
+            by_path["src/b.rs"], 0,
+            "stale count must not survive the enrich pass"
+        );
+    }
+
+    #[test]
     fn prune_removes_deleted_files() {
         let db = test_db();
         let entries = vec![
@@ -361,8 +450,7 @@ mod tests {
         ];
         db.upsert_file_inventory(&entries).unwrap();
 
-        let live: Vec<String> = vec!["a.rs".to_string(), "c.rs".to_string()];
-        let pruned = db.prune_file_inventory("r", &live).unwrap();
+        let pruned = db.prune_file_inventory("r", &["a.rs", "c.rs"]).unwrap();
         assert_eq!(pruned, 1, "one stale row should have been removed");
 
         let got = db
