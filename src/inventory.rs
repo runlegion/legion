@@ -43,9 +43,10 @@ pub fn lang_for_ext(ext: &str) -> Option<&'static str> {
 ///
 /// Dotfiles and dot-directories are included (`hidden(false)`): files like
 /// `.github/workflows/ci.yml`, `.env.example`, and `.gitignore` itself are
-/// part of the repo corpus and must appear in the inventory. The `.git/`
-/// object store is excluded unconditionally by the `ignore` crate regardless
-/// of this setting.
+/// part of the repo corpus and must appear in the inventory. With hidden
+/// disabled the `ignore` crate does NOT skip `.git/` on its own (verified
+/// empirically by `git_dir_is_excluded_even_with_hidden_false`), so the
+/// walk excludes it explicitly via `filter_entry`.
 ///
 /// `require_git` is set to `false` so the walk works correctly both inside
 /// a git checkout and in plain directories (tempdir-based tests). Per-file
@@ -64,6 +65,7 @@ pub fn walk_repo(repo_name: &str, repo_path: &Path) -> Vec<FileInventoryEntry> {
         .require_git(false)
         .hidden(false)
         .git_global(false)
+        .filter_entry(|entry| entry.file_name() != ".git")
         .build();
     let mut entries: Vec<FileInventoryEntry> = Vec::new();
 
@@ -255,6 +257,23 @@ mod tests {
         );
         assert!(paths.contains(&"src/main.rs"));
         assert_eq!(entries.len(), 3, "all three files must appear");
+    }
+
+    // --- .git object store is never inventoried ---
+
+    #[test]
+    fn git_dir_is_excluded_even_with_hidden_false() {
+        // walk_repo sets hidden(false) to include dotfiles; this must NOT
+        // pull in the .git object store. Pins the doc claim on walk_repo
+        // that the ignore crate skips .git regardless of hidden().
+        let dir = make_tree(&[".git/config", ".git/objects/aa/bb", "src/main.rs"]);
+        let entries = walk_repo("r", dir.path());
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(
+            !paths.iter().any(|p| p.starts_with(".git/")),
+            ".git/ contents must never be inventoried; got: {paths:?}"
+        );
+        assert!(paths.contains(&"src/main.rs"));
     }
 
     // --- gitignored files are excluded ---
