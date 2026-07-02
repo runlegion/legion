@@ -239,6 +239,9 @@ fn run_etc_find_content(
         hit_count: scan.as_ref().map_or(0, |(r, _)| r.hits.len() as u64),
         skipped_files: scan.as_ref().map_or(0, |(r, _)| r.skipped_files),
         error: scan.as_ref().err().map(|e| e.to_string()),
+        failed_repos: scan
+            .as_ref()
+            .map_or(0, |(r, _)| r.failed_repos.len() as u64),
     };
     if let Err(e) = telemetry::append_etc_usage(&usage) {
         eprintln!("[legion] etc usage telemetry write failed: {e}");

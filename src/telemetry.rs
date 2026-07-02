@@ -91,6 +91,14 @@ pub struct EtcUsageRecord {
     /// "tool failed to answer"; defaulted so pre-#719 rows still parse.
     #[serde(default)]
     pub error: Option<String>,
+    /// Watched repos whose workdir could not be walked at all. Nonzero with
+    /// `error: None` means a partial corpus: the scan succeeded but covered
+    /// fewer repos than the scope claimed. Without this, a zero-hit row over
+    /// a half-dead corpus reads as "tool answered zero" in the #704 metric
+    /// when part of the corpus was never searched. Defaulted so earlier
+    /// rows still parse.
+    #[serde(default)]
+    pub failed_repos: u64,
 }
 
 /// Resolve the canonical etc-usage log path (sibling of `bypass.jsonl`).
@@ -107,21 +115,31 @@ pub fn append_etc_usage(record: &EtcUsageRecord) -> Result<()> {
 /// Append one serializable record as a single JSONL line, creating parent
 /// dirs and the file on first use.
 ///
-/// The file is tightened to 0600 on unix: these logs persist raw search
-/// patterns and query text, which can be secret-shaped (an agent grepping
-/// for a token writes the token here). Shell history and Claude transcripts
-/// -- the other places such strings land -- are 600/700; this must not be
-/// the least-protected copy. Same idiom as `cluster.rs` config saving.
+/// The file is 0600 on unix: these logs persist raw search patterns and
+/// query text, which can be secret-shaped (an agent grepping for a token
+/// writes the token here). Shell history and Claude transcripts -- the
+/// other places such strings land -- are 600/700; this must not be the
+/// least-protected copy. The mode is set at open time, not chmodded after
+/// create: a create-then-chmod leaves a window where the umask-default
+/// file is world-readable, and a reader who opened an fd in that window
+/// keeps it past the chmod. The follow-up `set_permissions` repairs files
+/// created by earlier builds with default permissions.
 fn append_jsonl<T: Serialize>(path: &std::path::Path, record: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     let line = serde_json::to_string(record)?;
     file.write_all(line.as_bytes())?;
@@ -309,6 +327,7 @@ mod tests {
             hit_count: 3,
             skipped_files: 1,
             error: None,
+            failed_repos: 1,
         };
         append_jsonl(&path, &rec).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -323,6 +342,7 @@ mod tests {
         let legacy = r#"{"ts":"2026-07-02T01:01:32Z","command":"find-content","repo":null,"pattern":"x","fixed_strings":false,"hit_count":0,"skipped_files":0}"#;
         let parsed: EtcUsageRecord = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.error, None);
+        assert_eq!(parsed.failed_repos, 0);
 
         let rec = EtcUsageRecord {
             ts: Utc::now(),
@@ -333,6 +353,7 @@ mod tests {
             hit_count: 0,
             skipped_files: 0,
             error: Some("invalid regex '(unclosed': ...".to_string()),
+            failed_repos: 0,
         };
         let json = serde_json::to_string(&rec).unwrap();
         let back: EtcUsageRecord = serde_json::from_str(&json).unwrap();
