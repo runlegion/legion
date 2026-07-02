@@ -88,31 +88,65 @@ fn find_content_cli_end_to_end_with_json_and_telemetry() {
 fn find_content_unknown_repo_fails_loudly() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let repo_dir = tempfile::tempdir().expect("repo dir");
+    // Errored invocations write telemetry too (#719 review fix), so the
+    // state dir must be isolated or the test pollutes the real usage log.
+    let state_dir = tempfile::tempdir().expect("state dir");
     seed_watch_toml(data_dir.path(), &[("etcrepo", repo_dir.path())]);
 
-    let (_stdout, stderr) = run_fail(legion_cmd(data_dir.path()).args([
-        "sym",
-        "etc",
-        "find-content",
-        "needle",
-        "--repo",
-        "nonesuch",
-    ]));
+    let (_stdout, stderr) = run_fail(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "etc", "find-content", "needle", "--repo", "nonesuch"]),
+    );
     assert!(
         stderr.contains("not in watch.toml"),
         "expected the fix-hint error, got:\n{stderr}"
+    );
+    // The failed invocation itself lands in telemetry with the error text.
+    let usage = std::fs::read_to_string(state_dir.path().join("legion/etc-usage.jsonl"))
+        .expect("errored invocation still writes a usage row");
+    let row: serde_json::Value =
+        serde_json::from_str(usage.lines().next().expect("one row")).expect("row is JSON");
+    assert_eq!(row["hit_count"], 0);
+    assert!(
+        row["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("nonesuch")),
+        "error field should carry the failure, got: {row}"
     );
 }
 
 #[test]
 fn find_content_empty_corpus_fails_loudly() {
     let data_dir = tempfile::tempdir().expect("data dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
     std::fs::write(data_dir.path().join("watch.toml"), "").expect("empty watch.toml");
 
-    let (_stdout, stderr) =
-        run_fail(legion_cmd(data_dir.path()).args(["sym", "etc", "find-content", "needle"]));
+    let (_stdout, stderr) = run_fail(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "etc", "find-content", "needle"]),
+    );
     assert!(
         stderr.contains("no repos in watch.toml"),
         "expected the empty-corpus error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn find_content_all_repos_unscannable_fails_loudly() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    let ghost = data_dir.path().join("no-such-workdir");
+    seed_watch_toml(data_dir.path(), &[("ghost", ghost.as_path())]);
+
+    let (_stdout, stderr) = run_fail(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "etc", "find-content", "needle"]),
+    );
+    assert!(
+        stderr.contains("no repo could be scanned") && stderr.contains("ghost"),
+        "expected the unscannable-corpus error naming the repo, got:\n{stderr}"
     );
 }
