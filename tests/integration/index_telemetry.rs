@@ -251,10 +251,19 @@ fn index_and_sym_def_refs_roundtrip_against_fixture_repo() {
     let dir = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
 
-    // Fixture repo: a Cargo.toml marker so detect_languages says "rust".
+    // Fixture repo: a Cargo.toml marker so detect_languages says "rust",
+    // plus the src/lib.rs the blob's document refers to -- the inventory
+    // walk only rows files that exist on disk, and the symbol-count
+    // enrichment joins blob relative_path to inventory path (#705).
     std::fs::write(
         repo.path().join("Cargo.toml"),
         "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.path().join("src")).unwrap();
+    std::fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub struct Greeter;\npub fn hello() {}\n",
     )
     .unwrap();
 
@@ -317,6 +326,18 @@ fn index_and_sym_def_refs_roundtrip_against_fixture_repo() {
     assert!(
         index_stderr.contains("indexed fixture (rust)"),
         "expected index confirmation, got: {index_stderr}"
+    );
+    // #705 end-to-end: the walk inventoried the fixture and the enrichment
+    // pass matched the blob's src/lib.rs document to its inventory row --
+    // "applied to 1" proves the SCIP relative_path joined the walk's
+    // repo-relative path through the real CLI + DB, not just unit halves.
+    assert!(
+        index_stderr.contains("inventoried"),
+        "expected the inventory summary, got: {index_stderr}"
+    );
+    assert!(
+        index_stderr.contains("symbol counts applied to 1 inventoried files for fixture"),
+        "expected the symbol-count enrichment line, got: {index_stderr}"
     );
 
     // def: the single definition occurrence, 1-indexed (range line 4 -> 5).

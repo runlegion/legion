@@ -966,14 +966,25 @@ pub(crate) fn handle_index(
     // one row per file. Ordered before the SCIP loop so inventory truly runs
     // independent of SCIP outcomes -- including the all-indexers-failed hard
     // error below, which must not leave the inventory stale (#705 review).
-    let entries: Vec<crate::db::inventory::FileInventoryEntry> =
-        inventory::walk_repo(&repo, &repo_path);
-    let live_paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
-    database.upsert_file_inventory(&entries)?;
-    let pruned: usize = database.prune_file_inventory(&repo, &live_paths)?;
+    let outcome = inventory::walk_repo(&repo, &repo_path);
+    let live_paths: Vec<String> = outcome.entries.iter().map(|e| e.path.clone()).collect();
+    database.upsert_file_inventory(&outcome.entries)?;
+    // Prune only on a complete walk: with walk errors the entry set may be
+    // missing files that still exist, and evicting their rows would let a
+    // transient I/O failure shrink the inventory (#718 re-review). Upserting
+    // the partial set is still correct -- fresh data is fresh.
+    let pruned: usize = if outcome.walk_errors == 0 {
+        database.prune_file_inventory(&repo, &live_paths)?
+    } else {
+        eprintln!(
+            "[legion] {} walk errors for {repo} -- stale-row prune skipped (partial walk must not evict rows)",
+            outcome.walk_errors
+        );
+        0
+    };
     eprintln!(
         "[legion] inventoried {} files for {repo} ({pruned} stale rows pruned)",
-        entries.len()
+        outcome.entries.len()
     );
 
     // SCIP indexing runs only when language markers are present. A docs-only

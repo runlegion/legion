@@ -16,7 +16,9 @@ use crate::error::Result;
 /// Paths are always repo-relative (forward-slash separated, no leading slash).
 /// `lang` is the SCIP language tag (e.g. "rust", "typescript"); `None` for
 /// files that SCIP does not index (docs, configs, scripts, etc.).
-/// `symbol_count` is 0 until a later epic populates it from the SCIP blob.
+/// `symbol_count` is written 0 by the walk, then enriched from the SCIP
+/// blob by `update_file_symbol_counts` when `legion index` builds one;
+/// files no blob covers stay at 0 (non-SCIP formats gain sources in E6/E7).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileInventoryEntry {
     pub repo: String,
