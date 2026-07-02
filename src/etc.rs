@@ -236,11 +236,14 @@ pub fn find_content(pattern: &str, scope: &ContentScope<'_>) -> Result<FindConte
     Ok(result)
 }
 
+/// Repo-relative path with forward-slash separators on every platform,
+/// matching the inventory walk's convention (#705) so the two surfaces
+/// never disagree about the same file.
 fn relative_path(path: &Path, workdir: &Path) -> String {
     path.strip_prefix(workdir)
         .unwrap_or(path)
         .to_string_lossy()
-        .into_owned()
+        .replace('\\', "/")
 }
 
 #[cfg(test)]

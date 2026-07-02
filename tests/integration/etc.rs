@@ -8,13 +8,16 @@
 use crate::common::{legion_cmd, run_fail, run_ok};
 
 /// Seed a watch.toml in the data dir pointing at `repos` (name, workdir).
+/// Backslashes are TOML escape syntax, so Windows paths interpolated raw
+/// into a basic string make the whole file unparseable -- normalize to
+/// forward slashes, which Windows path APIs accept.
 fn seed_watch_toml(data_dir: &std::path::Path, repos: &[(&str, &std::path::Path)]) {
     let mut toml = String::new();
     for (name, workdir) in repos {
         toml.push_str(&format!(
             "[[repos]]\nname = \"{}\"\nworkdir = \"{}\"\n\n",
             name,
-            workdir.display()
+            workdir.display().to_string().replace('\\', "/")
         ));
     }
     std::fs::write(data_dir.join("watch.toml"), toml).expect("seed watch.toml");
