@@ -46,6 +46,17 @@ hostname = "0.4"
 # on Windows.
 portable-pty = "0.9"
 
+# sym etc find-content (#707): the ripgrep engine crates, in-process. Exact
+# content search over watched repos with gitignore + binary handling -- a
+# direct disk scan, deliberately NOT an index (tokenized indexes destroy
+# punctuation-heavy literals and go stale on git operations).
+grep-regex = "0.1"
+grep-searcher = "0.1"
+
+# File inventory walk (#705): gitignore-aware recursive walk over watched
+# workdirs. The same crate powers the ripgrep engine used by find-content.
+ignore = "0.4"
+
 # libc pulls in only on unix for killpg in call_plugin_inner's timeout arm.
 # Must stay AFTER all platform-independent deps -- TOML tables consume
 # every key until the next header, so listing it mid-file would leak the

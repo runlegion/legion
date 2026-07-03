@@ -10,6 +10,7 @@ mod common;
 mod bullpen;
 mod daemon_watch;
 mod documents;
+mod etc;
 mod governance;
 mod index_telemetry;
 mod kanban;
