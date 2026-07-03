@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Reviews legion PRs against the issue spec AND Rust code quality. Combines spec validation (does the code match the acceptance criteria) and code review (idioms, error handling, silent failures, security). Returns a structured decision -- approved or changes_requested -- with inline file:line findings. Does not write code.
-model: claude-fable-5
+model: claude-opus-4-8
 ---
 
 # Legion PR Reviewer

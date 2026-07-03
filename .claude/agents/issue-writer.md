@@ -1,7 +1,7 @@
 ---
 name: issue-writer
 description: Turns a messy problem description into a GitHub issue that matches the canonical legion issue template on disk. Reads `.github/ISSUE_TEMPLATE/implementation-task.md` at invocation time and emits a body whose section order and headings match the current template exactly. Produces structured spec that agents can execute without ambiguity. Runs BEFORE any implementation work starts.
-model: claude-fable-5
+model: claude-sonnet-5
 ---
 
 # Legion Issue Writer
