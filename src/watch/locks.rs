@@ -38,16 +38,52 @@ pub fn release_pid_lock(lock_path: &Path) {
     let _ = std::fs::remove_file(lock_path);
 }
 
+/// Acquire the per-repo index lock, serializing `legion index` runs so an
+/// older run's stale live-paths walk snapshot cannot prune inventory rows a
+/// newer overlapping run just inserted (#722, PR #718 review).
+///
+/// Lock lives at `<data_dir>/locks/index-<repo>.lock` and holds the same
+/// idiom as [`acquire_pid_lock`]: a live holder errors loudly with its pid
+/// (`LegionError::IndexAlreadyRunning`); a dead holder (stale lock, process
+/// no longer alive) is reclaimed and overwritten. Returns a [`PidLockGuard`]
+/// that releases the lock on drop -- callers keep the guard bound for the
+/// duration of the indexing run so it covers the walk + upsert + prune
+/// sequence.
+pub fn acquire_index_lock(data_dir: &Path, repo: &str) -> Result<PidLockGuard> {
+    let lock_path = data_dir.join("locks").join(format!("index-{repo}.lock"));
+
+    if lock_path.exists() {
+        let contents = std::fs::read_to_string(&lock_path).unwrap_or_default();
+        if let Ok(pid) = contents.trim().parse::<u32>() {
+            if process_alive(pid) {
+                return Err(LegionError::IndexAlreadyRunning {
+                    repo: repo.to_string(),
+                    pid,
+                });
+            }
+            eprintln!("[legion index] removing stale lock (pid {pid}) for {repo}");
+        }
+    }
+
+    let pid = std::process::id();
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&lock_path, pid.to_string())?;
+    Ok(PidLockGuard(lock_path))
+}
+
 /// RAII guard that releases the PID lock file on drop.
 ///
 /// Holds the lock path and removes the file when dropped, ensuring the lock
 /// is always released even on panic or task abort.
+#[derive(Debug)]
 pub struct PidLockGuard(pub PathBuf);
 
 impl Drop for PidLockGuard {
     fn drop(&mut self) {
         release_pid_lock(&self.0);
-        eprintln!("[legion watch] released lock");
+        eprintln!("[legion] released lock: {}", self.0.display());
     }
 }
 
@@ -602,5 +638,69 @@ mod tests {
 
         // Should succeed because the process is not running
         acquire_pid_lock(&lock_path).expect("acquire lock over stale");
+    }
+
+    // -- acquire_index_lock (#722) --------------------------------------------
+
+    #[test]
+    fn index_lock_fresh_acquire_creates_dir_and_guard_releases_on_drop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock_path = dir.path().join("locks").join("index-myrepo.lock");
+        assert!(!lock_path.exists(), "precondition: no lock file yet");
+
+        let guard = acquire_index_lock(dir.path(), "myrepo").expect("fresh acquire must succeed");
+        assert!(lock_path.exists(), "acquire must create the lock file");
+
+        drop(guard);
+        assert!(!lock_path.exists(), "guard drop must release the lock file");
+    }
+
+    // Relies on our own PID reading as alive -- unix-only, per the cfg(unix)
+    // note on `session_lock_active_for_fresh_live_pid` above.
+    #[cfg(unix)]
+    #[test]
+    fn index_lock_errors_loudly_on_live_holder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock_path = dir.path().join("locks").join("index-myrepo.lock");
+        std::fs::create_dir_all(lock_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&lock_path, std::process::id().to_string()).expect("seed live lock");
+
+        let err = acquire_index_lock(dir.path(), "myrepo")
+            .expect_err("a live holder must refuse the second acquire");
+        // Pins the exact user-facing message the acceptance criteria require:
+        // "index already running for <repo>" with the holder pid.
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "index already running for myrepo (pid {})",
+                std::process::id()
+            ),
+        );
+        match err {
+            LegionError::IndexAlreadyRunning { repo, pid } => {
+                assert_eq!(repo, "myrepo");
+                assert_eq!(pid, std::process::id());
+            }
+            other => panic!("expected IndexAlreadyRunning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn index_lock_reclaims_stale_dead_pid_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock_path = dir.path().join("locks").join("index-myrepo.lock");
+        std::fs::create_dir_all(lock_path.parent().expect("parent")).expect("mkdir");
+        // A PID very unlikely to be running, matching `pid_lock_detects_stale_lock`.
+        std::fs::write(&lock_path, "999999999").expect("seed stale lock");
+
+        let guard = acquire_index_lock(dir.path(), "myrepo").expect("stale lock must be reclaimed");
+        let contents = std::fs::read_to_string(&lock_path).expect("read lock");
+        assert_eq!(
+            contents,
+            std::process::id().to_string(),
+            "reclaimed lock must now hold our own pid"
+        );
+        drop(guard);
+        assert!(!lock_path.exists());
     }
 }
