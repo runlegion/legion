@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Response, Sse};
@@ -200,7 +200,82 @@ pub fn router(state: ChannelState) -> Router {
         .route("/api/feed", get(api_feed))
         .route("/api/tasks", get(api_tasks))
         .route("/api/post", post(api_post))
+        .route("/api/documents", get(api_documents))
+        .route("/api/documents/{id}", get(api_document))
+        .route("/api/documents/{id}/status", post(api_document_set_status))
         .with_state(state)
+}
+
+/// Query parameters for GET /api/documents. All optional; omitting every
+/// field returns the hot (non-archived) document set. Field names are part
+/// of the public JSON contract and mirror the `legion document list` flags.
+#[derive(serde::Deserialize)]
+pub struct DocumentListQuery {
+    pub doc_type: Option<String>,
+    pub surface: Option<String>,
+    pub status: Option<String>,
+    pub owner: Option<String>,
+    /// None -> hot only; Some(true) -> archived only; Some(false) -> hot only.
+    pub archived: Option<bool>,
+}
+
+/// Body for POST /api/documents/{id}/status -- the dashboard Publish/Approve
+/// action. `{ "to": "published" }`.
+#[derive(serde::Deserialize)]
+pub struct SetStatusBody {
+    pub to: String,
+}
+
+/// GET /api/documents -- the navigator list. Filters by doc_type / surface
+/// (= repo) / status / owner, matching `legion document list`. Returns the
+/// full Document rows (including payload) so the client can render without a
+/// second round-trip per row.
+pub async fn api_documents(
+    State(state): State<ChannelState>,
+    Query(q): Query<DocumentListQuery>,
+) -> Result<Json<Vec<crate::documents::Document>>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    let filter = crate::documents::DocumentFilter {
+        doc_type: q.doc_type.as_deref(),
+        surface: q.surface.as_deref(),
+        status: q.status.as_deref(),
+        owner: q.owner.as_deref(),
+        archived: q.archived,
+    };
+    Ok(Json(db.list_documents(&filter)?))
+}
+
+/// GET /api/documents/{id} -- one document for the render pane. 404 when the
+/// id does not resolve, rather than the generic 500 a missing row would take
+/// through the blanket LegionError conversion.
+pub async fn api_document(
+    State(state): State<ChannelState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::documents::Document>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    let doc = db
+        .get_document(&id)?
+        .ok_or_else(|| ServeError::NotFound(format!("document '{id}' not found")))?;
+    Ok(Json(doc))
+}
+
+/// POST /api/documents/{id}/status -- flip a document's lifecycle status
+/// (the Publish/Approve button). Returns the updated document. The localhost
+/// operator is the human gate; there is no status-machine enforcement, mirroring
+/// the `legion document set-status` verb this wraps.
+pub async fn api_document_set_status(
+    State(state): State<ChannelState>,
+    Path(id): Path<String>,
+    Json(body): Json<SetStatusBody>,
+) -> Result<Json<crate::documents::Document>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    // Return 404 for a missing doc, consistent with the GET handler, rather
+    // than the 500 the blanket LegionError conversion would give the
+    // set_document_status not-found error.
+    if db.get_document(&id)?.is_none() {
+        return Err(ServeError::NotFound(format!("document '{id}' not found")));
+    }
+    Ok(Json(db.set_document_status(&id, &body.to)?))
 }
 
 /// Pure builder for the `/health` JSON body. Separated from the axum
@@ -900,6 +975,101 @@ mod tests {
             obj.len(),
             1,
             "api_post body is exactly {{\"id\"}}, got: {parsed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn document_endpoints_publish_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let meta = crate::documents::DocumentMeta {
+            id: Some("FR-SERVE-1"),
+            doc_type: "requirement",
+            surface: Some("legion"),
+            status: Some("draft"),
+            priority: None,
+            owner: "legion",
+        };
+        db.insert_document(&meta, "{}").expect("insert");
+        drop(db);
+
+        let (tx, _rx) = new_broadcast();
+        let state = ChannelState {
+            data_dir: data_dir.clone(),
+            tx,
+            started_at: chrono::Utc::now(),
+            role: ServerRole::Daemon,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.expect("serve");
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Raw HTTP/1.1 request helper -> (status_line, body).
+        async fn req(port: u16, method: &str, path: &str, body: Option<&str>) -> (String, String) {
+            let (method, path) = (method.to_string(), path.to_string());
+            let body = body.map(str::to_string);
+            tokio::task::spawn_blocking(move || {
+                use std::io::{Read, Write};
+                use std::net::TcpStream;
+                let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+                let payload = body.unwrap_or_default();
+                let head = format!(
+                    "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                stream.write_all(head.as_bytes()).expect("write head");
+                stream.write_all(payload.as_bytes()).expect("write body");
+                let mut buf = Vec::new();
+                stream.read_to_end(&mut buf).expect("read");
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let status = text.lines().next().unwrap_or("").to_string();
+                let body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
+                (status, body)
+            })
+            .await
+            .expect("spawn_blocking")
+        }
+
+        // Publish flips draft -> published and echoes the updated row.
+        let (status, body) = req(
+            port,
+            "POST",
+            "/api/documents/FR-SERVE-1/status",
+            Some(r#"{"to":"published"}"#),
+        )
+        .await;
+        assert!(status.starts_with("HTTP/1.1 200"), "publish: {status}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse publish body");
+        assert_eq!(parsed["status"], "published");
+
+        // The flip persisted -- a fresh GET sees published.
+        let (status, body) = req(port, "GET", "/api/documents/FR-SERVE-1", None).await;
+        assert!(status.starts_with("HTTP/1.1 200"), "view: {status}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse view body");
+        assert_eq!(parsed["status"], "published");
+
+        // Missing id is a 404 on both read and mutate, not a 500.
+        let (view_missing, _) = req(port, "GET", "/api/documents/NOPE", None).await;
+        assert!(
+            view_missing.starts_with("HTTP/1.1 404"),
+            "view-missing: {view_missing}"
+        );
+        let (post_missing, _) = req(
+            port,
+            "POST",
+            "/api/documents/NOPE/status",
+            Some(r#"{"to":"published"}"#),
+        )
+        .await;
+        assert!(
+            post_missing.starts_with("HTTP/1.1 404"),
+            "post-missing: {post_missing}"
         );
     }
 
