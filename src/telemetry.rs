@@ -67,16 +67,80 @@ fn bypass_log_dir() -> PathBuf {
 /// filesystems because each record is a single short JSON line followed by a
 /// newline; concurrent writers will not interleave bytes.
 pub fn append_bypass(record: &BypassRecord) -> Result<()> {
-    append_bypass_to(&bypass_log_path(), record)
+    append_jsonl(&bypass_log_path(), record)
 }
 
-/// Test-friendly variant: write to an explicit path instead of the resolved
-/// XDG location.
-fn append_bypass_to(path: &std::path::Path, record: &BypassRecord) -> Result<()> {
+/// One row in `etc-usage.jsonl` (#707): a sanctioned `sym etc` / `sym tree`
+/// query. The counterpart of `BypassRecord` -- bypass volume says where the
+/// index fails agents; usage rows and their zero-result rate say whether the
+/// sanctioned surface actually answers (#704's primary success metric).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EtcUsageRecord {
+    pub ts: DateTime<Utc>,
+    /// Query shape, e.g. "find-content", "tree", "extract".
+    pub command: String,
+    /// Repo filter; `None` means cross-repo.
+    pub repo: Option<String>,
+    pub pattern: String,
+    pub fixed_strings: bool,
+    pub hit_count: u64,
+    pub skipped_files: u64,
+    /// Error text when the invocation failed before or during the scan
+    /// (invalid regex, unknown repo, empty or unscannable corpus). `None` on
+    /// success. Lets the #704 metric separate "tool answered zero" from
+    /// "tool failed to answer"; defaulted so pre-#719 rows still parse.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Watched repos whose workdir could not be walked at all. Nonzero with
+    /// `error: None` means a partial corpus: the scan succeeded but covered
+    /// fewer repos than the scope claimed. Without this, a zero-hit row over
+    /// a half-dead corpus reads as "tool answered zero" in the #704 metric
+    /// when part of the corpus was never searched. Defaulted so earlier
+    /// rows still parse.
+    #[serde(default)]
+    pub failed_repos: u64,
+}
+
+/// Resolve the canonical etc-usage log path (sibling of `bypass.jsonl`).
+pub fn etc_usage_log_path() -> PathBuf {
+    bypass_log_dir().join("etc-usage.jsonl")
+}
+
+/// Append one usage record. Best-effort at the call site: a telemetry write
+/// failure must never fail the query that produced it.
+pub fn append_etc_usage(record: &EtcUsageRecord) -> Result<()> {
+    append_jsonl(&etc_usage_log_path(), record)
+}
+
+/// Append one serializable record as a single JSONL line, creating parent
+/// dirs and the file on first use.
+///
+/// The file is 0600 on unix: these logs persist raw search patterns and
+/// query text, which can be secret-shaped (an agent grepping for a token
+/// writes the token here). Shell history and Claude transcripts -- the
+/// other places such strings land -- are 600/700; this must not be the
+/// least-protected copy. The mode is set at open time, not chmodded after
+/// create: a create-then-chmod leaves a window where the umask-default
+/// file is world-readable, and a reader who opened an fd in that window
+/// keeps it past the chmod. The follow-up `set_permissions` repairs files
+/// created by earlier builds with default permissions.
+fn append_jsonl<T: Serialize>(path: &std::path::Path, record: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
     let line = serde_json::to_string(record)?;
     file.write_all(line.as_bytes())?;
     file.write_all(b"\n")?;
@@ -244,17 +308,74 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("nested/bypass.jsonl");
         let rec = sample("legion", Utc::now());
-        append_bypass_to(&path, &rec).unwrap();
+        append_jsonl(&path, &rec).unwrap();
         let rows = list_bypasses_from(&path, None, None).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0], rec);
     }
 
     #[test]
+    fn etc_usage_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("etc-usage.jsonl");
+        let rec = EtcUsageRecord {
+            ts: Utc::now(),
+            command: "find-content".to_string(),
+            repo: Some("legion".to_string()),
+            pattern: "<<<<<<<".to_string(),
+            fixed_strings: true,
+            hit_count: 3,
+            skipped_files: 1,
+            error: None,
+            failed_repos: 1,
+        };
+        append_jsonl(&path, &rec).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: EtcUsageRecord = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(parsed, rec);
+    }
+
+    /// Pre-#719 rows have no `error` key; the serde default must keep them
+    /// parseable, and an error row must round-trip its text.
+    #[test]
+    fn etc_usage_error_field_defaults_and_round_trips() {
+        let legacy = r#"{"ts":"2026-07-02T01:01:32Z","command":"find-content","repo":null,"pattern":"x","fixed_strings":false,"hit_count":0,"skipped_files":0}"#;
+        let parsed: EtcUsageRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.error, None);
+        assert_eq!(parsed.failed_repos, 0);
+
+        let rec = EtcUsageRecord {
+            ts: Utc::now(),
+            command: "find-content".to_string(),
+            repo: None,
+            pattern: "(unclosed".to_string(),
+            fixed_strings: false,
+            hit_count: 0,
+            skipped_files: 0,
+            error: Some("invalid regex '(unclosed': ...".to_string()),
+            failed_repos: 0,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: EtcUsageRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rec);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_tightens_file_permissions_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bypass.jsonl");
+        append_jsonl(&path, &sample("legion", Utc::now())).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "telemetry logs persist raw patterns");
+    }
+
+    #[test]
     fn append_creates_parent_dirs() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("a/b/c/bypass.jsonl");
-        append_bypass_to(&path, &sample("legion", Utc::now())).unwrap();
+        append_jsonl(&path, &sample("legion", Utc::now())).unwrap();
         assert!(path.exists());
     }
 
@@ -262,8 +383,8 @@ mod tests {
     fn list_filters_by_repo() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("bypass.jsonl");
-        append_bypass_to(&path, &sample("legion", Utc::now())).unwrap();
-        append_bypass_to(&path, &sample("smugglr", Utc::now())).unwrap();
+        append_jsonl(&path, &sample("legion", Utc::now())).unwrap();
+        append_jsonl(&path, &sample("smugglr", Utc::now())).unwrap();
         let rows = list_bypasses_from(&path, None, Some("legion")).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].repo, "legion");
@@ -275,10 +396,10 @@ mod tests {
         let path = tmp.path().join("bypass.jsonl");
         let now = Utc::now();
         // 4 rows: 2 legion (one stale, one fresh), 2 smugglr (one stale, one fresh).
-        append_bypass_to(&path, &sample("legion", now - Duration::hours(48))).unwrap();
-        append_bypass_to(&path, &sample("legion", now - Duration::minutes(5))).unwrap();
-        append_bypass_to(&path, &sample("smugglr", now - Duration::hours(48))).unwrap();
-        append_bypass_to(&path, &sample("smugglr", now - Duration::minutes(5))).unwrap();
+        append_jsonl(&path, &sample("legion", now - Duration::hours(48))).unwrap();
+        append_jsonl(&path, &sample("legion", now - Duration::minutes(5))).unwrap();
+        append_jsonl(&path, &sample("smugglr", now - Duration::hours(48))).unwrap();
+        append_jsonl(&path, &sample("smugglr", now - Duration::minutes(5))).unwrap();
         let rows = list_bypasses_from(&path, Some(Duration::hours(24)), Some("legion")).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].repo, "legion");
@@ -290,8 +411,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("bypass.jsonl");
         let now = Utc::now();
-        append_bypass_to(&path, &sample("legion", now - Duration::hours(48))).unwrap();
-        append_bypass_to(&path, &sample("legion", now - Duration::minutes(5))).unwrap();
+        append_jsonl(&path, &sample("legion", now - Duration::hours(48))).unwrap();
+        append_jsonl(&path, &sample("legion", now - Duration::minutes(5))).unwrap();
         let rows = list_bypasses_from(&path, Some(Duration::hours(24)), None).unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].ts > now - Duration::hours(24));

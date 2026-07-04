@@ -8,6 +8,7 @@ mod db;
 mod documents;
 mod embed;
 mod error;
+mod etc;
 mod gate_trust;
 mod health;
 mod init;

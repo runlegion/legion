@@ -7,7 +7,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{open_db, open_db_and_index};
-use crate::{db, error, inventory, scip, sym, watch};
+use crate::{db, error, etc, inventory, scip, sym, telemetry, watch};
 
 #[derive(Subcommand)]
 pub(crate) enum SymAction {
@@ -77,6 +77,14 @@ pub(crate) enum SymAction {
         json: bool,
     },
 
+    /// Non-symbol answer surface (#704): query shapes over the files SCIP
+    /// does not parse (docs, configs, css, prose). `sym` answers symbol
+    /// questions; `sym etc` answers everything else.
+    Etc {
+        #[command(subcommand)]
+        shape: EtcShape,
+    },
+
     /// Enumerate the definitions in the index -- the "what functions/enums/etc.
     /// are defined here" query. Byte-cheap: names + locations, never source
     /// bodies. This is the shape `grep "fn "` was serving; use it instead.
@@ -95,6 +103,39 @@ pub(crate) enum SymAction {
         #[arg(long)]
         file: Option<String>,
         /// Emit results as a JSON array of SymbolEntry objects
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum EtcShape {
+    /// Exact, line-accurate content search over watched repos -- the
+    /// sanctioned grep (#707). Direct disk scan: always fresh, true grep
+    /// parity including regex and punctuation-heavy literals.
+    FindContent {
+        /// Pattern to search: a regex by default, a literal with --fixed-strings.
+        /// Hyphen-leading patterns (`--spacing-0.5`) are accepted as values,
+        /// not parsed as flags -- they are a headline query shape (#707).
+        #[arg(allow_hyphen_values = true)]
+        pattern: String,
+        /// Restrict to a single repo (default: every repo in watch.toml)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Restrict to files with this extension (without the dot)
+        #[arg(long)]
+        ext: Option<String>,
+        /// Treat the pattern as a literal string, not a regex
+        #[arg(long)]
+        fixed_strings: bool,
+        /// Search hidden files and directories (.github/, .claude/, dotfiles).
+        /// `.git/` stays excluded. Mirrors ripgrep's --hidden. NOTE: gitignore
+        /// is the only guard here -- a secret-bearing dotfile that is not
+        /// gitignored (e.g. an un-ignored .env) WILL be searched and its
+        /// matching lines printed.
+        #[arg(long)]
+        hidden: bool,
+        /// Emit results as a JSON array of ContentHit objects
         #[arg(long)]
         json: bool,
     },
@@ -146,7 +187,166 @@ fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<(
             file,
             json,
         } => run_sym_list(database, repo, lang, kind, file, json),
+        SymAction::Etc { shape } => run_sym_etc(shape),
     }
+}
+
+/// Dispatch `legion sym etc <shape>`. Unlike the symbol queries these do not
+/// read the SCIP store -- find-content scans watched workdirs directly.
+fn run_sym_etc(shape: EtcShape) -> error::Result<()> {
+    match shape {
+        EtcShape::FindContent {
+            pattern,
+            repo,
+            ext,
+            fixed_strings,
+            hidden,
+            json,
+        } => run_etc_find_content(&pattern, repo, ext, fixed_strings, hidden, json),
+    }
+}
+
+/// `sym etc find-content` (#707): exact content search over watch.toml
+/// workdirs via the in-process ripgrep engine. Prints `path:line: text`
+/// (repo-prefixed when scanning cross-repo) or a JSON hit array; suppressed,
+/// skipped, and binary counts go to stderr so truncation is never silent,
+/// and a repo whose workdir cannot be walked is named. Telemetry records one
+/// row per invocation -- error exits (empty corpus, unknown repo, invalid
+/// regex, unscannable corpus) carry the error text so the epic's metric can
+/// separate "tool answered zero" from "tool failed to answer" (#704).
+fn run_etc_find_content(
+    pattern: &str,
+    repo: Option<String>,
+    ext: Option<String>,
+    fixed_strings: bool,
+    hidden: bool,
+    json: bool,
+) -> error::Result<()> {
+    let scan = scan_etc_content(
+        pattern,
+        repo.as_deref(),
+        ext.as_deref(),
+        fixed_strings,
+        hidden,
+    );
+
+    let usage = telemetry::EtcUsageRecord {
+        ts: chrono::Utc::now(),
+        command: "find-content".to_string(),
+        repo: repo.clone(),
+        pattern: pattern.to_string(),
+        fixed_strings,
+        hit_count: scan.as_ref().map_or(0, |(r, _)| r.hits.len() as u64),
+        skipped_files: scan.as_ref().map_or(0, |(r, _)| r.skipped_files),
+        error: scan.as_ref().err().map(|e| e.to_string()),
+        failed_repos: scan
+            .as_ref()
+            .map_or(0, |(r, _)| r.failed_repos.len() as u64),
+    };
+    if let Err(e) = telemetry::append_etc_usage(&usage) {
+        eprintln!("[legion] etc usage telemetry write failed: {e}");
+    }
+
+    let (result, repo_count) = scan?;
+    if json {
+        println!("{}", serde_json::to_string(&result.hits)?);
+    } else {
+        let cross_repo = repo.is_none() && repo_count > 1;
+        for hit in &result.hits {
+            if cross_repo {
+                println!("{}/{}:{}: {}", hit.repo, hit.path, hit.line, hit.text);
+            } else {
+                println!("{}:{}: {}", hit.path, hit.line, hit.text);
+            }
+        }
+    }
+    for (name, err) in &result.failed_repos {
+        eprintln!("[legion] repo '{name}' could not be scanned: {err}");
+    }
+    if result.suppressed > 0 {
+        eprintln!(
+            "[legion] {} more matches suppressed (cap {}); narrow with --repo/--ext or a tighter pattern",
+            result.suppressed,
+            etc::MAX_HITS
+        );
+    }
+    if result.skipped_files > 0 {
+        eprintln!(
+            "[legion] {} files skipped (unreadable or larger than {} bytes)",
+            result.skipped_files,
+            etc::MAX_FILE_SIZE
+        );
+    }
+    if result.binary_skipped > 0 {
+        eprintln!(
+            "[legion] {} binary files skipped (NUL byte found)",
+            result.binary_skipped
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the scan scope from watch.toml and run the search. Split from
+/// `run_etc_find_content` so every exit -- including the loud errors below --
+/// funnels through the caller's telemetry write. Returns the result plus the
+/// number of repos scanned (for cross-repo output prefixing).
+fn scan_etc_content(
+    pattern: &str,
+    repo: Option<&str>,
+    ext: Option<&str>,
+    fixed_strings: bool,
+    hidden: bool,
+) -> error::Result<(etc::FindContentResult, usize)> {
+    let base = data_dir()?;
+    let watch_path = base.join("watch.toml");
+    let all = watch::list_repos_in_config(&watch_path)?;
+    // An empty corpus must be loud: zero hits over zero repos is
+    // indistinguishable from "the pattern is not in your code".
+    if all.is_empty() {
+        return Err(error::LegionError::WatchConfig(
+            "no repos in watch.toml -- nothing to search. Add one with `legion watch add <name> <path>`."
+                .to_string(),
+        ));
+    }
+    let repos: Vec<(String, PathBuf)> = match repo {
+        Some(name) => {
+            let entry = all.iter().find(|r| r.name == name).ok_or_else(|| {
+                error::LegionError::WatchConfig(format!(
+                    "repo '{name}' not in watch.toml. Add it with `legion watch add {name} <path>`."
+                ))
+            })?;
+            vec![(entry.name.clone(), PathBuf::from(&entry.workdir))]
+        }
+        None => all
+            .iter()
+            .map(|r| (r.name.clone(), PathBuf::from(&r.workdir)))
+            .collect(),
+    };
+
+    let scope = etc::ContentScope {
+        repos: &repos,
+        ext,
+        fixed_strings,
+        include_hidden: hidden,
+        max_file_size: etc::MAX_FILE_SIZE,
+        max_hits: etc::MAX_HITS,
+    };
+    let repo_count = repos.len();
+    let result = etc::find_content(pattern, &scope)?;
+    // Every scoped repo failing to walk is the empty-corpus case in
+    // disguise: zero hits that mean "nothing was searched", not "no match".
+    if result.failed_repos.len() == repo_count {
+        let detail: Vec<String> = result
+            .failed_repos
+            .iter()
+            .map(|(name, err)| format!("{name}: {err}"))
+            .collect();
+        return Err(error::LegionError::Search(format!(
+            "no repo could be scanned -- {}. Fix the workdir(s) or `legion watch remove` stale entries.",
+            detail.join("; ")
+        )));
+    }
+    Ok((result, repo_count))
 }
 
 /// Enumerate definitions across the matching SCIP indexes (#558). Validates
@@ -588,7 +788,7 @@ fn run_index_status_banner(base: &std::path::Path, repo: Option<&str>) -> error:
             return Ok(());
         }
     };
-    let repo_path = std::path::PathBuf::from(&entry.workdir);
+    let repo_path = PathBuf::from(&entry.workdir);
     let detected = scip::detect_languages(&repo_path);
 
     let database = match db::Database::open(&base.join("legion.db")) {
@@ -944,7 +1144,7 @@ pub(crate) fn handle_index(
             ));
         }
     };
-    let repo_path = std::path::PathBuf::from(&entry.workdir);
+    let repo_path = PathBuf::from(&entry.workdir);
 
     // A missing workdir must fail BEFORE the walk: walk_repo on a vanished
     // root returns an empty entry set, and pruning against it would delete
