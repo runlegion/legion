@@ -1,38 +1,14 @@
 # CLAUDE.md
 
-Legion is a local Rust binary that stores and retrieves agent reflections. It is the memory layer for Claude Code agents working on specific codebases.
+Legion is a local Rust binary that stores and retrieves agent reflections -- the memory
+layer for Claude Code agents working on specific codebases.
 
-## Technical invariants (this repo)
+This file is deliberately minimal. Rules restated in a file drift from the rules in use;
+the canon lives in legion memory, which is versioned by reflection and served at boot.
 
-- No emoji in code, comments, or documentation
-- No `unwrap()` in production code
-- No `unsafe` code
-- All types explicit
-- Errors use `thiserror` derive macros
-- UUIDv7 for all IDs
-- `cargo clippy -- -D warnings` must pass
-- `cargo fmt -- --check` must pass
-
-## Dev workflow (mandatory)
-
-1. **Plan** -- propose approach, get Sean's confirmation before coding.
-2. **Issue** -- `legion issue create --repo legion --title '...' --body '...'`.
-3. **Build** -- branch `feat/<issue#>-<short-desc>`. Tests alongside code. `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` all pass.
-4. **Simplify** -- run `/legion-simplify` on the branch. Records its result via `legion quality-gate record`.
-5. **PR** -- `legion pr create`. Must reference the issue. `legion pr create` requires a clean simplify gate on HEAD.
-6. **Automated review** -- `/review-pr` launches parallel review agents.
-7. **Fix** -- address every finding. Re-run tests after fixes.
-8. **Team review** -- request reviews via `legion pr review`:
-   - **vault** validates work against the issue spec and acceptance criteria
-   - **smugglr** reviews Rust patterns, idioms, correctness
-9. **Consensus** -- for big changes, post to the bullpen and get team input before merging.
-10. **Ask for merge** -- never merge to main without explicit user approval.
-
-## Reach for these when you need more
-
-- `legion --help` for the full command surface (CLI reference).
-- `docs/site/architecture.md` for schema, sync model, indexing.
-- `docs/plans/` for in-flight design documents.
-- `legion recall --repo legion --context "..."` for accumulated decisions and lessons.
-
-Identity, voice, doctrine, and universal rules live in your identity reflection -- they surface automatically at session start via the SessionStart whoami banner. This file holds only repo-specific technical invariants and the workflow.
+- Who you are: `legion whoami --repo legion` (injected at session start)
+- How you operate -- invariants, workflow, model policy: `legion whatami --repo legion`
+  (domain=workflow; if the boot banner shows a truncation line, run this before assuming
+  you know your own rules)
+- Decisions and history: `legion recall --repo legion --context "..."`
+- Command surface: `legion --help`

@@ -1146,6 +1146,13 @@ pub(crate) fn handle_index(
     };
     let repo_path = PathBuf::from(&entry.workdir);
 
+    // Serialize concurrent index runs on this repo: an older run's stale
+    // live-paths walk snapshot must not prune inventory rows a newer
+    // overlapping run just inserted (#722, PR #718 review). Held across
+    // the rest of this function -- walk, upsert, prune, and the SCIP
+    // indexing loop -- and released when `_index_lock` drops at return.
+    let _index_lock = watch::acquire_index_lock(&base, &repo)?;
+
     // A missing workdir must fail BEFORE the walk: walk_repo on a vanished
     // root returns an empty entry set, and pruning against it would delete
     // every inventory row for the repo -- a transient mount failure (watched
