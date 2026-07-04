@@ -1221,40 +1221,27 @@ fn quality_gate_stats_filter_by_skill() {
 /// Set up a minimal git repo with a `main` branch (one seed commit) and a
 /// feature branch with one changed file (`src/foo.rs`). Returns the repo dir.
 ///
-/// The repo uses a dummy user identity so CI environments without a global
-/// git config do not fail the commit step.
+/// Every git invocation runs via `run_git_fixture`: explicit tempdir
+/// `current_dir` plus per-invocation `-c user.name`/`-c user.email`/`-c
+/// commit.gpgsign=false` -- never a `git config` write -- so the fixture
+/// cannot poison the enclosing real checkout's config (#723).
 fn setup_git_repo_with_feature_branch() -> tempfile::TempDir {
     let repo = tempfile::tempdir().unwrap();
     let rp = repo.path();
 
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(rp)
-            .output()
-            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
-        assert!(
-            out.status.success(),
-            "git {args:?} exited non-zero\nstderr: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
-
-    git(&["init", "-b", "main"]);
-    git(&["config", "user.email", "test@example.com"]);
-    git(&["config", "user.name", "Test"]);
+    run_git_fixture(rp, &["init", "-b", "main"]);
 
     // Seed commit on main so `main` resolves as a real ref.
     std::fs::write(rp.join("README.md"), "seed\n").unwrap();
-    git(&["add", "README.md"]);
-    git(&["commit", "-m", "seed"]);
+    run_git_fixture(rp, &["add", "README.md"]);
+    run_git_fixture(rp, &["commit", "-m", "seed"]);
 
     // Feature branch: add one changed file.
-    git(&["checkout", "-b", "feat/test"]);
+    run_git_fixture(rp, &["checkout", "-b", "feat/test"]);
     std::fs::create_dir_all(rp.join("src")).unwrap();
     std::fs::write(rp.join("src/foo.rs"), "// changed\n").unwrap();
-    git(&["add", "src/foo.rs"]);
-    git(&["commit", "-m", "add foo"]);
+    run_git_fixture(rp, &["add", "src/foo.rs"]);
+    run_git_fixture(rp, &["commit", "-m", "add foo"]);
 
     repo
 }
@@ -1276,6 +1263,7 @@ fn good_articulation_for_foo() -> String {
 #[cfg(unix)]
 #[test]
 fn quality_gate_check_passing_articulation_records_gate_row() {
+    let _config_guard = RealRepoConfigGuard::new();
     let repo = setup_git_repo_with_feature_branch();
     let data_dir = tempfile::tempdir().unwrap();
     let artic_file = tempfile::NamedTempFile::new().unwrap();
@@ -1320,6 +1308,7 @@ fn quality_gate_check_passing_articulation_records_gate_row() {
 #[cfg(unix)]
 #[test]
 fn quality_gate_check_failing_articulation_exits_nonzero_and_records_no_row() {
+    let _config_guard = RealRepoConfigGuard::new();
     let repo = setup_git_repo_with_feature_branch();
     let data_dir = tempfile::tempdir().unwrap();
     // Articulation is empty -- no entries at all, so src/foo.rs is uncovered.
@@ -1409,34 +1398,20 @@ fn quality_gate_check_outside_git_repo_exits_nonzero() {
 #[cfg(unix)]
 #[test]
 fn quality_gate_check_no_base_ref_with_parent_commit_exits_nonzero() {
+    let _config_guard = RealRepoConfigGuard::new();
     let repo = tempfile::tempdir().unwrap();
     let rp = repo.path();
-
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(rp)
-            .output()
-            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
-        assert!(
-            out.status.success(),
-            "git {args:?} exited non-zero\nstderr: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
 
     // Use a non-standard default branch name so neither `main` nor
     // `origin/main` is present. The repo has two commits (seed + feature),
     // so HEAD does have a parent.
-    git(&["init", "-b", "trunk"]);
-    git(&["config", "user.email", "test@example.com"]);
-    git(&["config", "user.name", "Test"]);
+    run_git_fixture(rp, &["init", "-b", "trunk"]);
     std::fs::write(rp.join("README.md"), "seed\n").unwrap();
-    git(&["add", "README.md"]);
-    git(&["commit", "-m", "seed"]);
+    run_git_fixture(rp, &["add", "README.md"]);
+    run_git_fixture(rp, &["commit", "-m", "seed"]);
     std::fs::write(rp.join("change.rs"), "// changed\n").unwrap();
-    git(&["add", "change.rs"]);
-    git(&["commit", "-m", "feature"]);
+    run_git_fixture(rp, &["add", "change.rs"]);
+    run_git_fixture(rp, &["commit", "-m", "feature"]);
 
     let data_dir = tempfile::tempdir().unwrap();
     let artic_file = tempfile::NamedTempFile::new().unwrap();
@@ -1479,39 +1454,25 @@ fn quality_gate_check_no_base_ref_with_parent_commit_exits_nonzero() {
 #[cfg(unix)]
 #[test]
 fn quality_gate_check_non_ascii_path_roundtrips_correctly() {
+    let _config_guard = RealRepoConfigGuard::new();
     let repo = tempfile::tempdir().unwrap();
     let rp = repo.path();
 
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(rp)
-            .output()
-            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
-        assert!(
-            out.status.success(),
-            "git {args:?} exited non-zero\nstderr: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
-
-    git(&["init", "-b", "main"]);
-    git(&["config", "user.email", "test@example.com"]);
-    git(&["config", "user.name", "Test"]);
+    run_git_fixture(rp, &["init", "-b", "main"]);
     // Seed commit on main.
     std::fs::write(rp.join("README.md"), "seed\n").unwrap();
-    git(&["add", "README.md"]);
-    git(&["commit", "-m", "seed"]);
+    run_git_fixture(rp, &["add", "README.md"]);
+    run_git_fixture(rp, &["commit", "-m", "seed"]);
 
     // Feature branch: add a file with a non-ASCII name.
-    git(&["checkout", "-b", "feat/nonascii"]);
+    run_git_fixture(rp, &["checkout", "-b", "feat/nonascii"]);
     std::fs::create_dir_all(rp.join("src")).unwrap();
     // Use a UTF-8 filename. The file system must support this; macOS and
     // Linux UTF-8 locales both do.
     let nonascii_name = "src/cafe\u{0301}.rs"; // NFC: src/café.rs (combining acute)
     std::fs::write(rp.join(nonascii_name), "// non-ascii\n").unwrap();
-    git(&["add", nonascii_name]);
-    git(&["commit", "-m", "add non-ascii file"]);
+    run_git_fixture(rp, &["add", nonascii_name]);
+    run_git_fixture(rp, &["commit", "-m", "add non-ascii file"]);
 
     // Ask git what name it reports (with core.quotePath=false).
     let diff_out = Command::new("git")
