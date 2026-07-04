@@ -488,3 +488,84 @@ fn index_unreadable_workdir_skips_prune_instead_of_wiping_inventory() {
         "expected exactly one stale row pruned after the recovery run, got: {stderr}"
     );
 }
+
+/// #722: overlapping `legion index` runs on one repo must not interleave
+/// walk/upsert/prune. A second run finding the per-repo index lock held by
+/// a live process fails loudly, naming the repo and the holder pid, instead
+/// of racing the first run's stale live-paths snapshot against the prune.
+///
+/// Relies on `process_alive` treating our own pid as alive, which is
+/// unix-only (see the cfg(unix) note in src/watch/locks.rs); the lock still
+/// exists cross-platform, only this liveness-dependent assertion is gated.
+#[cfg(unix)]
+#[test]
+fn index_second_run_errors_loudly_with_holder_pid() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("README.md"), "# docs only\n").unwrap();
+
+    std::fs::write(
+        dir.path().join("watch.toml"),
+        format!(
+            // Forward slashes: see index_docs_only_repo_succeeds_and_inventories.
+            "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"lockedrepo\"\nworkdir = \"{}\"\n",
+            repo.path().display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    // Simulate a still-running index by planting the lock file with our own
+    // (live) pid -- same idiom the src/watch/locks.rs unit tests use.
+    let lock_path = dir.path().join("locks").join("index-lockedrepo.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    std::fs::write(&lock_path, std::process::id().to_string()).unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args(["index", "lockedrepo"]));
+    assert!(
+        stderr.contains("index already running for lockedrepo"),
+        "expected the already-running refusal naming the repo, got: {stderr}"
+    );
+    assert!(
+        stderr.contains(&std::process::id().to_string()),
+        "expected the holder pid in the error, got: {stderr}"
+    );
+
+    // The lock file must be untouched by the failed second run -- the first
+    // run's (simulated) hold is still the only writer.
+    let contents = std::fs::read_to_string(&lock_path).unwrap();
+    assert_eq!(contents, std::process::id().to_string());
+}
+
+/// #722: a lock file left behind by a crashed prior run (dead pid) must be
+/// reclaimed rather than permanently wedging every future index run on that
+/// repo.
+#[test]
+fn index_stale_lock_is_reclaimed_and_run_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("README.md"), "# docs only\n").unwrap();
+
+    std::fs::write(
+        dir.path().join("watch.toml"),
+        format!(
+            "poll_interval_secs = 30\ncooldown_secs = 300\n\n[[repos]]\nname = \"stalerepo\"\nworkdir = \"{}\"\n",
+            repo.path().display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    let lock_path = dir.path().join("locks").join("index-stalerepo.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    std::fs::write(&lock_path, "999999999").unwrap();
+
+    let stderr = run_ok_stderr(legion_cmd(dir.path()).args(["index", "stalerepo"]));
+    assert!(
+        stderr.contains("inventoried 1 files for stalerepo"),
+        "expected the stale lock to be reclaimed and indexing to proceed, got: {stderr}"
+    );
+    // Lock is released again once the (successful, non-overlapping) run ends.
+    assert!(
+        !lock_path.exists(),
+        "lock must be released when the run completes"
+    );
+}
