@@ -20,11 +20,11 @@ Legion is a local Rust binary that stores and retrieves agent reflections. It is
 3. **Build** -- branch `feat/<issue#>-<short-desc>`. Tests alongside code. `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` all pass.
 4. **Simplify** -- run `/legion-simplify` on the branch. Records its result via `legion quality-gate record`.
 5. **PR** -- `legion pr create`. Must reference the issue. `legion pr create` requires a clean simplify gate on HEAD.
-6. **Automated review** -- `/review-pr` launches parallel review agents.
-7. **Fix** -- address every finding. Re-run tests after fixes.
-8. **Team review** -- request reviews via `legion pr review`:
-   - **vault** validates work against the issue spec and acceptance criteria
-   - **smugglr** reviews Rust patterns, idioms, correctness
+6. **Review** -- run `/legion-review` on the PR: fans out review dimensions, adversarially
+   verifies findings, records the gate. This replaces team review -- do not request
+   vault/smugglr reviews.
+7. **Fix** -- address every finding. Re-run tests after fixes; re-record gates on the new HEAD.
+8. **Verify** -- run `/legion-verify` against the card's acceptance criteria before Done.
 9. **Consensus** -- for big changes, post to the bullpen and get team input before merging.
 10. **Ask for merge** -- never merge to main without explicit user approval.
 
