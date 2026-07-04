@@ -50,7 +50,10 @@ run_claude_review() {
     local watchdog_pid=$!
     wait "$claude_pid" 2>/dev/null
     local status=$?
-    kill "$watchdog_pid" 2>/dev/null
+    # The watchdog is itself a process-group leader under `set -m`; kill its
+    # group (not just its own pid) so a still-sleeping timer does not linger
+    # as an orphan on the fast path where claude finishes before timing out.
+    kill -- -"$watchdog_pid" 2>/dev/null
     wait "$watchdog_pid" 2>/dev/null
     exit "$status"
   )
