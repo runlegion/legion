@@ -1,6 +1,48 @@
 #!/bin/bash
 # Pre-push: run full PR review on branch changes via Claude Code.
 # Catches bugs, silent failures, and test gaps before code reaches remote.
+# Skipped silently if Claude Code is unavailable, disabled, or does not
+# answer within CLAUDE_REVIEW_TIMEOUT_SECS.
+
+# Bounds the nested `claude -p` review so a wedged or slow child can never
+# hang the push. Stock macOS ships bash without GNU coreutils' `timeout`, so
+# this uses the background-process + watchdog pattern: `set -m` puts the
+# backgrounded claude invocation in its own process group, so the watchdog
+# can signal the whole group (including any grandchildren claude spawns,
+# e.g. MCP servers) instead of leaving orphans that keep a terminal wedged.
+CLAUDE_REVIEW_TIMEOUT_SECS=120
+
+# run_claude_review PROMPT INPUT_FILE OUTPUT_FILE
+#
+# Runs `claude -p PROMPT < INPUT_FILE > OUTPUT_FILE`, killing the whole
+# process group if it runs past CLAUDE_REVIEW_TIMEOUT_SECS. Sets
+# LEGION_SKIP_STOP_BLOCK=1 on the child so a healthy claude invocation can
+# exit on its own instead of being held open by legion's Stop gate when this
+# hook fires from inside an agent session. Returns the child's exit status;
+# a killed-for-timeout child reports a nonzero status like any other failure,
+# so callers only need one failure branch.
+run_claude_review() {
+  local prompt="$1"
+  local input_file="$2"
+  local output_file="$3"
+  (
+    set -m
+    LEGION_SKIP_STOP_BLOCK=1 claude -p "$prompt" <"$input_file" >"$output_file" 2>/dev/null &
+    local claude_pid=$!
+    (
+      sleep "$CLAUDE_REVIEW_TIMEOUT_SECS"
+      kill -TERM -"$claude_pid" 2>/dev/null
+      sleep 2
+      kill -KILL -"$claude_pid" 2>/dev/null
+    ) &
+    local watchdog_pid=$!
+    wait "$claude_pid" 2>/dev/null
+    local status=$?
+    kill "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
+    exit "$status"
+  )
+}
 
 # Get the branch being pushed
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -20,25 +62,31 @@ if [ -z "$DIFF" ]; then
   exit 0
 fi
 
-CHANGED_FILES=$(git diff --name-only "$BASE"...HEAD)
 LINE_COUNT=$(echo "$DIFF" | wc -l | tr -d ' ')
 
 echo "[pre-push] Running PR review on ${LINE_COUNT} lines of changes across branch ${BRANCH}..."
 
-RESULT=$(echo "$DIFF" | claude -p "You are a senior code reviewer. Review this diff for:
+DIFF_FILE=$(mktemp)
+RESULT_FILE=$(mktemp)
+trap 'rm -f "$DIFF_FILE" "$RESULT_FILE"' EXIT
+printf '%s\n' "$DIFF" >"$DIFF_FILE"
+
+run_claude_review "You are a senior code reviewer. Review this diff for:
 1. Bugs and logic errors (CRITICAL)
 2. Silent failures -- catch blocks that swallow errors, fallbacks that hide problems (CRITICAL)
 3. Security issues -- injection, unsafe input handling (CRITICAL)
 4. Missing error handling at system boundaries (HIGH)
 5. Test coverage gaps for new functionality (HIGH)
 
-For each issue found, rate it CRITICAL or HIGH. If you find any CRITICAL issues, start with BLOCK: and list them. If only HIGH issues or no issues, start with PASS: and list any HIGH items as warnings. Be concise -- file:line format." 2>/dev/null)
+For each issue found, rate it CRITICAL or HIGH. If you find any CRITICAL issues, start with BLOCK: and list them. If only HIGH issues or no issues, start with PASS: and list any HIGH items as warnings. Be concise -- file:line format." "$DIFF_FILE" "$RESULT_FILE"
+CLAUDE_STATUS=$?
 
-if [ $? -ne 0 ]; then
+if [ "$CLAUDE_STATUS" -ne 0 ]; then
   echo "[pre-push] Claude Code unavailable, skipping review"
   exit 0
 fi
 
+RESULT=$(cat "$RESULT_FILE")
 echo "$RESULT"
 
 if echo "$RESULT" | grep -q "^BLOCK:"; then
