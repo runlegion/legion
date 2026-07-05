@@ -489,8 +489,15 @@ pub(crate) enum Commands {
         lines: usize,
         /// Render a SessionStart-friendly status banner for one repo.
         /// Silent on healthy (every detected language has a fresh index),
-        /// loud on stale or missing. Requires `<repo>` and `--status`.
-        /// Used by `plugin/hooks/session-start.sh` so agents see whether
+        /// loud on stale or missing. A missing language names WHY: "not
+        /// indexed yet" (running this command fixes it) versus "indexer
+        /// unavailable" (the binary that language needs is not on PATH,
+        /// so this command cannot fix it by itself) -- the coverage
+        /// guarantee from #713, so a repo showing only some languages
+        /// indexed reads as a known, explained gap rather than "sym does
+        /// not cover language X" in general. Requires `<repo>` and
+        /// `--status`. Used by `plugin/hooks/session-start.sh` and the
+        /// `legion-explore` agent's preflight so agents see whether
         /// `legion sym` will succeed before they try.
         #[arg(long, requires = "status")]
         banner: bool,
@@ -585,7 +592,11 @@ pub(crate) enum Commands {
     /// hook (#438/#439), and read the log back. Append-only JSONL at
     /// `${XDG_STATE_HOME:-~/.local/state}/legion/bypass.jsonl`. Feeds the
     /// uncertainty engine (#354) -- bypass volume on a (repo, pattern) is a
-    /// signal that sym/recall is missing an answer agents expected.
+    /// signal that sym/recall is missing an answer agents expected. Also
+    /// reads `sym etc`/`sym tree` usage from the sibling `etc-usage.jsonl`
+    /// (`etc-summary`, #713) -- the PRIMARY sym-etc epic (#704) metric,
+    /// since rewording the guard changes what counts as a bypass mid-
+    /// experiment.
     Telemetry {
         #[command(subcommand)]
         action: TelemetryAction,

@@ -272,6 +272,123 @@ pub fn summarize(rows: &[BypassRecord], top: usize) -> Vec<BypassSummaryRow> {
     out
 }
 
+/// Read all `sym etc` / `sym tree` usage rows, optionally filtered by
+/// `since` (drop rows older than `now - since`) and `command` (e.g.
+/// "find-content", "tree", "extract", "find-file"). Malformed lines are
+/// skipped with a stderr breadcrumb, mirroring `list_bypasses`.
+pub fn list_etc_usage(
+    since: Option<Duration>,
+    command: Option<&str>,
+) -> Result<Vec<EtcUsageRecord>> {
+    list_etc_usage_from(&etc_usage_log_path(), since, command)
+}
+
+fn list_etc_usage_from(
+    path: &std::path::Path,
+    since: Option<Duration>,
+    command: Option<&str>,
+) -> Result<Vec<EtcUsageRecord>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let cutoff = since.map(|d| Utc::now() - d);
+    let file = std::fs::File::open(path)?;
+    let mut out = Vec::new();
+    for (i, line) in BufReader::new(file).lines().enumerate() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[legion] etc-usage.jsonl line {} read error: {e}", i + 1);
+                continue;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: EtcUsageRecord = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[legion] etc-usage.jsonl line {} parse error: {e}", i + 1);
+                continue;
+            }
+        };
+        if let Some(c) = cutoff
+            && record.ts < c
+        {
+            continue;
+        }
+        if let Some(cmd) = command
+            && record.command != cmd
+        {
+            continue;
+        }
+        out.push(record);
+    }
+    Ok(out)
+}
+
+/// One row of `legion telemetry etc-summary` output (#713): the PRIMARY
+/// success metric for the sym-etc epic (#704). This issue reworded the
+/// grep/find guard, which changes what gets classified as a bypass
+/// mid-experiment -- so raw bypass counts are the SECONDARY signal only
+/// (see `BypassSummaryRow`). The primary signal is whether the sanctioned
+/// surface actually answers: usage volume and zero-result rate per query
+/// shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EtcSummaryRow {
+    /// Query shape: "find-content", "tree", "extract", or "find-file".
+    pub command: String,
+    pub count: usize,
+    /// Invocations that ran to completion but matched nothing -- the tool
+    /// answered, and the answer was "zero". Distinct from `error_count`
+    /// (the tool could not even attempt an answer).
+    pub zero_result_count: usize,
+    /// Fraction (0.0..=1.0) of non-error invocations that returned zero
+    /// hits. A high rate on a shape is the same signal bypass volume used
+    /// to be: evidence the sanctioned surface under-serves real queries.
+    pub zero_result_pct: f64,
+    pub error_count: usize,
+    pub last_used_ts: DateTime<Utc>,
+}
+
+/// Group etc-usage rows by `command`, sort by count desc. Used by
+/// `legion telemetry etc-summary`.
+pub fn summarize_etc_usage(rows: &[EtcUsageRecord]) -> Vec<EtcSummaryRow> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<String, Vec<&EtcUsageRecord>> = BTreeMap::new();
+    for r in rows {
+        groups.entry(r.command.clone()).or_default().push(r);
+    }
+    let mut out: Vec<EtcSummaryRow> = groups
+        .into_iter()
+        .map(|(command, rs)| {
+            let count = rs.len();
+            let error_count = rs.iter().filter(|r| r.error.is_some()).count();
+            let zero_result_count = rs
+                .iter()
+                .filter(|r| r.error.is_none() && r.hit_count == 0)
+                .count();
+            let non_error_count = count - error_count;
+            let zero_result_pct = if non_error_count == 0 {
+                0.0
+            } else {
+                zero_result_count as f64 / non_error_count as f64
+            };
+            let last = rs.iter().map(|r| r.ts).max().unwrap_or_else(Utc::now);
+            EtcSummaryRow {
+                command,
+                count,
+                zero_result_count,
+                zero_result_pct,
+                error_count,
+                last_used_ts: last,
+            }
+        })
+        .collect();
+    out.sort_by_key(|r| std::cmp::Reverse(r.count));
+    out
+}
+
 /// Parse a duration string like `24h`, `7d`, `30m`, `90s`. Used by
 /// `--since` on `list-bypasses`.
 pub fn parse_duration(s: &str) -> Result<Duration> {
@@ -426,6 +543,101 @@ mod tests {
         let json = serde_json::to_string(&rec).unwrap();
         let back: EtcUsageRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, rec);
+    }
+
+    fn etc_rec(
+        command: &str,
+        hit_count: u64,
+        error: Option<&str>,
+        ts: DateTime<Utc>,
+    ) -> EtcUsageRecord {
+        EtcUsageRecord {
+            ts,
+            command: command.to_string(),
+            repo: Some("legion".to_string()),
+            pattern: "x".to_string(),
+            fixed_strings: false,
+            hit_count,
+            skipped_files: 0,
+            error: error.map(|e| e.to_string()),
+            failed_repos: 0,
+            format: None,
+        }
+    }
+
+    #[test]
+    fn list_etc_usage_filters_by_since_and_command() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("etc-usage.jsonl");
+        let old = etc_rec("find-content", 1, None, Utc::now() - Duration::days(10));
+        let recent_fc = etc_rec("find-content", 0, None, Utc::now());
+        let recent_tree = etc_rec("tree", 3, None, Utc::now());
+        for r in [&old, &recent_fc, &recent_tree] {
+            append_jsonl(&path, r).unwrap();
+        }
+
+        let all = list_etc_usage_from(&path, None, None).unwrap();
+        assert_eq!(all.len(), 3);
+
+        let since_7d = list_etc_usage_from(&path, Some(Duration::days(7)), None).unwrap();
+        assert_eq!(since_7d.len(), 2, "the 10-day-old row must be dropped");
+
+        let tree_only = list_etc_usage_from(&path, None, Some("tree")).unwrap();
+        assert_eq!(tree_only.len(), 1);
+        assert_eq!(tree_only[0].command, "tree");
+    }
+
+    /// The #713 primary metric: zero-result rate must exclude error rows
+    /// from its denominator -- an invalid-regex error is "the tool could
+    /// not attempt an answer", not "the tool answered zero", and conflating
+    /// the two would understate how often the sanctioned surface actually
+    /// works when it gets a chance to run.
+    #[test]
+    fn summarize_etc_usage_computes_zero_result_rate_excluding_errors() {
+        let now = Utc::now();
+        let rows = vec![
+            etc_rec("find-content", 5, None, now),
+            etc_rec("find-content", 0, None, now),
+            etc_rec("find-content", 0, None, now),
+            etc_rec("find-content", 0, Some("invalid regex"), now),
+        ];
+        let summary = summarize_etc_usage(&rows);
+        assert_eq!(summary.len(), 1);
+        let row = &summary[0];
+        assert_eq!(row.command, "find-content");
+        assert_eq!(row.count, 4);
+        assert_eq!(row.error_count, 1);
+        assert_eq!(row.zero_result_count, 2);
+        assert!(
+            (row.zero_result_pct - (2.0 / 3.0)).abs() < 1e-9,
+            "2 zero-results out of 3 non-error invocations: {}",
+            row.zero_result_pct
+        );
+    }
+
+    #[test]
+    fn summarize_etc_usage_groups_by_command_and_sorts_by_count_desc() {
+        let now = Utc::now();
+        let rows = vec![
+            etc_rec("tree", 1, None, now),
+            etc_rec("find-file", 1, None, now),
+            etc_rec("find-file", 0, None, now),
+        ];
+        let summary = summarize_etc_usage(&rows);
+        assert_eq!(summary.len(), 2);
+        assert_eq!(summary[0].command, "find-file");
+        assert_eq!(summary[0].count, 2);
+        assert_eq!(summary[1].command, "tree");
+        assert_eq!(summary[1].count, 1);
+    }
+
+    /// All-error groups must report 0.0, not NaN from a 0/0 division.
+    #[test]
+    fn summarize_etc_usage_all_errors_has_zero_pct_not_nan() {
+        let now = Utc::now();
+        let rows = vec![etc_rec("extract", 0, Some("bad field"), now)];
+        let summary = summarize_etc_usage(&rows);
+        assert_eq!(summary[0].zero_result_pct, 0.0);
     }
 
     #[cfg(unix)]

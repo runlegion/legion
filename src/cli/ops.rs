@@ -75,6 +75,26 @@ pub(crate) enum TelemetryAction {
         #[arg(long)]
         json: bool,
     },
+
+    /// Summarize `sym etc` / `sym tree` usage by query shape (#713): the
+    /// PRIMARY success metric for the sym-etc epic (#704). Rewording the
+    /// grep/find guard changes what gets classified as a bypass
+    /// mid-experiment, so raw bypass counts (`summary` above) are the
+    /// SECONDARY signal only. This reads `etc-usage.jsonl` instead of
+    /// `bypass.jsonl` and reports usage volume + zero-result rate per
+    /// shape (find-content/tree/extract/find-file) -- whether the
+    /// sanctioned surface actually answers.
+    EtcSummary {
+        /// Drop rows older than this duration before summarizing.
+        #[arg(long)]
+        since: Option<String>,
+        /// Restrict to one query shape: find-content, tree, extract, find-file.
+        #[arg(long)]
+        command: Option<String>,
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -659,6 +679,42 @@ pub(crate) fn handle_telemetry(action: TelemetryAction) -> error::Result<()> {
                         row.count,
                         row.had_sym_hits_pct * 100.0,
                         row.had_recall_hits_pct * 100.0,
+                    )?;
+                }
+            }
+        }
+        TelemetryAction::EtcSummary {
+            since,
+            command,
+            json,
+        } => {
+            let since_dur = match since {
+                Some(s) => Some(telemetry::parse_duration(&s)?),
+                None => None,
+            };
+            let rows = telemetry::list_etc_usage(since_dur, command.as_deref())?;
+            let summary = telemetry::summarize_etc_usage(&rows);
+            if json {
+                println!("{}", serde_json::to_string(&summary)?);
+            } else if summary.is_empty() {
+                println!("[legion] no sym etc/tree usage recorded in scope");
+            } else {
+                use std::io::Write;
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                writeln!(
+                    out,
+                    "{:<14} {:<8} {:<12} {:<8}",
+                    "command", "count", "zero-res %", "errors"
+                )?;
+                for row in &summary {
+                    writeln!(
+                        out,
+                        "{:<14} {:<8} {:<12.1} {:<8}",
+                        row.command,
+                        row.count,
+                        row.zero_result_pct * 100.0,
+                        row.error_count,
                     )?;
                 }
             }
