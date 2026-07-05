@@ -67,6 +67,13 @@ assert_contains "deny decision present" "$out" '"permissionDecision": "deny"'
 assert_contains "deny reason mentions sym def" "$out" 'legion sym def'
 assert_contains "deny reason names the pattern" "$out" 'Symbol'
 
+echo "==> #713: BLOCK message routes to sym etc for non-symbol shapes, not just the Grep tool"
+assert_contains "names find-content for content search" "$out" 'sym etc find-content'
+assert_contains "names sym tree for structure" "$out" 'sym tree'
+assert_contains "names extract for config/frontmatter fields" "$out" 'sym etc extract'
+assert_contains "names find-file for locate-by-name" "$out" 'sym etc find-file'
+assert_contains "states sym is not rust-only" "$out" 'not just Rust'
+
 echo "==> sym tier: word-boundary-wrapped pattern still resolves"
 out=$(printf '%s\n' '{"cwd":"/tmp/legion","tool_name":"Grep","tool_input":{"pattern":"\\bSymbol\\b"},"session_id":"wb-t"}' | run_hook)
 assert_contains "stripped \\b pattern blocks too" "$out" '"permissionDecision": "deny"'
@@ -86,6 +93,11 @@ echo "==> bypass: refused for a symbol with a local hit"
 out=$(echo '{"cwd":"/tmp/legion","tool_name":"Grep","tool_input":{"pattern":"Symbol"},"session_id":"byp-t"}' | LEGION_BYPASS_GREP=1 run_hook)
 assert_contains "bypass refused on local symbol" "$out" '"permissionDecision": "deny"'
 assert_contains "refusal explains the escape is for free text" "$out" 'free-text searches'
+echo "==> #713: bypass-refusal message also routes to sym etc for non-symbol shapes"
+assert_contains "refusal names find-content" "$out" 'sym etc find-content'
+assert_contains "refusal names sym tree" "$out" 'sym tree'
+assert_contains "refusal names extract" "$out" 'sym etc extract'
+assert_contains "refusal names find-file" "$out" 'sym etc find-file'
 
 echo "==> bypass: allowed + telemetried for non-local pattern"
 export LEGION_TEST_MARKER="$WORK/state/bypass-marker.log"

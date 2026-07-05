@@ -94,6 +94,13 @@ assert_contains "deny reason names the pattern" "$out" 'Symbol'
 assert_contains "deny reason offers env bypass" "$out" 'LEGION_BYPASS_GREP=1'
 assert_contains "deny reason offers sentinel bypass" "$out" '# legion-bypass:'
 
+echo "==> #713: BLOCK message routes to sym etc for non-symbol shapes, not just the Grep tool"
+assert_contains "names find-content for content search" "$out" 'sym etc find-content'
+assert_contains "names sym tree for structure" "$out" 'sym tree'
+assert_contains "names extract for config/frontmatter fields" "$out" 'sym etc extract'
+assert_contains "names find-file for locate-by-name" "$out" 'sym etc find-file'
+assert_contains "states sym is not rust-only" "$out" 'not just Rust'
+
 echo "==> #458 relevance gate: cluster-wide hit but NOT in this repo -> pass through (no block)"
 # Stub legion returns commonword hits in huttspawn, but the grep target is in /tmp/legion.
 # Pre-#458 behavior: would block on those cross-repo hits.
@@ -111,6 +118,11 @@ out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"gre
 assert_contains "soft env bypass refused on local symbol" "$out" '"permissionDecision": "deny"'
 assert_contains "refusal points to sym list, not a hard escape" "$out" 'sym list'
 assert_file_not_contains "refused soft bypass writes no telemetry row" "$LEGION_TEST_MARKER" "record-bypass"
+echo "==> #713: bypass-refusal message also routes to sym etc for non-symbol shapes"
+assert_contains "refusal names find-content" "$out" 'sym etc find-content'
+assert_contains "refusal names sym tree" "$out" 'sym tree'
+assert_contains "refusal names extract" "$out" 'sym etc extract'
+assert_contains "refusal names find-file" "$out" 'sym etc find-file'
 
 echo "==> harder bypass: soft sentinel bypass REFUSED for symbol with local hit"
 rm -f "$LEGION_TEST_MARKER"
