@@ -17,10 +17,13 @@ const COSINE_MIN_THRESHOLD: f32 = 0.3;
 pub const WHOAMI_BANNER_OPEN: &str = "=== WHO YOU ARE -- READ THIS ===";
 pub const WHOAMI_BANNER_CLOSE: &str = "=== END IDENTITY ===";
 
-/// Soft byte budget for `legion whoami` output. Sized for the SessionStart
-/// inline context window -- larger payloads are truncated by the harness to
-/// a 2KB preview, which silently drops doctrines past the cutoff. Keeping
-/// the whole banner under this budget guarantees nothing is dropped.
+/// Soft byte budget for `legion whoami` output. This is a self-imposed
+/// scannability budget, not a measured harness cutoff -- multi-KB identity
+/// roots have been observed to render in full in live SessionStart banners,
+/// so the harness does not hard-truncate at 2KB. The budget exists to keep
+/// the boot banner readable and to force `format_capped_banner` to divide
+/// space fairly across roots (per-entry budgeting, #716) rather than letting
+/// the newest root consume it unbounded.
 pub const WHOAMI_BYTE_CAP: usize = 2048;
 
 /// Banner that wraps `legion whatami` output -- the operating contract (how I
@@ -29,10 +32,20 @@ pub const WHOAMI_BYTE_CAP: usize = 2048;
 pub const WHATAMI_BANNER_OPEN: &str = "=== HOW YOU OPERATE -- READ THIS ===";
 pub const WHATAMI_BANNER_CLOSE: &str = "=== END OPERATING CONTRACT ===";
 
-/// Soft byte budget for `legion whatami` output. Same rationale and size as
-/// `WHOAMI_BYTE_CAP`: keep the SessionStart block under the harness's 2KB
-/// inline-context cutoff so nothing is silently dropped.
+/// Soft byte budget for `legion whatami` output. Same rationale as
+/// `WHOAMI_BYTE_CAP`: a scannability budget enforced fairly per-entry, not a
+/// measured harness cutoff.
 pub const WHATAMI_BYTE_CAP: usize = 2048;
+
+/// Minimum bytes of actual reflection text (after subtracting the id line,
+/// truncation notice, and chain pointer overhead) a truncated entry must get
+/// to be worth rendering. Below this, an entry would show only an id and a
+/// couple of characters -- unreadable, not truncated. Entries whose fair
+/// share cannot clear this floor are dropped from the banner body and
+/// folded into the aggregate truncation pointer instead -- except the first
+/// entry, which always renders at least this much text even if it must
+/// borrow beyond its computed fair share (see `format_capped_banner`).
+const MIN_ENTRY_RENDER_BYTES: usize = 40;
 
 /// A single entry passed to the banner formatters. The flag indicates whether
 /// the reflection has chain context worth pointing the reader at. Shared by
@@ -43,17 +56,44 @@ pub struct WhoamiEntry {
     pub in_chain: bool,
 }
 
-/// Render the whoami banner from the supplied identity reflections, capped at
-/// `WHOAMI_BYTE_CAP` bytes total. Iterates entries in order; each entry is
-/// emitted in full if its addition keeps the buffer (plus footer) under the
-/// cap. The first entry is always emitted regardless of size to avoid an
-/// empty banner -- a single oversized root is preferable to silent absence.
-/// Remaining entries are summarized with a recall pointer.
+/// Truncate `text` to at most `max_bytes`, backing off to the nearest lower
+/// UTF-8 character boundary so multi-byte characters are never split.
+fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// Render a byte-capped boot banner from root reflections. Shared by
-/// `format_whoami` and `format_whatami`. Emits each entry in full while it fits
-/// under `cap`; the first entry always emits even if oversized (a single large
-/// root beats an empty banner), and the remainder is summarized with a recall
-/// pointer to `--domain {recall_domain}`.
+/// `format_whoami` and `format_whatami`.
+///
+/// Per-entry budgeting (#716): the available space (cap minus header/footer)
+/// is divided evenly across the remaining entries at each step, so a single
+/// oversized root cannot consume the whole cap and starve the rest -- the
+/// prior all-or-nothing behavior let exactly that happen (a newest root a
+/// few hundred bytes over budget rendered in full, then every other root
+/// collapsed to a bare count). An entry that fits its fair share in full
+/// renders in full, and any unused share rolls forward to later entries.
+/// An entry that does not fit is head-truncated to its share with a recall
+/// pointer appended, provided at least `MIN_ENTRY_RENDER_BYTES` of actual
+/// text survives the truncation; otherwise it is dropped and folded into
+/// the aggregate truncation pointer instead of emitting an unreadable
+/// fragment. The first entry is exempt from the drop: it always renders,
+/// borrowing budget beyond its computed fair share if needed to clear the
+/// minimum-text floor, so the banner is never structurally present but
+/// informationally empty.
+///
+/// Note on ordering: a later entry's fair share is recomputed from whatever
+/// budget remains, so a dropped entry can free up enough room for a
+/// subsequent entry to clear the floor and render. `entries` is expected to
+/// arrive newest-first (recency, not priority), so this does not skip a
+/// higher-priority root in favor of a lower one -- it only means recency
+/// order, not list position, determines what survives.
 #[allow(clippy::too_many_arguments)]
 fn format_capped_banner(
     open: &str,
@@ -70,25 +110,73 @@ fn format_capped_banner(
     }
     let header = format!("{open}\n{header_line}\n");
     let footer = format!("{close}\n");
+    let available = cap.saturating_sub(header.len() + footer.len());
+    let truncated_notice = format!(
+        "  \u{21b3} truncated -- full text: `legion recall --repo {repo} --domain {recall_domain}`\n"
+    );
+
     let mut buf = header;
-    let mut emitted = 0usize;
-    for entry in entries {
+    let mut remaining_budget = available;
+    let mut dropped = 0usize;
+    let total = entries.len();
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let slots_left = total - idx;
+        let per_entry_budget = remaining_budget / slots_left;
         let chain_line = if entry.in_chain {
             format!("  \u{21b3} chain context: legion chain --id {}\n", entry.id)
         } else {
             String::new()
         };
-        let body = format!("- {} (id: {})\n{}", entry.text, entry.id, chain_line);
-        if buf.len() + body.len() + footer.len() > cap && emitted > 0 {
-            break;
+        let full_body = format!("- {} (id: {})\n{}", entry.text, entry.id, chain_line);
+
+        if full_body.len() <= per_entry_budget {
+            remaining_budget = remaining_budget.saturating_sub(full_body.len());
+            buf.push_str(&full_body);
+            continue;
         }
+
+        let overhead = "- ".len()
+            + format!("... (id: {})\n", entry.id).len()
+            + truncated_notice.len()
+            + chain_line.len();
+
+        // The floor applies to actual text bytes, not the raw per-entry
+        // share -- the share must cover overhead before any of it counts as
+        // readable content.
+        let budget_for_entry = if idx == 0 {
+            per_entry_budget.max(overhead + MIN_ENTRY_RENDER_BYTES)
+        } else if per_entry_budget.saturating_sub(overhead) < MIN_ENTRY_RENDER_BYTES {
+            dropped += 1;
+            continue;
+        } else {
+            per_entry_budget
+        };
+
+        let text_budget = budget_for_entry.saturating_sub(overhead);
+        let truncated_text = truncate_at_char_boundary(&entry.text, text_budget);
+        let text_was_cut = truncated_text.len() < entry.text.len();
+        let ellipsis = if text_was_cut { "..." } else { "" };
+        // Only claim truncation when text was actually cut -- the full body
+        // can exceed its share purely from id/chain overhead while the text
+        // itself still fits, and a "truncated" notice on unclipped text
+        // would be a false claim.
+        let notice = if text_was_cut {
+            truncated_notice.as_str()
+        } else {
+            ""
+        };
+        let body = format!(
+            "- {truncated_text}{ellipsis} (id: {})\n{notice}{chain_line}",
+            entry.id
+        );
+        remaining_budget = remaining_budget.saturating_sub(budget_for_entry);
         buf.push_str(&body);
-        emitted += 1;
     }
-    let remaining = entries.len().saturating_sub(emitted);
-    if remaining > 0 {
+
+    if dropped > 0 {
         buf.push_str(&format!(
-            "- ({remaining} more {truncation_noun} truncated; recall via `legion recall --repo {repo} --domain {recall_domain}`)\n"
+            "- ({dropped} more {truncation_noun} truncated; recall via `legion recall --repo {repo} --domain {recall_domain}`)\n"
         ));
     }
     buf.push_str(&footer);
@@ -1272,6 +1360,29 @@ mod tests {
     }
 
     #[test]
+    fn truncate_at_char_boundary_backs_off_multibyte_char() {
+        // "e" (1 byte) + combining acute U+0301 (2 bytes) = 3 bytes per
+        // unit, repeated 10x = 30 bytes. Char boundaries fall at
+        // 0,1,3,4,6,7,9,10,12,13,15,... -- a budget of 14 lands inside the
+        // combining accent's 2-byte encoding at [13..15), which a naive
+        // byte-index slice would split (panicking on non-UTF-8-boundary
+        // slicing). The back-off loop must walk down to the boundary at 13.
+        let text = "e\u{0301}".repeat(10);
+        let truncated = truncate_at_char_boundary(&text, 14);
+        assert!(text.is_char_boundary(truncated.len()));
+        assert_eq!(
+            truncated.len(),
+            13,
+            "must back off from the mid-character budget of 14 to the nearest lower boundary"
+        );
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_returns_full_text_when_under_budget() {
+        assert_eq!(truncate_at_char_boundary("short", 100), "short");
+    }
+
+    #[test]
     fn format_whoami_empty_returns_empty() {
         assert_eq!(format_whoami("legion", &[]), "");
     }
@@ -1298,28 +1409,138 @@ mod tests {
     }
 
     #[test]
-    fn format_whoami_caps_output_under_budget_with_truncation_pointer() {
+    fn format_whoami_caps_output_with_per_entry_truncation() {
+        // Each entry's fair share (available / 5) is well over
+        // MIN_ENTRY_RENDER_BYTES, so all five render truncated -- none are
+        // dropped to a bare count. This is the #716 behavior change: prior
+        // code emitted 2 entries in full and lumped the other 3 into a
+        // "3 more truncated" pointer.
         let big = "x".repeat(800);
         let entries: Vec<WhoamiEntry> = (0..5)
             .map(|i| entry(&format!("id{i}"), &big, false))
             .collect();
         let out = format_whoami("legion", &entries);
+        for i in 0..5 {
+            assert!(out.contains(&format!("id{i}")), "id{i} should be present");
+        }
+        assert!(out.contains("truncated -- full text"));
+        assert!(!out.contains("more identity reflections truncated"));
+    }
+
+    #[test]
+    fn format_whoami_drops_entries_below_min_render_floor() {
+        // Many entries competing for a fixed cap drives per-entry share
+        // below MIN_ENTRY_RENDER_BYTES -- those are genuinely dropped and
+        // folded into the aggregate pointer, per the "truncation line stays
+        // accurate about what was omitted" contract.
+        let text = "x".repeat(400);
+        let entries: Vec<WhoamiEntry> = (0..40)
+            .map(|i| entry(&format!("id{i}"), &text, false))
+            .collect();
+        let out = format_whoami("legion", &entries);
+        assert!(out.contains("id0"), "first entry always renders");
+        // The first entry must clear the minimum-text floor, not just emit
+        // an id with no content -- otherwise it is structurally present but
+        // informationally empty.
+        assert!(
+            out.contains(&"x".repeat(MIN_ENTRY_RENDER_BYTES)),
+            "first entry must render at least {MIN_ENTRY_RENDER_BYTES} bytes of real text, got: {out}"
+        );
+        assert!(out.contains("more identity reflections truncated"));
+        assert!(out.contains("legion recall --repo legion --domain identity"));
+    }
+
+    #[test]
+    fn format_whoami_truncated_entry_keeps_chain_pointer() {
+        // The chain pointer is baked into the per-entry overhead calculation
+        // (so it is charged against the entry's budget), not appended after
+        // truncation as an afterthought -- confirm it actually survives into
+        // the rendered, truncated body rather than being silently dropped.
+        let big = "x".repeat(800);
+        let entries: Vec<WhoamiEntry> = (0..5)
+            .map(|i| entry(&format!("id{i}"), &big, i == 2))
+            .collect();
+        let out = format_whoami("legion", &entries);
+        assert!(
+            out.contains("legion chain --id id2"),
+            "chain pointer for the in_chain entry must survive truncation, got: {out}"
+        );
+    }
+
+    #[test]
+    fn format_whoami_worst_case_size_with_drops_and_first_entry_borrow() {
+        // Pin the worst-case banner size when both size-inflating paths are
+        // active at once: the first entry borrows beyond its fair share
+        // (line 148's `.max(overhead + MIN_ENTRY_RENDER_BYTES)`) and enough
+        // entries are dropped to trigger the unbudgeted aggregate pointer
+        // line (src/recall.rs:171-175). Both are documented as soft-cap
+        // overshoot; this test bounds how soft in practice so a future
+        // change that blows the overshoot open further has to touch this
+        // assertion deliberately.
+        let text = "x".repeat(400);
+        let entries: Vec<WhoamiEntry> = (0..40)
+            .map(|i| entry(&format!("id{i}"), &text, false))
+            .collect();
+        let out = format_whoami("legion", &entries);
         assert!(out.contains("more identity reflections truncated"));
         assert!(
-            out.len() < WHOAMI_BYTE_CAP + 200,
-            "output {} bytes should be near the cap",
+            out.len() < WHOAMI_BYTE_CAP + 300,
+            "worst-case overshoot (first-entry borrow + unbudgeted drop pointer) grew past the pinned bound: {} bytes",
             out.len()
         );
     }
 
     #[test]
-    fn format_whoami_always_emits_first_entry_even_if_oversized() {
+    fn format_whoami_first_entry_truncated_when_oversized_alone() {
+        // A solo oversized entry no longer renders unbounded -- it is
+        // head-truncated to the banner's budget, keeping the banner itself
+        // under the byte cap the doc comment promises.
         let huge = "x".repeat(WHOAMI_BYTE_CAP * 2);
         let out = format_whoami("legion", &[entry("solo", &huge, false)]);
         assert!(out.contains("solo"));
         assert!(out.contains(WHOAMI_BANNER_OPEN));
         assert!(out.contains(WHOAMI_BANNER_CLOSE));
-        assert!(!out.contains("truncated"));
+        assert!(out.contains("truncated -- full text"));
+        assert!(
+            out.len() < WHOAMI_BYTE_CAP + 200,
+            "solo oversized entry should still be bounded near the cap, got {} bytes",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn format_whatami_rafters_shape_all_roots_readable() {
+        // The rafters case that motivated #716: one 2.4KB narrative root
+        // (newest) plus two small rule roots, under a 2KB cap. Before the
+        // fix, the 2.4KB root alone blew the cap and the two rule roots
+        // collapsed to "(2 more truncated)". After the fix, all three
+        // roots must appear as content, not just a count.
+        let narrative = "N".repeat(2400);
+        let rule_one = "work the board before asking for more".to_string();
+        let rule_two = "night-shift agents post status, do not ping".to_string();
+        let entries = vec![
+            entry("narrative-root", &narrative, false),
+            entry("rule-root-1", &rule_one, false),
+            entry("rule-root-2", &rule_two, false),
+        ];
+        let out = format_whatami("rafters", &entries);
+
+        assert!(
+            out.contains("narrative-root"),
+            "oversized root still renders"
+        );
+        assert!(
+            out.contains(&rule_one),
+            "small rule root renders in full, not as a count"
+        );
+        assert!(
+            out.contains(&rule_two),
+            "small rule root renders in full, not as a count"
+        );
+        assert!(
+            !out.contains("more operating-contract reflections truncated"),
+            "no root should collapse to a bare count when all three fit their fair share"
+        );
     }
 
     #[test]
@@ -1348,12 +1569,27 @@ mod tests {
 
     #[test]
     fn format_whatami_truncation_pointer_uses_workflow_domain() {
+        // Enough entries to push per-entry share below MIN_ENTRY_RENDER_BYTES
+        // so some are genuinely dropped and the aggregate pointer fires.
+        let big = "x".repeat(400);
+        let entries: Vec<WhoamiEntry> = (0..40)
+            .map(|i| entry(&format!("w{i}"), &big, false))
+            .collect();
+        let out = format_whatami("kelex", &entries);
+        assert!(out.contains("more operating-contract reflections truncated"));
+        assert!(out.contains("legion recall --repo kelex --domain workflow"));
+    }
+
+    #[test]
+    fn format_whatami_per_entry_truncation_uses_workflow_domain() {
         let big = "x".repeat(800);
         let entries: Vec<WhoamiEntry> = (0..5)
             .map(|i| entry(&format!("w{i}"), &big, false))
             .collect();
         let out = format_whatami("kelex", &entries);
-        assert!(out.contains("more operating-contract reflections truncated"));
+        for i in 0..5 {
+            assert!(out.contains(&format!("w{i}")), "w{i} should be present");
+        }
         assert!(out.contains("legion recall --repo kelex --domain workflow"));
     }
 
