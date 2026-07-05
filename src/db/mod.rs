@@ -14,6 +14,7 @@ mod health;
 mod heartbeat;
 pub mod inventory;
 mod kanban;
+pub mod module_edges;
 pub(crate) mod quality_gates;
 mod reflections;
 mod schedules;
@@ -119,6 +120,7 @@ impl Database {
         autonomy::create_tables(conn)?;
         heartbeat::create_tables(conn)?;
         inventory::create_tables(conn)?;
+        module_edges::create_tables(conn)?;
         tx.commit()?;
 
         reflections::migrate(conn)?;

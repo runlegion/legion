@@ -10,6 +10,7 @@ mod embed;
 mod error;
 mod etc;
 mod gate_trust;
+mod graph;
 mod health;
 mod init;
 mod inventory;

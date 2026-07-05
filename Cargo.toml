@@ -64,6 +64,19 @@ ignore = "0.4"
 # (one dotted-path walker shared across json/toml/yaml/frontmatter).
 serde_yaml_ng = "0.10"
 
+# Module-graph engine (#710): parse js/ts/jsx/tsx imports and resolve each
+# specifier against the referrer. oxc_parser's ModuleRecord already collects
+# every static import/export/re-export specifier (deduped, source-order) as
+# part of parsing -- no hand-rolled AST visitor needed. oxc_resolver mirrors
+# Node + bundler resolution (tsconfig `paths`, node_modules, package.json
+# `exports`/`imports`) and is the same resolution engine Rolldown/Rspack
+# embed. Headless: legion INDEXES, it does not bundle or emit code, so the
+# runtime dependency is these crates, not the Rolldown binary.
+oxc_parser = "0.138.0"
+oxc_resolver = "11.23.0"
+oxc_allocator = "0.138.0"
+oxc_span = "0.138.0"
+
 # libc pulls in only on unix for killpg in call_plugin_inner's timeout arm.
 # Must stay AFTER all platform-independent deps -- TOML tables consume
 # every key until the next header, so listing it mid-file would leak the
