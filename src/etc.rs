@@ -253,9 +253,14 @@ fn relative_path(path: &Path, workdir: &Path) -> String {
 }
 
 /// Structured formats `extract` understands, detected from the file
-/// extension. `.md`/`.mdx`/`.astro` route to the YAML frontmatter block, not
-/// the whole file -- extract answers "what does this doc's frontmatter say",
-/// not "search the prose" (that is find-content's job, #707).
+/// extension. `.md`/`.mdx`/`.astro` route to the leading `---`-delimited
+/// block, not the whole file -- extract answers "what does this doc's
+/// frontmatter say", not "search the prose" (that is find-content's job,
+/// #707). Per #708's spec this block is parsed as YAML for all three
+/// extensions; note that a real `.astro` file's fence more often holds a
+/// JS/TS component script than YAML, so `.astro` support here only covers
+/// files whose fence happens to be YAML-shaped (e.g. plain frontmatter
+/// metadata above the component script).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceFormat {
     Json,
@@ -397,6 +402,10 @@ fn extract_frontmatter(content: &str, path: &Path) -> Result<String> {
 /// segment looks up an object key. On failure the error names the deepest
 /// segment that DID resolve (`<root>` if none did), so the caller can
 /// correct the path without opening the file.
+///
+/// A numeric segment always tries array-indexing first, so an object with a
+/// literal numeric key (e.g. `{"0": "x"}`) is unreachable by that key --
+/// same v1 scope limitation as keys containing a literal `.`.
 fn walk_field(root: &serde_json::Value, field: &str, path: &Path) -> Result<serde_json::Value> {
     let mut current = root;
     let mut resolved: Vec<&str> = Vec::new();

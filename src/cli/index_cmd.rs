@@ -1,7 +1,7 @@
 //! `legion index`/`sym`/`reindex`/`cleanup`/`rename` handlers and the
 //! background indexer plumbing (carved from main.rs, #610).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 
@@ -313,7 +313,7 @@ fn run_etc_find_content(
 /// is detected independently of the extract result (cheap: an extension
 /// check, no extra file read) so a usage row still names the format even
 /// when the field itself was missing.
-fn run_etc_extract(path: &std::path::Path, field: &str, json: bool) -> error::Result<()> {
+fn run_etc_extract(path: &Path, field: &str, json: bool) -> error::Result<()> {
     let outcome = etc::extract_field(path, field);
     let format = etc::detect_format(path)
         .ok()
