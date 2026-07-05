@@ -7,7 +7,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{open_db, open_db_and_index};
-use crate::{db, error, etc, inventory, scip, sym, telemetry, watch};
+use crate::{db, error, etc, graph, inventory, scip, sym, telemetry, watch};
 
 #[derive(Subcommand)]
 pub(crate) enum SymAction {
@@ -2029,6 +2029,55 @@ pub(crate) fn handle_index(
         "[legion] inventoried {} files for {repo} ({pruned} stale rows pruned)",
         outcome.entries.len()
     );
+
+    // Module graph (#710): parse js/ts/jsx/tsx imports and resolve each
+    // specifier against its referrer. Runs over the inventory's
+    // typescript-lang subset (extension-based, from the walk above) --
+    // independent of the SCIP `langs` marker-file detection below, since
+    // oxc_parser/oxc_resolver need only the files themselves, not a
+    // scip-typescript binary on PATH.
+    let ts_files: Vec<PathBuf> = outcome
+        .entries
+        .iter()
+        .filter(|e| e.lang.as_deref() == Some("typescript"))
+        .map(|e| PathBuf::from(&e.path))
+        .collect();
+    // Computed once and reused for both the upsert below (which files must
+    // have their stale rows cleared before the fresh edges are inserted)
+    // and the prune below (which files are still live at all).
+    let live_from: Vec<&str> = ts_files.iter().filter_map(|p| p.to_str()).collect();
+    let mut edge_count: usize = 0;
+    if !ts_files.is_empty() {
+        match graph::build_module_graph(&repo, &repo_path, &ts_files) {
+            Ok(edges) => {
+                edge_count = edges.len();
+                database.upsert_module_edges(&repo, &live_from, &edges)?;
+            }
+            Err(e) => {
+                eprintln!("[legion] module graph build failed for {repo}: {e}");
+            }
+        }
+    }
+    // Prune unconditionally on a clean walk -- mirroring the file-inventory
+    // prune above, including its zero-entries case: a repo that has gone to
+    // zero JS/TS files (last one deleted, or the repo migrated off JS) must
+    // still wipe its now-stale module_edges rows, exactly as
+    // `prune_file_inventory` wipes the whole repo when `live_paths` is empty.
+    // Gating this behind `!ts_files.is_empty()` would leave those rows
+    // orphaned forever. Same partial-walk guard as the file-inventory prune:
+    // a walk with errors may be missing files that still exist, and pruning
+    // against that incomplete set would evict edges for files the walk
+    // simply failed to see this run.
+    if outcome.walk_errors == 0 {
+        let pruned_edges = database.prune_module_edges(&repo, &live_from)?;
+        eprintln!(
+            "[legion] module graph: {edge_count} edges for {repo} ({pruned_edges} stale edges pruned)"
+        );
+    } else {
+        eprintln!(
+            "[legion] module graph: {edge_count} edges for {repo} (stale-edge prune skipped: partial walk)"
+        );
+    }
 
     // SCIP indexing runs only when language markers are present. A docs-only
     // repo (no Cargo.toml, package.json, etc.) skips this block entirely --
