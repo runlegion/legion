@@ -105,6 +105,57 @@ fn index_populates_module_edges_through_tsconfig_paths_and_records_unresolved() 
 }
 
 #[test]
+fn reindex_drops_edges_for_imports_removed_from_a_still_live_file() {
+    // Regression test for the module_edges upsert bug where a file that
+    // stays live but sheds an import (or all of them) left the stale edge
+    // rows behind forever: the upsert only ever inserts/updates, and
+    // `prune_module_edges` only removes edges for files that are no longer
+    // walked at all, so neither path used to clear a specifier that
+    // disappeared from a file's *current* content.
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+
+    std::fs::create_dir_all(repo_dir.path().join("src")).expect("mkdir src");
+    std::fs::write(
+        repo_dir.path().join("src/index.ts"),
+        "import { b } from './b';\nimport { c } from './c';\nexport { b, c };\n",
+    )
+    .expect("write index.ts");
+    std::fs::write(repo_dir.path().join("src/b.ts"), "export const b = 1;\n").expect("write b.ts");
+    std::fs::write(repo_dir.path().join("src/c.ts"), "export const c = 1;\n").expect("write c.ts");
+
+    seed_watch_toml(data_dir.path(), &[("reindexrepo", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "reindexrepo"]));
+
+    let first_pass = edges_for_repo(data_dir.path(), "reindexrepo");
+    assert_eq!(
+        first_pass.len(),
+        2,
+        "expected both ./b and ./c edges on the first index, got {first_pass:?}"
+    );
+
+    // src/index.ts stays live but drops its `./c` import entirely.
+    std::fs::write(
+        repo_dir.path().join("src/index.ts"),
+        "import { b } from './b';\nexport { b };\n",
+    )
+    .expect("rewrite index.ts");
+
+    run_ok(legion_cmd(data_dir.path()).args(["index", "reindexrepo"]));
+
+    let second_pass = edges_for_repo(data_dir.path(), "reindexrepo");
+    assert_eq!(
+        second_pass,
+        vec![(
+            "src/index.ts".to_string(),
+            "./b".to_string(),
+            Some("src/b.ts".to_string())
+        )],
+        "the dropped ./c import must not survive re-indexing, got {second_pass:?}"
+    );
+}
+
+#[test]
 fn index_with_no_ts_files_leaves_module_edges_empty() {
     // A repo with no js/ts/jsx/tsx files at all must not error, and must
     // simply produce no module_edges rows -- the graph pass is skipped

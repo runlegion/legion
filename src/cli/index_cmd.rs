@@ -2042,12 +2042,16 @@ pub(crate) fn handle_index(
         .filter(|e| e.lang.as_deref() == Some("typescript"))
         .map(|e| PathBuf::from(&e.path))
         .collect();
+    // Computed once and reused for both the upsert below (which files must
+    // have their stale rows cleared before the fresh edges are inserted)
+    // and the prune below (which files are still live at all).
+    let live_from: Vec<&str> = ts_files.iter().filter_map(|p| p.to_str()).collect();
     let mut edge_count: usize = 0;
     if !ts_files.is_empty() {
         match graph::build_module_graph(&repo, &repo_path, &ts_files) {
             Ok(edges) => {
                 edge_count = edges.len();
-                database.upsert_module_edges(&edges)?;
+                database.upsert_module_edges(&repo, &live_from, &edges)?;
             }
             Err(e) => {
                 eprintln!("[legion] module graph build failed for {repo}: {e}");
@@ -2065,7 +2069,6 @@ pub(crate) fn handle_index(
     // against that incomplete set would evict edges for files the walk
     // simply failed to see this run.
     if outcome.walk_errors == 0 {
-        let live_from: Vec<&str> = ts_files.iter().filter_map(|p| p.to_str()).collect();
         let pruned_edges = database.prune_module_edges(&repo, &live_from)?;
         eprintln!(
             "[legion] module graph: {edge_count} edges for {repo} ({pruned_edges} stale edges pruned)"
