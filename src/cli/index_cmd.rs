@@ -1,7 +1,7 @@
 //! `legion index`/`sym`/`reindex`/`cleanup`/`rename` handlers and the
 //! background indexer plumbing (carved from main.rs, #610).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 
@@ -164,6 +164,24 @@ pub(crate) enum EtcShape {
         #[arg(long)]
         json: bool,
     },
+
+    /// Return one field from a JSON/TOML/YAML file, or the YAML frontmatter
+    /// of a `.md`/`.mdx`/`.astro` file, without reading the whole file
+    /// (#708). The bytes an agent wants -- a config value, a frontmatter
+    /// field -- not the surrounding file.
+    Extract {
+        /// Path to the structured file to extract from.
+        path: PathBuf,
+        /// jq-style dotted path: `.`-separated segments walk objects, and a
+        /// purely numeric segment indexes an array (`scripts.build`,
+        /// `keywords.0`, `workspaces.packages.1`). Keys that themselves
+        /// contain a literal `.` are out of scope for v1.
+        #[arg(long)]
+        field: String,
+        /// Emit the value as JSON instead of a bare scalar/lines
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Dispatch `legion sym <action>` against the local index store.
@@ -235,6 +253,7 @@ fn run_sym_etc(shape: EtcShape) -> error::Result<()> {
             hidden,
             json,
         } => run_etc_find_content(&pattern, repo, ext, fixed_strings, hidden, json),
+        EtcShape::Extract { path, field, json } => run_etc_extract(&path, &field, json),
     }
 }
 
@@ -274,6 +293,7 @@ fn run_etc_find_content(
         failed_repos: scan
             .as_ref()
             .map_or(0, |(r, _)| r.failed_repos.len() as u64),
+        format: None,
     };
     if let Err(e) = telemetry::append_etc_usage(&usage) {
         eprintln!("[legion] etc usage telemetry write failed: {e}");
@@ -316,6 +336,61 @@ fn run_etc_find_content(
         );
     }
     Ok(())
+}
+
+/// `sym etc extract` (#708): pull one field out of a config/frontmatter file
+/// without reading the whole thing. Telemetry records one row per
+/// invocation -- `hit_count` is 1 on a resolved field and 0 on a miss or
+/// error, so the epic's zero-result metric covers this shape too. `format`
+/// is detected independently of the extract result (cheap: an extension
+/// check, no extra file read) so a usage row still names the format even
+/// when the field itself was missing.
+fn run_etc_extract(path: &Path, field: &str, json: bool) -> error::Result<()> {
+    let outcome = etc::extract_field(path, field);
+    let format = etc::detect_format(path)
+        .ok()
+        .map(|f| f.as_str().to_string());
+
+    let usage = telemetry::EtcUsageRecord {
+        ts: chrono::Utc::now(),
+        command: "extract".to_string(),
+        repo: None,
+        pattern: field.to_string(),
+        fixed_strings: false,
+        hit_count: u64::from(outcome.is_ok()),
+        skipped_files: 0,
+        error: outcome.as_ref().err().map(|e| e.to_string()),
+        failed_repos: 0,
+        format,
+    };
+    if let Err(e) = telemetry::append_etc_usage(&usage) {
+        eprintln!("[legion] etc usage telemetry write failed: {e}");
+    }
+
+    let value = outcome?;
+    if json {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        print_extract_value(&value);
+    }
+    Ok(())
+}
+
+/// Print an extracted value the way an agent wants to consume it without
+/// `--json`: a string prints bare (no quotes), an array prints each element
+/// on its own line (flattening nested arrays the same way), and every other
+/// JSON scalar (number/bool/null) or a whole object prints via its compact
+/// JSON form.
+fn print_extract_value(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => println!("{s}"),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                print_extract_value(item);
+            }
+        }
+        other => println!("{other}"),
+    }
 }
 
 /// Resolve the scan scope from watch.toml and run the search. Split from
@@ -515,6 +590,7 @@ fn run_sym_tree(
         skipped_files: 0,
         error: scan.as_ref().err().map(|e| e.to_string()),
         failed_repos: 0,
+        format: None,
     };
     if let Err(e) = telemetry::append_etc_usage(&usage) {
         eprintln!("[legion] etc usage telemetry write failed: {e}");

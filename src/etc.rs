@@ -7,6 +7,12 @@
 //! (`<<<<<<<`, `--spacing-0.5`), and any content corpus goes stale on git
 //! operations that fire no edit hooks. Scanning the working tree gives grep
 //! parity and freshness by construction.
+//!
+//! extract (#708) is the complementary shape: return the specific bytes an
+//! agent wants -- a config value, a frontmatter field -- without reading the
+//! whole file. json/toml/yaml, plus the YAML frontmatter block in
+//! `.md`/`.mdx`/`.astro`, all convert into one `serde_json::Value` tree so a
+//! single dotted-path walker serves every format.
 
 use std::path::{Path, PathBuf};
 
@@ -244,6 +250,190 @@ fn relative_path(path: &Path, workdir: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// Structured formats `extract` understands, detected from the file
+/// extension. `.md`/`.mdx`/`.astro` route to the leading `---`-delimited
+/// block, not the whole file -- extract answers "what does this doc's
+/// frontmatter say", not "search the prose" (that is find-content's job,
+/// #707). Per #708's spec this block is parsed as YAML for all three
+/// extensions; note that a real `.astro` file's fence more often holds a
+/// JS/TS component script than YAML, so `.astro` support here only covers
+/// files whose fence happens to be YAML-shaped (e.g. plain frontmatter
+/// metadata above the component script).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceFormat {
+    Json,
+    Toml,
+    Yaml,
+    Frontmatter,
+}
+
+impl SourceFormat {
+    /// Stable lowercase name, used as the `format` field in `extract`'s
+    /// usage telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SourceFormat::Json => "json",
+            SourceFormat::Toml => "toml",
+            SourceFormat::Yaml => "yaml",
+            SourceFormat::Frontmatter => "frontmatter",
+        }
+    }
+}
+
+/// Detect the structured format from `path`'s extension. Unsupported or
+/// missing extensions are a loud, named error -- extract never guesses at a
+/// format from content sniffing.
+pub fn detect_format(path: &Path) -> Result<SourceFormat> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("json") => Ok(SourceFormat::Json),
+        Some("toml") => Ok(SourceFormat::Toml),
+        Some("yaml") | Some("yml") => Ok(SourceFormat::Yaml),
+        Some("md") | Some("mdx") | Some("astro") => Ok(SourceFormat::Frontmatter),
+        Some(other) => Err(LegionError::Etc(format!(
+            "unsupported format '.{other}' for extract -- handles json, toml, yaml, and YAML \
+             frontmatter in .md/.mdx/.astro"
+        ))),
+        None => Err(LegionError::Etc(format!(
+            "'{}' has no file extension -- cannot detect a format for extract",
+            path.display()
+        ))),
+    }
+}
+
+/// Extract one field from `path` by a jq-style dotted path (#708): `.`
+/// separated segments walk objects, and a purely numeric segment indexes an
+/// array (`scripts.build`, `keywords.0`, `workspaces.packages.1`). The
+/// format is detected from the extension -- json, toml, yaml, or the YAML
+/// frontmatter block of a `.md`/`.mdx`/`.astro` file. A missing field names
+/// the deepest segment that DID resolve, so the caller can correct the path
+/// without opening the file. Keys that themselves contain a literal `.` are
+/// out of scope for v1.
+pub fn extract_field(path: &Path, field: &str) -> Result<serde_json::Value> {
+    if field.trim().is_empty() {
+        return Err(LegionError::Etc("--field must not be empty".to_string()));
+    }
+    let format = detect_format(path)?;
+    let root = parse_source(path, format)?;
+    walk_field(&root, field, path)
+}
+
+/// Read and parse `path` into a generic JSON value per its detected format.
+/// TOML and YAML each parse into their own `Value` type first, then convert
+/// into `serde_json::Value` -- one dotted-path walker (`walk_field`) then
+/// serves every format identically.
+fn parse_source(path: &Path, format: SourceFormat) -> Result<serde_json::Value> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| LegionError::Etc(format!("cannot read '{}': {e}", path.display())))?;
+    match format {
+        SourceFormat::Json => serde_json::from_str(&content)
+            .map_err(|e| LegionError::Etc(format!("invalid JSON in '{}': {e}", path.display()))),
+        SourceFormat::Toml => {
+            let value: toml::Value = toml::from_str(&content).map_err(|e| {
+                LegionError::Etc(format!("invalid TOML in '{}': {e}", path.display()))
+            })?;
+            serde_json::to_value(value).map_err(|e| {
+                LegionError::Etc(format!(
+                    "cannot convert TOML to JSON in '{}': {e}",
+                    path.display()
+                ))
+            })
+        }
+        SourceFormat::Yaml => parse_yaml(&content, path),
+        SourceFormat::Frontmatter => {
+            let yaml_text = extract_frontmatter(&content, path)?;
+            parse_yaml(&yaml_text, path)
+        }
+    }
+}
+
+/// Parse a YAML document (or a frontmatter block's text) into JSON. YAML is
+/// handled by `serde_yaml_ng`, a maintained fork of the archived and
+/// unmaintained `serde_yaml` (RUSTSEC-2024-0320) -- API-compatible, so the
+/// rest of the pipeline (deserialize to a `Value`, convert to
+/// `serde_json::Value`) is identical to the TOML path.
+fn parse_yaml(text: &str, path: &Path) -> Result<serde_json::Value> {
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)
+        .map_err(|e| LegionError::Etc(format!("invalid YAML in '{}': {e}", path.display())))?;
+    serde_json::to_value(value).map_err(|e| {
+        LegionError::Etc(format!(
+            "cannot convert YAML to JSON in '{}': {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Pull the YAML frontmatter block out of a `.md`/`.mdx`/`.astro` file: the
+/// leading `---` ... `---` (or `...`) delimited section. The prose/component
+/// body after it is out of scope for extract -- that is find-content's job
+/// (#707).
+fn extract_frontmatter(content: &str, path: &Path) -> Result<String> {
+    let mut lines = content.lines();
+    match lines.next() {
+        Some(first) if first.trim_end() == "---" => {}
+        _ => {
+            return Err(LegionError::Etc(format!(
+                "no YAML frontmatter in '{}': file must start with a '---' line",
+                path.display()
+            )));
+        }
+    }
+    let mut yaml_lines = Vec::new();
+    for line in lines {
+        let trimmed = line.trim_end();
+        if trimmed == "---" || trimmed == "..." {
+            return Ok(yaml_lines.join("\n"));
+        }
+        yaml_lines.push(line);
+    }
+    Err(LegionError::Etc(format!(
+        "YAML frontmatter in '{}' has no closing '---' delimiter",
+        path.display()
+    )))
+}
+
+/// Walk `root` along the `.`-separated segments of `field`. A segment that
+/// parses as a plain non-negative integer indexes an array; any other
+/// segment looks up an object key. On failure the error names the deepest
+/// segment that DID resolve (`<root>` if none did), so the caller can
+/// correct the path without opening the file.
+///
+/// A numeric segment always tries array-indexing first, so an object with a
+/// literal numeric key (e.g. `{"0": "x"}`) is unreachable by that key --
+/// same v1 scope limitation as keys containing a literal `.`.
+fn walk_field(root: &serde_json::Value, field: &str, path: &Path) -> Result<serde_json::Value> {
+    let mut current = root;
+    let mut resolved: Vec<&str> = Vec::new();
+    for segment in field.split('.') {
+        let next = match segment.parse::<usize>() {
+            Ok(idx) => current.as_array().and_then(|arr| arr.get(idx)),
+            Err(_) => current.as_object().and_then(|obj| obj.get(segment)),
+        };
+        match next {
+            Some(value) => {
+                current = value;
+                resolved.push(segment);
+            }
+            None => {
+                let deepest = if resolved.is_empty() {
+                    "<root>".to_string()
+                } else {
+                    resolved.join(".")
+                };
+                return Err(LegionError::Etc(format!(
+                    "field '{field}' not found in '{}': segment '{segment}' does not resolve \
+                     after '{deepest}' (keys containing a literal '.' are out of scope for extract)",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(current.clone())
 }
 
 #[cfg(test)]
@@ -501,5 +691,257 @@ mod tests {
         let result = find_content("needle", &scope(&repos)).expect("search");
         let repos_seen: Vec<&str> = result.hits.iter().map(|h| h.repo.as_str()).collect();
         assert_eq!(repos_seen, vec!["alpha", "beta"]);
+    }
+
+    // -- extract (#708) --
+
+    #[test]
+    fn extract_json_nested_string_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "package.json",
+            r#"{"scripts": {"build": "tsc -p ."}}"#,
+        );
+        let value = extract_field(&dir.path().join("package.json"), "scripts.build")
+            .expect("field resolves");
+        assert_eq!(value, serde_json::json!("tsc -p ."));
+    }
+
+    #[test]
+    fn extract_numeric_segment_indexes_array() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "package.json",
+            r#"{"keywords": ["cli", "agents", "memory"]}"#,
+        );
+        let value = extract_field(&dir.path().join("package.json"), "keywords.1")
+            .expect("array index resolves");
+        assert_eq!(value, serde_json::json!("agents"));
+    }
+
+    #[test]
+    fn extract_nested_numeric_segment_indexes_array() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "pnpm-workspace.json",
+            r#"{"workspaces": {"packages": ["apps/web", "packages/core"]}}"#,
+        );
+        let value = extract_field(
+            &dir.path().join("pnpm-workspace.json"),
+            "workspaces.packages.1",
+        )
+        .expect("nested array index resolves");
+        assert_eq!(value, serde_json::json!("packages/core"));
+    }
+
+    #[test]
+    fn extract_missing_field_names_deepest_resolved_segment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "package.json",
+            r#"{"scripts": {"build": "tsc"}}"#,
+        );
+        let err = extract_field(&dir.path().join("package.json"), "scripts.test")
+            .expect_err("field is missing");
+        let msg = err.to_string();
+        assert!(msg.contains("'test'"), "message was: {msg}");
+        assert!(msg.contains("'scripts'"), "message was: {msg}");
+    }
+
+    #[test]
+    fn extract_missing_top_level_field_names_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "package.json", r#"{"scripts": {}}"#);
+        let err = extract_field(&dir.path().join("package.json"), "dependencies")
+            .expect_err("field is missing");
+        assert!(err.to_string().contains("<root>"));
+    }
+
+    #[test]
+    fn extract_empty_field_is_a_loud_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "package.json", r#"{"scripts": {}}"#);
+        let err =
+            extract_field(&dir.path().join("package.json"), "").expect_err("empty field rejected");
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn extract_toml_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "Cargo.toml",
+            "[package]\nname = \"legion\"\nversion = \"0.18.8\"\n",
+        );
+        let value = extract_field(&dir.path().join("Cargo.toml"), "package.name")
+            .expect("toml field resolves");
+        assert_eq!(value, serde_json::json!("legion"));
+    }
+
+    #[test]
+    fn extract_yaml_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "config.yaml",
+            "database:\n  host: localhost\n  port: 5432\n",
+        );
+        let value = extract_field(&dir.path().join("config.yaml"), "database.port")
+            .expect("yaml field resolves");
+        assert_eq!(value, serde_json::json!(5432));
+    }
+
+    #[test]
+    fn extract_yml_extension_also_parses_as_yaml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "config.yml", "name: legion\n");
+        let value =
+            extract_field(&dir.path().join("config.yml"), "name").expect("yml field resolves");
+        assert_eq!(value, serde_json::json!("legion"));
+    }
+
+    #[test]
+    fn extract_md_frontmatter_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "post.md",
+            "---\ntitle: Hello World\ntags:\n  - rust\n  - cli\n---\n\n# Body\n\nNot YAML.\n",
+        );
+        let value =
+            extract_field(&dir.path().join("post.md"), "title").expect("frontmatter resolves");
+        assert_eq!(value, serde_json::json!("Hello World"));
+        let tag = extract_field(&dir.path().join("post.md"), "tags.0")
+            .expect("frontmatter array resolves");
+        assert_eq!(tag, serde_json::json!("rust"));
+    }
+
+    #[test]
+    fn extract_mdx_frontmatter_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "doc.mdx",
+            "---\ntitle: MDX Doc\n---\nimport { Foo } from './foo';\n\n<Foo />\n",
+        );
+        let value =
+            extract_field(&dir.path().join("doc.mdx"), "title").expect("frontmatter resolves");
+        assert_eq!(value, serde_json::json!("MDX Doc"));
+    }
+
+    #[test]
+    fn extract_astro_frontmatter_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "page.astro",
+            "---\ntitle: Astro Page\ndraft: false\n---\n<h1>{title}</h1>\n",
+        );
+        let value =
+            extract_field(&dir.path().join("page.astro"), "draft").expect("frontmatter resolves");
+        assert_eq!(value, serde_json::json!(false));
+    }
+
+    #[test]
+    fn extract_frontmatter_can_close_with_ellipsis() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "post.md",
+            "---\ntitle: Ellipsis Close\n...\nBody.\n",
+        );
+        let value =
+            extract_field(&dir.path().join("post.md"), "title").expect("frontmatter resolves");
+        assert_eq!(value, serde_json::json!("Ellipsis Close"));
+    }
+
+    #[test]
+    fn extract_missing_frontmatter_delimiter_is_a_loud_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "post.md",
+            "# Just a heading\n\nNo frontmatter.\n",
+        );
+        let err = extract_field(&dir.path().join("post.md"), "title")
+            .expect_err("no frontmatter present");
+        assert!(err.to_string().contains("frontmatter"));
+    }
+
+    #[test]
+    fn extract_unclosed_frontmatter_is_a_loud_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "post.md",
+            "---\ntitle: Unclosed\nBody with no close.\n",
+        );
+        let err = extract_field(&dir.path().join("post.md"), "title")
+            .expect_err("frontmatter never closes");
+        assert!(err.to_string().contains("closing"));
+    }
+
+    #[test]
+    fn extract_unsupported_extension_is_a_loud_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "notes.txt", "not structured\n");
+        let err = extract_field(&dir.path().join("notes.txt"), "anything")
+            .expect_err("unsupported format rejected");
+        assert!(err.to_string().contains("unsupported format"));
+    }
+
+    #[test]
+    fn extract_no_extension_is_a_loud_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "Makefile", "build:\n\tcargo build\n");
+        let err = extract_field(&dir.path().join("Makefile"), "anything")
+            .expect_err("no extension rejected");
+        assert!(err.to_string().contains("no file extension"));
+    }
+
+    #[test]
+    fn extract_invalid_json_is_a_loud_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "bad.json", "{not valid json");
+        let err = extract_field(&dir.path().join("bad.json"), "anything")
+            .expect_err("invalid json rejected");
+        assert!(err.to_string().contains("invalid JSON"));
+    }
+
+    #[test]
+    fn detect_format_maps_every_supported_extension() {
+        assert_eq!(
+            detect_format(Path::new("x.json")).unwrap(),
+            SourceFormat::Json
+        );
+        assert_eq!(
+            detect_format(Path::new("x.toml")).unwrap(),
+            SourceFormat::Toml
+        );
+        assert_eq!(
+            detect_format(Path::new("x.yaml")).unwrap(),
+            SourceFormat::Yaml
+        );
+        assert_eq!(
+            detect_format(Path::new("x.yml")).unwrap(),
+            SourceFormat::Yaml
+        );
+        assert_eq!(
+            detect_format(Path::new("x.md")).unwrap(),
+            SourceFormat::Frontmatter
+        );
+        assert_eq!(
+            detect_format(Path::new("x.mdx")).unwrap(),
+            SourceFormat::Frontmatter
+        );
+        assert_eq!(
+            detect_format(Path::new("x.astro")).unwrap(),
+            SourceFormat::Frontmatter
+        );
     }
 }
