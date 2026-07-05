@@ -455,7 +455,7 @@ fn run_sym_list(
 /// the issue names (repo, path, ext, lang, size, symbol_count). `mtime` is
 /// deliberately dropped -- `sym tree` answers "what/where", not "when did
 /// it last change".
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct SymTreeEntry {
     repo: String,
     path: String,
