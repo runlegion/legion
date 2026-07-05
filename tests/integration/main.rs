@@ -17,6 +17,7 @@ mod kanban;
 mod mcp;
 mod memory;
 mod mesh;
+mod module_graph;
 mod serve;
 mod spec_gen;
 mod sym_tree;

@@ -70,6 +70,14 @@ impl Database {
 
     /// Return every edge whose importer is `from_path` -- "what does this
     /// file import" -- ordered by specifier for stable output.
+    ///
+    /// Not yet wired to a CLI surface -- #710 only populates the table via
+    /// `legion index` (see `handle_index` in `src/cli/index_cmd.rs`). No
+    /// issue is filed yet for the query commands (`sym imports` /
+    /// `sym importers`, or similar) that would call this; this is the query
+    /// API they will use once one is. Exercised directly by this module's
+    /// tests in the meantime.
+    #[allow(dead_code)]
     pub fn list_module_edges_from(&self, repo: &str, from_path: &str) -> Result<Vec<ImportEdge>> {
         let mut stmt = self.conn.prepare(
             "SELECT repo, from_path, specifier, to_path
@@ -87,6 +95,9 @@ impl Database {
     /// file" -- ordered by importer path for stable output. Edges with
     /// `to_path IS NULL` (unresolved/external) never match; there is
     /// nothing to look up an importee for.
+    ///
+    /// Not yet wired to a CLI surface; see `list_module_edges_from`.
+    #[allow(dead_code)]
     pub fn list_module_edges_to(&self, repo: &str, to_path: &str) -> Result<Vec<ImportEdge>> {
         let mut stmt = self.conn.prepare(
             "SELECT repo, from_path, specifier, to_path
