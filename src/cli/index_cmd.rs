@@ -1,7 +1,7 @@
 //! `legion index`/`sym`/`reindex`/`cleanup`/`rename` handlers and the
 //! background indexer plumbing (carved from main.rs, #610).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 
@@ -85,6 +85,31 @@ pub(crate) enum SymAction {
         shape: EtcShape,
     },
 
+    /// Structured, cross-repo view of the file inventory built by `legion
+    /// index` -- the "build tree" shape (#706), the sanctioned replacement
+    /// for `find` / `ls -R` / `tree` / a throwaway `os.walk`. Queries
+    /// `Database::list_file_inventory`; never walks the filesystem at
+    /// query time, so it answers instantly regardless of repo size.
+    Tree {
+        /// Restrict to a single repo (default: cross-repo over every repo
+        /// with inventory rows, each entry tagged with its own `repo` field)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Filter by extension, without the leading dot (e.g. "rs")
+        #[arg(long)]
+        ext: Option<String>,
+        /// Scope to a subtree prefix (e.g. "src/db")
+        #[arg(long)]
+        under: Option<String>,
+        /// Max path depth: number of path segments, counted from --under
+        /// when given, else from the repo root
+        #[arg(long)]
+        depth: Option<u32>,
+        /// Emit results as a JSON array of structured entries
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Enumerate the definitions in the index -- the "what functions/enums/etc.
     /// are defined here" query. Byte-cheap: names + locations, never source
     /// bodies. This is the shape `grep "fn "` was serving; use it instead.
@@ -139,6 +164,24 @@ pub(crate) enum EtcShape {
         #[arg(long)]
         json: bool,
     },
+
+    /// Return one field from a JSON/TOML/YAML file, or the YAML frontmatter
+    /// of a `.md`/`.mdx`/`.astro` file, without reading the whole file
+    /// (#708). The bytes an agent wants -- a config value, a frontmatter
+    /// field -- not the surrounding file.
+    Extract {
+        /// Path to the structured file to extract from.
+        path: PathBuf,
+        /// jq-style dotted path: `.`-separated segments walk objects, and a
+        /// purely numeric segment indexes an array (`scripts.build`,
+        /// `keywords.0`, `workspaces.packages.1`). Keys that themselves
+        /// contain a literal `.` are out of scope for v1.
+        #[arg(long)]
+        field: String,
+        /// Emit the value as JSON instead of a bare scalar/lines
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Dispatch `legion sym <action>` against the local index store.
@@ -187,6 +230,13 @@ fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<(
             file,
             json,
         } => run_sym_list(database, repo, lang, kind, file, json),
+        SymAction::Tree {
+            repo,
+            ext,
+            under,
+            depth,
+            json,
+        } => run_sym_tree(database, repo, ext, under, depth, json),
         SymAction::Etc { shape } => run_sym_etc(shape),
     }
 }
@@ -203,6 +253,7 @@ fn run_sym_etc(shape: EtcShape) -> error::Result<()> {
             hidden,
             json,
         } => run_etc_find_content(&pattern, repo, ext, fixed_strings, hidden, json),
+        EtcShape::Extract { path, field, json } => run_etc_extract(&path, &field, json),
     }
 }
 
@@ -242,6 +293,7 @@ fn run_etc_find_content(
         failed_repos: scan
             .as_ref()
             .map_or(0, |(r, _)| r.failed_repos.len() as u64),
+        format: None,
     };
     if let Err(e) = telemetry::append_etc_usage(&usage) {
         eprintln!("[legion] etc usage telemetry write failed: {e}");
@@ -284,6 +336,61 @@ fn run_etc_find_content(
         );
     }
     Ok(())
+}
+
+/// `sym etc extract` (#708): pull one field out of a config/frontmatter file
+/// without reading the whole thing. Telemetry records one row per
+/// invocation -- `hit_count` is 1 on a resolved field and 0 on a miss or
+/// error, so the epic's zero-result metric covers this shape too. `format`
+/// is detected independently of the extract result (cheap: an extension
+/// check, no extra file read) so a usage row still names the format even
+/// when the field itself was missing.
+fn run_etc_extract(path: &Path, field: &str, json: bool) -> error::Result<()> {
+    let outcome = etc::extract_field(path, field);
+    let format = etc::detect_format(path)
+        .ok()
+        .map(|f| f.as_str().to_string());
+
+    let usage = telemetry::EtcUsageRecord {
+        ts: chrono::Utc::now(),
+        command: "extract".to_string(),
+        repo: None,
+        pattern: field.to_string(),
+        fixed_strings: false,
+        hit_count: u64::from(outcome.is_ok()),
+        skipped_files: 0,
+        error: outcome.as_ref().err().map(|e| e.to_string()),
+        failed_repos: 0,
+        format,
+    };
+    if let Err(e) = telemetry::append_etc_usage(&usage) {
+        eprintln!("[legion] etc usage telemetry write failed: {e}");
+    }
+
+    let value = outcome?;
+    if json {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        print_extract_value(&value);
+    }
+    Ok(())
+}
+
+/// Print an extracted value the way an agent wants to consume it without
+/// `--json`: a string prints bare (no quotes), an array prints each element
+/// on its own line (flattening nested arrays the same way), and every other
+/// JSON scalar (number/bool/null) or a whole object prints via its compact
+/// JSON form.
+fn print_extract_value(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => println!("{s}"),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                print_extract_value(item);
+            }
+        }
+        other => println!("{other}"),
+    }
 }
 
 /// Resolve the scan scope from watch.toml and run the search. Split from
@@ -417,6 +524,436 @@ fn run_sym_list(
         }
     }
     Ok(())
+}
+
+/// One row in `sym tree`'s structured output: the file-inventory columns
+/// the issue names (repo, path, ext, lang, size, symbol_count). `mtime` is
+/// deliberately dropped -- `sym tree` answers "what/where", not "when did
+/// it last change".
+#[derive(Debug, serde::Serialize)]
+struct SymTreeEntry {
+    repo: String,
+    path: String,
+    ext: Option<String>,
+    lang: Option<String>,
+    size: u64,
+    symbol_count: u32,
+}
+
+impl From<db::inventory::FileInventoryEntry> for SymTreeEntry {
+    fn from(e: db::inventory::FileInventoryEntry) -> Self {
+        Self {
+            repo: e.repo,
+            path: e.path,
+            ext: e.ext,
+            lang: e.lang,
+            size: e.size,
+            symbol_count: e.symbol_count,
+        }
+    }
+}
+
+/// `sym tree` (#706): a structured, cross-repo view of the file inventory
+/// (`Database::list_file_inventory`) -- no filesystem walk at query time.
+/// `--repo` omitted means cross-repo over whatever the inventory table
+/// holds, each entry tagged with its own `repo` field. `--ext` narrows
+/// server-side via the DB filter; `--under`/`--depth` narrow in-process
+/// since neither has a dedicated column. Telemetry records every
+/// invocation -- including error exits -- with the result count, mirroring
+/// `find-content` (#704's primary metric is the zero-result rate across
+/// every sanctioned query shape).
+fn run_sym_tree(
+    database: &db::Database,
+    repo: Option<String>,
+    ext: Option<String>,
+    under: Option<String>,
+    depth: Option<u32>,
+    json: bool,
+) -> error::Result<()> {
+    use std::io::Write;
+
+    let scan = scan_tree(
+        database,
+        repo.as_deref(),
+        ext.as_deref(),
+        under.as_deref(),
+        depth,
+    );
+
+    let usage = telemetry::EtcUsageRecord {
+        ts: chrono::Utc::now(),
+        command: "tree".to_string(),
+        repo: repo.clone(),
+        pattern: describe_tree_scope(ext.as_deref(), under.as_deref(), depth),
+        fixed_strings: false,
+        hit_count: scan.as_ref().map_or(0, |r| r.entries.len() as u64),
+        skipped_files: 0,
+        error: scan.as_ref().err().map(|e| e.to_string()),
+        failed_repos: 0,
+        format: None,
+    };
+    if let Err(e) = telemetry::append_etc_usage(&usage) {
+        eprintln!("[legion] etc usage telemetry write failed: {e}");
+    }
+
+    let result = scan?;
+    if let Some(msg) = &result.message {
+        eprintln!("[legion] {msg}");
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        serde_json::to_writer(&mut out, &result.entries)?;
+        writeln!(out)?;
+    } else {
+        let cross_repo = repo.is_none();
+        for e in &result.entries {
+            let ext_col = e.ext.as_deref().unwrap_or("-");
+            let lang_col = e.lang.as_deref().unwrap_or("-");
+            if cross_repo {
+                writeln!(
+                    out,
+                    "{}/{}\t{ext_col}\t{lang_col}\t{}\t{}",
+                    e.repo, e.path, e.size, e.symbol_count
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "{}\t{ext_col}\t{lang_col}\t{}\t{}",
+                    e.path, e.size, e.symbol_count
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Result of a `sym tree` scan: the filtered, sorted entries plus an
+/// optional human-facing note for the empty case (either "never indexed"
+/// or "filter matched nothing", distinguished by `compute_uncovered_message`).
+struct TreeScan {
+    entries: Vec<SymTreeEntry>,
+    message: Option<String>,
+}
+
+/// Resolve and filter `sym tree` scope: validate an explicit `--repo`
+/// against watch.toml (the fix-hint error path), query the inventory table
+/// (server-side `--ext`/`--repo` filter), then narrow by `--under`/`--depth`
+/// in-process. Cross-repo (`repo: None`) never touches watch.toml -- the
+/// inventory table is the source of truth once `legion index` has run.
+fn scan_tree(
+    database: &db::Database,
+    repo: Option<&str>,
+    ext: Option<&str>,
+    under: Option<&str>,
+    depth: Option<u32>,
+) -> error::Result<TreeScan> {
+    if let Some(name) = repo {
+        validate_repo_known(name)?;
+    }
+
+    let filter = db::inventory::InventoryFilter {
+        repo,
+        ext,
+        lang: None,
+    };
+    let raw = database.list_file_inventory(&filter)?;
+    let entries = filter_and_scope(raw, under, depth);
+    let message = compute_uncovered_message(database, repo, &entries)?;
+    Ok(TreeScan { entries, message })
+}
+
+/// Error when `name` is not a repo in watch.toml -- the fix hint the issue
+/// requires for an unknown `--repo`.
+fn validate_repo_known(name: &str) -> error::Result<()> {
+    let base = data_dir()?;
+    let watch_path = base.join("watch.toml");
+    let all = watch::list_repos_in_config(&watch_path)?;
+    if !all.iter().any(|r| r.name == name) {
+        return Err(error::LegionError::WatchConfig(format!(
+            "repo '{name}' not in watch.toml. Add it with `legion watch add {name} <path>`."
+        )));
+    }
+    Ok(())
+}
+
+/// Narrow `raw` by `--under` (subtree prefix) and `--depth` (max path
+/// segments), then sort by `(repo, path)`. Pure function of already-fetched
+/// rows so it is unit-testable without a database.
+fn filter_and_scope(
+    raw: Vec<db::inventory::FileInventoryEntry>,
+    under: Option<&str>,
+    depth: Option<u32>,
+) -> Vec<SymTreeEntry> {
+    let mut entries: Vec<SymTreeEntry> = raw
+        .into_iter()
+        .filter(|e| under.is_none_or(|u| under_matches(&e.path, u)))
+        .filter(|e| depth.is_none_or(|d| tree_depth(&e.path, under) <= d as usize))
+        .map(SymTreeEntry::from)
+        .collect();
+    entries.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.path.cmp(&b.path)));
+    entries
+}
+
+/// True when `path` is `under` itself or lives inside it. Boundary-checked
+/// so `src/db` matches `src/db/x.rs` but not the sibling `src/dbfoo.rs`.
+fn under_matches(path: &str, under: &str) -> bool {
+    let u = under.trim_end_matches('/');
+    if u.is_empty() {
+        return true;
+    }
+    path == u || path.starts_with(&format!("{u}/"))
+}
+
+/// Path depth in segments, counted relative to `under` when given (so
+/// `--under src/db --depth 1` returns only the direct children of
+/// `src/db`), else relative to the repo root.
+fn tree_depth(path: &str, under: Option<&str>) -> usize {
+    let rel = match under {
+        Some(u) => {
+            let u = u.trim_end_matches('/');
+            path.strip_prefix(u)
+                .map(|s| s.trim_start_matches('/'))
+                .unwrap_or(path)
+        }
+        None => path,
+    };
+    if rel.is_empty() {
+        0
+    } else {
+        rel.split('/').count()
+    }
+}
+
+/// Empty-result message, distinguishing "this repo has never been indexed"
+/// from "the filter matched nothing" -- the criterion requires the former
+/// to be an explicit "run `legion index <repo>`" hint, not silence. Runs a
+/// second, unfiltered-by-ext query only on the empty path, so the common
+/// non-empty case pays no extra cost.
+fn compute_uncovered_message(
+    database: &db::Database,
+    repo: Option<&str>,
+    entries: &[SymTreeEntry],
+) -> error::Result<Option<String>> {
+    if !entries.is_empty() {
+        return Ok(None);
+    }
+    let baseline = database.list_file_inventory(&db::inventory::InventoryFilter {
+        repo,
+        ext: None,
+        lang: None,
+    })?;
+    Ok(Some(if baseline.is_empty() {
+        match repo {
+            Some(name) => format!("no inventory for '{name}'; run `legion index {name}` first"),
+            None => {
+                "no inventory across any watched repo; run `legion index <repo>` first".to_string()
+            }
+        }
+    } else {
+        "no files match the --ext/--under/--depth filter".to_string()
+    }))
+}
+
+/// Compact telemetry description of the filters used, e.g. "ext=rs,under=src/db,depth=2".
+fn describe_tree_scope(ext: Option<&str>, under: Option<&str>, depth: Option<u32>) -> String {
+    let mut parts = Vec::new();
+    if let Some(e) = ext {
+        parts.push(format!("ext={e}"));
+    }
+    if let Some(u) = under {
+        parts.push(format!("under={u}"));
+    }
+    if let Some(d) = depth {
+        parts.push(format!("depth={d}"));
+    }
+    parts.join(",")
+}
+
+#[cfg(test)]
+mod sym_tree_tests {
+    use super::*;
+
+    fn entry(
+        repo: &str,
+        path: &str,
+        ext: Option<&str>,
+        lang: Option<&str>,
+    ) -> db::inventory::FileInventoryEntry {
+        db::inventory::FileInventoryEntry {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            ext: ext.map(|s| s.to_string()),
+            lang: lang.map(|s| s.to_string()),
+            size: 10,
+            mtime: "2026-07-01T00:00:00+00:00".to_string(),
+            symbol_count: 0,
+        }
+    }
+
+    // --- under_matches ---
+
+    #[test]
+    fn under_matches_exact_and_nested() {
+        assert!(under_matches("src/db", "src/db"));
+        assert!(under_matches("src/db/inventory.rs", "src/db"));
+        assert!(under_matches("src/db/sub/x.rs", "src/db"));
+    }
+
+    #[test]
+    fn under_matches_rejects_sibling_prefix() {
+        // "src/dbfoo.rs" shares the string prefix "src/db" but is not
+        // inside it -- the boundary check must reject it.
+        assert!(!under_matches("src/dbfoo.rs", "src/db"));
+        assert!(!under_matches("src/other/x.rs", "src/db"));
+    }
+
+    #[test]
+    fn under_matches_trailing_slash_is_normalized() {
+        assert!(under_matches("src/db/x.rs", "src/db/"));
+    }
+
+    #[test]
+    fn under_matches_empty_matches_everything() {
+        assert!(under_matches("anything.rs", ""));
+    }
+
+    // --- tree_depth ---
+
+    #[test]
+    fn tree_depth_relative_to_repo_root() {
+        assert_eq!(tree_depth("a.rs", None), 1);
+        assert_eq!(tree_depth("src/a.rs", None), 2);
+        assert_eq!(tree_depth("src/db/a.rs", None), 3);
+    }
+
+    #[test]
+    fn tree_depth_relative_to_under() {
+        assert_eq!(tree_depth("src/db/a.rs", Some("src/db")), 1);
+        assert_eq!(tree_depth("src/db/sub/a.rs", Some("src/db")), 2);
+        // The under path itself: zero remaining segments.
+        assert_eq!(tree_depth("src/db", Some("src/db")), 0);
+    }
+
+    // --- filter_and_scope ---
+
+    #[test]
+    fn filter_and_scope_no_filters_returns_all_sorted() {
+        let raw = vec![
+            entry("r", "b.rs", Some("rs"), Some("rust")),
+            entry("r", "a.rs", Some("rs"), Some("rust")),
+        ];
+        let got = filter_and_scope(raw, None, None);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].path, "a.rs");
+        assert_eq!(got[1].path, "b.rs");
+    }
+
+    #[test]
+    fn filter_and_scope_sorts_by_repo_then_path() {
+        let raw = vec![
+            entry("beta", "a.rs", Some("rs"), Some("rust")),
+            entry("alpha", "z.rs", Some("rs"), Some("rust")),
+        ];
+        let got = filter_and_scope(raw, None, None);
+        assert_eq!(got[0].repo, "alpha");
+        assert_eq!(got[1].repo, "beta");
+    }
+
+    #[test]
+    fn filter_and_scope_under_scopes_subtree() {
+        let raw = vec![
+            entry("r", "src/db/inventory.rs", Some("rs"), Some("rust")),
+            entry("r", "src/other.rs", Some("rs"), Some("rust")),
+            entry("r", "src/dbfoo.rs", Some("rs"), Some("rust")),
+        ];
+        let got = filter_and_scope(raw, Some("src/db"), None);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, "src/db/inventory.rs");
+    }
+
+    #[test]
+    fn filter_and_scope_depth_limits_results() {
+        let raw = vec![
+            entry("r", "src/a.rs", Some("rs"), Some("rust")),
+            entry("r", "src/sub/b.rs", Some("rs"), Some("rust")),
+        ];
+        let got = filter_and_scope(raw, Some("src"), Some(1));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, "src/a.rs");
+    }
+
+    #[test]
+    fn filter_and_scope_non_symbol_file_has_lang_none() {
+        let raw = vec![entry("r", "README.md", Some("md"), None)];
+        let got = filter_and_scope(raw, None, None);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].lang, None);
+    }
+
+    // --- compute_uncovered_message ---
+
+    #[test]
+    fn message_none_when_entries_present() {
+        let db = crate::db::testutil::test_db();
+        let entries = vec![SymTreeEntry {
+            repo: "r".to_string(),
+            path: "a.rs".to_string(),
+            ext: Some("rs".to_string()),
+            lang: Some("rust".to_string()),
+            size: 1,
+            symbol_count: 0,
+        }];
+        let msg = compute_uncovered_message(&db, Some("r"), &entries).unwrap();
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn message_no_inventory_when_repo_never_indexed() {
+        let db = crate::db::testutil::test_db();
+        let msg = compute_uncovered_message(&db, Some("ghost"), &[]).unwrap();
+        assert!(msg.as_deref().is_some_and(
+            |m| m.contains("no inventory for 'ghost'") && m.contains("legion index ghost")
+        ));
+    }
+
+    #[test]
+    fn message_cross_repo_wording_when_repo_none() {
+        let db = crate::db::testutil::test_db();
+        let msg = compute_uncovered_message(&db, None, &[]).unwrap();
+        assert!(
+            msg.as_deref()
+                .is_some_and(|m| m.contains("no inventory across any watched repo"))
+        );
+    }
+
+    #[test]
+    fn message_no_match_when_repo_has_rows_but_filter_empty() {
+        let db = crate::db::testutil::test_db();
+        db.upsert_file_inventory(&[entry("r", "a.rs", Some("rs"), Some("rust"))])
+            .unwrap();
+        let msg = compute_uncovered_message(&db, Some("r"), &[]).unwrap();
+        assert!(
+            msg.as_deref()
+                .is_some_and(|m| m.contains("no files match the --ext/--under/--depth filter"))
+        );
+    }
+
+    // --- describe_tree_scope ---
+
+    #[test]
+    fn describe_tree_scope_empty_when_no_filters() {
+        assert_eq!(describe_tree_scope(None, None, None), "");
+    }
+
+    #[test]
+    fn describe_tree_scope_all_filters() {
+        assert_eq!(
+            describe_tree_scope(Some("rs"), Some("src/db"), Some(2)),
+            "ext=rs,under=src/db,depth=2"
+        );
+    }
 }
 
 /// Read the diff source -- file path or "-" for stdin -- and run impact

@@ -19,6 +19,7 @@ mod memory;
 mod mesh;
 mod serve;
 mod spec_gen;
+mod sym_tree;
 mod task;
 mod uncertainty;
 mod usage;

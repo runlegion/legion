@@ -74,14 +74,23 @@ pub fn append_bypass(record: &BypassRecord) -> Result<()> {
 /// query. The counterpart of `BypassRecord` -- bypass volume says where the
 /// index fails agents; usage rows and their zero-result rate say whether the
 /// sanctioned surface actually answers (#704's primary success metric).
+///
+/// The schema is shared across query shapes rather than one struct per
+/// shape: `pattern` doubles as `extract`'s dotted `--field` path, and
+/// `hit_count` is 0/1 for a single-value lookup instead of a match count.
+/// `command` is what tells a reader which shape produced a given row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EtcUsageRecord {
     pub ts: DateTime<Utc>,
     /// Query shape, e.g. "find-content", "tree", "extract".
     pub command: String,
-    /// Repo filter; `None` means cross-repo.
+    /// Repo filter; `None` means cross-repo. Always `None` for `extract`,
+    /// which takes a direct path rather than a watch.toml repo.
     pub repo: Option<String>,
+    /// The search pattern (`find-content`) or dotted `--field` path
+    /// (`extract`).
     pub pattern: String,
+    /// `find-content` only; always `false` for other shapes.
     pub fixed_strings: bool,
     pub hit_count: u64,
     pub skipped_files: u64,
@@ -99,6 +108,12 @@ pub struct EtcUsageRecord {
     /// rows still parse.
     #[serde(default)]
     pub failed_repos: u64,
+    /// Detected source format for `extract` rows (json/toml/yaml/frontmatter,
+    /// see `etc::SourceFormat`). `None` for `find-content` rows, for an
+    /// `extract` invocation whose path had no recognizable format, and for
+    /// rows logged before #708. Defaulted so earlier rows still parse.
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 /// Resolve the canonical etc-usage log path (sibling of `bypass.jsonl`).
@@ -328,6 +343,31 @@ mod tests {
             skipped_files: 1,
             error: None,
             failed_repos: 1,
+            format: None,
+        };
+        append_jsonl(&path, &rec).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: EtcUsageRecord = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(parsed, rec);
+    }
+
+    /// `extract` (#708) rows use the same schema: `pattern` carries the
+    /// dotted `--field` path and `format` names the detected source format.
+    #[test]
+    fn etc_usage_extract_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("etc-usage.jsonl");
+        let rec = EtcUsageRecord {
+            ts: Utc::now(),
+            command: "extract".to_string(),
+            repo: None,
+            pattern: "scripts.build".to_string(),
+            fixed_strings: false,
+            hit_count: 1,
+            skipped_files: 0,
+            error: None,
+            failed_repos: 0,
+            format: Some("json".to_string()),
         };
         append_jsonl(&path, &rec).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -343,6 +383,7 @@ mod tests {
         let parsed: EtcUsageRecord = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.error, None);
         assert_eq!(parsed.failed_repos, 0);
+        assert_eq!(parsed.format, None);
 
         let rec = EtcUsageRecord {
             ts: Utc::now(),
@@ -354,6 +395,33 @@ mod tests {
             skipped_files: 0,
             error: Some("invalid regex '(unclosed': ...".to_string()),
             failed_repos: 0,
+            format: None,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: EtcUsageRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rec);
+    }
+
+    /// Pre-#708 rows (find-content only) have no `format` key; the serde
+    /// default must keep them parseable, and an extract row's format text
+    /// must round-trip.
+    #[test]
+    fn etc_usage_format_field_defaults_and_round_trips() {
+        let legacy = r#"{"ts":"2026-07-02T01:01:32Z","command":"find-content","repo":null,"pattern":"x","fixed_strings":false,"hit_count":0,"skipped_files":0,"error":null,"failed_repos":0}"#;
+        let parsed: EtcUsageRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.format, None);
+
+        let rec = EtcUsageRecord {
+            ts: Utc::now(),
+            command: "extract".to_string(),
+            repo: None,
+            pattern: "database.port".to_string(),
+            fixed_strings: false,
+            hit_count: 0,
+            skipped_files: 0,
+            error: Some("field 'port' not found in 'config.yaml': ...".to_string()),
+            failed_repos: 0,
+            format: Some("yaml".to_string()),
         };
         let json = serde_json::to_string(&rec).unwrap();
         let back: EtcUsageRecord = serde_json::from_str(&json).unwrap();
