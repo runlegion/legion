@@ -155,16 +155,22 @@ fn format_capped_banner(
 
         let text_budget = budget_for_entry.saturating_sub(overhead);
         let truncated_text = truncate_at_char_boundary(&entry.text, text_budget);
-        let ellipsis = if truncated_text.len() < entry.text.len() {
-            "..."
+        let text_was_cut = truncated_text.len() < entry.text.len();
+        let ellipsis = if text_was_cut { "..." } else { "" };
+        // Only claim truncation when text was actually cut -- the full body
+        // can exceed its share purely from id/chain overhead while the text
+        // itself still fits, and a "truncated" notice on unclipped text
+        // would be a false claim.
+        let notice = if text_was_cut {
+            truncated_notice.as_str()
         } else {
             ""
         };
         let body = format!(
-            "- {truncated_text}{ellipsis} (id: {})\n{truncated_notice}{chain_line}",
+            "- {truncated_text}{ellipsis} (id: {})\n{notice}{chain_line}",
             entry.id
         );
-        remaining_budget = remaining_budget.saturating_sub(budget_for_entry.min(remaining_budget));
+        remaining_budget = remaining_budget.saturating_sub(budget_for_entry);
         buf.push_str(&body);
     }
 
@@ -1354,6 +1360,29 @@ mod tests {
     }
 
     #[test]
+    fn truncate_at_char_boundary_backs_off_multibyte_char() {
+        // "e" (1 byte) + combining acute U+0301 (2 bytes) = 3 bytes per
+        // unit, repeated 10x = 30 bytes. Char boundaries fall at
+        // 0,1,3,4,6,7,9,10,12,13,15,... -- a budget of 14 lands inside the
+        // combining accent's 2-byte encoding at [13..15), which a naive
+        // byte-index slice would split (panicking on non-UTF-8-boundary
+        // slicing). The back-off loop must walk down to the boundary at 13.
+        let text = "e\u{0301}".repeat(10);
+        let truncated = truncate_at_char_boundary(&text, 14);
+        assert!(text.is_char_boundary(truncated.len()));
+        assert_eq!(
+            truncated.len(),
+            13,
+            "must back off from the mid-character budget of 14 to the nearest lower boundary"
+        );
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_returns_full_text_when_under_budget() {
+        assert_eq!(truncate_at_char_boundary("short", 100), "short");
+    }
+
+    #[test]
     fn format_whoami_empty_returns_empty() {
         assert_eq!(format_whoami("legion", &[]), "");
     }
@@ -1419,6 +1448,46 @@ mod tests {
         );
         assert!(out.contains("more identity reflections truncated"));
         assert!(out.contains("legion recall --repo legion --domain identity"));
+    }
+
+    #[test]
+    fn format_whoami_truncated_entry_keeps_chain_pointer() {
+        // The chain pointer is baked into the per-entry overhead calculation
+        // (so it is charged against the entry's budget), not appended after
+        // truncation as an afterthought -- confirm it actually survives into
+        // the rendered, truncated body rather than being silently dropped.
+        let big = "x".repeat(800);
+        let entries: Vec<WhoamiEntry> = (0..5)
+            .map(|i| entry(&format!("id{i}"), &big, i == 2))
+            .collect();
+        let out = format_whoami("legion", &entries);
+        assert!(
+            out.contains("legion chain --id id2"),
+            "chain pointer for the in_chain entry must survive truncation, got: {out}"
+        );
+    }
+
+    #[test]
+    fn format_whoami_worst_case_size_with_drops_and_first_entry_borrow() {
+        // Pin the worst-case banner size when both size-inflating paths are
+        // active at once: the first entry borrows beyond its fair share
+        // (line 148's `.max(overhead + MIN_ENTRY_RENDER_BYTES)`) and enough
+        // entries are dropped to trigger the unbudgeted aggregate pointer
+        // line (src/recall.rs:171-175). Both are documented as soft-cap
+        // overshoot; this test bounds how soft in practice so a future
+        // change that blows the overshoot open further has to touch this
+        // assertion deliberately.
+        let text = "x".repeat(400);
+        let entries: Vec<WhoamiEntry> = (0..40)
+            .map(|i| entry(&format!("id{i}"), &text, false))
+            .collect();
+        let out = format_whoami("legion", &entries);
+        assert!(out.contains("more identity reflections truncated"));
+        assert!(
+            out.len() < WHOAMI_BYTE_CAP + 300,
+            "worst-case overshoot (first-entry borrow + unbudgeted drop pointer) grew past the pinned bound: {} bytes",
+            out.len()
+        );
     }
 
     #[test]
