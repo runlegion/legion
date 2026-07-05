@@ -78,14 +78,10 @@ oxc_allocator = "0.138.0"
 oxc_span = "0.138.0"
 
 # CSS symbol extraction (#711): parse compiled stylesheets into class-selector
-# and custom-property definitions. lightningcss, not oxc-css-parser --
-# oxc-css-parser 0.0.3 is spec-strict and REJECTS real Tailwind v4 output
-# (`--spacing-0.5`, a dotted custom-property name that is grammar-illegal but
-# browser-accepted and pervasive in compiled Tailwind sheets); lightningcss
-# parses it with zero errors and benchmarked speed-neutral (reflections
-# 019f1eee/019f1eef). Default features pull in nodejs/bundler/sourcemap
-# extras (serde-content, dashmap, rayon, parcel_sourcemap) this binary never
-# uses -- disabled for a lean dependency footprint.
+# and custom-property definitions. lightningcss, not oxc-css-parser -- see
+# src/css.rs module docs for why. Default features pull in nodejs/bundler/
+# sourcemap extras (serde-content, dashmap, rayon, parcel_sourcemap) this
+# binary never uses -- disabled for a lean dependency footprint.
 lightningcss = { version = "1.0.0-alpha.71", default-features = false }
 
 # libc pulls in only on unix for killpg in call_plugin_inner's timeout arm.

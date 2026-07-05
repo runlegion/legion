@@ -2102,14 +2102,20 @@ pub(crate) fn handle_index(
         .map(|e| PathBuf::from(&e.path))
         .collect();
     let live_css: Vec<&str> = css_files.iter().filter_map(|p| p.to_str()).collect();
-    let css_symbols = css::extract_css_symbols_for_files(&repo_path, &css_files);
+    let mut css_symbols: Vec<css::CssSymbol> = Vec::new();
     if !css_files.is_empty() {
+        css_symbols = css::extract_css_symbols_for_files(&repo_path, &css_files);
         counts_available = true;
         for s in &css_symbols {
             *symbol_counts.entry(s.path.clone()).or_insert(0) += 1;
         }
+        database.upsert_css_symbols(&repo, &live_css, &css_symbols)?;
     }
-    database.upsert_css_symbols(&repo, &live_css, &css_symbols)?;
+    // Prune unconditionally on a clean walk -- mirroring the module-graph
+    // prune above (and `prune_file_inventory`), including its zero-entries
+    // case: a repo that has gone to zero css files (last one deleted) must
+    // still wipe its now-stale css_symbols rows. Gating this behind
+    // `!css_files.is_empty()` would leave those rows orphaned forever.
     if outcome.walk_errors == 0 {
         let pruned_css = database.prune_css_symbols(&repo, &live_css)?;
         eprintln!(
