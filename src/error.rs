@@ -92,6 +92,9 @@ pub enum LegionError {
     #[error("watch config error: {0}")]
     WatchConfig(String),
 
+    #[error("etc error: {0}")]
+    Etc(String),
+
     #[error("watch already running (pid {0})")]
     WatchAlreadyRunning(u32),
 
@@ -264,6 +267,15 @@ mod tests {
         // the intercept below the generic printer.
         assert_eq!(LegionError::ExitWith(1).to_string(), "");
         assert_eq!(LegionError::ExitWith(2).to_string(), "");
+    }
+
+    #[test]
+    fn error_display_etc() {
+        let err = LegionError::Etc("field 'foo' not found in 'x.json'".to_string());
+        assert_eq!(
+            err.to_string(),
+            "etc error: field 'foo' not found in 'x.json'"
+        );
     }
 
     #[test]

@@ -1,9 +1,10 @@
-//! CLI end-to-end tests for `legion sym etc find-content` (#707).
+//! CLI end-to-end tests for `legion sym etc find-content` (#707) and
+//! `legion sym etc extract` (#708).
 //!
-//! The library core (`etc::find_content`) is unit-tested in src/etc.rs;
-//! these tests exercise the actual binary surface the review found
-//! uncovered: flag parsing, output shapes, loud error paths, and the
-//! telemetry side effect landing in etc-usage.jsonl.
+//! The library core (`etc::find_content`, `etc::extract_field`) is
+//! unit-tested in src/etc.rs; these tests exercise the actual binary
+//! surface the review found uncovered: flag parsing, output shapes, loud
+//! error paths, and the telemetry side effect landing in etc-usage.jsonl.
 
 use crate::common::{legion_cmd, run_fail, run_ok};
 
@@ -287,4 +288,196 @@ fn find_content_hit_cap_warns_on_stderr() {
         stderr.contains("5 more matches suppressed (cap 500)"),
         "expected the suppression note, got:\n{stderr}"
     );
+}
+
+// -- extract (#708) --
+
+#[test]
+fn extract_cli_default_output_and_telemetry() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(
+        repo_dir.path().join("package.json"),
+        r#"{"scripts": {"build": "tsc -p ."}}"#,
+    )
+    .expect("write fixture");
+
+    let stdout = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "extract",
+                repo_dir.path().join("package.json").to_str().unwrap(),
+                "--field",
+                "scripts.build",
+            ]),
+    );
+    // Default output is the bare scalar, not a JSON-quoted string.
+    assert_eq!(stdout.trim(), "tsc -p .");
+
+    let usage = std::fs::read_to_string(state_dir.path().join("legion/etc-usage.jsonl"))
+        .expect("etc-usage.jsonl written");
+    let row: serde_json::Value =
+        serde_json::from_str(usage.lines().next().expect("one row")).expect("row is JSON");
+    assert_eq!(row["command"], "extract");
+    assert_eq!(row["pattern"], "scripts.build");
+    assert_eq!(row["hit_count"], 1);
+    assert_eq!(row["format"], "json");
+    assert!(row["error"].is_null());
+}
+
+#[test]
+fn extract_cli_json_flag_emits_json_value() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(
+        repo_dir.path().join("config.yaml"),
+        "database:\n  port: 5432\n",
+    )
+    .expect("write fixture");
+
+    let stdout = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "extract",
+                repo_dir.path().join("config.yaml").to_str().unwrap(),
+                "--field",
+                "database.port",
+                "--json",
+            ]),
+    );
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(value, serde_json::json!(5432));
+}
+
+#[test]
+fn extract_cli_array_field_prints_one_element_per_line() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(
+        repo_dir.path().join("package.json"),
+        r#"{"keywords": ["cli", "agents", "memory"]}"#,
+    )
+    .expect("write fixture");
+
+    let stdout = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "extract",
+                repo_dir.path().join("package.json").to_str().unwrap(),
+                "--field",
+                "keywords",
+            ]),
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec!["cli", "agents", "memory"]
+    );
+}
+
+#[test]
+fn extract_cli_mdx_frontmatter_field() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(
+        repo_dir.path().join("doc.mdx"),
+        "---\ntitle: Hello\n---\nimport { Foo } from './foo';\n\n<Foo />\n",
+    )
+    .expect("write fixture");
+
+    let stdout = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "extract",
+                repo_dir.path().join("doc.mdx").to_str().unwrap(),
+                "--field",
+                "title",
+            ]),
+    );
+    assert_eq!(stdout.trim(), "Hello");
+}
+
+#[test]
+fn extract_cli_missing_field_fails_loudly_and_lands_in_telemetry() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(
+        repo_dir.path().join("package.json"),
+        r#"{"scripts": {"build": "tsc"}}"#,
+    )
+    .expect("write fixture");
+
+    let (_stdout, stderr) = run_fail(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "extract",
+                repo_dir.path().join("package.json").to_str().unwrap(),
+                "--field",
+                "scripts.test",
+            ]),
+    );
+    assert!(
+        stderr.contains("'test'") && stderr.contains("'scripts'"),
+        "expected the deepest-resolved-segment error, got:\n{stderr}"
+    );
+
+    let usage = std::fs::read_to_string(state_dir.path().join("legion/etc-usage.jsonl"))
+        .expect("errored invocation still writes a usage row");
+    let row: serde_json::Value =
+        serde_json::from_str(usage.lines().next().expect("one row")).expect("row is JSON");
+    assert_eq!(row["hit_count"], 0);
+    assert_eq!(row["format"], "json");
+    assert!(row["error"].as_str().is_some_and(|e| e.contains("scripts")));
+}
+
+#[test]
+fn extract_cli_unsupported_extension_fails_loudly() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(repo_dir.path().join("notes.txt"), "plain text\n").expect("write fixture");
+
+    let (_stdout, stderr) = run_fail(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "extract",
+                repo_dir.path().join("notes.txt").to_str().unwrap(),
+                "--field",
+                "anything",
+            ]),
+    );
+    assert!(
+        stderr.contains("unsupported format"),
+        "expected the unsupported-format error, got:\n{stderr}"
+    );
+
+    // Format could not be detected, so the telemetry row's format is null,
+    // not a guess.
+    let usage = std::fs::read_to_string(state_dir.path().join("legion/etc-usage.jsonl"))
+        .expect("errored invocation still writes a usage row");
+    let row: serde_json::Value =
+        serde_json::from_str(usage.lines().next().expect("one row")).expect("row is JSON");
+    assert!(row["format"].is_null());
 }

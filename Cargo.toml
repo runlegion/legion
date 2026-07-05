@@ -57,6 +57,13 @@ grep-searcher = "0.1"
 # workdirs. The same crate powers the ripgrep engine used by find-content.
 ignore = "0.4"
 
+# sym etc extract (#708): YAML support. serde_yaml is archived and
+# unmaintained (RUSTSEC-2024-0320) -- do not reintroduce it. serde_yaml_ng is
+# a maintained, API-compatible fork: same Value/Deserializer shape, so a
+# parsed document converts into serde_json::Value the same way TOML's does
+# (one dotted-path walker shared across json/toml/yaml/frontmatter).
+serde_yaml_ng = "0.10"
+
 # libc pulls in only on unix for killpg in call_plugin_inner's timeout arm.
 # Must stay AFTER all platform-independent deps -- TOML tables consume
 # every key until the next header, so listing it mid-file would leak the
