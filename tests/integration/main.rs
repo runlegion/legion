@@ -8,6 +8,7 @@
 mod common;
 
 mod bullpen;
+mod css_symbols;
 mod daemon_watch;
 mod documents;
 mod etc;

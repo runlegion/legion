@@ -77,6 +77,13 @@ oxc_resolver = "11.23.0"
 oxc_allocator = "0.138.0"
 oxc_span = "0.138.0"
 
+# CSS symbol extraction (#711): parse compiled stylesheets into class-selector
+# and custom-property definitions. lightningcss, not oxc-css-parser -- see
+# src/css.rs module docs for why. Default features pull in nodejs/bundler/
+# sourcemap extras (serde-content, dashmap, rayon, parcel_sourcemap) this
+# binary never uses -- disabled for a lean dependency footprint.
+lightningcss = { version = "1.0.0-alpha.71", default-features = false }
+
 # libc pulls in only on unix for killpg in call_plugin_inner's timeout arm.
 # Must stay AFTER all platform-independent deps -- TOML tables consume
 # every key until the next header, so listing it mid-file would leak the
