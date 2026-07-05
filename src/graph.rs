@@ -85,7 +85,19 @@ pub fn build_module_graph(
     // given root if it does not exist (a caller passing a path that is
     // about to be created, or a broken watch entry) -- resolution will
     // simply fail per-file in that case, which is already handled.
+    //
+    // On Windows, `std::fs::canonicalize` returns the verbatim form
+    // (`\\?\C:\...`). `oxc_resolver` canonicalizes its own resolved output
+    // too (`ResolveOptions::symlinks` defaults to `true`), but its
+    // `Cache::canonicalize` strips that same verbatim prefix before handing
+    // the path back (see `oxc_resolver`'s `cache/cache_impl.rs`, which calls
+    // `strip_windows_prefix` under `cfg(target_os = "windows")`). Left
+    // unstripped here, `repo_root` stays verbatim while every resolved
+    // import comes back plain, so `strip_prefix` below disagrees on every
+    // single edge -- on Windows only, since canonicalize does not add a
+    // prefix on macOS/Linux.
     let repo_root = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let repo_root = strip_verbatim_prefix(&repo_root);
     let repo_root = repo_root.as_path();
 
     let resolver = Resolver::new(ResolveOptions {
@@ -190,6 +202,26 @@ fn to_repo_relative(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// Strip Windows' `\\?\` verbatim-path prefix (and the `\\?\UNC\` variant)
+/// from an already-canonicalized path.
+///
+/// `std::fs::canonicalize` hands back the verbatim form on Windows, but
+/// `oxc_resolver`'s resolved paths come back in plain form (it strips the
+/// same prefix internally -- see the call site of `strip_verbatim_prefix`
+/// above for why the two must agree before `strip_prefix` compares them). A
+/// no-op when the prefix is absent, so safe to call unconditionally on every
+/// platform and every path, not just ones that came from Windows.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Render a resolved absolute path as repo-relative when it lives under
 /// `repo_root`, or as a forward-slash-normalized absolute path otherwise (a
 /// hoisted/symlinked `node_modules` can resolve outside the repo root in a
@@ -259,6 +291,40 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, content).unwrap();
+    }
+
+    // --- strip_verbatim_prefix: Windows verbatim-path normalization ---
+    //
+    // Pure string transforms, so these run (and matter) on every OS, not
+    // just Windows -- the bug they guard is a mismatch between two forms
+    // that only diverge on Windows, but the function itself is portable.
+
+    #[test]
+    fn strip_verbatim_prefix_strips_dos_disk_prefix() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\C:\Users\user\repo")),
+            PathBuf::from(r"C:\Users\user\repo")
+        );
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_strips_unc_prefix() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share\repo")),
+            PathBuf::from(r"\\server\share\repo")
+        );
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_is_noop_without_the_prefix() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"C:\Users\user\repo")),
+            PathBuf::from(r"C:\Users\user\repo")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new("/home/user/repo")),
+            PathBuf::from("/home/user/repo")
+        );
     }
 
     // --- literal_specifier: the dynamic import() text -> specifier helper ---
