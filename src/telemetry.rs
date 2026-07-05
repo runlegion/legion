@@ -82,13 +82,13 @@ pub fn append_bypass(record: &BypassRecord) -> Result<()> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EtcUsageRecord {
     pub ts: DateTime<Utc>,
-    /// Query shape, e.g. "find-content", "tree", "extract".
+    /// Query shape, e.g. "find-content", "tree", "extract", "find-file".
     pub command: String,
     /// Repo filter; `None` means cross-repo. Always `None` for `extract`,
     /// which takes a direct path rather than a watch.toml repo.
     pub repo: Option<String>,
-    /// The search pattern (`find-content`) or dotted `--field` path
-    /// (`extract`).
+    /// The search pattern (`find-content`), dotted `--field` path
+    /// (`extract`), or `query=...[,role=...]` description (`find-file`).
     pub pattern: String,
     /// `find-content` only; always `false` for other shapes.
     pub fixed_strings: bool,

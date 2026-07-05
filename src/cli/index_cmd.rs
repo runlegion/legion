@@ -182,6 +182,30 @@ pub(crate) enum EtcShape {
         #[arg(long)]
         json: bool,
     },
+
+    /// Locate a file by basename/glob or by role heuristic across watched
+    /// repos (#709) -- the "which repo owns X" / "locate the Y checkout"
+    /// shape. Queries the file inventory built by `legion index`
+    /// (`Database::list_file_inventory`); never walks the filesystem at
+    /// query time.
+    FindFile {
+        /// Basename or glob to match (e.g. "components.json",
+        /// "*.test.ts"). Matched against the file's basename; a query
+        /// containing `/` matches the full repo-relative path instead
+        /// (e.g. "src/db/*.rs"). `*`/`?` are glob wildcards; case-sensitive.
+        query: String,
+        /// Restrict to a single repo (default: cross-repo over every repo
+        /// with inventory rows, each entry tagged with its own `repo` field)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Restrict to files matching a coarse role heuristic inferred
+        /// from path/extension only -- no content read.
+        #[arg(long)]
+        role: Option<db::inventory::FileRole>,
+        /// Emit results as a JSON array of FileInventoryEntry objects
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Dispatch `legion sym <action>` against the local index store.
@@ -237,13 +261,15 @@ fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<(
             depth,
             json,
         } => run_sym_tree(database, repo, ext, under, depth, json),
-        SymAction::Etc { shape } => run_sym_etc(shape),
+        SymAction::Etc { shape } => run_sym_etc(database, shape),
     }
 }
 
-/// Dispatch `legion sym etc <shape>`. Unlike the symbol queries these do not
-/// read the SCIP store -- find-content scans watched workdirs directly.
-fn run_sym_etc(shape: EtcShape) -> error::Result<()> {
+/// Dispatch `legion sym etc <shape>`. `find-content`/`extract` do not read
+/// the SCIP store -- find-content scans watched workdirs directly and
+/// extract reads one file directly. `find-file` queries the file inventory
+/// table, hence the `database` handle every arm now threads through.
+fn run_sym_etc(database: &db::Database, shape: EtcShape) -> error::Result<()> {
     match shape {
         EtcShape::FindContent {
             pattern,
@@ -254,6 +280,12 @@ fn run_sym_etc(shape: EtcShape) -> error::Result<()> {
             json,
         } => run_etc_find_content(&pattern, repo, ext, fixed_strings, hidden, json),
         EtcShape::Extract { path, field, json } => run_etc_extract(&path, &field, json),
+        EtcShape::FindFile {
+            query,
+            repo,
+            role,
+            json,
+        } => run_etc_find_file(database, &query, repo, role, json),
     }
 }
 
@@ -769,6 +801,273 @@ fn describe_tree_scope(ext: Option<&str>, under: Option<&str>, depth: Option<u32
         parts.push(format!("depth={d}"));
     }
     parts.join(",")
+}
+
+/// `sym etc find-file` (#709): locate a file by basename/glob or role
+/// heuristic across the file inventory (`Database::list_file_inventory`) --
+/// no filesystem walk at query time. Telemetry records one row per
+/// invocation, mirroring `find-content`/`tree` (#704's zero-result metric).
+fn run_etc_find_file(
+    database: &db::Database,
+    query: &str,
+    repo: Option<String>,
+    role: Option<db::inventory::FileRole>,
+    json: bool,
+) -> error::Result<()> {
+    use std::io::Write;
+
+    let scan = scan_find_file(database, repo.as_deref(), query, role);
+
+    let usage = telemetry::EtcUsageRecord {
+        ts: chrono::Utc::now(),
+        command: "find-file".to_string(),
+        repo: repo.clone(),
+        pattern: describe_find_file_scope(query, role),
+        fixed_strings: false,
+        hit_count: scan.as_ref().map_or(0, |r| r.entries.len() as u64),
+        skipped_files: 0,
+        error: scan.as_ref().err().map(|e| e.to_string()),
+        failed_repos: 0,
+        format: None,
+    };
+    if let Err(e) = telemetry::append_etc_usage(&usage) {
+        eprintln!("[legion] etc usage telemetry write failed: {e}");
+    }
+
+    let result = scan?;
+    if let Some(msg) = &result.message {
+        eprintln!("[legion] {msg}");
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        serde_json::to_writer(&mut out, &result.entries)?;
+        writeln!(out)?;
+    } else {
+        let cross_repo = repo.is_none();
+        for e in &result.entries {
+            if cross_repo {
+                writeln!(out, "{}/{}", e.repo, e.path)?;
+            } else {
+                writeln!(out, "{}", e.path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Result of a `sym etc find-file` scan: the filtered, sorted entries plus
+/// an optional human-facing note for the empty case (either "never
+/// indexed" or "name/role matched nothing").
+#[derive(Debug)]
+struct FindFileScan {
+    entries: Vec<db::inventory::FileInventoryEntry>,
+    message: Option<String>,
+}
+
+/// Resolve and filter `sym etc find-file` scope: validate an explicit
+/// `--repo` against watch.toml (the fix-hint error path), query the
+/// inventory table once (server-side `--repo` filter only -- name and role
+/// have no dedicated column), then narrow by name/role in-process, the
+/// same split `scan_tree` uses for `--under`/`--depth`. Unlike `scan_tree`
+/// (whose main query is already `--ext`-filtered, so its uncovered-message
+/// baseline is a genuinely different, unfiltered query), find-file's main
+/// query has no server-side name/role filter to begin with -- so `raw`
+/// emptiness *is* the "never indexed" baseline, and no second query is
+/// needed to compute it.
+fn scan_find_file(
+    database: &db::Database,
+    repo: Option<&str>,
+    query: &str,
+    role: Option<db::inventory::FileRole>,
+) -> error::Result<FindFileScan> {
+    if let Some(name) = repo {
+        validate_repo_known(name)?;
+    }
+
+    let filter = db::inventory::InventoryFilter {
+        repo,
+        ext: None,
+        lang: None,
+    };
+    let raw = database.list_file_inventory(&filter)?;
+    let never_indexed = raw.is_empty();
+    let mut entries: Vec<db::inventory::FileInventoryEntry> = raw
+        .into_iter()
+        .filter(|e| db::inventory::matches_name(e, query))
+        .filter(|e| role.is_none_or(|r| r.matches(e)))
+        .collect();
+    entries.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.path.cmp(&b.path)));
+
+    let message = compute_find_file_uncovered_message(repo, query, role, never_indexed, &entries);
+    Ok(FindFileScan { entries, message })
+}
+
+/// Empty-result message, distinguishing "this repo has never been indexed"
+/// (or no repo has, cross-repo) from "the name/role filter matched
+/// nothing" -- the criterion requires an explicit hint, not a bare empty
+/// list. `never_indexed` is the emptiness of the *unfiltered* inventory
+/// read `scan_find_file` already performed -- a pure function of that
+/// result, not a second database round-trip.
+fn compute_find_file_uncovered_message(
+    repo: Option<&str>,
+    query: &str,
+    role: Option<db::inventory::FileRole>,
+    never_indexed: bool,
+    entries: &[db::inventory::FileInventoryEntry],
+) -> Option<String> {
+    if !entries.is_empty() {
+        return None;
+    }
+    Some(if never_indexed {
+        match repo {
+            Some(name) => format!("no inventory for '{name}'; run `legion index {name}` first"),
+            None => {
+                "no inventory across any watched repo; run `legion index <repo>` first".to_string()
+            }
+        }
+    } else {
+        match role {
+            Some(r) => format!("no file named '{query}' with role '{r}' found"),
+            None => format!("no file named '{query}' found"),
+        }
+    })
+}
+
+/// Compact telemetry description of the query/role used, e.g.
+/// "query=components.json,role=config".
+fn describe_find_file_scope(query: &str, role: Option<db::inventory::FileRole>) -> String {
+    match role {
+        Some(r) => format!("query={query},role={r}"),
+        None => format!("query={query}"),
+    }
+}
+
+#[cfg(test)]
+mod find_file_tests {
+    use super::*;
+
+    fn entry(
+        repo: &str,
+        path: &str,
+        ext: Option<&str>,
+        lang: Option<&str>,
+    ) -> db::inventory::FileInventoryEntry {
+        db::inventory::FileInventoryEntry {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            ext: ext.map(|s| s.to_string()),
+            lang: lang.map(|s| s.to_string()),
+            size: 10,
+            mtime: "2026-07-01T00:00:00+00:00".to_string(),
+            symbol_count: 0,
+        }
+    }
+
+    #[test]
+    fn scan_find_file_matches_by_basename_across_repos() {
+        let db = crate::db::testutil::test_db();
+        db.upsert_file_inventory(&[
+            entry("alpha", "web/components.json", Some("json"), None),
+            entry("beta", "components.json", Some("json"), None),
+            entry("alpha", "src/main.rs", Some("rs"), Some("rust")),
+        ])
+        .unwrap();
+
+        let scan = scan_find_file(&db, None, "components.json", None).unwrap();
+        assert_eq!(scan.entries.len(), 2);
+        assert!(scan.entries.iter().any(|e| e.repo == "alpha"));
+        assert!(scan.entries.iter().any(|e| e.repo == "beta"));
+        assert!(scan.message.is_none());
+    }
+
+    // NOTE: repo-scoping (`--repo alpha`) is not unit-tested here because
+    // `scan_find_file` validates `--repo` against a real watch.toml via
+    // `validate_repo_known`, which needs `LEGION_DATA_DIR` wired up --
+    // covered by the CLI end-to-end tests in tests/integration/find_file.rs
+    // instead (same split `sym_tree_tests` uses for `scan_tree`).
+
+    #[test]
+    fn scan_find_file_filters_by_role() {
+        let db = crate::db::testutil::test_db();
+        db.upsert_file_inventory(&[
+            entry("r", "app.config.json", Some("json"), None),
+            entry("r", "app.rs", Some("rs"), Some("rust")),
+        ])
+        .unwrap();
+
+        let scan = scan_find_file(&db, None, "*", Some(db::inventory::FileRole::Config)).unwrap();
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].path, "app.config.json");
+    }
+
+    #[test]
+    fn scan_find_file_unknown_repo_errors() {
+        let db = crate::db::testutil::test_db();
+        let err = scan_find_file(&db, Some("ghost-repo"), "x", None).unwrap_err();
+        assert!(err.to_string().contains("ghost-repo"));
+    }
+
+    #[test]
+    fn message_none_when_entries_present_find_file() {
+        let entries = vec![entry("r", "components.json", Some("json"), None)];
+        let msg = compute_find_file_uncovered_message(
+            Some("r"),
+            "components.json",
+            None,
+            false,
+            &entries,
+        );
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn message_no_inventory_hint_when_repo_never_indexed() {
+        let msg = compute_find_file_uncovered_message(Some("ghost"), "x", None, true, &[]);
+        assert!(msg.as_deref().is_some_and(
+            |m| m.contains("no inventory for 'ghost'") && m.contains("legion index ghost")
+        ));
+    }
+
+    #[test]
+    fn message_cross_repo_wording_when_repo_none_find_file() {
+        let msg = compute_find_file_uncovered_message(None, "x", None, true, &[]);
+        assert!(
+            msg.as_deref()
+                .is_some_and(|m| m.contains("no inventory across any watched repo"))
+        );
+    }
+
+    #[test]
+    fn message_no_match_names_query_and_role() {
+        let msg = compute_find_file_uncovered_message(
+            Some("r"),
+            "nope.json",
+            Some(db::inventory::FileRole::Config),
+            false,
+            &[],
+        );
+        assert!(msg.as_deref().is_some_and(|m| {
+            m.contains("no file named 'nope.json'") && m.contains("role 'config'")
+        }));
+    }
+
+    #[test]
+    fn describe_find_file_scope_query_only() {
+        assert_eq!(
+            describe_find_file_scope("components.json", None),
+            "query=components.json"
+        );
+    }
+
+    #[test]
+    fn describe_find_file_scope_with_role() {
+        assert_eq!(
+            describe_find_file_scope("*", Some(db::inventory::FileRole::Config)),
+            "query=*,role=config"
+        );
+    }
 }
 
 #[cfg(test)]
