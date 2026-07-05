@@ -9,6 +9,7 @@
 mod audit;
 mod autonomy;
 mod board;
+pub mod css_symbols;
 mod documents;
 mod health;
 mod heartbeat;
@@ -121,6 +122,7 @@ impl Database {
         heartbeat::create_tables(conn)?;
         inventory::create_tables(conn)?;
         module_edges::create_tables(conn)?;
+        css_symbols::create_tables(conn)?;
         tx.commit()?;
 
         reflections::migrate(conn)?;

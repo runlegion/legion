@@ -126,6 +126,9 @@ pub enum LegionError {
     #[error("mesh error: {0}")]
     Mesh(String),
 
+    #[error("css error: {0}")]
+    Css(String),
+
     #[error(
         "indexer not found: '{binary}' is not on PATH (required for {lang} indexing). For Rust, install rust-analyzer (`rustup component add rust-analyzer`) which provides `rust-analyzer scip`; the legacy scip-rust repo is archived."
     )]

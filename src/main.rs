@@ -3,6 +3,7 @@ mod board;
 mod card_parse;
 mod channel;
 mod cluster;
+mod css;
 mod daemon;
 mod db;
 mod documents;

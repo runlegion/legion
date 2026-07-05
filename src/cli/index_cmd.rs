@@ -7,7 +7,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{open_db, open_db_and_index};
-use crate::{db, error, etc, graph, inventory, scip, sym, telemetry, watch};
+use crate::{css, db, error, etc, graph, inventory, scip, sym, telemetry, watch};
 
 #[derive(Subcommand)]
 pub(crate) enum SymAction {
@@ -2079,6 +2079,50 @@ pub(crate) fn handle_index(
         );
     }
 
+    // CSS symbols (#711): parse compiled stylesheets' class-selector and
+    // custom-property definitions via lightningcss, so `sym` can answer
+    // "where is `.foo` / `--token` defined" for the design system. Runs over
+    // the inventory's `.css`-extension subset -- css is not a SCIP language
+    // (`inventory::lang_for_ext` maps it to `None`), so this is independent
+    // of the `langs` marker-file detection below.
+    //
+    // `counts_available`/`symbol_counts` are shared with the SCIP loop below
+    // and enriched by BOTH sources before the single `update_file_symbol_counts`
+    // call at the end of this function: that call resets the whole repo's
+    // counts to 0 before applying the map, so calling it twice (once per
+    // source) would let the second call zero out the first source's counts.
+    let mut counts_available = false;
+    let mut symbol_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+
+    let css_files: Vec<PathBuf> = outcome
+        .entries
+        .iter()
+        .filter(|e| e.ext.as_deref() == Some("css"))
+        .map(|e| PathBuf::from(&e.path))
+        .collect();
+    let live_css: Vec<&str> = css_files.iter().filter_map(|p| p.to_str()).collect();
+    let css_symbols = css::extract_css_symbols_for_files(&repo_path, &css_files);
+    if !css_files.is_empty() {
+        counts_available = true;
+        for s in &css_symbols {
+            *symbol_counts.entry(s.path.clone()).or_insert(0) += 1;
+        }
+    }
+    database.upsert_css_symbols(&repo, &live_css, &css_symbols)?;
+    if outcome.walk_errors == 0 {
+        let pruned_css = database.prune_css_symbols(&repo, &live_css)?;
+        eprintln!(
+            "[legion] css symbols: {} for {repo} ({pruned_css} stale rows pruned)",
+            css_symbols.len()
+        );
+    } else {
+        eprintln!(
+            "[legion] css symbols: {} for {repo} (stale-row prune skipped: partial walk)",
+            css_symbols.len()
+        );
+    }
+
     // SCIP indexing runs only when language markers are present. A docs-only
     // repo (no Cargo.toml, package.json, etc.) skips this block entirely --
     // the file inventory above already covered it (#705).
@@ -2090,9 +2134,6 @@ pub(crate) fn handle_index(
         );
     } else {
         let mut indexed: u32 = 0;
-        let mut counts_available = false;
-        let mut symbol_counts: std::collections::HashMap<String, u32> =
-            std::collections::HashMap::new();
         for lang in &langs {
             let blob = match scip::run_indexer(lang, &repo_path) {
                 Ok(b) => b,
@@ -2139,15 +2180,18 @@ pub(crate) fn handle_index(
                 langs.join(", ")
             )));
         }
-        // Gate on parse success, not on non-empty counts: a blob that parsed
-        // but yielded zero definitions (the repo's last definition was
-        // deleted) must still run the enrich pass so its reset clears the
-        // now-stale counts. A parse FAILURE skips the pass entirely,
-        // preserving prior enrichment.
-        if counts_available {
-            let updated = database.update_file_symbol_counts(&repo, &symbol_counts)?;
-            eprintln!("[legion] symbol counts applied to {updated} inventoried files for {repo}");
-        }
+    }
+
+    // Gate on a source having run at all, not on non-empty counts: a blob
+    // (or css batch) that parsed but yielded zero definitions (the repo's
+    // last definition was deleted) must still run the enrich pass so its
+    // reset clears the now-stale counts. A source that never ran (no
+    // languages detected, no css files) leaves prior enrichment untouched --
+    // this call is shared by SCIP and CSS (see the comment above the css
+    // block) so a docs-only-turned-css-only repo still gets counts applied.
+    if counts_available {
+        let updated = database.update_file_symbol_counts(&repo, &symbol_counts)?;
+        eprintln!("[legion] symbol counts applied to {updated} inventoried files for {repo}");
     }
 
     Ok(())
