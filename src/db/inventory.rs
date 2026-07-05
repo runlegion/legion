@@ -44,10 +44,8 @@ pub struct FileInventoryEntry {
 /// `None` on any field disables that filter; `InventoryFilter::default()`
 /// returns every row.
 ///
-/// Used by `sym tree` (#706) and `sym etc find-file` (#709); `#[allow]`
-/// silences the dead-code lint until those callers land.
+/// Used by `sym tree` (#706) and `sym etc find-file` (#709).
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 pub struct InventoryFilter<'a> {
     pub repo: Option<&'a str>,
     pub ext: Option<&'a str>,
@@ -125,9 +123,7 @@ impl Database {
     /// `None` on any filter field disables that restriction. All three
     /// `None` returns every row in the table.
     ///
-    /// Read path for `sym tree` (#706) and `sym etc find-file` (#709);
-    /// `#[allow]` silences the dead-code lint until those callers land.
-    #[allow(dead_code)]
+    /// Read path for `sym tree` (#706) and `sym etc find-file` (#709).
     pub fn list_file_inventory(
         &self,
         filter: &InventoryFilter<'_>,
