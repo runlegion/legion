@@ -868,9 +868,14 @@ struct FindFileScan {
 
 /// Resolve and filter `sym etc find-file` scope: validate an explicit
 /// `--repo` against watch.toml (the fix-hint error path), query the
-/// inventory table (server-side `--repo` filter only -- name and role have
-/// no dedicated column), then narrow by name/role in-process, the same
-/// split `scan_tree` uses for `--under`/`--depth`.
+/// inventory table once (server-side `--repo` filter only -- name and role
+/// have no dedicated column), then narrow by name/role in-process, the
+/// same split `scan_tree` uses for `--under`/`--depth`. Unlike `scan_tree`
+/// (whose main query is already `--ext`-filtered, so its uncovered-message
+/// baseline is a genuinely different, unfiltered query), find-file's main
+/// query has no server-side name/role filter to begin with -- so `raw`
+/// emptiness *is* the "never indexed" baseline, and no second query is
+/// needed to compute it.
 fn scan_find_file(
     database: &db::Database,
     repo: Option<&str>,
@@ -887,6 +892,7 @@ fn scan_find_file(
         lang: None,
     };
     let raw = database.list_file_inventory(&filter)?;
+    let never_indexed = raw.is_empty();
     let mut entries: Vec<db::inventory::FileInventoryEntry> = raw
         .into_iter()
         .filter(|e| db::inventory::matches_name(e, query))
@@ -894,31 +900,27 @@ fn scan_find_file(
         .collect();
     entries.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.path.cmp(&b.path)));
 
-    let message = compute_find_file_uncovered_message(database, repo, query, role, &entries)?;
+    let message = compute_find_file_uncovered_message(repo, query, role, never_indexed, &entries);
     Ok(FindFileScan { entries, message })
 }
 
 /// Empty-result message, distinguishing "this repo has never been indexed"
 /// (or no repo has, cross-repo) from "the name/role filter matched
 /// nothing" -- the criterion requires an explicit hint, not a bare empty
-/// list. Runs a second, unfiltered query only on the empty path, so the
-/// common non-empty case pays no extra cost.
+/// list. `never_indexed` is the emptiness of the *unfiltered* inventory
+/// read `scan_find_file` already performed -- a pure function of that
+/// result, not a second database round-trip.
 fn compute_find_file_uncovered_message(
-    database: &db::Database,
     repo: Option<&str>,
     query: &str,
     role: Option<db::inventory::FileRole>,
+    never_indexed: bool,
     entries: &[db::inventory::FileInventoryEntry],
-) -> error::Result<Option<String>> {
+) -> Option<String> {
     if !entries.is_empty() {
-        return Ok(None);
+        return None;
     }
-    let baseline = database.list_file_inventory(&db::inventory::InventoryFilter {
-        repo,
-        ext: None,
-        lang: None,
-    })?;
-    Ok(Some(if baseline.is_empty() {
+    Some(if never_indexed {
         match repo {
             Some(name) => format!("no inventory for '{name}'; run `legion index {name}` first"),
             None => {
@@ -930,7 +932,7 @@ fn compute_find_file_uncovered_message(
             Some(r) => format!("no file named '{query}' with role '{r}' found"),
             None => format!("no file named '{query}' found"),
         }
-    }))
+    })
 }
 
 /// Compact telemetry description of the query/role used, e.g.
@@ -1009,18 +1011,20 @@ mod find_file_tests {
 
     #[test]
     fn message_none_when_entries_present_find_file() {
-        let db = crate::db::testutil::test_db();
         let entries = vec![entry("r", "components.json", Some("json"), None)];
-        let msg =
-            compute_find_file_uncovered_message(&db, Some("r"), "components.json", None, &entries)
-                .unwrap();
+        let msg = compute_find_file_uncovered_message(
+            Some("r"),
+            "components.json",
+            None,
+            false,
+            &entries,
+        );
         assert!(msg.is_none());
     }
 
     #[test]
     fn message_no_inventory_hint_when_repo_never_indexed() {
-        let db = crate::db::testutil::test_db();
-        let msg = compute_find_file_uncovered_message(&db, Some("ghost"), "x", None, &[]).unwrap();
+        let msg = compute_find_file_uncovered_message(Some("ghost"), "x", None, true, &[]);
         assert!(msg.as_deref().is_some_and(
             |m| m.contains("no inventory for 'ghost'") && m.contains("legion index ghost")
         ));
@@ -1028,8 +1032,7 @@ mod find_file_tests {
 
     #[test]
     fn message_cross_repo_wording_when_repo_none_find_file() {
-        let db = crate::db::testutil::test_db();
-        let msg = compute_find_file_uncovered_message(&db, None, "x", None, &[]).unwrap();
+        let msg = compute_find_file_uncovered_message(None, "x", None, true, &[]);
         assert!(
             msg.as_deref()
                 .is_some_and(|m| m.contains("no inventory across any watched repo"))
@@ -1038,17 +1041,13 @@ mod find_file_tests {
 
     #[test]
     fn message_no_match_names_query_and_role() {
-        let db = crate::db::testutil::test_db();
-        db.upsert_file_inventory(&[entry("r", "a.rs", Some("rs"), Some("rust"))])
-            .unwrap();
         let msg = compute_find_file_uncovered_message(
-            &db,
             Some("r"),
             "nope.json",
             Some(db::inventory::FileRole::Config),
+            false,
             &[],
-        )
-        .unwrap();
+        );
         assert!(msg.as_deref().is_some_and(|m| {
             m.contains("no file named 'nope.json'") && m.contains("role 'config'")
         }));

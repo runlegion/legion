@@ -185,18 +185,41 @@ fn is_entry(entry: &FileInventoryEntry) -> bool {
 /// single character); every other character must match literally. Matching
 /// is anchored to the whole string -- a query of `config` does not also
 /// match `myconfig.toml` -- and case-sensitive, since basenames are
-/// case-sensitive on the platforms legion indexes. Recurses over `char`
-/// slices (not bytes) so multi-byte UTF-8 basenames compare correctly.
+/// case-sensitive on the platforms legion indexes. Compares by `char`
+/// (not byte) so multi-byte UTF-8 basenames compare correctly.
+///
+/// Iterative two-pointer scan (the classic wildcard-matching algorithm),
+/// not recursive backtracking: `query` is free-form input run against
+/// every inventory row, and a naive `glob_match(pat) = glob_match(pat[1..])
+/// || glob_match(pat, name[1..])` recursion on `*` is exponential on an
+/// adversarial pattern like `"*a*a*a*a*a*a*a*a*a*a"` against a long
+/// near-miss name. This version tracks at most one "last `*`" backtrack
+/// point (`star_idx`/`match_idx`) and never re-explores a branch, so it's
+/// linear in `pattern.len() + name.len()` for any input.
 fn glob_match(pattern: &[char], name: &[char]) -> bool {
-    match (pattern.first(), name.first()) {
-        (None, None) => true,
-        (Some('*'), _) => {
-            glob_match(&pattern[1..], name) || (!name.is_empty() && glob_match(pattern, &name[1..]))
+    let (mut pi, mut ni) = (0usize, 0usize);
+    let mut star_idx: Option<usize> = None;
+    let mut match_idx = 0usize;
+    while ni < name.len() {
+        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == name[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < pattern.len() && pattern[pi] == '*' {
+            star_idx = Some(pi);
+            match_idx = ni;
+            pi += 1;
+        } else if let Some(si) = star_idx {
+            pi = si + 1;
+            match_idx += 1;
+            ni = match_idx;
+        } else {
+            return false;
         }
-        (Some('?'), Some(_)) => glob_match(&pattern[1..], &name[1..]),
-        (Some(p), Some(n)) if p == n => glob_match(&pattern[1..], &name[1..]),
-        _ => false,
     }
+    while pi < pattern.len() && pattern[pi] == '*' {
+        pi += 1;
+    }
+    pi == pattern.len()
 }
 
 /// True when `entry` matches `query` for `sym etc find-file` (#709). A
@@ -724,6 +747,31 @@ mod tests {
         let e = entry("r", "src/db/inventory.rs", Some("rs"), Some("rust"));
         assert!(matches_name(&e, "src/db/*.rs"));
         assert!(!matches_name(&e, "src/cli/*.rs"));
+    }
+
+    /// Regression guard: a naive recursive `glob_match` that backtracks by
+    /// re-exploring both branches of `*` is exponential on a many-star
+    /// pattern against a long near-miss name. This asserts the match
+    /// completes (and answers correctly) well within a runtime that would
+    /// be unreachable if the exponential behavior had regressed.
+    #[test]
+    fn matches_name_many_star_pattern_is_not_exponential() {
+        let long_name = "a".repeat(40) + "!"; // never satisfies a trailing literal "a"
+        let e = entry("r", &long_name, None, None);
+        let pattern = "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a";
+
+        let start = std::time::Instant::now();
+        let result = matches_name(&e, pattern);
+        let elapsed = start.elapsed();
+
+        assert!(
+            !result,
+            "pattern requires a literal trailing 'a', name ends in '!'"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "glob_match took {elapsed:?} -- backtracking blowup regressed"
+        );
     }
 
     // --- FileRole heuristics ---
