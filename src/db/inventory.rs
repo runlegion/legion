@@ -52,6 +52,193 @@ pub struct InventoryFilter<'a> {
     pub lang: Option<&'a str>,
 }
 
+/// Coarse role bucket for `sym etc find-file --role` (#709), inferred
+/// purely from path and extension -- no file content is read. Each
+/// heuristic trades completeness for being answerable straight from the
+/// inventory row; a project with unconventional naming will have real
+/// files a role misses. `sym etc find-content`/`extract` are the routes
+/// for anything that needs to look inside a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum FileRole {
+    /// Settings/config files: a known config extension, or a well-known
+    /// config basename that carries no extension of its own.
+    Config,
+    /// Test files: under a tests/test/__tests__ directory, or named with a
+    /// test/spec convention (`foo.test.ts`, `test_foo.py`, `foo_test.go`).
+    Test,
+    /// Documentation: prose extensions, files under a docs/ directory, or
+    /// well-known doc basenames (README, CHANGELOG, LICENSE).
+    Doc,
+    /// Entrypoints: the file a language's toolchain treats as a program's
+    /// starting point (`main.rs`, `index.ts`, `__init__.py`, ...).
+    Entry,
+}
+
+impl std::fmt::Display for FileRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Config => "config",
+            Self::Test => "test",
+            Self::Doc => "doc",
+            Self::Entry => "entry",
+        };
+        write!(f, "{s}")
+    }
+}
+
+const CONFIG_EXTS: &[&str] = &["toml", "yaml", "yml", "json", "ini", "cfg", "conf", "env"];
+const CONFIG_BASENAMES: &[&str] = &[
+    "Dockerfile",
+    "Makefile",
+    ".env",
+    ".gitignore",
+    ".editorconfig",
+    ".npmrc",
+    ".nvmrc",
+];
+const DOC_EXTS: &[&str] = &["md", "mdx", "txt", "rst", "adoc"];
+const DOC_BASENAMES: &[&str] = &[
+    "README",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+];
+const ENTRY_BASENAMES: &[&str] = &[
+    "main.rs",
+    "lib.rs",
+    "mod.rs",
+    "main.py",
+    "__init__.py",
+    "app.py",
+    "index.ts",
+    "index.js",
+    "index.tsx",
+    "index.jsx",
+    "main.go",
+    "main.java",
+];
+const TEST_DIR_SEGMENTS: &[&str] = &["tests", "test", "__tests__", "spec"];
+
+/// Final path segment (the filename), or the whole path when it has no `/`.
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+impl FileRole {
+    /// True when `entry`'s path/extension matches this role's heuristic.
+    pub fn matches(self, entry: &FileInventoryEntry) -> bool {
+        match self {
+            Self::Config => is_config(entry),
+            Self::Test => is_test(entry),
+            Self::Doc => is_doc(entry),
+            Self::Entry => is_entry(entry),
+        }
+    }
+}
+
+fn is_config(entry: &FileInventoryEntry) -> bool {
+    if let Some(ext) = &entry.ext
+        && CONFIG_EXTS.contains(&ext.as_str())
+    {
+        return true;
+    }
+    CONFIG_BASENAMES.contains(&basename(&entry.path))
+}
+
+fn is_test(entry: &FileInventoryEntry) -> bool {
+    let path = entry.path.as_str();
+    if path.split('/').any(|seg| TEST_DIR_SEGMENTS.contains(&seg)) {
+        return true;
+    }
+    let base = basename(path);
+    let stem = entry
+        .ext
+        .as_deref()
+        .and_then(|e| base.strip_suffix(&format!(".{e}")))
+        .unwrap_or(base);
+    stem.starts_with("test_")
+        || stem.ends_with("_test")
+        || stem.ends_with(".test")
+        || stem.ends_with(".spec")
+}
+
+fn is_doc(entry: &FileInventoryEntry) -> bool {
+    if let Some(ext) = &entry.ext
+        && DOC_EXTS.contains(&ext.as_str())
+    {
+        return true;
+    }
+    let path = entry.path.as_str();
+    if path == "docs" || path.starts_with("docs/") || path.contains("/docs/") {
+        return true;
+    }
+    DOC_BASENAMES.contains(&basename(path))
+}
+
+fn is_entry(entry: &FileInventoryEntry) -> bool {
+    ENTRY_BASENAMES.contains(&basename(&entry.path))
+}
+
+/// True when `name` matches `pattern`, where `pattern` may use glob
+/// wildcards `*` (any run of characters, including none) and `?` (any
+/// single character); every other character must match literally. Matching
+/// is anchored to the whole string -- a query of `config` does not also
+/// match `myconfig.toml` -- and case-sensitive, since basenames are
+/// case-sensitive on the platforms legion indexes. Compares by `char`
+/// (not byte) so multi-byte UTF-8 basenames compare correctly.
+///
+/// Iterative two-pointer scan (the classic wildcard-matching algorithm),
+/// not recursive backtracking: `query` is free-form input run against
+/// every inventory row, and a naive `glob_match(pat) = glob_match(pat[1..])
+/// || glob_match(pat, name[1..])` recursion on `*` is exponential on an
+/// adversarial pattern like `"*a*a*a*a*a*a*a*a*a*a"` against a long
+/// near-miss name. This version tracks at most one "last `*`" backtrack
+/// point (`star_idx`/`match_idx`) and never re-explores a branch, so it's
+/// linear in `pattern.len() + name.len()` for any input.
+fn glob_match(pattern: &[char], name: &[char]) -> bool {
+    let (mut pi, mut ni) = (0usize, 0usize);
+    let mut star_idx: Option<usize> = None;
+    let mut match_idx = 0usize;
+    while ni < name.len() {
+        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == name[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < pattern.len() && pattern[pi] == '*' {
+            star_idx = Some(pi);
+            match_idx = ni;
+            pi += 1;
+        } else if let Some(si) = star_idx {
+            pi = si + 1;
+            match_idx += 1;
+            ni = match_idx;
+        } else {
+            return false;
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == '*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
+/// True when `entry` matches `query` for `sym etc find-file` (#709). A
+/// query containing `/` matches against the full repo-relative path (so a
+/// subtree-scoped glob like `src/db/*.rs` works); otherwise it matches
+/// against just the basename, so `components.json` finds the file
+/// regardless of which directory holds it. See [`glob_match`] for wildcard
+/// semantics.
+pub fn matches_name(entry: &FileInventoryEntry, query: &str) -> bool {
+    let pattern: Vec<char> = query.chars().collect();
+    if query.contains('/') {
+        let path: Vec<char> = entry.path.chars().collect();
+        glob_match(&pattern, &path)
+    } else {
+        let base: Vec<char> = basename(&entry.path).chars().collect();
+        glob_match(&pattern, &base)
+    }
+}
+
 /// Create the `file_inventory` table and its `(repo, ext)` covering index.
 ///
 /// Repo-scoped lookups need no dedicated index: the `(repo, path)` primary
@@ -517,5 +704,127 @@ mod tests {
             .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].repo, "alpha");
+    }
+
+    // --- matches_name / glob_match ---
+
+    #[test]
+    fn matches_name_exact_basename() {
+        let e = entry("r", "src/components.json", Some("json"), None);
+        assert!(matches_name(&e, "components.json"));
+        assert!(!matches_name(&e, "component.json"));
+    }
+
+    #[test]
+    fn matches_name_ignores_directory_when_query_has_no_slash() {
+        let e = entry("r", "deep/nested/dir/config.toml", Some("toml"), None);
+        assert!(matches_name(&e, "config.toml"));
+    }
+
+    #[test]
+    fn matches_name_star_glob_matches_basename() {
+        let e = entry("r", "src/foo.test.ts", Some("ts"), Some("typescript"));
+        assert!(matches_name(&e, "*.test.ts"));
+        assert!(!matches_name(&e, "*.spec.ts"));
+    }
+
+    #[test]
+    fn matches_name_question_mark_matches_single_char() {
+        let e = entry("r", "a.rs", Some("rs"), Some("rust"));
+        assert!(matches_name(&e, "?.rs"));
+        assert!(!matches_name(&e, "??.rs"));
+    }
+
+    #[test]
+    fn matches_name_is_anchored_not_substring() {
+        let e = entry("r", "myconfig.toml", Some("toml"), None);
+        assert!(!matches_name(&e, "config"));
+        assert!(matches_name(&e, "myconfig.toml"));
+    }
+
+    #[test]
+    fn matches_name_slash_in_query_matches_full_path() {
+        let e = entry("r", "src/db/inventory.rs", Some("rs"), Some("rust"));
+        assert!(matches_name(&e, "src/db/*.rs"));
+        assert!(!matches_name(&e, "src/cli/*.rs"));
+    }
+
+    /// Regression guard: a naive recursive `glob_match` that backtracks by
+    /// re-exploring both branches of `*` is exponential on a many-star
+    /// pattern against a long near-miss name. This asserts the match
+    /// completes (and answers correctly) well within a runtime that would
+    /// be unreachable if the exponential behavior had regressed.
+    #[test]
+    fn matches_name_many_star_pattern_is_not_exponential() {
+        let long_name = "a".repeat(40) + "!"; // never satisfies a trailing literal "a"
+        let e = entry("r", &long_name, None, None);
+        let pattern = "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a";
+
+        let start = std::time::Instant::now();
+        let result = matches_name(&e, pattern);
+        let elapsed = start.elapsed();
+
+        assert!(
+            !result,
+            "pattern requires a literal trailing 'a', name ends in '!'"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "glob_match took {elapsed:?} -- backtracking blowup regressed"
+        );
+    }
+
+    // --- FileRole heuristics ---
+
+    #[test]
+    fn role_config_matches_known_ext_and_basename() {
+        assert!(FileRole::Config.matches(&entry("r", "watch.toml", Some("toml"), None)));
+        assert!(FileRole::Config.matches(&entry("r", "Dockerfile", None, None)));
+        assert!(!FileRole::Config.matches(&entry("r", "src/main.rs", Some("rs"), Some("rust"))));
+    }
+
+    #[test]
+    fn role_test_matches_test_dir_and_naming_conventions() {
+        assert!(FileRole::Test.matches(&entry(
+            "r",
+            "tests/integration/foo.rs",
+            Some("rs"),
+            Some("rust")
+        )));
+        assert!(FileRole::Test.matches(&entry(
+            "r",
+            "src/foo.test.ts",
+            Some("ts"),
+            Some("typescript")
+        )));
+        assert!(FileRole::Test.matches(&entry("r", "test_foo.py", Some("py"), Some("python"))));
+        assert!(!FileRole::Test.matches(&entry("r", "src/main.rs", Some("rs"), Some("rust"))));
+    }
+
+    #[test]
+    fn role_doc_matches_prose_ext_and_docs_dir() {
+        assert!(FileRole::Doc.matches(&entry("r", "docs/site/architecture.md", Some("md"), None)));
+        assert!(FileRole::Doc.matches(&entry("r", "README.md", Some("md"), None)));
+        assert!(!FileRole::Doc.matches(&entry("r", "src/main.rs", Some("rs"), Some("rust"))));
+    }
+
+    #[test]
+    fn role_entry_matches_known_entrypoint_basenames() {
+        assert!(FileRole::Entry.matches(&entry("r", "src/main.rs", Some("rs"), Some("rust"))));
+        assert!(FileRole::Entry.matches(&entry("r", "index.ts", Some("ts"), Some("typescript"))));
+        assert!(!FileRole::Entry.matches(&entry(
+            "r",
+            "src/db/inventory.rs",
+            Some("rs"),
+            Some("rust")
+        )));
+    }
+
+    #[test]
+    fn role_display_matches_cli_value_names() {
+        assert_eq!(FileRole::Config.to_string(), "config");
+        assert_eq!(FileRole::Test.to_string(), "test");
+        assert_eq!(FileRole::Doc.to_string(), "doc");
+        assert_eq!(FileRole::Entry.to_string(), "entry");
     }
 }

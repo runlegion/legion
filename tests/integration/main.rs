@@ -11,6 +11,7 @@ mod bullpen;
 mod daemon_watch;
 mod documents;
 mod etc;
+mod find_file;
 mod governance;
 mod index_telemetry;
 mod kanban;
