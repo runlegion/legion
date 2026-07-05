@@ -590,6 +590,7 @@ fn run_sym_tree(
         skipped_files: 0,
         error: scan.as_ref().err().map(|e| e.to_string()),
         failed_repos: 0,
+        format: None,
     };
     if let Err(e) = telemetry::append_etc_usage(&usage) {
         eprintln!("[legion] etc usage telemetry write failed: {e}");
