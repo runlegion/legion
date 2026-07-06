@@ -93,7 +93,7 @@ fi
 # up as text); telemetried and allowed otherwise.
 if [ "${LEGION_BYPASS_GREP:-}" = "1" ]; then
   if [ -n "$LOCAL_HITS" ] && [ "$LOCAL_HITS" != "[]" ]; then
-    emit_deny "Soft bypass refused: \`${SYMBOL}\` resolves to a symbol in this repo's SCIP index. Use \`legion sym def ${SYMBOL} --repo ${REPO}\` (or \`sym refs\` / \`sym hover\`) instead. LEGION_BYPASS_GREP exists for free-text searches; it cannot route around sym for symbol queries.
+    emit_deny "Soft bypass refused: \`${SYMBOL}\` resolves to a symbol in this repo's SCIP index. Use \`legion sym def ${SYMBOL} --repo ${REPO}\` (or \`sym refs\` / \`sym hover\`) instead -- sym covers every indexed language, not just Rust. LEGION_BYPASS_GREP exists for free-text searches; it cannot route around sym for symbol queries.
 
 \`legion sym def ${SYMBOL} --repo ${REPO}\` returned:
 
@@ -101,7 +101,7 @@ if [ "${LEGION_BYPASS_GREP:-}" = "1" ]; then
 ${LOCAL_HITS}
 \`\`\`
 
-There is no env-var hard escape -- the mandatory search block is the operator's permissions.deny."
+For non-symbol shapes, ${TOOL} is not the sanctioned surface either: \`legion sym etc find-content '${PATTERN}' --repo ${REPO}\` (content), \`legion sym tree --repo ${REPO}\` (structure), \`legion sym etc extract <path> --field <field>\` (a config/frontmatter value), \`legion sym etc find-file '${PATTERN}' --repo ${REPO}\` (locate by name/role). There is no env-var hard escape -- the mandatory search block is the operator's permissions.deny."
     exit 0
   fi
   legion_prequery_record_bypass \
@@ -121,7 +121,7 @@ if [ -n "$LOCAL_HITS" ] && [ "$LOCAL_HITS" != "[]" ]; then
 ${LOCAL_HITS}
 \`\`\`
 
-The soft bypass (LEGION_BYPASS_GREP=1) is REFUSED for symbol-shaped patterns that resolve in this repo's SCIP index -- it exists for free-text searches, not symbol queries dressed up as text. For symbols use \`legion sym def ${SYMBOL}\` / \`sym refs\` / \`sym list\`. There is no env-var hard escape -- the mandatory search block is the operator's permissions.deny."
+The soft bypass (LEGION_BYPASS_GREP=1) is REFUSED for symbol-shaped patterns that resolve in this repo's SCIP index -- it exists for free-text searches, not symbol queries dressed up as text. For symbols use \`legion sym def ${SYMBOL}\` / \`sym refs\` / \`sym list\` -- sym covers every indexed language, not just Rust. For non-symbol shapes: \`legion sym etc find-content '${PATTERN}' --repo ${REPO}\` (content), \`legion sym tree --repo ${REPO}\` (structure), \`legion sym etc extract <path> --field <field>\` (a config/frontmatter value), \`legion sym etc find-file '${PATTERN}' --repo ${REPO}\` (locate by name/role). There is no env-var hard escape -- the mandatory search block is the operator's permissions.deny."
   exit 0
 fi
 
@@ -148,7 +148,7 @@ ${HITS}
 
 ${REFS_LINE}
 
-If this answers your symbol question, skip the ${TOOL}. SCIP is byte-cheap; file scans are not."
+If this answers your symbol question, skip the ${TOOL}. SCIP is byte-cheap; file scans are not. For non-symbol content (literal strings, config/frontmatter, file discovery), \`legion sym etc find-content\` / \`sym tree\` / \`sym etc extract\` / \`sym etc find-file\` answer those shapes without a file scan either."
   emit_allow "$CTX" "legion sym hits for the symbol"
   exit 0
 fi
@@ -259,6 +259,6 @@ Before ${TOOL} on \`${QUERY}\`, legion recall returned:
 
 ${RECALL_HITS}
 
-If these answer your question, skip the ${TOOL}. Otherwise continue -- but consider whether the reflection explains WHY before you search for WHAT."
+If these answer your question, skip the ${TOOL}. Otherwise continue -- but consider whether the reflection explains WHY before you search for WHAT. If you are after WHAT (exact content, structure, a config value, or a file by name) rather than WHY, \`legion sym etc find-content\` / \`sym tree\` / \`sym etc extract\` / \`sym etc find-file\` answer those directly and are cheaper than a ${TOOL} scan."
 
 emit_allow "$CTX" "legion recall hits for the query"

@@ -116,6 +116,64 @@ fn has_dotnet_project(repo_path: &Path) -> bool {
     false
 }
 
+/// Binaries that would satisfy `run_indexer` for `lang`, in the order
+/// `run_indexer` tries them. Rust tries two (`scip-rust`, then the
+/// `rust-analyzer` fallback, #381); every other supported language has
+/// exactly one. Kept in lockstep with `run_indexer`'s dispatch table by
+/// this module's own coverage tests -- a language added to one table and
+/// not the other silently breaks the #713 coverage message, not a build.
+fn indexer_binary_candidates(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "rust" => &["scip-rust", "rust-analyzer"],
+        "typescript" => &["scip-typescript"],
+        "python" => &["scip-python"],
+        "go" => &["scip-go"],
+        "java" => &["scip-java"],
+        "ruby" => &["scip-ruby"],
+        "clang" => &["scip-clang"],
+        "csharp" => &["scip-dotnet"],
+        "php" => &["scip-php"],
+        _ => &[],
+    }
+}
+
+/// First candidate binary name for `lang`, for display in the #713
+/// coverage message. A pure lookup -- unlike `indexer_available`, it
+/// never touches `PATH` -- so callers that only need a name to print (not
+/// an availability verdict) can use it from code that must stay
+/// deterministic for tests (e.g. `render_index_status_banner`).
+pub fn indexer_binary_hint(lang: &str) -> &'static str {
+    indexer_binary_candidates(lang)
+        .first()
+        .copied()
+        .unwrap_or("(no known indexer)")
+}
+
+/// True if any indexer binary that could satisfy `lang` resolves on
+/// `PATH`. A cheap existence check -- never spawns the binary, unlike
+/// `run_indexer`. Used by the `legion index --banner` coverage message
+/// (#713) to distinguish "nobody has run `legion index` yet" (actionable:
+/// running it will index this language) from "the indexer this language
+/// needs is not installed on this machine" (`legion index` cannot fix
+/// that by itself -- and the coverage guarantee for #442's daemon-dispatch
+/// gap is explicitly deferred to #442, not solved here). Reads `PATH` at
+/// call time, so keep this out of pure/testable code paths -- callers
+/// pass the verdict in as data instead (see `render_index_status_banner`
+/// in `cli::index_cmd`).
+pub fn indexer_available(lang: &str) -> bool {
+    let Ok(path_var) = std::env::var("PATH") else {
+        return false;
+    };
+    indexer_binary_candidates(lang).iter().any(|bin| {
+        std::env::split_paths(&path_var).any(|dir| {
+            dir.join(bin).is_file()
+                || dir
+                    .join(format!("{bin}{}", std::env::consts::EXE_SUFFIX))
+                    .is_file()
+        })
+    })
+}
+
 /// Run the appropriate SCIP indexer for `lang` against `repo_path` and
 /// return the resulting protobuf bytes.
 ///
@@ -801,6 +859,81 @@ mod tests {
                 other => panic!("expected IndexerNotFound for {lang}, got {other:?}"),
             }
         }
+    }
+
+    /// Pin `indexer_binary_hint`'s table against the same per-language
+    /// binaries `run_indexer_dispatches_each_language_to_its_helper` pins
+    /// on the dispatch side -- the two tables must never drift, or the
+    /// #713 coverage message would name a binary `run_indexer` does not
+    /// actually try.
+    #[test]
+    fn indexer_binary_hint_names_first_candidate_for_every_supported_lang() {
+        let cases = [
+            ("rust", "scip-rust"),
+            ("typescript", "scip-typescript"),
+            ("python", "scip-python"),
+            ("go", "scip-go"),
+            ("java", "scip-java"),
+            ("ruby", "scip-ruby"),
+            ("clang", "scip-clang"),
+            ("csharp", "scip-dotnet"),
+            ("php", "scip-php"),
+        ];
+        for (lang, expected) in cases {
+            assert_eq!(indexer_binary_hint(lang), expected, "lang={lang}");
+        }
+        assert_eq!(indexer_binary_hint("swift"), "(no known indexer)");
+    }
+
+    /// `indexer_available` must find a shimmed binary on `PATH` -- the
+    /// "not indexed yet" branch of the #713 coverage message depends on
+    /// this returning true whenever `legion index` would actually be able
+    /// to run the indexer.
+    #[cfg(unix)]
+    #[test]
+    fn indexer_available_true_when_shim_on_path() {
+        let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("PATH").unwrap_or_default();
+        let (shim_dir, shim_path) =
+            isolate_path_with_shims(&[("scip-python", "#!/bin/bash\nexit 0\n")]);
+        unsafe {
+            std::env::set_var("PATH", &shim_path);
+        }
+        let available = indexer_available("python");
+        unsafe {
+            std::env::set_var("PATH", &prior);
+        }
+        drop(shim_dir);
+        assert!(available, "shimmed scip-python must be found on PATH");
+    }
+
+    /// No candidate binary on `PATH` -> unavailable. This is the "indexer
+    /// unavailable" branch of the #713 coverage message: `legion index`
+    /// cannot fix this on its own, unlike a plain "not indexed yet".
+    #[cfg(unix)]
+    #[test]
+    fn indexer_available_false_when_path_has_no_matching_binary() {
+        let _guard = PATH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("PATH").unwrap_or_default();
+        let (empty_dir, empty_path) = isolate_path_with_shims(&[]);
+        unsafe {
+            std::env::set_var("PATH", &empty_path);
+        }
+        let available = indexer_available("python");
+        unsafe {
+            std::env::set_var("PATH", &prior);
+        }
+        drop(empty_dir);
+        assert!(!available, "empty PATH must report unavailable");
+    }
+
+    /// A language with no entry in `indexer_binary_candidates` (should
+    /// never happen given `detect_languages` only emits supported tags,
+    /// but `indexer_available` must stay total) reports unavailable
+    /// rather than panicking on an empty candidate slice.
+    #[test]
+    fn indexer_available_false_for_unknown_language() {
+        assert!(!indexer_available("swift"));
     }
 
     #[test]

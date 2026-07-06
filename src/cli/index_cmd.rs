@@ -1642,8 +1642,21 @@ fn run_index_status_banner(base: &std::path::Path, repo: Option<&str>) -> error:
         }
     };
 
+    // Coverage guarantee (#713): a detected-but-unindexed language is either
+    // "not indexed yet" (running `legion index` fixes it) or "indexer
+    // unavailable" (the binary the language needs is not on this machine's
+    // PATH, so `legion index` cannot fix it by itself). Computed here, not
+    // inside the pure renderer below, so the renderer stays deterministic
+    // and testable without mocking PATH.
+    let unavailable_langs: Vec<&str> = detected
+        .iter()
+        .filter(|lang| !indexes.iter().any(|i| i.lang == **lang) && !scip::indexer_available(lang))
+        .copied()
+        .collect();
+
     let now = chrono::Utc::now();
-    let banner = render_index_status_banner(repo_name, &detected, &indexes, now);
+    let banner =
+        render_index_status_banner(repo_name, &detected, &indexes, &unavailable_langs, now);
     if !banner.is_empty() {
         writeln!(out, "{banner}")?;
     }
@@ -1654,12 +1667,18 @@ fn run_index_status_banner(base: &std::path::Path, repo: Option<&str>) -> error:
 /// means "silent" (every detected language has a fresh index). Returns a
 /// multi-line block when anything is stale or missing.
 ///
+/// `unavailable_langs` names detected languages whose indexer binary is not
+/// on `PATH` (#713 coverage guarantee) -- computed by the caller via
+/// `scip::indexer_available` so this renderer stays a pure function of its
+/// arguments and does not read the environment itself.
+///
 /// Stale threshold: 7 days. Override-friendly through a build constant if
 /// future tuning needs it; not exposed as a CLI flag in v1.
 fn render_index_status_banner(
     repo_name: &str,
     detected_langs: &[&str],
     indexes: &[scip::ScipIndex],
+    unavailable_langs: &[&str],
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
     const STALE_THRESHOLD_DAYS: i64 = 7;
@@ -1671,9 +1690,23 @@ fn render_index_status_banner(
     }
 
     enum LangHealth {
-        Fresh { lang: String, age: String },
-        Stale { lang: String, age: String },
-        Missing { lang: String },
+        Fresh {
+            lang: String,
+            age: String,
+        },
+        Stale {
+            lang: String,
+            age: String,
+        },
+        Missing {
+            lang: String,
+        },
+        /// #713: detected but no indexer binary is installed for it. Distinct
+        /// from `Missing` -- `legion index` cannot fix this by itself.
+        IndexerUnavailable {
+            lang: String,
+            binary: String,
+        },
     }
 
     fn humanize_age(seconds: i64) -> String {
@@ -1719,9 +1752,18 @@ fn render_index_status_banner(
                     });
                 }
             },
-            None => report.push(LangHealth::Missing {
-                lang: (*lang).to_string(),
-            }),
+            None => {
+                if unavailable_langs.contains(lang) {
+                    report.push(LangHealth::IndexerUnavailable {
+                        lang: (*lang).to_string(),
+                        binary: scip::indexer_binary_hint(lang).to_string(),
+                    });
+                } else {
+                    report.push(LangHealth::Missing {
+                        lang: (*lang).to_string(),
+                    });
+                }
+            }
         }
     }
 
@@ -1753,7 +1795,12 @@ fn render_index_status_banner(
             }
             LangHealth::Missing { lang } => {
                 lines.push(format!(
-                    "  {lang}: not indexed -- run `legion index {repo_name}` or `legion watch add {repo_name}` to build"
+                    "  {lang}: not indexed yet -- run `legion index {repo_name}` to build"
+                ));
+            }
+            LangHealth::IndexerUnavailable { lang, binary } => {
+                lines.push(format!(
+                    "  {lang}: indexer unavailable ({binary} not on PATH) -- `legion index` cannot cover this language until it is installed; `legion sym etc find-content` / `sym tree` / `sym etc find-file` still cover its files by content and structure without SCIP"
                 ));
             }
         }
@@ -2295,7 +2342,7 @@ mod index_banner_tests {
     #[test]
     fn empty_when_no_languages_detected() {
         let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
-        let banner = render_index_status_banner("legion", &[], &[], now);
+        let banner = render_index_status_banner("legion", &[], &[], &[], now);
         assert!(banner.is_empty());
     }
 
@@ -2304,7 +2351,7 @@ mod index_banner_tests {
         let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
         let recent = "2026-05-07T10:00:00Z";
         let indexes = vec![idx("legion", "rust", recent)];
-        let banner = render_index_status_banner("legion", &["rust"], &indexes, now);
+        let banner = render_index_status_banner("legion", &["rust"], &indexes, &[], now);
         assert!(banner.starts_with("[Legion] Index status for legion: "));
         assert!(banner.contains("rust: fresh"));
         assert_eq!(banner.lines().count(), 1, "fresh state must be one line");
@@ -2313,11 +2360,35 @@ mod index_banner_tests {
     #[test]
     fn loud_block_when_missing_language() {
         let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
-        let banner = render_index_status_banner("legion", &["rust", "typescript"], &[], now);
+        let banner = render_index_status_banner("legion", &["rust", "typescript"], &[], &[], now);
         assert!(banner.contains("[Legion] Index status for legion:"));
-        assert!(banner.contains("rust: not indexed"));
-        assert!(banner.contains("typescript: not indexed"));
+        assert!(banner.contains("rust: not indexed yet"));
+        assert!(banner.contains("typescript: not indexed yet"));
         assert!(banner.contains("legion index legion"));
+    }
+
+    /// #713 coverage guarantee: a detected language whose indexer binary is
+    /// not on PATH must be named as "indexer unavailable", not lumped in
+    /// with "not indexed yet" -- the two demand different operator actions,
+    /// and collapsing them is what taught agents "sym doesn't do X" instead
+    /// of "nobody installed X's indexer here".
+    #[test]
+    fn loud_block_distinguishes_indexer_unavailable_from_not_indexed_yet() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let banner =
+            render_index_status_banner("legion", &["rust", "python"], &[], &["python"], now);
+        assert!(
+            banner.contains("rust: not indexed yet"),
+            "rust (available indexer, just unindexed) must read 'not indexed yet': {banner}"
+        );
+        assert!(
+            banner.contains("python: indexer unavailable (scip-python not on PATH)"),
+            "python (no indexer on PATH) must name the missing binary: {banner}"
+        );
+        assert!(
+            banner.contains("sym etc find-content"),
+            "unavailable-indexer message must point at sym etc as the language-agnostic fallback: {banner}"
+        );
     }
 
     #[test]
@@ -2326,7 +2397,7 @@ mod index_banner_tests {
         // 14 days ago -- past the 7-day threshold.
         let stale = "2026-04-23T12:00:00Z";
         let indexes = vec![idx("legion", "rust", stale)];
-        let banner = render_index_status_banner("legion", &["rust"], &indexes, now);
+        let banner = render_index_status_banner("legion", &["rust"], &indexes, &[], now);
         assert!(banner.contains("rust: STALE"));
         assert!(banner.contains("14d ago"));
         assert!(banner.contains("legion index legion"));
@@ -2341,8 +2412,13 @@ mod index_banner_tests {
             idx("legion", "rust", recent),
             idx("legion", "typescript", stale),
         ];
-        let banner =
-            render_index_status_banner("legion", &["rust", "typescript", "python"], &indexes, now);
+        let banner = render_index_status_banner(
+            "legion",
+            &["rust", "typescript", "python"],
+            &indexes,
+            &[],
+            now,
+        );
         assert!(banner.contains("rust: fresh"));
         assert!(banner.contains("typescript: STALE"));
         assert!(banner.contains("python: not indexed"));
@@ -2354,7 +2430,7 @@ mod index_banner_tests {
     fn unparseable_timestamp_is_treated_as_stale() {
         let now = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
         let indexes = vec![idx("legion", "rust", "not-a-timestamp")];
-        let banner = render_index_status_banner("legion", &["rust"], &indexes, now);
+        let banner = render_index_status_banner("legion", &["rust"], &indexes, &[], now);
         assert!(banner.contains("rust: STALE"));
         assert!(banner.contains("unknown age"));
     }
@@ -2368,6 +2444,7 @@ mod index_banner_tests {
             "legion",
             &["rust"],
             &[idx("legion", "rust", one_hr_ago)],
+            &[],
             now,
         );
         assert!(banner.contains("1h ago"));

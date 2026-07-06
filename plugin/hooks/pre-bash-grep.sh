@@ -111,7 +111,7 @@ if [ -n "$BYPASS_REASON" ]; then
 ${LOCAL_HITS}
 \`\`\`
 
-For symbols, \`legion sym def ${PATTERN}\` / \`sym refs\` / \`sym list\` answer in bytes. For genuinely non-symbol, non-indexed content (e.g. an .astro file), use the Grep tool -- not shell ${BINARY}. Your operator may block shell ${BINARY} outright via permissions.deny; that is the intended mandatory gate, and there is no env-var escape from it."
+For symbols, \`legion sym def ${PATTERN}\` / \`sym refs\` / \`sym list\` answer in bytes -- sym covers every indexed language, not just Rust. For non-symbol shapes: \`legion sym etc find-content '${PATTERN}' --repo ${REPO}\` (exact/regex content, the sanctioned grep), \`legion sym tree --repo ${REPO}\` (file/dir structure), \`legion sym etc extract <path> --field <field>\` (one config/frontmatter value without a full read), \`legion sym etc find-file '${PATTERN}' --repo ${REPO}\` (locate a file by name/role). Reach for the Grep tool only if none of those answer it. Your operator may block shell ${BINARY} outright via permissions.deny; that is the intended mandatory gate, and there is no env-var escape from it."
     emit_deny "$REASON"
     exit 0
   fi
@@ -156,7 +156,7 @@ if legion_indexed "$SESSION_ID" "$REPO"; then
 ${LOCAL_HITS}
 \`\`\`
 
-The soft bypass (\`# legion-bypass: <reason>\` or LEGION_BYPASS_GREP=1) is REFUSED for symbol-shaped patterns that resolve in this repo's SCIP index -- the sentinel exists for free-text searches, not for symbol queries dressed up as text. For symbols use \`legion sym def ${PATTERN}\` / \`sym refs\` / \`sym list\`; for genuinely non-symbol, non-indexed content use the Grep tool, not shell ${BINARY}. There is no env-var hard escape -- the mandatory shell-grep block is the operator's permissions.deny."
+The soft bypass (\`# legion-bypass: <reason>\` or LEGION_BYPASS_GREP=1) is REFUSED for symbol-shaped patterns that resolve in this repo's SCIP index -- the sentinel exists for free-text searches, not for symbol queries dressed up as text. For symbols use \`legion sym def ${PATTERN}\` / \`sym refs\` / \`sym list\` -- sym covers every indexed language, not just Rust. For non-symbol shapes: \`legion sym etc find-content '${PATTERN}' --repo ${REPO}\` (content), \`legion sym tree --repo ${REPO}\` (structure), \`legion sym etc extract <path> --field <field>\` (a config/frontmatter value), \`legion sym etc find-file '${PATTERN}' --repo ${REPO}\` (locate by name/role). Reach for the Grep tool only if none of those answer it. There is no env-var hard escape -- the mandatory shell-grep block is the operator's permissions.deny."
     emit_deny "$REASON"
     exit 0
   fi
@@ -167,11 +167,11 @@ fi
 # the hits as additionalContext so the agent can decide.
 CTX="## Legion sym for \`${PATTERN}\` (Bash ${BINARY})
 
-\`legion sym def ${PATTERN}\` returned:
+\`legion sym def ${PATTERN}\` returned (from other repos' indexes -- ${REPO} has no local SCIP index yet, so the block tier is disabled here):
 
 \`\`\`json
 ${HITS}
 \`\`\`
 
-This repo has no SCIP index, so the block tier is disabled. Consider \`legion sym def ${PATTERN}\` instead of ${BINARY} on this pattern."
+For ${REPO} itself, non-symbol shapes still have a sanctioned answer that needs no SCIP index: \`legion sym etc find-content '${PATTERN}' --repo ${REPO}\` (content), \`legion sym tree --repo ${REPO}\` (structure), \`legion sym etc find-file '${PATTERN}' --repo ${REPO}\` (locate by name). Run \`legion index ${REPO}\` to get a real local \`sym def\` answer too."
 emit_allow "$CTX" "legion sym/recall results injected"
