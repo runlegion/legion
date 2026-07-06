@@ -639,35 +639,38 @@ fn freshness_repo_scope<'a>(
     }
 }
 
-/// Resolve `name`'s workdir from watch.toml, or `None` when it is not a
-/// known repo -- a stale/removed inventory row must not error the whole
-/// freshness computation (#746).
-fn repo_workdir(name: &str) -> error::Result<Option<PathBuf>> {
-    let base = data_dir()?;
-    let watch_path = base.join("watch.toml");
-    let all = watch::list_repos_in_config(&watch_path)?;
-    Ok(all
+/// Resolve `name`'s workdir from an already-loaded watch.toml repo list, or
+/// `None` when it is not a known repo -- a stale/removed inventory row must
+/// not error the whole freshness computation (#746).
+fn resolve_repo_workdir(repos: &[watch::WatchRepoConfig], name: &str) -> Option<PathBuf> {
+    repos
         .iter()
         .find(|r| r.name == name)
-        .map(|r| PathBuf::from(&r.workdir)))
+        .map(|r| PathBuf::from(&r.workdir))
 }
 
 /// Compute freshness metadata for one `--json`/human freshness line per repo
 /// in `freshness_repo_scope`'s result: read the stored `inventory_snapshots`
 /// row, resolve the repo's live workdir, and do one `git rev-parse HEAD`
-/// (never a filesystem walk) to detect drift (#746).
+/// (never a filesystem walk) to detect drift (#746). Loads watch.toml once
+/// up front rather than per repo -- cross-repo results with many distinct
+/// repos must not reparse the file once per name.
 fn compute_freshness<'a>(
     database: &db::Database,
     repo: Option<&str>,
     entry_repos: impl Iterator<Item = &'a str>,
 ) -> error::Result<Vec<SnapshotFreshness>> {
     let names = freshness_repo_scope(repo, entry_repos);
+    let base = data_dir()?;
+    let watch_path = base.join("watch.toml");
+    let all_repos = watch::list_repos_in_config(&watch_path)?;
+
     let mut result = Vec::with_capacity(names.len());
     for name in names {
         let snapshot = database.get_inventory_snapshot(&name)?;
         let indexed_at = snapshot.as_ref().map(|s| s.indexed_at.clone());
         let head_at_index = snapshot.and_then(|s| s.head);
-        let current_head = repo_workdir(&name)?
+        let current_head = resolve_repo_workdir(&all_repos, &name)
             .as_deref()
             .and_then(inventory::current_head);
         let drift = head_drift(head_at_index.as_deref(), current_head.as_deref());
@@ -683,9 +686,13 @@ fn compute_freshness<'a>(
 }
 
 /// Shorten a full SHA to git's conventional 7-char display form. Shorter
-/// input (should not happen for a real SHA) is returned as-is.
+/// input (should not happen for a real SHA) is returned as-is. `get`
+/// (byte-index-checked) rather than a raw slice: a real git SHA is
+/// all-ASCII hex so a 7-byte boundary is always a char boundary, but this
+/// reads a plain `TEXT` column with no format constraint enforced at the
+/// database layer, so no code path here may assume it can't panic.
 fn short_sha(sha: &str) -> &str {
-    &sha[..sha.len().min(7)]
+    sha.get(..7).unwrap_or(sha)
 }
 
 /// Coarse "how long ago" label for a freshness line: seconds/minutes/
