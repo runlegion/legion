@@ -120,6 +120,13 @@ pub struct ContentScope<'a> {
     /// configs). Off by default to match ripgrep; `.git/` stays excluded
     /// even when enabled.
     pub include_hidden: bool,
+    /// Disable all ignore-file sources (.gitignore, .ignore, parent-directory
+    /// ignore files, .git/info/exclude, global gitignore) -- mirrors
+    /// ripgrep's `-u`/`--no-ignore`. INDEPENDENT of `include_hidden`: this
+    /// does NOT admit dotfiles/dot-directories on its own (a gitignored
+    /// dot-directory like `.rafters/` needs BOTH flags together). `.git/`
+    /// itself stays excluded regardless, via the existing filter_entry guard.
+    pub no_ignore: bool,
     pub max_file_size: u64,
     pub max_hits: usize,
 }
@@ -130,11 +137,15 @@ pub struct ContentScope<'a> {
 /// not readdir-order roulette.
 ///
 /// The walk respects `.gitignore` (even outside a git checkout -- watched
-/// workdirs are the corpus, not arbitrary directories), skips hidden files
-/// unless `include_hidden` is set (ripgrep's `--hidden` semantics; the
-/// `ignore` crate does NOT skip `.git/` on its own once hidden files are
-/// admitted -- verified empirically in #705's twin walk -- so `.git` is
-/// excluded explicitly), and quits on binary content (a NUL byte), counting
+/// workdirs are the corpus, not arbitrary directories) unless `no_ignore` is
+/// set (ripgrep's `-u`/`--no-ignore` semantics), skips hidden files unless
+/// `include_hidden` is set (ripgrep's `--hidden` semantics; the `ignore`
+/// crate does NOT skip `.git/` on its own once hidden files are admitted --
+/// verified empirically in #705's twin walk -- so `.git` is excluded
+/// explicitly). `no_ignore` and `include_hidden` are independent toggles:
+/// a gitignored dot-directory (e.g. `.rafters/`) needs both together, since
+/// the hidden-file filter prunes it regardless of ignore-file state. Quits
+/// on binary content (a NUL byte), counting
 /// the file in `binary_skipped` -- the quit itself returns Ok, so without
 /// that counter a text file with an embedded NUL would vanish silently.
 /// Non-UTF-8 text files are searched lossily (invalid bytes become U+FFFD)
@@ -170,6 +181,11 @@ pub fn find_content(pattern: &str, scope: &ContentScope<'_>) -> Result<FindConte
         let walker = WalkBuilder::new(workdir)
             .require_git(false)
             .hidden(!scope.include_hidden)
+            .parents(!scope.no_ignore)
+            .ignore(!scope.no_ignore)
+            .git_ignore(!scope.no_ignore)
+            .git_exclude(!scope.no_ignore)
+            .git_global(!scope.no_ignore)
             .filter_entry(|entry| entry.file_name() != ".git")
             .sort_by_file_name(std::ffi::OsStr::cmp)
             .build();
@@ -454,6 +470,7 @@ mod tests {
             ext: None,
             fixed_strings: false,
             include_hidden: false,
+            no_ignore: false,
             max_file_size: MAX_FILE_SIZE,
             max_hits: MAX_HITS,
         }
@@ -660,6 +677,74 @@ mod tests {
         let result = find_content("needle", &sc).expect("search");
         let paths: Vec<&str> = result.hits.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(paths, vec![".github/workflows/ci.yml", "seen.txt"]);
+    }
+
+    #[test]
+    fn no_ignore_includes_gitignored_non_hidden_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), ".gitignore", "ignored.txt\n");
+        write(dir.path(), "ignored.txt", "needle\n");
+        write(dir.path(), "kept.txt", "needle\n");
+        let repos = one_repo(dir.path());
+        let mut sc = scope(&repos);
+        sc.no_ignore = true;
+        let result = find_content("needle", &sc).expect("search");
+        let paths: Vec<&str> = result.hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["ignored.txt", "kept.txt"]);
+    }
+
+    /// Load-bearing (#745): `--no-ignore` alone does NOT reach a gitignored
+    /// DOT-directory. `.rafters/` is pruned by the hidden-directory filter
+    /// independent of gitignore state, so bypassing ignore files alone
+    /// cannot surface it -- pinning the exact failure mode from the field
+    /// report (bullpen 019f355c) where the missing flag was misdiagnosed.
+    #[test]
+    fn no_ignore_alone_does_not_reach_gitignored_dot_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), ".gitignore", ".rafters/\n");
+        write(dir.path(), ".rafters/output/rafters.css", "needle\n");
+        let repos = one_repo(dir.path());
+        let mut sc = scope(&repos);
+        sc.no_ignore = true;
+        let result = find_content("needle", &sc).expect("search");
+        assert!(
+            result.hits.is_empty(),
+            "no_ignore alone must not reach a gitignored dot-dir, got: {:?}",
+            result.hits
+        );
+    }
+
+    /// Direct regression test for the reported rafters bug: reaching a
+    /// gitignored generated workspace requires --no-ignore AND --hidden
+    /// together, not --no-ignore alone.
+    #[test]
+    fn no_ignore_plus_hidden_reaches_gitignored_dot_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), ".gitignore", ".rafters/\n");
+        write(dir.path(), ".rafters/output/rafters.css", "needle\n");
+        let repos = one_repo(dir.path());
+        let mut sc = scope(&repos);
+        sc.no_ignore = true;
+        sc.include_hidden = true;
+        let result = find_content("needle", &sc).expect("search");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].path, ".rafters/output/rafters.css");
+    }
+
+    #[test]
+    fn no_ignore_still_excludes_git_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), ".git/config", "needle\n");
+        let repos = one_repo(dir.path());
+        let mut sc = scope(&repos);
+        sc.no_ignore = true;
+        sc.include_hidden = true;
+        let result = find_content("needle", &sc).expect("search");
+        assert!(
+            result.hits.is_empty(),
+            ".git/ must stay excluded even with no_ignore + include_hidden, got: {:?}",
+            result.hits
+        );
     }
 
     #[test]
