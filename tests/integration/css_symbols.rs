@@ -1,18 +1,20 @@
-//! CLI end-to-end tests for the CSS symbol wiring in `legion index` (#711).
+//! CLI end-to-end tests for the CSS symbol wiring in `legion index` (#711)
+//! and the `sym list`/`sym def`/`sym hover --lang css` query surface (#744).
 //!
 //! `src/css.rs` and `src/db/css_symbols.rs` carry their own unit tests for
-//! the parse/extract logic and the persistence API in isolation; these tests
-//! exercise the actual binary surface -- a real `legion index <repo>` run
-//! over a small CSS fixture (including a Tailwind-v4-shaped `@theme` block)
-//! must populate `css_symbols` and bump `file_inventory.symbol_count` for
-//! the css file. No CLI query surface exists yet (see
-//! `Database::find_css_symbol`'s doc comment), so assertions read the
-//! `css_symbols` and `file_inventory` tables directly out of the data dir's
-//! `legion.db`. Mirrors `module_graph.rs`'s shape (#710).
+//! the parse/extract logic and the persistence API in isolation; the first
+//! group of tests below exercises the actual binary surface -- a real
+//! `legion index <repo>` run over a small CSS fixture (including a
+//! Tailwind-v4-shaped `@theme` block) must populate `css_symbols` and bump
+//! `file_inventory.symbol_count` for the css file -- and reads the
+//! `css_symbols`/`file_inventory` tables directly out of the data dir's
+//! `legion.db` (mirrors `module_graph.rs`'s shape, #710). The second group
+//! drives `sym list`/`sym def`/`sym hover --lang css` through the compiled
+//! binary against that same indexed data.
 
 use rusqlite::Connection;
 
-use crate::common::{legion_cmd, run_ok};
+use crate::common::{legion_cmd, run_fail, run_ok, run_ok_stderr};
 
 /// Seed a watch.toml in the data dir pointing at `repos` (name, workdir).
 /// Mirrors `module_graph::seed_watch_toml` -- forward-slash normalized so a
@@ -170,4 +172,378 @@ fn index_with_no_css_files_leaves_css_symbols_empty() {
         symbols.is_empty(),
         "expected no css symbols, got {symbols:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `sym list`/`sym def`/`sym hover --lang css` (#744)
+// ---------------------------------------------------------------------------
+
+/// Seed a repo with one known class and one known custom property, index
+/// it, and return the data dir. Shared setup for the CLI-level tests below.
+fn seed_and_index_one_repo(repo: &str) -> tempfile::TempDir {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    std::fs::write(
+        repo_dir.path().join("a.css"),
+        ".foo { color: red; }\n:root { --brand: blue; }\n",
+    )
+    .expect("write a.css");
+    seed_watch_toml(data_dir.path(), &[(repo, repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", repo]));
+    // Keep repo_dir alive for the duration of the index run, then drop it --
+    // the data dir (with legion.db) is all the CLI queries below touch.
+    drop(repo_dir);
+    data_dir
+}
+
+#[test]
+fn sym_list_lang_css_prints_seeded_rows_in_text_format() {
+    let data_dir = seed_and_index_one_repo("cssq");
+
+    let out = run_ok(legion_cmd(data_dir.path()).args(["sym", "list", "--lang", "css"]));
+    assert!(
+        out.lines().any(|l| l == ".foo\ta.css:1\t[class] cssq/css"),
+        "expected the .foo line, got:\n{out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l == "--brand\ta.css:2\t[custom-property] cssq/css"),
+        "expected the --brand line, got:\n{out}"
+    );
+}
+
+#[test]
+fn sym_list_lang_css_json_emits_css_symbol_hits() {
+    let data_dir = seed_and_index_one_repo("cssqjson");
+
+    let out = run_ok(legion_cmd(data_dir.path()).args(["sym", "list", "--lang", "css", "--json"]));
+    let hits: Vec<serde_json::Value> =
+        serde_json::from_str(out.trim()).expect("stdout is a JSON array");
+    assert_eq!(hits.len(), 2, "expected both rows, got {hits:?}");
+    assert!(
+        hits.iter()
+            .any(|h| h["kind"] == "class" && h["name"] == ".foo"),
+        "expected a class hit, got {hits:?}"
+    );
+    assert!(
+        hits.iter()
+            .any(|h| h["kind"] == "custom-property" && h["name"] == "--brand"),
+        "expected a custom-property hit, got {hits:?}"
+    );
+}
+
+#[test]
+fn sym_list_lang_css_kind_filters_to_class_only() {
+    let data_dir = seed_and_index_one_repo("cssqkindclass");
+
+    let out = run_ok(
+        legion_cmd(data_dir.path()).args(["sym", "list", "--lang", "css", "--kind", "class"]),
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1, "expected exactly one row, got {lines:?}");
+    assert!(lines[0].contains("[class]"));
+}
+
+#[test]
+fn sym_list_lang_css_kind_filters_to_custom_property_only() {
+    let data_dir = seed_and_index_one_repo("cssqkindprop");
+
+    let out = run_ok(legion_cmd(data_dir.path()).args([
+        "sym",
+        "list",
+        "--lang",
+        "css",
+        "--kind",
+        "custom-property",
+    ]));
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1, "expected exactly one row, got {lines:?}");
+    assert!(lines[0].contains("[custom-property]"));
+}
+
+#[test]
+fn sym_list_lang_css_file_scopes_to_one_file() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    std::fs::write(repo_dir.path().join("a.css"), ".foo { color: red; }\n").expect("write a.css");
+    std::fs::write(repo_dir.path().join("b.css"), ".bar { color: blue; }\n").expect("write b.css");
+    seed_watch_toml(data_dir.path(), &[("cssqfile", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "cssqfile"]));
+
+    let out = run_ok(
+        legion_cmd(data_dir.path()).args(["sym", "list", "--lang", "css", "--file", "a.css"]),
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1, "expected only a.css's row, got {lines:?}");
+    assert!(lines[0].starts_with(".foo\t"));
+}
+
+#[test]
+fn sym_list_lang_css_indexed_but_empty_result_prints_no_matching_definitions() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    std::fs::write(repo_dir.path().join("a.css"), ".foo { color: red; }\n").expect("write a.css");
+    seed_watch_toml(data_dir.path(), &[("cssqempty", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "cssqempty"]));
+
+    // Repo has classes only -- filtering to custom-property is a clean
+    // empty result (exit 0 via `run_ok`/`run_ok_stderr`, which both assert
+    // success), not a "never indexed" error.
+    let stdout = run_ok(legion_cmd(data_dir.path()).args([
+        "sym",
+        "list",
+        "--lang",
+        "css",
+        "--kind",
+        "custom-property",
+    ]));
+    assert_eq!(stdout, "", "empty result must not print any rows");
+
+    let stderr = run_ok_stderr(legion_cmd(data_dir.path()).args([
+        "sym",
+        "list",
+        "--lang",
+        "css",
+        "--kind",
+        "custom-property",
+    ]));
+    assert!(
+        stderr.contains("[legion] no matching definitions"),
+        "expected the existing no-matching-definitions line, got: {stderr}"
+    );
+}
+
+#[test]
+fn sym_list_lang_css_never_indexed_prints_css_aware_message_and_fails() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    // No css files at all -- `legion index` runs but never touches css.
+    std::fs::write(repo_dir.path().join("README.md"), "# hi\n").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("cssqnever", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "cssqnever"]));
+
+    let (_, stderr) = run_fail(legion_cmd(data_dir.path()).args([
+        "sym",
+        "list",
+        "--lang",
+        "css",
+        "--repo",
+        "cssqnever",
+    ]));
+    assert!(
+        stderr.contains("legion index cssqnever"),
+        "expected the message to name the fixing command, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("found for cssqnever/css"),
+        "must not reuse no_index_found's generic wording, got: {stderr}"
+    );
+}
+
+/// The exact bug reported live against 0.19.0: `legion index` then
+/// immediately `sym list`/`sym def --lang css` must never print "no index
+/// found" -- that message is false once css_symbols rows exist.
+#[test]
+fn regression_index_then_query_never_says_no_index_found() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    std::fs::write(
+        repo_dir.path().join("rafters.css"),
+        ".foo { color: red; }\n",
+    )
+    .expect("write rafters.css");
+    seed_watch_toml(data_dir.path(), &[("cssregress", repo_dir.path())]);
+
+    run_ok(legion_cmd(data_dir.path()).args(["index", "cssregress"]));
+
+    let list_out = legion_cmd(data_dir.path())
+        .args(["sym", "list", "--lang", "css", "--repo", "cssregress"])
+        .output()
+        .expect("run sym list");
+    let list_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&list_out.stdout),
+        String::from_utf8_lossy(&list_out.stderr)
+    );
+    assert!(
+        !list_combined.contains("no index found"),
+        "sym list must never say 'no index found' right after indexing, got: {list_combined}"
+    );
+
+    let def_out = legion_cmd(data_dir.path())
+        .args([
+            "sym",
+            "def",
+            ".foo",
+            "--lang",
+            "css",
+            "--repo",
+            "cssregress",
+        ])
+        .output()
+        .expect("run sym def");
+    let def_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&def_out.stdout),
+        String::from_utf8_lossy(&def_out.stderr)
+    );
+    assert!(
+        !def_combined.contains("no index found"),
+        "sym def must never say 'no index found' right after indexing, got: {def_combined}"
+    );
+}
+
+#[test]
+fn sym_def_lang_css_prints_the_seeded_row() {
+    let data_dir = seed_and_index_one_repo("cssdefq");
+
+    let out = run_ok(
+        legion_cmd(data_dir.path())
+            .args(["sym", "def", ".foo", "--lang", "css", "--repo", "cssdefq"]),
+    );
+    assert_eq!(out.trim(), "a.css:1\t[cssdefq/css]");
+}
+
+#[test]
+fn sym_def_lang_css_json_emits_a_css_symbol_hit() {
+    let data_dir = seed_and_index_one_repo("cssdefjson");
+
+    let out = run_ok(legion_cmd(data_dir.path()).args([
+        "sym",
+        "def",
+        ".foo",
+        "--lang",
+        "css",
+        "--repo",
+        "cssdefjson",
+        "--json",
+    ]));
+    let hits: Vec<serde_json::Value> =
+        serde_json::from_str(out.trim()).expect("stdout is a JSON array");
+    assert_eq!(hits.len(), 1, "expected the one seeded match, got {hits:?}");
+    assert_eq!(hits[0]["name"], ".foo");
+    assert_eq!(hits[0]["kind"], "class");
+    assert_eq!(hits[0]["file"], "a.css");
+    assert_eq!(hits[0]["line"], 1);
+    assert_eq!(hits[0]["repo"], "cssdefjson");
+}
+
+#[test]
+fn sym_def_lang_css_name_matching_is_exact_and_sigil_inclusive() {
+    let data_dir = seed_and_index_one_repo("cssdefsigil");
+
+    let with_sigil = run_ok(legion_cmd(data_dir.path()).args([
+        "sym",
+        "def",
+        ".foo",
+        "--lang",
+        "css",
+        "--repo",
+        "cssdefsigil",
+    ]));
+    assert_eq!(with_sigil.trim(), "a.css:1\t[cssdefsigil/css]");
+
+    let without_sigil = run_ok(legion_cmd(data_dir.path()).args([
+        "sym",
+        "def",
+        "foo",
+        "--lang",
+        "css",
+        "--repo",
+        "cssdefsigil",
+    ]));
+    assert_eq!(
+        without_sigil.trim(),
+        "",
+        "a sigil-less query must not fuzzy-match the stored sigil-bearing name"
+    );
+}
+
+#[test]
+fn sym_def_lang_css_repo_scoping_covers_both_call_shapes() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_a = tempfile::tempdir().expect("repo a");
+    let repo_b = tempfile::tempdir().expect("repo b");
+    std::fs::write(repo_a.path().join("a.css"), ".shared { color: red; }\n")
+        .expect("write repo a css");
+    std::fs::write(repo_b.path().join("b.css"), ".shared { color: blue; }\n")
+        .expect("write repo b css");
+    seed_watch_toml(
+        data_dir.path(),
+        &[("cssrepoa", repo_a.path()), ("cssrepob", repo_b.path())],
+    );
+    run_ok(legion_cmd(data_dir.path()).args(["index", "cssrepoa"]));
+    run_ok(legion_cmd(data_dir.path()).args(["index", "cssrepob"]));
+
+    // --repo scopes to one repo (find_css_symbol(Some(repo), name)).
+    let scoped = run_ok(legion_cmd(data_dir.path()).args([
+        "sym", "def", ".shared", "--lang", "css", "--repo", "cssrepoa",
+    ]));
+    assert_eq!(scoped.trim(), "a.css:1\t[cssrepoa/css]");
+
+    // Omitting --repo queries cross-repo -- both repos' rows come back.
+    let cross_repo =
+        run_ok(legion_cmd(data_dir.path()).args(["sym", "def", ".shared", "--lang", "css"]));
+    let lines: Vec<&str> = cross_repo.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected a row from each repo, got {lines:?}"
+    );
+    assert!(lines.contains(&"a.css:1\t[cssrepoa/css]"));
+    assert!(lines.contains(&"b.css:1\t[cssrepob/css]"));
+}
+
+#[test]
+fn sym_def_lang_css_miss_on_indexed_repo_prints_nothing_and_exits_0() {
+    let data_dir = seed_and_index_one_repo("cssdefmiss");
+
+    let out = run_ok(legion_cmd(data_dir.path()).args([
+        "sym",
+        "def",
+        ".does-not-exist",
+        "--lang",
+        "css",
+        "--repo",
+        "cssdefmiss",
+    ]));
+    assert_eq!(out, "", "a def miss must print nothing, not an error");
+}
+
+#[test]
+fn sym_def_lang_css_never_indexed_fails_with_css_aware_message() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    std::fs::write(repo_dir.path().join("README.md"), "# hi\n").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("cssdefnever", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "cssdefnever"]));
+
+    let (_, stderr) = run_fail(legion_cmd(data_dir.path()).args([
+        "sym",
+        "def",
+        ".foo",
+        "--lang",
+        "css",
+        "--repo",
+        "cssdefnever",
+    ]));
+    assert!(stderr.contains("legion index cssdefnever"));
+    assert!(!stderr.contains("found for cssdefnever/css"));
+}
+
+#[test]
+fn sym_hover_lang_css_always_reports_no_hover_surface() {
+    let data_dir = seed_and_index_one_repo("csshover");
+
+    // Query the exact name that DOES have real css_symbols rows -- proving
+    // this is a "no such surface" message, not a disguised "no data" one.
+    let (_, stderr) = run_fail(legion_cmd(data_dir.path()).args([
+        "sym", "hover", ".foo", "--lang", "css", "--repo", "csshover",
+    ]));
+    assert!(
+        stderr.contains("css symbols have no hover surface"),
+        "got: {stderr}"
+    );
+    assert!(stderr.contains("sym list --lang css"));
+    assert!(stderr.contains("sym etc find-content"));
 }
