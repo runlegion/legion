@@ -1,5 +1,195 @@
 # Legion Changelog
 
+## 0.19.0
+
+The bypass-replacement release. Epic #704 set out to replace `grep`/`find`/`ls -R`/`os.walk`
+shell escapes with structured queries answered from an index, and this release ships every
+query shape the epic's bypass survey named: exact content search, a cross-repo build tree,
+config/frontmatter field extraction, and cross-repo file lookup by name or role -- plus two
+new symbol engines (a JS/TS module-import graph and CSS class/custom-property extraction) that
+extend `sym`-style answers to file types SCIP never covered. The grep/find guard and the
+`legion-explore` routing ladder are reworded so every blocked query names the exact `sym etc`
+command to use instead of leaving symbol lookup as the only sanctioned alternative -- the guard
+message and the explore agent's ladder are plugin surfaces, so this wording only reaches live
+agent sessions once the plugin itself updates to 0.19.0; pinning an older plugin against a
+0.19.0 daemon keeps the old, symbols-only guard text. Three hardening fixes round out the
+release: a per-repo index lock closes a walk/upsert/prune race, integration test fixtures no
+longer touch the real repo's `.git/config`, and `claude -p` review hooks are bounded by a
+watchdog so they cannot wedge a commit or push. Minor release: three new tables
+(`file_inventory`, `module_edges`, `css_symbols`) are additive schema migrations -- no column
+removed or renamed on an existing table -- and every new CLI surface (`sym tree`, `sym etc
+find-content/extract/find-file`, `document set-status`, the two `document` serve endpoints) is
+a net-new subcommand or route; no existing flag, subcommand, or wire format changed or was
+removed.
+
+### New
+
+- **`legion sym etc find-content` -- exact content search via ripgrep crates** (PR #719, #707):
+  the sanctioned replacement for the largest logged bypass class (60+ escapes). `src/etc.rs`
+  runs the in-process ripgrep engine (`grep-regex` + `grep-searcher` over an `ignore` walk)
+  directly against the working tree at query time -- deliberately not a corpus, because a
+  tokenized index returns nothing on the punctuation-heavy literals agents actually grep for,
+  and any content index goes stale on checkout/pull, neither of which fires an edit hook.
+  Literal mode uses `fixed_strings()` so conflict markers and dotted patterns match verbatim;
+  regex is the default. `--repo`/`--ext` filter, results are name-sorted for deterministic
+  capping, and every invocation (including failures) lands a row in `etc-usage.jsonl` -- the
+  epic's primary success metric, instrumented from the first query shape shipped.
+- **File-inventory table -- the substrate under `tree` and `find-file`** (PR #718, #705): a new
+  `file_inventory` table, populated on every `legion index` run by a gitignore-aware
+  `ignore::WalkBuilder` walk (`src/inventory.rs`), one row per non-ignored file with an
+  extension-derived `lang` (independent of SCIP's repo-level marker sniffing, so a `.sh`/`.md`
+  file gets a row with `lang = NULL` rather than no row at all). Re-index is idempotent
+  (`ON CONFLICT(repo, path) DO UPDATE`) and pruned via a temp-table diff rather than a bound
+  `NOT IN (?,...)` list, so large repos do not hit SQLite's variable-count limit. A docs-only
+  repo (no language markers) now populates its inventory instead of hard-erroring, since the
+  SCIP block below it is independently gated.
+- **`legion sym tree` -- structured cross-repo build-tree query** (PR #730, #706): answers from
+  `Database::list_file_inventory` with no filesystem walk at query time, emitting
+  `{repo, path, ext, lang, size, symbol_count}` entries in `--json` mode. `--repo`/`--ext`
+  filter server-side; `--under`/`--depth` filter in-process (`under_matches` rejects a sibling
+  path that merely shares a string prefix); omitting `--repo` returns every watched repo's
+  files tagged by owning repo. Every invocation, success or error, records a telemetry row.
+- **`legion sym etc extract` -- pull one field without a full read** (PR #731, #708): `extract
+  <path> --field <dotted.path>` reads a JSON/TOML/YAML config file or the YAML frontmatter of a
+  `.md`/`.mdx`/`.astro` doc, converts it into one `serde_json::Value` tree, and walks the dotted
+  path with a single walker shared across all four source shapes -- numeric segments index
+  arrays. A missing field names both the failing segment and the deepest segment that did
+  resolve. YAML goes through `serde_yaml_ng` rather than the archived, advisory-carrying
+  `serde_yaml` (RUSTSEC-2024-0320).
+- **`legion sym etc find-file` -- locate a file by name or role across repos** (PR #734, #709):
+  matches basenames/paths against a hand-rolled `*`/`?` glob and an optional coarse `--role`
+  (config/test/doc/entry) heuristic, over the same file-inventory table, cross-repo by default
+  and tagging every hit with its owning repo. Answers "which repo owns X" without touching the
+  filesystem or SCIP at query time.
+- **Module-graph engine -- JS/TS import edges via `oxc_parser` + `oxc_resolver`** (PR #735,
+  #710): `src/graph.rs` parses every js/ts/jsx/tsx file's static imports/exports/re-exports and
+  literal dynamic `import()`s through `oxc_parser`'s `ModuleRecord`, then resolves each
+  specifier against its referrer with `oxc_resolver` (tsconfig `paths` auto-discovered per
+  file, `node_modules`, package.json `exports`/`imports`); unresolved or external specifiers are
+  recorded with `to = None` rather than dropped. Edges persist in a new `module_edges` table,
+  keyed on `(repo, from_path, specifier)`, and `legion index` runs the pass unconditionally over
+  the inventory's typescript-lang subset -- independent of whether `scip-typescript` is on PATH,
+  since oxc needs only the files on disk. A follow-up fix clears a live file's stale edges when
+  its import set shrinks (previously neither the upsert nor the prune path touched a file that
+  stayed live but dropped an import), and a Windows-only fix strips the `\\?\` verbatim-path
+  prefix `std::fs::canonicalize` returns before comparing it against `oxc_resolver`'s
+  already-stripped resolved paths, which otherwise made every edge on Windows misclassify as
+  external. No CLI query surface (`sym imports`/`importers`) yet -- `list_module_edges_from/_to`
+  are ready for a follow-on issue to wire up.
+- **CSS symbols via `lightningcss`** (PR #739, #711): a new `css_symbols` table captures every
+  class-selector and `--custom-property` definition, recursing into native CSS nesting,
+  `@media`/`@supports`/`@container`/`@scope`/`@layer`, `@property`, and functional pseudo-classes
+  (`:is()`/`:where()`/`:not()`/`:has()`). Tailwind v4's `@theme` block is unknown to
+  `lightningcss` and parses as a raw token list; custom-property definitions inside it are
+  recovered by scanning that token list directly for a `DashedIdent` followed by a colon rather
+  than a `var()` reference. Wired into `legion index` alongside the module-graph pass, bumping
+  `file_inventory.symbol_count` for CSS files through the same enrich pass SCIP uses.
+- **Fair-guard rewording -- `sym etc` routing, lane-4/5 ladder, coverage-status banner, usage
+  telemetry** (PR #737, #713): the grep/find guard (`pre-bash-grep.sh`, `pre-grep.sh`) used to
+  offer only symbol lookup (`sym def`/`refs`/`hover`) as the sanctioned alternative to a blocked
+  shell search, so a non-symbol query -- a literal string, a config value, "which file has X" --
+  had nowhere to route and agents bypassed to shell grep, inferring false generalizations like
+  "sym is rust-only" along the way (87 bypasses/30d per the epic's telemetry, 79 from
+  `legion-explore`). Every deny/inject message now prints the exact `sym etc` command for the
+  blocked query shape. `legion-explore`'s routing ladder grows a lane: the former last-resort
+  bounded-text-search lane moves to lane 5, and the new lane 4 is `sym etc`/`sym tree` --
+  commands that need no SCIP index at all, so a coverage gap is no longer a dead end. The
+  `legion index --banner` coverage-status message now distinguishes "not indexed yet" (running
+  `legion index` fixes it) from "indexer binary not on PATH" (it cannot, but `sym etc` still
+  works for that language's files) instead of collapsing both into "not indexed". A new `legion
+  telemetry etc-summary` command reads `etc-usage.jsonl` and reports per-query-shape count,
+  zero-result rate (errors excluded from the denominator), and error count -- the epic's primary
+  success metric made readable in one command. This wording and routing lives in the plugin
+  (`plugin/hooks/`, `plugin/agents/legion-explore.md`), so it reaches a live agent session only
+  once that session's plugin is on 0.19.0 or later.
+- **`legion document set-status`** (PR #701, #700): the missing mutation primitive for a
+  document's lifecycle status -- `document create`/`view`/`list`/`archive`/`validate` existed
+  but nothing could flip `status` after insert, so the dashboard's draft-to-published flow had
+  no backend. Sets the column, bumps `updated_at`, and returns the persisted row (re-fetched,
+  not constructed in memory) so a printed status is proof of the write. No status-machine
+  enforcement -- the localhost operator clicking Publish is the human gate, by design.
+- **Document read + publish serve endpoints** (PR #703, #702): `GET /api/documents`, `GET
+  /api/documents/{id}`, and `POST /api/documents/{id}/status` land in `channel::router`, the
+  surface both the daemon and `legion serve` mount, so the embedded dashboard can list, view,
+  and publish documents without 404ing under the daemon (an endpoint added only to `serve.rs`
+  would have). A miss on the by-id or status routes returns 404, not the 500 the blanket
+  `LegionError` conversion would otherwise produce.
+- **Daemon supervisor restarts on build-id drift, not just version drift** (PR #699, #698): a
+  rebuild that does not bump `Cargo.toml` -- the everyday dev loop -- previously left the daemon
+  serving stale code until a manual restart. A new `build.rs` embeds a git short-SHA build id
+  (`-dirty` suffixed on an unclean tree) via `LEGION_BUILD_ID`, surfaced on `/health` and
+  `legion --version`; the supervisor now bounces the daemon when the version matches but the
+  build id differs, role-aware (in-place `daemon-restart` for the daemon, kill-and-respawn for
+  `legion serve`).
+
+### Fixed
+
+- **`whatami`/`whoami` banner budgets space per entry instead of all-or-nothing** (PR #738,
+  #716): `format_capped_banner` used to render the newest root in full regardless of size, then
+  collapse every later root into a single count if the remainder didn't fit whole. One oversized
+  narrative root (observed on rafters: a 2.4KB entry alone blowing the 2KB cap) pushed two real
+  operating-rule roots out of the banner entirely, into a bare "(N more truncated)" pointer, so a
+  full session rediscovered rules it already owned. The cap now divides the remaining space
+  evenly across remaining entries at each step, rolling unused share forward; an entry that
+  doesn't fit its share is head-truncated with a recall pointer rather than dropped, provided a
+  minimum amount of real text survives, and the first (newest) entry is exempt from being dropped
+  outright. The doc comments claiming a measured "harness truncates to 2KB" cutoff are corrected
+  -- `session-start.sh` has no truncation logic of its own; the cap is a self-imposed
+  scannability budget, not a measured harness limit.
+- **Per-repo index lock serializes walk + upsert + prune** (PR #726, #722): `legion index` runs
+  on the same repo could overlap -- a manual run racing the detached background indexer `legion
+  watch add` spawns -- and `prune_file_inventory` deletes rows absent from the current run's
+  walk snapshot with no ordering guard, so an older run's stale snapshot could silently drop a
+  row a newer overlapping run had just inserted. `acquire_index_lock` (reusing the existing
+  `src/watch/locks.rs` pidfile idiom) now spans the entire walk/upsert/prune/SCIP-index sequence
+  per repo; a live-pid holder fails the second run loudly, naming the holder's pid, and a
+  dead-pid lock is reclaimed and the run proceeds.
+- **Hermetic git fixtures -- integration tests can no longer poison the real `.git/config`** (PR
+  #727, #723): fixture git invocations wrote identity via `git config user.name`/`user.email`
+  directly against a `current_dir`-scoped repo; if that scoping ever silently failed to apply,
+  the write fell through to whatever repo git resolved from the process cwd -- and because `git
+  worktree` checkouts share their main repo's `.git/config`, that meant the real, shared config.
+  This had already happened live: four commits got mis-attributed as `Test <test@example.com>`
+  and `core.bare` was independently observed flipped to `true` mid-review. Every fixture now
+  passes identity as per-invocation `-c` overrides (never a config write), and a suite-wide
+  `RealRepoConfigGuard` hashes the real repo's `.git/config` before and after the run, panicking
+  and naming the file if it changed.
+- **Hooks cannot hang -- `claude -p` review is bounded by a watchdog** (PR #729, #728):
+  `.githooks/pre-commit` and `.githooks/pre-push` piped the diff into `claude -p` with no
+  timeout; invoked from inside a Claude Code session, the nested child inherits the session's
+  Stop gate and can hang indefinitely, and the "unavailable, skipping review" fallback never
+  fires because the subprocess never returns -- the hang that was normalizing `--no-verify`
+  bypasses. A `run_claude_review()` helper backgrounds the `claude` invocation in its own
+  process group (`set -m`, no GNU `timeout` dependency, portable to stock macOS bash) behind a
+  120s watchdog that `SIGTERM`s then `SIGKILL`s the whole group, including any grandchildren; the
+  child runs with `LEGION_SKIP_STOP_BLOCK=1` so a healthy `claude` can still exit on its own. A
+  timeout or failure routes through the existing "unavailable, skipping" fallback and the hook
+  still exits 0; the deterministic `scripts/sync-version.sh` step stays blocking and unchanged.
+  ShellCheck's CI job is extended to cover `.githooks/*`, which it had silently skipped before.
+- **`legion sub-issue list` no longer fails on every call** (PR #717, #714): the GitHub
+  sub-issue GraphQL API returns only `{number, url, title, state, body}` per child, but
+  `ExternalIssue.labels` was modeled as required, so serde rejected the entire payload before
+  any row could print. `#[serde(default)]` on the field lets an absent `labels` deserialize to
+  an empty vec without disturbing the `gh issue list` path, which does supply labels.
+
+### Changed
+
+- **Model policy, sole-implementer roster, barebones CLAUDE.md** (PR #725, #724): agent model
+  pins updated (`rust`/`issue-writer` to `claude-sonnet-5`, `reviewer` to `claude-opus-4-8`,
+  replacing a stale `claude-sonnet-4-6`; no agent pins the Fable interactive-planning tier). The
+  `porter` and `dashboarder` agents are deleted with `rust` as sole implementer, and every
+  reference to the removed agents (routing rules, boundary fencing, PR-producer lists) is
+  scrubbed. `CLAUDE.md` is rewritten from 41 lines of restated workflow/invariants to a minimal
+  pointer file (what legion is, and where to look: whoami, whatami, recall, `--help`), closing a
+  drift where the old text named a since-deleted `/review-pr` skill and a review process the
+  team had already moved off of.
+- **Wave 2 orchestration workflow committed** (PR #733, #732): `.claude/workflows/wave2.js`, the
+  script that ran four merge-ready PRs through isolated-worktree implementation, gate recording
+  on every HEAD, and an Opus review/fix loop with zero human intervention between launch and
+  merge, is checked in as infrastructure rather than left untracked on one machine. Enforces the
+  no-`--no-verify` doctrine at every stage that touches git, and accepts both a JSON object and
+  a JSON-encoded string for its args (the shape the harness actually sent on its first live run).
+
 ## 0.18.8
 
 The gate-trust release. The quality gates now feed the uncertainty engine: every simplify, review, and pr-write verdict is emitted as a `surface=legion.gate` prediction, and the downstream legion-review gate witnesses the upstream simplify verdict so a "clean" simplify that review later contradicts is recorded as wrong. The same audit that produced 0.18.4 also found a residual hole -- simplify recorded issues on 0.9% of runs against pr-write's 21.3% on the same self-review-your-own-diff structure -- and this release closes the last structural difference by requiring located file:line/symbol evidence in the simplify articulation, not just substantive prose. Patch release: gate-trust is an additive feature built on the existing uncertainty engine (Pillar 2, shipped at 0.15) and the existing quality gates, emitted in-process and non-blocking with no engine logic change; no wire-format change, no schema migration.
