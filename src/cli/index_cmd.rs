@@ -655,6 +655,16 @@ fn resolve_repo_workdir(repos: &[watch::WatchRepoConfig], name: &str) -> Option<
 /// (never a filesystem walk) to detect drift (#746). Loads watch.toml once
 /// up front rather than per repo -- cross-repo results with many distinct
 /// repos must not reparse the file once per name.
+///
+/// A malformed watch.toml degrades to an empty repo list (with a stderr
+/// note) rather than propagating: unlike `validate_repo_known` (which only
+/// runs for an explicit `--repo` and is allowed to hard-fail since the
+/// repo name itself came from watch.toml), this runs unconditionally,
+/// including on the cross-repo path that previously never touched
+/// watch.toml at query time at all. HEAD comparison is a freshness signal,
+/// never a hard requirement (see `current_head`'s doc comment), so a
+/// config-file syntax error must not take down a read-only DB query --
+/// callers just see `current_head: None` for every repo in scope.
 fn compute_freshness<'a>(
     database: &db::Database,
     repo: Option<&str>,
@@ -663,7 +673,13 @@ fn compute_freshness<'a>(
     let names = freshness_repo_scope(repo, entry_repos);
     let base = data_dir()?;
     let watch_path = base.join("watch.toml");
-    let all_repos = watch::list_repos_in_config(&watch_path)?;
+    let all_repos = watch::list_repos_in_config(&watch_path).unwrap_or_else(|e| {
+        eprintln!(
+            "[legion] warning: could not read watch.toml for freshness check ({e}); \
+             live HEAD comparison skipped for this query"
+        );
+        Vec::new()
+    });
 
     let mut result = Vec::with_capacity(names.len());
     for name in names {

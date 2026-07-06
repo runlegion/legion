@@ -376,3 +376,49 @@ fn tree_human_output_prints_freshness_warning_on_head_drift() {
     assert!(snapshots[0]["current_head"].is_string());
     assert_ne!(snapshots[0]["head_at_index"], snapshots[0]["current_head"]);
 }
+
+/// A malformed watch.toml must not hard-fail `sym tree` (#746 review
+/// follow-up): the cross-repo path (`--repo` omitted) previously never
+/// touched watch.toml at query time at all -- `sym tree`/`find-file`
+/// answer from the inventory DB alone. `compute_freshness` now reads
+/// watch.toml unconditionally to resolve live workdirs, but HEAD
+/// comparison is a freshness *signal*, never a hard requirement, so a
+/// syntax error in watch.toml must degrade to "can't compare" (`snapshots`
+/// still present, `current_head: null`, `head_drift: false`) rather than
+/// aborting the whole query.
+#[test]
+fn tree_survives_malformed_watch_toml_on_cross_repo_path() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+
+    std::fs::write(repo_dir.path().join("a.rs"), "").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("treerepo", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "treerepo"]));
+
+    // Corrupt watch.toml only *after* indexing -- the inventory rows
+    // already written by `legion index` must still be queryable.
+    std::fs::write(data_dir.path().join("watch.toml"), "not valid toml [[[")
+        .expect("corrupt watch.toml");
+
+    let json_out = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "tree", "--json"]),
+    );
+    let envelope: serde_json::Value = serde_json::from_str(json_out.trim())
+        .expect("malformed watch.toml must not abort the query -- stdout is still a JSON envelope");
+    let entries = envelope["entries"].as_array().expect("entries array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "inventory rows written before watch.toml was corrupted must still be readable: {entries:?}"
+    );
+    let snapshots = envelope["snapshots"].as_array().expect("snapshots array");
+    assert_eq!(snapshots.len(), 1);
+    assert!(
+        snapshots[0]["current_head"].is_null(),
+        "workdir cannot be resolved without a parseable watch.toml: {snapshots:?}"
+    );
+    assert_eq!(snapshots[0]["head_drift"], false);
+}
