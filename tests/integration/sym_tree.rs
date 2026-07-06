@@ -7,7 +7,7 @@
 //! real `legion index` run, cross-repo tagging, and the telemetry side
 //! effect landing in etc-usage.jsonl.
 
-use crate::common::{legion_cmd, run_fail, run_ok, run_ok_stderr};
+use crate::common::{legion_cmd, run_fail, run_ok, run_ok_output, run_ok_stderr};
 
 /// Seed a watch.toml in the data dir pointing at `repos` (name, workdir).
 /// Backslashes are TOML escape syntax, so Windows paths interpolated raw
@@ -401,11 +401,21 @@ fn tree_survives_malformed_watch_toml_on_cross_repo_path() {
     std::fs::write(data_dir.path().join("watch.toml"), "not valid toml [[[")
         .expect("corrupt watch.toml");
 
-    let json_out = run_ok(
+    // A single invocation, checked for both stdout (still a valid JSON
+    // envelope) and stderr (the degrade warning the doc comment promises) --
+    // two separate runs would each only see half the contract.
+    let output = run_ok_output(
         legion_cmd(data_dir.path())
             .env("XDG_STATE_HOME", state_dir.path())
             .args(["sym", "tree", "--json"]),
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not read watch.toml"),
+        "expected the degrade warning on stderr, got:\n{stderr}"
+    );
+
+    let json_out = String::from_utf8_lossy(&output.stdout);
     let envelope: serde_json::Value = serde_json::from_str(json_out.trim())
         .expect("malformed watch.toml must not abort the query -- stdout is still a JSON envelope");
     let entries = envelope["entries"].as_array().expect("entries array");
