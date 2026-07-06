@@ -51,8 +51,9 @@ fn tree_cli_end_to_end_with_json_ext_and_telemetry() {
             .env("XDG_STATE_HOME", state_dir.path())
             .args(["sym", "tree", "--repo", "treerepo", "--ext", "rs", "--json"]),
     );
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(json_out.trim()).expect("stdout is a JSON array");
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    let entries = envelope["entries"].as_array().expect("entries array");
     assert_eq!(entries.len(), 1, "only the .rs file should match --ext rs");
     assert_eq!(entries[0]["repo"], "treerepo");
     assert_eq!(entries[0]["path"], "src/db/inventory.rs");
@@ -65,8 +66,9 @@ fn tree_cli_end_to_end_with_json_ext_and_telemetry() {
             .env("XDG_STATE_HOME", state_dir.path())
             .args(["sym", "tree", "--repo", "treerepo", "--json"]),
     );
-    let all: Vec<serde_json::Value> =
-        serde_json::from_str(all_out.trim()).expect("stdout is a JSON array");
+    let all_envelope: serde_json::Value =
+        serde_json::from_str(all_out.trim()).expect("stdout is a JSON envelope object");
+    let all = all_envelope["entries"].as_array().expect("entries array");
     assert_eq!(all.len(), 3, "every inventoried file must appear: {all:?}");
     let readme = all
         .iter()
@@ -113,8 +115,9 @@ fn tree_under_scopes_to_subtree() {
                 "sym", "tree", "--repo", "treerepo", "--under", "src/db", "--json",
             ]),
     );
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(json_out.trim()).expect("stdout is a JSON array");
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    let entries = envelope["entries"].as_array().expect("entries array");
     assert_eq!(
         entries.len(),
         1,
@@ -144,8 +147,9 @@ fn tree_no_repo_is_cross_repo_and_tags_each_entry() {
             .env("XDG_STATE_HOME", state_dir.path())
             .args(["sym", "tree", "--json"]),
     );
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(json_out.trim()).expect("stdout is a JSON array");
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    let entries = envelope["entries"].as_array().expect("entries array");
     let repos: std::collections::HashSet<&str> = entries
         .iter()
         .map(|e| e["repo"].as_str().unwrap())
@@ -153,6 +157,19 @@ fn tree_no_repo_is_cross_repo_and_tags_each_entry() {
     assert!(
         repos.contains("alpha") && repos.contains("beta"),
         "cross-repo tree must tag entries from every indexed repo: {entries:?}"
+    );
+
+    // Cross-repo snapshots cover exactly the distinct repos in `entries`,
+    // not every watched repo (#746).
+    let snapshots = envelope["snapshots"].as_array().expect("snapshots array");
+    let snapshot_repos: std::collections::HashSet<&str> = snapshots
+        .iter()
+        .map(|s| s["repo"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        snapshot_repos,
+        std::collections::HashSet::from(["alpha", "beta"]),
+        "cross-repo snapshots must cover exactly the repos represented in entries: {snapshots:?}"
     );
 
     // Human output prefixes cross-repo lines with the repo name.
@@ -214,4 +231,148 @@ fn tree_uncovered_repo_prints_explicit_message_not_silence() {
         stderr.contains("no inventory for 'treerepo'") && stderr.contains("legion index treerepo"),
         "expected the explicit no-inventory hint, got:\n{stderr}"
     );
+    // Never-indexed repo also has no snapshot row (#746): the freshness
+    // line must name that explicitly, not stay silent about staleness.
+    assert!(
+        stderr.contains("no inventory snapshot recorded")
+            && stderr.contains("legion index treerepo"),
+        "expected the no-snapshot-recorded freshness hint, got:\n{stderr}"
+    );
+}
+
+/// `--json` emits the `{snapshots, entries}` envelope, not a bare array
+/// (#746): the explicit-repo case always yields exactly one snapshot for
+/// that repo, with `indexed_at`/`head_at_index` recorded by the `legion
+/// index` run above.
+#[test]
+fn sym_tree_json_wraps_entries_with_snapshot_freshness() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+
+    std::fs::write(repo_dir.path().join("a.rs"), "").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("treerepo", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "treerepo"]));
+
+    let json_out = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "tree", "--repo", "treerepo", "--json"]),
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    assert!(envelope["entries"].is_array());
+    let snapshots = envelope["snapshots"].as_array().expect("snapshots array");
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "explicit --repo yields exactly one snapshot: {snapshots:?}"
+    );
+    assert_eq!(snapshots[0]["repo"], "treerepo");
+    assert!(
+        snapshots[0]["indexed_at"].is_string(),
+        "indexed_at must be recorded by `legion index`: {snapshots:?}"
+    );
+    assert_eq!(snapshots[0]["head_drift"], false);
+}
+
+/// Cross-repo `--json` with zero matching entries yields an empty
+/// `snapshots` array -- not one row per watch.toml repo (#746).
+#[test]
+fn sym_tree_json_cross_repo_empty_result_yields_empty_snapshots() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    // In watch.toml but never indexed -- zero inventory rows anywhere.
+    seed_watch_toml(data_dir.path(), &[("treerepo", repo_dir.path())]);
+
+    let json_out = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "tree", "--json"]),
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    assert_eq!(envelope["entries"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        envelope["snapshots"].as_array().unwrap().len(),
+        0,
+        "empty cross-repo result must not synthesize one row per watch.toml repo: {envelope}"
+    );
+}
+
+/// Human output prints an "up to date" freshness line before the entry
+/// table when the repo's live HEAD still matches the index-time HEAD
+/// (#746).
+#[test]
+fn tree_human_output_prints_up_to_date_when_head_matches() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+
+    crate::common::run_git_fixture(repo_dir.path(), &["init"]);
+    std::fs::write(repo_dir.path().join("a.rs"), "fn a() {}\n").expect("write fixture");
+    crate::common::run_git_fixture(repo_dir.path(), &["add", "a.rs"]);
+    crate::common::run_git_fixture(repo_dir.path(), &["commit", "-m", "initial"]);
+    seed_watch_toml(data_dir.path(), &[("treerepo", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "treerepo"]));
+
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "tree", "--repo", "treerepo"]),
+    );
+    assert!(
+        stderr.contains("treerepo: indexed") && stderr.contains("up to date"),
+        "expected an up-to-date freshness line, got:\n{stderr}"
+    );
+    assert!(!stderr.contains("WARNING"), "got:\n{stderr}");
+}
+
+/// Human output prints a loud WARNING freshness line naming both HEADs
+/// when the repo's live HEAD has moved past the index-time HEAD (#746) --
+/// the exact scenario bullpen post 019f355c reported as silently invisible.
+#[test]
+fn tree_human_output_prints_freshness_warning_on_head_drift() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+
+    crate::common::run_git_fixture(repo_dir.path(), &["init"]);
+    std::fs::write(repo_dir.path().join("a.rs"), "fn a() {}\n").expect("write fixture");
+    crate::common::run_git_fixture(repo_dir.path(), &["add", "a.rs"]);
+    crate::common::run_git_fixture(repo_dir.path(), &["commit", "-m", "initial"]);
+    seed_watch_toml(data_dir.path(), &[("treerepo", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "treerepo"]));
+
+    // The repo moves past the indexed HEAD -- `legion index` is not re-run.
+    std::fs::write(repo_dir.path().join("b.rs"), "fn b() {}\n").expect("write fixture");
+    crate::common::run_git_fixture(repo_dir.path(), &["add", "b.rs"]);
+    crate::common::run_git_fixture(repo_dir.path(), &["commit", "-m", "second"]);
+
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "tree", "--repo", "treerepo"]),
+    );
+    assert!(
+        stderr.contains("WARNING: current HEAD is")
+            && stderr.contains("inventory may be stale")
+            && stderr.contains("re-run 'legion index treerepo'"),
+        "expected a head-drift warning, got:\n{stderr}"
+    );
+
+    let json_out = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "tree", "--repo", "treerepo", "--json"]),
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    let snapshots = envelope["snapshots"].as_array().expect("snapshots array");
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0]["head_drift"], true);
+    assert!(snapshots[0]["head_at_index"].is_string());
+    assert!(snapshots[0]["current_head"].is_string());
+    assert_ne!(snapshots[0]["head_at_index"], snapshots[0]["current_head"]);
 }

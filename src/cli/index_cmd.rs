@@ -585,6 +585,157 @@ impl From<db::inventory::FileInventoryEntry> for SymTreeEntry {
     }
 }
 
+/// Per-repo freshness metadata attached to a `--json` response (#746): when
+/// the backing inventory snapshot was captured, and whether the repo's
+/// current HEAD (read live, once per distinct repo represented in the
+/// result -- one `git rev-parse HEAD`, not a filesystem walk) has moved
+/// since.
+#[derive(Debug, serde::Serialize)]
+struct SnapshotFreshness {
+    repo: String,
+    indexed_at: Option<String>,
+    head_at_index: Option<String>,
+    current_head: Option<String>,
+    /// True only when both heads are `Some` and differ.
+    head_drift: bool,
+}
+
+/// `--json` envelope replacing the previous bare-array output for both
+/// `sym tree` and `sym etc find-file` (#746). This deliberately breaks the
+/// previous bare-array `--json` shape (0.19.0 shipped it days before this
+/// issue landed, with no external contract on it) -- freshness metadata
+/// cannot be attached to a bare array.
+#[derive(Debug, serde::Serialize)]
+struct FreshJsonEnvelope<T: serde::Serialize> {
+    snapshots: Vec<SnapshotFreshness>,
+    entries: Vec<T>,
+}
+
+/// True only when `head_at_index` and `current_head` are both present and
+/// differ -- nothing to compare (either side `None`) is not drift (#746).
+fn head_drift(head_at_index: Option<&str>, current_head: Option<&str>) -> bool {
+    matches!((head_at_index, current_head), (Some(a), Some(b)) if a != b)
+}
+
+/// Repo scope for a freshness computation: explicit `--repo` always yields
+/// exactly that one name (even when the result set is empty); cross-repo
+/// yields the distinct repos actually represented in `entry_repos`, in
+/// first-seen order (callers already sort entries by `(repo, path)`, so
+/// this comes out repo-sorted for free). An empty cross-repo result yields
+/// an empty list, not one entry per watch.toml repo (#746).
+fn freshness_repo_scope<'a>(
+    repo: Option<&str>,
+    entry_repos: impl Iterator<Item = &'a str>,
+) -> Vec<String> {
+    match repo {
+        Some(name) => vec![name.to_string()],
+        None => {
+            let mut seen = std::collections::HashSet::new();
+            entry_repos
+                .filter(|r| seen.insert((*r).to_string()))
+                .map(|r| r.to_string())
+                .collect()
+        }
+    }
+}
+
+/// Resolve `name`'s workdir from watch.toml, or `None` when it is not a
+/// known repo -- a stale/removed inventory row must not error the whole
+/// freshness computation (#746).
+fn repo_workdir(name: &str) -> error::Result<Option<PathBuf>> {
+    let base = data_dir()?;
+    let watch_path = base.join("watch.toml");
+    let all = watch::list_repos_in_config(&watch_path)?;
+    Ok(all
+        .iter()
+        .find(|r| r.name == name)
+        .map(|r| PathBuf::from(&r.workdir)))
+}
+
+/// Compute freshness metadata for one `--json`/human freshness line per repo
+/// in `freshness_repo_scope`'s result: read the stored `inventory_snapshots`
+/// row, resolve the repo's live workdir, and do one `git rev-parse HEAD`
+/// (never a filesystem walk) to detect drift (#746).
+fn compute_freshness<'a>(
+    database: &db::Database,
+    repo: Option<&str>,
+    entry_repos: impl Iterator<Item = &'a str>,
+) -> error::Result<Vec<SnapshotFreshness>> {
+    let names = freshness_repo_scope(repo, entry_repos);
+    let mut result = Vec::with_capacity(names.len());
+    for name in names {
+        let snapshot = database.get_inventory_snapshot(&name)?;
+        let indexed_at = snapshot.as_ref().map(|s| s.indexed_at.clone());
+        let head_at_index = snapshot.and_then(|s| s.head);
+        let current_head = repo_workdir(&name)?
+            .as_deref()
+            .and_then(inventory::current_head);
+        let drift = head_drift(head_at_index.as_deref(), current_head.as_deref());
+        result.push(SnapshotFreshness {
+            repo: name,
+            indexed_at,
+            head_at_index,
+            current_head,
+            head_drift: drift,
+        });
+    }
+    Ok(result)
+}
+
+/// Shorten a full SHA to git's conventional 7-char display form. Shorter
+/// input (should not happen for a real SHA) is returned as-is.
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
+}
+
+/// Coarse "how long ago" label for a freshness line: seconds/minutes/
+/// hours/days, whichever unit `elapsed` falls into. Negative or malformed
+/// durations (clock skew) floor to zero rather than printing a negative
+/// number.
+fn format_relative_duration(elapsed: chrono::Duration) -> String {
+    let secs = elapsed.num_seconds().max(0);
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// Human-facing freshness line for one repo, printed to stderr before the
+/// entry table (#746):
+/// - no snapshot recorded: hint to re-index.
+/// - snapshot present, HEAD matches or nothing to compare: "up to date".
+/// - snapshot present, HEAD drifted: a loud warning naming both HEADs.
+fn format_freshness_line(s: &SnapshotFreshness, now: chrono::DateTime<chrono::Utc>) -> String {
+    let Some(indexed_at) = &s.indexed_at else {
+        return format!(
+            "{}: no inventory snapshot recorded; re-run 'legion index {}' to capture indexed-at/HEAD",
+            s.repo, s.repo
+        );
+    };
+    let ago = chrono::DateTime::parse_from_rfc3339(indexed_at)
+        .map(|d| format_relative_duration(now - d.with_timezone(&chrono::Utc)))
+        .unwrap_or_else(|_| "unknown".to_string());
+    let head_disp = s.head_at_index.as_deref().map(short_sha).unwrap_or("none");
+    if s.head_drift {
+        let current_disp = s.current_head.as_deref().map(short_sha).unwrap_or("none");
+        format!(
+            "{}: indexed {indexed_at} ({ago}), HEAD {head_disp} -- WARNING: current HEAD is \
+             {current_disp}; inventory may be stale, re-run 'legion index {}'",
+            s.repo, s.repo
+        )
+    } else {
+        format!(
+            "{}: indexed {indexed_at} ({ago}), HEAD {head_disp} -- up to date",
+            s.repo
+        )
+    }
+}
+
 /// `sym tree` (#706): a structured, cross-repo view of the file inventory
 /// (`Database::list_file_inventory`) -- no filesystem walk at query time.
 /// `--repo` omitted means cross-repo over whatever the inventory table
@@ -633,12 +784,26 @@ fn run_sym_tree(
         eprintln!("[legion] {msg}");
     }
 
+    let snapshots = compute_freshness(
+        database,
+        repo.as_deref(),
+        result.entries.iter().map(|e| e.repo.as_str()),
+    )?;
+
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     if json {
-        serde_json::to_writer(&mut out, &result.entries)?;
+        let envelope = FreshJsonEnvelope {
+            snapshots,
+            entries: result.entries,
+        };
+        serde_json::to_writer(&mut out, &envelope)?;
         writeln!(out)?;
     } else {
+        let now = chrono::Utc::now();
+        for s in &snapshots {
+            eprintln!("[legion] {}", format_freshness_line(s, now));
+        }
         let cross_repo = repo.is_none();
         for e in &result.entries {
             let ext_col = e.ext.as_deref().unwrap_or("-");
@@ -839,12 +1004,26 @@ fn run_etc_find_file(
         eprintln!("[legion] {msg}");
     }
 
+    let snapshots = compute_freshness(
+        database,
+        repo.as_deref(),
+        result.entries.iter().map(|e| e.repo.as_str()),
+    )?;
+
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     if json {
-        serde_json::to_writer(&mut out, &result.entries)?;
+        let envelope = FreshJsonEnvelope {
+            snapshots,
+            entries: result.entries,
+        };
+        serde_json::to_writer(&mut out, &envelope)?;
         writeln!(out)?;
     } else {
+        let now = chrono::Utc::now();
+        for s in &snapshots {
+            eprintln!("[legion] {}", format_freshness_line(s, now));
+        }
         let cross_repo = repo.is_none();
         for e in &result.entries {
             if cross_repo {
@@ -1251,6 +1430,136 @@ mod sym_tree_tests {
         assert_eq!(
             describe_tree_scope(Some("rs"), Some("src/db"), Some(2)),
             "ext=rs,under=src/db,depth=2"
+        );
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+
+    // --- head_drift ---
+
+    #[test]
+    fn snapshot_freshness_head_drift_true_only_when_both_present_and_differ() {
+        assert!(head_drift(Some("aaa"), Some("bbb")), "both present, differ");
+        assert!(!head_drift(Some("aaa"), Some("aaa")), "both present, match");
+        assert!(!head_drift(None, Some("bbb")), "no index-time head");
+        assert!(!head_drift(Some("aaa"), None), "no current head");
+        assert!(!head_drift(None, None), "neither known");
+    }
+
+    // --- freshness_repo_scope ---
+
+    #[test]
+    fn freshness_repo_scope_explicit_repo_is_always_one_entry_even_when_empty() {
+        let scope = freshness_repo_scope(Some("r"), std::iter::empty());
+        assert_eq!(scope, vec!["r".to_string()]);
+    }
+
+    #[test]
+    fn freshness_repo_scope_cross_repo_dedupes_in_first_seen_order() {
+        let repos = vec!["beta", "alpha", "beta", "alpha"];
+        let scope = freshness_repo_scope(None, repos.into_iter());
+        assert_eq!(scope, vec!["beta".to_string(), "alpha".to_string()]);
+    }
+
+    #[test]
+    fn freshness_repo_scope_cross_repo_empty_result_is_empty_scope() {
+        let scope = freshness_repo_scope(None, std::iter::empty());
+        assert!(scope.is_empty());
+    }
+
+    // --- short_sha ---
+
+    #[test]
+    fn short_sha_truncates_to_seven_chars() {
+        assert_eq!(short_sha("8ed18c6abcdef1234567890"), "8ed18c6");
+    }
+
+    #[test]
+    fn short_sha_returns_shorter_input_as_is() {
+        assert_eq!(short_sha("abc"), "abc");
+    }
+
+    // --- format_relative_duration ---
+
+    #[test]
+    fn format_relative_duration_buckets_by_unit() {
+        assert_eq!(
+            format_relative_duration(chrono::Duration::seconds(30)),
+            "30s ago"
+        );
+        assert_eq!(
+            format_relative_duration(chrono::Duration::minutes(14)),
+            "14m ago"
+        );
+        assert_eq!(
+            format_relative_duration(chrono::Duration::hours(5)),
+            "5h ago"
+        );
+        assert_eq!(
+            format_relative_duration(chrono::Duration::days(6)),
+            "6d ago"
+        );
+    }
+
+    #[test]
+    fn format_relative_duration_negative_floors_to_zero() {
+        assert_eq!(
+            format_relative_duration(chrono::Duration::seconds(-5)),
+            "0s ago"
+        );
+    }
+
+    // --- format_freshness_line ---
+
+    #[test]
+    fn format_freshness_line_no_snapshot_recorded_hint() {
+        let s = SnapshotFreshness {
+            repo: "legion".to_string(),
+            indexed_at: None,
+            head_at_index: None,
+            current_head: None,
+            head_drift: false,
+        };
+        let line = format_freshness_line(&s, chrono::Utc::now());
+        assert!(
+            line.contains("no inventory snapshot recorded") && line.contains("legion index legion"),
+            "got: {line}"
+        );
+    }
+
+    #[test]
+    fn format_freshness_line_up_to_date_when_no_drift() {
+        let now = chrono::Utc::now();
+        let s = SnapshotFreshness {
+            repo: "legion".to_string(),
+            indexed_at: Some(now.to_rfc3339()),
+            head_at_index: Some("8ed18c6ffff".to_string()),
+            current_head: Some("8ed18c6ffff".to_string()),
+            head_drift: false,
+        };
+        let line = format_freshness_line(&s, now);
+        assert!(line.contains("up to date"), "got: {line}");
+        assert!(!line.contains("WARNING"), "got: {line}");
+    }
+
+    #[test]
+    fn format_freshness_line_warns_on_drift() {
+        let now = chrono::Utc::now();
+        let s = SnapshotFreshness {
+            repo: "legion".to_string(),
+            indexed_at: Some(now.to_rfc3339()),
+            head_at_index: Some("8ed18c6ffff".to_string()),
+            current_head: Some("31b01ecffff".to_string()),
+            head_drift: true,
+        };
+        let line = format_freshness_line(&s, now);
+        assert!(
+            line.contains("WARNING: current HEAD is 31b01ec")
+                && line.contains("re-run 'legion index legion'"),
+            "got: {line}"
         );
     }
 }
@@ -2059,6 +2368,13 @@ pub(crate) fn handle_index(
     let outcome = inventory::walk_repo(&repo, &repo_path);
     let live_paths: Vec<&str> = outcome.entries.iter().map(|e| e.path.as_str()).collect();
     database.upsert_file_inventory(&outcome.entries)?;
+    // Snapshot fact (#746): when this walk ran and the repo's HEAD at that
+    // moment, so `sym tree`/`sym etc find-file` can surface staleness.
+    // `current_head` is best-effort (never an error) -- a non-git workdir
+    // still gets a snapshot row, with `head: None`.
+    let indexed_at = chrono::Utc::now().to_rfc3339();
+    let head_at_index = inventory::current_head(&repo_path);
+    database.upsert_inventory_snapshot(&repo, &indexed_at, head_at_index.as_deref())?;
     // Prune only on a complete walk: with walk errors the entry set may be
     // missing files that still exist, and evicting their rows would let a
     // transient I/O failure shrink the inventory (#718 re-review). Upserting

@@ -50,8 +50,9 @@ fn find_file_matches_by_basename_across_repos() {
             .env("XDG_STATE_HOME", state_dir.path())
             .args(["sym", "etc", "find-file", "components.json", "--json"]),
     );
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(json_out.trim()).expect("stdout is a JSON array");
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    let entries = envelope["entries"].as_array().expect("entries array");
     assert_eq!(
         entries.len(),
         2,
@@ -108,8 +109,9 @@ fn find_file_repo_flag_scopes_to_one_repo() {
                 "--json",
             ]),
     );
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(json_out.trim()).expect("stdout is a JSON array");
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    let entries = envelope["entries"].as_array().expect("entries array");
     assert_eq!(entries.len(), 1, "must scope to alpha only: {entries:?}");
     assert_eq!(entries[0]["repo"], "alpha");
 }
@@ -130,8 +132,9 @@ fn find_file_role_filters_to_config_files() {
             .env("XDG_STATE_HOME", state_dir.path())
             .args(["sym", "etc", "find-file", "*", "--role", "config", "--json"]),
     );
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(json_out.trim()).expect("stdout is a JSON array");
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    let entries = envelope["entries"].as_array().expect("entries array");
     assert_eq!(
         entries.len(),
         1,
@@ -208,5 +211,149 @@ fn find_file_uncovered_repo_prints_explicit_message_not_silence() {
     assert!(
         stderr.contains("no inventory for 'findrepo'") && stderr.contains("legion index findrepo"),
         "expected the explicit no-inventory hint, got:\n{stderr}"
+    );
+    // Never-indexed repo also has no snapshot row (#746): the freshness
+    // line must name that explicitly, not stay silent about staleness.
+    assert!(
+        stderr.contains("no inventory snapshot recorded")
+            && stderr.contains("legion index findrepo"),
+        "expected the no-snapshot-recorded freshness hint, got:\n{stderr}"
+    );
+}
+
+/// `--json` emits the `{snapshots, entries}` envelope, not a bare array
+/// (#746).
+#[test]
+fn find_file_json_wraps_entries_with_snapshot_freshness() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+
+    std::fs::write(repo_dir.path().join("a.rs"), "").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("findrepo", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "findrepo"]));
+
+    let json_out = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "find-file",
+                "a.rs",
+                "--repo",
+                "findrepo",
+                "--json",
+            ]),
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    assert!(envelope["entries"].is_array());
+    let snapshots = envelope["snapshots"].as_array().expect("snapshots array");
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "explicit --repo yields exactly one snapshot: {snapshots:?}"
+    );
+    assert_eq!(snapshots[0]["repo"], "findrepo");
+    assert!(snapshots[0]["indexed_at"].is_string());
+    assert_eq!(snapshots[0]["head_drift"], false);
+}
+
+/// Human output prints an "up to date" freshness line before the entry
+/// list when the repo's live HEAD still matches the index-time HEAD
+/// (#746).
+#[test]
+fn find_file_human_output_prints_up_to_date_when_head_matches() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+
+    crate::common::run_git_fixture(repo_dir.path(), &["init"]);
+    std::fs::write(repo_dir.path().join("a.rs"), "fn a() {}\n").expect("write fixture");
+    crate::common::run_git_fixture(repo_dir.path(), &["add", "a.rs"]);
+    crate::common::run_git_fixture(repo_dir.path(), &["commit", "-m", "initial"]);
+    seed_watch_toml(data_dir.path(), &[("findrepo", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "findrepo"]));
+
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "etc", "find-file", "a.rs", "--repo", "findrepo"]),
+    );
+    assert!(
+        stderr.contains("findrepo: indexed") && stderr.contains("up to date"),
+        "expected an up-to-date freshness line, got:\n{stderr}"
+    );
+    assert!(!stderr.contains("WARNING"), "got:\n{stderr}");
+}
+
+/// Regression test built directly from the field report (bullpen post
+/// 019f355c): a file's inventory row can be current while the repo's live
+/// HEAD has moved past the index-time HEAD, with nothing in the old output
+/// hinting the row might be stale. Seeds a real git repo, indexes it,
+/// advances HEAD without re-indexing, then asserts `find-file` surfaces
+/// the drift instead of staying silent (#746).
+#[test]
+fn find_file_regression_head_drift_surfaced_instead_of_silent() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+
+    crate::common::run_git_fixture(repo_dir.path(), &["init"]);
+    std::fs::write(repo_dir.path().join("CHANGELOG.md"), "# v1\n").expect("write fixture");
+    crate::common::run_git_fixture(repo_dir.path(), &["add", "CHANGELOG.md"]);
+    crate::common::run_git_fixture(repo_dir.path(), &["commit", "-m", "v1"]);
+    seed_watch_toml(data_dir.path(), &[("legion", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "legion"]));
+
+    // The repo moves past the indexed HEAD -- the release edit the field
+    // report named -- without a follow-up `legion index` run.
+    std::fs::write(repo_dir.path().join("CHANGELOG.md"), "# v2\n").expect("write fixture");
+    crate::common::run_git_fixture(repo_dir.path(), &["add", "CHANGELOG.md"]);
+    crate::common::run_git_fixture(repo_dir.path(), &["commit", "-m", "v2"]);
+
+    let json_out = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "find-file",
+                "CHANGELOG.md",
+                "--repo",
+                "legion",
+                "--json",
+            ]),
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    let snapshots = envelope["snapshots"].as_array().expect("snapshots array");
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(
+        snapshots[0]["head_drift"], true,
+        "the field report's exact scenario must now be visible: {snapshots:?}"
+    );
+    assert!(snapshots[0]["head_at_index"].is_string());
+    assert!(snapshots[0]["current_head"].is_string());
+    assert_ne!(snapshots[0]["head_at_index"], snapshots[0]["current_head"]);
+
+    // Human output warns loudly instead of staying silent.
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "find-file",
+                "CHANGELOG.md",
+                "--repo",
+                "legion",
+            ]),
+    );
+    assert!(
+        stderr.contains("WARNING: current HEAD is")
+            && stderr.contains("re-run 'legion index legion'"),
+        "expected a head-drift warning, got:\n{stderr}"
     );
 }

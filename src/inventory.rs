@@ -160,6 +160,29 @@ pub fn walk_repo(repo_name: &str, repo_path: &Path) -> WalkOutcome {
     }
 }
 
+/// Best-effort `git rev-parse HEAD` against `repo_path`. Returns `None`
+/// (never an error) when the directory is not a git checkout, `git` is
+/// not on PATH, or the command exits non-zero or produces unparseable
+/// output -- this is a freshness signal, not a requirement for indexing
+/// or querying to proceed (#746).
+pub fn current_head(repo_path: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(output.stdout).ok()?;
+    let sha = sha.trim();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -376,5 +399,68 @@ mod tests {
             vec!["real.rs"],
             "symlink entries must be skipped (follow_links off + is_file guard)"
         );
+    }
+
+    // --- current_head (#746) ---
+
+    /// Run `git` in `dir` with hermetic per-invocation identity (never a
+    /// `git config` write), mirroring the integration crate's
+    /// `run_git_fixture` -- this is a lib unit test, a separate crate
+    /// target, so that helper is not importable here.
+    fn run_git_fixture(dir: &std::path::Path, args: &[&str]) {
+        let mut full_args: Vec<&str> = vec![
+            "-c",
+            "user.name=Legion Test Fixture",
+            "-c",
+            "user.email=legion-test-fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        full_args.extend_from_slice(args);
+        let out = std::process::Command::new("git")
+            .args(&full_args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn in {dir:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} exited non-zero in {dir:?}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn current_head_reads_head_in_real_git_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git_fixture(dir.path(), &["init"]);
+        fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        run_git_fixture(dir.path(), &["add", "a.txt"]);
+        run_git_fixture(dir.path(), &["commit", "-m", "initial"]);
+
+        let expected = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        assert_eq!(current_head(dir.path()), Some(expected));
+    }
+
+    #[test]
+    fn current_head_returns_none_for_non_git_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(current_head(dir.path()), None);
+    }
+
+    #[test]
+    fn current_head_returns_none_for_directory_with_broken_git_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        // A `.git` that is a plain empty file, not a valid gitdir pointer or
+        // repository -- `git rev-parse HEAD` must fail cleanly, not panic.
+        fs::write(dir.path().join(".git"), b"").unwrap();
+        assert_eq!(current_head(dir.path()), None);
     }
 }
