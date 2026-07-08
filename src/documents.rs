@@ -804,7 +804,10 @@ mod tests {
         let db = test_db();
         let mut m = sample_meta("requirement", "mail");
         m.id = Some("FR-CANCEL");
-        db.insert_document(&m, "{}").unwrap();
+        // force_move_card to "cancelled" now runs the same document-sync as
+        // the governed move path (#753), so the payload needs a "meta"
+        // object for the sync to have somewhere to write "status" into.
+        db.insert_document(&m, r#"{"meta":{}}"#).unwrap();
 
         let card_id = insert_bound_card(&db, "FR-CANCEL");
         // Cancel the card.
