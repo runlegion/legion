@@ -667,6 +667,9 @@ mod tests {
         // Cross-repo target must not match a same-repo mention and vice versa.
         let cross_repo = CloseRef::parse("owner/repo#751").unwrap();
         assert!(!has_closing_keyword("Closes #751", &cross_repo));
+        // A trailing colon breaks GitHub's own auto-linking too -- "Closes:"
+        // must not register as the keyword.
+        assert!(!has_closing_keyword("Closes: #751", &target));
     }
 
     #[test]
