@@ -746,8 +746,10 @@ impl Database {
         }
 
         // -- sync the bound document, same as the governed move path --
-        // Read document_id inside the transaction so the sync sees the same
-        // snapshot the card update just committed to.
+        // Read document_id via the same (uncommitted) transaction, not a
+        // fresh connection read, so this sees the row the UPDATE above just
+        // wrote -- both statements are part of the one transaction that
+        // commits or rolls back together below.
         let document_id: Option<String> = {
             let mut stmt =
                 tx.prepare("SELECT document_id FROM tasks WHERE id = ?1 AND deleted_at IS NULL")?;
