@@ -52,6 +52,24 @@ pub struct InventoryFilter<'a> {
     pub lang: Option<&'a str>,
 }
 
+/// One row per repo: when the most recent `legion index` walk ran, and
+/// what the repo's HEAD commit was at that moment. Kept separate from the
+/// per-file `file_inventory` rows (whose `mtime` is per-file "when did
+/// this file change", not "when did we last look") so the snapshot fact
+/// is not duplicated across every file row on each index run (#746).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventorySnapshot {
+    pub repo: String,
+    /// RFC3339 timestamp of when the walk producing the current
+    /// `file_inventory` rows for `repo` ran.
+    pub indexed_at: String,
+    /// `git rev-parse HEAD` output for `repo`'s workdir at index time.
+    /// `None` when the workdir is not a git checkout or the command
+    /// failed -- HEAD capture is a freshness signal, never a hard
+    /// requirement for `legion index` to succeed.
+    pub head: Option<String>,
+}
+
 /// Coarse role bucket for `sym etc find-file --role` (#709), inferred
 /// purely from path and extension -- no file content is read. Each
 /// heuristic trades completeness for being answerable straight from the
@@ -259,7 +277,12 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
             PRIMARY KEY (repo, path)
         );
         CREATE INDEX IF NOT EXISTS idx_file_inventory_repo_ext
-            ON file_inventory(repo, ext);",
+            ON file_inventory(repo, ext);
+        CREATE TABLE IF NOT EXISTS inventory_snapshots (
+            repo TEXT PRIMARY KEY,
+            indexed_at TEXT NOT NULL,
+            head TEXT
+        );",
     )?;
     Ok(())
 }
@@ -443,6 +466,42 @@ impl Database {
             rusqlite::params![repo],
         )?;
         Ok(n)
+    }
+
+    /// Upsert `repo`'s snapshot row, replacing any prior indexed_at/head
+    /// (one row per repo, not one per index run) (#746).
+    pub fn upsert_inventory_snapshot(
+        &self,
+        repo: &str,
+        indexed_at: &str,
+        head: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO inventory_snapshots (repo, indexed_at, head)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(repo) DO UPDATE SET
+                 indexed_at = excluded.indexed_at,
+                 head = excluded.head",
+            rusqlite::params![repo, indexed_at, head],
+        )?;
+        Ok(())
+    }
+
+    /// `None` when `repo` has never been indexed, or was indexed before
+    /// this table existed (#746).
+    pub fn get_inventory_snapshot(&self, repo: &str) -> Result<Option<InventorySnapshot>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT repo, indexed_at, head FROM inventory_snapshots WHERE repo = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![repo])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(InventorySnapshot {
+                repo: row.get(0)?,
+                indexed_at: row.get(1)?,
+                head: row.get(2)?,
+            })),
+            None => Ok(None),
+        }
     }
 }
 
@@ -826,5 +885,72 @@ mod tests {
         assert_eq!(FileRole::Test.to_string(), "test");
         assert_eq!(FileRole::Doc.to_string(), "doc");
         assert_eq!(FileRole::Entry.to_string(), "entry");
+    }
+
+    // --- inventory_snapshots (#746) ---
+
+    #[test]
+    fn get_inventory_snapshot_returns_none_when_absent() {
+        let db = test_db();
+        assert_eq!(db.get_inventory_snapshot("r").unwrap(), None);
+    }
+
+    #[test]
+    fn upsert_and_get_inventory_snapshot_round_trip() {
+        let db = test_db();
+        db.upsert_inventory_snapshot("r", "2026-07-05T08:00:00+00:00", Some("abc123"))
+            .unwrap();
+        let got = db.get_inventory_snapshot("r").unwrap().unwrap();
+        assert_eq!(got.repo, "r");
+        assert_eq!(got.indexed_at, "2026-07-05T08:00:00+00:00");
+        assert_eq!(got.head.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn upsert_inventory_snapshot_allows_none_head() {
+        let db = test_db();
+        db.upsert_inventory_snapshot("r", "2026-07-05T08:00:00+00:00", None)
+            .unwrap();
+        let got = db.get_inventory_snapshot("r").unwrap().unwrap();
+        assert_eq!(got.head, None);
+    }
+
+    #[test]
+    fn upsert_inventory_snapshot_replaces_prior_row_not_accumulates() {
+        let db = test_db();
+        db.upsert_inventory_snapshot("r", "2026-06-29T09:00:00+00:00", Some("old-sha"))
+            .unwrap();
+        db.upsert_inventory_snapshot("r", "2026-07-05T08:00:00+00:00", Some("new-sha"))
+            .unwrap();
+
+        let got = db.get_inventory_snapshot("r").unwrap().unwrap();
+        assert_eq!(got.indexed_at, "2026-07-05T08:00:00+00:00");
+        assert_eq!(got.head.as_deref(), Some("new-sha"));
+
+        // Exactly one row for "r" -- re-running the upsert must not
+        // accumulate a row per call.
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM inventory_snapshots WHERE repo = 'r'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn inventory_snapshots_are_scoped_per_repo() {
+        let db = test_db();
+        db.upsert_inventory_snapshot("alpha", "2026-07-01T00:00:00+00:00", Some("a-sha"))
+            .unwrap();
+        db.upsert_inventory_snapshot("beta", "2026-07-02T00:00:00+00:00", Some("b-sha"))
+            .unwrap();
+
+        let alpha = db.get_inventory_snapshot("alpha").unwrap().unwrap();
+        let beta = db.get_inventory_snapshot("beta").unwrap().unwrap();
+        assert_eq!(alpha.head.as_deref(), Some("a-sha"));
+        assert_eq!(beta.head.as_deref(), Some("b-sha"));
     }
 }

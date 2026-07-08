@@ -66,6 +66,15 @@ pub fn run_ok_stderr(cmd: &mut Command) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// Run the command, require success, and return the raw `Output` so the
+/// caller can assert on stdout and stderr from a single invocation --
+/// `run_ok`/`run_ok_stderr` each only see half the picture across two
+/// separate spawns, which matters when a test needs to pin both a JSON
+/// payload on stdout and a diagnostic on stderr from the same run.
+pub fn run_ok_output(cmd: &mut Command) -> Output {
+    output_ok(cmd)
+}
+
 /// Run the command, require failure (non-zero exit), and return
 /// `(stdout, stderr)` so the caller can assert on the error surface.
 pub fn run_fail(cmd: &mut Command) -> (String, String) {
