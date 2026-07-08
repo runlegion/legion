@@ -794,6 +794,138 @@ fn issue_close_with_configured_worksource_writes_audit_row() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// `legion issue list` (#750): enumerate work-source issues via the live
+// plugin path, not the local kanban cache.
+// ---------------------------------------------------------------------------
+
+/// Stub plugin that answers only `list-issues`, returning two fixed issues
+/// with distinct `updatedAt` values so the CLI's updated-at column has
+/// something to assert on.
+#[cfg(unix)]
+fn list_issues_stub_plugin() -> String {
+    r##"#!/bin/bash
+set -e
+case "${1:-}" in
+  list-issues)
+    cat <<'BODY'
+[
+  {"url":"https://example.com/issues/42","number":42,"title":"first issue","body":"","labels":[],"assignees":null,"state":"OPEN","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"},
+  {"url":"https://example.com/issues/43","number":43,"title":"second issue","body":"","labels":[],"assignees":null,"state":"OPEN","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-03T00:00:00Z"}
+]
+BODY
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##
+    .to_string()
+}
+
+/// `legion issue list` fails with the canonical worksource error when the
+/// repo has no watch.toml entry -- confirms the command is wired up and
+/// resolves config before ever reaching a plugin.
+#[test]
+fn issue_list_errors_without_worksource_config() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) =
+        run_fail(legion_cmd(dir.path()).args(["issue", "list", "--repo", "no-such-repo"]));
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected 'no work source configured' error, got: {stderr}"
+    );
+}
+
+/// An invalid `--state` is rejected before any worksource resolution, with
+/// a message naming the allowed values.
+#[test]
+fn issue_list_rejects_invalid_state() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "issue",
+        "list",
+        "--repo",
+        "no-such-repo",
+        "--state",
+        "bogus",
+    ]));
+    assert!(
+        stderr.contains("--state must be one of open|closed|all"),
+        "expected state validation error, got: {stderr}"
+    );
+}
+
+/// With a configured work source, `issue list` prints number/state/updated-at
+/// /title per issue (live plugin state, #750 AC1) and writes an audit row
+/// (#750 AC4) carrying the requested state and label filters (#750 AC1).
+#[cfg(unix)]
+#[test]
+fn issue_list_prints_issues_and_writes_audit_row_with_filters() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &list_issues_stub_plugin(),
+    );
+
+    let stdout = run_ok(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["issue", "list", "--repo", "stub", "--label", "bug"]),
+    );
+    assert!(
+        stdout.contains("#42") && stdout.contains("first issue"),
+        "expected first issue row, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("#43") && stdout.contains("second issue"),
+        "expected second issue row, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("2026-01-02T00:00:00Z") && stdout.contains("2026-01-03T00:00:00Z"),
+        "expected updated-at column for both rows, got: {stdout}"
+    );
+
+    let audit_out =
+        run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "list-issues", "--json"]));
+    assert!(
+        audit_out.contains("\"action\": \"list-issues\""),
+        "expected a list-issues audit row, got: {audit_out}"
+    );
+    assert!(
+        audit_out.contains("label") && audit_out.contains("bug"),
+        "expected the audit details to carry the --label filter, got: {audit_out}"
+    );
+}
+
+/// `--json` emits a parseable array carrying the live plugin fields, for
+/// scripted callers (#750 AC1).
+#[cfg(unix)]
+#[test]
+fn issue_list_json_flag_emits_parseable_array() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &list_issues_stub_plugin(),
+    );
+
+    let stdout = run_ok(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["issue", "list", "--repo", "stub", "--json"]),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let arr = parsed.as_array().expect("expected a JSON array");
+    assert_eq!(arr.len(), 2, "expected both stub issues, got: {stdout}");
+    assert_eq!(arr[0]["number"], 42);
+    assert_eq!(arr[0]["updated_at"], "2026-01-02T00:00:00Z");
+}
+
 /// Create a card on repo `stub` linked to external issue #42 and promote
 /// it to a Done-eligible state (Backlog -> assign -> accept). Shared by
 /// the Done propagation tests.

@@ -31,6 +31,31 @@ case "${1:-}" in
       --limit 50 2>/dev/null || echo "[]"
     ;;
 
+  list-issues)
+    # Enumerate work-source issues for `legion issue list` (#750): number,
+    # title, state, updated-at, filtered by state and (optionally) label.
+    # Distinct from `list` above (used by `sync`, always open/unfiltered) so
+    # sync's behavior does not shift as a side effect of this verb.
+    #
+    # Env: LEGION_WS_REPO, LEGION_WS_STATE (open|closed|all, default open),
+    #      LEGION_WS_LABEL (optional)
+    STATE="${LEGION_WS_STATE:-open}"
+    LABEL="${LEGION_WS_LABEL:-}"
+    if [ -z "$REPO" ]; then
+      echo "[]"
+      exit 0
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo "[]"
+      exit 0
+    fi
+    ARGS=(issue list --repo "$REPO" --state "$STATE" \
+      --json url,number,title,body,labels,assignees,state,createdAt,updatedAt \
+      --limit 200)
+    [ -n "$LABEL" ] && ARGS+=(--label "$LABEL")
+    gh "${ARGS[@]}" 2>/dev/null || echo "[]"
+    ;;
+
   close)
     NUMBER="${2:-}"
     COMMENT="${LEGION_WS_COMMENT:-}"
@@ -574,7 +599,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close|pr-checks|view-pr|pr-comments|pr-reviews|pr-check-log>" >&2
+    echo "Usage: github <list|list-issues|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close|pr-checks|view-pr|pr-comments|pr-reviews|pr-check-log>" >&2
     exit 1
     ;;
 esac

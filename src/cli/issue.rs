@@ -76,6 +76,29 @@ pub(crate) enum IssueAction {
         #[arg(long)]
         number: u64,
     },
+    /// List work-source issues: number, title, state, updated-at (#750).
+    ///
+    /// Reads the work source's live state via the same plugin path as
+    /// `issue view` -- not the local kanban cache, which `sync` can miss
+    /// entirely (see #750's motivating groom, where #711 sat open although
+    /// shipped because it had no local card at all).
+    List {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// State filter: open (default) | closed | all.
+        #[arg(long, default_value = "open")]
+        state: String,
+
+        /// Filter by label (forwarded to the work source as-is).
+        #[arg(long)]
+        label: Option<String>,
+
+        /// Emit as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Close an issue via the configured work source
     ///
     /// Used to reconcile a shipped kanban card with its public GitHub state
@@ -253,6 +276,56 @@ pub(crate) fn handle(action: IssueAction) -> error::Result<()> {
 
             println!("State: {}", issue.state);
             println!("URL: {}", issue.url);
+        }
+        IssueAction::List {
+            repo,
+            state,
+            label,
+            json,
+        } => {
+            if !matches!(state.as_str(), "open" | "closed" | "all") {
+                return Err(error::LegionError::WorkSource(format!(
+                    "legion issue list: --state must be one of open|closed|all, got '{state}'"
+                )));
+            }
+
+            let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+            let database = open_db()?;
+
+            let issues =
+                worksource::list_all_issues(&plugin_name, &source_repo, &state, label.as_deref())?;
+
+            let details = serde_json::json!({ "state": state, "label": label });
+            let details_str = details.to_string();
+            audit(
+                &database,
+                &db::AuditInput {
+                    agent: &repo,
+                    action: "list-issues",
+                    target_type: "issue",
+                    target_ref: &source_repo,
+                    task_id: None,
+                    source_type: &plugin_name,
+                    details: Some(&details_str),
+                    outcome: "success",
+                },
+            );
+
+            if json {
+                println!("{}", serde_json::to_string(&issues)?);
+            } else if issues.is_empty() {
+                println!("[legion] no issues on {} (state={})", source_repo, state);
+            } else {
+                for i in &issues {
+                    println!(
+                        "#{}\t{}\t{}\t{}",
+                        i.number,
+                        i.state,
+                        i.updated_at.as_deref().unwrap_or("-"),
+                        i.title
+                    );
+                }
+            }
         }
         IssueAction::Close {
             repo,
