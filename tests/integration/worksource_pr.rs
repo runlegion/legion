@@ -487,6 +487,13 @@ fn pr_view_surfaces_malformed_plugin_json_as_worksource_error() {
         !stderr.is_empty(),
         "expected a non-empty error message on malformed plugin output"
     );
+    // #720: the error must name the operation (view-pr), not just the
+    // offending field, so the operator can tell which of a dozen worksource
+    // calls actually failed.
+    assert!(
+        stderr.contains("view-pr"),
+        "expected the operation name in the error, got: {stderr}"
+    );
 }
 
 // ---------------------------------------------------------------------------
