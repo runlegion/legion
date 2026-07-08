@@ -302,7 +302,7 @@ const CLOSING_KEYWORDS: [&str; 9] = [
 /// A single `--closes` argument to `legion pr create` (#751): either a
 /// same-repo issue number (`"751"`, or `"#751"`) or a cross-repo reference
 /// (`"owner/repo#751"`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct CloseRef {
     owner_repo: Option<String>,
     number: u64,
@@ -369,7 +369,7 @@ impl CloseRef {
 /// True when `tok` (after trimming trailing sentence punctuation) has the
 /// shape of an issue reference: `#N` or `owner/repo#N`.
 fn looks_like_issue_ref(tok: &str) -> bool {
-    let tok = tok.trim_end_matches([',', '.', ';', ':']);
+    let tok = tok.trim_end_matches([',', '.', ';']);
     match tok.rsplit_once('#') {
         Some((prefix, digits)) => {
             !digits.is_empty()
@@ -383,34 +383,31 @@ fn looks_like_issue_ref(tok: &str) -> bool {
 }
 
 /// True when `body` already carries a recognized GitHub closing keyword
-/// (case-insensitive) applying to `close_ref` -- `Closes #N`, `Fixes
-/// owner/repo#N`, or a comma-separated group (`Closes #1, #2`). Scoped per
-/// line and per keyword-then-reference-run, mirroring how GitHub itself
-/// parses closing keywords: a keyword stays "active" across a run of
-/// comma-separated reference tokens and resets on anything else, so `Closes
-/// #999 but not #751` does NOT count as closing #751. Used both to keep
+/// (case-insensitive) directly followed by a reference to `close_ref` --
+/// `Closes #N`, `Fixes owner/repo#N`. GitHub requires the keyword to
+/// immediately precede the reference it closes, so a comma-separated group
+/// like `Closes #1, #2` closes ONLY #1 -- #2 needs its own keyword (`Closes
+/// #1, closes #2`). This mirrors that exactly: the keyword only "covers" the
+/// single token right after it, so `Closes #999 but not #751` does not count
+/// as closing #751, and neither does `Closes #1, #751`. Used both to keep
 /// `pr create --closes` idempotent and by `pr write-check` to warn when
 /// linkage is missing.
 pub fn has_closing_keyword(body: &str, close_ref: &CloseRef) -> bool {
     let target = close_ref.reference().to_lowercase();
 
     for line in body.lines() {
-        let mut keyword_active = false;
+        let mut prev_was_keyword = false;
         for raw_tok in line.split_whitespace() {
-            let tok = raw_tok.trim_end_matches([',', '.', ';', ':']);
+            let tok = raw_tok.trim_end_matches([',', '.', ';']);
             let lower_tok = tok.to_lowercase();
             if CLOSING_KEYWORDS.contains(&lower_tok.as_str()) {
-                keyword_active = true;
+                prev_was_keyword = true;
                 continue;
             }
-            if keyword_active && looks_like_issue_ref(tok) {
-                if lower_tok == target {
-                    return true;
-                }
-                // Still inside a comma-separated group of references.
-                continue;
+            if prev_was_keyword && looks_like_issue_ref(tok) && lower_tok == target {
+                return true;
             }
-            keyword_active = false;
+            prev_was_keyword = false;
         }
     }
     false
@@ -645,8 +642,8 @@ mod tests {
             "This PR resolves #751 finally.",
             &same_repo
         ));
-        // Comma-separated group: keyword stays active across the run.
-        assert!(has_closing_keyword("Closes #1, #751", &same_repo));
+        // Repeated keyword, one per reference -- GitHub closes both.
+        assert!(has_closing_keyword("Closes #1, closes #751", &same_repo));
 
         let cross_repo = CloseRef::parse("owner/repo#751").unwrap();
         assert!(has_closing_keyword("Resolves owner/repo#751", &cross_repo));
@@ -663,6 +660,10 @@ mod tests {
         assert!(!has_closing_keyword("prefix #751 is unrelated", &target));
         // A bare mention with no keyword at all.
         assert!(!has_closing_keyword("See #751 for context", &target));
+        // A single keyword shared across a comma-separated group does NOT
+        // carry to the second reference on GitHub -- #751 here would stay
+        // open, so this must not read as already-closed.
+        assert!(!has_closing_keyword("Closes #1, #751", &target));
         // Cross-repo target must not match a same-repo mention and vice versa.
         let cross_repo = CloseRef::parse("owner/repo#751").unwrap();
         assert!(!has_closing_keyword("Closes #751", &cross_repo));

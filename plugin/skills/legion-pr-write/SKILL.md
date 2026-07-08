@@ -101,6 +101,8 @@ simplify gate).
   keyword for `--issue`. `legion pr create --closes <issue>` appends `Closes #<issue>` (or
   `Closes owner/repo#<issue>` cross-repo) itself unless one is already present -- idempotent,
   so re-running it never duplicates the line.
-- GitHub only auto-closes the *first* keyword'd issue on a merged PR. When a PR ships more
-  than one issue, pass `--closes` for all of them (audit trail) but expect to close the
-  secondary ones manually, or run `legion kanban reconcile` after merge to catch the drift.
+- GitHub requires the closing keyword to immediately precede EACH reference -- `Closes #1,
+  #2` closes only #1, not #2 (`Closes #1, closes #2` closes both). Repeatable `--closes`
+  handles this correctly (one `Closes #N` line per issue); if you hand-write a body instead,
+  repeat the keyword per issue rather than comma-joining bare references, or run
+  `legion kanban reconcile` after merge to catch anything that silently stayed open.
