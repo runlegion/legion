@@ -232,9 +232,15 @@ fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<(
             repo,
             lang,
             json,
-        } => run_location_query(database, repo, lang, json, false, |idx| {
-            sym::query_definitions(&idx.blob, &name, &idx.repo, &idx.lang)
-        }),
+        } => {
+            if lang.as_deref() == Some("css") {
+                run_css_sym_def(database, &name, repo, json)
+            } else {
+                run_location_query(database, repo, lang, json, false, |idx| {
+                    sym::query_definitions(&idx.blob, &name, &idx.repo, &idx.lang)
+                })
+            }
+        }
         SymAction::Refs {
             name,
             repo,
@@ -256,7 +262,13 @@ fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<(
             repo,
             lang,
             json,
-        } => run_hover_query(database, &name, repo, lang, json),
+        } => {
+            if lang.as_deref() == Some("css") {
+                run_css_hover_query()
+            } else {
+                run_hover_query(database, &name, repo, lang, json)
+            }
+        }
         SymAction::Impact { repo, diff, json } => run_sym_impact(database, &repo, &diff, json),
         SymAction::List {
             repo,
@@ -518,6 +530,10 @@ fn run_sym_list(
     json: bool,
 ) -> error::Result<()> {
     use std::io::Write;
+
+    if lang.as_deref() == Some("css") {
+        return run_css_sym_list(database, repo, kind, file, json);
+    }
 
     let norm_kind = match kind.as_deref() {
         Some(k) => match sym::normalize_kind_filter(k) {
@@ -1937,6 +1953,195 @@ fn no_index_found(repo: Option<&str>, lang: Option<&str>) {
         (None, None) => "(any repo)".to_string(),
     };
     eprintln!("[legion] no index found for {scope}; run `legion index <repo>` first");
+}
+
+/// True when `repo` has at least one CSS file recorded in `file_inventory`
+/// -- i.e. `legion index` has run at least once over this repo's CSS files
+/// -- filtered by `ext = "css"`, NOT `lang`: `inventory::lang_for_ext` maps
+/// css to `None` (it is not a SCIP language, #711), so a `lang = "css"`
+/// filter on `file_inventory` always comes back empty regardless of how
+/// many `css_symbols` rows exist. This is the discriminator `sym list`/`sym
+/// def --lang css` need: "never indexed" vs. "indexed, this query's result
+/// is just empty" are different states and must print different messages
+/// (#744). `repo: None` (cross-repo query) checks whether ANY repo has a
+/// css-ext inventory row.
+fn css_indexed(database: &db::Database, repo: Option<&str>) -> error::Result<bool> {
+    let entries = database.list_file_inventory(&db::inventory::InventoryFilter {
+        repo,
+        ext: Some("css"),
+        lang: None,
+    })?;
+    Ok(!entries.is_empty())
+}
+
+/// Every repo `sym list`/`sym def --lang css` should query: just `repo`
+/// itself when given, else every repo with a css-ext `file_inventory` row,
+/// sorted. Looping the CLI's css queries over this list (rather than a
+/// single `Database::{list_css_symbols,find_css_symbol}` call with `repo:
+/// None`) is what lets each printed hit carry its owning repo -- `CssSymbol`
+/// has no `repo` column, so a `None`-scoped query result cannot be
+/// attributed back to the repo it came from (#744).
+fn css_repo_scope(database: &db::Database, repo: Option<&str>) -> error::Result<Vec<String>> {
+    if let Some(r) = repo {
+        return Ok(vec![r.to_string()]);
+    }
+    let entries = database.list_file_inventory(&db::inventory::InventoryFilter {
+        repo: None,
+        ext: Some("css"),
+        lang: None,
+    })?;
+    let mut repos: Vec<String> = entries.into_iter().map(|e| e.repo).collect();
+    repos.sort();
+    repos.dedup();
+    Ok(repos)
+}
+
+/// `sym list`/`sym def --lang css`'s "never indexed" error message.
+/// Deliberately distinct from `no_index_found`'s generic SCIP-oriented
+/// string: that message is false for `--lang css` on a repo that HAS been
+/// indexed (css is not a SCIP language, so `list_scip_indexes_filtered`
+/// always comes back empty for it) -- reusing it here would recreate the
+/// exact misroute bug this issue closes (#744).
+fn css_symbol_no_index_message(repo: Option<&str>) -> String {
+    let scope = repo.unwrap_or("(any repo)");
+    format!("[legion] no CSS index found for {scope}; run `legion index {scope}` first")
+}
+
+/// `sym hover --lang css`'s fixed response: CSS symbols have no hover
+/// surface (no signature/docstring concept in `css_symbols`), so this is a
+/// "no such surface" message, never a disguised "no data" message (#744).
+const CSS_NO_HOVER_MESSAGE: &str = "[legion] css symbols have no hover surface; use `sym list --lang css` or `sym etc find-content` instead";
+
+/// One CSS symbol hit as printed/serialized by `sym list --lang css` and
+/// `sym def --lang css`. Deliberately not `sym::SymbolLocation` (which
+/// always carries a SCIP `column` -- `CssSymbol` is line-only) and not
+/// `sym::SymbolEntry` (same column-shaped mismatch) (#744).
+#[derive(Debug, serde::Serialize)]
+struct CssSymbolHit {
+    name: String,
+    kind: String,
+    file: String,
+    line: u32,
+    repo: String,
+}
+
+/// `sym list --lang css` (#744): enumerate `css_symbols` rows. Loops over
+/// `css_repo_scope` calling `Database::list_css_symbols(Some(repo), ..)`
+/// per repo (see that fn's doc comment for why) rather than the single
+/// `list_css_symbols(None, ..)` call shape, which unit tests cover
+/// directly instead.
+fn run_css_sym_list(
+    database: &db::Database,
+    repo: Option<String>,
+    kind: Option<String>,
+    file: Option<String>,
+    json: bool,
+) -> error::Result<()> {
+    use std::io::Write;
+
+    let css_kind = match kind.as_deref() {
+        Some(k) => match css::CssSymbolKind::parse(k) {
+            Some(k) => Some(k),
+            None => {
+                eprintln!(
+                    "[legion] unknown --kind '{k}' for --lang css. Supported: class, custom-property"
+                );
+                return Err(error::LegionError::ExitWith(2));
+            }
+        },
+        None => None,
+    };
+
+    if !css_indexed(database, repo.as_deref())? {
+        eprintln!("{}", css_symbol_no_index_message(repo.as_deref()));
+        return Err(error::LegionError::ExitWith(1));
+    }
+
+    let repos = css_repo_scope(database, repo.as_deref())?;
+    let mut hits = Vec::new();
+    for r in &repos {
+        let symbols = database.list_css_symbols(Some(r), css_kind, file.as_deref())?;
+        hits.extend(symbols.into_iter().map(|s| CssSymbolHit {
+            name: s.name,
+            kind: s.kind.as_str().to_string(),
+            file: s.path,
+            line: s.line,
+            repo: r.clone(),
+        }));
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        serde_json::to_writer(&mut out, &hits)?;
+        writeln!(out)?;
+    } else {
+        for h in &hits {
+            writeln!(
+                out,
+                "{}\t{}:{}\t[{}] {}/css",
+                h.name, h.file, h.line, h.kind, h.repo
+            )?;
+        }
+        if hits.is_empty() {
+            eprintln!("[legion] no matching definitions");
+        }
+    }
+    Ok(())
+}
+
+/// `sym def <name> --lang css` (#744): point lookup via
+/// `Database::find_css_symbol`. Loops over `css_repo_scope` the same way
+/// `run_css_sym_list` does, for the same repo-attribution reason. A miss
+/// (indexed repo, no matching name) prints nothing and exits 0, mirroring
+/// `run_location_query`'s behavior for a SCIP `def` miss -- only the
+/// never-indexed case is an error.
+fn run_css_sym_def(
+    database: &db::Database,
+    name: &str,
+    repo: Option<String>,
+    json: bool,
+) -> error::Result<()> {
+    use std::io::Write;
+
+    if !css_indexed(database, repo.as_deref())? {
+        eprintln!("{}", css_symbol_no_index_message(repo.as_deref()));
+        return Err(error::LegionError::ExitWith(1));
+    }
+
+    let repos = css_repo_scope(database, repo.as_deref())?;
+    let mut hits = Vec::new();
+    for r in &repos {
+        let symbols = database.find_css_symbol(Some(r), name)?;
+        hits.extend(symbols.into_iter().map(|s| CssSymbolHit {
+            name: s.name,
+            kind: s.kind.as_str().to_string(),
+            file: s.path,
+            line: s.line,
+            repo: r.clone(),
+        }));
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        serde_json::to_writer(&mut out, &hits)?;
+        writeln!(out)?;
+    } else {
+        for h in &hits {
+            writeln!(out, "{}:{}\t[{}/css]", h.file, h.line, h.repo)?;
+        }
+    }
+    Ok(())
+}
+
+/// `sym hover --lang css` (#744): css symbols have no hover surface at all
+/// (no signature/docstring concept), so this always fails loudly and never
+/// touches `list_scip_indexes_filtered`/`no_index_found` -- unlike the
+/// never-indexed cases above, this is true regardless of index state.
+fn run_css_hover_query() -> error::Result<()> {
+    eprintln!("{CSS_NO_HOVER_MESSAGE}");
+    Err(error::LegionError::ExitWith(1))
 }
 
 #[allow(clippy::too_many_arguments)]

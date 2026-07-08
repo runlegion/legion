@@ -47,6 +47,36 @@ pub enum CssSymbolKind {
     CustomProperty,
 }
 
+impl CssSymbolKind {
+    /// The wire/CLI string for this kind: `"class"` or `"custom-property"`.
+    /// Single source of truth for `db::css_symbols`'s SQL storage strings
+    /// and the CLI's `sym list --lang css --kind` / `--json` output (#744).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CssSymbolKind::Class => "class",
+            CssSymbolKind::CustomProperty => "custom-property",
+        }
+    }
+
+    /// Parse a `sym list --lang css --kind <k>` value. Unlike the SCIP
+    /// `--kind` filter (`sym::normalize_kind_filter`), there are no
+    /// aliases -- `class` and `custom-property` are the only two storage
+    /// kinds `css_symbols` has (#744).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "class" => Some(CssSymbolKind::Class),
+            "custom-property" => Some(CssSymbolKind::CustomProperty),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for CssSymbolKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One CSS symbol definition site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CssSymbol {
@@ -497,5 +527,21 @@ mod tests {
             "the missing file must be skipped, not fatal"
         );
         assert_eq!(symbols[0].path, "ok.css");
+    }
+
+    // --- CssSymbolKind wire strings (#744) ---
+
+    #[test]
+    fn css_symbol_kind_round_trips_through_its_wire_string() {
+        for kind in [CssSymbolKind::Class, CssSymbolKind::CustomProperty] {
+            assert_eq!(CssSymbolKind::parse(kind.as_str()), Some(kind));
+            assert_eq!(kind.to_string(), kind.as_str());
+        }
+    }
+
+    #[test]
+    fn css_symbol_kind_parse_rejects_unknown_strings() {
+        assert_eq!(CssSymbolKind::parse("fn"), None);
+        assert_eq!(CssSymbolKind::parse(""), None);
     }
 }

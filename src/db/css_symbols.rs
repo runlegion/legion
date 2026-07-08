@@ -40,10 +40,7 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
 }
 
 fn kind_to_str(kind: CssSymbolKind) -> &'static str {
-    match kind {
-        CssSymbolKind::Class => "class",
-        CssSymbolKind::CustomProperty => "custom-property",
-    }
+    kind.as_str()
 }
 
 fn kind_from_str(s: &str) -> rusqlite::Result<CssSymbolKind> {
@@ -116,11 +113,12 @@ impl Database {
     /// `--token` defined" -- optionally scoped to a single repo, ordered by
     /// `(repo, path, line)` for stable output.
     ///
-    /// Not yet wired to a CLI surface -- #711 only populates the table via
-    /// `legion index` (see `handle_index` in `src/cli/index_cmd.rs`), same
-    /// as `module_edges` (#710). Exercised directly by this module's tests
-    /// in the meantime.
-    #[allow(dead_code)]
+    /// Wired to `sym def --lang css` (#744): the CLI resolves the repo
+    /// scope itself (looping per repo when `--repo` is omitted, since
+    /// `CssSymbol` carries no `repo` column to attribute a cross-repo row
+    /// back to its owner) rather than always calling this with `repo:
+    /// None`; that call shape is still exercised directly below by
+    /// `find_without_repo_searches_across_repos`.
     pub fn find_css_symbol(&self, repo: Option<&str>, name: &str) -> Result<Vec<CssSymbol>> {
         if let Some(repo) = repo {
             let mut stmt = self.conn.prepare(
@@ -145,6 +143,58 @@ impl Database {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             Ok(rows)
         }
+    }
+
+    /// Enumerate every CSS symbol for `repo` (or every repo with rows, if
+    /// `None`), optionally filtered by `kind` and/or `file`. `file` mirrors
+    /// `query_symbols`'s `--file` semantics for `sym list` (exact
+    /// repo-relative path or a path suffix), not a substring match anywhere
+    /// in the path. Ordered by `(repo, path, line)`, matching
+    /// `find_css_symbol`'s own ordering.
+    ///
+    /// `find_css_symbol` cannot serve `sym list --lang css` directly: it is
+    /// a point lookup keyed on an exact `name` (`WHERE name = ?1`), and
+    /// `sym list` is an enumeration with no name argument at all -- the same
+    /// def-vs-list split `sym::query_definitions` vs `sym::query_symbols`
+    /// already has for SCIP. This is the `list` half.
+    ///
+    /// Like `find_css_symbol`, a `None` repo returns rows with no repo
+    /// attribution (`CssSymbol` has no `repo` column) -- `sym list --lang
+    /// css`'s CLI handler resolves the repo scope itself and calls this
+    /// once per repo so it can tag each hit.
+    pub fn list_css_symbols(
+        &self,
+        repo: Option<&str>,
+        kind: Option<CssSymbolKind>,
+        file: Option<&str>,
+    ) -> Result<Vec<CssSymbol>> {
+        let mut sql = String::from(
+            "SELECT repo, path, kind, name, line
+             FROM css_symbols
+             WHERE 1=1",
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(r) = repo {
+            sql.push_str(" AND repo = ?");
+            params.push(Box::new(r.to_string()));
+        }
+        if let Some(k) = kind {
+            sql.push_str(" AND kind = ?");
+            params.push(Box::new(kind_to_str(k).to_string()));
+        }
+        sql.push_str(" ORDER BY repo, path, line");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut rows = stmt
+            .query_map(rusqlite::params_from_iter(param_refs), row_to_symbol)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        if let Some(f) = file {
+            rows.retain(|s| s.path == f || s.path.ends_with(f));
+        }
+
+        Ok(rows)
     }
 
     /// Delete CSS symbols for `repo` whose file is not in `live_paths`.
@@ -339,5 +389,108 @@ mod tests {
 
         let got = db.find_css_symbol(Some("r"), ".foo").unwrap();
         assert_eq!(got.len(), 2, "both definition sites must be kept");
+    }
+
+    #[test]
+    fn list_css_symbols_enumerates_all_rows_for_a_repo() {
+        let db = test_db();
+        db.upsert_css_symbols(
+            "r",
+            &["a.css"],
+            &[
+                symbol(CssSymbolKind::Class, ".foo", "a.css", 1),
+                symbol(CssSymbolKind::CustomProperty, "--brand", "a.css", 5),
+            ],
+        )
+        .unwrap();
+
+        let got = db.list_css_symbols(Some("r"), None, None).unwrap();
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn list_css_symbols_filters_by_kind() {
+        let db = test_db();
+        db.upsert_css_symbols(
+            "r",
+            &["a.css"],
+            &[
+                symbol(CssSymbolKind::Class, ".foo", "a.css", 1),
+                symbol(CssSymbolKind::CustomProperty, "--brand", "a.css", 5),
+            ],
+        )
+        .unwrap();
+
+        let classes = db
+            .list_css_symbols(Some("r"), Some(CssSymbolKind::Class), None)
+            .unwrap();
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].kind, CssSymbolKind::Class);
+
+        let props = db
+            .list_css_symbols(Some("r"), Some(CssSymbolKind::CustomProperty), None)
+            .unwrap();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].kind, CssSymbolKind::CustomProperty);
+    }
+
+    #[test]
+    fn list_css_symbols_filters_by_file_exact_or_suffix() {
+        let db = test_db();
+        db.upsert_css_symbols(
+            "r",
+            &["src/a.css", "src/b.css"],
+            &[
+                symbol(CssSymbolKind::Class, ".foo", "src/a.css", 1),
+                symbol(CssSymbolKind::Class, ".bar", "src/b.css", 1),
+            ],
+        )
+        .unwrap();
+
+        let exact = db
+            .list_css_symbols(Some("r"), None, Some("src/a.css"))
+            .unwrap();
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].name, ".foo");
+
+        let suffix = db.list_css_symbols(Some("r"), None, Some("a.css")).unwrap();
+        assert_eq!(suffix.len(), 1);
+        assert_eq!(suffix[0].name, ".foo");
+    }
+
+    #[test]
+    fn list_css_symbols_without_repo_searches_across_repos() {
+        let db = test_db();
+        db.upsert_css_symbols(
+            "alpha",
+            &["a.css"],
+            &[symbol(CssSymbolKind::Class, ".shared", "a.css", 1)],
+        )
+        .unwrap();
+        db.upsert_css_symbols(
+            "beta",
+            &["b.css"],
+            &[symbol(CssSymbolKind::Class, ".shared", "b.css", 2)],
+        )
+        .unwrap();
+
+        let got = db.list_css_symbols(None, None, None).unwrap();
+        assert_eq!(got.len(), 2, "cross-repo enumeration must find both");
+    }
+
+    #[test]
+    fn list_css_symbols_empty_result_is_not_an_error() {
+        let db = test_db();
+        db.upsert_css_symbols(
+            "r",
+            &["a.css"],
+            &[symbol(CssSymbolKind::Class, ".foo", "a.css", 1)],
+        )
+        .unwrap();
+
+        let got = db
+            .list_css_symbols(Some("r"), Some(CssSymbolKind::CustomProperty), None)
+            .unwrap();
+        assert!(got.is_empty());
     }
 }
