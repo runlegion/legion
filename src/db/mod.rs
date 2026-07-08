@@ -36,6 +36,7 @@ pub use schedules::{Schedule, validate_hhmm};
 pub use stats::DashboardRepoStats;
 
 use std::path::Path;
+use std::time::Duration;
 
 use chrono::Utc;
 use rusqlite::Connection;
@@ -53,6 +54,19 @@ pub(crate) fn format_date(iso_timestamp: &str) -> &str {
     }
 }
 
+/// Default busy timeout applied to every connection opened via
+/// [`Database::open`], matching the value `sync_actor` has used
+/// historically for its own explicit override (src/sync_actor.rs).
+///
+/// rusqlite's bundled SQLite already applies its own 5s `busy_timeout`
+/// default on `Connection::open`, so this isn't closing a zero-timeout
+/// gap in practice -- it pins every CLI connection (`open_db` /
+/// `open_db_and_index`, src/cli/util.rs) to the *same* explicit value
+/// `sync_actor` uses, rather than leaving them dependent on an
+/// undocumented library default that could change or drift out of sync
+/// with sync_actor's own setting (#721).
+const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Persistent storage for reflections backed by SQLite.
 pub struct Database {
     pub(crate) conn: Connection,
@@ -62,13 +76,17 @@ impl Database {
     /// Open (or create) a SQLite database at the given path.
     ///
     /// Parent directories are created automatically if they do not exist.
-    /// WAL mode is enabled for concurrent read performance.
+    /// WAL mode is enabled for concurrent read performance. A default
+    /// busy timeout (see [`DEFAULT_BUSY_TIMEOUT`]) bounds how long a
+    /// connection retries against `SQLITE_BUSY` before giving up.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let conn = Connection::open(path)?;
+        conn.busy_timeout(DEFAULT_BUSY_TIMEOUT)
+            .map_err(LegionError::Database)?;
 
         let mode: String = conn
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
@@ -278,6 +296,83 @@ mod tests {
             .insert_reflection("legion", "post-migration row", "team")
             .unwrap();
         assert!(db.get_reflection_by_id(&r.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn open_sets_default_busy_timeout() {
+        let db = test_db();
+        let timeout_ms: i64 = db
+            .conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout_ms, DEFAULT_BUSY_TIMEOUT.as_millis() as i64);
+    }
+
+    #[test]
+    fn concurrent_open_and_write_retries_instead_of_immediate_busy() {
+        // Behavioral guard for #721: a second connection opening and
+        // writing while another holds the write lock retries rather than
+        // failing instantly, succeeding once the first connection commits.
+        // (`open_sets_default_busy_timeout` above is the guard that pins the
+        // exact 2s value -- rusqlite's bundled sqlite already applies its
+        // own 5s busy_timeout default on every `Connection::open`, so this
+        // test alone can't distinguish "our 2s" from "rusqlite's built-in
+        // 5s"; it exists to prove the concurrent open+write path actually
+        // retries in practice, per #721's acceptance criteria.)
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("busy.db");
+
+        // Create the file and run schema init up front via a throwaway
+        // connection so both threads below open an already-migrated db.
+        drop(Database::open(&path).unwrap());
+
+        let lock_held = Arc::new(Barrier::new(2));
+        let lock_held_writer = Arc::clone(&lock_held);
+        let writer_path = path.clone();
+
+        let holder = thread::spawn(move || {
+            let db = Database::open(&writer_path).unwrap();
+            db.conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO reflections (id, repo, text, created_at) \
+                     VALUES ('holder-row', 'legion', 'held by writer', '2026-01-01T00:00:00+00:00')",
+                    [],
+                )
+                .unwrap();
+            // Signal the write lock is held before sleeping, so the main
+            // thread's write below is guaranteed to contend for it.
+            lock_held_writer.wait();
+            thread::sleep(Duration::from_millis(300));
+            db.conn.execute_batch("COMMIT;").unwrap();
+        });
+
+        lock_held.wait();
+
+        // Time the open AND the write together: Database::open's own
+        // migrate step issues unconditional `CREATE INDEX IF NOT EXISTS`
+        // DDL, which needs the write lock even when the index already
+        // exists, so contention can surface during open, not just insert.
+        let start = Instant::now();
+        let waiter = Database::open(&path).unwrap();
+        waiter
+            .insert_reflection("legion", "waited for the write lock", "self")
+            .expect("write should retry past SQLITE_BUSY and succeed");
+        let elapsed = start.elapsed();
+
+        holder.join().unwrap();
+
+        // The write only succeeds once the holder commits at ~300ms, so a
+        // near-instant elapsed time here would mean the busy timeout was
+        // not actually applied (i.e. it failed fast instead of retrying).
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "expected the writer to block on the lock and retry, took {elapsed:?}"
+        );
     }
 
     #[test]
