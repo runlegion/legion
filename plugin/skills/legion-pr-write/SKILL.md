@@ -63,6 +63,9 @@ simplify gate).
    line of evidence. The mapping must be composed prose, not a checklist -- a fill-in form
    defeats the purpose.
 
+   The body also needs a GitHub closing keyword (`Closes #<issue>`) so the merge auto-closes
+   the issue -- see step 5, `--closes` appends it for you.
+
 4. **Validate.** This records the gate and refuses boilerplate:
 
    ```bash
@@ -74,11 +77,14 @@ simplify gate).
      Do not pad to clear the word count; write the real explanation. If a criterion genuinely
      is not addressed, that is a signal the work is not done.
 
-5. **Open the PR** with the validated body:
+5. **Open the PR** with the validated body, passing `--closes` for the issue it satisfies so
+   the merge auto-closes it (#751; repeatable for more than one issue, quote the cross-repo
+   form since `#` starts a shell comment):
 
    ```bash
    legion pr create --repo <repo> --title "<type>(#<issue>): <summary>" \
-     --body "$(cat /tmp/pr-body-<issue>.md)" --task <card-id>
+     --body "$(cat /tmp/pr-body-<issue>.md)" --task <card-id> --closes <issue>
+   # cross-repo: --closes 'owner/repo#<issue>'
    ```
 
 ## Notes
@@ -91,3 +97,10 @@ simplify gate).
 - Re-running write-check overwrites the previous gate row for HEAD; the most recent wins.
 - Bootstrap only: a branch that ships these skills themselves cannot gate on them. Use
   `legion pr create --skip-gates` (it writes an audit row so the skip is never silent).
+- `legion pr write-check` warns (does not fail, v1) when the validated body has no closing
+  keyword for `--issue`. `legion pr create --closes <issue>` appends `Closes #<issue>` (or
+  `Closes owner/repo#<issue>` cross-repo) itself unless one is already present -- idempotent,
+  so re-running it never duplicates the line.
+- GitHub only auto-closes the *first* keyword'd issue on a merged PR. When a PR ships more
+  than one issue, pass `--closes` for all of them (audit trail) but expect to close the
+  secondary ones manually, or run `legion kanban reconcile` after merge to catch the drift.

@@ -293,6 +293,156 @@ fn has_source_path_with_line(entry: &str) -> bool {
     })
 }
 
+/// GitHub's recognized issue-closing keywords, case-insensitive:
+/// <https://docs.github.com/articles/closing-issues-using-keywords>
+const CLOSING_KEYWORDS: [&str; 9] = [
+    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+];
+
+/// A single `--closes` argument to `legion pr create` (#751): either a
+/// same-repo issue number (`"751"`, or `"#751"`) or a cross-repo reference
+/// (`"owner/repo#751"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloseRef {
+    owner_repo: Option<String>,
+    number: u64,
+}
+
+impl CloseRef {
+    /// Parse a `--closes` value. Accepts a bare issue number (`"751"`), the
+    /// same with a leading `#` (`"#751"`), or a cross-repo reference
+    /// (`"owner/repo#751"`). Callers passing the cross-repo form on a shell
+    /// command line must quote it -- an unquoted `#` starts a comment.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let spec = spec.trim();
+        let stripped = spec.strip_prefix('#').unwrap_or(spec);
+        match stripped.split_once('#') {
+            Some((owner_repo, num)) => {
+                if owner_repo.is_empty() || !owner_repo.contains('/') {
+                    return Err(format!(
+                        "invalid --closes value '{spec}': cross-repo form is 'owner/repo#N'"
+                    ));
+                }
+                let number = num.parse::<u64>().map_err(|_| {
+                    format!("invalid --closes value '{spec}': '{num}' is not an issue number")
+                })?;
+                Ok(Self {
+                    owner_repo: Some(owner_repo.to_owned()),
+                    number,
+                })
+            }
+            None => {
+                let number = stripped.parse::<u64>().map_err(|_| {
+                    format!("invalid --closes value '{spec}': expected 'N' or 'owner/repo#N'")
+                })?;
+                Ok(Self {
+                    owner_repo: None,
+                    number,
+                })
+            }
+        }
+    }
+
+    /// A same-repo reference to `number`, bypassing string parsing. Used by
+    /// `pr write-check`, which already has the issue number as a `u64`.
+    pub fn same_repo(number: u64) -> Self {
+        Self {
+            owner_repo: None,
+            number,
+        }
+    }
+
+    /// The bare reference text GitHub matches: `#N` or `owner/repo#N`.
+    fn reference(&self) -> String {
+        match &self.owner_repo {
+            Some(or) => format!("{or}#{}", self.number),
+            None => format!("#{}", self.number),
+        }
+    }
+
+    /// The `Closes #N` / `Closes owner/repo#N` line to append to a PR body.
+    pub fn closing_line(&self) -> String {
+        format!("Closes {}", self.reference())
+    }
+}
+
+/// True when `tok` (after trimming trailing sentence punctuation) has the
+/// shape of an issue reference: `#N` or `owner/repo#N`.
+fn looks_like_issue_ref(tok: &str) -> bool {
+    let tok = tok.trim_end_matches([',', '.', ';', ':']);
+    match tok.rsplit_once('#') {
+        Some((prefix, digits)) => {
+            !digits.is_empty()
+                && digits.chars().all(|c| c.is_ascii_digit())
+                && prefix
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '/'))
+        }
+        None => false,
+    }
+}
+
+/// True when `body` already carries a recognized GitHub closing keyword
+/// (case-insensitive) applying to `close_ref` -- `Closes #N`, `Fixes
+/// owner/repo#N`, or a comma-separated group (`Closes #1, #2`). Scoped per
+/// line and per keyword-then-reference-run, mirroring how GitHub itself
+/// parses closing keywords: a keyword stays "active" across a run of
+/// comma-separated reference tokens and resets on anything else, so `Closes
+/// #999 but not #751` does NOT count as closing #751. Used both to keep
+/// `pr create --closes` idempotent and by `pr write-check` to warn when
+/// linkage is missing.
+pub fn has_closing_keyword(body: &str, close_ref: &CloseRef) -> bool {
+    let target = close_ref.reference().to_lowercase();
+
+    for line in body.lines() {
+        let mut keyword_active = false;
+        for raw_tok in line.split_whitespace() {
+            let tok = raw_tok.trim_end_matches([',', '.', ';', ':']);
+            let lower_tok = tok.to_lowercase();
+            if CLOSING_KEYWORDS.contains(&lower_tok.as_str()) {
+                keyword_active = true;
+                continue;
+            }
+            if keyword_active && looks_like_issue_ref(tok) {
+                if lower_tok == target {
+                    return true;
+                }
+                // Still inside a comma-separated group of references.
+                continue;
+            }
+            keyword_active = false;
+        }
+    }
+    false
+}
+
+/// Append a `Closes #N` (or `Closes owner/repo#N`) line for each of
+/// `close_refs` that `body` does not already carry a recognized closing
+/// keyword for. Idempotent: calling this again on its own output appends
+/// nothing new. Inserted lines are grouped as a single block, separated
+/// from any existing body content by one blank line.
+pub fn append_closing_lines(body: &str, close_refs: &[CloseRef]) -> String {
+    let mut out = body.to_owned();
+    let mut first_insertion = true;
+    for cr in close_refs {
+        if has_closing_keyword(&out, cr) {
+            continue;
+        }
+        if first_insertion {
+            if !out.is_empty() {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push('\n');
+            }
+            first_insertion = false;
+        }
+        out.push_str(&cr.closing_line());
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,5 +590,106 @@ mod tests {
         // behavioral cue both still count.
         assert!(has_evidence("src/foo.rs reads cleanly"));
         assert!(has_evidence("the observable behavior is unchanged"));
+    }
+
+    #[test]
+    fn close_ref_parses_same_repo_and_cross_repo() {
+        assert_eq!(
+            CloseRef::parse("751").unwrap(),
+            CloseRef {
+                owner_repo: None,
+                number: 751
+            }
+        );
+        assert_eq!(
+            CloseRef::parse("#751").unwrap(),
+            CloseRef {
+                owner_repo: None,
+                number: 751
+            }
+        );
+        assert_eq!(
+            CloseRef::parse("owner/repo#751").unwrap(),
+            CloseRef {
+                owner_repo: Some("owner/repo".to_owned()),
+                number: 751
+            }
+        );
+        assert!(CloseRef::parse("abc").is_err());
+        assert!(
+            CloseRef::parse("owner#751").is_err(),
+            "no slash -- not owner/repo"
+        );
+        assert!(CloseRef::parse("owner/repo#abc").is_err());
+    }
+
+    #[test]
+    fn closing_line_formats_same_and_cross_repo() {
+        assert_eq!(
+            CloseRef::parse("751").unwrap().closing_line(),
+            "Closes #751"
+        );
+        assert_eq!(
+            CloseRef::parse("owner/repo#751").unwrap().closing_line(),
+            "Closes owner/repo#751"
+        );
+    }
+
+    #[test]
+    fn has_closing_keyword_detects_common_forms() {
+        let same_repo = CloseRef::same_repo(751);
+        assert!(has_closing_keyword("Closes #751", &same_repo));
+        assert!(has_closing_keyword("closes #751", &same_repo));
+        assert!(has_closing_keyword("Fixes #751", &same_repo));
+        assert!(has_closing_keyword(
+            "This PR resolves #751 finally.",
+            &same_repo
+        ));
+        // Comma-separated group: keyword stays active across the run.
+        assert!(has_closing_keyword("Closes #1, #751", &same_repo));
+
+        let cross_repo = CloseRef::parse("owner/repo#751").unwrap();
+        assert!(has_closing_keyword("Resolves owner/repo#751", &cross_repo));
+    }
+
+    #[test]
+    fn has_closing_keyword_rejects_non_matches() {
+        let target = CloseRef::same_repo(751);
+        // Different issue number entirely.
+        assert!(!has_closing_keyword("Closes #999", &target));
+        // Keyword group broken by intervening prose -- must not count #751.
+        assert!(!has_closing_keyword("Closes #999 but not #751", &target));
+        // "prefix" must not match the "fix" keyword (word-boundary check).
+        assert!(!has_closing_keyword("prefix #751 is unrelated", &target));
+        // A bare mention with no keyword at all.
+        assert!(!has_closing_keyword("See #751 for context", &target));
+        // Cross-repo target must not match a same-repo mention and vice versa.
+        let cross_repo = CloseRef::parse("owner/repo#751").unwrap();
+        assert!(!has_closing_keyword("Closes #751", &cross_repo));
+    }
+
+    #[test]
+    fn append_closing_lines_is_idempotent_and_never_duplicates() {
+        let refs = vec![CloseRef::same_repo(751)];
+        let once = append_closing_lines("## Summary\n\nDoes the thing.\n", &refs);
+        assert!(once.contains("Closes #751"));
+        let twice = append_closing_lines(&once, &refs);
+        assert_eq!(once, twice, "re-running must not duplicate the line");
+        assert_eq!(twice.matches("Closes #751").count(), 1);
+    }
+
+    #[test]
+    fn append_closing_lines_skips_when_keyword_already_present() {
+        let refs = vec![CloseRef::same_repo(751)];
+        let body = "## Summary\n\nFixes #751 already.\n";
+        let out = append_closing_lines(body, &refs);
+        assert_eq!(out, body, "existing manual keyword must be left unchanged");
+    }
+
+    #[test]
+    fn append_closing_lines_handles_empty_body_and_multiple_refs() {
+        let refs = vec![CloseRef::same_repo(1), CloseRef::same_repo(2)];
+        let out = append_closing_lines("", &refs);
+        assert_eq!(out, "Closes #1\nCloses #2\n");
     }
 }
