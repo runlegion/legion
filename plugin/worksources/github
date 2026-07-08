@@ -37,23 +37,37 @@ case "${1:-}" in
     # Distinct from `list` above (used by `sync`, always open/unfiltered) so
     # sync's behavior does not shift as a side effect of this verb.
     #
+    # Fail-closed on an actual gh failure (bad auth, rate limit, network,
+    # unknown repo slug): this is a user-facing enumeration command whose
+    # motivating incident (#711) was exactly "the tool said nothing was
+    # there when something was" -- swallowing errors to `[]` here would
+    # reproduce that failure mode. `list`/`pr-list` above stay fail-open
+    # since callers (`sync`) already treat "no data" as a benign no-op.
+    #
     # Env: LEGION_WS_REPO, LEGION_WS_STATE (open|closed|all, default open),
     #      LEGION_WS_LABEL (optional)
     STATE="${LEGION_WS_STATE:-open}"
     LABEL="${LEGION_WS_LABEL:-}"
+    LIMIT=1000
     if [ -z "$REPO" ]; then
       echo "[]"
       exit 0
     fi
     if ! command -v gh &>/dev/null; then
-      echo "[]"
-      exit 0
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
     fi
     ARGS=(issue list --repo "$REPO" --state "$STATE" \
       --json url,number,title,body,labels,assignees,state,createdAt,updatedAt \
-      --limit 200)
+      --limit "$LIMIT")
     [ -n "$LABEL" ] && ARGS+=(--label "$LABEL")
-    gh "${ARGS[@]}" 2>/dev/null || echo "[]"
+    RESULT=$(gh "${ARGS[@]}" 2>/dev/null) \
+      || { echo '{"error":"gh issue list failed (check gh auth status, rate limit, or repo slug)"}' >&2; exit 1; }
+    COUNT=$(echo "$RESULT" | jq 'length' 2>/dev/null || echo 0)
+    if [ "$COUNT" -ge "$LIMIT" ]; then
+      echo "[legion worksource:github] warning: list-issues hit the ${LIMIT}-row limit; results may be truncated" >&2
+    fi
+    echo "$RESULT"
     ;;
 
   close)

@@ -801,16 +801,22 @@ fn issue_close_with_configured_worksource_writes_audit_row() {
 
 /// Stub plugin that answers only `list-issues`, returning two fixed issues
 /// with distinct `updatedAt` values so the CLI's updated-at column has
-/// something to assert on.
+/// something to assert on. The first issue's title embeds the
+/// `LEGION_WS_STATE`/`LEGION_WS_LABEL` values the stub actually received, so
+/// tests can confirm `list_all_issues` forwards the filters rather than only
+/// checking the audit row (which records what the CLI *asked for*, not what
+/// the plugin *got*).
 #[cfg(unix)]
 fn list_issues_stub_plugin() -> String {
     r##"#!/bin/bash
 set -e
 case "${1:-}" in
   list-issues)
-    cat <<'BODY'
+    STATE="${LEGION_WS_STATE:-unset}"
+    LABEL="${LEGION_WS_LABEL:-unset}"
+    cat <<BODY
 [
-  {"url":"https://example.com/issues/42","number":42,"title":"first issue","body":"","labels":[],"assignees":null,"state":"OPEN","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"},
+  {"url":"https://example.com/issues/42","number":42,"title":"first issue (state=$STATE label=$LABEL)","body":"","labels":[],"assignees":null,"state":"OPEN","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"},
   {"url":"https://example.com/issues/43","number":43,"title":"second issue","body":"","labels":[],"assignees":null,"state":"OPEN","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-03T00:00:00Z"}
 ]
 BODY
@@ -884,6 +890,11 @@ fn issue_list_prints_issues_and_writes_audit_row_with_filters() {
     assert!(
         stdout.contains("#43") && stdout.contains("second issue"),
         "expected second issue row, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("state=open") && stdout.contains("label=bug"),
+        "expected the plugin to actually receive LEGION_WS_STATE=open and \
+         LEGION_WS_LABEL=bug (not just the audit row asking for them), got: {stdout}"
     );
     assert!(
         stdout.contains("2026-01-02T00:00:00Z") && stdout.contains("2026-01-03T00:00:00Z"),
