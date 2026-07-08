@@ -634,6 +634,43 @@ esac
     .to_string()
 }
 
+/// A body that satisfies `validate_pr_body` against the two-criterion issue
+/// `view_issue_stub_plugin` returns: one substantive `### ` entry per
+/// criterion, each with an `Evidence:` line, plus a non-empty `Not done`
+/// section. Shared by every write-check test that needs a passing mapping so
+/// the fixture only needs updating in one place if the gate's structural
+/// requirements change.
+fn substantive_body() -> &'static str {
+    "## Summary\n\nDoes the thing.\n\n\
+     ## Acceptance criteria mapping\n\n\
+     ### 1. crit one\n\
+     The handler now threads the flag through the dispatch table so the \
+     first criterion is satisfied end to end.\n\
+     Evidence: tests/integration/worksource_pr.rs::stub_test\n\n\
+     ### 2. crit two\n\
+     The second path is covered by the new guard clause, which refuses \
+     the malformed input before it reaches the store.\n\
+     Evidence: src/pr_write.rs:49 validate_pr_body\n\n\
+     ## Not done\n\n\
+     Did not migrate old rows -- out of scope, tracked separately.\n"
+}
+
+/// `pr write-check`'s repeated `--repo stub --issue 7 --body-file <path>`
+/// arg block, shared by every test in this file that drives the stub
+/// write-check plugin.
+fn write_check_args(body_file: &std::path::Path) -> Vec<String> {
+    vec![
+        "pr".to_string(),
+        "write-check".to_string(),
+        "--repo".to_string(),
+        "stub".to_string(),
+        "--issue".to_string(),
+        "7".to_string(),
+        "--body-file".to_string(),
+        body_file.display().to_string(),
+    ]
+}
+
 /// `legion pr write-check` with a substantive body: exits 0, reports the
 /// gate clean, and counts one mapping entry per acceptance criterion
 /// (#519 forcing function, #608 coverage net).
@@ -648,31 +685,11 @@ fn pr_write_check_passes_substantive_body_and_reports_clean() {
         &view_issue_stub_plugin(),
     );
 
-    let body = "## Summary\n\nDoes the thing.\n\n\
-        ## Acceptance criteria mapping\n\n\
-        ### 1. crit one\n\
-        The handler now threads the flag through the dispatch table so the \
-        first criterion is satisfied end to end.\n\
-        Evidence: tests/integration/worksource_pr.rs::stub_test\n\n\
-        ### 2. crit two\n\
-        The second path is covered by the new guard clause, which refuses \
-        the malformed input before it reaches the store.\n\
-        Evidence: src/pr_write.rs:49 validate_pr_body\n\n\
-        ## Not done\n\n\
-        Did not migrate old rows -- out of scope, tracked separately.\n";
     let body_file = data_dir.path().join("pr-body.md");
-    std::fs::write(&body_file, body).unwrap();
+    std::fs::write(&body_file, substantive_body()).unwrap();
 
-    let stdout = run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
-        "pr",
-        "write-check",
-        "--repo",
-        "stub",
-        "--issue",
-        "7",
-        "--body-file",
-        body_file.to_str().unwrap(),
-    ]));
+    let stdout =
+        run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)));
     assert!(
         stdout.contains("pr-write gate clean"),
         "expected clean gate message, got: {stdout}"
@@ -699,16 +716,9 @@ fn pr_write_check_refuses_boilerplate_body_with_gaps() {
     let body_file = data_dir.path().join("pr-body.md");
     std::fs::write(&body_file, "## Summary\n\nDid stuff.\n").unwrap();
 
-    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
-        "pr",
-        "write-check",
-        "--repo",
-        "stub",
-        "--issue",
-        "7",
-        "--body-file",
-        body_file.to_str().unwrap(),
-    ]));
+    let (_stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)),
+    );
     assert!(
         stderr.contains("pr-write gate FAILED"),
         "expected gate failure banner, got: {stderr}"
@@ -720,6 +730,98 @@ fn pr_write_check_refuses_boilerplate_body_with_gaps() {
     assert!(
         stderr.contains("Not done"),
         "expected the missing not-done finding, got: {stderr}"
+    );
+}
+
+/// `legion pr write-check` warns (does not fail, v1 -- #751) when the
+/// validated body has no GitHub closing keyword for `--issue`. The warning
+/// must not affect the exit code or the gate result: `run_ok_output` already
+/// asserts success, so a regression that turned this into a hard failure
+/// would fail this test even before the stderr assertions run.
+#[cfg(unix)]
+#[test]
+fn pr_write_check_warns_on_missing_closing_keyword() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &view_issue_stub_plugin(),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+
+    let out = run_ok_output(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("pr-write gate clean"),
+        "missing closing keyword must warn, not fail the gate; got stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("no closing keyword for issue #7"),
+        "expected the missing-closing-keyword warning, got: {stderr}"
+    );
+}
+
+/// The same body with a `Closes #7` line: the write-check warning is absent.
+#[cfg(unix)]
+#[test]
+fn pr_write_check_silent_when_closing_keyword_present() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &view_issue_stub_plugin(),
+    );
+
+    let body = format!("{}\nCloses #7\n", substantive_body());
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, body).unwrap();
+
+    let out = run_ok_output(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("no closing keyword"),
+        "closing keyword is present -- warning must not fire, got: {stderr}"
+    );
+}
+
+/// `legion pr create --closes` is repeatable: clap accepts multiple
+/// occurrences and the command proceeds past argument parsing to worksource
+/// resolution (#751), rather than erroring on the flag shape.
+#[test]
+fn pr_create_accepts_repeated_closes_flag() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = legion_cmd(dir.path())
+        .args([
+            "pr",
+            "create",
+            "--repo",
+            "no-such-repo",
+            "--title",
+            "Bootstrap PR",
+            "--skip-gates",
+            "--closes",
+            "751",
+            "--closes",
+            "752",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no work source configured for repo 'no-such-repo' in watch.toml"),
+        "both --closes values should parse and the command should reach worksource \
+         resolution (not fail on argument parsing), got: {stderr}"
     );
 }
 
