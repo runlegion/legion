@@ -160,6 +160,17 @@ pub(crate) enum EtcShape {
         /// matching lines printed.
         #[arg(long)]
         hidden: bool,
+        /// Disable .gitignore/.ignore/parent-dir-ignore/.git/info/exclude/global
+        /// gitignore checks (ripgrep's -u/--no-ignore semantics). Combine with
+        /// --hidden to reach a gitignored DOT-directory (e.g. a generated
+        /// `.rafters/` workspace) -- --no-ignore alone does not admit dotfiles.
+        /// `.git/` stays excluded regardless of this flag.
+        ///
+        /// SECURITY: gitignored files commonly hold secrets (.env is typically
+        /// gitignored BECAUSE it holds secrets) -- this flag widens the scan to
+        /// include them, and any matching line is printed to stdout/JSON.
+        #[arg(long)]
+        no_ignore: bool,
         /// Emit results as a JSON array of ContentHit objects
         #[arg(long)]
         json: bool,
@@ -289,8 +300,9 @@ fn run_sym_etc(database: &db::Database, shape: EtcShape) -> error::Result<()> {
             ext,
             fixed_strings,
             hidden,
+            no_ignore,
             json,
-        } => run_etc_find_content(&pattern, repo, ext, fixed_strings, hidden, json),
+        } => run_etc_find_content(&pattern, repo, ext, fixed_strings, hidden, no_ignore, json),
         EtcShape::Extract { path, field, json } => run_etc_extract(&path, &field, json),
         EtcShape::FindFile {
             query,
@@ -315,6 +327,7 @@ fn run_etc_find_content(
     ext: Option<String>,
     fixed_strings: bool,
     hidden: bool,
+    no_ignore: bool,
     json: bool,
 ) -> error::Result<()> {
     let scan = scan_etc_content(
@@ -323,6 +336,7 @@ fn run_etc_find_content(
         ext.as_deref(),
         fixed_strings,
         hidden,
+        no_ignore,
     );
 
     let usage = telemetry::EtcUsageRecord {
@@ -447,6 +461,7 @@ fn scan_etc_content(
     ext: Option<&str>,
     fixed_strings: bool,
     hidden: bool,
+    no_ignore: bool,
 ) -> error::Result<(etc::FindContentResult, usize)> {
     let base = data_dir()?;
     let watch_path = base.join("watch.toml");
@@ -479,6 +494,7 @@ fn scan_etc_content(
         ext,
         fixed_strings,
         include_hidden: hidden,
+        no_ignore,
         max_file_size: etc::MAX_FILE_SIZE,
         max_hits: etc::MAX_HITS,
     };

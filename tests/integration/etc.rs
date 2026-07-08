@@ -290,6 +290,96 @@ fn find_content_hit_cap_warns_on_stderr() {
     );
 }
 
+/// The --no-ignore flag parses independently of --hidden (#745): a bare
+/// `--no-ignore` invocation with no `--hidden` present must be accepted by
+/// clap and reach the scan, not be rejected as a missing-flag combination.
+/// The library-level semantics (no_ignore alone vs. no_ignore+hidden) are
+/// pinned in src/etc.rs; this pins the clap wiring the review found
+/// uncovered for --hidden (per reflection 019f2068).
+#[test]
+fn find_content_no_ignore_flag_parses_independently_of_hidden() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(repo_dir.path().join(".gitignore"), "ignored.txt\n").expect("write fixture");
+    std::fs::write(repo_dir.path().join("ignored.txt"), "needle\n").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("etcrepo", repo_dir.path())]);
+
+    // --no-ignore alone (no --hidden) must be accepted and reach ignored.txt,
+    // an ordinary (non-dot) gitignored file.
+    let out = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "find-content",
+                "needle",
+                "--repo",
+                "etcrepo",
+                "--no-ignore",
+            ]),
+    );
+    assert!(
+        out.contains("ignored.txt:1: needle"),
+        "--no-ignore alone must be accepted by clap and reach a gitignored file, got:\n{out}"
+    );
+}
+
+/// End-to-end pin of the load-bearing behavior (#745): --no-ignore alone
+/// does not reach a gitignored DOT-directory; --no-ignore + --hidden
+/// together do. This is the exact rafters field report (bullpen 019f355c).
+#[test]
+fn find_content_no_ignore_and_hidden_together_reach_gitignored_dot_dir() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(repo_dir.path().join(".gitignore"), ".rafters/\n").expect("write fixture");
+    let rafters_dir = repo_dir.path().join(".rafters/output");
+    std::fs::create_dir_all(&rafters_dir).expect("mkdir .rafters/output");
+    std::fs::write(rafters_dir.join("rafters.css"), "needle\n").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("etcrepo", repo_dir.path())]);
+
+    // --no-ignore alone: the dot-dir is still pruned by the hidden filter.
+    let no_ignore_only = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "find-content",
+                "needle",
+                "--repo",
+                "etcrepo",
+                "--no-ignore",
+            ]),
+    );
+    assert!(
+        !no_ignore_only.contains(".rafters"),
+        "--no-ignore alone must not reach a gitignored dot-dir, got:\n{no_ignore_only}"
+    );
+
+    // --no-ignore + --hidden together: the dot-dir is reached.
+    let both = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "find-content",
+                "needle",
+                "--repo",
+                "etcrepo",
+                "--no-ignore",
+                "--hidden",
+            ]),
+    );
+    assert!(
+        both.contains(".rafters/output/rafters.css:1: needle"),
+        "--no-ignore + --hidden together must reach the gitignored dot-dir, got:\n{both}"
+    );
+}
+
 // -- extract (#708) --
 
 #[test]
