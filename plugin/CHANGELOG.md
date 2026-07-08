@@ -1,5 +1,67 @@
 # Legion Changelog
 
+## 0.20.0
+
+The field-report release. All three changes trace to a single bullpen post (019f355c): a
+rafters agent exercised the 0.19.0 `sym`/`sym etc` surface hands-on within hours of release
+and hit three real gaps -- CSS queries told to re-run an index that had already run,
+gitignored generated workspaces invisible to the sanctioned grep replacement, and `find-file`
+serving a six-day-stale file row with no hint it was stale. Each gap violated the #713
+standard the surface was built to (every block or error routes to a command that actually
+works, and the index answer is trustworthy enough that shell bypass has no excuse), and each
+is now closed. Minor release: one additive schema migration (`inventory_snapshots`, one
+freshness row per repo -- no existing table touched), and one deliberate wire-format break --
+`sym tree --json` and `sym etc find-file --json` now emit a `{snapshots, entries}` envelope
+instead of the bare array 0.19.0 shipped days earlier with no external contract.
+
+### New
+
+- **`--no-ignore` on `sym etc find-content` -- reach gitignored generated workspaces** (PR
+  #747, #745): `ContentScope` gains a `no_ignore` toggle threaded into the walk's
+  `parents`/`ignore`/`git_ignore`/`git_exclude`/`git_global` switches, mirroring ripgrep's
+  `-u`. The field report's live case: rafters' generated-but-gitignored `.rafters/` workspace
+  was invisible to the entire `etc` surface, recreating the exact shell-grep bypass incentive
+  epic #704 exists to kill. `no_ignore` is deliberately independent of `--hidden` -- bypassing
+  gitignore alone does not admit a dot-directory, so reaching a gitignored DOTDIR like
+  `.rafters/` needs `--no-ignore` and `--hidden` together, pinned by both a unit test and a
+  CLI end-to-end test (the field report itself misdiagnosed which flag was missing). `.git/`
+  stays excluded regardless of either flag, and the help text carries a secret-exposure
+  warning in the same register as `--hidden`'s.
+- **Inventory freshness -- indexed-at snapshots and HEAD-drift warnings on `tree`/`find-file`**
+  (PR #749, #746): the field report's live case was `find-file` returning a `CHANGELOG.md`
+  size/mtime from six days before the file on disk -- legion's own 0.19.0 release edit,
+  invisible to legion's own tool, with nothing in the output hinting the row might be stale.
+  A new `inventory_snapshots` table (one row per repo: `indexed_at` plus repo HEAD at index
+  time, captured by a best-effort `git rev-parse HEAD` that returns `None` rather than failing
+  on a non-git workdir) is written on every `legion index` run. `sym tree --json` and `sym etc
+  find-file --json` now wrap results in a `{snapshots, entries}` envelope carrying per-repo
+  `indexed_at`, `head_at_index`, `current_head`, and `head_drift` -- computed with one live
+  `rev-parse` per repo in the result, never a filesystem walk; human output prints a stderr
+  freshness line per repo ("up to date", a loud HEAD-drift WARNING naming both SHAs, or a
+  re-index hint when no snapshot exists). The issue's open design question was resolved
+  against a live-walk `--verify` fallback: it would reintroduce the per-query walk cost the
+  inventory-backed design exists to avoid, and #707 already redesigned the one shape that
+  needed staleness-proofing (`find-content`) as a direct scan. A malformed `watch.toml`
+  degrades HEAD comparison to a stderr note instead of hard-failing a previously-DB-only read
+  path.
+
+### Fixed
+
+- **CSS symbols wired to the query surface -- and the no-index error stops lying** (PR #748,
+  #744): 0.19.0's #711 shipped CSS extraction (the `css_symbols` table via `lightningcss`)
+  but no reader path -- `sym list`/`def --lang css` fell through to the SCIP-only index
+  lookup, always empty for CSS, so every query printed "no index found; run `legion index`"
+  even one command after a successful index run: an error prescribing a fix that cannot fix
+  it, precisely the misroute #713 exists to close. A new `Database::list_css_symbols` (the
+  enumeration half of the existing `find_css_symbol` point lookup) now backs `sym list --lang
+  css` (class and custom-property defs, text and `--json`, `--kind`/`--file` filters) and
+  `sym def <name> --lang css`, cross-repo by default with each hit tagged by owning repo. The
+  never-indexed check now gates on `file_inventory` rows with `ext = "css"` -- not `lang`,
+  which is always `NULL` for CSS -- so "never indexed" and "indexed, empty result" print
+  different, truthful messages, and `sym hover --lang css` fails loudly with a fixed
+  no-hover-surface message routing to the commands that do work. A regression test reproduces
+  the live 0.19.0 bug: `legion index` followed immediately by a CSS query.
+
 ## 0.19.0
 
 The bypass-replacement release. Epic #704 set out to replace `grep`/`find`/`ls -R`/`os.walk`
