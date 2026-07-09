@@ -353,8 +353,8 @@ fn cmdline_is_legion_daemon(cmdline: &str) -> bool {
 /// `false` -- the safety invariant is "refuse to kill an unidentified or
 /// non-legion process".
 ///
-/// Extracted from `kill_orphaned_daemon_on_port` so this safety contract is
-/// independently testable without spawning real processes.
+/// Extracted from `kill_orphaned_daemon_on_port_with` so this safety contract
+/// is independently testable without spawning real processes.
 pub(crate) fn should_kill_port_holder(cmdline: Option<&str>) -> bool {
     match cmdline {
         Some(c) => cmdline_is_legion_daemon(c),
@@ -369,15 +369,44 @@ pub(crate) fn should_kill_port_holder(cmdline: Option<&str>) -> bool {
 ///
 /// Safety invariant: we ONLY kill the process when `cmdline_is_legion_daemon`
 /// returns true. An unrelated process holding the same port is never touched.
-fn kill_orphaned_daemon_on_port(port: u16) -> bool {
-    let pids = port_listener_pids(port);
+///
+/// DI seam (#675): `list_pids` and `read_cmdline` stand in for
+/// `port_listener_pids`/`process_cmdline` (`restart_detached_with` and the
+/// production `restart_detached` both wire the real functions through) so the
+/// TERM->wait->KILL escalation and the kill/no-kill safety gate can be
+/// exercised deterministically in tests, without depending on `lsof`/`ps` or a
+/// real killable process.
+fn kill_orphaned_daemon_on_port_with(
+    port: u16,
+    list_pids: impl Fn(u16) -> Vec<u32>,
+    read_cmdline: impl Fn(u32) -> Option<String>,
+) -> bool {
+    let pids = list_pids(port);
     if pids.is_empty() {
+        // #675 fix 3: on platforms where `process_cmdline` cannot identify a
+        // process (anything other than macOS/Linux -- see its cfg gate) this
+        // whole wedge-recovery step degrades to a silent no-op, since
+        // `port_listener_pids` is also empty there. Log it so the operator
+        // knows auto-recovery was skipped rather than assuming it ran.
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        eprintln!(
+            "[legion] daemon-restart: orphan-kill wedge recovery is not supported on this \
+             platform (port-holder identification needs macOS or Linux); if port {port} is \
+             held by a stale legion daemon, stop it manually, then retry."
+        );
         return false;
     }
 
     let mut killed_any = false;
     for pid in pids {
-        let cmdline: Option<String> = process_cmdline(pid);
+        // TOCTOU: `list_pids` already observed `pid` holding the port, but
+        // between that snapshot and this re-read the holder can exit and the
+        // pid be recycled by an unrelated process. This re-read is
+        // intentional and safe: `should_kill_port_holder` judges whatever
+        // process CURRENTLY answers to `pid`, so a recycled pid is decided on
+        // its own (non-legion) cmdline and is never killed on the strength of
+        // stale information from the `list_pids` snapshot.
+        let cmdline: Option<String> = read_cmdline(pid);
         if !should_kill_port_holder(cmdline.as_deref()) {
             match &cmdline {
                 None => eprintln!(
@@ -434,6 +463,21 @@ fn kill_orphaned_daemon_on_port(port: u16) -> bool {
 /// where a daemon whose pidfile was lost still holds the port, and
 /// `daemon-spawn` refuses with "port in use" until a manual kill.
 pub fn restart_detached(data_dir: &Path, port: u16) -> Result<()> {
+    restart_detached_with(data_dir, port, port_listener_pids, process_cmdline)
+}
+
+/// DI seam for `restart_detached`'s wedge-recovery step: `list_pids` and
+/// `read_cmdline` are threaded straight through to
+/// `kill_orphaned_daemon_on_port_with` so a test can drive the whole
+/// stop -> detect-orphan -> kill-decision -> spawn sequence deterministically
+/// (#675). See `kill_orphaned_daemon_on_port_with` for what each closure
+/// stands in for.
+fn restart_detached_with(
+    data_dir: &Path,
+    port: u16,
+    list_pids: impl Fn(u16) -> Vec<u32>,
+    read_cmdline: impl Fn(u32) -> Option<String>,
+) -> Result<()> {
     if stop_detached(data_dir)? {
         eprintln!("[legion] stopped running daemon");
     }
@@ -446,7 +490,7 @@ pub fn restart_detached(data_dir: &Path, port: u16) -> Result<()> {
             "[legion] daemon-restart: port {port} still held after pidfile-based stop; \
              checking for orphaned daemon"
         );
-        kill_orphaned_daemon_on_port(port);
+        kill_orphaned_daemon_on_port_with(port, list_pids, read_cmdline);
 
         // Give the OS a moment to release the port after the kill.
         if !port_available(port) {
@@ -992,5 +1036,119 @@ mod tests {
             should_kill_port_holder(Some("legion serve")),
             "legacy 'legion serve' form must be approved"
         );
+    }
+
+    // -- kill orchestration smoke tests via the DI seam (#675) ---------------
+    //
+    // `kill_orphaned_daemon_on_port_with` sends real SIGTERM/SIGKILL, so it is
+    // the highest-leverage gap in the whole wedge-recovery path: a bug here
+    // kills an unrelated process. These tests bind a REAL listener to prove the
+    // port is genuinely held, but inject `list_pids`/`read_cmdline` (rather
+    // than relying on `lsof`/`ps` to introspect the real holder) so the
+    // safety-gate assertion is deterministic and independent of what tooling
+    // happens to be on the test-runner's PATH.
+
+    #[test]
+    fn kill_orphaned_daemon_on_port_with_refuses_non_legion_holder() {
+        // Hold a real port -- the "orphan" the wedge-recovery path is asked
+        // to look at -- but never actually spawn a killable process; the
+        // injected closures fully control what the kill decision sees.
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let port = listener.local_addr().expect("addr").port();
+        // Maximum valid POSIX PID -- almost never a live process on any real
+        // system (same convention as `daemon_auto_spawn_clears_stale_pid`).
+        let fake_holder_pid = i32::MAX as u32;
+
+        let killed = kill_orphaned_daemon_on_port_with(
+            port,
+            |_port| vec![fake_holder_pid],
+            |pid| {
+                assert_eq!(pid, fake_holder_pid, "must query the injected pid");
+                Some("node server.js".to_string())
+            },
+        );
+
+        assert!(
+            !killed,
+            "a holder whose cmdline is not a legion daemon must never be killed"
+        );
+        assert!(
+            !port_available(port),
+            "the real listener must still hold the port -- nothing was signaled"
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn kill_orphaned_daemon_on_port_with_approves_legion_holder() {
+        // Complementary case: when the injected cmdline DOES look like a
+        // legion daemon, `should_kill_port_holder` approves it and the
+        // escalation loop attempts a signal. There is no real process behind
+        // `fake_pid`, so `send_signal`/`wait_for_exit` observe it as already
+        // gone -- this pins that the approve-path is reached and returns
+        // `true` (via `watch::process_alive` reading false for a nonexistent
+        // pid) without needing a real spawned daemon to kill.
+        let fake_pid = (i32::MAX - 1) as u32;
+        let killed = kill_orphaned_daemon_on_port_with(
+            0,
+            |_port| vec![fake_pid],
+            |pid| {
+                assert_eq!(pid, fake_pid);
+                Some("legion daemon --port 3131".to_string())
+            },
+        );
+        assert!(
+            killed,
+            "a confirmed legion daemon holder (already-gone pid) must report killed"
+        );
+    }
+
+    /// Drives the full `restart_detached` sequence (stop -> detect-orphan ->
+    /// kill-decision -> spawn) end to end. The real listener proves the port
+    /// is genuinely held (not a mocked `port_available`); the injected
+    /// cmdline proves the safety gate refuses to kill it; and the
+    /// `DaemonPortInUse` error proves `spawn_detached` was still attempted
+    /// afterward, exactly as production `restart_detached` always does
+    /// regardless of whether the kill step succeeded.
+    #[test]
+    fn restart_detached_refuses_to_kill_non_legion_holder_but_still_attempts_spawn() {
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let port = listener.local_addr().expect("addr").port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake_holder_pid = (i32::MAX - 2) as u32;
+
+        let cmdline_lookups = std::cell::Cell::new(0u32);
+        let err = restart_detached_with(
+            dir.path(),
+            port,
+            |_port| vec![fake_holder_pid],
+            |pid| {
+                cmdline_lookups.set(cmdline_lookups.get() + 1);
+                assert_eq!(pid, fake_holder_pid, "must query the injected pid");
+                Some("node server.js".to_string())
+            },
+        )
+        .expect_err("the port is genuinely held, so spawn must fail loud");
+
+        assert!(
+            matches!(err, LegionError::DaemonPortInUse(_)),
+            "expected DaemonPortInUse (spawn was attempted and hit the real held port), \
+             got {err:?}"
+        );
+        assert_eq!(
+            cmdline_lookups.get(),
+            1,
+            "cmdline lookup must run exactly once for the one reported pid"
+        );
+        assert!(
+            !port_available(port),
+            "the real (non-legion) listener must still hold the port -- it was never killed"
+        );
+        assert!(
+            !dir.path().join(DAEMON_PID_FILE).exists(),
+            "no pidfile should be written when spawn's own preflight refuses"
+        );
+
+        drop(listener);
     }
 }
