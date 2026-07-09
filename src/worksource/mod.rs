@@ -375,8 +375,12 @@ fn require_plugin(plugin_name: &str) -> Result<PathBuf> {
 }
 
 /// Run a plugin subcommand and return its raw stdout. The no-decode variant
-/// of [`plugin_call`], for ops whose output is empty (close, merge, review)
-/// or plain text (CI logs).
+/// of [`plugin_call`], for ops whose output is empty (close, review) or
+/// plain text (CI logs). `merge_pr` (#630) also calls this directly rather
+/// than going through `plugin_call`: its output now carries a `queued` flag
+/// worth decoding, but a plugin predating #630 may still emit the old
+/// empty-stdout contract, which `merge_pr` handles as a fallback before
+/// decoding.
 fn plugin_call_raw(plugin_name: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
     let plugin_path = require_plugin(plugin_name)?;
     call_plugin(&plugin_path, args, env)

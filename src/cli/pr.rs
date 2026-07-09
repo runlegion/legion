@@ -741,51 +741,69 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 ));
             }
 
-            worksource::merge_pr(&plugin_name, &source_repo, number, &strategy, !keep_branch)?;
+            let merge_outcome =
+                worksource::merge_pr(&plugin_name, &source_repo, number, &strategy, !keep_branch)?;
 
-            // Transition kanban card to done if linked
-            if let Some(ref task_id) = task {
-                match kanban::transition_card(
-                    &database,
-                    task_id,
-                    kanban::Action::Done,
-                    Some(&format!("PR #{} merged", number)),
-                ) {
-                    Ok(_) => eprintln!("[legion] card {} marked done", task_id),
-                    Err(e) => eprintln!(
-                        "[legion] warning: could not complete card {}: {}",
-                        task_id, e
-                    ),
-                }
-
-                // Close the linked issue if the card has a source URL,
-                // using a generated merge comment so the GitHub issue
-                // records which PR merge closed it.
-                if let Some(card) = database.get_card_by_id(task_id)?
-                    && let Some(ref url) = card.source_url
-                    && let Some(issue_num) = worksource::extract_issue_number(url)
-                    && let Some(ref source) = card.source_type
-                {
-                    let merge_comment =
-                        format!("Closed by PR #{number} merge via legion kanban propagation.");
-                    if let Err(e) = worksource::close_issue(
-                        source,
-                        &source_repo,
-                        issue_num,
-                        Some(&merge_comment),
+            // A queued PR (#630) has not actually merged yet -- the base
+            // branch's merge queue completes it asynchronously, possibly
+            // after re-running CI. Firing the kanban-done transition and
+            // issue-close side effects here would mark the card/issue done
+            // before the merge has happened, so both are skipped when
+            // queued and left for the queue's own completion to be
+            // reconciled later.
+            if !merge_outcome.queued {
+                // Transition kanban card to done if linked
+                if let Some(ref task_id) = task {
+                    match kanban::transition_card(
+                        &database,
+                        task_id,
+                        kanban::Action::Done,
+                        Some(&format!("PR #{} merged", number)),
                     ) {
-                        eprintln!(
-                            "[legion] warning: could not close issue #{}: {}",
-                            issue_num, e
-                        );
-                    } else {
-                        eprintln!("[legion] closed issue #{}", issue_num);
+                        Ok(_) => eprintln!("[legion] card {} marked done", task_id),
+                        Err(e) => eprintln!(
+                            "[legion] warning: could not complete card {}: {}",
+                            task_id, e
+                        ),
+                    }
+
+                    // Close the linked issue if the card has a source URL,
+                    // using a generated merge comment so the GitHub issue
+                    // records which PR merge closed it.
+                    if let Some(card) = database.get_card_by_id(task_id)?
+                        && let Some(ref url) = card.source_url
+                        && let Some(issue_num) = worksource::extract_issue_number(url)
+                        && let Some(ref source) = card.source_type
+                    {
+                        let merge_comment =
+                            format!("Closed by PR #{number} merge via legion kanban propagation.");
+                        if let Err(e) = worksource::close_issue(
+                            source,
+                            &source_repo,
+                            issue_num,
+                            Some(&merge_comment),
+                        ) {
+                            eprintln!(
+                                "[legion] warning: could not close issue #{}: {}",
+                                issue_num, e
+                            );
+                        } else {
+                            eprintln!("[legion] closed issue #{}", issue_num);
+                        }
                     }
                 }
             }
 
+            // delete_branch records the effective outcome, not just the
+            // request: the queue path never passes --delete-branch (branch
+            // deletion after a queue merge is the queue/repo's own setting,
+            // not something this CLI flag controls), so recording
+            // `!keep_branch` there would claim an effect that did not
+            // happen.
             let details = serde_json::json!({
-                "strategy": strategy, "delete_branch": !keep_branch,
+                "strategy": strategy,
+                "delete_branch": !keep_branch && !merge_outcome.queued,
+                "queued": merge_outcome.queued,
             });
             let details_str = details.to_string();
             audit(
@@ -802,7 +820,14 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 },
             );
 
-            println!("PR #{} merged on {}", number, source_repo);
+            if merge_outcome.queued {
+                println!(
+                    "PR #{} enqueued on {} merge queue -- the queue will complete the merge",
+                    number, source_repo
+                );
+            } else {
+                println!("PR #{} merged on {}", number, source_repo);
+            }
         }
         PrAction::Close {
             repo,

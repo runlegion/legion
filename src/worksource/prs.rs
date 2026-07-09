@@ -3,7 +3,7 @@
 
 use crate::error::Result;
 
-use super::{plugin_call, plugin_call_raw};
+use super::{decode_plugin_output, plugin_call, plugin_call_raw};
 
 /// Result of creating a PR via a work source plugin.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -193,14 +193,43 @@ pub fn review_pr(
     Ok(())
 }
 
+/// Outcome of a `merge_pr` call (#630). A base branch protected by a GitHub
+/// merge queue cannot be merged directly -- the plugin enqueues the PR
+/// instead and the queue completes the merge asynchronously. Callers must
+/// not treat `queued` the same as an actual merge: kanban transitions and
+/// issue-closing side effects that assume the PR is now merged would fire
+/// too early against a PR that has only been queued, not merged.
+///
+/// `#[serde(default)]` on `queued`: a plugin predating #630 (or a
+/// third-party one) that still emits the old `{"ok":true}` shape decodes
+/// as `queued: false`, i.e. today's direct-merge behavior, rather than
+/// failing the whole merge on a missing field. `merge_pr` itself handles
+/// the other half of the old contract -- blank stdout -- since that is not
+/// valid JSON `serde` can decode at all; see its doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub struct MergeOutcome {
+    #[serde(default)]
+    pub queued: bool,
+}
+
 /// Merge a PR via a work source plugin. Refuses if not approved.
+///
+/// Returns [`MergeOutcome`] so the caller can tell a direct merge apart from
+/// an enqueue onto the base branch's merge queue (#630).
+///
+/// A plugin predating #630 (or a third-party one) may still honor the old
+/// contract of empty stdout on success -- `merge` was listed among the
+/// empty-output ops in `plugin_call_raw`'s doc comment before this change.
+/// Blank stdout is not valid JSON, so decoding it would fail the whole
+/// merge even though it actually succeeded; treat it as `queued: false`
+/// (today's direct-merge behavior) instead.
 pub fn merge_pr(
     plugin_name: &str,
     github_repo: &str,
     pr_number: u64,
     strategy: &str,
     delete_branch: bool,
-) -> Result<()> {
+) -> Result<MergeOutcome> {
     let pr_num_str = pr_number.to_string();
     let delete_str = if delete_branch { "true" } else { "false" };
     let env: Vec<(&str, &str)> = vec![
@@ -210,8 +239,11 @@ pub fn merge_pr(
         ("LEGION_WS_DELETE_BRANCH", delete_str),
     ];
 
-    plugin_call_raw(plugin_name, &["merge"], &env)?;
-    Ok(())
+    let output = plugin_call_raw(plugin_name, &["merge"], &env)?;
+    if output.trim().is_empty() {
+        return Ok(MergeOutcome { queued: false });
+    }
+    decode_plugin_output(&["merge"], &output)
 }
 
 /// Close a PR via a work source plugin without merging.
@@ -388,6 +420,24 @@ mod tests {
             link: String::new(),
             description: String::new(),
         }
+    }
+
+    /// A plugin predating #630 (or a third-party one) that still emits the
+    /// old empty-ish merge output must decode as `queued: false` -- today's
+    /// direct-merge behavior -- rather than failing on a missing field.
+    #[test]
+    fn merge_outcome_defaults_queued_false_for_pre_630_plugin_output() {
+        let outcome: MergeOutcome = serde_json::from_str(r#"{"ok":true}"#).unwrap();
+        assert_eq!(outcome, MergeOutcome { queued: false });
+
+        let outcome: MergeOutcome = serde_json::from_str("{}").unwrap();
+        assert_eq!(outcome, MergeOutcome { queued: false });
+    }
+
+    #[test]
+    fn merge_outcome_decodes_queued_true() {
+        let outcome: MergeOutcome = serde_json::from_str(r#"{"queued":true}"#).unwrap();
+        assert_eq!(outcome, MergeOutcome { queued: true });
     }
 
     #[test]
