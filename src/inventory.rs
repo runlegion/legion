@@ -424,14 +424,27 @@ mod tests {
         })
     }
 
-    /// Run `git` in `dir` with hermetic per-invocation identity (never a
-    /// `git config` write) plus full config/dir isolation (#740:
-    /// `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` pinned to isolated empty
-    /// files, `GIT_DIR`/`GIT_WORK_TREE` pinned to `dir`), mirroring the
-    /// integration crate's `run_git_fixture` -- this is a lib unit test, a
-    /// separate crate target, so that helper is not importable here.
-    fn run_git_fixture(dir: &std::path::Path, args: &[&str]) {
+    /// Build a `git` `Command` scoped to `dir`: explicit `current_dir` plus
+    /// the `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_DIR`/`GIT_WORK_TREE`
+    /// isolation (#740), mirroring the integration crate's
+    /// `fixture_git_command` -- this is a lib unit test, a separate crate
+    /// target, so that helper is not importable here. Callers add their own
+    /// args (and, for writes, their own `-c` identity overrides).
+    fn fixture_git_command(dir: &std::path::Path) -> std::process::Command {
         let (global_config, system_config) = isolated_git_config_paths();
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", global_config)
+            .env("GIT_CONFIG_SYSTEM", system_config)
+            .env("GIT_DIR", dir.join(".git"))
+            .env("GIT_WORK_TREE", dir);
+        cmd
+    }
+
+    /// Run `git` in `dir` with hermetic per-invocation identity (never a
+    /// `git config` write) plus the full config/dir isolation `fixture_git_command`
+    /// provides, mirroring the integration crate's `run_git_fixture`.
+    fn run_git_fixture(dir: &std::path::Path, args: &[&str]) {
         let mut full_args: Vec<&str> = vec![
             "-c",
             "user.name=Legion Test Fixture",
@@ -441,13 +454,8 @@ mod tests {
             "commit.gpgsign=false",
         ];
         full_args.extend_from_slice(args);
-        let out = std::process::Command::new("git")
+        let out = fixture_git_command(dir)
             .args(&full_args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", global_config)
-            .env("GIT_CONFIG_SYSTEM", system_config)
-            .env("GIT_DIR", dir.join(".git"))
-            .env("GIT_WORK_TREE", dir)
             .output()
             .unwrap_or_else(|e| panic!("git {args:?} failed to spawn in {dir:?}: {e}"));
         assert!(
@@ -460,14 +468,8 @@ mod tests {
     /// Read-only counterpart to `run_git_fixture`, sharing the same
     /// isolation, for queries whose stdout the caller needs.
     fn run_git_fixture_output(dir: &std::path::Path, args: &[&str]) -> String {
-        let (global_config, system_config) = isolated_git_config_paths();
-        let out = std::process::Command::new("git")
+        let out = fixture_git_command(dir)
             .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", global_config)
-            .env("GIT_CONFIG_SYSTEM", system_config)
-            .env("GIT_DIR", dir.join(".git"))
-            .env("GIT_WORK_TREE", dir)
             .output()
             .unwrap_or_else(|e| panic!("git {args:?} failed to spawn in {dir:?}: {e}"));
         assert!(

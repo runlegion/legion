@@ -476,8 +476,8 @@ case "${1:-}" in
     BASE_REF=""
     PR_NODE_ID=""
     if [ -n "$PR_META" ]; then
-      BASE_REF=$(echo "$PR_META" | jq -r '.baseRefName // empty')
-      PR_NODE_ID=$(echo "$PR_META" | jq -r '.id // empty')
+      BASE_REF=$(printf '%s' "$PR_META" | jq -r '.baseRefName // empty')
+      PR_NODE_ID=$(printf '%s' "$PR_META" | jq -r '.id // empty')
     fi
     QUEUE_ID=""
     if [ -n "$BASE_REF" ]; then
@@ -504,6 +504,9 @@ case "${1:-}" in
         squash) ARGS+=(--squash) ;;
         merge)  ARGS+=(--merge) ;;
         rebase) ARGS+=(--rebase) ;;
+        # No *) arm: the case above (line 443-446) already validated
+        # $STRATEGY against squash|merge|rebase and exits on anything
+        # else, so this case cannot fall through unmatched.
       esac
       [ "$DELETE_BRANCH" = "true" ] && ARGS+=(--delete-branch)
       gh "${ARGS[@]}" >/dev/null || { echo "gh pr merge failed" >&2; exit 1; }

@@ -335,6 +335,12 @@ fn query_config_value(root: &Path, key: &str) -> Option<String> {
 /// `run_git_fixture` literals, in case some future fixture regresses to a
 /// real `git config` write. Returns one human-readable string per
 /// signature found; empty means clean.
+///
+/// #740: an operator whose real `user.name` legitimately happens to be
+/// "Test" (or whose email is literally "test@example.com") would false-
+/// positive here; this is an accepted trade-off given how narrow and
+/// unusual that identity is in practice, weighed against the cost of a
+/// silently unrepaired real corruption.
 fn corruption_signatures(
     bare: Option<&str>,
     name: Option<&str>,
@@ -418,12 +424,23 @@ fn check_suite_start_for_leftover_corruption() {
         if found.is_empty() {
             return;
         }
+        // The disposition sentence only claims a repair when `core.bare` was
+        // actually part of what was found -- `detect_and_repair_corruption`
+        // leaves a poisoned identity untouched (see its doc comment), so an
+        // identity-only corruption must not claim a repair that never
+        // happened.
+        let disposition = if found.iter().any(|f| f.starts_with("core.bare")) {
+            "core.bare has been repaired to false; if a poisoned identity was also found, \
+             verify user.name/user.email manually before committing."
+        } else {
+            "No repair was applied (only a poisoned identity was found, not core.bare); \
+             verify user.name/user.email manually before committing."
+        };
         panic!(
             "enclosing checkout's real .git/config was corrupted BEFORE this suite run started \
              ({}) at {:?} -- a previous integration-suite run was almost certainly killed \
-             mid-fixture (#723's end-of-suite guard cannot fire on a killed process). core.bare \
-             has been repaired to false; if a poisoned identity was found, verify user.name/\
-             user.email manually before committing. See #740.",
+             mid-fixture (#723's end-of-suite guard cannot fire on a killed process). \
+             {disposition} See #740.",
             found.join("; "),
             checkout_root(),
         );
