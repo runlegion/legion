@@ -55,17 +55,61 @@ ok "gt twodigit" is_strictly_greater 0.18.10 0.18.9
 ok "gt major"   is_strictly_greater 1.0.0 0.18.2
 no "gt majdown" is_strictly_greater 0.18.2 1.0.0
 
-# non_changelog_dirty: only plugin/CHANGELOG.md is allowed dirty; anything else
-# (including a rename whose destination is not CHANGELOG) is "other dirty".
+# non_changelog_dirty: only the configured changelog path is allowed dirty;
+# anything else (including a rename whose destination is not the changelog)
+# is "other dirty".
 eq "dirty: changelog only allowed" "" \
-  "$(printf ' M plugin/CHANGELOG.md\n' | non_changelog_dirty)"
+  "$(printf ' M plugin/CHANGELOG.md\n' | non_changelog_dirty 'plugin/CHANGELOG.md')"
 eq "dirty: other file flagged" " M src/main.rs" \
-  "$(printf ' M plugin/CHANGELOG.md\n M src/main.rs\n' | non_changelog_dirty)"
+  "$(printf ' M plugin/CHANGELOG.md\n M src/main.rs\n' | non_changelog_dirty 'plugin/CHANGELOG.md')"
 eq "dirty: suffix lookalike flagged" " M docs/plugin/CHANGELOG.md" \
-  "$(printf ' M docs/plugin/CHANGELOG.md\n' | non_changelog_dirty)"
+  "$(printf ' M docs/plugin/CHANGELOG.md\n' | non_changelog_dirty 'plugin/CHANGELOG.md')"
 eq "dirty: rename dest to changelog allowed" "" \
-  "$(printf 'R  old.md -> plugin/CHANGELOG.md\n' | non_changelog_dirty)"
-eq "dirty: empty tree is clean" "" "$(printf '' | non_changelog_dirty)"
+  "$(printf 'R  old.md -> plugin/CHANGELOG.md\n' | non_changelog_dirty 'plugin/CHANGELOG.md')"
+eq "dirty: empty tree is clean" "" "$(printf '' | non_changelog_dirty 'plugin/CHANGELOG.md')"
+eq "dirty: honors a different configured path" "" \
+  "$(printf ' M CHANGELOG.md\n' | non_changelog_dirty 'CHANGELOG.md')"
+
+# field_leaf: last "."-separated segment.
+eq "leaf: nested"    "version" "$(field_leaf package.version)"
+eq "leaf: flat"       "version" "$(field_leaf version)"
+eq "leaf: array index" "version" "$(field_leaf plugins.0.version)"
+
+# render_tag: "{version}" substitution.
+eq "tag: default format"  "v0.20.0"        "$(render_tag 'v{version}' 0.20.0)"
+eq "tag: no placeholder"  "release"        "$(render_tag release 0.20.0)"
+eq "tag: custom format"   "ledger@0.2.0"   "$(render_tag '{version}' ledger@0.2.0)"
+
+# bump_source_file: rewrites the version-of-record file in place per its
+# extension, and never mutates + returns 1 on an unsupported one -- this is
+# #741's proof that the bump step generalizes beyond Cargo.toml (a package.json
+# source, e.g. a JS repo's `[version] file = "package.json"`, bumps the same way
+# a flat json target does in scripts/sync-version.sh).
+BUMP_DIR=$(mktemp -d)
+trap 'rm -rf "$BUMP_DIR"' EXIT
+
+cat >"${BUMP_DIR}/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.6.5"
+edition = "2024"
+EOF
+ok "bump: toml source" bump_source_file "${BUMP_DIR}/Cargo.toml" package.version 0.6.5 0.7.0
+eq "bump: toml result" 'version = "0.7.0"' "$(grep '^version' "${BUMP_DIR}/Cargo.toml")"
+
+cat >"${BUMP_DIR}/package.json" <<'EOF'
+{
+  "name": "@rafters/fixture",
+  "version": "0.2.0"
+}
+EOF
+ok "bump: json source" bump_source_file "${BUMP_DIR}/package.json" version 0.2.0 0.3.0
+eq "bump: json result" '  "version": "0.3.0"' "$(grep '"version"' "${BUMP_DIR}/package.json")"
+eq "bump: json rest untouched" '  "name": "@rafters/fixture",' "$(sed -n '2p' "${BUMP_DIR}/package.json")"
+
+echo "unsupported" >"${BUMP_DIR}/version.yaml"
+no "bump: unsupported format refused" bump_source_file "${BUMP_DIR}/version.yaml" version 0.1.0 0.2.0
+eq "bump: unsupported format untouched" "unsupported" "$(cat "${BUMP_DIR}/version.yaml")"
 
 printf '\n[test-release] %d passed, %d failed\n' "$PASS" "$FAIL" >&2
 [ "$FAIL" -eq 0 ]

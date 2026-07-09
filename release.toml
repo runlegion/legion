@@ -1,0 +1,69 @@
+# release.toml -- per-repo config for the release toolchain (scripts/release.sh,
+# scripts/sync-version.sh, the `changelog` agent). Schema (#741): every path
+# below is relative to the repo root and MUST use forward slashes, even on
+# Windows -- backslashes are TOML string escapes, so a literal Windows path
+# would corrupt this file.
+#
+# Every field is read generically via
+#   legion sym etc extract release.toml --field <dotted.path>
+# (jq-style: "."-separated segments walk tables, a purely numeric segment
+# indexes an array). Any repo with `legion` on PATH can adopt these scripts
+# by dropping in its own release.toml -- no code changes required.
+
+[version]
+# The file that holds this repo's version of record. Any format
+# `legion sym etc extract` understands (json/toml/yaml) works for READING.
+# scripts/release.sh's bump step supports .toml and .json sources (a flat or
+# single-table-nested leaf key, e.g. "version" or "package.version"); a yaml
+# source would need a bump strategy added there.
+file = "Cargo.toml"
+# Dotted path to the version field within that file.
+field = "package.version"
+
+[changelog]
+# Changelog the release entry is prepended to; its top "## <version>" header
+# must match [version] before a release can ship -- the header-match abort
+# net scripts/release.sh and scripts/sync-version.sh both enforce.
+path = "plugin/CHANGELOG.md"
+# Optional: a different file to mine for voice/style, when it diverges from
+# `path` (e.g. a curated sample of "good" entries). Defaults to `path` when
+# omitted. The `changelog` agent reads this for its voice model.
+# voice_sample = "plugin/CHANGELOG.md"
+
+[git]
+# Branch a release must be cut from.
+branch = "main"
+# Tag name template; "{version}" is replaced with the release version.
+tag_format = "v{version}"
+# Annotated tag message template; "{version}" is replaced with the release
+# version. Defaults to "{version}" (the bare version, not the tag name --
+# under the default tag_format that means "0.20.0", not "v0.20.0") when
+# omitted.
+tag_message = "legion {version}"
+# Optional co-authorship trailer appended to the release commit message.
+# Defaults to legion's own release agent when omitted.
+co_authored_by = "Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+
+[preflight]
+# Commands run, in order, repo-root relative, before a release is cut. Each
+# runs via `bash -c "<command>"` -- prefix a script with `bash` (as below)
+# rather than relying on its executable bit, which some filesystems (certain
+# Windows + WSL setups) do not preserve on checkout.
+commands = ["bash scripts/preflight.sh"]
+
+# Propagation targets: files whose version field is rewritten to match
+# [version] on every release, and staged into the release commit alongside
+# it. `field` uses the same dotted-path convention as [version].field. A
+# field with no "." is rewritten via a single-line replace that leaves the
+# rest of the file untouched (matches legion's historical plugin.json
+# behavior byte-for-byte); a dotted field (nested key or array index, e.g.
+# "plugins.0.version") is rewritten via a full json.load/write cycle (matches
+# legion's historical marketplace.json behavior). Only json targets are
+# supported on the write side today.
+[[targets]]
+file = "plugin/.claude-plugin/plugin.json"
+field = "version"
+
+[[targets]]
+file = ".claude-plugin/marketplace.json"
+field = "plugins.0.version"

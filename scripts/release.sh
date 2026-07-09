@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# release.sh: one-command release for legion. Cargo.toml is the source of truth
-# for the version; everything else is derived and validated.
+# release.sh: one-command release, generalized to any repo via release.toml
+# (schema documented there; see #741). The version-of-record file (default
+# Cargo.toml) is the source of truth for the version; everything else --
+# changelog path, propagation targets, tag format -- is read from config,
+# derived, and validated.
 #
 # Usage:
 #   scripts/release.sh patch            # 0.18.2 -> 0.18.3
@@ -9,33 +12,38 @@
 #   scripts/release.sh 0.20.0           # explicit version
 #   scripts/release.sh patch --dry-run  # print every step, mutate nothing
 #   scripts/release.sh patch --activate # also build+install the binary and
-#                                        # restart the local daemon
-#   scripts/release.sh patch --no-preflight  # skip the cargo/scip gate (CI re-runs it)
+#                                        # restart the local daemon (legion-
+#                                        # specific; a no-op knob elsewhere)
+#   scripts/release.sh patch --no-preflight  # skip the preflight gate (CI re-runs it)
 #
 # Entry contract: the CHANGELOG entry for the new version must already be written
 # (by the `changelog` agent, or by hand) and left UNCOMMITTED in the working tree.
 # release.sh validates it, bumps the version, syncs the manifests, and commits the
-# whole release in one shot. The only file allowed to be dirty at entry is
-# plugin/CHANGELOG.md; everything else must be committed. (Note: even --dry-run
-# requires the "## <new>" CHANGELOG header to exist -- the header check is part of
-# what a dry-run verifies.)
+# whole release in one shot. The only file allowed to be dirty at entry is the
+# configured changelog path; everything else must be committed. (Note: even
+# --dry-run requires the "## <new>" CHANGELOG header to exist -- the header
+# check is part of what a dry-run verifies.)
 #
-# What it does, in order:
-#   1. Guards: on main, tree clean except plugin/CHANGELOG.md, in sync with origin.
+# What it does, in order (unchanged by #741 -- only WHERE paths come from
+# changed, not the sequence):
+#   1. Guards: on the configured branch, tree clean except the changelog,
+#      in sync with origin.
 #   2. Computes the new version from the bump level (or takes it explicitly).
-#   3. Requires plugin/CHANGELOG.md's "## <new>" top header to exist.
-#   4. Runs scripts/preflight.sh (fmt, clippy --all-targets, test, SCIP regen).
-#   5. Bumps Cargo.toml, refreshes Cargo.lock.
-#   6. Syncs plugin.json + marketplace.json (scripts/sync-version.sh) and commits.
-#   7. Tags v<new> and atomically pushes the commit + tag, firing release.yml.
+#   3. Requires the changelog's "## <new>" top header to exist.
+#   4. Runs the configured preflight commands (default: scripts/preflight.sh).
+#   5. Bumps the version-of-record file, refreshes Cargo.lock (Rust sources only).
+#   6. Syncs every configured target (scripts/sync-version.sh) and commits.
+#   7. Tags per the configured tag format and atomically pushes the commit +
+#      tag, firing release.yml.
 #   8. With --activate: builds the release binary, installs it to the plugin data
 #      dir atomically, and restarts the local daemon (verifying it comes back up).
 #
 # The pure helpers below (compute_new_version, is_semver, is_strictly_greater,
-# non_changelog_dirty) are unit-tested by scripts/test-release.sh, which sources
-# this file. main() runs only when the script is executed, not when it is sourced.
-# Implementation is kept POSIX-portable (no GNU-only sed/sort) because the release
-# is cut on darwin, where BSD sed/sort lack the GNU extensions.
+# non_changelog_dirty, field_leaf, render_tag, bump_source_file) are unit-tested
+# by scripts/test-release.sh, which sources this file. main() runs only when the
+# script is executed, not when it is sourced. Implementation is kept
+# POSIX-portable (no GNU-only sed/sort) because the release is cut on darwin,
+# where BSD sed/sort lack the GNU extensions.
 set -euo pipefail
 
 info() { printf '[release] %s\n' "$1" >&2; }
@@ -83,26 +91,109 @@ EOF
   [ "$nc" -gt "$cc" ]
 }
 
-# non_changelog_dirty: read `git status --porcelain` on stdin, print the lines
-# whose changed path is NOT exactly plugin/CHANGELOG.md. Parses the porcelain
-# path field (handling rename/copy "ORIG -> DEST" by testing DEST) so the guard
-# allowlists the file itself, not any path that merely ends in that suffix.
+# non_changelog_dirty <changelog_path>: read `git status --porcelain` on
+# stdin, print the lines whose changed path is NOT exactly <changelog_path>
+# (repo-root-relative, forward-slash form -- the configured changelog.path).
+# Parses the porcelain path field (handling rename/copy "ORIG -> DEST" by
+# testing DEST) so the guard allowlists the file itself, not any path that
+# merely ends in that suffix.
 non_changelog_dirty() {
+  local changelog_path="$1"
   local line path
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     path="${line:3}"                       # drop the 2-char status + space
     case "$path" in *" -> "*) path="${path##* -> }" ;; esac
-    [ "$path" = "plugin/CHANGELOG.md" ] || printf '%s\n' "$line"
+    [ "$path" = "$changelog_path" ] || printf '%s\n' "$line"
   done
 }
 
+# field_leaf <field>: the last "."-separated segment of a dotted field path
+# (e.g. "package.version" -> "version"). Used to find the literal `key =
+# "value"` / `"key": "value"` line a flat-file bump rewrites -- release.toml's
+# [version].field uses the same dotted-path convention as `legion sym etc
+# extract`, but the bump step below only supports a top-level (or
+# single-table-nested) leaf key, not a deep JSON walk.
+field_leaf() {
+  local field="$1"
+  printf '%s' "${field##*.}"
+}
+
+# render_tag <format> <version>: substitute "{version}" in a template string.
+# Used for both release.toml's [git].tag_format (e.g. "v{version}") and
+# [git].tag_message (e.g. "legion {version}") -- same substitution either way.
+render_tag() {
+  local format="$1" version="$2"
+  printf '%s' "${format//\{version\}/$version}"
+}
+
+# bump_source_file <file> <field> <current> <new>: rewrite the version-of-
+# record file in place. Detects strategy from the file extension; both
+# strategies rewrite only the FIRST matching line, so a second identical
+# version string elsewhere in the file is left untouched:
+#   .toml -- awk-based exact-line replace on `<leaf> = "<current>"` (the
+#            existing Cargo.toml strategy; portable, no GNU sed/awk needed).
+#   .json -- awk-based substring replace on `"<leaf>": "<current>"`, tolerant
+#            of surrounding indentation (unlike the .toml branch, a json line
+#            is rarely an exact match on its own).
+# Any other extension is unsupported; returns 1 without mutating anything so
+# the caller can name the failure (this function never calls exit, so it stays
+# unit-testable, including its failure path).
+bump_source_file() {
+  local file="$1" field="$2" current="$3" new="$4" leaf
+  leaf="$(field_leaf "$field")"
+  case "$file" in
+    *.toml)
+      awk -v old="${leaf} = \"${current}\"" -v new="${leaf} = \"${new}\"" '
+        !done && $0 == old { print new; done = 1; next } { print }
+      ' "$file" >"${file}.tmp" && mv "${file}.tmp" "$file"
+      ;;
+    *.json)
+      awk -v old="\"${leaf}\": \"${current}\"" -v new="\"${leaf}\": \"${new}\"" '
+        !done && index($0, old) > 0 { sub(old, new); done = 1 } { print }
+      ' "$file" >"${file}.tmp" && mv "${file}.tmp" "$file"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 main() {
-  local REPO_ROOT CARGO_TOML CHANGELOG
+  local REPO_ROOT CONFIG SOURCE_FILE CHANGELOG
   REPO_ROOT="$(git rev-parse --show-toplevel)"
   cd "$REPO_ROOT"
-  CARGO_TOML="${REPO_ROOT}/Cargo.toml"
-  CHANGELOG="${REPO_ROOT}/plugin/CHANGELOG.md"
+  CONFIG="${REPO_ROOT}/release.toml"
+
+  command -v legion >/dev/null 2>&1 || fail "'legion' binary not found on PATH -- required to read release.toml"
+  command -v python3 >/dev/null 2>&1 || fail "'python3' not found on PATH -- required to parse release.toml's json fields (preflight.commands, targets)"
+  [ -f "$CONFIG" ] || fail "release.toml not found at repo root -- see scripts/release.sh header for the schema"
+
+  # extract_cfg <field>: read one release.toml field, or fail loudly naming it.
+  extract_cfg() {
+    local field="$1" value
+    value="$(legion sym etc extract "$CONFIG" --field "$field" 2>/dev/null)" \
+      || fail "release.toml missing required field '${field}'"
+    printf '%s' "$value"
+  }
+  # extract_cfg_default <field> <default>: like extract_cfg, but falls back
+  # to <default> instead of failing when the field is absent.
+  extract_cfg_default() {
+    local field="$1" default="$2"
+    legion sym etc extract "$CONFIG" --field "$field" 2>/dev/null || printf '%s' "$default"
+  }
+
+  local SOURCE_FILE_REL SOURCE_FIELD CHANGELOG_REL RELEASE_BRANCH TAG_FORMAT TAG_MESSAGE_FORMAT CO_AUTHORED_BY
+  SOURCE_FILE_REL="$(extract_cfg version.file)"
+  SOURCE_FIELD="$(extract_cfg version.field)"
+  CHANGELOG_REL="$(extract_cfg changelog.path)"
+  RELEASE_BRANCH="$(extract_cfg_default git.branch main)"
+  TAG_FORMAT="$(extract_cfg_default git.tag_format 'v{version}')"
+  TAG_MESSAGE_FORMAT="$(extract_cfg_default git.tag_message '{version}')"
+  CO_AUTHORED_BY="$(extract_cfg_default git.co_authored_by 'Claude Opus 4.8 (1M context) <noreply@anthropic.com>')"
+
+  SOURCE_FILE="${REPO_ROOT}/${SOURCE_FILE_REL}"
+  CHANGELOG="${REPO_ROOT}/${CHANGELOG_REL}"
 
   # -- arg parsing -----------------------------------------------------------
   local BUMP="" DRY_RUN=0 ACTIVATE=0 RUN_PREFLIGHT=1 arg
@@ -133,33 +224,36 @@ main() {
   # -- 1. guards -------------------------------------------------------------
   local BRANCH LOCAL REMOTE DIRTY_OTHER
   BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-  [ "$BRANCH" = "main" ] || fail "must be on main to release (on '$BRANCH')"
+  [ "$BRANCH" = "$RELEASE_BRANCH" ] || fail "must be on ${RELEASE_BRANCH} to release (on '$BRANCH')"
 
   # The CHANGELOG entry is written-but-uncommitted at entry; everything else
-  # must be clean. Allow only plugin/CHANGELOG.md to be dirty.
-  DIRTY_OTHER="$(git status --porcelain --untracked-files=no | non_changelog_dirty)"
-  [ -z "$DIRTY_OTHER" ] || fail "working tree has changes other than plugin/CHANGELOG.md -- commit or stash first:
+  # must be clean. Allow only the configured changelog path to be dirty.
+  DIRTY_OTHER="$(git status --porcelain --untracked-files=no | non_changelog_dirty "$CHANGELOG_REL")"
+  [ -z "$DIRTY_OTHER" ] || fail "working tree has changes other than ${CHANGELOG_REL} -- commit or stash first:
 $DIRTY_OTHER"
 
-  git fetch origin main --quiet || fail "git fetch failed"
+  git fetch origin "$RELEASE_BRANCH" --quiet || fail "git fetch failed"
   LOCAL="$(git rev-parse @)"
   REMOTE="$(git rev-parse '@{u}' 2>/dev/null || echo "")"
-  [ -n "$REMOTE" ] || fail "no upstream for main"
-  [ "$LOCAL" = "$REMOTE" ] || fail "local main is not in sync with origin/main -- pull/push first"
+  [ -n "$REMOTE" ] || fail "no upstream for ${RELEASE_BRANCH}"
+  [ "$LOCAL" = "$REMOTE" ] || fail "local ${RELEASE_BRANCH} is not in sync with origin/${RELEASE_BRANCH} -- pull/push first"
 
   # -- 2. compute + validate the new version ---------------------------------
-  local CURRENT NEW
-  CURRENT="$(grep -m1 '^version' "$CARGO_TOML" | sed 's/version = "\(.*\)"/\1/' || true)"
-  [ -n "$CURRENT" ] || fail "could not read version from Cargo.toml"
-  is_semver "$CURRENT" || fail "Cargo.toml version '$CURRENT' is not strict X.Y.Z"
+  local CURRENT NEW TAG TAG_MESSAGE
+  CURRENT="$(legion sym etc extract "$SOURCE_FILE" --field "$SOURCE_FIELD" 2>/dev/null || true)"
+  [ -n "$CURRENT" ] || fail "could not read '${SOURCE_FIELD}' from ${SOURCE_FILE_REL}"
+  is_semver "$CURRENT" || fail "${SOURCE_FILE_REL} version '$CURRENT' is not strict X.Y.Z"
 
   NEW="$(compute_new_version "$CURRENT" "$BUMP")"
   is_semver "$NEW" || fail "invalid version '$NEW' (expected X.Y.Z)"
   is_strictly_greater "$NEW" "$CURRENT" || fail "refusing non-increment $CURRENT -> $NEW"
 
+  TAG="$(render_tag "$TAG_FORMAT" "$NEW")"
+  TAG_MESSAGE="$(render_tag "$TAG_MESSAGE_FORMAT" "$NEW")"
+
   # Refuse a tag that already exists (a re-run after a partial failure, or a typo
   # colliding with history) before we mutate anything.
-  ! git rev-parse "v${NEW}" >/dev/null 2>&1 || fail "tag v${NEW} already exists"
+  ! git rev-parse "$TAG" >/dev/null 2>&1 || fail "tag ${TAG} already exists"
 
   info "releasing ${CURRENT} -> ${NEW}"
 
@@ -167,47 +261,73 @@ $DIRTY_OTHER"
   local TOP_HEADER
   TOP_HEADER="$(grep -E '^## [0-9]' "$CHANGELOG" | head -1 | sed -E 's/^## //' | awk '{print $1}')"
   if [ "$TOP_HEADER" != "$NEW" ]; then
-    fail "plugin/CHANGELOG.md top header is '## ${TOP_HEADER:-<none>}', expected '## ${NEW}'.
+    fail "${CHANGELOG_REL} top header is '## ${TOP_HEADER:-<none>}', expected '## ${NEW}'.
        Have the changelog agent (or you) add a '## ${NEW}' section at the top, then re-run."
   fi
   info "CHANGELOG header matches ${NEW}"
 
   # -- 4. preflight ----------------------------------------------------------
   if [ "$RUN_PREFLIGHT" = "1" ]; then
-    info "running preflight (fmt, clippy, test, scip)"
-    run bash "${REPO_ROOT}/scripts/preflight.sh"
+    local PREFLIGHT_JSON PREFLIGHT_CMDS
+    PREFLIGHT_JSON="$(legion sym etc extract "$CONFIG" --field preflight.commands --json 2>/dev/null || printf '["bash scripts/preflight.sh"]')"
+    PREFLIGHT_CMDS="$(printf '%s' "$PREFLIGHT_JSON" | python3 -c '
+import json, sys
+for c in json.load(sys.stdin):
+    print(c)
+')"
+    info "running preflight: $(printf '%s' "$PREFLIGHT_CMDS" | tr '\n' ',' | sed 's/,$//')"
+    while IFS= read -r cmd; do
+      [ -n "$cmd" ] || continue
+      run bash -c "$cmd"
+    done <<<"$PREFLIGHT_CMDS"
   else
     info "preflight skipped (--no-preflight)"
   fi
 
-  # -- 5. bump Cargo.toml + refresh Cargo.lock -------------------------------
-  # Replace the first exact `version = "<current>"` line via awk -- portable,
-  # unlike `sed '0,/re/'` whose line-address 0 is a GNU extension BSD sed rejects.
+  # -- 5. bump the version-of-record file + refresh Cargo.lock ---------------
   if [ "$DRY_RUN" = "1" ]; then
-    printf '[dry-run] set Cargo.toml version %s -> %s\n' "$CURRENT" "$NEW" >&2
+    printf '[dry-run] set %s %s -> %s\n' "$SOURCE_FILE_REL" "$CURRENT" "$NEW" >&2
   else
-    awk -v old="version = \"${CURRENT}\"" -v new="version = \"${NEW}\"" '
-      !done && $0 == old { print new; done = 1; next } { print }
-    ' "$CARGO_TOML" > "${CARGO_TOML}.tmp" && mv "${CARGO_TOML}.tmp" "$CARGO_TOML"
+    bump_source_file "$SOURCE_FILE" "$SOURCE_FIELD" "$CURRENT" "$NEW" \
+      || fail "unsupported version.file format '${SOURCE_FILE_REL}' (bump supports .toml and .json)"
   fi
-  run cargo build --quiet   # refreshes Cargo.lock's legion entry to ${NEW}
+  # Cargo.lock only exists (and only needs refreshing) for a Rust source file.
+  if [ "${SOURCE_FILE_REL##*/}" = "Cargo.toml" ]; then
+    run cargo build --quiet   # refreshes Cargo.lock's own version entry to ${NEW}
+  fi
 
   # -- 6. sync manifests + commit --------------------------------------------
   # Run sync-version explicitly so the manifests are correct even if the
   # pre-commit hook is not installed in this clone (the #656 failure mode).
   run bash "${REPO_ROOT}/scripts/sync-version.sh"
-  run git add Cargo.toml Cargo.lock plugin/CHANGELOG.md \
-    plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json
+  local ADD_FILES=("$SOURCE_FILE" "$CHANGELOG")
+  if [ "${SOURCE_FILE_REL##*/}" = "Cargo.toml" ] && [ -f "${REPO_ROOT}/Cargo.lock" ]; then
+    ADD_FILES+=("${REPO_ROOT}/Cargo.lock")
+  fi
+  local TARGETS_JSON TARGET_FILES_REL
+  TARGETS_JSON="$(legion sym etc extract "$CONFIG" --field targets --json 2>/dev/null || printf '[]')"
+  TARGET_FILES_REL="$(printf '%s' "$TARGETS_JSON" | python3 -c '
+import json, sys
+for t in json.load(sys.stdin):
+    print(t["file"])
+')"
+  if [ -n "$TARGET_FILES_REL" ]; then
+    while IFS= read -r t; do
+      [ -n "$t" ] || continue
+      ADD_FILES+=("${REPO_ROOT}/${t}")
+    done <<<"$TARGET_FILES_REL"
+  fi
+  run git add "${ADD_FILES[@]}"
   run git commit -m "chore(release): ${NEW}
 
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: ${CO_AUTHORED_BY}"
 
   # -- 7. tag + atomic push --------------------------------------------------
-  # --atomic so main and the tag land together: a half-push that left the commit
-  # without its tag would leave release.yml unfired.
-  run git tag -a "v${NEW}" -m "legion ${NEW}"
-  run git push --atomic origin main "v${NEW}"
-  info "pushed v${NEW} -- release.yml will build + publish the platform binaries"
+  # --atomic so the branch and the tag land together: a half-push that left
+  # the commit without its tag would leave release.yml unfired.
+  run git tag -a "$TAG" -m "$TAG_MESSAGE"
+  run git push --atomic origin "$RELEASE_BRANCH" "$TAG"
+  info "pushed ${TAG} -- release.yml will build + publish the platform binaries"
 
   # -- 8. optional local activation ------------------------------------------
   if [ "$ACTIVATE" = "1" ]; then
