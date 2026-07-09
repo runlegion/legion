@@ -121,11 +121,6 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/no-harness-explore.sh",
             "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/recall-first.sh",
-            "timeout": 5
           }
         ]
       },
