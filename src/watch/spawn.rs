@@ -122,6 +122,13 @@ pub fn record_session_end(
     repo_hint: Option<&str>,
     data_dir: &Path,
 ) -> Result<()> {
+    // Contract (#675): for interactive sessions the hook invokes this with
+    // `attempt_id == ""` (see `WatchAction::SessionEnd`'s doc comment) rather
+    // than omitting it. That is deliberate, not a bug -- a UUIDv7 primary key
+    // can never equal the empty string, so the lookup below is guaranteed to
+    // miss and fall into the `WakeAttemptNotFound` arm, which is exactly the
+    // interactive-cleanup path (release `.session` via `repo_hint` instead of
+    // a wake_attempts row).
     match db.mark_wake_attempt_exit_observed(attempt_id) {
         Ok(()) => {}
         Err(LegionError::WakeAttemptNotFound(_)) => {
