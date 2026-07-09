@@ -35,7 +35,7 @@ TRANSCRIPT="$WORK/agent-transcript.jsonl"
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Root cause: cookie SameSite=Strict drops the refresh on cross-site nav."}]}}'
 } > "$TRANSCRIPT"
 
-echo "==> persists a subagent checkpoint + informs the parent"
+echo "==> persists a subagent checkpoint + nudges the subagent's own turn"
 : > "$STUB_LOG"
 out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${TRANSCRIPT}\"}" \
   | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
@@ -81,7 +81,7 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Deduped s
 dedup_in="{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${DEDUP_TRANSCRIPT}\",\"session_id\":\"sess-1\"}"
 out1=$(echo "$dedup_in" | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
 out2=$(echo "$dedup_in" | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
-assert_contains "first fire informs the parent" "$out1" '"hookEventName": "SubagentStop"'
+assert_contains "first fire nudges the subagent" "$out1" '"hookEventName": "SubagentStop"'
 assert_empty "second (re-delivered) fire is silent" "$out2"
 reflect_count=$(grep -c 'reflect' "$STUB_LOG" 2>/dev/null || echo 0)
 assert_eq "reflect called exactly once across two fires" "$reflect_count" "1"
