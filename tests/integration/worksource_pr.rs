@@ -557,6 +557,229 @@ fn pr_merge_refuses_when_head_has_zero_runs() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #630: merge-queue support. The plugin's `merge` subcommand now reports
+// whether it merged the PR directly or enqueued it onto the base branch's
+// merge queue via `{"queued": <bool>}`. These tests stub that boundary --
+// the plugin's own GraphQL queue-detection and enqueue calls are mocked here
+// (no live queue-enabled repo is available in CI); confirming the real
+// GraphQL shape against a live merge-queue repo is a post-merge operator
+// step, not something these tests can exercise.
+// ---------------------------------------------------------------------------
+
+/// Stub worksource plugin for `legion pr merge` tests: `pr-checks` always
+/// reports one passing check (so the zero-runs gate never fires here), and
+/// `merge` echoes the caller-supplied JSON verbatim -- letting a single stub
+/// stand in for both the direct-merge and the enqueued outcome. `close`
+/// exits 0 so linked-issue close propagation (when exercised) succeeds too.
+#[cfg(unix)]
+fn pr_merge_stub_plugin(merge_output: &str) -> String {
+    format!(
+        r#"#!/bin/bash
+set -e
+case "${{1:-}}" in
+  pr-checks)
+    cat <<'BODY'
+{{"headSha":"cafef00d","checks":[{{"name":"CI","state":"SUCCESS","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/1","description":""}}]}}
+BODY
+    ;;
+  merge)
+    echo '{merge_output}'
+    ;;
+  close)
+    exit 0
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"#
+    )
+}
+
+/// Stub whose `merge` subcommand fails the way a real enqueue failure would
+/// -- exits non-zero with the plugin's own error text on stderr, the same
+/// shape `enqueuePullRequest` failing in the real plugin produces.
+#[cfg(unix)]
+fn pr_merge_failing_stub_plugin() -> String {
+    r#"#!/bin/bash
+set -e
+case "${1:-}" in
+  pr-checks)
+    cat <<'BODY'
+{"headSha":"cafef00d","checks":[{"name":"CI","state":"SUCCESS","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/1","description":""}]}
+BODY
+    ;;
+  merge)
+    echo "enqueuePullRequest failed: some GraphQL error" >&2
+    exit 1
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"#
+    .to_string()
+}
+
+/// Stub whose `merge` subcommand prints nothing on success -- the pre-#630
+/// contract (`merge` was listed among the empty-output ops in
+/// `plugin_call_raw`'s doc comment). `merge_pr` must treat blank stdout as
+/// `queued: false`, not fail the whole merge on unparseable JSON: the merge
+/// already happened on GitHub by the time this plugin call returns, so
+/// erroring here would skip the kanban-done transition and issue-close
+/// while incorrectly reporting the merge as failed.
+#[cfg(unix)]
+fn pr_merge_pre_630_empty_output_stub_plugin() -> String {
+    r#"#!/bin/bash
+set -e
+case "${1:-}" in
+  pr-checks)
+    cat <<'BODY'
+{"headSha":"cafef00d","checks":[{"name":"CI","state":"SUCCESS","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/1","description":""}]}
+BODY
+    ;;
+  merge)
+    exit 0
+    ;;
+  close)
+    exit 0
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"#
+    .to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_merge_treats_pre_630_empty_output_as_direct_merge() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &pr_merge_pre_630_empty_output_stub_plugin(),
+    );
+    let card = setup_linked_done_eligible_card(data_dir.path());
+
+    let out = run_ok_output(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr", "merge", "--repo", "stub", "--number", "42", "--task", &card,
+    ]));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("PR #42 merged on owner/stub"),
+        "expected blank stdout to be treated as a direct merge, got: {stdout}"
+    );
+    assert!(
+        stderr.contains(&format!("card {} marked done", card)),
+        "expected the kanban-done transition to still fire on the legacy empty-output contract, got: {stderr}"
+    );
+}
+
+/// Non-queue repo (AC #2): `merge` reports `{"queued": false}` and `pr merge`
+/// must behave exactly as before this change -- the same "PR #N merged on
+/// R" message, plus the kanban-done transition and linked-issue close still
+/// fire when `--task` is given.
+#[cfg(unix)]
+#[test]
+fn pr_merge_direct_when_not_queued_behaves_as_before() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &pr_merge_stub_plugin(r#"{"queued":false}"#),
+    );
+    let card = setup_linked_done_eligible_card(data_dir.path());
+
+    let out = run_ok_output(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr", "merge", "--repo", "stub", "--number", "42", "--task", &card,
+    ]));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("PR #42 merged on owner/stub"),
+        "expected the unchanged direct-merge message, got: {stdout}"
+    );
+    assert!(
+        stderr.contains(&format!("card {} marked done", card)),
+        "expected the kanban-done transition to still fire, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("closed issue #42"),
+        "expected the linked-issue close to still fire, got: {stderr}"
+    );
+}
+
+/// Queue-enabled base branch (AC #1): `merge` reports `{"queued": true}` and
+/// `pr merge` must enqueue instead of failing, report the enqueue (not
+/// "merged") in its message, and must NOT fire the kanban-done transition or
+/// linked-issue close -- the PR has not actually merged yet.
+#[cfg(unix)]
+#[test]
+fn pr_merge_enqueues_when_queued_skips_done_side_effects() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &pr_merge_stub_plugin(r#"{"queued":true}"#),
+    );
+    let card = setup_linked_done_eligible_card(data_dir.path());
+
+    let out = run_ok_output(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr", "merge", "--repo", "stub", "--number", "42", "--task", &card,
+    ]));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("enqueued") && stdout.contains("owner/stub"),
+        "expected an enqueue message naming the repo, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("PR #42 merged on owner/stub"),
+        "must not claim the PR merged when it was only enqueued, got: {stdout}"
+    );
+    assert!(
+        !stderr.contains("marked done"),
+        "must not transition the kanban card before the queue actually merges, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("closed issue"),
+        "must not close the linked issue before the queue actually merges, got: {stderr}"
+    );
+}
+
+/// AC #3: an enqueue failure from `gh`/GraphQL must surface as a loud error,
+/// not be swallowed into a false success.
+#[cfg(unix)]
+#[test]
+fn pr_merge_surfaces_enqueue_failure() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &pr_merge_failing_stub_plugin(),
+    );
+
+    let (_stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["pr", "merge", "--repo", "stub", "--number", "42"]),
+    );
+    assert!(
+        stderr.contains("enqueuePullRequest failed"),
+        "expected the plugin's enqueue-failure text to be surfaced, got: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn pr_view_surfaces_malformed_plugin_json_as_worksource_error() {

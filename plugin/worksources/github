@@ -435,16 +435,80 @@ case "${1:-}" in
         exit 1
         ;;
     esac
-    ARGS=(pr merge "$PR_NUMBER" --repo "$REPO")
+    # Validate the strategy unconditionally, before the queue check below --
+    # even though the queue path ignores it (the queue's own configuration
+    # picks the merge method), an unknown strategy value is still a caller
+    # error that must not silently pass just because the base happens to
+    # have a queue.
     case "$STRATEGY" in
-      squash) ARGS+=(--squash) ;;
-      merge)  ARGS+=(--merge) ;;
-      rebase) ARGS+=(--rebase) ;;
-      *)      echo "Unknown strategy: $STRATEGY" >&2; exit 1 ;;
+      squash|merge|rebase) ;;
+      *) echo "Unknown strategy: $STRATEGY" >&2; exit 1 ;;
     esac
-    [ "$DELETE_BRANCH" = "true" ] && ARGS+=(--delete-branch)
-    gh "${ARGS[@]}" >/dev/null || { echo "gh pr merge failed" >&2; exit 1; }
-    echo '{"ok":true}'
+    # Merge-queue detection (#630): a base branch protected by a GitHub merge
+    # queue rejects an explicit merge strategy and branch-deletion flag with
+    # ('merge strategy for main is set by the merge queue', 'Auto merge is
+    # not allowed (enablePullRequestAutoMerge)'). Query the base branch's
+    # mergeQueue via GraphQL before attempting the strategy merge, and
+    # enqueue instead when one is configured. Branch deletion after a queue
+    # merge is the queue/repo's own setting, not something the CLI flag
+    # controls -- so the queue path never passes --delete-branch.
+    #
+    # One `gh pr view` fetches both baseRefName (for the queue lookup) and
+    # id (the PR's GraphQL node id, needed only if the enqueue path fires)
+    # so a non-queue merge still costs a single lookup, not two.
+    #
+    # The detection query itself fails open (`|| true`): a query error here
+    # (older GHE without the `mergeQueue` field, a transient API hiccup)
+    # falls through to the existing strategy-merge path, which is exactly
+    # today's behavior for a repo this plugin has never seen a queue on. The
+    # enqueue mutation below is the opposite -- fail-closed -- since that is
+    # the actual merge action and its failure must not be swallowed.
+    #
+    # `-f` (not `-F`) for the owner/name/branch variables: `-F` type-sniffs
+    # its value (numeric-looking strings become GraphQL Int, `true`/`false`
+    # become Boolean), which would break the `String!` binding for a
+    # numeric GitHub owner/repo or a branch literally named `123` or
+    # `true`. `-f` always sends a literal string, which is what these three
+    # String! variables need.
+    OWNER="${REPO%%/*}"
+    REPO_NAME="${REPO#*/}"
+    PR_META=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName,id 2>/dev/null || true)
+    BASE_REF=""
+    PR_NODE_ID=""
+    if [ -n "$PR_META" ]; then
+      BASE_REF=$(echo "$PR_META" | jq -r '.baseRefName // empty')
+      PR_NODE_ID=$(echo "$PR_META" | jq -r '.id // empty')
+    fi
+    QUEUE_ID=""
+    if [ -n "$BASE_REF" ]; then
+      QUEUE_ID=$(gh api graphql -f query="query(\$o: String!, \$n: String!, \$b: String!) { repository(owner: \$o, name: \$n) { mergeQueue(branch: \$b) { id } } }" \
+        -f o="$OWNER" -f n="$REPO_NAME" -f b="$BASE_REF" --jq '.data.repository.mergeQueue.id // empty' 2>/dev/null || true)
+    fi
+
+    if [ -n "$QUEUE_ID" ]; then
+      if [ -z "$PR_NODE_ID" ]; then
+        echo "could not resolve node id for PR #${PR_NUMBER} to enqueue" >&2
+        exit 1
+      fi
+      ENQUEUE_ERR=$(mktemp)
+      trap 'rm -f "$ENQUEUE_ERR"' EXIT
+      if ! gh api graphql -f query="mutation(\$id: ID!) { enqueuePullRequest(input: { pullRequestId: \$id }) { mergeQueueEntry { id } } }" \
+        -f id="$PR_NODE_ID" >/dev/null 2>"$ENQUEUE_ERR"; then
+        echo "enqueuePullRequest failed: $(tr '\n' ' ' < "$ENQUEUE_ERR")" >&2
+        exit 1
+      fi
+      echo '{"queued":true}'
+    else
+      ARGS=(pr merge "$PR_NUMBER" --repo "$REPO")
+      case "$STRATEGY" in
+        squash) ARGS+=(--squash) ;;
+        merge)  ARGS+=(--merge) ;;
+        rebase) ARGS+=(--rebase) ;;
+      esac
+      [ "$DELETE_BRANCH" = "true" ] && ARGS+=(--delete-branch)
+      gh "${ARGS[@]}" >/dev/null || { echo "gh pr merge failed" >&2; exit 1; }
+      echo '{"queued":false}'
+    fi
     ;;
 
   pr-close)
