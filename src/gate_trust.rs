@@ -27,16 +27,35 @@
 //!     simplify and review land on the same commit and the lookup hits. But if a
 //!     fix commit lands between simplify and review without simplify re-running,
 //!     the lookup no-ops -- silently UNDERCOUNTING (it misses a clean verdict that
-//!     was later fixed, exactly a rubber-stamp).
+//!     was later fixed, exactly a rubber-stamp). BOUND (#694): an unwitnessed
+//!     emitted prediction can only ever resolve one of two ways -- witnessed
+//!     before its TTL, or orphaned. `legion uncertainty orphans --surface
+//!     legion.gate` is therefore an upper bound on the undercount: every
+//!     silently-missed clean verdict from this gap shows up there once its
+//!     30-day TTL elapses, so the undercount is measured (not merely
+//!     hand-waved), even though it is not eliminated. Eliminating it outright
+//!     would need branch-scoped fallback resolution (matching the latest
+//!     emitted gate for the skill on the row's branch when the exact commit
+//!     misses) -- deliberately deferred: it risks witnessing a *different*,
+//!     unrelated earlier commit's prediction on the same branch, trading a
+//!     measured undercount for an unmeasured miscount.
 //!  2. Weak positive: a clean review corroborates at correctness 1.0, but
 //!     legion-review records clean-on-approve, so the witnessed-correct population
 //!     skews optimistic. The `Escalated`/0.0 review-CAUGHT path is the only fully
 //!     trustworthy signal; read clean-corroboration as a lower bound on the
 //!     rubber-stamp rate, not a measurement of it.
 //!
-//! Closing both needs a stronger, decorrelated witness source (an independent
-//! reviewer on a different model; revert / post-merge-bug detection) -- tracked
-//! as #694, not this MVP.
+//! DECORRELATED WITNESS (#694): `witness_gate_external` closes limitation 2.
+//! It witnesses a `legion.gate` prediction from a source outside the
+//! pipeline -- today an operator via `legion uncertainty witness-gate`, the
+//! CLI option named in #694 -- so the positive direction (correct == true) is
+//! ground truth rather than a downstream skill's own clean-on-approve
+//! optimism. Because the source is external, it also witnesses in the
+//! negative direction (correct == false) without needing a review catch,
+//! giving a second, decorrelated path to the escalated signal. The other two
+//! #694 options (an independent reviewer on a different model; git-revert /
+//! post-merge-bug detection) remain future work -- see the PR body for why
+//! the operator-CLI source was chosen as the smallest compliant mechanism.
 
 use crate::db::Database;
 use crate::db::quality_gates::QualityGateRow;
@@ -70,17 +89,16 @@ const ISSUES_CONFIDENCE: f64 = 0.05;
 /// witness recomputes it to find this prediction. No hashing is needed; hashing
 /// would only obscure an already-unique key.
 ///
-/// PRECONDITION: `skill` contains no `:`. Gate skill names are colon-free slugs
+/// EXPECTED: `skill` contains no `:`. Gate skill names are colon-free slugs
 /// (`legion-simplify`, `legion-review`, `legion-pr-write`) and commit hashes are
 /// hex, so the join is unambiguous. The fingerprint is treated as an OPAQUE key
 /// (recomputed and compared, never parsed back into parts), so a stray colon
-/// would only risk a (vanishingly unlikely) collision between two distinct
-/// (skill, commit) pairs, never a parse error.
+/// only risks a (vanishingly unlikely) collision between two distinct (skill,
+/// commit) pairs, never a parse error -- so this deliberately does not assert
+/// the expectation: `witness_gate_external` (#694) passes an operator-supplied
+/// `--skill` value through to this function, and a typo'd colon in that free
+/// text must degrade to a harmless lookup miss, not a panic.
 pub fn gate_fingerprint(skill: &str, commit_hash: &str) -> String {
-    debug_assert!(
-        !skill.contains(':'),
-        "gate skill names must be colon-free for an unambiguous fingerprint, got {skill:?}"
-    );
     format!("{skill}:{commit_hash}")
 }
 
@@ -214,6 +232,58 @@ pub fn maybe_witness_from_review(db: &Database, row: &QualityGateRow) {
             matches!(row.result, GateResult::Issues),
         );
     }
+}
+
+/// Witness a `surface=legion.gate` prediction from a DECORRELATED external
+/// source -- an operator or other ground truth outside the pipeline that
+/// emitted the verdict (#694). This is the source that closes the gap the
+/// module doc's WITNESS LIMITATIONS section names: `witness_simplify_from_review`
+/// is a downstream pipeline stage witnessing an upstream one, so its
+/// clean-corroboration is optimistic by construction (legion-review records
+/// clean-on-approve); an operator saying "this clean verdict was actually
+/// wrong" (or actually right) is independent of the pipeline's own
+/// rubber-stamp tendency in BOTH directions, not just the caught-by-review
+/// direction.
+///
+/// Unlike `witness_simplify_from_review`, this does NOT skip a non-clean
+/// (`issues`) prediction: a review-catch is only indirect evidence that a
+/// clean verdict was optimistic, so restricting it to clean predictions
+/// avoids polluting the signal with an already-non-rubber-stamping run. An
+/// operator witness is direct ground truth about whichever verdict the gate
+/// actually recorded, clean or issues, so both are eligible.
+///
+/// Resolves the prediction by the deterministic `(skill, commit)`
+/// fingerprint, taking the latest Emitted row per the re-run contract (see
+/// module docs). Returns `Ok(Some(prediction_id))` naming the witnessed row
+/// when a matching Emitted prediction exists, `Ok(None)` if none does
+/// (already witnessed/orphaned, or the gate was never recorded for that
+/// commit) -- a clean no-op the CLI layer turns into a clear error for the
+/// operator. The id lets the operator audit exactly which row their witness
+/// touched, echoing the generic `legion uncertainty witness` command's habit
+/// of returning the touched prediction's id.
+pub fn witness_gate_external(
+    db: &Database,
+    skill: &str,
+    commit_hash: &str,
+    correct: bool,
+) -> UncertaintyResult<Option<String>> {
+    let fingerprint = gate_fingerprint(skill, commit_hash);
+    let Some(mut prediction) = db.latest_emitted_by_fingerprint(GATE_SURFACE, &fingerprint)? else {
+        return Ok(None);
+    };
+    let (label, correctness) = if correct {
+        (OutcomeLabel::Shipped, 1.0)
+    } else {
+        (OutcomeLabel::Escalated, 0.0)
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let payload = serde_json::json!({
+        "witnessed_by": "operator",
+        "correct": correct,
+    });
+    prediction.witness(label, payload, Correctness::from_f64(correctness)?, &now)?;
+    db.update_prediction(&prediction)?;
+    Ok(Some(prediction.id))
 }
 
 #[cfg(test)]
@@ -411,5 +481,112 @@ mod tests {
         let fetched = db.get_prediction(&id).unwrap().unwrap();
         assert_eq!(fetched.claimed_confidence.value(), ISSUES_CONFIDENCE);
         assert_eq!(fetched.feature_key, "gate.legion-review");
+    }
+
+    // -- #694: decorrelated external witness --------------------------------
+
+    #[test]
+    fn external_witness_corroborates_a_clean_verdict() {
+        let db = test_db();
+        let id =
+            emit_gate_prediction(&db, &gate_row("legion-simplify", GateResult::Clean, 0)).unwrap();
+        let witnessed =
+            witness_gate_external(&db, "legion-simplify", "deadbeefcafe", true).unwrap();
+        assert_eq!(witnessed, Some(id.clone()));
+        let fetched = db.get_prediction(&id).unwrap().unwrap();
+        assert_eq!(fetched.state, PredictionState::Witnessed);
+        assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(1.0));
+        assert_eq!(fetched.outcome_label, Some(OutcomeLabel::Shipped));
+        assert_eq!(fetched.outcome_payload.unwrap()["witnessed_by"], "operator");
+    }
+
+    #[test]
+    fn external_witness_marks_a_clean_verdict_wrong() {
+        let db = test_db();
+        let id =
+            emit_gate_prediction(&db, &gate_row("legion-simplify", GateResult::Clean, 0)).unwrap();
+        let witnessed =
+            witness_gate_external(&db, "legion-simplify", "deadbeefcafe", false).unwrap();
+        assert_eq!(witnessed, Some(id.clone()));
+        let fetched = db.get_prediction(&id).unwrap().unwrap();
+        assert_eq!(fetched.state, PredictionState::Witnessed);
+        assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(0.0));
+        assert_eq!(fetched.outcome_label, Some(OutcomeLabel::Escalated));
+    }
+
+    #[test]
+    fn external_witness_covers_an_issues_verdict_too() {
+        // Unlike witness_simplify_from_review, the external witness does NOT
+        // restrict to clean verdicts: an operator's ground truth is direct
+        // evidence about whichever verdict the gate actually recorded, so an
+        // "issues" prediction is just as eligible as a "clean" one.
+        let db = test_db();
+        let id =
+            emit_gate_prediction(&db, &gate_row("legion-review", GateResult::Issues, 2)).unwrap();
+        let witnessed = witness_gate_external(&db, "legion-review", "deadbeefcafe", true).unwrap();
+        assert_eq!(
+            witnessed,
+            Some(id.clone()),
+            "an issues-verdict prediction must be witnessable by the external source"
+        );
+        let fetched = db.get_prediction(&id).unwrap().unwrap();
+        assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(1.0));
+    }
+
+    #[test]
+    fn external_witness_with_no_matching_prediction_is_noop() {
+        let db = test_db();
+        let witnessed =
+            witness_gate_external(&db, "legion-simplify", "nosuchcommit", true).unwrap();
+        assert_eq!(
+            witnessed, None,
+            "expected a no-op when no Emitted prediction matches the fingerprint"
+        );
+    }
+
+    #[test]
+    fn external_witness_takes_the_latest_emitted_on_rerun() {
+        let db = test_db();
+        let row = gate_row("legion-simplify", GateResult::Clean, 0);
+        let _id1 = emit_gate_prediction(&db, &row).unwrap();
+        let _id2 = emit_gate_prediction(&db, &row).unwrap();
+        assert!(
+            witness_gate_external(&db, "legion-simplify", "deadbeefcafe", true)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            witness_gate_external(&db, "legion-simplify", "deadbeefcafe", true)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            witness_gate_external(&db, "legion-simplify", "deadbeefcafe", true).unwrap(),
+            None
+        );
+    }
+
+    // -- #694: exact-commit undercount is a measured bound -------------------
+
+    #[test]
+    fn an_unwitnessed_gate_prediction_surfaces_in_the_orphan_count() {
+        // Documents and proves the #694 bound on WITNESS LIMITATIONS item 1:
+        // a clean verdict this module's witnesses miss (e.g. the exact-commit
+        // gap) is never silently dropped -- it stays Emitted until the TTL
+        // elapses, then the (external, not-yet-built) sweep orphans it, and
+        // `legion uncertainty orphans --surface legion.gate` counts it. This
+        // proves the counting path end-to-end for the gate surface
+        // specifically, so the undercount is measurable rather than asserted.
+        let db = test_db();
+        let row = gate_row("legion-simplify", GateResult::Clean, 0);
+        let id = emit_gate_prediction(&db, &row).unwrap();
+        let mut prediction = db.get_prediction(&id).unwrap().unwrap();
+        prediction.orphan("2026-07-08T00:00:00+00:00").unwrap();
+        db.update_prediction(&prediction).unwrap();
+
+        let rows = db.count_orphans_by_surface(Some(GATE_SURFACE)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].surface, GATE_SURFACE);
+        assert_eq!(rows[0].count, 1);
     }
 }
