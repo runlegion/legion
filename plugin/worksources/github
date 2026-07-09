@@ -68,12 +68,25 @@ case "${1:-}" in
       --json url,number,title,body,labels,assignees,state,createdAt,updatedAt \
       --limit "$LIMIT")
     [ -n "$LABEL" ] && ARGS+=(--label "$LABEL")
-    # Merge stderr into the captured output so a failure carries gh's actual
-    # message (auth expired / rate limited / unknown repo) instead of a
-    # guessed one -- `if` (not `set -e`) governs the exit check here, so a
-    # nonzero gh exit falls into the `else` branch rather than killing the
-    # script.
-    if OUT=$(gh "${ARGS[@]}" 2>&1); then
+    # Capture gh's stderr to a scratch file rather than merging it into
+    # $OUT: merging (2>&1) would splice any stderr gh emits on a
+    # *successful* call (deprecation notices etc.) into the JSON payload
+    # this verb echoes to stdout, corrupting it, and would also make the
+    # unguarded `jq 'length'` below see non-JSON input and fail --
+    # fatally, since `set -e` governs this script and there is no `||`
+    # guard on that pipeline. `if` (not `set -e`) governs the gh exit
+    # check itself, so a nonzero gh exit falls into the `else` branch
+    # rather than killing the script.
+    GH_ERR=$(mktemp)
+    trap 'rm -f "$GH_ERR"' EXIT
+    if OUT=$(gh "${ARGS[@]}" 2>"$GH_ERR"); then
+      # Relay whatever gh put on stderr even though the call succeeded
+      # (e.g. a deprecation notice) -- the point of routing it to a
+      # scratch file instead of 2>&1 is to keep it out of $OUT, not to
+      # discard it; call_plugin_inner (#750) relays this same channel for
+      # every plugin, and this verb's own doctrine above is "surface,
+      # don't silently drop."
+      [ -s "$GH_ERR" ] && cat "$GH_ERR" >&2
       if ! command -v jq &>/dev/null; then
         # Missing jq must not silently disable truncation detection -- say
         # so, rather than defaulting COUNT to 0 and staying quiet.
@@ -86,7 +99,7 @@ case "${1:-}" in
       fi
       echo "$OUT"
     else
-      ESCAPED=$(printf '%s' "$OUT" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+      ESCAPED=$(sed 's/\\/\\\\/g; s/"/\\"/g' "$GH_ERR" | tr '\n' ' ')
       echo "{\"error\":\"gh issue list failed: ${ESCAPED}\"}" >&2
       exit 1
     fi
