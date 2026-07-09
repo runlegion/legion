@@ -394,7 +394,11 @@ pub(crate) fn resolve_acceptance_criteria(
     Ok((criteria, "card".to_string()))
 }
 
-pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> error::Result<()> {
+pub(crate) fn handle_verify(
+    card: String,
+    verdicts_file: Option<String>,
+    deviation: Option<String>,
+) -> error::Result<()> {
     let database = open_db()?;
 
     let card_row = database
@@ -407,6 +411,47 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
     //    canonical criteria -- the spec is authoritative.
     // 2. Otherwise fall back to `tasks.acceptance` exactly as before.
     let (acceptance, ac_source) = resolve_acceptance_criteria(&database, &card_row)?;
+
+    // Spec-revision deviation gate (#554,
+    // docs/decisions/2026-05-31-spec-revision-protocol.md). Checked before
+    // reading verdicts: an unratified deviation hard-blocks regardless of
+    // what the verdicts file claims, because the presence of a ratified
+    // `ReplanRecord` -- not the agent's self-reported verdicts -- is the
+    // signal that distinguishes a sanctioned re-plan from improvisation.
+    let ratified_replan_exists = database
+        .get_latest_replan_record(&card)?
+        .is_some_and(|r| r.ratified);
+    if let Some(verify::VerifyDecision::ReplanRequired { reason }) =
+        verify::replan_gate(deviation.as_deref(), ratified_replan_exists)
+    {
+        let (commit_hash, branch) = git_head_commit_and_branch()?;
+        let skill = verify::verify_gate_key(&card);
+        let details = serde_json::json!({
+            "skill": "legion-verify",
+            "card": card,
+            "decision": format!("ReplanRequired: {reason}"),
+        })
+        .to_string();
+        database.record_quality_gate(
+            &branch,
+            &commit_hash,
+            &skill,
+            GateResult::Issues,
+            1,
+            Some(&details),
+        )?;
+        eprintln!("[legion] verify BLOCKED for card {card}: {reason}");
+        return Err(error::LegionError::ExitWith(1));
+    } else if let Some(reason) = deviation.as_deref() {
+        // A deviation was asserted but a ratified ReplanRecord covers it --
+        // proceed against the current (revised) AC via the normal decide()
+        // path below. Leave a breadcrumb so the asserted reason is not
+        // silently dropped from the audit trail.
+        eprintln!(
+            "[legion] verify: deviation ratified for card {card} ({reason}) -- \
+             auditing against the revised acceptance criteria"
+        );
+    }
 
     // Read the agent's per-criterion verdicts (file or stdin).
     let raw = read_file_or_stdin(verdicts_file.as_deref(), "--verdicts-file")?;
@@ -435,6 +480,7 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
         verify::VerifyDecision::NeedsInput { uncertain } => uncertain.len() as u64,
         verify::VerifyDecision::Incomplete { unaddressed } => *unaddressed as u64,
         verify::VerifyDecision::NoCheckableAc => 1,
+        verify::VerifyDecision::ReplanRequired { .. } => 1,
         verify::VerifyDecision::Proceed => 0,
     };
     let gate_result = if decision.allows_done() {
@@ -510,6 +556,14 @@ pub(crate) fn handle_verify(card: String, verdicts_file: Option<String>) -> erro
                      {e}; move it manually.)"
                 ),
             }
+            return Err(error::LegionError::ExitWith(1));
+        }
+        // `decide()` never produces this variant itself -- it is returned
+        // only by `verify::replan_gate`, which `handle_verify` checks (and
+        // returns early on) before `decide()` runs. Covered here for
+        // exhaustiveness against future callers of `decide()`.
+        verify::VerifyDecision::ReplanRequired { reason } => {
+            eprintln!("[legion] verify BLOCKED for card {card}: {reason}");
             return Err(error::LegionError::ExitWith(1));
         }
     }
