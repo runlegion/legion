@@ -18,6 +18,7 @@ mod kanban;
 pub mod module_edges;
 pub(crate) mod quality_gates;
 mod reflections;
+pub(crate) mod replan;
 mod schedules;
 mod scip;
 mod sessions;
@@ -141,6 +142,7 @@ impl Database {
         inventory::create_tables(conn)?;
         module_edges::create_tables(conn)?;
         css_symbols::create_tables(conn)?;
+        replan::create_tables(conn)?;
         tx.commit()?;
 
         reflections::migrate(conn)?;

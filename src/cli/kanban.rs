@@ -168,6 +168,43 @@ pub(crate) enum KanbanAction {
         id: String,
     },
 
+    /// Request a re-plan: the agent has concluded the card's frozen
+    /// acceptance criteria are wrong, incomplete, or unachievable as
+    /// written, and stops instead of improvising around them (Accepted ->
+    /// NeedsInput). This is the "stop, do not route around" step of the
+    /// spec-revision protocol
+    /// (docs/decisions/2026-05-31-spec-revision-protocol.md): the reason is
+    /// required because it is what a human re-ratifies against.
+    ///
+    /// Once the AC are revised and ratified, record that with
+    /// `legion kanban replan-record` before resuming work -- an unratified
+    /// deviation from the frozen AC fails `legion verify`.
+    ReplanRequest {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+
+        /// Why the frozen acceptance criteria are wrong, incomplete, or
+        /// unachievable. Required: this is the surfaced reason a human
+        /// re-ratifies against.
+        #[arg(long)]
+        reason: String,
+    },
+
+    /// Record a ratified re-plan for a card: the frozen acceptance criteria
+    /// were revised by a deliberate design act (human + agent), not
+    /// improvised around mid-flight. `legion verify` consults this record to
+    /// tell a sanctioned re-plan apart from an unratified deviation.
+    ReplanRecord {
+        /// Card ID the re-plan is bound to
+        #[arg(long)]
+        id: String,
+
+        /// What changed and why
+        #[arg(long)]
+        reason: String,
+    },
+
     /// Cancel a card
     ///
     /// When the card has a linked external issue (`source_url`), the
@@ -779,6 +816,22 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
         KanbanAction::Resume { id } => {
             kanban::transition_card(&database, &id, kanban::Action::Resume, None)?;
             println!("{id}");
+        }
+        KanbanAction::ReplanRequest { id, reason } => {
+            kanban::transition_card(
+                &database,
+                &id,
+                kanban::Action::ReplanRequest,
+                Some(reason.as_str()),
+            )?;
+            println!("{id}");
+        }
+        KanbanAction::ReplanRecord { id, reason } => {
+            // Recording one at all is the ratification act (see the
+            // `ratified` field's doc comment on `ReplanRecord`); there is no
+            // CLI path to record an unratified proposal.
+            let record = database.record_replan_record(&id, &reason, true)?;
+            println!("{}", record.id);
         }
         KanbanAction::Cancel {
             id,

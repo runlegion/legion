@@ -112,6 +112,13 @@ pub enum VerifyDecision {
     /// Fewer verdicts than criteria: some criterion was never assessed. Block
     /// until every criterion has a verdict.
     Incomplete { unaddressed: usize },
+    /// The work deviates from the card's frozen acceptance criteria and no
+    /// ratified `ReplanRecord` exists for the card (#554, spec-revision
+    /// protocol: docs/decisions/2026-05-31-spec-revision-protocol.md). Hard
+    /// block -- an unratified deviation is improvisation, not a sanctioned
+    /// re-plan. Distinct from `Block` so the message names the missing
+    /// ratification rather than a plain unmet criterion.
+    ReplanRequired { reason: String },
 }
 
 impl VerifyDecision {
@@ -242,6 +249,48 @@ pub fn decide(acceptance: &[String], results: &[AcResult]) -> VerifyDecision {
     VerifyDecision::Proceed
 }
 
+/// The spec-revision deviation gate (#554,
+/// docs/decisions/2026-05-31-spec-revision-protocol.md).
+///
+/// The RFC's audit signal is one bit: was a deviation from the card's frozen
+/// acceptance criteria ratified? `deviation` carries the caller's assertion
+/// that the work diverges from the frozen AC on its own authority (a reason,
+/// not just a flag -- it is what a human re-ratifies against);
+/// `ratified_replan_exists` is whether the card has a `ReplanRecord` with
+/// `ratified == true`.
+///
+/// Returns `Some(VerifyDecision::ReplanRequired)` -- a hard block -- only
+/// when a deviation is asserted and no ratified re-plan covers it. Returns
+/// `None` otherwise, meaning: no deviation was asserted, or one was asserted
+/// and a ratified `ReplanRecord` exists, in which case normal `decide()`
+/// auditing against the (now current, ratified) acceptance criteria applies
+/// unchanged.
+///
+/// NOTE: this gate is only as good as its input. `deviation` is not yet
+/// derived automatically from the per-criterion verdicts the verify skill
+/// produces -- today it is surfaced by an explicit `--deviation` flag on
+/// `legion verify` (see `cli::verify::handle_verify`) for a human or agent
+/// who has judged the frozen AC wrong. Without that flag (or a future
+/// automated signal from the skill), this gate does not fire and is a no-op.
+pub fn replan_gate(
+    deviation: Option<&str>,
+    ratified_replan_exists: bool,
+) -> Option<VerifyDecision> {
+    let reason = deviation?;
+    if ratified_replan_exists {
+        return None;
+    }
+    Some(VerifyDecision::ReplanRequired {
+        reason: format!(
+            "unratified deviation from the frozen acceptance criteria: {reason} \
+             -- no ratified ReplanRecord exists for this card. Either the work matches \
+             the frozen AC, or the re-plan must be ratified first \
+             (`legion kanban replan-request` then `legion kanban replan-record`) before \
+             verify can audit against revised criteria."
+        ),
+    })
+}
+
 /// Split a card's stored `acceptance` field (newline-joined criteria, as
 /// `db::insert_card` stores them) into individual criteria, dropping blank
 /// lines. Returns an empty vec for `None` or an all-blank field, which
@@ -355,6 +404,44 @@ mod tests {
             decide(&ac, &results),
             VerifyDecision::Incomplete { unaddressed: 2 }
         );
+    }
+
+    // --- spec-revision deviation gate (#554) ---
+
+    #[test]
+    fn replan_gate_noop_without_deviation() {
+        assert_eq!(replan_gate(None, false), None);
+        assert_eq!(replan_gate(None, true), None);
+    }
+
+    #[test]
+    fn replan_gate_blocks_unratified_deviation() {
+        let decision = replan_gate(Some("step 2 revealed step 1's AC was unachievable"), false);
+        match decision {
+            Some(VerifyDecision::ReplanRequired { reason }) => {
+                assert!(reason.contains("unratified deviation"));
+                assert!(reason.contains("step 2 revealed"));
+            }
+            other => panic!("expected ReplanRequired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replan_gate_allows_ratified_deviation() {
+        // A ratified ReplanRecord covers the deviation -- normal decide()
+        // auditing against the revised AC applies, so the gate is a no-op.
+        assert_eq!(
+            replan_gate(Some("AC was revised after re-plan"), true),
+            None
+        );
+    }
+
+    #[test]
+    fn replan_required_never_allows_done() {
+        let decision = VerifyDecision::ReplanRequired {
+            reason: "x".to_owned(),
+        };
+        assert!(!decision.allows_done());
     }
 
     #[test]

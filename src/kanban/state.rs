@@ -140,6 +140,14 @@ pub enum Action {
     Review,
     /// accepted -> needs-input (blocked on human)
     NeedInput,
+    /// accepted -> needs-input (re-plan requested: the agent has concluded the
+    /// frozen acceptance criteria are wrong, incomplete, or unachievable as
+    /// written, and stops rather than improvising around them -- the
+    /// spec-revision protocol, docs/decisions/2026-05-31-spec-revision-protocol.md).
+    /// A distinct action from `NeedInput` (same destination status) so the
+    /// transition history/audit trail can tell a re-plan request apart from a
+    /// generic "needs human input".
+    ReplanRequest,
     /// accepted -> blocked (technical blocker)
     Block,
     /// blocked -> accepted
@@ -161,6 +169,7 @@ pub fn transition(current: CardStatus, action: Action) -> Result<CardStatus> {
         (CardStatus::Pending, Action::Accept) => CardStatus::Accepted,
         (CardStatus::Accepted, Action::Review) => CardStatus::InReview,
         (CardStatus::Accepted, Action::NeedInput) => CardStatus::NeedsInput,
+        (CardStatus::Accepted, Action::ReplanRequest) => CardStatus::NeedsInput,
         (CardStatus::Accepted, Action::Block) => CardStatus::Blocked,
         (CardStatus::Accepted, Action::Done) => CardStatus::Done,
         (CardStatus::Blocked, Action::Unblock) => CardStatus::Accepted,
@@ -381,5 +390,38 @@ mod tests {
     fn cannot_done_from_blocked() {
         let result = transition(CardStatus::Blocked, Action::Done);
         assert!(result.is_err());
+    }
+
+    // --- Spec-revision protocol (#554): re-plan request ---
+
+    #[test]
+    fn replan_request_from_accepted() {
+        // The agent stops rather than improvising when the frozen AC turn
+        // out wrong: Accepted -> NeedsInput, same destination as NeedInput
+        // but a distinct action so the audit trail can tell them apart.
+        let result = transition(CardStatus::Accepted, Action::ReplanRequest);
+        assert_eq!(
+            result.expect("replan-request is valid from accepted"),
+            CardStatus::NeedsInput
+        );
+    }
+
+    #[test]
+    fn cannot_replan_request_from_non_accepted_states() {
+        for status in [
+            CardStatus::Backlog,
+            CardStatus::Pending,
+            CardStatus::NeedsInput,
+            CardStatus::InReview,
+            CardStatus::Blocked,
+            CardStatus::Done,
+            CardStatus::Cancelled,
+        ] {
+            let result = transition(status, Action::ReplanRequest);
+            assert!(
+                result.is_err(),
+                "replan-request should be rejected from {status:?}"
+            );
+        }
     }
 }

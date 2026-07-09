@@ -832,6 +832,15 @@ pub(crate) enum Commands {
         /// "pass|fail|uncertain", "evidence": "..."}, ...]`.
         #[arg(long)]
         verdicts_file: Option<String>,
+
+        /// Spec-revision deviation gate (#554): assert that the work
+        /// diverges from the card's frozen acceptance criteria, naming why.
+        /// Checked against the card's `ReplanRecord` before verdicts are
+        /// read: a ratified record lets verify proceed against the revised
+        /// AC as normal; without one, verify hard-blocks as an unratified
+        /// deviation (docs/decisions/2026-05-31-spec-revision-protocol.md).
+        #[arg(long)]
+        deviation: Option<String>,
     },
 
     /// Weekly autonomy budget (#524): the governor on self-directed work.
