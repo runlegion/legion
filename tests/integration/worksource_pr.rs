@@ -897,6 +897,226 @@ fn issue_close_with_configured_worksource_writes_audit_row() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// `legion issue list` (#750): enumerate work-source issues via the live
+// plugin path, not the local kanban cache.
+// ---------------------------------------------------------------------------
+
+/// Stub plugin that answers only `list-issues`, returning two fixed issues
+/// with distinct `updatedAt` values so the CLI's updated-at column has
+/// something to assert on. The first issue's title embeds the
+/// `LEGION_WS_STATE`/`LEGION_WS_LABEL` values the stub actually received, so
+/// tests can confirm `list_all_issues` forwards the filters rather than only
+/// checking the audit row (which records what the CLI *asked for*, not what
+/// the plugin *got*).
+#[cfg(unix)]
+fn list_issues_stub_plugin() -> String {
+    r##"#!/bin/bash
+set -e
+case "${1:-}" in
+  list-issues)
+    STATE="${LEGION_WS_STATE:-unset}"
+    LABEL="${LEGION_WS_LABEL:-unset}"
+    cat <<BODY
+[
+  {"url":"https://example.com/issues/42","number":42,"title":"first issue (state=$STATE label=$LABEL)","body":"","labels":[],"assignees":null,"state":"OPEN","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"},
+  {"url":"https://example.com/issues/43","number":43,"title":"second issue","body":"","labels":[],"assignees":null,"state":"OPEN","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-03T00:00:00Z"}
+]
+BODY
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##
+    .to_string()
+}
+
+/// `legion issue list` fails with the canonical worksource error when the
+/// repo has no watch.toml entry -- confirms the command is wired up and
+/// resolves config before ever reaching a plugin.
+#[test]
+fn issue_list_errors_without_worksource_config() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) =
+        run_fail(legion_cmd(dir.path()).args(["issue", "list", "--repo", "no-such-repo"]));
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected 'no work source configured' error, got: {stderr}"
+    );
+}
+
+/// An invalid `--state` is rejected before any worksource resolution, with
+/// a message naming the allowed values.
+#[test]
+fn issue_list_rejects_invalid_state() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "issue",
+        "list",
+        "--repo",
+        "no-such-repo",
+        "--state",
+        "bogus",
+    ]));
+    assert!(
+        stderr.contains("--state must be one of open|closed|all"),
+        "expected state validation error, got: {stderr}"
+    );
+}
+
+/// With a configured work source, `issue list` prints number/state/updated-at
+/// /title per issue (live plugin state, #750 AC1) and writes an audit row
+/// (#750 AC4) carrying the requested state and label filters (#750 AC1).
+#[cfg(unix)]
+#[test]
+fn issue_list_prints_issues_and_writes_audit_row_with_filters() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &list_issues_stub_plugin(),
+    );
+
+    let stdout = run_ok(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["issue", "list", "--repo", "stub", "--label", "bug"]),
+    );
+    assert!(
+        stdout.contains("#42") && stdout.contains("first issue"),
+        "expected first issue row, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("#43") && stdout.contains("second issue"),
+        "expected second issue row, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("state=open") && stdout.contains("label=bug"),
+        "expected the plugin to actually receive LEGION_WS_STATE=open and \
+         LEGION_WS_LABEL=bug (not just the audit row asking for them), got: {stdout}"
+    );
+    assert!(
+        stdout.contains("2026-01-02T00:00:00Z") && stdout.contains("2026-01-03T00:00:00Z"),
+        "expected updated-at column for both rows, got: {stdout}"
+    );
+
+    let audit_out =
+        run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "list-issues", "--json"]));
+    assert!(
+        audit_out.contains("\"action\": \"list-issues\""),
+        "expected a list-issues audit row, got: {audit_out}"
+    );
+    assert!(
+        audit_out.contains("label") && audit_out.contains("bug"),
+        "expected the audit details to carry the --label filter, got: {audit_out}"
+    );
+}
+
+/// `--json` emits a parseable array carrying the live plugin fields, for
+/// scripted callers (#750 AC1).
+#[cfg(unix)]
+#[test]
+fn issue_list_json_flag_emits_parseable_array() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &list_issues_stub_plugin(),
+    );
+
+    let stdout = run_ok(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["issue", "list", "--repo", "stub", "--json"]),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let arr = parsed.as_array().expect("expected a JSON array");
+    assert_eq!(arr.len(), 2, "expected both stub issues, got: {stdout}");
+    assert_eq!(arr[0]["number"], 42);
+    assert_eq!(arr[0]["updated_at"], "2026-01-02T00:00:00Z");
+}
+
+/// A `gh` failure inside the plugin (expired auth, rate limit, unknown repo)
+/// must surface as a loud error, not a silent empty list -- this is the
+/// exact #711 failure mode #750 exists to prevent. The stub's `list-issues`
+/// case exits 1 with a message on stderr, mirroring a real `gh` failure.
+#[cfg(unix)]
+#[test]
+fn issue_list_surfaces_plugin_failure_as_error_not_empty_list() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = r##"#!/bin/bash
+case "${1:-}" in
+  list-issues)
+    echo '{"error":"gh issue list failed: HTTP 401: Bad credentials"}' >&2
+    exit 1
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##;
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), body);
+
+    let (stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(["issue", "list", "--repo", "stub"]),
+    );
+    assert!(
+        stdout.trim().is_empty() || !stdout.contains("no issues"),
+        "a plugin failure must not be reported as an empty list, got stdout: {stdout}"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "expected a non-empty error message on plugin failure, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Bad credentials"),
+        "expected the plugin's actual gh error text to propagate through \
+         call_plugin_inner, not a generic message, got: {stderr}"
+    );
+}
+
+/// A plugin can succeed but still have something worth telling the user --
+/// `list-issues`' own truncation warning (plugin/worksources/github) is the
+/// motivating case. Confirms `call_plugin_inner` relays non-empty stderr on
+/// a *successful* call rather than discarding it; before that fix this
+/// warning would have been silently dropped by the caller, which a pre-push
+/// review caught on this same branch (the CRITICAL finding on commit
+/// 51b90a5).
+#[cfg(unix)]
+#[test]
+fn issue_list_relays_plugin_stderr_warning_on_success() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = r##"#!/bin/bash
+case "${1:-}" in
+  list-issues)
+    echo "[legion worksource:github] warning: list-issues hit the 2-row limit; results may be truncated" >&2
+    echo '[{"url":"https://example.com/issues/1","number":1,"title":"x","body":"","labels":[],"assignees":null,"state":"OPEN","createdAt":"2026-01-01T00:00:00Z"}]'
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##;
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), body);
+
+    let out = run_ok_output(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(["issue", "list", "--repo", "stub"]),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("results may be truncated"),
+        "expected the plugin's success-path warning to reach the user, got stderr: {stderr}"
+    );
+}
+
 /// Create a card on repo `stub` linked to external issue #42 and promote
 /// it to a Done-eligible state (Backlog -> assign -> accept). Shared by
 /// the Done propagation tests.

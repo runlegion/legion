@@ -28,6 +28,7 @@ FIRST_BIN="${FIRST_TOKEN##*/}"
 if [ "$FIRST_BIN" = "gh" ]; then
   emit_deny "Do not use gh directly. Use legion commands instead:
 - legion issue create --repo <name> --title '...' --body '...'
+- legion issue list --repo <name>
 - legion pr create --repo <name> --title '...'
 - legion pr list --repo <name>
 - legion pr review --repo <name> --number <n> --approve

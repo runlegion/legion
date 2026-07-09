@@ -26,6 +26,12 @@ pub struct ExternalIssue {
     pub state: String,
     #[serde(default, alias = "createdAt")]
     pub created_at: Option<String>,
+    /// Last-updated timestamp (#750: `legion issue list` reports this
+    /// alongside state so backlog grooming does not need a separate
+    /// `gh issue view` per row). Absent from shapes that don't carry it
+    /// (e.g. the sub-issue GraphQL projection), hence `Option` + default.
+    #[serde(default, alias = "updatedAt")]
+    pub updated_at: Option<String>,
 }
 
 /// List issues from a work source plugin.
@@ -46,6 +52,31 @@ pub fn list_issues(
             ("LEGION_WS_WORKDIR", workdir),
         ],
     )
+}
+
+/// List work-source issues with state/label filters, for `legion issue
+/// list` (#750): backlog enumeration -- number/title/state/updated-at --
+/// against the work source's live state, not the local kanban cache.
+///
+/// Deliberately a separate plugin verb (`list-issues`) from `list_issues`
+/// (used by `sync`, always open/unfiltered) rather than adding params to
+/// that call, so sync's behavior cannot shift as a side effect of this
+/// verb's defaults changing.
+///
+/// Fail-closed like the other list ops: a missing plugin is an error, not
+/// an empty list (see `require_plugin`).
+pub fn list_all_issues(
+    plugin_name: &str,
+    github_repo: &str,
+    state: &str,
+    label: Option<&str>,
+) -> Result<Vec<ExternalIssue>> {
+    let mut env: Vec<(&str, &str)> =
+        vec![("LEGION_WS_REPO", github_repo), ("LEGION_WS_STATE", state)];
+    if let Some(l) = label {
+        env.push(("LEGION_WS_LABEL", l));
+    }
+    plugin_call(plugin_name, &["list-issues"], &env)
 }
 
 /// View a single issue via a work source plugin.
@@ -360,6 +391,16 @@ mod tests {
     #[test]
     fn list_issues_returns_worksource_error_when_plugin_missing() {
         let result = list_issues("nonexistent-plugin-xyz", "owner/repo", "/tmp");
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn list_all_issues_returns_worksource_error_when_plugin_missing() {
+        let result = list_all_issues("nonexistent-plugin-xyz", "owner/repo", "open", None);
         assert!(
             matches!(result, Err(LegionError::WorkSource(_))),
             "expected WorkSource error, got {:?}",

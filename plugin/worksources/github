@@ -31,6 +31,80 @@ case "${1:-}" in
       --limit 50 2>/dev/null || echo "[]"
     ;;
 
+  list-issues)
+    # Enumerate work-source issues for `legion issue list` (#750): number,
+    # title, state, updated-at, filtered by state and (optionally) label.
+    # Distinct from `list` above (used by `sync`, always open/unfiltered) so
+    # sync's behavior does not shift as a side effect of this verb.
+    #
+    # Fail-closed on an actual gh failure (bad auth, rate limit, network,
+    # unknown repo slug): this is a user-facing enumeration command whose
+    # motivating incident (#711) was exactly "the tool said nothing was
+    # there when something was" -- swallowing errors to `[]` here would
+    # reproduce that failure mode. `list`/`pr-list` above stay fail-open
+    # since callers (`sync`) already treat "no data" as a benign no-op.
+    #
+    # Env: LEGION_WS_REPO, LEGION_WS_STATE (open|closed|all, default open),
+    #      LEGION_WS_LABEL (optional)
+    STATE="${LEGION_WS_STATE:-open}"
+    LABEL="${LEGION_WS_LABEL:-}"
+    # Overridable for tests that want to exercise the truncation-warning
+    # branch without fetching 1000 real issues; production callers never set
+    # this and get the real limit.
+    LIMIT="${LEGION_WS_LIST_LIMIT:-1000}"
+    # Every branch below is fail-closed -- including a blank $REPO, which
+    # earlier read as "no data" and contradicted this verb's own fail-closed
+    # policy (a `watch.toml` row with an empty `github` value would then
+    # report a false-empty backlog, the exact #711 shape).
+    if [ -z "$REPO" ]; then
+      echo '{"error":"LEGION_WS_REPO not set"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    ARGS=(issue list --repo "$REPO" --state "$STATE" \
+      --json url,number,title,body,labels,assignees,state,createdAt,updatedAt \
+      --limit "$LIMIT")
+    [ -n "$LABEL" ] && ARGS+=(--label "$LABEL")
+    # Capture gh's stderr to a scratch file rather than merging it into
+    # $OUT: merging (2>&1) would splice any stderr gh emits on a
+    # *successful* call (deprecation notices etc.) into the JSON payload
+    # this verb echoes to stdout, corrupting it, and would also make the
+    # unguarded `jq 'length'` below see non-JSON input and fail --
+    # fatally, since `set -e` governs this script and there is no `||`
+    # guard on that pipeline. `if` (not `set -e`) governs the gh exit
+    # check itself, so a nonzero gh exit falls into the `else` branch
+    # rather than killing the script.
+    GH_ERR=$(mktemp)
+    trap 'rm -f "$GH_ERR"' EXIT
+    if OUT=$(gh "${ARGS[@]}" 2>"$GH_ERR"); then
+      # Relay whatever gh put on stderr even though the call succeeded
+      # (e.g. a deprecation notice) -- the point of routing it to a
+      # scratch file instead of 2>&1 is to keep it out of $OUT, not to
+      # discard it; call_plugin_inner (#750) relays this same channel for
+      # every plugin, and this verb's own doctrine above is "surface,
+      # don't silently drop."
+      [ -s "$GH_ERR" ] && cat "$GH_ERR" >&2
+      if ! command -v jq &>/dev/null; then
+        # Missing jq must not silently disable truncation detection -- say
+        # so, rather than defaulting COUNT to 0 and staying quiet.
+        echo "[legion worksource:github] warning: jq not found -- cannot check list-issues for truncation" >&2
+      else
+        COUNT=$(echo "$OUT" | jq 'length')
+        if [ "$COUNT" -ge "$LIMIT" ]; then
+          echo "[legion worksource:github] warning: list-issues hit the ${LIMIT}-row limit; results may be truncated" >&2
+        fi
+      fi
+      echo "$OUT"
+    else
+      ESCAPED=$(sed 's/\\/\\\\/g; s/"/\\"/g' "$GH_ERR" | tr '\n' ' ')
+      echo "{\"error\":\"gh issue list failed: ${ESCAPED}\"}" >&2
+      exit 1
+    fi
+    ;;
+
   close)
     NUMBER="${2:-}"
     COMMENT="${LEGION_WS_COMMENT:-}"
@@ -643,7 +717,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "Usage: github <list|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close|pr-checks|view-pr|pr-comments|pr-reviews|pr-check-log>" >&2
+    echo "Usage: github <list|list-issues|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close|pr-checks|view-pr|pr-comments|pr-reviews|pr-check-log>" >&2
     exit 1
     ;;
 esac
