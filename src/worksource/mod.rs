@@ -381,7 +381,21 @@ fn plugin_call<T: serde::de::DeserializeOwned>(
     env: &[(&str, &str)],
 ) -> Result<T> {
     let output = plugin_call_raw(plugin_name, args, env)?;
-    serde_json::from_str(&output).map_err(|e| LegionError::WorkSource(e.to_string()))
+    decode_plugin_output(args, &output)
+}
+
+/// Decode a plugin's raw JSON stdout, naming the operation in any
+/// deserialization failure (#720). `args[0]` is the plugin subcommand every
+/// call site passes (e.g. `list-sub-issues`, `pr-list`) -- serde only
+/// supplies the offending field, so without this the operator sees "missing
+/// field `labels`" with no clue which of a dozen worksource calls produced
+/// it. Split out from `plugin_call` so the error-shaping logic is testable
+/// without spawning a plugin process.
+fn decode_plugin_output<T: serde::de::DeserializeOwned>(args: &[&str], output: &str) -> Result<T> {
+    serde_json::from_str(output).map_err(|e| {
+        let op = args.first().copied().unwrap_or("<unknown op>");
+        LegionError::WorkSource(format!("{op}: {e}"))
+    })
 }
 
 /// Resolve work source config for a repo from watch.toml.
@@ -468,6 +482,51 @@ mod tests {
     fn find_plugin_returns_none_for_nonexistent() {
         let result = find_plugin("nonexistent-plugin-xyz");
         assert!(result.is_none());
+    }
+
+    /// #720: a deserialization failure must name the operation, not just the
+    /// offending field. `list-sub-issues` is the representative verb from the
+    /// issue (the payload that motivated #714 and later #720).
+    #[test]
+    fn decode_plugin_output_names_the_operation_on_deserialize_failure() {
+        let result: Result<serde_json::Value> =
+            decode_plugin_output(&["list-sub-issues"], "not json");
+        let Err(LegionError::WorkSource(msg)) = result else {
+            panic!("expected WorkSource error, got {:?}", result);
+        };
+        assert!(
+            msg.starts_with("list-sub-issues:"),
+            "expected the operation to prefix the error, got: {msg}"
+        );
+    }
+
+    /// Every verb goes through the same helper, so the property holds
+    /// generally, not just for the one call site #714/#720 were filed
+    /// against. Exercise a second, differently-shaped op name.
+    #[test]
+    fn decode_plugin_output_names_the_operation_for_other_verbs() {
+        let result: Result<serde_json::Value> = decode_plugin_output(&["pr-list"], "{ bad json");
+        let Err(LegionError::WorkSource(msg)) = result else {
+            panic!("expected WorkSource error, got {:?}", result);
+        };
+        assert!(
+            msg.starts_with("pr-list:"),
+            "expected the operation to prefix the error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn decode_plugin_output_falls_back_when_args_empty() {
+        // Defensive: no call site passes empty args today, but the helper
+        // must not panic if one ever does.
+        let result: Result<serde_json::Value> = decode_plugin_output(&[], "not json");
+        let Err(LegionError::WorkSource(msg)) = result else {
+            panic!("expected WorkSource error, got {:?}", result);
+        };
+        assert!(
+            msg.starts_with("<unknown op>:"),
+            "expected the fallback op marker, got: {msg}"
+        );
     }
 
     #[test]
