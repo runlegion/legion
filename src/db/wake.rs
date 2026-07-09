@@ -39,6 +39,27 @@ fn map_persona_lease_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonaWak
     })
 }
 
+/// The single definition of "this lease is live": not soft-deleted and not
+/// past its TTL. Shared verbatim by every reader/writer that needs to agree
+/// on liveness -- `list_persona_leases` (what the CLI displays),
+/// `release_persona_lease` (the operator-facing forced release), and
+/// `release_persona_leases_by_host` -- so a released-or-expired lease can
+/// never render as live in one code path while another still treats it as
+/// gone (#679: the list and release paths previously diverged because
+/// release only checked `deleted_at`, ignoring `expires_at`, so an
+/// expired-but-undeleted row was invisible to `list` yet still "releasable"
+/// to `release`).
+///
+/// Deliberately NOT used by `release_persona_lease_if_owner` -- see that
+/// function's doc comment for why the watch reaper's own finalization write
+/// must stay unconditional on `expires_at` (PR #764 review: gating it here
+/// let an expired-but-undeleted row survive reap and get resurrected by the
+/// next same-tick heartbeat).
+///
+/// Uses one unnumbered `?` placeholder -- callers bind `now` at the position
+/// where this fragment lands in the finished SQL text.
+const LIVE_LEASE_WHERE: &str = "deleted_at IS NULL AND expires_at > ?";
+
 /// `persona_wake_leases` (#308) and `wake_attempts` (#487) tables.
 pub(super) fn create_tables(conn: &Connection) -> Result<()> {
     // Migration 17: Persona wake leases for cluster-wide wake coordination (#308).
@@ -205,7 +226,10 @@ impl Database {
     }
 
     /// Soft-delete one lease by (persona_id, signal_id). Returns true if a
-    /// matching live lease existed. Idempotent on an already-released lease.
+    /// matching *live* lease existed (per [`LIVE_LEASE_WHERE`] -- the same
+    /// predicate `list_persona_leases` uses), false when it was already
+    /// released or had already expired. Idempotent on an already-released
+    /// lease.
     ///
     /// Unscoped by host -- used by the operator CLI to forcibly drop any
     /// stuck lease. The watch reaper uses `release_persona_lease_if_owner`
@@ -213,19 +237,47 @@ impl Database {
     /// accidentally release the winner's row.
     pub fn release_persona_lease(&self, persona_id: &str, signal_id: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
-        let updated = self.conn.execute(
+        let sql = format!(
             "UPDATE persona_wake_leases \
-             SET deleted_at = ?1, updated_at = ?1 \
-             WHERE persona_id = ?2 AND signal_id = ?3 AND deleted_at IS NULL",
-            rusqlite::params![&now, persona_id, signal_id],
+             SET deleted_at = ?, updated_at = ? \
+             WHERE persona_id = ? AND signal_id = ? AND {LIVE_LEASE_WHERE}"
+        );
+        let updated = self.conn.execute(
+            &sql,
+            rusqlite::params![&now, &now, persona_id, signal_id, &now],
         )?;
         Ok(updated > 0)
     }
 
     /// Like `release_persona_lease`, but only if the lease is still held by
-    /// `host`. Used by the watch reaper so a late-loser whose lease was
-    /// overwritten by a sync-resolved peer cannot release the peer's row.
-    /// Returns true only when this host's row was released.
+    /// `host`. Used by the watch reaper -- via `AgentTracker::reap_finished`
+    /// -- to finalize a lease the tracker still lists in `held_leases` once
+    /// the child it was guarding has been reaped. `acquired_by_host = host`
+    /// still guards against a late-loser releasing a peer's row after a
+    /// sync-resolved handoff.
+    ///
+    /// Deliberately does NOT gate on `expires_at` (does not use
+    /// [`LIVE_LEASE_WHERE`]): this is a "finalize my own row" write, not a
+    /// "report whether this lease still reads as live" query, and those two
+    /// questions must stay decoupled. `tick_health` runs
+    /// `reap_finished` (which calls this) before
+    /// `heartbeat_persona_leases`, and `heartbeat_persona_leases` is
+    /// host-scoped but liveness-blind -- it refreshes every row still owned
+    /// by `host` with `deleted_at IS NULL`, regardless of `expires_at`. If
+    /// this release were gated on `expires_at > now` the same way
+    /// `list_persona_leases` is, a lease that had already ticked past its TTL
+    /// by the time reap ran would fail to match here (still `deleted_at IS
+    /// NULL`, but `expires_at <= now`), and the very next line of the same
+    /// tick would have `heartbeat_persona_leases` push `expires_at` back into
+    /// the future -- resurrecting a lease the reaper had already finished
+    /// with into a permanent ghost that `list_persona_leases` renders as live
+    /// forever (PR #764 review finding). Owning the row (`acquired_by_host =
+    /// host`) plus not-yet-soft-deleted (`deleted_at IS NULL`) is sufficient
+    /// grounds to finalize it here; whether it also happened to still be
+    /// unexpired is irrelevant to "am I done with this lease."
+    ///
+    /// Returns true only when a row this host still owned (and had not
+    /// already soft-deleted) was released.
     pub fn release_persona_lease_if_owner(
         &self,
         persona_id: &str,
@@ -236,53 +288,59 @@ impl Database {
         let updated = self.conn.execute(
             "UPDATE persona_wake_leases \
              SET deleted_at = ?1, updated_at = ?1 \
-             WHERE persona_id = ?2 AND signal_id = ?3 \
-               AND acquired_by_host = ?4 AND deleted_at IS NULL",
+             WHERE persona_id = ?2 AND signal_id = ?3 AND acquired_by_host = ?4 \
+               AND deleted_at IS NULL",
             rusqlite::params![&now, persona_id, signal_id, host],
         )?;
         Ok(updated > 0)
     }
 
-    /// Soft-delete every live lease held by `host`. Called on daemon shutdown
-    /// so a graceful exit does not leave ghost leases that must age out via TTL.
+    /// Soft-delete every live lease (per [`LIVE_LEASE_WHERE`]) held by `host`.
+    /// Called on daemon shutdown so a graceful exit does not leave ghost
+    /// leases that must age out via TTL.
     #[allow(dead_code)] // wired by a future SIGTERM handler; kept in the API surface now
     pub fn release_persona_leases_by_host(&self, host: &str) -> Result<u64> {
         let now = Utc::now().to_rfc3339();
-        let updated = self.conn.execute(
+        let sql = format!(
             "UPDATE persona_wake_leases \
-             SET deleted_at = ?1, updated_at = ?1 \
-             WHERE acquired_by_host = ?2 AND deleted_at IS NULL",
-            rusqlite::params![&now, host],
-        )?;
+             SET deleted_at = ?, updated_at = ? \
+             WHERE acquired_by_host = ? AND {LIVE_LEASE_WHERE}"
+        );
+        let updated = self
+            .conn
+            .execute(&sql, rusqlite::params![&now, &now, host, &now])?;
         Ok(updated as u64)
     }
 
-    /// Return every live (non-expired, non-deleted) lease, optionally filtered
-    /// to a single persona. Ordered oldest-first by `acquired_at` so the CLI
-    /// lists leases in the order they were taken.
+    /// Return every live lease (per [`LIVE_LEASE_WHERE`] -- the same
+    /// predicate the release paths use, #679), optionally filtered to a
+    /// single persona. Ordered oldest-first by `acquired_at` so the CLI lists
+    /// leases in the order they were taken.
     pub fn list_persona_leases(&self, persona: Option<&str>) -> Result<Vec<PersonaWakeLease>> {
         let now = Utc::now().to_rfc3339();
         match persona {
             Some(p) => {
-                let mut stmt = self.conn.prepare(
+                let sql = format!(
                     "SELECT persona_id, signal_id, acquired_by_host, acquired_at, \
                             heartbeat_at, expires_at, deleted_at, updated_at \
                      FROM persona_wake_leases \
-                     WHERE deleted_at IS NULL AND expires_at > ?1 AND persona_id = ?2 \
-                     ORDER BY acquired_at ASC",
-                )?;
+                     WHERE {LIVE_LEASE_WHERE} AND persona_id = ? \
+                     ORDER BY acquired_at ASC"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
                 Ok(stmt
                     .query_map(rusqlite::params![&now, p], map_persona_lease_row)?
                     .collect::<rusqlite::Result<Vec<_>>>()?)
             }
             None => {
-                let mut stmt = self.conn.prepare(
+                let sql = format!(
                     "SELECT persona_id, signal_id, acquired_by_host, acquired_at, \
                             heartbeat_at, expires_at, deleted_at, updated_at \
                      FROM persona_wake_leases \
-                     WHERE deleted_at IS NULL AND expires_at > ?1 \
-                     ORDER BY acquired_at ASC",
-                )?;
+                     WHERE {LIVE_LEASE_WHERE} \
+                     ORDER BY acquired_at ASC"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
                 Ok(stmt
                     .query_map(rusqlite::params![&now], map_persona_lease_row)?
                     .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -770,6 +828,140 @@ mod tests {
         db.release_persona_lease("legion", "sig-1").unwrap();
         let listed = db.list_persona_leases(None).unwrap();
         assert!(listed.is_empty(), "released leases must not appear in list");
+    }
+
+    #[test]
+    fn persona_lease_release_and_list_agree_on_expired_lease() {
+        // #679: the list and release paths must share one definition of
+        // "live". Before the fix, `release_persona_lease` ignored
+        // `expires_at` and would happily soft-delete (and report `true` for)
+        // an expired-but-undeleted row that `list_persona_leases` had
+        // already stopped displaying -- the exact display-vs-release-path
+        // mismatch the issue reported. An expired lease must read as
+        // "not live" to BOTH paths, not just the list.
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(0))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+
+        // List already agrees the lease is gone.
+        assert!(
+            db.list_persona_leases(None).unwrap().is_empty(),
+            "expired lease must not appear in list"
+        );
+
+        // Release must agree: an expired lease is already "not live", so
+        // there is nothing live left to release.
+        let released = db.release_persona_lease("legion", "sig-1").unwrap();
+        assert!(
+            !released,
+            "release must report 'no live lease found' for an expired lease, \
+             matching what the list already shows"
+        );
+    }
+
+    #[test]
+    fn persona_lease_release_if_owner_finalizes_an_already_expired_lease() {
+        // PR #764 review (regression from the #679 fix above): unlike
+        // `release_persona_lease`, the reaper's owner-scoped release must
+        // NOT agree with `list_persona_leases` on an already-expired lease --
+        // it must finalize (soft-delete) it regardless, so the row is gone
+        // by the time the same tick's `heartbeat_persona_leases` runs. If
+        // this returned `false` here (matching list's "not live" view) the
+        // row would stay `deleted_at IS NULL` and the next heartbeat would
+        // push `expires_at` forward, resurrecting it as a permanent ghost.
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(0))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+
+        // List already treats it as gone (per #679) ...
+        assert!(db.list_persona_leases(None).unwrap().is_empty());
+
+        // ... but the reaper's finalization write must still succeed against
+        // the still-undeleted row.
+        let released = db
+            .release_persona_lease_if_owner("legion", "sig-1", "hostA")
+            .unwrap();
+        assert!(
+            released,
+            "owner-scoped release must finalize an expired-but-undeleted \
+             lease unconditionally, decoupled from list's liveness view"
+        );
+    }
+
+    #[test]
+    fn persona_lease_reap_then_heartbeat_does_not_resurrect_expired_lease() {
+        // Regression test for the PR #764 review finding: reap
+        // (`release_persona_lease_if_owner`) followed by heartbeat
+        // (`heartbeat_persona_leases`) on the same `tick_health` cycle --
+        // exactly `WatchLoop::tick_health`'s order -- must not bring an
+        // expired, reaper-finalized lease back to life.
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-ghost", "hostA", Duration::from_secs(0))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+
+        // The lease has expired but is still `deleted_at IS NULL` at this
+        // point -- exactly the state the reaper finds it in.
+        assert!(
+            db.list_persona_leases(None).unwrap().is_empty(),
+            "expired lease must already read as not-live before reap runs"
+        );
+
+        // Step 1: reap finalizes its own row (as `AgentTracker::reap_finished`
+        // does via `held_leases`).
+        assert!(
+            db.release_persona_lease_if_owner("legion", "sig-ghost", "hostA")
+                .unwrap(),
+            "reap must finalize the expired lease it owns"
+        );
+
+        // Step 2: the same tick's heartbeat sweeps every live lease for this
+        // host. Before the fix this would resurrect the just-reaped row.
+        db.heartbeat_persona_leases("hostA", Duration::from_secs(60))
+            .unwrap();
+
+        assert!(
+            db.list_persona_leases(None)
+                .unwrap()
+                .iter()
+                .all(|l| l.signal_id != "sig-ghost"),
+            "a reaped lease must not reappear in list_persona_leases after \
+             the next heartbeat -- resurrection would make it a permanent ghost"
+        );
+    }
+
+    #[test]
+    fn persona_lease_never_renders_as_live_after_release_or_expiry() {
+        // Direct acceptance-criteria test (#679): drive a lease through both
+        // terminal paths (explicit release, and TTL expiry) and assert the
+        // list never shows it as live in either case.
+        let db = test_db();
+
+        // Path 1: explicit release.
+        db.try_acquire_persona_lease("legion", "sig-released", "hostA", Duration::from_secs(60))
+            .unwrap();
+        assert!(db.release_persona_lease("legion", "sig-released").unwrap());
+        assert!(
+            db.list_persona_leases(Some("legion"))
+                .unwrap()
+                .iter()
+                .all(|l| l.signal_id != "sig-released"),
+            "a released lease must never render as live"
+        );
+
+        // Path 2: TTL expiry, no explicit release.
+        db.try_acquire_persona_lease("legion", "sig-expired", "hostA", Duration::from_secs(0))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            db.list_persona_leases(Some("legion"))
+                .unwrap()
+                .iter()
+                .all(|l| l.signal_id != "sig-expired"),
+            "an expired lease must never render as live"
+        );
     }
 
     #[test]
