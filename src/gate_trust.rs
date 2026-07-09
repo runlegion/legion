@@ -271,7 +271,24 @@ pub fn witness_gate_external(
     let Some(mut prediction) = db.latest_emitted_by_fingerprint(GATE_SURFACE, &fingerprint)? else {
         return Ok(None);
     };
-    let (label, correctness) = if correct {
+    // The claimed event on this surface is P(clean) (CLEAN_CONFIDENCE for a
+    // `clean` verdict, ISSUES_CONFIDENCE for an `issues` verdict, which claims
+    // NOT clean). `correct` is relative to whichever verdict the gate actually
+    // recorded, so it must be reprojected onto the claimed event -- "actually
+    // clean" -- before mapping to an outcome, the same way
+    // `witness_simplify_from_review` reads `was_clean` above. For a `clean`
+    // verdict, correct IS actually_clean. For an `issues` verdict, a correct
+    // catch means it was NOT actually clean, so actually_clean is the
+    // negation of `correct`. Skipping this reprojection (mapping `correct`
+    // straight to Shipped/Escalated) inverts the signal for every `issues`
+    // verdict.
+    let was_clean = prediction
+        .prediction_payload
+        .get("result")
+        .and_then(|v| v.as_str())
+        == Some("clean");
+    let actually_clean = if was_clean { correct } else { !correct };
+    let (label, correctness) = if actually_clean {
         (OutcomeLabel::Shipped, 1.0)
     } else {
         (OutcomeLabel::Escalated, 0.0)
@@ -520,6 +537,10 @@ mod tests {
         // restrict to clean verdicts: an operator's ground truth is direct
         // evidence about whichever verdict the gate actually recorded, so an
         // "issues" prediction is just as eligible as a "clean" one.
+        //
+        // The claimed event is P(clean), so `correct=true` on an ISSUES
+        // verdict means the catch was right -- the diff was NOT actually
+        // clean -- which must record as Escalated/0.0, not Shipped/1.0.
         let db = test_db();
         let id =
             emit_gate_prediction(&db, &gate_row("legion-review", GateResult::Issues, 2)).unwrap();
@@ -530,7 +551,28 @@ mod tests {
             "an issues-verdict prediction must be witnessable by the external source"
         );
         let fetched = db.get_prediction(&id).unwrap().unwrap();
+        assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(0.0));
+        assert_eq!(fetched.outcome_label, Some(OutcomeLabel::Escalated));
+    }
+
+    #[test]
+    fn external_witness_covers_a_false_positive_issues_verdict() {
+        // Mirror case: the gate recorded ISSUES but the operator says the
+        // catch was wrong (`correct=false`) -- the diff was actually clean.
+        // actually_clean = !correct = true, so this must record as
+        // Shipped/1.0, not Escalated/0.0.
+        let db = test_db();
+        let id =
+            emit_gate_prediction(&db, &gate_row("legion-review", GateResult::Issues, 2)).unwrap();
+        let witnessed = witness_gate_external(&db, "legion-review", "deadbeefcafe", false).unwrap();
+        assert_eq!(
+            witnessed,
+            Some(id.clone()),
+            "an issues-verdict prediction must be witnessable by the external source"
+        );
+        let fetched = db.get_prediction(&id).unwrap().unwrap();
         assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(1.0));
+        assert_eq!(fetched.outcome_label, Some(OutcomeLabel::Shipped));
     }
 
     #[test]

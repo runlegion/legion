@@ -199,10 +199,16 @@ pub(crate) enum UncertaintyAction {
         /// Commit hash the gate verdict was recorded against.
         #[arg(long)]
         commit: String,
-        /// Whether the recorded verdict was actually correct: true
-        /// corroborates it (Shipped, correctness 1.0); false marks it
-        /// wrong (Escalated, correctness 0.0) -- e.g. a clean verdict on a
-        /// commit that turned out to ship a bug. Takes an explicit
+        /// Whether the recorded verdict was actually correct, relative to
+        /// WHICHEVER verdict the gate recorded (clean or issues) -- not a
+        /// bare "was the diff clean" flag. For a clean verdict: true
+        /// corroborates it (Shipped, correctness 1.0); false marks it wrong
+        /// (Escalated, correctness 0.0) -- e.g. a clean verdict on a commit
+        /// that turned out to ship a bug. For an issues verdict it is
+        /// reprojected onto the same "was it actually clean" axis before
+        /// scoring: true (the catch was right, the diff was NOT clean)
+        /// still maps to Escalated/0.0, and false (a false-positive catch,
+        /// the diff WAS clean) maps to Shipped/1.0. Takes an explicit
         /// `true`/`false` value (not a bare flag), so a negative witness is
         /// as easy to record as a positive one.
         #[arg(long, action = clap::ArgAction::Set)]
