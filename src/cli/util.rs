@@ -172,7 +172,16 @@ pub(crate) fn git_changed_files() -> Result<std::collections::HashSet<String>, e
                     .to_owned(),
             ));
         }
-        // HEAD has no parent: genuine initial commit, vacuously valid.
+        // HEAD has no parent: genuine initial commit, vacuously valid. This is
+        // unreachable in the normal branch-off-main workflow (HEAD always has
+        // a parent once `main` exists), but note it on stderr rather than
+        // passing silently -- a vacuous pass should never be invisible to
+        // whoever is watching the gate run.
+        eprintln!(
+            "[legion] no base ref ('main' or 'origin/main') found and HEAD has no parent \
+             commit -- treating this as the initial commit. The changed-file set is empty \
+             and any articulation is accepted vacuously."
+        );
         return Ok(std::collections::HashSet::new());
     };
 

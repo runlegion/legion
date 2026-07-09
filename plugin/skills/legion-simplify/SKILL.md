@@ -6,7 +6,7 @@ description: |
   file, what you checked and why the verdict holds; `legion quality-gate check` validates the
   articulation (coverage + non-boilerplate + located evidence) and records the gate so `legion
   pr create` can verify clean state before opening a PR. Run this on every feature branch before a PR.
-version: 2.1.0
+version: 2.1.1
 user-invocable: true
 allowed-tools: Bash, Read
 ---
@@ -79,7 +79,20 @@ Error paths propagate via `?`. No stringly-typed state. Verdict: clean.
    `origin/main...HEAD`) -- this is your coverage list. The `-c core.quotePath=false` flag
    ensures paths with non-ASCII characters are returned unescaped, matching the headings you
    write in step 2. Use `### <path>` headings that are repo-root-relative paths exactly as
-   git reports them (e.g. `### src/café.rs`, not an escaped or shortened form).
+   git reports them (e.g. `### src/café.rs`, not an escaped or shortened form) -- no `./`
+   prefix, no trailing text after the path on the heading line. Coverage matching is exact
+   string equality against what git printed; a heading that does not match byte-for-byte is
+   refused as missing, no matter how much prose you add under it.
+
+   **Renames**: a rename git still recognizes as such (similarity above its threshold --
+   the common case, even with a real edit alongside the move) reports as one `R` line and
+   `--name-only` prints just the new path, so it needs only the one new-path entry. Only a
+   rewrite heavy enough to drop below git's similarity threshold splits into two separate
+   paths -- the old path (deleted) and the new path (added) -- and both then need their own
+   `### <path>` entry, including the old one, even though it no longer exists in the tree.
+   That old-path entry still has to clear the same substance and locator bars as any other:
+   a short paragraph noting where the content moved, with an `Evidence:` line pointing at the
+   new path, clears both; a bare "moved to new_name.rs" does not.
 2. For EACH changed file: read it, review its hunks against the categories above, and write its
    `### <path>` entry with real reasoning.
 3. Write the articulation to a file (e.g. `/tmp/simplify-<branch>.md`).
@@ -106,3 +119,13 @@ Error paths propagate via `?`. No stringly-typed state. Verdict: clean.
 exists for the current HEAD commit hash with `result = "clean"`. Because the gate is recorded
 only by `legion quality-gate check`, a clean row now means an accepted per-file articulation
 exists -- not merely that someone typed "clean".
+
+## Notes
+
+- The validator checks structure, not reasoning quality: file coverage, a word count per
+  entry (~12 words after the heading is stripped), and a within-file locator (`file:line`,
+  `line N`, a symbol, or an `Evidence:` line). It cannot tell a correct verdict from a
+  plausible-sounding wrong one -- that stays the reviewer's job, same division of labor as
+  `legion pr write-check`. It can tell when an entry is empty, boilerplate, or points at
+  nothing locatable, and it refuses those.
+- If you commit again after a clean gate, the gate no longer matches HEAD -- re-run step 4.

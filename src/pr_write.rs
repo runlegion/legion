@@ -172,8 +172,13 @@ fn split_entries(mapping: &str) -> Vec<String> {
 /// criterion and the evidence line is checked separately, so neither should
 /// count toward the substance threshold.
 ///
-/// Shared with `simplify_check`, which uses the same strip-then-count logic
-/// to validate per-file simplify articulation entries.
+/// pr-write-only (#669): `simplify_check` deliberately does NOT share this
+/// stripper. Dropping the `Evidence:` line is correct here because pr-write
+/// checks that line's presence separately from the word count, but in
+/// simplify articulation an `Evidence:` line IS the within-file locator
+/// (see `simplify_check::entry_body`), so stripping it there silently
+/// discarded a legitimate entry's substance. Sharing this function again
+/// would reintroduce that leak.
 pub(crate) fn strip_evidence_lines(entry: &str) -> String {
     entry
         .lines()
