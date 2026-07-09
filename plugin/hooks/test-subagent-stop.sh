@@ -2,8 +2,12 @@
 # Test runner for the SubagentStop hook (#570).
 #
 # subagent-stop.sh persists a finished subagent's transcript tail as a
-# domain=checkpoint reflection (tagged subagent,auto) and injects a one-line
-# pointer to the parent via hookSpecificOutput.additionalContext. Every failure
+# domain=checkpoint reflection (tagged subagent,auto) and injects a nudge via
+# hookSpecificOutput.additionalContext that continues the SUBAGENT's own turn.
+# That continuation message is what the Task tool actually returns to the
+# parent, so the nudge must order the subagent to restate its complete
+# deliverable first and append the checkpoint note only after (#752) --
+# never a bare acknowledgment that references a prior message. Every failure
 # path must exit 0 (never block the parent).
 #
 # Run from anywhere:
@@ -31,7 +35,7 @@ TRANSCRIPT="$WORK/agent-transcript.jsonl"
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Root cause: cookie SameSite=Strict drops the refresh on cross-site nav."}]}}'
 } > "$TRANSCRIPT"
 
-echo "==> persists a subagent checkpoint + informs the parent"
+echo "==> persists a subagent checkpoint + nudges the subagent's own turn"
 : > "$STUB_LOG"
 out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${TRANSCRIPT}\"}" \
   | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
@@ -39,15 +43,22 @@ assert_contains "reflect called with domain=checkpoint" "$(cat "$STUB_LOG")" 're
 assert_contains "tagged subagent,auto" "$(cat "$STUB_LOG")" 'subagent,auto'
 assert_contains "checkpoint text names the agent_type" "$(cat "$STUB_LOG")" 'SUBAGENT CHECKPOINT] Explore'
 assert_contains "scraped the transcript summary" "$(cat "$STUB_LOG")" 'token refresh bug'
-assert_contains "parent context is additionalContext" "$out" '"hookEventName": "SubagentStop"'
-assert_contains "parent pointer names recall" "$out" 'legion recall --repo legion-subagent-test --domain checkpoint'
+assert_contains "nudge is additionalContext continuing the subagent's turn" "$out" '"hookEventName": "SubagentStop"'
+assert_contains "checkpoint note names recall" "$out" 'legion recall --repo legion-subagent-test --domain checkpoint'
+assert_contains "prompt orders a full restatement" "$out" 'RESTATE your complete deliverable in full'
+assert_contains "prompt names the next message as the only channel" "$out" 'Your NEXT message is the ONLY message the orchestrator that spawned you will ever receive'
+# The needle's ".." stand in for the JSON-escaped \" quotes jq wraps each
+# phrase in (grep BRE has no lookaround, so a literal quote is unreliable
+# across escaped/unescaped output; "." as a single-char wildcard is not).
+assert_contains "prompt forbids referencing a prior message" "$out" 'Never write ..see above.., ..already delivered.., or any other reference to a prior message'
+assert_contains "restatement instruction precedes the checkpoint note (not just present)" "$out" 'exactly as if reporting it for the first time.*Only after the full restatement, append one line'
 
-echo "==> missing transcript: skip reflect, still inform parent, exit 0"
+echo "==> missing transcript: skip reflect, still nudge the subagent, exit 0"
 : > "$STUB_LOG"
 out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"/no/such/file.jsonl\"}" \
   | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
 assert_not_contains "no reflect call on missing transcript" "$(cat "$STUB_LOG")" 'reflect'
-assert_contains "parent still informed" "$out" '"hookEventName": "SubagentStop"'
+assert_contains "subagent still nudged" "$out" '"hookEventName": "SubagentStop"'
 
 echo "==> no cwd: pass through silently"
 out=$(echo '{}' | bash "$HOOK")
@@ -70,7 +81,7 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Deduped s
 dedup_in="{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${DEDUP_TRANSCRIPT}\",\"session_id\":\"sess-1\"}"
 out1=$(echo "$dedup_in" | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
 out2=$(echo "$dedup_in" | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
-assert_contains "first fire informs the parent" "$out1" '"hookEventName": "SubagentStop"'
+assert_contains "first fire nudges the subagent" "$out1" '"hookEventName": "SubagentStop"'
 assert_empty "second (re-delivered) fire is silent" "$out2"
 reflect_count=$(grep -c 'reflect' "$STUB_LOG" 2>/dev/null || echo 0)
 assert_eq "reflect called exactly once across two fires" "$reflect_count" "1"
