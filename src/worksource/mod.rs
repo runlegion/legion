@@ -318,6 +318,17 @@ fn call_plugin_inner(
         return Err(LegionError::WorkSource(format!("plugin failed: {stderr}")));
     }
 
+    // A plugin that succeeds can still have something worth telling the
+    // user (e.g. `list-issues`' "result set truncated" warning, #750). Prior
+    // to this, stderr on a *successful* call was captured only to be
+    // discarded, so any such warning silently vanished -- the same
+    // quiet-failure shape #750 exists to close, just one layer down. This is
+    // relayed for every plugin call, not just `list-issues`, since any
+    // future plugin warning-on-success deserves the same treatment.
+    if !stderr.trim().is_empty() {
+        eprintln!("{}", stderr.trim_end());
+    }
+
     Ok(stdout)
 }
 

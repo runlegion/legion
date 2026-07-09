@@ -937,6 +937,83 @@ fn issue_list_json_flag_emits_parseable_array() {
     assert_eq!(arr[0]["updated_at"], "2026-01-02T00:00:00Z");
 }
 
+/// A `gh` failure inside the plugin (expired auth, rate limit, unknown repo)
+/// must surface as a loud error, not a silent empty list -- this is the
+/// exact #711 failure mode #750 exists to prevent. The stub's `list-issues`
+/// case exits 1 with a message on stderr, mirroring a real `gh` failure.
+#[cfg(unix)]
+#[test]
+fn issue_list_surfaces_plugin_failure_as_error_not_empty_list() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = r##"#!/bin/bash
+case "${1:-}" in
+  list-issues)
+    echo '{"error":"gh issue list failed: HTTP 401: Bad credentials"}' >&2
+    exit 1
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##;
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), body);
+
+    let (stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(["issue", "list", "--repo", "stub"]),
+    );
+    assert!(
+        stdout.trim().is_empty() || !stdout.contains("no issues"),
+        "a plugin failure must not be reported as an empty list, got stdout: {stdout}"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "expected a non-empty error message on plugin failure, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Bad credentials"),
+        "expected the plugin's actual gh error text to propagate through \
+         call_plugin_inner, not a generic message, got: {stderr}"
+    );
+}
+
+/// A plugin can succeed but still have something worth telling the user --
+/// `list-issues`' own truncation warning (plugin/worksources/github) is the
+/// motivating case. Confirms `call_plugin_inner` relays non-empty stderr on
+/// a *successful* call rather than discarding it; before that fix this
+/// warning would have been silently dropped by the caller, which a pre-push
+/// review caught on this same branch (the CRITICAL finding on commit
+/// 51b90a5).
+#[cfg(unix)]
+#[test]
+fn issue_list_relays_plugin_stderr_warning_on_success() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = r##"#!/bin/bash
+case "${1:-}" in
+  list-issues)
+    echo "[legion worksource:github] warning: list-issues hit the 2-row limit; results may be truncated" >&2
+    echo '[{"url":"https://example.com/issues/1","number":1,"title":"x","body":"","labels":[],"assignees":null,"state":"OPEN","createdAt":"2026-01-01T00:00:00Z"}]'
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##;
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), body);
+
+    let out = run_ok_output(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(["issue", "list", "--repo", "stub"]),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("results may be truncated"),
+        "expected the plugin's success-path warning to reach the user, got stderr: {stderr}"
+    );
+}
+
 /// Create a card on repo `stub` linked to external issue #42 and promote
 /// it to a Done-eligible state (Backlog -> assign -> accept). Shared by
 /// the Done propagation tests.

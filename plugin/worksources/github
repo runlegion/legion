@@ -48,10 +48,17 @@ case "${1:-}" in
     #      LEGION_WS_LABEL (optional)
     STATE="${LEGION_WS_STATE:-open}"
     LABEL="${LEGION_WS_LABEL:-}"
-    LIMIT=1000
+    # Overridable for tests that want to exercise the truncation-warning
+    # branch without fetching 1000 real issues; production callers never set
+    # this and get the real limit.
+    LIMIT="${LEGION_WS_LIST_LIMIT:-1000}"
+    # Every branch below is fail-closed -- including a blank $REPO, which
+    # earlier read as "no data" and contradicted this verb's own fail-closed
+    # policy (a `watch.toml` row with an empty `github` value would then
+    # report a false-empty backlog, the exact #711 shape).
     if [ -z "$REPO" ]; then
-      echo "[]"
-      exit 0
+      echo '{"error":"LEGION_WS_REPO not set"}' >&2
+      exit 1
     fi
     if ! command -v gh &>/dev/null; then
       echo '{"error":"gh CLI not found"}' >&2
@@ -61,13 +68,28 @@ case "${1:-}" in
       --json url,number,title,body,labels,assignees,state,createdAt,updatedAt \
       --limit "$LIMIT")
     [ -n "$LABEL" ] && ARGS+=(--label "$LABEL")
-    RESULT=$(gh "${ARGS[@]}" 2>/dev/null) \
-      || { echo '{"error":"gh issue list failed (check gh auth status, rate limit, or repo slug)"}' >&2; exit 1; }
-    COUNT=$(echo "$RESULT" | jq 'length' 2>/dev/null || echo 0)
-    if [ "$COUNT" -ge "$LIMIT" ]; then
-      echo "[legion worksource:github] warning: list-issues hit the ${LIMIT}-row limit; results may be truncated" >&2
+    # Merge stderr into the captured output so a failure carries gh's actual
+    # message (auth expired / rate limited / unknown repo) instead of a
+    # guessed one -- `if` (not `set -e`) governs the exit check here, so a
+    # nonzero gh exit falls into the `else` branch rather than killing the
+    # script.
+    if OUT=$(gh "${ARGS[@]}" 2>&1); then
+      if ! command -v jq &>/dev/null; then
+        # Missing jq must not silently disable truncation detection -- say
+        # so, rather than defaulting COUNT to 0 and staying quiet.
+        echo "[legion worksource:github] warning: jq not found -- cannot check list-issues for truncation" >&2
+      else
+        COUNT=$(echo "$OUT" | jq 'length')
+        if [ "$COUNT" -ge "$LIMIT" ]; then
+          echo "[legion worksource:github] warning: list-issues hit the ${LIMIT}-row limit; results may be truncated" >&2
+        fi
+      fi
+      echo "$OUT"
+    else
+      ESCAPED=$(printf '%s' "$OUT" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+      echo "{\"error\":\"gh issue list failed: ${ESCAPED}\"}" >&2
+      exit 1
     fi
-    echo "$RESULT"
     ;;
 
   close)
