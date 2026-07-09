@@ -31,7 +31,7 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
 
 /// A recorded spec re-plan bound to a card: `{card_id, reason, revised_at,
 /// ratified}` per the RFC (docs/decisions/2026-05-31-spec-revision-protocol.md).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ReplanRecord {
     pub id: String,
     pub card_id: String,
@@ -74,6 +74,8 @@ impl Database {
     /// `verify::replan_gate`.
     pub fn get_latest_replan_record(&self, card_id: &str) -> Result<Option<ReplanRecord>> {
         let mut stmt = self.conn.prepare(
+            // `ORDER BY id DESC` relies on `id` being a UUIDv7 (time-ordered
+            // lexicographically): the newest record has the largest id.
             "SELECT id, card_id, reason, revised_at, ratified
              FROM replan_records
              WHERE card_id = ?1
