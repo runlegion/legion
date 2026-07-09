@@ -5,7 +5,7 @@
 //! of the `--json` envelope (see sym_tree.rs/find_file.rs for the
 //! freshness/drift-detection tests built on top of this).
 
-use crate::common::{legion_cmd, run_git_fixture, run_ok};
+use crate::common::{legion_cmd, run_git_fixture, run_git_fixture_output, run_ok};
 
 /// Seed a watch.toml in the data dir pointing at `repos` (name, workdir).
 /// Backslashes are TOML escape syntax, so Windows paths interpolated raw
@@ -36,14 +36,7 @@ fn legion_index_records_inventory_snapshot_with_head_in_git_checkout() {
     run_git_fixture(repo_dir.path(), &["add", "a.rs"]);
     run_git_fixture(repo_dir.path(), &["commit", "-m", "initial"]);
 
-    let expected_head = {
-        let out = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo_dir.path())
-            .output()
-            .expect("git rev-parse HEAD");
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    };
+    let expected_head = run_git_fixture_output(repo_dir.path(), &["rev-parse", "HEAD"]);
 
     seed_watch_toml(data_dir.path(), &[("gitrepo", repo_dir.path())]);
     let before = chrono::Utc::now();
@@ -127,14 +120,7 @@ fn reindex_replaces_prior_snapshot_row_not_accumulates() {
     run_git_fixture(repo_dir.path(), &["commit", "-m", "second"]);
     run_ok(legion_cmd(data_dir.path()).args(["index", "gitrepo"]));
 
-    let expected_head = {
-        let out = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo_dir.path())
-            .output()
-            .expect("git rev-parse HEAD");
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    };
+    let expected_head = run_git_fixture_output(repo_dir.path(), &["rev-parse", "HEAD"]);
 
     let json_out = run_ok(
         legion_cmd(data_dir.path())

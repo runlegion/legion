@@ -403,11 +403,35 @@ mod tests {
 
     // --- current_head (#746) ---
 
+    /// Suite-wide isolated (always-empty) `GIT_CONFIG_GLOBAL` /
+    /// `GIT_CONFIG_SYSTEM` file paths for this crate target's fixture git
+    /// invocations (#740). Mirrors the integration crate's
+    /// `isolated_git_config_paths` -- this is a lib unit test, a separate
+    /// crate target, so that helper is not importable here. The backing
+    /// tempdir is deliberately leaked: it must outlive every test in this
+    /// binary, and process exit reclaims it like any other tempfile.
+    fn isolated_git_config_paths() -> &'static (std::path::PathBuf, std::path::PathBuf) {
+        static ISOLATED_GIT_CONFIG: std::sync::OnceLock<(std::path::PathBuf, std::path::PathBuf)> =
+            std::sync::OnceLock::new();
+        ISOLATED_GIT_CONFIG.get_or_init(|| {
+            let dir = tempfile::tempdir().expect("create isolated git config dir");
+            let global = dir.path().join("global.gitconfig");
+            let system = dir.path().join("system.gitconfig");
+            fs::write(&global, "").expect("write isolated global gitconfig");
+            fs::write(&system, "").expect("write isolated system gitconfig");
+            std::mem::forget(dir);
+            (global, system)
+        })
+    }
+
     /// Run `git` in `dir` with hermetic per-invocation identity (never a
-    /// `git config` write), mirroring the integration crate's
-    /// `run_git_fixture` -- this is a lib unit test, a separate crate
-    /// target, so that helper is not importable here.
+    /// `git config` write) plus full config/dir isolation (#740:
+    /// `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` pinned to isolated empty
+    /// files, `GIT_DIR`/`GIT_WORK_TREE` pinned to `dir`), mirroring the
+    /// integration crate's `run_git_fixture` -- this is a lib unit test, a
+    /// separate crate target, so that helper is not importable here.
     fn run_git_fixture(dir: &std::path::Path, args: &[&str]) {
+        let (global_config, system_config) = isolated_git_config_paths();
         let mut full_args: Vec<&str> = vec![
             "-c",
             "user.name=Legion Test Fixture",
@@ -420,6 +444,10 @@ mod tests {
         let out = std::process::Command::new("git")
             .args(&full_args)
             .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", global_config)
+            .env("GIT_CONFIG_SYSTEM", system_config)
+            .env("GIT_DIR", dir.join(".git"))
+            .env("GIT_WORK_TREE", dir)
             .output()
             .unwrap_or_else(|e| panic!("git {args:?} failed to spawn in {dir:?}: {e}"));
         assert!(
@@ -427,6 +455,27 @@ mod tests {
             "git {args:?} exited non-zero in {dir:?}\nstderr: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// Read-only counterpart to `run_git_fixture`, sharing the same
+    /// isolation, for queries whose stdout the caller needs.
+    fn run_git_fixture_output(dir: &std::path::Path, args: &[&str]) -> String {
+        let (global_config, system_config) = isolated_git_config_paths();
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", global_config)
+            .env("GIT_CONFIG_SYSTEM", system_config)
+            .env("GIT_DIR", dir.join(".git"))
+            .env("GIT_WORK_TREE", dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn in {dir:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} exited non-zero in {dir:?}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
     #[test]
@@ -437,14 +486,7 @@ mod tests {
         run_git_fixture(dir.path(), &["add", "a.txt"]);
         run_git_fixture(dir.path(), &["commit", "-m", "initial"]);
 
-        let expected = {
-            let out = std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(dir.path())
-                .output()
-                .unwrap();
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        };
+        let expected = run_git_fixture_output(dir.path(), &["rev-parse", "HEAD"]);
 
         assert_eq!(current_head(dir.path()), Some(expected));
     }

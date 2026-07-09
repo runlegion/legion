@@ -1957,18 +1957,16 @@ fn quality_gate_check_non_ascii_path_roundtrips_correctly() {
     run_git_fixture(rp, &["commit", "-m", "add non-ascii file"]);
 
     // Ask git what name it reports (with core.quotePath=false).
-    let diff_out = Command::new("git")
-        .args([
+    let reported_path = run_git_fixture_output(
+        rp,
+        &[
             "-c",
             "core.quotePath=false",
             "diff",
             "--name-only",
             "main...HEAD",
-        ])
-        .current_dir(rp)
-        .output()
-        .expect("git diff failed");
-    let reported_path = String::from_utf8_lossy(&diff_out.stdout).trim().to_string();
+        ],
+    );
     // The path must be non-empty and not octal-quoted.
     assert!(
         !reported_path.is_empty(),
