@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use crate::pr_write::{MIN_MAPPING_WORDS, has_within_file_locator, strip_evidence_lines};
+use crate::pr_write::{MIN_MAPPING_WORDS, has_within_file_locator};
 
 /// Minimum words of prose per file entry, after the heading is stripped.
 /// Aliased to `pr_write::MIN_MAPPING_WORDS` so both gates share a single
@@ -85,10 +85,12 @@ pub fn parse_articulation(articulation: &str) -> Vec<ArticulationEntry> {
 }
 
 /// Strip the `### <path>` heading line(s) from an articulation entry, leaving
-/// the body for the located-evidence check. Unlike `strip_evidence_lines` this
-/// KEEPS any `Evidence:` line (so an explicit citation counts) and removes only
-/// the heading -- the heading restates the file path and would otherwise
-/// satisfy `has_evidence`'s source-path test for free.
+/// the body for both the substance count and the located-evidence check.
+/// Unlike `pr_write::strip_evidence_lines` this KEEPS any `Evidence:` line (so
+/// an explicit citation counts toward both the word threshold and
+/// `has_within_file_locator`'s source-path test) and removes only the heading
+/// -- the heading restates the file path and would otherwise satisfy that
+/// test for free.
 fn entry_body(raw: &str) -> String {
     raw.lines()
         .filter(|l| !l.trim_start().starts_with("### "))
@@ -146,13 +148,15 @@ pub fn validate_articulation(
         ));
     }
 
-    // Substance check: each entry must have enough prose.
-    // strip_evidence_lines already drops `### ` heading lines (they start with
-    // "### "), so the heading path tokens do not count toward the word
-    // threshold -- only the body prose does.
+    // Both checks below read the same stripped body -- see `entry_body`'s doc
+    // comment for why it (not `pr_write::strip_evidence_lines`) is the right
+    // stripper for simplify: an `Evidence:` line is simplify's own
+    // within-file locator, not a foreign convention to discard.
     for entry in &entries {
-        let prose = strip_evidence_lines(&entry.raw);
-        let words = prose.split_whitespace().count();
+        let body = entry_body(&entry.raw);
+
+        // Substance check: each entry must have enough prose.
+        let words = body.split_whitespace().count();
         if words < MIN_ENTRY_WORDS {
             findings.push(format!(
                 "entry '{}' is too thin ({} words) -- explain which checks were \
@@ -168,7 +172,7 @@ pub fn validate_articulation(
         // strict `has_within_file_locator` (symbol / file:line / Evidence:
         // line) -- neither a behavioral cue word nor a BARE filename (which
         // just repeats the heading) clears this structural gate.
-        if !has_within_file_locator(&entry_body(&entry.raw)) {
+        if !has_within_file_locator(&body) {
             findings.push(format!(
                 "entry '{}' cites no located evidence -- point at the construct \
                  you examined (a file:line, a `fn`/`::` symbol, or an \
@@ -328,6 +332,66 @@ mod tests {
              focused, with no duplication or abstraction-altitude problems worth changing.\n\
              Evidence: src/foo.rs:12 the single match in handle_event\n";
         let report = validate_articulation(&files, body);
+        assert!(report.ok, "expected clean, got {:?}", report.findings);
+    }
+
+    #[test]
+    fn accepts_entry_whose_substance_is_on_the_evidence_line() {
+        // Regression guard for the strip_evidence_lines convention leak (#669):
+        // simplify_check must not reuse pr_write's evidence-line-dropping
+        // stripper for the word count. An entry that packs its reasoning onto
+        // the `Evidence:` line must still count those words toward the
+        // substance threshold rather than losing them silently.
+        let files = changed(&["src/foo.rs"]);
+        let body = "### src/foo.rs\n\
+             Evidence: src/foo.rs:12 fn handle_event has a single match arm per variant, \
+             propagates errors via `?`, and duplicates nothing worth extracting here.\n";
+        let report = validate_articulation(&files, body);
+        assert!(
+            report.ok,
+            "prose on the Evidence: line must count toward substance, got {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn refuses_rename_when_old_path_entry_missing() {
+        // Renames below git's similarity threshold are reported by
+        // `git diff --name-only` as a delete of the old path plus an add of
+        // the new path (two separate entries), not a single rename line.
+        // Coverage must be exact-path: an articulation addressing only the
+        // new path still leaves the old path uncovered, and the gate refuses
+        // by name -- an agent cannot clear this by adding more prose about
+        // the new path, since the old path simply will not match.
+        let files = changed(&["src/old_name.rs", "src/new_name.rs"]);
+        let only_new_path = "### src/new_name.rs\n\
+             Renamed from old_name.rs and reviewed for duplicate logic, stringly-typed \
+             state, and unnecessary abstraction. `fn parse` at line 10 is unchanged \
+             behaviorally aside from the move; nothing to extract.\n";
+        let report = validate_articulation(&files, only_new_path);
+        assert!(
+            !report.ok,
+            "expected a refusal for the uncovered old path, got clean"
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.contains("missing coverage") && f.contains("src/old_name.rs")),
+            "expected a missing-coverage finding naming the old path exactly, got {:?}",
+            report.findings
+        );
+
+        // Only when BOTH git-reported paths get an exact-match entry does the
+        // articulation pass -- there is no way to satisfy coverage for the
+        // old path other than heading it with the exact path git reports.
+        let both_paths = format!(
+            "{only_new_path}\n### src/old_name.rs\n\
+             Deleted as part of the rename to new_name.rs; the content now lives there and \
+             was reviewed under that heading, so nothing further to check under this path.\n\
+             Evidence: content moved to src/new_name.rs, reviewed there in full\n"
+        );
+        let report = validate_articulation(&files, &both_paths);
         assert!(report.ok, "expected clean, got {:?}", report.findings);
     }
 

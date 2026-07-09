@@ -1873,6 +1873,63 @@ fn quality_gate_check_no_base_ref_with_parent_commit_exits_nonzero() {
     );
 }
 
+/// quality-gate check: a genuine initial commit (no `main`/`origin/main` ref
+/// AND HEAD has no parent) passes vacuously -- but must not do so silently.
+/// #669: the vacuous-pass branch now warns on stderr even though the command
+/// exits zero and records a clean gate.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_initial_commit_vacuous_pass_warns_on_stderr() {
+    let _config_guard = RealRepoConfigGuard::new();
+    let repo = tempfile::tempdir().unwrap();
+    let rp = repo.path();
+
+    // A non-standard branch name (neither `main` nor `origin/main`) with a
+    // single commit -- HEAD has no parent, so this is a genuine initial
+    // commit, not a misconfigured base ref.
+    run_git_fixture(rp, &["init", "-b", "trunk"]);
+    std::fs::write(rp.join("README.md"), "seed\n").unwrap();
+    run_git_fixture(rp, &["add", "README.md"]);
+    run_git_fixture(rp, &["commit", "-m", "seed"]);
+
+    let data_dir = tempfile::tempdir().unwrap();
+    // The changed-file set is empty on this path, so an articulation with no
+    // entries at all is vacuously accepted.
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), "# No changed files\n").unwrap();
+
+    let out = run_ok_output(legion_cmd(data_dir.path()).current_dir(rp).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+    ]));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("initial commit") && stderr.contains("vacuously"),
+        "expected the vacuous-pass path to warn on stderr, got: {stderr}"
+    );
+
+    // The gate is still recorded -- this is a pass, just a noted one.
+    let list_out = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-simplify",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
+    assert_eq!(
+        rows.as_array().unwrap().len(),
+        1,
+        "expected one gate row recorded on the vacuous pass, got: {list_out}"
+    );
+}
+
 /// quality-gate check: non-ASCII file paths with core.quotePath are handled
 /// correctly. The path returned by git (unescaped, with core.quotePath=false)
 /// must match the `### <path>` heading, and the articulation must pass.
