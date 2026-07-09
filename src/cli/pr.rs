@@ -52,6 +52,15 @@ pub(crate) enum PrAction {
         /// An audit entry is written so this cannot be done silently.
         #[arg(long)]
         skip_gates: bool,
+
+        /// Issue this PR closes on merge (repeatable). Accepts a same-repo
+        /// issue number ("751") or a cross-repo reference
+        /// ("owner/repo#751" -- quote it in the shell, `#` starts a
+        /// comment). Appends a `Closes #N` line to the body unless a
+        /// recognized closing keyword for that issue is already present;
+        /// idempotent across repeated invocations.
+        #[arg(long)]
+        closes: Vec<String>,
     },
 
     /// List open pull requests with review status
@@ -248,6 +257,7 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
             reviewer,
             task,
             skip_gates,
+            closes,
         } => {
             // One database handle for the whole arm (#610): the gate
             // check, the skip-gates audit entry, the card link, the
@@ -315,7 +325,32 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 }
             }
 
+            // Parse --closes eagerly, before worksource resolution, so a
+            // malformed value fails fast without needing a live PR round
+            // trip (mirrors the gate checks above).
+            let mut close_refs: Vec<pr_write::CloseRef> = Vec::with_capacity(closes.len());
+            for spec in &closes {
+                match pr_write::CloseRef::parse(spec) {
+                    Ok(cr) => close_refs.push(cr),
+                    Err(e) => {
+                        eprintln!("[legion] error: {e}");
+                        return Err(error::LegionError::ExitWith(1));
+                    }
+                }
+            }
+
             let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+
+            // Append a `Closes #N` line per --closes unless the body already
+            // carries a recognized closing keyword for that issue (#751).
+            let body = if close_refs.is_empty() {
+                body
+            } else {
+                Some(pr_write::append_closing_lines(
+                    body.as_deref().unwrap_or(""),
+                    &close_refs,
+                ))
+            };
 
             let created = worksource::create_pr(
                 &plugin_name,
@@ -525,6 +560,18 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
             let body = read_file_or_stdin(body_file.as_deref(), "--body-file")?;
 
             let report = pr_write::validate_pr_body(&parsed.acceptance, &body);
+
+            // Warn (never fail, v1 -- #751) when the body lacks a recognized
+            // GitHub closing keyword for this issue. Printed unconditionally,
+            // ahead of the ok/fail branch below, so a body that also fails
+            // the mapping check still surfaces the missing linkage.
+            if !pr_write::has_closing_keyword(&body, &pr_write::CloseRef::same_repo(issue)) {
+                eprintln!(
+                    "[legion] warning: body has no closing keyword for issue #{issue} -- add \
+                     'Closes #{issue}' (or pass `--closes {issue}` to `pr create`, which appends \
+                     it automatically) so the merge auto-closes it."
+                );
+            }
 
             // Record the gate on HEAD so `legion pr create` can gate on it,
             // exactly as it does for legion-simplify.
