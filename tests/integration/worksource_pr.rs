@@ -123,16 +123,19 @@ BODY
 BODY
     ;;
   pr-checks)
-    # Minimal fixture matching ExternalPRCheck shape so `pr checks --log-failed`
-    # has something to iterate. One failing check, one success, plus one
-    # failure whose link does not match the Actions pattern so the
-    # non-Actions-link branch runs.
+    # Minimal fixture matching PrChecksResult shape (#736: headSha + checks)
+    # so `pr checks --log-failed` has something to iterate. One failing
+    # check, one success, plus one failure whose link does not match the
+    # Actions pattern so the non-Actions-link branch runs.
     cat <<'BODY'
-[
-  {{"name":"Clippy","state":"FAILURE","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/42","description":""}},
-  {{"name":"Tests","state":"SUCCESS","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/99","description":""}},
-  {{"name":"External","state":"FAILURE","workflow":"CI","link":"https://dashboard.example.com/checks/abc","description":""}}
-]
+{{
+  "headSha": "deadbeef",
+  "checks": [
+    {{"name":"Clippy","state":"FAILURE","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/42","description":""}},
+    {{"name":"Tests","state":"SUCCESS","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/99","description":""}},
+    {{"name":"External","state":"FAILURE","workflow":"CI","link":"https://dashboard.example.com/checks/abc","description":""}}
+  ]
+}}
 BODY
     ;;
   pr-check-log)
@@ -387,7 +390,7 @@ set -e
 case "${1:-}" in
   pr-checks)
     cat <<'BODY'
-[{"name":"Clippy","state":"FAILURE","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/42","description":""}]
+{"headSha":"deadbeef","checks":[{"name":"Clippy","state":"FAILURE","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/42","description":""}]}
 BODY
     ;;
   pr-check-log)
@@ -459,6 +462,99 @@ fn pr_checks_log_failed_suppressed_under_json() {
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("stdout must be a single valid JSON array");
     assert!(parsed.is_array(), "expected JSON array, got {parsed}");
+}
+
+// ---------------------------------------------------------------------------
+// #736: pr-checks pinned to the PR head SHA. A plugin response distinguishes
+// "checks reported for this exact head commit" from "zero runs for the head"
+// -- the latter must be a distinct non-passing state, not a silent pass
+// inherited from wherever the branch's last suite happened to be.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn pr_checks_only_stub(pr_checks_body: &str) -> String {
+    format!(
+        r#"#!/bin/bash
+set -e
+case "${{1:-}}" in
+  pr-checks)
+    cat <<'BODY'
+{pr_checks_body}
+BODY
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"#
+    )
+}
+
+/// A plugin that resolved zero check-runs for the PR's head SHA must fail
+/// `legion pr checks` with a distinct, named state -- not silently exit 0
+/// because an empty `checks` array has nothing to iterate and "finds
+/// nothing failing" (the exact false-green shape observed live on PR #735).
+#[cfg(unix)]
+#[test]
+fn pr_checks_zero_runs_for_head_is_non_passing() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_checks_only_stub(r#"{"headSha":"ec3825b","checks":[]}"#);
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let (_stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["pr", "checks", "--repo", "stub", "--number", "735"]),
+    );
+    assert!(
+        stderr.contains("no runs for head ec3825b"),
+        "expected 'no runs for head <sha>' in stderr, got: {stderr}"
+    );
+}
+
+/// Contrast case: when the plugin reports checks FOR THE HEAD SHA and they
+/// are all in a passing state, `legion pr checks` must exit clean. Guards
+/// against a fix that over-corrects into always failing.
+#[cfg(unix)]
+#[test]
+fn pr_checks_head_sha_with_passing_runs_succeeds() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_checks_only_stub(
+        r#"{"headSha":"abc1234","checks":[{"name":"Tests","state":"SUCCESS","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/1","description":""}]}"#,
+    );
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let stdout = run_ok(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["pr", "checks", "--repo", "stub", "--number", "1"]),
+    );
+    assert!(stdout.contains("SUCCESS"));
+    assert!(stdout.contains("Tests"));
+}
+
+/// `legion pr merge` must refuse with the SAME "no runs for head <sha>"
+/// wording as `legion pr checks` (#736 criterion 3) -- and must refuse
+/// before ever invoking the plugin's `merge` subcommand, which this stub
+/// does not implement (a call to it would fail the test with "unknown
+/// subcommand" instead of the expected refusal, proving merge is gated).
+#[cfg(unix)]
+#[test]
+fn pr_merge_refuses_when_head_has_zero_runs() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_checks_only_stub(r#"{"headSha":"ec3825b","checks":[]}"#);
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let (_stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["pr", "merge", "--repo", "stub", "--number", "735"]),
+    );
+    assert!(
+        stderr.contains("no runs for head ec3825b"),
+        "expected the same 'no runs for head <sha>' refusal as `pr checks`, got: {stderr}"
+    );
 }
 
 #[cfg(unix)]

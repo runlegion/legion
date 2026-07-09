@@ -135,16 +135,28 @@ impl ExternalPRCheck {
     }
 }
 
-/// Fetch CI check status for a PR via a work source plugin.
+/// Result of resolving CI checks for a PR (#736). Carries the head SHA the
+/// plugin actually queried alongside the checks themselves, so a caller can
+/// tell "zero checks reported" apart from "zero checks for the commit we
+/// pinned to" -- and can name that commit in the refusal message. The plugin
+/// contract is to query `commits/{head_sha}/check-runs` for that exact SHA,
+/// never a branch's latest suite (observed live on PR #735: the head had no
+/// runs, but the branch's last-green parent commit's suite leaked through).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrChecksResult {
+    pub head_sha: String,
+    pub checks: Vec<ExternalPRCheck>,
+}
+
+/// Fetch CI check status for a PR via a work source plugin, pinned to the
+/// PR's head commit.
 ///
 /// Returns `Err` when the named plugin is not installed. Callers gate merges
-/// on this; an empty `Ok(Vec)` would render as a clean green and let a
-/// misconfigured `watch.toml` auto-approve a PR with no checks ever run.
-pub fn pr_checks(
-    plugin_name: &str,
-    github_repo: &str,
-    pr_number: u64,
-) -> Result<Vec<ExternalPRCheck>> {
+/// on this; an empty checks list is not silently treated as "nothing
+/// failing" -- see `PrChecksResult` and the `no runs for head` refusal in
+/// `legion pr checks` / `legion pr merge`.
+pub fn pr_checks(plugin_name: &str, github_repo: &str, pr_number: u64) -> Result<PrChecksResult> {
     plugin_call(
         plugin_name,
         &["pr-checks"],
@@ -537,5 +549,30 @@ mod tests {
             "expected WorkSource error, got {:?}",
             result
         );
+    }
+
+    /// The plugin protocol wraps checks in `{"headSha": ..., "checks": [...]}`
+    /// (#736) rather than a bare array, precisely so a zero-length `checks`
+    /// list can still name the head commit it is zero-length FOR. Guards the
+    /// camelCase wire shape against an accidental rename.
+    #[test]
+    fn pr_checks_result_deserializes_camel_case_wire_shape() {
+        let json = r#"{"headSha":"ec3825b","checks":[{"name":"Tests","state":"SUCCESS","workflow":"CI","link":"https://x","description":""}]}"#;
+        let parsed: PrChecksResult = serde_json::from_str(json).expect("valid PrChecksResult");
+        assert_eq!(parsed.head_sha, "ec3825b");
+        assert_eq!(parsed.checks.len(), 1);
+        assert_eq!(parsed.checks[0].name, "Tests");
+    }
+
+    /// Zero check runs for the head SHA still deserializes cleanly -- an
+    /// empty `checks` array with a populated `headSha` is the exact shape
+    /// the plugin emits when the Checks API returns `total_count: 0` for
+    /// that commit (#736).
+    #[test]
+    fn pr_checks_result_deserializes_zero_runs() {
+        let json = r#"{"headSha":"ec3825b","checks":[]}"#;
+        let parsed: PrChecksResult = serde_json::from_str(json).expect("valid PrChecksResult");
+        assert_eq!(parsed.head_sha, "ec3825b");
+        assert!(parsed.checks.is_empty());
     }
 }

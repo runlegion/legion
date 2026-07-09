@@ -224,6 +224,17 @@ pub(crate) enum PrAction {
     },
 }
 
+/// Shared refusal for a PR head with zero check runs (#736). `legion pr
+/// checks` and `legion pr merge` both hit this state and must present
+/// identical wording so the merge gate's failure reads the same everywhere
+/// it can fire.
+fn no_runs_for_head_error(head_sha: &str, number: u64, source_repo: &str) -> error::LegionError {
+    error::LegionError::WorkSource(format!(
+        "no runs for head {head_sha}: PR #{number} on {source_repo} has zero check runs \
+         for its head commit (not the branch's last suite)"
+    ))
+}
+
 pub(crate) fn handle(action: PrAction) -> error::Result<()> {
     match action {
         PrAction::Create {
@@ -406,27 +417,23 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
         } => {
             let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
-            let checks = worksource::pr_checks(&plugin_name, &source_repo, number)?;
+            let result = worksource::pr_checks(&plugin_name, &source_repo, number)?;
+            let checks = &result.checks;
 
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&checks)
+                    serde_json::to_string_pretty(checks)
                         .expect("ExternalPRCheck serializes infallibly")
                 );
-            } else if checks.is_empty() {
-                eprintln!(
-                    "[legion] no checks reported for PR #{} on {}",
-                    number, source_repo
-                );
-            } else {
+            } else if !checks.is_empty() {
                 let mut name_w = 0usize;
                 let mut wf_w = 0usize;
-                for c in &checks {
+                for c in checks {
                     name_w = name_w.max(c.name.len());
                     wf_w = wf_w.max(c.workflow.len());
                 }
-                for c in &checks {
+                for c in checks {
                     println!(
                         "{:<8} {:<name_w$}  {:<wf_w$}  {}",
                         c.state,
@@ -459,6 +466,18 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                         }
                     }
                 }
+            }
+
+            // Zero runs for the pinned head SHA is a distinct non-passing
+            // state, not a vacuous pass (#736): a fresh push whose CI has not
+            // started yet, or gh's checks view lagging the head commit, must
+            // not read as "nothing failing" to a merge gate.
+            if checks.is_empty() {
+                return Err(no_runs_for_head_error(
+                    &result.head_sha,
+                    number,
+                    &source_repo,
+                ));
             }
 
             let failed: Vec<&str> = checks
@@ -652,6 +671,28 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
         } => {
             let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
             let database = open_db()?;
+
+            // Same fail-closed gate as `legion pr checks` (#736): a head SHA
+            // with zero check runs must refuse the merge, not inherit the
+            // branch's last-green suite through some other path. Checked
+            // here (not left to branch protection) because a repo without a
+            // required-status-checks rule would otherwise let an untested
+            // head merge silently.
+            //
+            // Deliberately narrow: this refuses only the zero-runs state,
+            // not a head with checks that are actively failing. Merge never
+            // gated on failing checks before this change either (the plugin's
+            // own merge case only inspects reviewDecision) -- expanding that
+            // is a separate concern from #736's zero-runs false-green bug and
+            // left to the repo's own branch protection / required checks.
+            let checks_result = worksource::pr_checks(&plugin_name, &source_repo, number)?;
+            if checks_result.checks.is_empty() {
+                return Err(no_runs_for_head_error(
+                    &checks_result.head_sha,
+                    number,
+                    &source_repo,
+                ));
+            }
 
             worksource::merge_pr(&plugin_name, &source_repo, number, &strategy, !keep_branch)?;
 
