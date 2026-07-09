@@ -43,12 +43,15 @@ assert_contains "reflect called with domain=checkpoint" "$(cat "$STUB_LOG")" 're
 assert_contains "tagged subagent,auto" "$(cat "$STUB_LOG")" 'subagent,auto'
 assert_contains "checkpoint text names the agent_type" "$(cat "$STUB_LOG")" 'SUBAGENT CHECKPOINT] Explore'
 assert_contains "scraped the transcript summary" "$(cat "$STUB_LOG")" 'token refresh bug'
-assert_contains "parent context is additionalContext" "$out" '"hookEventName": "SubagentStop"'
-assert_contains "parent pointer names recall" "$out" 'legion recall --repo legion-subagent-test --domain checkpoint'
+assert_contains "nudge is additionalContext continuing the subagent's turn" "$out" '"hookEventName": "SubagentStop"'
+assert_contains "checkpoint note names recall" "$out" 'legion recall --repo legion-subagent-test --domain checkpoint'
 assert_contains "prompt orders a full restatement" "$out" 'RESTATE your complete deliverable in full'
 assert_contains "prompt names the next message as the only channel" "$out" 'Your NEXT message is the ONLY message the orchestrator that spawned you will ever receive'
+# The needle's ".." stand in for the JSON-escaped \" quotes jq wraps each
+# phrase in (grep BRE has no lookaround, so a literal quote is unreliable
+# across escaped/unescaped output; "." as a single-char wildcard is not).
 assert_contains "prompt forbids referencing a prior message" "$out" 'Never write ..see above.., ..already delivered.., or any other reference to a prior message'
-assert_contains "checkpoint note comes after the restatement instruction" "$out" 'Only after the full restatement, append one line'
+assert_contains "restatement instruction precedes the checkpoint note (not just present)" "$out" 'exactly as if reporting it for the first time.*Only after the full restatement, append one line'
 
 echo "==> missing transcript: skip reflect, still inform parent, exit 0"
 : > "$STUB_LOG"
