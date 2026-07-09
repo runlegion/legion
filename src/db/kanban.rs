@@ -641,61 +641,91 @@ impl Database {
             && let Some(typed) = card_status_typed
             && let Some(spec_status) = Self::requirement_status_for_card_status(typed)
         {
-            // Fetch and mutate the payload inside the transaction.
-            // Borrowing `tx` as a read source is fine because rusqlite
-            // allows reads mid-transaction on the same connection.
-            let payload_str: Option<String> = {
-                let mut stmt = tx.prepare(
-                    "SELECT payload FROM documents WHERE id = ?1 AND deleted_at IS NULL",
-                )?;
-                let mut rows = stmt.query(rusqlite::params![doc_id])?;
-                rows.next()?
-                    .map(|row| row.get::<_, String>(0))
-                    .transpose()
-                    .map_err(crate::error::LegionError::Database)?
-            };
-
-            let payload_str = payload_str.ok_or_else(|| {
-                crate::error::LegionError::WorkSource(format!(
-                    "bound document '{doc_id}' not found -- cannot sync status"
-                ))
-            })?;
-
-            let mut value: serde_json::Value = serde_json::from_str(&payload_str).map_err(|e| {
-                crate::error::LegionError::WorkSource(format!(
-                    "bound document '{doc_id}' has unparseable payload: {e}"
-                ))
-            })?;
-
-            let meta = value
-                .get_mut("meta")
-                .and_then(|m| m.as_object_mut())
-                .ok_or_else(|| {
-                    crate::error::LegionError::WorkSource(format!(
-                        "bound document '{doc_id}' payload has no 'meta' object"
-                    ))
-                })?;
-            meta.insert(
-                "status".to_string(),
-                serde_json::Value::String(spec_status.to_string()),
-            );
-
-            let updated_payload = serde_json::to_string(&value)?;
-            tx.execute(
-                "UPDATE documents SET payload = ?1, status = ?2, updated_at = ?3 \
-                 WHERE id = ?4 AND deleted_at IS NULL",
-                rusqlite::params![updated_payload, spec_status, now, doc_id],
-            )?;
+            Self::sync_bound_document(&tx, doc_id, spec_status, &now)?;
         }
 
         tx.commit()?;
         Ok(())
     }
 
+    /// Fetch, mutate, and persist a bound document's `meta.status` and
+    /// hoisted `status` column to `spec_status`, inside the caller's
+    /// transaction. Shared by `transition_card_status_with_sync` and
+    /// `force_move_card` (#753) so both card-move paths keep a linked
+    /// document's status in step identically.
+    ///
+    /// A missing document or an unparseable payload is a hard error --
+    /// returning `Err` here propagates out of the caller's `?` before
+    /// `tx.commit()`, so the whole transaction (including the card's own
+    /// status UPDATE) rolls back rather than leaving the card and its spec
+    /// out of sync.
+    fn sync_bound_document(
+        tx: &rusqlite::Transaction,
+        doc_id: &str,
+        spec_status: &str,
+        now: &str,
+    ) -> Result<()> {
+        // Fetch and mutate the payload inside the transaction.
+        // Borrowing `tx` as a read source is fine because rusqlite
+        // allows reads mid-transaction on the same connection.
+        let payload_str: Option<String> = {
+            let mut stmt =
+                tx.prepare("SELECT payload FROM documents WHERE id = ?1 AND deleted_at IS NULL")?;
+            let mut rows = stmt.query(rusqlite::params![doc_id])?;
+            rows.next()?
+                .map(|row| row.get::<_, String>(0))
+                .transpose()
+                .map_err(crate::error::LegionError::Database)?
+        };
+
+        let payload_str = payload_str.ok_or_else(|| {
+            crate::error::LegionError::WorkSource(format!(
+                "bound document '{doc_id}' not found -- cannot sync status"
+            ))
+        })?;
+
+        let mut value: serde_json::Value = serde_json::from_str(&payload_str).map_err(|e| {
+            crate::error::LegionError::WorkSource(format!(
+                "bound document '{doc_id}' has unparseable payload: {e}"
+            ))
+        })?;
+
+        let meta = value
+            .get_mut("meta")
+            .and_then(|m| m.as_object_mut())
+            .ok_or_else(|| {
+                crate::error::LegionError::WorkSource(format!(
+                    "bound document '{doc_id}' payload has no 'meta' object"
+                ))
+            })?;
+        meta.insert(
+            "status".to_string(),
+            serde_json::Value::String(spec_status.to_string()),
+        );
+
+        let updated_payload = serde_json::to_string(&value)?;
+        tx.execute(
+            "UPDATE documents SET payload = ?1, status = ?2, updated_at = ?3 \
+             WHERE id = ?4 AND deleted_at IS NULL",
+            rusqlite::params![updated_payload, spec_status, now, doc_id],
+        )?;
+        Ok(())
+    }
+
     /// Force-move a card to any status (bypasses state machine).
+    ///
+    /// Runs the same document-sync as the governed move path
+    /// (`transition_card_status_with_sync`), inside one transaction with the
+    /// card's own status/sort_order update (#753). A bound document that
+    /// fails to sync (missing, or unparseable payload) rolls back the card
+    /// move too -- a forced move must not leave the card and its linked
+    /// document out of step.
     pub fn force_move_card(&self, id: &str, status: &str, sort_order: Option<i32>) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let sort = sort_order.unwrap_or(0);
+
+        let tx = self.conn.unchecked_transaction()?;
+
         // Set the appropriate timestamp based on target status
         let ts_sql = match status {
             "done" | "cancelled" => ", completed_at = ?5",
@@ -707,15 +737,39 @@ impl Database {
             "UPDATE tasks SET status = ?1, sort_order = ?2, updated_at = ?3{ts_sql} WHERE id = ?4 AND deleted_at IS NULL"
         );
         let rows = if ts_sql.is_empty() {
-            self.conn
-                .execute(&sql, rusqlite::params![status, sort, now, id])?
+            tx.execute(&sql, rusqlite::params![status, sort, now, id])?
         } else {
-            self.conn
-                .execute(&sql, rusqlite::params![status, sort, now, id, now])?
+            tx.execute(&sql, rusqlite::params![status, sort, now, id, now])?
         };
         if rows == 0 {
             return Err(LegionError::CardNotFound(id.to_string()));
         }
+
+        // -- sync the bound document, same as the governed move path --
+        // Read document_id via `tx`, not a fresh connection read, so this
+        // query is part of the same transaction as the UPDATE above --
+        // isolated from any concurrent writer, and rolled back with the
+        // card move if the sync below fails.
+        let document_id: Option<String> = {
+            let mut stmt =
+                tx.prepare("SELECT document_id FROM tasks WHERE id = ?1 AND deleted_at IS NULL")?;
+            let mut rows = stmt.query(rusqlite::params![id])?;
+            rows.next()?
+                .map(|row| row.get::<_, Option<String>>(0))
+                .transpose()
+                .map_err(LegionError::Database)?
+                .flatten()
+        };
+
+        let card_status_typed = std::str::FromStr::from_str(status).ok();
+        if let Some(doc_id) = document_id.as_deref()
+            && let Some(typed) = card_status_typed
+            && let Some(spec_status) = Self::requirement_status_for_card_status(typed)
+        {
+            Self::sync_bound_document(&tx, doc_id, spec_status, &now)?;
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -1436,8 +1490,10 @@ mod tests {
             .expect("insert corrupt doc")
             .id;
         db.bind_card_to_document(&card_id, &doc_id).expect("bind");
-        db.force_move_card(&card_id, "accepted", None)
-            .expect("move");
+        // No status-changing setup call here: any mapped status (including
+        // "accepted") would already hit this same corrupt payload via
+        // force_move_card's own doc-sync (#753). The card stays at its
+        // as-inserted "backlog" status until the transition below.
 
         // Transitioning to "done" should fail because the payload is unparseable.
         let err = db
@@ -1459,7 +1515,7 @@ mod tests {
         let card = db.get_card_by_id(&card_id).expect("get").expect("exists");
         assert_eq!(
             card.status.to_string(),
-            "accepted",
+            "backlog",
             "card status must not change"
         );
 
@@ -1479,8 +1535,10 @@ mod tests {
         let doc_id = insert_test_document(&db);
 
         db.bind_card_to_document(&card_id, &doc_id).expect("bind");
-        db.force_move_card(&card_id, "accepted", None)
-            .expect("move");
+        // No status-changing setup call here: force_move_card now runs the
+        // same doc-sync as the governed path (#753), and "accepted" is
+        // itself a mapped status, so moving through it would already flip
+        // the doc away from "draft" before this test's own assertion.
 
         // blocked has no spec mapping -- doc stays "draft".
         db.transition_card_status_with_sync(
@@ -1536,6 +1594,110 @@ mod tests {
             payload["meta"]["status"].as_str(),
             Some("accepted"),
             "spec payload meta.status must be updated by pick_next_card"
+        );
+    }
+
+    /// force_move_card on a bound card must run the same document-sync as the
+    /// governed move path: forcing a move to "done" syncs the linked
+    /// document's hoisted status column AND payload meta.status to
+    /// "verified" in the same commit as the card's own status update (#753).
+    #[test]
+    fn force_move_card_syncs_bound_document_status() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+        let doc_id = insert_test_document(&db);
+
+        db.bind_card_to_document(&card_id, &doc_id).expect("bind");
+
+        // Force straight to "done" -- a forced move bypasses the state
+        // machine, so this single call is the whole test.
+        db.force_move_card(&card_id, "done", None)
+            .expect("force move to done");
+
+        let card = db.get_card_by_id(&card_id).expect("get").expect("exists");
+        assert_eq!(card.status.to_string(), "done");
+
+        let doc = db
+            .get_document(&doc_id)
+            .expect("get doc")
+            .expect("doc exists");
+        assert_eq!(
+            doc.status, "verified",
+            "hoisted status column must follow the forced card move"
+        );
+
+        let payload: serde_json::Value = serde_json::from_str(&doc.payload).expect("parse payload");
+        assert_eq!(
+            payload["meta"]["status"].as_str(),
+            Some("verified"),
+            "payload meta.status must follow the forced card move"
+        );
+    }
+
+    /// force_move_card doc-sync failure (unparseable bound document payload)
+    /// rolls back the card move too -- a forced move must not leave the card
+    /// and its linked document out of step (#753).
+    #[test]
+    fn force_move_card_rolls_back_on_doc_sync_failure() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+
+        // Insert a document with an invalid (non-JSON) payload.
+        let meta = crate::documents::DocumentMeta {
+            id: None,
+            doc_type: "requirement",
+            surface: Some("test"),
+            status: Some("draft"),
+            priority: None,
+            owner: "legion",
+        };
+        let doc_id = db
+            .insert_document(&meta, "NOT VALID JSON")
+            .expect("insert corrupt doc")
+            .id;
+        db.bind_card_to_document(&card_id, &doc_id).expect("bind");
+
+        // Forcing the card to "done" triggers a doc-sync (done -> verified)
+        // that must fail because the payload is unparseable.
+        let err = db.force_move_card(&card_id, "done", None).unwrap_err();
+        assert!(
+            err.to_string().contains("unparseable payload"),
+            "expected unparseable payload error, got: {err}"
+        );
+
+        // Card must NOT have moved (whole transaction rolled back).
+        let card = db.get_card_by_id(&card_id).expect("get").expect("exists");
+        assert_eq!(
+            card.status,
+            crate::kanban::CardStatus::Backlog,
+            "card status must not change when doc-sync fails"
+        );
+
+        // Document status must also be unchanged.
+        let doc = db.get_document(&doc_id).expect("get doc").expect("exists");
+        assert_eq!(
+            doc.status, "draft",
+            "document status must remain 'draft' when the forced move fails"
+        );
+    }
+
+    /// force_move_card on a card with NO linked document is unaffected by the
+    /// #753 doc-sync change: same status/sort_order/timestamp behavior as
+    /// before, no error, no document touched (there being none).
+    #[test]
+    fn force_move_card_unbound_card_unchanged_behavior() {
+        let db = test_db();
+        let card_id = insert_test_card(&db);
+
+        db.force_move_card(&card_id, "done", Some(7))
+            .expect("force move unbound card");
+
+        let card = db.get_card_by_id(&card_id).expect("get").expect("exists");
+        assert_eq!(card.status.to_string(), "done");
+        assert_eq!(card.sort_order, 7);
+        assert!(
+            card.completed_at.is_some(),
+            "done timestamp must still be set for unbound cards"
         );
     }
 
