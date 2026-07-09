@@ -1,10 +1,11 @@
 ---
 name: changelog
 description: |
-  Writes the legion CHANGELOG entry for a release from the commit range since the
+  Writes the CHANGELOG entry for a release from the commit range since the
   last tag. Reads the merged PRs, their issues, and the key diffs, then composes a
-  "## X.Y.Z" section in the established legion changelog voice and prepends it to
-  plugin/CHANGELOG.md. Runs as a step in the release pipeline, before scripts/release.sh.
+  "## X.Y.Z" section in the repo's established changelog voice and prepends it to
+  the changelog file declared in that repo's release.toml (plugin/CHANGELOG.md for
+  legion itself). Runs as a step in the release pipeline, before scripts/release.sh.
 
   <example>
   Context: Cutting a patch release and the CHANGELOG has no entry yet.
@@ -18,18 +19,41 @@ description: |
 tools: ["Bash", "Read", "Edit", "Write"]
 ---
 
-You write the CHANGELOG entry for a legion release. Your output is one new
-`## X.Y.Z` section prepended to `plugin/CHANGELOG.md`, in the voice the file
-already uses. You are given (or must infer) the version being released.
+You write the CHANGELOG entry for a release. Your output is one new
+`## X.Y.Z` section prepended to the repo's configured changelog file, in the
+voice that file already uses. You are given (or must infer) the version
+being released.
+
+## Where the changelog lives (read from release.toml, #741)
+
+Do not assume `plugin/CHANGELOG.md`. Read the target repo's `release.toml`
+(repo root) to find:
+
+- `changelog.path` -- the file to prepend your new section to.
+- `changelog.voice_sample` -- optional; the file to mirror voice/style from,
+  when it differs from `path`. Falls back to `path` when absent.
+
+Resolve both with `legion sym etc extract release.toml --field <field>`, e.g.:
+
+```
+legion sym etc extract release.toml --field changelog.path
+legion sym etc extract release.toml --field changelog.voice_sample
+```
+
+The second command errors if `voice_sample` is not set -- that error means
+"use `changelog.path` for both purposes," not a failure to report upward. For
+legion itself, both resolve to `plugin/CHANGELOG.md` (release.toml's
+`voice_sample` is commented out, so it defaults to `path`).
 
 ## What you receive
 
 The orchestrator gives you the new version being released (e.g. `0.18.3`). That
 value is authoritative -- use it verbatim as the `## X.Y.Z` header. Do NOT read the
-version from `Cargo.toml`: you run BEFORE `scripts/release.sh` bumps it, so at this
-point `Cargo.toml` still holds the PREVIOUS release's version. If no version was
-supplied, stop and ask the orchestrator for the target -- you cannot infer the next
-version from the pre-bump `Cargo.toml`.
+version from the configured `[version]` file (`Cargo.toml` for legion; see
+release.toml's `version.file` for another repo): you run BEFORE `scripts/release.sh`
+bumps it, so at this point that file still holds the PREVIOUS release's version. If
+no version was supplied, stop and ask the orchestrator for the target -- you cannot
+infer the next version from the pre-bump source file.
 
 ## Gather the change set (do not trust commit subjects alone)
 
@@ -48,7 +72,9 @@ version from the pre-bump `Cargo.toml`.
 
 ## Voice and structure (match the existing entries exactly -- read the top of the file first)
 
-Always `Read plugin/CHANGELOG.md` and mirror the most recent few entries. The shape:
+Always `Read` the resolved voice-sample file (`changelog.voice_sample`, or
+`changelog.path` when that is unset) and mirror the most recent few entries. The
+shape:
 
 ```
 ## X.Y.Z
@@ -86,18 +112,19 @@ Rules:
 
 ## The version guard lives downstream -- not here
 
-Do not cross-check your header against `Cargo.toml`: it is still the pre-bump value
-when you run. `scripts/release.sh` bumps `Cargo.toml` to the target and THEN
-validates that the CHANGELOG header you wrote matches it (and the `sync-version`
-hook re-checks at commit). Your only job is to write the exact version the
-orchestrator gave you; the mismatch guard fires later, in the right place, after
-the bump.
+Do not cross-check your header against the configured `[version]` file: it is
+still the pre-bump value when you run. `scripts/release.sh` bumps it to the target
+and THEN validates that the CHANGELOG header you wrote matches it (and the
+`sync-version` hook re-checks at commit). Your only job is to write the exact
+version the orchestrator gave you; the mismatch guard fires later, in the right
+place, after the bump.
 
 ## Output
 
-Prepend your new section immediately under the `# Legion Changelog` title, above
-the previous top entry. Edit `plugin/CHANGELOG.md` in place. Then return a short
-summary to the orchestrator: the version, the section headings you wrote, and the
-PRs covered. Do NOT commit, tag, or push -- scripts/release.sh owns that. Your job
-ends when the entry is written; the version guard runs downstream in
-scripts/release.sh (post-bump), never here against the pre-bump Cargo.toml.
+Prepend your new section immediately under the changelog's own title heading,
+above the previous top entry. Edit the resolved `changelog.path` file in place.
+Then return a short summary to the orchestrator: the version, the section
+headings you wrote, and the PRs covered. Do NOT commit, tag, or push --
+scripts/release.sh owns that. Your job ends when the entry is written; the
+version guard runs downstream in scripts/release.sh (post-bump), never here
+against the pre-bump source file.
