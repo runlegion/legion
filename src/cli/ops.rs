@@ -8,7 +8,7 @@ use clap::Subcommand;
 use crate::cli::datadir::data_dir;
 use crate::cli::util::format_age;
 use crate::cli::util::open_db;
-use crate::{cluster, error, health, mesh, telemetry, uncertainty, usage};
+use crate::{cluster, error, gate_trust, health, mesh, telemetry, uncertainty, usage};
 
 #[derive(Subcommand)]
 pub(crate) enum TelemetryAction {
@@ -178,6 +178,41 @@ pub(crate) enum UncertaintyAction {
         /// Emit JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
+    },
+
+    /// Witness a `surface=legion.gate` prediction from a DECORRELATED
+    /// source outside the review pipeline -- an operator (e.g. reading a
+    /// pre-push diff, or a post-merge report) saying whether a recorded
+    /// gate verdict was actually correct (#694). Unlike the automatic
+    /// legion-review witness, this call is direct ground truth, so it is
+    /// trustworthy in BOTH directions, not just the caught-by-review one.
+    ///
+    /// Looks the prediction up by the same `(skill, commit)` fingerprint
+    /// `legion quality-gate list` prints, so the operator never needs an
+    /// opaque prediction id. Errors if no Emitted `legion.gate` prediction
+    /// matches (never recorded, already witnessed, or orphaned).
+    WitnessGate {
+        /// Gate skill name the verdict was recorded under (e.g.
+        /// "legion-simplify", "legion-review").
+        #[arg(long)]
+        skill: String,
+        /// Commit hash the gate verdict was recorded against.
+        #[arg(long)]
+        commit: String,
+        /// Whether the recorded verdict was actually correct, relative to
+        /// WHICHEVER verdict the gate recorded (clean or issues) -- not a
+        /// bare "was the diff clean" flag. For a clean verdict: true
+        /// corroborates it (Shipped, correctness 1.0); false marks it wrong
+        /// (Escalated, correctness 0.0) -- e.g. a clean verdict on a commit
+        /// that turned out to ship a bug. For an issues verdict it is
+        /// reprojected onto the same "was it actually clean" axis before
+        /// scoring: true (the catch was right, the diff was NOT clean)
+        /// still maps to Escalated/0.0, and false (a false-positive catch,
+        /// the diff WAS clean) maps to Shipped/1.0. Takes an explicit
+        /// `true`/`false` value (not a bare flag), so a negative witness is
+        /// as easy to record as a positive one.
+        #[arg(long, action = clap::ArgAction::Set)]
+        correct: bool,
     },
 }
 
@@ -420,6 +455,29 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
                     writeln!(out, "{:<32} {:<8}", r.surface, r.count)?;
                 }
             }
+        }
+
+        UncertaintyAction::WitnessGate {
+            skill,
+            commit,
+            correct,
+        } => {
+            let witnessed_id =
+                gate_trust::witness_gate_external(&database, &skill, &commit, correct)
+                    .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            let Some(id) = witnessed_id else {
+                return Err(error::LegionError::WorkSource(format!(
+                    "no emitted legion.gate prediction for skill={skill} commit={commit} \
+                     (never recorded, already witnessed, or orphaned)"
+                )));
+            };
+            let out_json = serde_json::json!({
+                "id": id,
+                "skill": skill,
+                "commit": commit,
+                "correct": correct,
+            });
+            writeln!(out, "{}", serde_json::to_string(&out_json)?)?;
         }
     }
     Ok(())
