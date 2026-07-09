@@ -84,8 +84,8 @@ fi
 
 # Persist the subagent checkpoint. Fail-open: a reflect error must never block
 # the parent, so swallow it (|| true). No transcript text -> skip the reflect
-# entirely rather than store an empty marker; the parent pointer below still
-# fires so the parent knows the subagent ended.
+# entirely rather than store an empty marker; the nudge below still fires so
+# the subagent's final message (and thus the parent) is never silently empty.
 if [ -n "$SUMMARY" ]; then
   "$LEGION" reflect --repo "$REPO" --domain checkpoint --tags subagent,auto \
     --text "[SUBAGENT CHECKPOINT] ${AGENT_TYPE}: ${SUMMARY}" >/dev/null 2>&1 || true

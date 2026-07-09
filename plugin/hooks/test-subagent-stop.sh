@@ -53,12 +53,12 @@ assert_contains "prompt names the next message as the only channel" "$out" 'Your
 assert_contains "prompt forbids referencing a prior message" "$out" 'Never write ..see above.., ..already delivered.., or any other reference to a prior message'
 assert_contains "restatement instruction precedes the checkpoint note (not just present)" "$out" 'exactly as if reporting it for the first time.*Only after the full restatement, append one line'
 
-echo "==> missing transcript: skip reflect, still inform parent, exit 0"
+echo "==> missing transcript: skip reflect, still nudge the subagent, exit 0"
 : > "$STUB_LOG"
 out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"/no/such/file.jsonl\"}" \
   | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
 assert_not_contains "no reflect call on missing transcript" "$(cat "$STUB_LOG")" 'reflect'
-assert_contains "parent still informed" "$out" '"hookEventName": "SubagentStop"'
+assert_contains "subagent still nudged" "$out" '"hookEventName": "SubagentStop"'
 
 echo "==> no cwd: pass through silently"
 out=$(echo '{}' | bash "$HOOK")
