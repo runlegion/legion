@@ -430,9 +430,42 @@ pub(crate) enum Commands {
         #[arg(long)]
         repo: String,
 
-        /// Maximum number of identity reflections to return
+        /// Maximum number of identity reflections to return (plain listing
+        /// mode only; ignored when --generate is set)
         #[arg(long, default_value_t = 50)]
         limit: usize,
+
+        /// Enter generate mode: gather claimed-half (self-authored) and
+        /// given-half (cross-agent) source material for an identity rebuild
+        /// (default), or write an authored replacement (with --apply).
+        #[arg(long)]
+        generate: bool,
+
+        /// Repo (must be present in watch.toml) holding the agent's bylined
+        /// writing. Required with --generate unless --apply is also set.
+        #[arg(long, requires = "generate")]
+        vault_repo: Option<String>,
+
+        /// Comma-separated byline(s)/author name(s) to match against each
+        /// candidate file's frontmatter `author` field. Required with
+        /// --generate unless --apply is also set.
+        #[arg(long, value_delimiter = ',', requires = "generate")]
+        byline: Vec<String>,
+
+        /// Switch --generate into apply mode: perform the guarded swap from
+        /// an authored manifest instead of gathering source material.
+        #[arg(long, requires = "generate")]
+        apply: bool,
+
+        /// Path to the authored manifest (JSON: IdentityManifest shape).
+        /// Required with --apply.
+        #[arg(long, requires = "apply")]
+        from_file: Option<PathBuf>,
+
+        /// Compute and report the apply plan without writing or deleting
+        /// anything. Apply mode only.
+        #[arg(long, requires = "apply")]
+        dry_run: bool,
     },
 
     /// Print the operating contract for a repo -- how I operate, distinct from

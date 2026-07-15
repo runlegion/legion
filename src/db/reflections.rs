@@ -68,7 +68,6 @@ pub struct ReflectionMeta {
 
 /// Result of [`Database::swap_identity_root`]: the ids removed, the new
 /// root, and any chained children inserted after it (in chain order).
-#[allow(dead_code)] // consumed by #784 (whoami --generate), not yet landed
 pub struct IdentitySwapResult {
     pub deleted_ids: Vec<String>,
     pub root: Reflection,
@@ -369,7 +368,6 @@ impl Database {
     /// `new_root_text` becomes the new root (`parent_id = None`).
     /// `chained_texts`, if any, are inserted afterward as a chain: the
     /// first follows the new root, each subsequent one follows the last.
-    #[allow(dead_code)] // consumed by #784 (whoami --generate), not yet landed
     pub fn swap_identity_root(
         &self,
         repo: &str,

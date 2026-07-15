@@ -28,4 +28,5 @@ mod sym_tree;
 mod task;
 mod uncertainty;
 mod usage;
+mod whoami_generate;
 mod worksource_pr;
