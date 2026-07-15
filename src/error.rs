@@ -182,6 +182,15 @@ pub enum LegionError {
     #[error("invalid gate result: '{0}' (expected 'clean' or 'issues')")]
     InvalidGateResult(String),
 
+    #[error("branch '{branch}' not found in any worktree checkout (searched: {searched})")]
+    PushBranchNotFound { branch: String, searched: String },
+
+    #[error("refusing to push '{branch}': {reason}")]
+    PushRefused { branch: String, reason: String },
+
+    #[error("git push failed: {stderr}")]
+    PushFailed { stderr: String },
+
     /// Signals that the process should exit with a specific non-zero code.
     ///
     /// Used by CLI handlers that have already printed a user-facing message
@@ -287,5 +296,35 @@ mod tests {
         assert!(err.to_string().contains("bad"));
         assert!(err.to_string().contains("clean"));
         assert!(err.to_string().contains("issues"));
+    }
+
+    #[test]
+    fn push_branch_not_found_display() {
+        let err = LegionError::PushBranchNotFound {
+            branch: "feat/x".to_string(),
+            searched: "/a, /b".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("feat/x"));
+        assert!(msg.contains("/a, /b"));
+    }
+
+    #[test]
+    fn push_refused_display() {
+        let err = LegionError::PushRefused {
+            branch: "main".to_string(),
+            reason: "agents never push main".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("main"));
+        assert!(msg.contains("agents never push main"));
+    }
+
+    #[test]
+    fn push_failed_display() {
+        let err = LegionError::PushFailed {
+            stderr: "! [rejected]".to_string(),
+        };
+        assert!(err.to_string().contains("! [rejected]"));
     }
 }

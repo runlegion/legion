@@ -11,6 +11,7 @@ pub(crate) mod memory;
 pub(crate) mod misc;
 pub(crate) mod ops;
 pub(crate) mod pr;
+pub(crate) mod push;
 pub(crate) mod schedule;
 pub(crate) mod signal;
 pub(crate) mod spec_gen;
@@ -724,6 +725,34 @@ pub(crate) enum Commands {
     Pr {
         #[command(subcommand)]
         action: PrAction,
+    },
+
+    /// Push a branch to origin -- the sanctioned in-band push path (#791).
+    ///
+    /// Resolves the checkout that has `--branch` checked out via `git
+    /// worktree list --porcelain` and runs the push FROM that checkout, so
+    /// the push-from-own-checkout doctrine is enforced by the tool instead
+    /// of agent discipline: the pre-push hook reviews the CWD's checked-out
+    /// branch, not the ref being pushed, so pushing a ref from the wrong
+    /// checkout silently reviews (or blocks on) the wrong diff. Hard errors
+    /// if no checkout has the branch, naming the worktrees it searched.
+    ///
+    /// Refuses to push `main`/`master` (Sean merges; agents never push main)
+    /// and refuses any `--branch` value shaped like a git flag or a
+    /// force/retarget refspec (leading `-`/`+`, embedded `:`, whitespace) --
+    /// there is no `--force` flag on this command, and a crafted branch
+    /// value cannot recover force semantics either. Sets upstream (`-u
+    /// origin <branch>`) on every push, which is a no-op after the first.
+    /// Every attempt (success or failure) is audit-logged with the branch,
+    /// resolved checkout path, and head SHA.
+    Push {
+        /// Repository name (identifies the calling agent for the audit log)
+        #[arg(long)]
+        repo: String,
+
+        /// Branch to push. Defaults to the CWD's checked-out branch.
+        #[arg(long)]
+        branch: Option<String>,
     },
 
     /// View the audit log of work source actions
