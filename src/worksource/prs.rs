@@ -49,6 +49,37 @@ pub fn create_pr(
     plugin_call(plugin_name, &["create-pr"], &env)
 }
 
+/// Edit a live PR's title and/or body via a work source plugin (#776).
+///
+/// The in-place counterpart to `create_pr`: corrects a PR without a
+/// close+recreate round trip, which loses the review thread and forces
+/// re-recording the simplify + pr-write gates against a new HEAD. At least
+/// one of `title`/`body` must be `Some` -- the plugin itself refuses when
+/// both env vars are empty, but callers should validate first so a caller
+/// error surfaces before the plugin round trip.
+pub fn edit_pr(
+    plugin_name: &str,
+    github_repo: &str,
+    pr_number: u64,
+    title: Option<&str>,
+    body: Option<&str>,
+) -> Result<()> {
+    let pr_num_str = pr_number.to_string();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("LEGION_WS_REPO", github_repo),
+        ("LEGION_WS_PR_NUMBER", &pr_num_str),
+    ];
+    if let Some(t) = title {
+        env.push(("LEGION_WS_TITLE", t));
+    }
+    if let Some(b) = body {
+        env.push(("LEGION_WS_BODY", b));
+    }
+
+    plugin_call_raw(plugin_name, &["edit-pr"], &env)?;
+    Ok(())
+}
+
 /// A PR from an external tracker with review status.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -528,6 +559,24 @@ mod tests {
         // When the named plugin does not exist, close_pr must return a WorkSource
         // error, not panic. This exercises the find_plugin -> ok_or_else path.
         let result = close_pr("nonexistent-plugin-xyz", "owner/repo", 1, None, false);
+        assert!(
+            matches!(result, Err(LegionError::WorkSource(_))),
+            "expected WorkSource error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn edit_pr_returns_worksource_error_when_plugin_missing() {
+        // Mirrors close_pr's regression guard: when the named plugin does not
+        // exist, edit_pr must return a WorkSource error, not panic.
+        let result = edit_pr(
+            "nonexistent-plugin-xyz",
+            "owner/repo",
+            1,
+            Some("new title"),
+            None,
+        );
         assert!(
             matches!(result, Err(LegionError::WorkSource(_))),
             "expected WorkSource error, got {:?}",
