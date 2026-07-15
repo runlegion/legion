@@ -60,6 +60,16 @@ pub enum LegionError {
     #[error("invalid card transition: cannot {action} a card in status '{current}'")]
     InvalidCardTransition { action: String, current: String },
 
+    #[error(
+        "repo '{repo}' already has a live identity root ({existing_id}) -- a second, \
+         unparented identity write is exactly the leak vector that let a stray checkpoint \
+         outrank the real identity in the boot banner. Either chain onto the existing root \
+         (`legion reflect --whoami --follows {existing_id} --text \"...\"`) or replace it \
+         deliberately (`legion forget --id {existing_id}` then re-run `legion reflect --whoami`). \
+         Find the root again any time via `legion recall --repo {repo} --domain identity --limit 1`."
+    )]
+    IdentityRootExists { repo: String, existing_id: String },
+
     #[error("invalid card status: {0}")]
     InvalidCardStatus(String),
 
