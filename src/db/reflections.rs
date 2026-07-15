@@ -307,12 +307,20 @@ impl Database {
     /// which asserts the two-root state directly rather than leaving it
     /// implicit.
     fn live_identity_root_id(&self, repo: &str) -> Result<Option<String>> {
+        // ORDER BY pins which id surfaces in the IdentityRootExists error
+        // message when more than one live root already exists (reachable
+        // only via a guard-bypassing path like sync's apply_reflection_delta
+        // -- see get_identity_roots_excludes_chain_children's raw-INSERT
+        // fixture for the same scenario). Newest first, matching
+        // get_domain_roots's ordering, so the id in the error is
+        // deterministic rather than whichever row SQLite happens to
+        // return first.
         self.conn
             .query_row(
                 "SELECT id FROM reflections \
                  WHERE repo = ?1 AND domain = 'identity' AND parent_id IS NULL \
                    AND deleted_at IS NULL AND archived_at IS NULL \
-                 LIMIT 1",
+                 ORDER BY created_at DESC LIMIT 1",
                 [repo],
                 |row| row.get(0),
             )
@@ -1364,6 +1372,68 @@ mod tests {
 
         // Old root is gone, new root is the only live root.
         assert!(db.get_reflection_by_id(&old_root.id).unwrap().is_none());
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, result.root.id);
+    }
+
+    #[test]
+    fn swap_identity_root_does_not_cascade_to_old_chain_children() {
+        // Locks in the documented non-cascade decision: swap_identity_root
+        // deletes only the root row, matching legion forget's existing
+        // single-row delete_reflection (no cascade). The old root's
+        // --follows child survives as a live row with a now-dangling
+        // parent_id -- exactly what forget already leaves behind today,
+        // and what a future cascade (if #784 ever needs one) would change.
+        let db = test_db();
+        let old_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "old identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let old_child = db
+            .insert_reflection_with_meta(
+                "legion",
+                "old supporting beat",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    parent_id: Some(old_root.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let result = db
+            .swap_identity_root("legion", "new identity", &[], "self")
+            .unwrap();
+
+        assert_eq!(result.deleted_ids, vec![old_root.id.clone()]);
+        assert!(
+            db.get_reflection_by_id(&old_root.id).unwrap().is_none(),
+            "root must be deleted"
+        );
+
+        // The old child was NOT deleted -- it survives, dangling.
+        let surviving_child = db
+            .get_reflection_by_id(&old_child.id)
+            .unwrap()
+            .expect("old chain child must survive the swap (non-cascading delete)");
+        assert_eq!(
+            surviving_child.parent_id.as_deref(),
+            Some(old_root.id.as_str()),
+            "surviving child's parent_id still points at the now-deleted old root"
+        );
+
+        // The new root is the only row get_identity_roots surfaces --
+        // the dangling child has parent_id set, so it never counted as a
+        // root and does not resurrect the old identity in the banner.
         let roots = db.get_identity_roots("legion", 10).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].id, result.root.id);
