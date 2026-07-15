@@ -59,12 +59,13 @@
 
 use crate::db::Database;
 use crate::db::quality_gates::QualityGateRow;
+use crate::gate_registry;
 use crate::uncertainty::error::Result as UncertaintyResult;
 use crate::uncertainty::storage::orphan_after_from_ttl;
 use crate::uncertainty::types::{
     Confidence, Correctness, OutcomeLabel, Prediction, PredictionInput,
 };
-use crate::verify::GateResult;
+use crate::verify::{GateProvenance, GateResult};
 
 /// The uncertainty surface all gate verdicts emit under.
 pub const GATE_SURFACE: &str = "legion.gate";
@@ -151,10 +152,44 @@ pub fn emit_gate_prediction(db: &Database, row: &QualityGateRow) -> UncertaintyR
     Ok(prediction.id)
 }
 
+/// True when `row` must NOT be ingested as gate-trust ground truth (#780): an
+/// ASSERTED "clean" verdict for a skill that has a check validator
+/// (`gate_registry::has_check_validator`). Recording such a row is already
+/// refused at the CLI layer (`cli::verify::handle_quality_gate`'s `Record`
+/// arm), but this is the defense-in-depth boundary for the ingestion path
+/// itself -- a pre-#780 historical row, or any future caller that reaches
+/// `record_quality_gate` without going through that CLI refusal, must still
+/// never let a manufactured clean count as a passed gate. Admitting it would
+/// let exactly the rubber-stamp this module measures poison its own
+/// denominator.
+///
+/// A VALIDATED clean (the `check` path) and an ASSERTED `issues` (a real
+/// finding, self-reported or not, is not a ground-truth risk in the same
+/// direction) are both eligible for ingestion as before.
+fn is_ungrounded_assertion(row: &QualityGateRow) -> bool {
+    row.result == GateResult::Clean
+        && row.provenance == GateProvenance::Asserted
+        && gate_registry::has_check_validator(&row.skill)
+}
+
 /// Non-blocking gate-trust emit for the gate-record handlers: log on failure,
 /// never propagate. A gate-trust problem must never break gate recording or the
 /// agent's workflow -- the measurement is best-effort, the gate is not.
+///
+/// Skips ingestion entirely (no prediction emitted) for an ungrounded
+/// assertion (#780, see `is_ungrounded_assertion`) -- this is the boundary
+/// acceptance criterion #3 names: gate-trust must not consume an
+/// asserted-clean row for a check-gated skill as positive ground truth.
 pub fn emit_gate_trust(db: &Database, row: &QualityGateRow) {
+    if is_ungrounded_assertion(row) {
+        eprintln!(
+            "[legion] gate-trust: skipping ingestion of an ASSERTED clean verdict for \
+             check-gated skill '{}' on commit {} -- a manufactured clean cannot count as \
+             ground truth (#780). Re-run via 'quality-gate check' to validate and ingest it.",
+            row.skill, row.commit_hash
+        );
+        return;
+    }
     if let Err(e) = emit_gate_prediction(db, row) {
         eprintln!("[legion] gate-trust emit failed (non-fatal): {e}");
     }
@@ -309,7 +344,21 @@ mod tests {
     use crate::db::testutil::test_db;
     use crate::uncertainty::types::PredictionState;
 
+    /// Builds a row with VALIDATED provenance -- the common case every
+    /// pre-#780 test in this module exercises (emission/witness mechanics
+    /// unrelated to provenance), so defaulting here keeps their behavior
+    /// unchanged. The #780 ingestion-guard tests build their own row with
+    /// ASSERTED provenance via `gate_row_with_provenance` instead.
     fn gate_row(skill: &str, result: GateResult, findings: u64) -> QualityGateRow {
+        gate_row_with_provenance(skill, result, findings, GateProvenance::Validated)
+    }
+
+    fn gate_row_with_provenance(
+        skill: &str,
+        result: GateResult,
+        findings: u64,
+        provenance: GateProvenance,
+    ) -> QualityGateRow {
         QualityGateRow {
             id: "gate-id".to_string(),
             branch: "feat/x".to_string(),
@@ -319,6 +368,10 @@ mod tests {
             findings_count: findings,
             details: None,
             created_at: "2026-06-27T00:00:00+00:00".to_string(),
+            provenance,
+            voided_at: None,
+            void_reason: None,
+            superseded_by: None,
         }
     }
 
@@ -388,6 +441,106 @@ mod tests {
             .count_predictions_by_surface_state("legion.gate", PredictionState::Emitted)
             .unwrap();
         assert_eq!(emitted, 1, "the wrapper must emit exactly one Emitted row");
+    }
+
+    // -- #780: gate-trust must not ingest asserted-clean for a check-gated
+    // skill --------------------------------------------------------------
+
+    #[test]
+    fn ungrounded_assertion_detects_asserted_clean_check_gated() {
+        let row = gate_row_with_provenance(
+            "legion-simplify",
+            GateResult::Clean,
+            0,
+            GateProvenance::Asserted,
+        );
+        assert!(is_ungrounded_assertion(&row));
+
+        let row = gate_row_with_provenance(
+            "legion-pr-write",
+            GateResult::Clean,
+            0,
+            GateProvenance::Asserted,
+        );
+        assert!(is_ungrounded_assertion(&row));
+    }
+
+    #[test]
+    fn validated_clean_is_not_an_ungrounded_assertion() {
+        let row = gate_row_with_provenance(
+            "legion-simplify",
+            GateResult::Clean,
+            0,
+            GateProvenance::Validated,
+        );
+        assert!(!is_ungrounded_assertion(&row));
+    }
+
+    #[test]
+    fn asserted_issues_is_not_an_ungrounded_assertion() {
+        // Only a CLEAN claim is a ground-truth risk in this direction -- an
+        // asserted "issues" result is a self-reported finding, not a
+        // manufactured pass.
+        let row = gate_row_with_provenance(
+            "legion-simplify",
+            GateResult::Issues,
+            1,
+            GateProvenance::Asserted,
+        );
+        assert!(!is_ungrounded_assertion(&row));
+    }
+
+    #[test]
+    fn asserted_clean_for_a_skill_without_a_validator_is_not_ungrounded() {
+        // legion-review and a legion-verify:<card_id> verdict have no check
+        // validator -- asserted is their only, legitimate provenance, so a
+        // clean verdict from them must still be ingested.
+        let row = gate_row_with_provenance(
+            "legion-review",
+            GateResult::Clean,
+            0,
+            GateProvenance::Asserted,
+        );
+        assert!(!is_ungrounded_assertion(&row));
+
+        let row = gate_row_with_provenance(
+            "legion-verify:card-1",
+            GateResult::Clean,
+            0,
+            GateProvenance::Asserted,
+        );
+        assert!(!is_ungrounded_assertion(&row));
+    }
+
+    #[test]
+    fn emit_gate_trust_skips_ingestion_of_an_ungrounded_assertion() {
+        use crate::uncertainty::types::PredictionState;
+        let db = test_db();
+        let row = gate_row_with_provenance(
+            "legion-simplify",
+            GateResult::Clean,
+            0,
+            GateProvenance::Asserted,
+        );
+        emit_gate_trust(&db, &row);
+        let emitted = db
+            .count_predictions_by_surface_state("legion.gate", PredictionState::Emitted)
+            .unwrap();
+        assert_eq!(
+            emitted, 0,
+            "an asserted-clean row for a check-gated skill must not be ingested"
+        );
+    }
+
+    #[test]
+    fn emit_gate_trust_still_ingests_a_validated_clean_row() {
+        use crate::uncertainty::types::PredictionState;
+        let db = test_db();
+        emit_gate_trust(&db, &gate_row("legion-simplify", GateResult::Clean, 0));
+        let emitted = db
+            .count_predictions_by_surface_state("legion.gate", PredictionState::Emitted)
+            .unwrap();
+        assert_eq!(emitted, 1, "a validated clean row must still be ingested");
     }
 
     #[test]

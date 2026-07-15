@@ -5,7 +5,7 @@ use clap::Subcommand;
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{audit, git_head_commit_and_branch, open_db, read_file_or_stdin};
 use crate::db::quality_gates::QualityGateInput;
-use crate::verify::GateResult;
+use crate::verify::{GateProvenance, GateResult};
 use crate::{board, card_parse, db, error, kanban, pr_view, pr_write, search, worksource};
 
 #[derive(Subcommand, Debug)]
@@ -314,6 +314,12 @@ fn failing_checks_error(failed: &[&str], number: u64) -> error::LegionError {
 /// cross-checks the PR's head SHA first and phrases its own advice; the
 /// closing-keyword warning stays with each caller since the fix differs --
 /// `--closes` exists for `pr create`, not for editing a live PR).
+///
+/// This IS `legion-pr-write`'s check validator (#780): `pr_write::validate_pr_body`
+/// plays the same role `simplify_check::validate_articulation` plays for
+/// `legion-simplify` -- a structural gate the result must pass before the
+/// row is written -- so the row it records always carries VALIDATED
+/// provenance, mirroring `cli::verify`'s `Check` action.
 #[allow(clippy::too_many_arguments)]
 fn validate_and_record_pr_write_gate(
     plugin_name: &str,
@@ -349,6 +355,7 @@ fn validate_and_record_pr_write_gate(
         result: gate_result,
         findings_count: report.findings.len() as u64,
         details: Some(&details),
+        provenance: GateProvenance::Validated,
     })?;
     crate::gate_trust::emit_gate_trust(database, &row);
 
