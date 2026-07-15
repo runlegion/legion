@@ -4,6 +4,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{audit, git_head_commit_and_branch, open_db, read_file_or_stdin};
+use crate::db::quality_gates::QualityGateInput;
 use crate::verify::GateResult;
 use crate::{board, card_parse, db, error, kanban, pr_view, pr_write, search, worksource};
 
@@ -251,6 +252,14 @@ pub(crate) enum PrAction {
         /// Kanban card ID to transition to done
         #[arg(long)]
         task: Option<String>,
+
+        /// Operator override: merge despite failing check-runs on the head
+        /// SHA. Writes an audit entry naming the failing checks (mirrors
+        /// `pr create --skip-gates`). Does not affect the #736 zero-runs
+        /// refusal, which still fires first -- this only overrides the
+        /// present-and-failing case.
+        #[arg(long)]
+        merge_despite_failures: bool,
     },
 
     /// Close a pull request without merging
@@ -281,6 +290,19 @@ fn no_runs_for_head_error(head_sha: &str, number: u64, source_repo: &str) -> err
     error::LegionError::WorkSource(format!(
         "no runs for head {head_sha}: PR #{number} on {source_repo} has zero check runs \
          for its head commit (not the branch's last suite)"
+    ))
+}
+
+/// Shared refusal for a PR head with one or more check-runs in a failing
+/// state (see `ExternalPRCheck::is_failing`). `legion pr checks` and `legion
+/// pr merge` both classify with the same predicate and must name the same
+/// failing checks the same way.
+fn failing_checks_error(failed: &[&str], number: u64) -> error::LegionError {
+    error::LegionError::WorkSource(format!(
+        "{} check(s) failed on PR #{}: {}",
+        failed.len(),
+        number,
+        failed.join(", ")
     ))
 }
 
@@ -320,14 +342,14 @@ fn validate_and_record_pr_write_gate(
         "via": via,
     })
     .to_string();
-    let row = database.record_quality_gate(
+    let row = database.record_quality_gate(&QualityGateInput {
         branch,
         commit_hash,
-        "legion-pr-write",
-        gate_result,
-        report.findings.len() as u64,
-        Some(&details),
-    )?;
+        skill: "legion-pr-write",
+        result: gate_result,
+        findings_count: report.findings.len() as u64,
+        details: Some(&details),
+    })?;
     crate::gate_trust::emit_gate_trust(database, &row);
 
     Ok(report)
@@ -610,12 +632,7 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 .map(|c| c.name.as_str())
                 .collect();
             if !failed.is_empty() {
-                return Err(error::LegionError::WorkSource(format!(
-                    "{} check(s) failed on PR #{}: {}",
-                    failed.len(),
-                    number,
-                    failed.join(", ")
-                )));
+                return Err(failing_checks_error(&failed, number));
             }
         }
         PrAction::View { repo, number, json } => {
@@ -903,6 +920,7 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
             strategy,
             keep_branch,
             task,
+            merge_despite_failures,
         } => {
             let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
             let database = open_db()?;
@@ -913,13 +931,6 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
             // here (not left to branch protection) because a repo without a
             // required-status-checks rule would otherwise let an untested
             // head merge silently.
-            //
-            // Deliberately narrow: this refuses only the zero-runs state,
-            // not a head with checks that are actively failing. Merge never
-            // gated on failing checks before this change either (the plugin's
-            // own merge case only inspects reviewDecision) -- expanding that
-            // is a separate concern from #736's zero-runs false-green bug and
-            // left to the repo's own branch protection / required checks.
             let checks_result = worksource::pr_checks(&plugin_name, &source_repo, number)?;
             if checks_result.checks.is_empty() {
                 return Err(no_runs_for_head_error(
@@ -927,6 +938,48 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                     number,
                     &source_repo,
                 ));
+            }
+
+            // #761: gate on PRESENT-AND-FAILING check-runs too, not just
+            // absence. Same classification `legion pr checks` uses
+            // (`ExternalPRCheck::is_failing`) so a red required check-run
+            // cannot be merged through legion without branch protection
+            // noticing -- this matters on repos with admin-bypass merge
+            // rules, where branch protection alone would not stop it.
+            // `--merge-despite-failures` is the operator's audited escape
+            // hatch (mirrors `pr create --skip-gates`): it does not touch
+            // the zero-runs refusal above, which still fires first.
+            let failed: Vec<&str> = checks_result
+                .checks
+                .iter()
+                .filter(|c| c.is_failing())
+                .map(|c| c.name.as_str())
+                .collect();
+            if !failed.is_empty() {
+                if !merge_despite_failures {
+                    return Err(failing_checks_error(&failed, number));
+                }
+                let details = serde_json::json!({ "failing_checks": failed }).to_string();
+                audit(
+                    &database,
+                    &db::AuditInput {
+                        agent: &repo,
+                        action: "merge-despite-failures",
+                        target_type: "pr",
+                        target_ref: &number.to_string(),
+                        task_id: task.as_deref(),
+                        source_type: &plugin_name,
+                        details: Some(&details),
+                        outcome: "overridden",
+                    },
+                );
+                eprintln!(
+                    "[legion] warning: merging PR #{} despite {} failing check(s): {} \
+                     (--merge-despite-failures override, audit-logged)",
+                    number,
+                    failed.len(),
+                    failed.join(", ")
+                );
             }
 
             let merge_outcome =

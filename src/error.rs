@@ -60,6 +60,16 @@ pub enum LegionError {
     #[error("invalid card transition: cannot {action} a card in status '{current}'")]
     InvalidCardTransition { action: String, current: String },
 
+    #[error(
+        "repo '{repo}' already has a live identity root ({existing_id}) -- a second, \
+         unparented identity write is exactly the leak vector that let a stray checkpoint \
+         outrank the real identity in the boot banner. Either chain onto the existing root \
+         (`legion reflect --whoami --follows {existing_id} --text \"...\"`) or replace it \
+         deliberately (`legion forget --id {existing_id}` then re-run `legion reflect --whoami`). \
+         Find the root again any time via `legion recall --repo {repo} --domain identity --limit 1`."
+    )]
+    IdentityRootExists { repo: String, existing_id: String },
+
     #[error("invalid card status: {0}")]
     InvalidCardStatus(String),
 
@@ -182,6 +192,15 @@ pub enum LegionError {
     #[error("invalid gate result: '{0}' (expected 'clean' or 'issues')")]
     InvalidGateResult(String),
 
+    #[error("branch '{branch}' not found in any worktree checkout (searched: {searched})")]
+    PushBranchNotFound { branch: String, searched: String },
+
+    #[error("refusing to push '{branch}': {reason}")]
+    PushRefused { branch: String, reason: String },
+
+    #[error("git push failed: {stderr}")]
+    PushFailed { stderr: String },
+
     /// Signals that the process should exit with a specific non-zero code.
     ///
     /// Used by CLI handlers that have already printed a user-facing message
@@ -287,5 +306,35 @@ mod tests {
         assert!(err.to_string().contains("bad"));
         assert!(err.to_string().contains("clean"));
         assert!(err.to_string().contains("issues"));
+    }
+
+    #[test]
+    fn push_branch_not_found_display() {
+        let err = LegionError::PushBranchNotFound {
+            branch: "feat/x".to_string(),
+            searched: "/a, /b".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("feat/x"));
+        assert!(msg.contains("/a, /b"));
+    }
+
+    #[test]
+    fn push_refused_display() {
+        let err = LegionError::PushRefused {
+            branch: "main".to_string(),
+            reason: "agents never push main".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("main"));
+        assert!(msg.contains("agents never push main"));
+    }
+
+    #[test]
+    fn push_failed_display() {
+        let err = LegionError::PushFailed {
+            stderr: "! [rejected]".to_string(),
+        };
+        assert!(err.to_string().contains("! [rejected]"));
     }
 }

@@ -131,6 +131,34 @@ pub(crate) enum SymAction {
         #[arg(long)]
         json: bool,
     },
+
+    /// What this file imports -- one row per static/dynamic import in a
+    /// js/ts/jsx/tsx file, resolved (to = Some) or unresolved/external
+    /// (to = None). Direct edges only; no transitive/re-export resolution.
+    Imports {
+        /// Importer file: exact repo-relative path or a path-suffix
+        /// (mirrors `sym list --file` matching).
+        file: String,
+        /// Restrict to a single repo (default: every indexed repo)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Emit results as the #746 freshness envelope
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// What imports this file -- every edge that resolved to it. Answers
+    /// the "who consumes X" question SCIP symbol-refs cannot.
+    Importers {
+        /// Importee file: exact repo-relative path or a path-suffix.
+        file: String,
+        /// Restrict to a single repo (default: every indexed repo)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Emit results as the #746 freshness envelope
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -277,6 +305,8 @@ fn run_sym_action(database: &db::Database, action: SymAction) -> error::Result<(
             file,
             json,
         } => run_sym_list(database, repo, lang, kind, file, json),
+        SymAction::Imports { file, repo, json } => run_sym_imports(database, file, repo, json),
+        SymAction::Importers { file, repo, json } => run_sym_importers(database, file, repo, json),
         SymAction::Tree {
             repo,
             ext,
@@ -588,6 +618,216 @@ fn run_sym_list(
         }
     }
     Ok(())
+}
+
+/// One row in `sym imports`/`sym importers`' output: a `graph::ImportEdge`
+/// decoupled into its own JSON-facing shape (mirrors `CssSymbolHit`, #744)
+/// so a future change to the internal graph-edge type does not silently
+/// reshape the CLI's `--json` contract.
+#[derive(Debug, serde::Serialize)]
+struct ImportEdgeHit {
+    repo: String,
+    from: String,
+    specifier: String,
+    to: Option<String>,
+}
+
+impl From<graph::ImportEdge> for ImportEdgeHit {
+    fn from(e: graph::ImportEdge) -> Self {
+        Self {
+            repo: e.repo,
+            from: e.from,
+            specifier: e.specifier,
+            to: e.to,
+        }
+    }
+}
+
+/// Every repo `sym imports`/`sym importers` should query: just `repo` itself
+/// when given, else every repo with at least one `file_inventory` row.
+///
+/// Deliberately NOT narrowed by extension the way `css_repo_scope` narrows
+/// to `ext = "css"`: `module_edges` is populated only for js/ts/jsx/tsx
+/// files (`build_module_graph`), so a cleanly indexed pure-Rust (or
+/// mixed-language) repo has zero edges forever but is still indexed --
+/// narrowing this scope by extension would make such a repo invisible to a
+/// cross-repo query instead of correctly contributing an empty result
+/// (Build Notes, #772).
+fn module_edges_repo_scope(
+    database: &db::Database,
+    repo: Option<&str>,
+) -> error::Result<Vec<String>> {
+    if let Some(r) = repo {
+        return Ok(vec![r.to_string()]);
+    }
+    let entries = database.list_file_inventory(&db::inventory::InventoryFilter {
+        repo: None,
+        ext: None,
+        lang: None,
+    })?;
+    let mut repos: Vec<String> = entries.into_iter().map(|e| e.repo).collect();
+    repos.sort();
+    repos.dedup();
+    Ok(repos)
+}
+
+/// True when `repo` (or, when `None`, any repo at all) has at least one
+/// `file_inventory` row -- "has `legion index` ever run here", not "does
+/// this repo have js/ts files" and not "does this file have edges".
+///
+/// Keying off `file_inventory` rather than `module_edges` rowcount matters:
+/// `module_edges` is js/ts/jsx/tsx-only, so a cleanly indexed pure-Rust repo
+/// has zero `module_edges` rows forever and would otherwise false-error as
+/// "never indexed" on every `sym imports`/`sym importers` call -- the same
+/// misroute class `css_symbol_no_index_message` prevents for `--lang css`,
+/// but mirrored without the ext filter since the js/ts narrowing that is
+/// correct for css is exactly what would break here (Build Notes, #772).
+fn module_edges_indexed(database: &db::Database, repo: Option<&str>) -> error::Result<bool> {
+    let entries = database.list_file_inventory(&db::inventory::InventoryFilter {
+        repo,
+        ext: None,
+        lang: None,
+    })?;
+    Ok(!entries.is_empty())
+}
+
+/// `sym imports`/`sym importers`'s "never indexed" error message, mirroring
+/// `css_symbol_no_index_message`'s shape and fix-hint wording.
+fn module_edges_no_index_message(repo: Option<&str>) -> String {
+    let scope = repo.unwrap_or("(any repo)");
+    format!("[legion] no index found for {scope}; run `legion index {scope}` first")
+}
+
+/// Print one line per edge in the `sym list` house style: specifier, the
+/// from -> to arrow (an unresolved/external edge prints `unresolved`
+/// instead of a path -- it is shown, not dropped), then the owning repo.
+/// Shared by `run_sym_imports`/`run_sym_importers`; the two commands differ
+/// only in which DB method produced `hits` and which "matched nothing"
+/// hint to print.
+fn print_import_edge_hits(
+    out: &mut impl std::io::Write,
+    hits: &[ImportEdgeHit],
+) -> error::Result<()> {
+    for h in hits {
+        let to_col = h.to.as_deref().unwrap_or("unresolved");
+        writeln!(
+            out,
+            "{}\t{} -> {}\t[{}]",
+            h.specifier, h.from, to_col, h.repo
+        )?;
+    }
+    Ok(())
+}
+
+/// Shared implementation for `sym imports`/`sym importers` (#772):
+/// never-indexed check, the `module_edges_repo_scope` loop, freshness
+/// computation, and the human/`--json` output shapes. The two commands
+/// differ only in which DB method produces edges (`list_module_edges_from`
+/// vs `list_module_edges_to`, passed as `query_edges`) and which "matched
+/// nothing" hint to print (`empty_message`).
+///
+/// Unresolved/external edges (`to: None`) are included, not dropped -- an
+/// agent needs to see the dangling `lodash` / broken-relative import.
+///
+/// `--json` wraps results in the #746 `FreshJsonEnvelope` (mirroring
+/// `run_sym_tree`), never a bare array -- `run_css_sym_list`'s bare-array
+/// `--json` is the anti-pattern this issue deliberately does not copy,
+/// since a graph answer is only as good as the last index.
+fn run_sym_edges(
+    database: &db::Database,
+    file: String,
+    repo: Option<String>,
+    json: bool,
+    empty_message: &str,
+    query_edges: impl Fn(&db::Database, &str, &str) -> error::Result<Vec<graph::ImportEdge>>,
+) -> error::Result<()> {
+    use std::io::Write;
+
+    // An empty `file` argument is a suffix of every path (`"".ends_with("")`
+    // and `s.ends_with("")` are both always true), so without this guard the
+    // suffix match in `list_module_edges_from`/`_to` would silently return
+    // every edge in scope instead of erroring on a clearly-wrong query.
+    if file.trim().is_empty() {
+        eprintln!("[legion] file argument must not be empty");
+        return Err(error::LegionError::ExitWith(2));
+    }
+
+    if !module_edges_indexed(database, repo.as_deref())? {
+        eprintln!("{}", module_edges_no_index_message(repo.as_deref()));
+        return Err(error::LegionError::ExitWith(1));
+    }
+
+    let repos = module_edges_repo_scope(database, repo.as_deref())?;
+    let mut hits = Vec::new();
+    for r in &repos {
+        let edges = query_edges(database, r, &file)?;
+        hits.extend(edges.into_iter().map(ImportEdgeHit::from));
+    }
+
+    let snapshots = compute_freshness(
+        database,
+        repo.as_deref(),
+        hits.iter().map(|h| h.repo.as_str()),
+    )?;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if json {
+        let envelope = FreshJsonEnvelope {
+            snapshots,
+            entries: hits,
+        };
+        serde_json::to_writer(&mut out, &envelope)?;
+        writeln!(out)?;
+    } else {
+        let now = chrono::Utc::now();
+        for s in &snapshots {
+            eprintln!("[legion] {}", format_freshness_line(s, now));
+        }
+        print_import_edge_hits(&mut out, &hits)?;
+        if hits.is_empty() {
+            eprintln!("[legion] {empty_message}");
+        }
+    }
+    Ok(())
+}
+
+/// `sym imports <file>` (#772): every edge whose importer matches `file`
+/// (exact path or suffix, `Database::list_module_edges_from`). See
+/// `run_sym_edges` for the shared implementation.
+fn run_sym_imports(
+    database: &db::Database,
+    file: String,
+    repo: Option<String>,
+    json: bool,
+) -> error::Result<()> {
+    run_sym_edges(
+        database,
+        file,
+        repo,
+        json,
+        "no imports found",
+        db::Database::list_module_edges_from,
+    )
+}
+
+/// `sym importers <file>` (#772): every edge that resolved to `file` (exact
+/// path or suffix, `Database::list_module_edges_to`). See `run_sym_edges`
+/// for the shared implementation.
+fn run_sym_importers(
+    database: &db::Database,
+    file: String,
+    repo: Option<String>,
+    json: bool,
+) -> error::Result<()> {
+    run_sym_edges(
+        database,
+        file,
+        repo,
+        json,
+        "no importers found",
+        db::Database::list_module_edges_to,
+    )
 }
 
 /// One row in `sym tree`'s structured output: the file-inventory columns

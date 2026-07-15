@@ -558,6 +558,146 @@ fn pr_merge_refuses_when_head_has_zero_runs() {
 }
 
 // ---------------------------------------------------------------------------
+// #761: `legion pr merge` gates on PRESENT-AND-FAILING check-runs too, not
+// just absence -- #736 only covered the zero-runs case. Same `is_failing()`
+// classification `legion pr checks` uses.
+// ---------------------------------------------------------------------------
+
+/// `legion pr merge` refuses when the head SHA has a check-run in a failing
+/// state, naming the failing check -- and never invokes the plugin's `merge`
+/// subcommand (this stub does not implement it; a call would fail the test
+/// with "unknown subcommand" instead of the expected refusal, proving merge
+/// is gated before the plugin call).
+#[cfg(unix)]
+#[test]
+fn pr_merge_refuses_when_head_has_failing_checks() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_checks_only_stub(
+        r#"{"headSha":"cafef00d","checks":[{"name":"Clippy","state":"FAILURE","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/1","description":""}]}"#,
+    );
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let (_stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["pr", "merge", "--repo", "stub", "--number", "42"]),
+    );
+    assert!(
+        stderr.contains("1 check(s) failed on PR #42"),
+        "expected the failing-checks refusal, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Clippy"),
+        "expected the failing check name in the refusal, got: {stderr}"
+    );
+}
+
+/// Stub worksource plugin for the failing-checks override test: `pr-checks`
+/// reports one FAILURE check on the pinned head SHA, `merge` succeeds
+/// (direct, non-queued), `close` exits 0 for the linked-issue path.
+#[cfg(unix)]
+fn pr_merge_failing_check_stub_plugin() -> String {
+    r#"#!/bin/bash
+set -e
+case "${1:-}" in
+  pr-checks)
+    cat <<'BODY'
+{"headSha":"cafef00d","checks":[{"name":"Clippy","state":"FAILURE","workflow":"CI","link":"https://github.com/ex/ex/actions/runs/1/job/1","description":""}]}
+BODY
+    ;;
+  merge)
+    echo '{"queued":false}'
+    ;;
+  close)
+    exit 0
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"#
+    .to_string()
+}
+
+/// `--merge-despite-failures` overrides the failing-checks refusal, actually
+/// merges, and writes an audit row naming the failing check -- the operator
+/// escape hatch mirroring `pr create --skip-gates`.
+#[cfg(unix)]
+#[test]
+fn pr_merge_despite_failures_overrides_and_audit_logs() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &pr_merge_failing_check_stub_plugin(),
+    );
+
+    let out = run_ok_output(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr",
+        "merge",
+        "--repo",
+        "stub",
+        "--number",
+        "42",
+        "--merge-despite-failures",
+    ]));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("PR #42 merged on owner/stub"),
+        "expected the override to still complete the merge, got: {stdout}"
+    );
+    assert!(
+        stderr.contains("Clippy"),
+        "expected the override warning to name the failing check, got: {stderr}"
+    );
+
+    let audit_out = run_ok(legion_cmd(data_dir.path()).args([
+        "audit",
+        "--action",
+        "merge-despite-failures",
+        "--json",
+    ]));
+    assert!(
+        audit_out.contains("Clippy"),
+        "expected the audit row to record the failing check name, got: {audit_out}"
+    );
+    assert!(
+        audit_out.contains("overridden"),
+        "expected the audit row outcome to mark this as an override, got: {audit_out}"
+    );
+}
+
+/// The #736 zero-runs refusal still fires first: `--merge-despite-failures`
+/// does not also waive the "no runs for head" state -- zero runs is absence,
+/// not a failing check-run, and is a different failure mode this flag does
+/// not cover.
+#[cfg(unix)]
+#[test]
+fn pr_merge_despite_failures_does_not_override_zero_runs_refusal() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let body = pr_checks_only_stub(r#"{"headSha":"ec3825b","checks":[]}"#);
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &body);
+
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr",
+        "merge",
+        "--repo",
+        "stub",
+        "--number",
+        "735",
+        "--merge-despite-failures",
+    ]));
+    assert!(
+        stderr.contains("no runs for head ec3825b"),
+        "expected the zero-runs refusal to still fire despite the override flag, got: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // #630: merge-queue support. The plugin's `merge` subcommand now reports
 // whether it merged the PR directly or enqueued it onto the base branch's
 // merge queue via `{"queued": <bool>}`. These tests stub that boundary --
