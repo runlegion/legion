@@ -72,10 +72,13 @@ Whichever candidate above becomes real, the consuming design should **mirror #77
 not invent a parallel one -- the two cases (watch-spawned, harness-native) are the same shape
 (bounded delegation to a liveness-checkable delegate) with different liveness sources:
 
-1. **Same `CardStatus::Delegated` and `Action::Delegate`** (`src/kanban/state.rs`'s closed enum
-   and exhaustive transition table, `CardStatus` at lines 15-24, `transition()` at 132-195) --
-   not a second status. The state means "work is running elsewhere and is liveness-checked,"
-   regardless of which substrate proves the liveness.
+1. **Same `CardStatus::Delegated` and `Action::Delegate`** -- #778's proposed variant and action,
+   not yet landed: today's `src/kanban/state.rs` enum (`CardStatus` at lines 15-24) has no
+   `Delegated` member, and the exhaustive transition table (`transition()` at 132-195) has no arm
+   for it. The citation points to where that enum and table live, not to an existing variant. Once
+   #778 lands `Delegated`, this design consumes that same status and action -- not a second one --
+   for the harness-native case. The state means "work is running elsewhere and is
+   liveness-checked," regardless of which substrate proves the liveness.
 2. **A second liveness predicate, gated the same way #778 gates the first.** Entry into
    `Delegated` from a harness-native background source requires the sound signal (a live registry
    entry, or fresh-enough transcript/task-file state) to be present *at entry time* -- exactly
@@ -229,6 +232,10 @@ the schema and refusal mechanism it is required to satisfy.
 
 - **docs/plans/ design doc merged covering both halves** -- this file, Part 1 (harness-native
   backgrounding) and Part 2 (fix-loop doctrine).
-- **#778 and #773 reference it** -- addressed by editing both issue bodies to add a "Companion
-  design doc" pointer to this file's path (`docs/plans/2026-07-14-stop-gate-background-and-fixloop-doctrine.md`),
-  done alongside this doc's merge.
+- **#778 and #773 reference it** -- **pending, not satisfied by this doc's merge.** The addenda
+  text (a "Companion design doc" pointer to this file's path,
+  `docs/plans/2026-07-14-stop-gate-background-and-fixloop-doctrine.md`) is drafted, but landing it
+  requires editing both issue bodies, and that write was refused by the session's permission
+  classifier (see this PR's body for the two denied attempts and the addenda text). This AC stays
+  open until a session with that write authorized applies it; #788 is referenced ("Refs #788"),
+  not closed, by the PR that adds this doc, so the issue remains open to track this.
