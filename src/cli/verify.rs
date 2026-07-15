@@ -7,7 +7,9 @@ use clap::Subcommand;
 use crate::cli::util::{
     git_changed_files, git_head_commit_and_branch, open_db, read_file_or_stdin,
 };
-use crate::db::quality_gates::{QualityGateFilter, QualityGateRow, QualityGateStats};
+use crate::db::quality_gates::{
+    QualityGateFilter, QualityGateInput, QualityGateRow, QualityGateStats,
+};
 use crate::gate_trust::emit_gate_trust;
 use crate::verify::GateResult;
 use crate::{error, kanban, simplify_check, verify};
@@ -138,14 +140,14 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             let (commit_hash, branch) = git_head_commit_and_branch()?;
 
             let database = open_db()?;
-            let row = database.record_quality_gate(
-                &branch,
-                &commit_hash,
-                &skill,
-                gate_result,
+            let row = database.record_quality_gate(&QualityGateInput {
+                branch: &branch,
+                commit_hash: &commit_hash,
+                skill: &skill,
+                result: gate_result,
                 findings_count,
-                details_json.as_deref(),
-            )?;
+                details: details_json.as_deref(),
+            })?;
             emit_gate_trust(&database, &row);
             // Phase 2b: a downstream legion-review verdict witnesses the
             // upstream legion-simplify gate prediction for this commit -- review
@@ -252,14 +254,14 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             .to_string();
 
             let database = open_db()?;
-            let row = database.record_quality_gate(
-                &branch,
-                &commit_hash,
-                &skill,
-                gate_result,
+            let row = database.record_quality_gate(&QualityGateInput {
+                branch: &branch,
+                commit_hash: &commit_hash,
+                skill: &skill,
+                result: gate_result,
                 findings_count,
-                Some(&details),
-            )?;
+                details: Some(&details),
+            })?;
             emit_gate_trust(&database, &row);
 
             println!(
@@ -432,14 +434,14 @@ pub(crate) fn handle_verify(
             "decision": format!("ReplanRequired: {reason}"),
         })
         .to_string();
-        database.record_quality_gate(
-            &branch,
-            &commit_hash,
-            &skill,
-            GateResult::Issues,
-            1,
-            Some(&details),
-        )?;
+        database.record_quality_gate(&QualityGateInput {
+            branch: &branch,
+            commit_hash: &commit_hash,
+            skill: &skill,
+            result: GateResult::Issues,
+            findings_count: 1,
+            details: Some(&details),
+        })?;
         eprintln!("[legion] verify BLOCKED for card {card}: {reason}");
         return Err(error::LegionError::ExitWith(1));
     } else if let Some(reason) = deviation.as_deref() {
@@ -488,14 +490,14 @@ pub(crate) fn handle_verify(
     } else {
         GateResult::Issues
     };
-    database.record_quality_gate(
-        &branch,
-        &commit_hash,
-        &skill,
-        gate_result,
-        findings,
-        Some(&details),
-    )?;
+    database.record_quality_gate(&QualityGateInput {
+        branch: &branch,
+        commit_hash: &commit_hash,
+        skill: &skill,
+        result: gate_result,
+        findings_count: findings,
+        details: Some(&details),
+    })?;
 
     match decision {
         verify::VerifyDecision::Proceed => {
@@ -769,14 +771,14 @@ mod tests {
 
         // Simulate what the handler does: record the gate.
         let row = db
-            .record_quality_gate(
-                "feat/665-simplify-articulation",
-                "deadbeefdeadbeef",
-                "legion-simplify",
-                GateResult::Clean,
-                0,
-                Some(&serde_json::json!({"articulation": articulation}).to_string()),
-            )
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/665-simplify-articulation",
+                commit_hash: "deadbeefdeadbeef",
+                skill: "legion-simplify",
+                result: GateResult::Clean,
+                findings_count: 0,
+                details: Some(&serde_json::json!({"articulation": articulation}).to_string()),
+            })
             .expect("record_quality_gate failed");
         assert!(!row.id.is_empty());
 
