@@ -17,6 +17,12 @@ use crate::task;
 const MAX_TOOL_RESULT_LEN: usize = 2000;
 
 /// Tool definitions returned by tools/list. Shape is a public contract -- external MCP clients pin to these field names.
+///
+/// #785: this list has no reflect-capable tool today, so it is not a bypass
+/// vector for the identity-root guard in `Database::insert_reflection_with_meta`.
+/// Any future MCP tool that stores reflections must call
+/// `insert_reflection_with_meta` (directly or via `reflect_from_text_with_meta`)
+/// to inherit that guard rather than issuing a hand-rolled INSERT.
 pub(super) fn tool_definitions() -> Value {
     json!([
         {

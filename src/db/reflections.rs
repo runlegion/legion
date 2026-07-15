@@ -66,6 +66,15 @@ pub struct ReflectionMeta {
     pub parent_id: Option<String>,
 }
 
+/// Result of [`Database::swap_identity_root`]: the ids removed, the new
+/// root, and any chained children inserted after it (in chain order).
+#[allow(dead_code)] // consumed by #784 (whoami --generate), not yet landed
+pub struct IdentitySwapResult {
+    pub deleted_ids: Vec<String>,
+    pub root: Reflection,
+    pub children: Vec<Reflection>,
+}
+
 /// Base `reflections` table and the indexes over its original columns.
 pub(super) fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -171,8 +180,69 @@ impl Database {
     ///
     /// Like `insert_reflection` but accepts domain, tags, and parent_id
     /// for learning chain linking and classification.
+    ///
+    /// Guard (#785): when `meta.domain` is `Some("identity")` and
+    /// `meta.parent_id` is `None`, this is a write to the identity-root
+    /// slot. At most one live identity root may exist per repo -- a
+    /// second orphan root is exactly how a stray checkpoint-shaped
+    /// reflection outranked a repo's real identity in the boot banner
+    /// (`019f198b`). If [`live_identity_root_id`](Self::live_identity_root_id)
+    /// finds one already, the insert is refused with
+    /// `LegionError::IdentityRootExists` before any row is written. This
+    /// check is unconditional with respect to caller intent -- it does
+    /// not look at `--force` or any other flag, because every caller (CLI
+    /// `reflect` today, any future MCP tool or hook-invoked call
+    /// tomorrow) converges here. Bootstrap (no live root yet) and
+    /// explicit chaining (`meta.parent_id = Some(_)`, e.g. `--follows`)
+    /// are both unaffected.
+    ///
+    /// This is an application-level check-then-insert, not a database
+    /// constraint: two concurrent `legion` processes racing this method
+    /// for the same repo could both read "no live root" before either
+    /// writes, and both succeed, producing the very state this guard
+    /// exists to prevent. `legion` is a per-invocation CLI with no long-
+    /// lived writer serializing access, so this window is real, not
+    /// theoretical. A DB-level `UNIQUE` partial index would close it
+    /// structurally, but cannot be added here: it would fail its own
+    /// migration on any already-leaked database (domain=identity rows
+    /// with `parent_id IS NULL` already duplicated, e.g. `019f198b`'s
+    /// repo before hand-repair) -- and retroactive cleanup of existing
+    /// duplicates is explicitly out of scope for this change. This guard
+    /// closes the write-time gap for the overwhelmingly common
+    /// single-process case; the concurrent-write race is a known,
+    /// documented gap for a future change to close once a cleanup path
+    /// exists.
     pub fn insert_reflection_with_meta(
         &self,
+        repo: &str,
+        text: &str,
+        audience: &str,
+        meta: &ReflectionMeta,
+    ) -> Result<Reflection> {
+        if meta.domain.as_deref() == Some("identity")
+            && meta.parent_id.is_none()
+            && let Some(existing_id) = self.live_identity_root_id(repo)?
+        {
+            return Err(LegionError::IdentityRootExists {
+                repo: repo.to_owned(),
+                existing_id,
+            });
+        }
+
+        Self::insert_reflection_row(&self.conn, repo, text, audience, meta)
+    }
+
+    /// Core row-insert logic, shared by [`insert_reflection_with_meta`]
+    /// (guarded, against `self.conn`) and [`swap_identity_root`] (against
+    /// an in-flight transaction). Takes `&Connection` rather than `&self`
+    /// so both a plain connection and a `rusqlite::Transaction` (which
+    /// derefs to `Connection`) can call it. Carries no guard of its own --
+    /// callers are responsible for any invariant checks before calling.
+    ///
+    /// [`insert_reflection_with_meta`]: Self::insert_reflection_with_meta
+    /// [`swap_identity_root`]: Self::swap_identity_root
+    fn insert_reflection_row(
+        conn: &Connection,
         repo: &str,
         text: &str,
         audience: &str,
@@ -189,7 +259,7 @@ impl Database {
             created_at_dt,
         );
 
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO reflections (id, repo, text, created_at, updated_at, audience, domain, tags, parent_id, expires_at, evergreen) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
@@ -211,6 +281,146 @@ impl Database {
             recall_count: 0,
             last_recalled_at: None,
             parent_id: meta.parent_id.clone(),
+        })
+    }
+
+    /// Return the id of the repo's live identity root, if one exists.
+    ///
+    /// "Live" here means `domain = 'identity' AND parent_id IS NULL AND
+    /// deleted_at IS NULL AND archived_at IS NULL` -- a standalone query,
+    /// not a call to [`get_identity_roots`](Self::get_identity_roots),
+    /// because the guard's liveness definition must include the
+    /// `archived_at` filter now (an archived root must not block a new
+    /// bootstrap or replacement) while the shared banner reader behind
+    /// `get_identity_roots` does not filter `archived_at` yet (tracked
+    /// separately as #782). This function does not wait for that fix.
+    ///
+    /// The asymmetry this creates -- an archived root plus a fresh root
+    /// both satisfying `get_identity_roots`'s current predicate -- is not
+    /// reachable through any production write path today: `legion
+    /// reflect` always stores identity reflections with `audience =
+    /// "self"` (hardcoded; there is no `--audience` flag), and the only
+    /// writer of `archived_at` on the `reflections` table
+    /// (`Database::archive_read_posts`, `src/db/board.rs`) is scoped to
+    /// `audience = 'team'`. Verified in
+    /// `insert_reflection_with_meta_ignores_archived_root_for_guard`,
+    /// which asserts the two-root state directly rather than leaving it
+    /// implicit.
+    fn live_identity_root_id(&self, repo: &str) -> Result<Option<String>> {
+        // ORDER BY pins which id surfaces in the IdentityRootExists error
+        // message when more than one live root already exists (reachable
+        // only via a guard-bypassing path like sync's apply_reflection_delta
+        // -- see get_identity_roots_excludes_chain_children's raw-INSERT
+        // fixture for the same scenario). Newest first, matching
+        // get_domain_roots's ordering, so the id in the error is
+        // deterministic rather than whichever row SQLite happens to
+        // return first.
+        self.conn
+            .query_row(
+                "SELECT id FROM reflections \
+                 WHERE repo = ?1 AND domain = 'identity' AND parent_id IS NULL \
+                   AND deleted_at IS NULL AND archived_at IS NULL \
+                 ORDER BY created_at DESC LIMIT 1",
+                [repo],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(LegionError::Database)
+    }
+
+    /// Atomically replace a repo's identity root (and, optionally, chain
+    /// it to fresh children) inside a single transaction.
+    ///
+    /// This is the ONLY sanctioned way to replace an existing identity
+    /// root. Unlike the `legion forget --id <root>` then `legion reflect
+    /// --whoami` sequence (which has a brief window with zero live
+    /// roots), this method never exposes an intermediate state to a
+    /// concurrent reader: either the swap fully commits (old root(s)
+    /// gone, new root and any chained children in place) or it fully
+    /// rolls back (old identity untouched) on any failure -- rusqlite
+    /// drops an uncommitted `Transaction` with an automatic ROLLBACK, so
+    /// a mid-swap error restores the prior state with no extra code here.
+    ///
+    /// Deletes every row matching `domain = 'identity' AND parent_id IS
+    /// NULL AND deleted_at IS NULL` for `repo` -- deliberately not
+    /// filtering `archived_at` the way the insert guard's
+    /// [`live_identity_root_id`](Self::live_identity_root_id) does. An
+    /// archived orphan left behind by a swap would still satisfy "a
+    /// second domain=identity, parent_id IS NULL row" for any reader that
+    /// does not yet filter `archived_at` (the banner reader, until #782),
+    /// which is exactly the two-roots bug this issue closes. Swap is the
+    /// explicit "replace everything" path, so it clears every *root* row,
+    /// including any pre-existing leaked duplicates from before this fix
+    /// landed -- the plain insert guard only ever sees (and blocks
+    /// against) one at a time.
+    ///
+    /// Deliberately NOT cascading: only the root row(s) are deleted, not
+    /// their `--follows` chain children. A replaced root's old chain
+    /// children (if any) survive as now-dangling `parent_id` references,
+    /// exactly like `legion forget --id <root>` already leaves them today
+    /// (`delete_reflection` is a single-row delete with no cascade). This
+    /// keeps swap's delete semantics consistent with the one delete
+    /// primitive that already exists, rather than inventing new cascade
+    /// behavior no other code path has. Full old-chain retirement is a
+    /// call for whichever future feature actually builds replacement
+    /// chains on top of this (`whoami --generate`, #784) to make against
+    /// its own real requirements, not a guess made here.
+    ///
+    /// `new_root_text` becomes the new root (`parent_id = None`).
+    /// `chained_texts`, if any, are inserted afterward as a chain: the
+    /// first follows the new root, each subsequent one follows the last.
+    #[allow(dead_code)] // consumed by #784 (whoami --generate), not yet landed
+    pub fn swap_identity_root(
+        &self,
+        repo: &str,
+        new_root_text: &str,
+        chained_texts: &[&str],
+        audience: &str,
+    ) -> Result<IdentitySwapResult> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        // One statement, not a SELECT-then-DELETE pair with the liveness
+        // predicate copy-pasted twice: `RETURNING id` deletes every live
+        // identity root for `repo` and hands back exactly which ones,
+        // in one round trip, so there is only one place the predicate can
+        // drift out of sync with the guard's own definition.
+        let mut delete_stmt = tx.prepare(
+            "DELETE FROM reflections \
+             WHERE repo = ?1 AND domain = 'identity' AND parent_id IS NULL AND deleted_at IS NULL \
+             RETURNING id",
+        )?;
+        let deleted_ids: Vec<String> = delete_stmt
+            .query_map([repo], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)?;
+        drop(delete_stmt);
+
+        let root_meta = ReflectionMeta {
+            domain: Some("identity".to_owned()),
+            tags: None,
+            parent_id: None,
+        };
+        let root = Self::insert_reflection_row(&tx, repo, new_root_text, audience, &root_meta)?;
+
+        let mut children = Vec::with_capacity(chained_texts.len());
+        let mut parent_id = root.id.clone();
+        for text in chained_texts {
+            let child_meta = ReflectionMeta {
+                domain: Some("identity".to_owned()),
+                tags: None,
+                parent_id: Some(parent_id.clone()),
+            };
+            let child = Self::insert_reflection_row(&tx, repo, text, audience, &child_meta)?;
+            parent_id = child.id.clone();
+            children.push(child);
+        }
+
+        tx.commit()?;
+
+        Ok(IdentitySwapResult {
+            deleted_ids,
+            root,
+            children,
         })
     }
 
@@ -632,6 +842,25 @@ mod tests {
 
     use crate::db::testutil::test_db;
 
+    /// Insert an orphan `domain='identity'` row via raw SQL, bypassing the
+    /// #785 guard entirely. Simulates the legacy/pre-guard state (or a
+    /// synced-in row from `apply_reflection_delta`, which also bypasses the
+    /// guard) that `get_identity_roots` and `swap_identity_root` must both
+    /// still handle correctly even though `insert_reflection_with_meta`
+    /// itself now refuses to create a second one. Returns the new row's id.
+    fn insert_raw_orphan_identity(db: &crate::db::Database, repo: &str, text: &str) -> String {
+        let id = Uuid::now_v7().to_string();
+        let now = Utc::now().to_rfc3339();
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, domain) \
+                 VALUES (?1, ?2, ?3, ?4, 'identity')",
+                rusqlite::params![&id, repo, text, &now],
+            )
+            .unwrap();
+        id
+    }
+
     #[test]
     fn insert_and_retrieve_reflection() {
         let db = test_db();
@@ -951,10 +1180,30 @@ mod tests {
                 },
             )
             .unwrap();
-        let orphan = db
+
+        // A second orphan root can no longer be created through
+        // `insert_reflection_with_meta` -- the #785 guard refuses it. This
+        // test still needs to prove `get_identity_roots` surfaces
+        // pre-existing/legacy orphan rows (predating the guard, or arriving
+        // via a sync race) rather than silently hiding them, so the orphan
+        // fixture goes in via a raw INSERT that deliberately bypasses the
+        // guard, exactly as a legacy row or a synced-in row would look.
+        let orphan_id = insert_raw_orphan_identity(&db, "legion", "orphan identity");
+
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        let ids: Vec<&str> = roots.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(roots.len(), 2);
+        assert!(ids.contains(&root.id.as_str()));
+        assert!(ids.contains(&orphan_id.as_str()));
+    }
+
+    #[test]
+    fn insert_reflection_with_meta_rejects_second_identity_root() {
+        let db = test_db();
+        let first = db
             .insert_reflection_with_meta(
                 "legion",
-                "orphan identity",
+                "first identity",
                 "self",
                 &ReflectionMeta {
                     domain: Some("identity".into()),
@@ -963,11 +1212,309 @@ mod tests {
             )
             .unwrap();
 
+        let result = db.insert_reflection_with_meta(
+            "legion",
+            "second identity",
+            "self",
+            &ReflectionMeta {
+                domain: Some("identity".into()),
+                ..Default::default()
+            },
+        );
+
+        match result {
+            Err(LegionError::IdentityRootExists { repo, existing_id }) => {
+                assert_eq!(repo, "legion");
+                assert_eq!(existing_id, first.id);
+            }
+            other => panic!("expected IdentityRootExists, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_reflection_with_meta_allows_identity_child_when_root_exists() {
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "root identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let child = db
+            .insert_reflection_with_meta(
+                "legion",
+                "chained identity beat",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    parent_id: Some(root.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(child.parent_id.as_deref(), Some(root.id.as_str()));
+    }
+
+    #[test]
+    fn insert_reflection_with_meta_allows_first_identity_root_when_repo_empty() {
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "fresh-repo",
+                "bootstrap identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(root.parent_id.is_none());
+    }
+
+    #[test]
+    fn insert_reflection_with_meta_ignores_archived_root_for_guard() {
+        // The guard's own liveness read filters archived_at IS NULL (#785
+        // build note), independently of get_identity_roots (which does
+        // not filter archived_at yet -- #782). An archived root must not
+        // block a fresh bootstrap insert.
+        //
+        // Documenting the consequence, not just the guard's own behavior:
+        // once this insert succeeds, get_identity_roots("legion", ..) DOES
+        // return both rows (asserted below) -- the pre-#782 banner reader
+        // would show two roots again if an identity reflection were ever
+        // archived. No current write path can do that: `legion reflect`
+        // always stores identity reflections with audience="self"
+        // (hardcoded, no --audience flag exists), and the only production
+        // writer of `archived_at` on the reflections table
+        // (`Database::archive_read_posts`, src/db/board.rs) is scoped to
+        // `audience = 'team'`. This test's archive step is a raw UPDATE
+        // simulating a future/hypothetical writer, not a reachable path
+        // today.
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "old archived identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        db.conn
+            .execute(
+                "UPDATE reflections SET archived_at = ?1 WHERE id = ?2",
+                rusqlite::params![&now, &root.id],
+            )
+            .unwrap();
+
+        let fresh = db
+            .insert_reflection_with_meta(
+                "legion",
+                "new identity after archive",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(fresh.parent_id.is_none());
+        assert_ne!(fresh.id, root.id);
+
+        // The archived root and the fresh root now BOTH satisfy
+        // get_identity_roots's current (pre-#782) predicate -- this is
+        // the documented, accepted asymmetry, made visible here rather
+        // than left implicit.
         let roots = db.get_identity_roots("legion", 10).unwrap();
-        let ids: Vec<&str> = roots.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(roots.len(), 2);
-        assert!(ids.contains(&root.id.as_str()));
-        assert!(ids.contains(&orphan.id.as_str()));
+        assert_eq!(
+            roots.len(),
+            2,
+            "pre-#782, get_identity_roots does not filter archived_at, so \
+             an archived root and a fresh root both surface -- tracked, not \
+             regressed, by this guard"
+        );
+    }
+
+    #[test]
+    fn swap_identity_root_replaces_existing_root() {
+        let db = test_db();
+        let old_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "old identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let result = db
+            .swap_identity_root("legion", "new identity", &[], "self")
+            .unwrap();
+
+        assert_eq!(result.deleted_ids, vec![old_root.id.clone()]);
+        assert_eq!(result.root.text, "new identity");
+        assert!(result.root.parent_id.is_none());
+        assert!(result.children.is_empty());
+
+        // Old root is gone, new root is the only live root.
+        assert!(db.get_reflection_by_id(&old_root.id).unwrap().is_none());
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, result.root.id);
+    }
+
+    #[test]
+    fn swap_identity_root_does_not_cascade_to_old_chain_children() {
+        // Locks in the documented non-cascade decision: swap_identity_root
+        // deletes only the root row, matching legion forget's existing
+        // single-row delete_reflection (no cascade). The old root's
+        // --follows child survives as a live row with a now-dangling
+        // parent_id -- exactly what forget already leaves behind today,
+        // and what a future cascade (if #784 ever needs one) would change.
+        let db = test_db();
+        let old_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "old identity",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let old_child = db
+            .insert_reflection_with_meta(
+                "legion",
+                "old supporting beat",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    parent_id: Some(old_root.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let result = db
+            .swap_identity_root("legion", "new identity", &[], "self")
+            .unwrap();
+
+        assert_eq!(result.deleted_ids, vec![old_root.id.clone()]);
+        assert!(
+            db.get_reflection_by_id(&old_root.id).unwrap().is_none(),
+            "root must be deleted"
+        );
+
+        // The old child was NOT deleted -- it survives, dangling.
+        let surviving_child = db
+            .get_reflection_by_id(&old_child.id)
+            .unwrap()
+            .expect("old chain child must survive the swap (non-cascading delete)");
+        assert_eq!(
+            surviving_child.parent_id.as_deref(),
+            Some(old_root.id.as_str()),
+            "surviving child's parent_id still points at the now-deleted old root"
+        );
+
+        // The new root is the only row get_identity_roots surfaces --
+        // the dangling child has parent_id set, so it never counted as a
+        // root and does not resurrect the old identity in the banner.
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, result.root.id);
+    }
+
+    #[test]
+    fn swap_identity_root_inserts_chained_children() {
+        let db = test_db();
+        db.insert_reflection_with_meta(
+            "legion",
+            "old identity",
+            "self",
+            &ReflectionMeta {
+                domain: Some("identity".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let result = db
+            .swap_identity_root(
+                "legion",
+                "new root",
+                &["supporting beat one", "supporting beat two"],
+                "self",
+            )
+            .unwrap();
+
+        assert_eq!(result.children.len(), 2);
+        assert_eq!(
+            result.children[0].parent_id.as_deref(),
+            Some(result.root.id.as_str())
+        );
+        assert_eq!(
+            result.children[1].parent_id.as_deref(),
+            Some(result.children[0].id.as_str())
+        );
+
+        // get_chain from the root walks forward through both children.
+        let chain = db.get_chain(&result.root.id).unwrap();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].id, result.root.id);
+        assert_eq!(chain[1].id, result.children[0].id);
+        assert_eq!(chain[2].id, result.children[1].id);
+    }
+
+    #[test]
+    fn swap_identity_root_cleans_up_multiple_pre_existing_orphans() {
+        // Simulates the pre-#785 leaked state: two orphan identity roots
+        // already exist (inserted via raw SQL, bypassing the guard, the
+        // same way the guard test above builds its legacy fixture). Swap
+        // must clear all of them, not just one.
+        let db = test_db();
+        let old_ids: Vec<String> = ["orphan one", "orphan two"]
+            .into_iter()
+            .map(|text| insert_raw_orphan_identity(&db, "legion", text))
+            .collect();
+
+        let result = db
+            .swap_identity_root("legion", "clean new identity", &[], "self")
+            .unwrap();
+
+        let mut deleted = result.deleted_ids.clone();
+        deleted.sort();
+        let mut expected = old_ids.clone();
+        expected.sort();
+        assert_eq!(deleted, expected);
+
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, result.root.id);
+    }
+
+    #[test]
+    fn swap_identity_root_bootstraps_when_no_prior_root_exists() {
+        let db = test_db();
+        let result = db
+            .swap_identity_root("fresh-repo", "first identity via swap", &[], "self")
+            .unwrap();
+        assert!(result.deleted_ids.is_empty());
+        assert_eq!(result.root.text, "first identity via swap");
     }
 
     #[test]
