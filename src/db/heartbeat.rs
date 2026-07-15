@@ -96,6 +96,17 @@ impl Database {
     /// yes/no gate (the delegated-liveness predicate in `wake.rs`) don't
     /// need the age breakdown. An unparseable `updated_at` reads as NOT
     /// alive (fail closed), matching `classify_beat`'s `i64::MAX` coercion.
+    ///
+    /// Known limitation (accepted, not a bug): this checks the most-recent
+    /// beat across ANY host, not the specific host that owns a delegated
+    /// attempt (`wake_attempts.acquired_by_host`). In a multi-host cluster
+    /// where host-A holds the delegated attempt and dies while host-B keeps
+    /// beating, this still reads "alive" even though nothing is left to
+    /// finalize host-A's now-orphaned attempt (`reap_dead_pid_attempts` only
+    /// scans pids the CALLING host's own tracker knows about). The
+    /// single-daemon-down case #778 targets -- one host, one daemon --
+    /// is handled correctly; cross-host delegation would need this scoped to
+    /// `acquired_by_host` to close the gap.
     pub fn watch_heartbeat_alive(&self, stale_after_secs: u64) -> Result<bool> {
         let beat = match self.get_watch_heartbeat(None)? {
             Some(b) => b,

@@ -703,6 +703,10 @@ impl Database {
     /// when the caller does not pass `--attempt-id` explicitly. Newest
     /// (`spawned_at DESC`) wins when more than one is in flight; callers
     /// that need a specific one among several should pass `--attempt-id`.
+    /// A `Claimed` row has no `spawned_at` yet (NULL), which SQLite sorts
+    /// last in a DESC ordering -- a just-claimed, not-yet-spawned attempt
+    /// loses to any already-spawned one. Intentional: prefer handing the
+    /// caller a worker that has actually started over one still starting.
     pub fn find_live_wake_attempt_for_repo(
         &self,
         repo_name: &str,
