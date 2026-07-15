@@ -131,6 +131,46 @@ pub(crate) enum PrAction {
         body_file: Option<String>,
     },
 
+    /// Edit a live pull request's title and/or body in place via the
+    /// configured work source (#776).
+    ///
+    /// The honest alternative to close+recreate when a re-review finds a PR
+    /// body that misdescribes its own diff: close+recreate loses the review
+    /// thread and forces re-recording the legion-simplify and legion-pr-write
+    /// gates on the new HEAD. `pr edit` corrects the live PR instead.
+    ///
+    /// When `--body-file` is given, the new body runs the same structural
+    /// pr-write validation `pr write-check` runs (against `--issue`'s
+    /// acceptance criteria) before it is ever sent to the work source, and a
+    /// clean result is recorded as the `legion-pr-write` gate for local HEAD.
+    /// That gate is refused -- not recorded -- when local HEAD is not the
+    /// PR's own head commit, so the recorded gate never attests a commit this
+    /// checkout was not actually on.
+    Edit {
+        /// Repository name (resolves work source config from watch.toml)
+        #[arg(long)]
+        repo: String,
+
+        /// PR number
+        #[arg(long)]
+        number: u64,
+
+        /// New PR title. At least one of --title / --body-file is required.
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Path to the corrected PR body (markdown). Runs the same
+        /// pr-write validation as `pr write-check` and re-records the
+        /// legion-pr-write gate for HEAD. Requires --issue.
+        #[arg(long)]
+        body_file: Option<String>,
+
+        /// Issue number whose acceptance criteria the body must map.
+        /// Required when --body-file is given.
+        #[arg(long)]
+        issue: Option<u64>,
+    },
+
     /// List comments on a pull request (top-level + inline review comments)
     /// in chronological order.
     Comments {
@@ -242,6 +282,55 @@ fn no_runs_for_head_error(head_sha: &str, number: u64, source_repo: &str) -> err
         "no runs for head {head_sha}: PR #{number} on {source_repo} has zero check runs \
          for its head commit (not the branch's last suite)"
     ))
+}
+
+/// Load `issue`'s acceptance criteria, validate `body` against them, and
+/// record the result as the `legion-pr-write` quality gate for
+/// `(branch, commit_hash)`. Shared by `PrAction::WriteCheck` and
+/// `PrAction::Edit`'s `--body-file` path -- both load the issue, validate,
+/// and record identically; only what surrounds this differs (Edit
+/// cross-checks the PR's head SHA first and phrases its own advice; the
+/// closing-keyword warning stays with each caller since the fix differs --
+/// `--closes` exists for `pr create`, not for editing a live PR).
+#[allow(clippy::too_many_arguments)]
+fn validate_and_record_pr_write_gate(
+    plugin_name: &str,
+    source_repo: &str,
+    issue: u64,
+    body: &str,
+    branch: &str,
+    commit_hash: &str,
+    database: &db::Database,
+    via: &str,
+) -> error::Result<pr_write::PrWriteReport> {
+    let ext = worksource::view_issue(plugin_name, source_repo, issue)?;
+    let parsed = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or(""));
+    let report = pr_write::validate_pr_body(&parsed.acceptance, body);
+
+    let gate_result = if report.ok {
+        GateResult::Clean
+    } else {
+        GateResult::Issues
+    };
+    let details = serde_json::json!({
+        "skill": "legion-pr-write",
+        "issue": issue,
+        "mapping_entries": report.mapping_entries,
+        "findings": report.findings,
+        "via": via,
+    })
+    .to_string();
+    let row = database.record_quality_gate(
+        branch,
+        commit_hash,
+        "legion-pr-write",
+        gate_result,
+        report.findings.len() as u64,
+        Some(&details),
+    )?;
+    crate::gate_trust::emit_gate_trust(database, &row);
+
+    Ok(report)
 }
 
 pub(crate) fn handle(action: PrAction) -> error::Result<()> {
@@ -550,16 +639,8 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
         } => {
             let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
-            // Load the issue's acceptance criteria -- the claim set the body
-            // must map. Parsed from the same template card_parse reads for
-            // `issue view`, so the criteria match what the agent saw.
-            let ext = worksource::view_issue(&plugin_name, &source_repo, issue)?;
-            let parsed = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or(""));
-
             // Read the drafted body from --body-file, or stdin when omitted.
             let body = read_file_or_stdin(body_file.as_deref(), "--body-file")?;
-
-            let report = pr_write::validate_pr_body(&parsed.acceptance, &body);
 
             // Warn (never fail, v1 -- #751) when the body lacks a recognized
             // GitHub closing keyword for this issue. Printed unconditionally,
@@ -573,32 +654,21 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 );
             }
 
-            // Record the gate on HEAD so `legion pr create` can gate on it,
+            // Load the issue's acceptance criteria, validate the body, and
+            // record the gate on HEAD so `legion pr create` can gate on it,
             // exactly as it does for legion-simplify.
             let (commit_hash, branch) = git_head_commit_and_branch()?;
-            let gate_result = if report.ok {
-                GateResult::Clean
-            } else {
-                GateResult::Issues
-            };
-            let details = serde_json::json!({
-                "skill": "legion-pr-write",
-                "issue": issue,
-                "mapping_entries": report.mapping_entries,
-                "findings": report.findings,
-            })
-            .to_string();
-
             let database = open_db()?;
-            let row = database.record_quality_gate(
+            let report = validate_and_record_pr_write_gate(
+                &plugin_name,
+                &source_repo,
+                issue,
+                &body,
                 &branch,
                 &commit_hash,
-                "legion-pr-write",
-                gate_result,
-                report.findings.len() as u64,
-                Some(&details),
+                &database,
+                "pr write-check",
             )?;
-            crate::gate_trust::emit_gate_trust(&database, &row);
 
             if report.ok {
                 println!(
@@ -621,6 +691,124 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 );
                 return Err(error::LegionError::ExitWith(1));
             }
+        }
+        PrAction::Edit {
+            repo,
+            number,
+            title,
+            body_file,
+            issue,
+        } => {
+            if title.is_none() && body_file.is_none() {
+                eprintln!("[legion] error: at least one of --title or --body-file is required");
+                return Err(error::LegionError::ExitWith(1));
+            }
+
+            let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+            let database = open_db()?;
+
+            // Validate + gate the new body BEFORE touching the live PR: a
+            // boilerplate/unmapped body must never reach `gh pr edit`, and a
+            // half-applied edit (title changed, body rejected) is worse than
+            // no edit at all.
+            let body: Option<String> = match &body_file {
+                None => None,
+                Some(bf) => {
+                    let issue = issue.ok_or_else(|| {
+                        error::LegionError::WorkSource(
+                            "--issue is required when --body-file is given (loads the \
+                             acceptance criteria the body must map, same as `pr write-check`)"
+                                .to_owned(),
+                        )
+                    })?;
+
+                    let new_body = read_file_or_stdin(Some(bf), "--body-file")?;
+
+                    if !pr_write::has_closing_keyword(
+                        &new_body,
+                        &pr_write::CloseRef::same_repo(issue),
+                    ) {
+                        eprintln!(
+                            "[legion] warning: body has no closing keyword for issue #{issue} \
+                             -- add 'Closes #{issue}' so the merge auto-closes it."
+                        );
+                    }
+
+                    // Gate-keying corner (#776 build notes): `record_quality_gate`
+                    // keys off the LOCAL checkout HEAD, not the PR's remote head
+                    // SHA. A pr-write gate re-recorded here must attest the commit
+                    // the live PR actually carries -- otherwise running this from
+                    // a stale or unrelated checkout would record a clean gate for
+                    // a commit the PR was never built from. Refuse before ever
+                    // loading the issue or recording anything when the two
+                    // disagree.
+                    let (commit_hash, branch) = git_head_commit_and_branch()?;
+                    let pr_checks = worksource::pr_checks(&plugin_name, &source_repo, number)?;
+                    if pr_checks.head_sha != commit_hash {
+                        eprintln!(
+                            "[legion] error: local HEAD ({}) does not match PR #{number}'s head \
+                             commit ({}) -- refusing to record a pr-write gate for a commit this \
+                             checkout is not on. Check out the PR's branch before editing its body.",
+                            &commit_hash[..commit_hash.len().min(8)],
+                            &pr_checks.head_sha[..pr_checks.head_sha.len().min(8)],
+                        );
+                        return Err(error::LegionError::ExitWith(1));
+                    }
+
+                    let report = validate_and_record_pr_write_gate(
+                        &plugin_name,
+                        &source_repo,
+                        issue,
+                        &new_body,
+                        &branch,
+                        &commit_hash,
+                        &database,
+                        "pr edit",
+                    )?;
+
+                    if !report.ok {
+                        eprintln!(
+                            "[legion] pr-write gate FAILED for issue #{issue} -- {} gap(s):",
+                            report.findings.len()
+                        );
+                        for f in &report.findings {
+                            eprintln!("  - {f}");
+                        }
+                        return Err(error::LegionError::ExitWith(1));
+                    }
+
+                    Some(new_body)
+                }
+            };
+
+            worksource::edit_pr(
+                &plugin_name,
+                &source_repo,
+                number,
+                title.as_deref(),
+                body.as_deref(),
+            )?;
+
+            let details = serde_json::json!({
+                "title_changed": title.is_some(),
+                "body_changed": body.is_some(),
+            });
+            let details_str = details.to_string();
+            audit(
+                &database,
+                &db::AuditInput {
+                    agent: &repo,
+                    action: "edit-pr",
+                    target_type: "pr",
+                    target_ref: &number.to_string(),
+                    task_id: None,
+                    source_type: &plugin_name,
+                    details: Some(&details_str),
+                    outcome: "success",
+                },
+            );
+
+            eprintln!("[legion] edited PR #{} on {}", number, source_repo);
         }
         PrAction::Comments { repo, number, json } => {
             let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;

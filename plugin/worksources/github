@@ -345,6 +345,35 @@ case "${1:-}" in
     jq -n --arg url "$URL" --argjson number "${NUMBER:-0}" '{"url":$url,"number":$number}'
     ;;
 
+  edit-pr)
+    # Edit a live PR's title and/or body in place (#776) -- the PR
+    # counterpart to `edit-issue`. Mirrors create-pr's arg handling, but
+    # against `gh pr edit` on an existing PR number rather than `gh pr
+    # create`. Neither field is required individually; at least one of
+    # the two must be set, exactly like edit-issue.
+    NUMBER="${LEGION_WS_PR_NUMBER:-}"
+    TITLE="${LEGION_WS_TITLE:-}"
+    BODY="${LEGION_WS_BODY:-}"
+    if [ -z "$REPO" ] || [ -z "$NUMBER" ]; then
+      echo '{"error":"LEGION_WS_REPO and LEGION_WS_PR_NUMBER required"}' >&2
+      exit 1
+    fi
+    if [ -z "$TITLE" ] && [ -z "$BODY" ]; then
+      echo '{"error":"at least one of LEGION_WS_TITLE or LEGION_WS_BODY required"}' >&2
+      exit 1
+    fi
+    if ! command -v gh &>/dev/null; then
+      echo '{"error":"gh CLI not found"}' >&2
+      exit 1
+    fi
+    ARGS=(pr edit "$NUMBER" --repo "$REPO")
+    [ -n "$TITLE" ] && ARGS+=(--title "$TITLE")
+    [ -n "$BODY" ] && ARGS+=(--body "$BODY")
+    gh "${ARGS[@]}" >/dev/null \
+      || { echo '{"error":"gh pr edit failed"}' >&2; exit 1; }
+    echo '{"ok":true}'
+    ;;
+
   comment)
     NUMBER="${LEGION_WS_NUMBER:-}"
     BODY="${LEGION_WS_BODY:-}"
@@ -784,7 +813,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "Usage: github <list|list-issues|close|detect|create-issue|create-pr|comment|pr-list|review|merge|pr-close|pr-checks|view-pr|pr-comments|pr-reviews|pr-check-log>" >&2
+    echo "Usage: github <list|list-issues|close|detect|create-issue|create-pr|edit-pr|comment|pr-list|review|merge|pr-close|pr-checks|view-pr|pr-comments|pr-reviews|pr-check-log>" >&2
     exit 1
     ;;
 esac

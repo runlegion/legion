@@ -1119,6 +1119,335 @@ fn pr_write_check_silent_when_closing_keyword_present() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// `legion pr edit` (#776): in-place title/body correction on a live PR, no
+// close+recreate. `--body-file` runs the same structural pr-write validation
+// as `pr write-check` and re-records the `legion-pr-write` gate for local
+// HEAD -- refused (not recorded) when local HEAD is not the PR's own head
+// commit, so a stale checkout cannot attest a commit it was never on.
+// ---------------------------------------------------------------------------
+
+/// Read the running checkout's actual HEAD commit, the same way
+/// `git_head_commit_and_branch` does. Tests that exercise the head-SHA
+/// cross-check need this to build a stub whose `pr-checks` head matches (or
+/// deliberately does not match) the checkout the test binary actually runs
+/// in -- `cargo test` inherits the crate root as CWD, so this is legion's own
+/// repo HEAD at test time, not a fixture value.
+#[cfg(unix)]
+fn current_git_head() -> String {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git rev-parse HEAD");
+    assert!(out.status.success(), "git rev-parse HEAD failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Stub plugin for `pr edit --body-file` tests: `view-issue` matches
+/// `view_issue_stub_plugin`'s fixture (issue #7, two acceptance criteria) so
+/// `substantive_body()` validates against it the same way the write-check
+/// tests do; `pr-checks` reports `head_sha` as the PR's head commit (an
+/// empty `checks` array -- irrelevant here, only the SHA matters to the
+/// cross-check). `edit-pr` is wired only when `handle_edit` is true so tests
+/// asserting a refusal can prove the live PR was never touched: an
+/// unexpected call falls through to the loud unknown-subcommand fallback
+/// instead of silently succeeding.
+#[cfg(unix)]
+fn edit_pr_stub_plugin(head_sha: &str, handle_edit: bool) -> String {
+    let mut script = String::from(
+        r#"#!/bin/bash
+set -e
+case "${1:-}" in
+  view-issue)
+    cat <<'BODY'
+{"url":"https://example.com/issues/7","number":7,"title":"stub issue","body":"Why it matters.\n\n## Acceptance criteria\n- crit one\n- crit two\n","labels":[],"assignees":null,"state":"OPEN"}
+BODY
+    ;;
+"#,
+    );
+    script.push_str(&format!(
+        "  pr-checks)\n    cat <<BODY\n{{\"headSha\":\"{head_sha}\",\"checks\":[]}}\nBODY\n    ;;\n"
+    ));
+    if handle_edit {
+        script.push_str("  edit-pr)\n    echo '{\"ok\":true}'\n    ;;\n");
+    }
+    script.push_str(
+        r#"  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"#,
+    );
+    script
+}
+
+/// `legion pr edit` fails with the canonical worksource error when the repo
+/// has no watch.toml entry -- confirms the command is wired up and resolves
+/// config before ever reaching a plugin.
+#[test]
+fn pr_edit_errors_without_worksource_config() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "pr",
+        "edit",
+        "--repo",
+        "no-such-repo",
+        "--number",
+        "42",
+        "--title",
+        "New title",
+    ]));
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected 'no work source configured' in stderr, got: {stderr}"
+    );
+}
+
+/// Neither `--title` nor `--body-file` given: refused before worksource
+/// resolution even runs (no watch.toml entry needed for this test to pass).
+#[test]
+fn pr_edit_requires_title_or_body_file() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "pr",
+        "edit",
+        "--repo",
+        "no-such-repo",
+        "--number",
+        "42",
+    ]));
+    assert!(
+        stderr.contains("at least one of --title or --body-file is required"),
+        "expected the missing-field refusal, got: {stderr}"
+    );
+}
+
+/// `--body-file` without `--issue`: refused with a message pointing at the
+/// missing flag. The stub plugin implements no verbs at all -- proving the
+/// refusal fires before any plugin call.
+#[cfg(unix)]
+#[test]
+fn pr_edit_body_file_requires_issue_number() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &edit_pr_stub_plugin("irrelevant", false),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr",
+        "edit",
+        "--repo",
+        "stub",
+        "--number",
+        "42",
+        "--body-file",
+        body_file.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("--issue is required"),
+        "expected the missing --issue refusal, got: {stderr}"
+    );
+}
+
+/// Title-only edit: no `--body-file`, so no pr-write validation or gate
+/// applies -- `gh pr edit` (the stub's `edit-pr` case) is called directly and
+/// an audit row is written.
+#[cfg(unix)]
+#[test]
+fn pr_edit_title_only_edits_and_audits() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &edit_pr_stub_plugin("irrelevant", true),
+    );
+
+    let stderr = run_ok_stderr(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr",
+        "edit",
+        "--repo",
+        "stub",
+        "--number",
+        "42",
+        "--title",
+        "Corrected title",
+    ]));
+    assert!(
+        stderr.contains("edited PR #42"),
+        "expected the edit confirmation, got: {stderr}"
+    );
+
+    let audit_out = run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "edit-pr"]));
+    assert!(
+        audit_out.contains("edit-pr") && audit_out.contains("42"),
+        "expected an edit-pr audit row for #42, got: {audit_out}"
+    );
+}
+
+/// Head-SHA cross-check (#776 build notes): local HEAD does not match the
+/// PR's own head SHA -- refused before recording any gate, and the stub has
+/// no `edit-pr` case, proving `gh pr edit` was never invoked either.
+#[cfg(unix)]
+#[test]
+fn pr_edit_body_file_refuses_on_head_sha_mismatch() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    // A SHA that is (barring an extraordinarily unlucky coincidence) never
+    // this checkout's actual HEAD.
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &edit_pr_stub_plugin("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", false),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr",
+        "edit",
+        "--repo",
+        "stub",
+        "--number",
+        "42",
+        "--issue",
+        "7",
+        "--body-file",
+        body_file.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("does not match PR #42's head commit"),
+        "expected the head-SHA mismatch refusal, got: {stderr}"
+    );
+
+    // No gate must have been recorded for a commit this checkout was never
+    // verified against.
+    let gates = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-pr-write",
+    ]));
+    assert!(
+        gates.trim().is_empty() || !gates.contains("legion-pr-write"),
+        "expected no pr-write gate recorded on a head-SHA mismatch, got: {gates}"
+    );
+}
+
+/// Boilerplate body with a matching head SHA: the structural validation
+/// itself refuses, an `issues` gate is recorded (not silently skipped), and
+/// the stub's missing `edit-pr` case proves the live PR was never touched.
+#[cfg(unix)]
+#[test]
+fn pr_edit_body_file_refuses_boilerplate_body() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let head = current_git_head();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &edit_pr_stub_plugin(&head, false),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, "## Summary\n\nDid stuff.\n").unwrap();
+
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr",
+        "edit",
+        "--repo",
+        "stub",
+        "--number",
+        "42",
+        "--issue",
+        "7",
+        "--body-file",
+        body_file.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("pr-write gate FAILED"),
+        "expected the gate-failure banner, got: {stderr}"
+    );
+
+    let gates = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-pr-write",
+        "--result",
+        "issues",
+    ]));
+    assert!(
+        gates.contains("legion-pr-write"),
+        "expected an issues-result pr-write gate to still be recorded, got: {gates}"
+    );
+}
+
+/// Happy path: local HEAD matches the PR's head SHA, the body is
+/// substantive -- the gate is recorded clean, `gh pr edit` (the stub's
+/// `edit-pr` case) is actually called, and an audit row lands.
+#[cfg(unix)]
+#[test]
+fn pr_edit_body_file_records_clean_gate_and_edits_when_head_matches() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let head = current_git_head();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &edit_pr_stub_plugin(&head, true),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+
+    let stderr = run_ok_stderr(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "pr",
+        "edit",
+        "--repo",
+        "stub",
+        "--number",
+        "42",
+        "--issue",
+        "7",
+        "--body-file",
+        body_file.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("edited PR #42"),
+        "expected the edit confirmation, got: {stderr}"
+    );
+
+    let gates = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-pr-write",
+        "--result",
+        "clean",
+    ]));
+    assert!(
+        gates.contains("legion-pr-write"),
+        "expected a clean pr-write gate recorded for HEAD, got: {gates}"
+    );
+
+    let audit_out = run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "edit-pr"]));
+    assert!(
+        audit_out.contains("edit-pr") && audit_out.contains("42"),
+        "expected an edit-pr audit row for #42, got: {audit_out}"
+    );
+}
+
 /// `legion pr create --closes` is repeatable: clap accepts multiple
 /// occurrences and the command proceeds past argument parsing to worksource
 /// resolution (#751), rather than erroring on the flag shape.
