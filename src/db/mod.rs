@@ -150,6 +150,7 @@ impl Database {
         kanban::migrate(conn)?;
         schedules::migrate(conn)?;
         wake::migrate(conn)?;
+        quality_gates::migrate(conn)?;
         Ok(())
     }
 

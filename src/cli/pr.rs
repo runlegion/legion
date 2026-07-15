@@ -349,6 +349,7 @@ fn validate_and_record_pr_write_gate(
         result: gate_result,
         findings_count: report.findings.len() as u64,
         details: Some(&details),
+        base: None,
     })?;
     crate::gate_trust::emit_gate_trust(database, &row);
 

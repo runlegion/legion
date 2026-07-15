@@ -319,6 +319,7 @@ mod tests {
             findings_count: findings,
             details: None,
             created_at: "2026-06-27T00:00:00+00:00".to_string(),
+            base: None,
         }
     }
 

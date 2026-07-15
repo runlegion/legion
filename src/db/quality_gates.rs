@@ -34,6 +34,22 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Column migrations for `quality_gates`, in their original patch order.
+pub(super) fn migrate(conn: &Connection) -> Result<()> {
+    // Migration 17 (#779): `--base` override for `legion quality-gate check`.
+    // Nullable -- existing rows and gates recorded without an explicit
+    // `--base` (the default main/origin-main resolution, or non-`check`
+    // gate kinds like `record` and `legion-verify`) have no base to record.
+    // Recording the resolved base ref on the row (rather than only inside
+    // the `details` JSON blob) keeps a too-narrow `--base` visible to the
+    // same `quality-gate list`/`stats` surfaces that already query columns,
+    // consistent with the issue's auditability-over-trust stance.
+    if !Database::has_column(conn, "quality_gates", "base")? {
+        conn.execute_batch("ALTER TABLE quality_gates ADD COLUMN base TEXT;")?;
+    }
+    Ok(())
+}
+
 /// A recorded quality gate result tied to a git commit and skill.
 ///
 /// Written by skill runners so `legion pr create` can verify clean state
@@ -49,6 +65,11 @@ pub struct QualityGateRow {
     pub findings_count: u64,
     pub details: Option<String>,
     pub created_at: String,
+    /// The `--base` ref the changed-file set was computed against (#779),
+    /// when the caller supplied one. `None` for gates recorded without an
+    /// explicit base (default main/origin-main resolution, or gate kinds
+    /// that never compute a changed-file set, e.g. `legion-verify`).
+    pub base: Option<String>,
 }
 
 /// Parse a `GateResult` from a DB string, mapping unknown values to a
@@ -76,6 +97,11 @@ pub struct QualityGateInput<'a> {
     pub result: GateResult,
     pub findings_count: u64,
     pub details: Option<&'a str>,
+    /// The `--base` ref used to compute the changed-file set (#779), when
+    /// the caller resolved one. `None` for gate kinds that never compute a
+    /// changed-file set, or when the default main/origin-main resolution
+    /// was used (as opposed to an explicit `--base` override).
+    pub base: Option<&'a str>,
 }
 
 impl Database {
@@ -90,8 +116,8 @@ impl Database {
         let result_str: &str = input.result.as_str();
         self.conn.execute(
             "INSERT INTO quality_gates \
-             (id, branch, commit_hash, skill, result, findings_count, details, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (id, branch, commit_hash, skill, result, findings_count, details, created_at, base) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 &id,
                 input.branch,
@@ -101,6 +127,7 @@ impl Database {
                 input.findings_count as i64,
                 input.details,
                 &created_at,
+                input.base,
             ],
         )?;
         Ok(QualityGateRow {
@@ -112,6 +139,7 @@ impl Database {
             findings_count: input.findings_count,
             details: input.details.map(str::to_owned),
             created_at,
+            base: input.base.map(str::to_owned),
         })
     }
 
@@ -125,7 +153,7 @@ impl Database {
         skill: &str,
     ) -> Result<Option<QualityGateRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at \
+            "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at, base \
              FROM quality_gates \
              WHERE commit_hash = ?1 AND skill = ?2 \
              ORDER BY created_at DESC \
@@ -143,6 +171,7 @@ impl Database {
                 findings_count: findings_count_i64.unsigned_abs(),
                 details: row.get(6)?,
                 created_at: row.get(7)?,
+                base: row.get(8)?,
             })
         })?;
         match rows.next() {
@@ -162,7 +191,7 @@ impl Database {
     /// after material changes.
     pub fn get_latest_quality_gate_by_skill(&self, skill: &str) -> Result<Option<QualityGateRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at \
+            "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at, base \
              FROM quality_gates \
              WHERE skill = ?1 \
              ORDER BY created_at DESC \
@@ -180,6 +209,7 @@ impl Database {
                 findings_count: findings_count_i64.unsigned_abs(),
                 details: row.get(6)?,
                 created_at: row.get(7)?,
+                base: row.get(8)?,
             })
         })?;
         match rows.next() {
@@ -262,7 +292,7 @@ impl Database {
         let where_clause = where_and(&predicates);
 
         let sql = format!(
-            "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at \
+            "SELECT id, branch, commit_hash, skill, result, findings_count, details, created_at, base \
              FROM quality_gates \
              {where_clause} \
              ORDER BY created_at DESC"
@@ -283,6 +313,7 @@ impl Database {
                     findings_count: findings_count_i64.unsigned_abs(),
                     details: row.get(6)?,
                     created_at: row.get(7)?,
+                    base: row.get(8)?,
                 })
             },
         )?;
@@ -389,6 +420,7 @@ mod tests {
                 result: GateResult::Clean,
                 findings_count: 0,
                 details: None,
+                base: None,
             })
             .unwrap();
         assert!(!row.id.is_empty());
@@ -406,6 +438,70 @@ mod tests {
         let fetched = fetched.unwrap();
         assert_eq!(fetched.id, row.id);
         assert_eq!(fetched.result, GateResult::Clean);
+    }
+
+    /// The `base` column (#779) round-trips through insert, direct lookup,
+    /// and `list_quality_gates` -- the three read paths a gate row is
+    /// visible through.
+    #[test]
+    fn quality_gate_base_column_round_trips_through_insert_and_reads() {
+        use crate::db::quality_gates::QualityGateFilter;
+
+        let db = test_db();
+        let row = db
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/child",
+                commit_hash: "base1234",
+                skill: "legion-simplify",
+                result: GateResult::Clean,
+                findings_count: 0,
+                details: None,
+                base: Some("feat/base-branch"),
+            })
+            .unwrap();
+        assert_eq!(row.base.as_deref(), Some("feat/base-branch"));
+
+        let fetched = db
+            .get_quality_gate("base1234", "legion-simplify")
+            .unwrap()
+            .expect("gate row should exist");
+        assert_eq!(fetched.base.as_deref(), Some("feat/base-branch"));
+
+        let listed = db
+            .list_quality_gates(&QualityGateFilter {
+                skill: Some("legion-simplify".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].base.as_deref(), Some("feat/base-branch"));
+    }
+
+    /// A gate recorded without an explicit base (the common case: `record`,
+    /// `legion-verify`, or a `check` run against the default main/origin-main
+    /// resolution's vacuous-initial-commit branch) stores `base` as `NULL`
+    /// and reads back as `None`, not an empty string.
+    #[test]
+    fn quality_gate_base_column_defaults_to_none() {
+        let db = test_db();
+        let row = db
+            .record_quality_gate(&QualityGateInput {
+                branch: "main",
+                commit_hash: "nobase123",
+                skill: "legion-verify:card-1",
+                result: GateResult::Clean,
+                findings_count: 0,
+                details: None,
+                base: None,
+            })
+            .unwrap();
+        assert!(row.base.is_none());
+
+        let fetched = db
+            .get_quality_gate("nobase123", "legion-verify:card-1")
+            .unwrap()
+            .expect("gate row should exist");
+        assert!(fetched.base.is_none());
     }
 
     #[test]
@@ -427,6 +523,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
         // Different skill on the same commit should not match.
@@ -445,6 +542,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -454,6 +552,7 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 2,
             details: Some("{}"),
+            base: None,
         })
         .unwrap();
 
@@ -483,6 +582,7 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 3,
             details: None,
+            base: None,
         })
         .unwrap();
         // Second run after fixing: clean.
@@ -493,6 +593,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
 
@@ -519,6 +620,7 @@ mod tests {
                 result: GateResult::Issues,
                 findings_count: 1,
                 details: Some(details),
+                base: None,
             })
             .unwrap();
         assert_eq!(row.details.as_deref(), Some(details));
@@ -544,6 +646,7 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 1,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -553,6 +656,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
 
@@ -598,6 +702,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
         // Force a strictly later timestamp so ORDER BY created_at DESC is
@@ -611,6 +716,7 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 2,
             details: None,
+            base: None,
         })
         .unwrap();
 
@@ -634,6 +740,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -643,6 +750,7 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 1,
             details: None,
+            base: None,
         })
         .unwrap();
 
@@ -667,6 +775,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -676,6 +785,7 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 3,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -685,6 +795,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
 
@@ -710,6 +821,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -719,6 +831,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
 
@@ -748,6 +861,7 @@ mod tests {
                 result: GateResult::Clean,
                 findings_count: 0,
                 details: None,
+                base: None,
             })
             .unwrap();
         // Sleep briefly so the second row has a strictly later timestamp.
@@ -760,6 +874,7 @@ mod tests {
                 result: GateResult::Issues,
                 findings_count: 1,
                 details: None,
+                base: None,
             })
             .unwrap();
 
@@ -796,6 +911,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -805,6 +921,7 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 5,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -814,6 +931,7 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 3,
             details: None,
+            base: None,
         })
         .unwrap();
         // 1 run for legion-review: 1 clean, findings = 0.
@@ -824,6 +942,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
 
@@ -867,6 +986,7 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 2,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -876,6 +996,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
 
@@ -897,6 +1018,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -906,6 +1028,7 @@ mod tests {
             result: GateResult::Clean,
             findings_count: 0,
             details: None,
+            base: None,
         })
         .unwrap();
 
@@ -924,6 +1047,7 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 1,
             details: None,
+            base: None,
         })
         .unwrap();
         db.record_quality_gate(&QualityGateInput {
@@ -933,11 +1057,53 @@ mod tests {
             result: GateResult::Issues,
             findings_count: 1,
             details: None,
+            base: None,
         })
         .unwrap();
 
         let stats = db.quality_gate_stats(None, None).unwrap();
         assert_eq!(stats.len(), 1);
         assert!((stats[0].catch_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    /// Migration 17's `base` column ALTER is idempotent on reopen (#779),
+    /// same shape as kanban.rs's `migration_document_id_column_is_idempotent_on_reopen`
+    /// (migration 16): a second `Database::open` over the same file-backed
+    /// path must not fail even though `has_column` now finds `base` already
+    /// present. Uses a real file path (not in-memory) so the guard actually
+    /// runs against a persisted schema.
+    #[test]
+    fn migration_base_column_is_idempotent_on_reopen() {
+        use crate::db::Database;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_base_idempotent.db");
+
+        // First open: creates the schema including the base column.
+        let db1 = Database::open(&db_path).expect("first open");
+        let row = db1
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "reopen-hash",
+                skill: "legion-simplify",
+                result: GateResult::Clean,
+                findings_count: 0,
+                details: None,
+                base: Some("main"),
+            })
+            .expect("record on first open");
+        assert_eq!(row.base.as_deref(), Some("main"));
+        drop(db1);
+
+        // Second open over the same path: migration 17's has_column guard
+        // must prevent a duplicate ALTER TABLE from failing, and the row
+        // written under the first open must still read back correctly.
+        let db2 = Database::open(&db_path).expect("second open must not fail");
+        let fetched = db2
+            .get_quality_gate("reopen-hash", "legion-simplify")
+            .expect("get")
+            .expect("row from first open readable after second open");
+        assert_eq!(fetched.base.as_deref(), Some("main"));
+        // dir is dropped here, cleaning up the temp files.
     }
 }

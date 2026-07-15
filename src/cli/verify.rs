@@ -89,19 +89,27 @@ pub(crate) enum QualityGateAction {
     /// Validate a simplify articulation file before recording the gate (#665).
     ///
     /// Resolves the changed-file set from
-    /// `git -c core.quotePath=false diff --name-only main...HEAD` (three-dot
-    /// merge-base range; falls back to origin/main...HEAD when main is absent).
+    /// `git -c core.quotePath=false diff --name-status -M50% <base>...HEAD`
+    /// (three-dot merge-base range; `<base>` is `--base` when given, else
+    /// `main`, falling back to `origin/main...HEAD` when `main` is absent).
     /// If no base ref resolves and HEAD has a parent commit, this hard-errors
-    /// rather than recording a gate against an empty set. Parses
-    /// the articulation file -- markdown with one `### <path>` heading per
-    /// changed file followed by prose -- and refuses when:
+    /// rather than recording a gate against an empty set; an explicit
+    /// `--base` that does not resolve is likewise a hard error (#779). Pure
+    /// (zero-delta, R100) renames are auto-cleared from the coverage set --
+    /// their old/new path pairs are recorded in the gate's `details` JSON
+    /// instead of requiring an articulation entry, since a byte-identical
+    /// move carries no simplification risk by construction. Renames with a
+    /// content delta (R<100) still require an entry under the new path.
+    /// Parses the articulation file -- markdown with one `### <path>`
+    /// heading per changed file followed by prose -- and refuses when:
     ///   - Coverage gap: a changed file has no `### <path>` entry (reports
     ///     which files are unaddressed).
     ///   - Boilerplate / thin: an entry's prose is below the substance threshold
     ///     (reuses the same word-count heuristic as `pr write-check`).
     ///
     /// On pass: records a quality gate for HEAD under `--skill` with
-    /// `--result` as the gate outcome. On failure: lists each gap and exits
+    /// `--result` as the gate outcome, and the resolved base ref on the
+    /// gate row's `base` column. On failure: lists each gap and exits
     /// non-zero without recording a gate.
     ///
     /// Mirror of `legion pr write-check` for the simplify gate. The
@@ -125,6 +133,19 @@ pub(crate) enum QualityGateAction {
         /// Number of skill findings (default 0; used when --result is "issues").
         #[arg(long, default_value = "0")]
         findings_count: u64,
+
+        /// Override the base ref the changed-file set is diffed against
+        /// (default: `main`, falling back to `origin/main`). For stacked
+        /// branches whose parent is an unmerged feature branch, pass that
+        /// branch so the coverage set is scoped to what this branch actually
+        /// changed rather than everything since `main` (#779). Must resolve
+        /// to a real ref -- an unresolvable `--base` is a hard error, same as
+        /// the no-base-ref case with no override. The resolved base is
+        /// recorded on the gate row regardless of whether it came from this
+        /// flag or the default resolution, so a too-narrow base stays
+        /// visible in the audit trail.
+        #[arg(long)]
+        base: Option<String>,
     },
 }
 
@@ -147,6 +168,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 result: gate_result,
                 findings_count,
                 details: details_json.as_deref(),
+                base: None,
             })?;
             emit_gate_trust(&database, &row);
             // Phase 2b: a downstream legion-review verdict witnesses the
@@ -202,19 +224,23 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             result,
             articulation_file,
             findings_count,
+            base,
         } => {
             // Parse and validate the result flag before touching the FS.
             let gate_result: GateResult = GateResult::from_str(&result)?;
 
-            // Resolve the changed-file set from git. Falls back gracefully
-            // when main is not present locally.
-            let changed_files = git_changed_files()?;
+            // Resolve the changed-file set from git. `--base` overrides the
+            // default main/origin-main resolution (#779); an unresolvable
+            // `--base` hard-errors rather than falling back silently. Pure
+            // (R100) renames are cleared from `files` and carried separately
+            // in `cleared_renames` for the audit trail.
+            let changed = git_changed_files(base.as_deref())?;
 
             // Read the articulation from --articulation-file or stdin.
             let articulation =
                 read_file_or_stdin(articulation_file.as_deref(), "--articulation-file")?;
 
-            let report = simplify_check::validate_articulation(&changed_files, &articulation);
+            let report = simplify_check::validate_articulation(&changed.files, &articulation);
 
             // The gate is only recorded when the articulation passes the
             // structural validator. A failed articulation exits non-zero
@@ -244,12 +270,23 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // flag is informational, and the skill runner may not always surface
             // a count. The gate result is what matters for `legion pr create`.
             let (commit_hash, branch) = git_head_commit_and_branch()?;
+            // Cleared (R100) renames are excluded from `report`'s coverage
+            // requirement but still surfaced here -- count + pairs -- so the
+            // exclusion is auditable rather than silent (#779).
+            let cleared_renames_json: Vec<serde_json::Value> = changed
+                .cleared_renames
+                .iter()
+                .map(|(old, new)| serde_json::json!({"old": old, "new": new}))
+                .collect();
             let details = serde_json::json!({
                 "skill": skill,
                 "result": result,
                 "entry_count": report.entry_count,
                 "findings_count": findings_count,
                 "articulation": articulation,
+                "base": changed.base,
+                "cleared_renames_count": cleared_renames_json.len(),
+                "cleared_renames": cleared_renames_json,
             })
             .to_string();
 
@@ -261,14 +298,18 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 result: gate_result,
                 findings_count,
                 details: Some(&details),
+                base: changed.base.as_deref(),
             })?;
             emit_gate_trust(&database, &row);
 
             println!(
                 "[legion] simplify-check articulation accepted for skill '{skill}' \
-                 (result '{result}', {} file entries, {findings_count} skill findings). \
-                 Gate id: {}",
-                report.entry_count, row.id,
+                 (result '{result}', {} file entries, {findings_count} skill findings, \
+                 base '{}', {} rename(s) auto-cleared). Gate id: {}",
+                report.entry_count,
+                changed.base.as_deref().unwrap_or("<none>"),
+                changed.cleared_renames.len(),
+                row.id,
             );
         }
     }
@@ -441,6 +482,7 @@ pub(crate) fn handle_verify(
             result: GateResult::Issues,
             findings_count: 1,
             details: Some(&details),
+            base: None,
         })?;
         eprintln!("[legion] verify BLOCKED for card {card}: {reason}");
         return Err(error::LegionError::ExitWith(1));
@@ -497,6 +539,7 @@ pub(crate) fn handle_verify(
         result: gate_result,
         findings_count: findings,
         details: Some(&details),
+        base: None,
     })?;
 
     match decision {
@@ -778,6 +821,7 @@ mod tests {
                 result: GateResult::Clean,
                 findings_count: 0,
                 details: Some(&serde_json::json!({"articulation": articulation}).to_string()),
+                base: None,
             })
             .expect("record_quality_gate failed");
         assert!(!row.id.is_empty());
