@@ -329,21 +329,21 @@ impl Database {
     ) -> Result<IdentitySwapResult> {
         let tx = self.conn.unchecked_transaction()?;
 
-        let mut deleted_ids_stmt = tx.prepare(
-            "SELECT id FROM reflections \
-             WHERE repo = ?1 AND domain = 'identity' AND parent_id IS NULL AND deleted_at IS NULL",
+        // One statement, not a SELECT-then-DELETE pair with the liveness
+        // predicate copy-pasted twice: `RETURNING id` deletes every live
+        // identity root for `repo` and hands back exactly which ones,
+        // in one round trip, so there is only one place the predicate can
+        // drift out of sync with the guard's own definition.
+        let mut delete_stmt = tx.prepare(
+            "DELETE FROM reflections \
+             WHERE repo = ?1 AND domain = 'identity' AND parent_id IS NULL AND deleted_at IS NULL \
+             RETURNING id",
         )?;
-        let deleted_ids: Vec<String> = deleted_ids_stmt
+        let deleted_ids: Vec<String> = delete_stmt
             .query_map([repo], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)?;
-        drop(deleted_ids_stmt);
-
-        tx.execute(
-            "DELETE FROM reflections \
-             WHERE repo = ?1 AND domain = 'identity' AND parent_id IS NULL AND deleted_at IS NULL",
-            [repo],
-        )?;
+        drop(delete_stmt);
 
         let root_meta = ReflectionMeta {
             domain: Some("identity".to_owned()),
