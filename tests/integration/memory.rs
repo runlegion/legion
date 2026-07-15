@@ -811,6 +811,21 @@ fn forget_persist_rejects_wrong_repo_safety_check() {
         stdout.contains("doomed persist attempt"),
         "reflection should still be hot after rejected persist, got: {stdout}"
     );
+
+    // The rejected --persist is audited under archive-reflection (not
+    // delete-reflection) with outcome=rejected -- destructive-command
+    // rejections are forensically relevant for persist exactly as they
+    // are for a permanent forget.
+    let audit_stdout =
+        run_ok(legion_cmd(dir.path()).args(["audit", "--action", "archive-reflection", "--json"]));
+    assert!(
+        audit_stdout.contains("\"outcome\": \"rejected\""),
+        "rejected persist should be audited, got: {audit_stdout}"
+    );
+    assert!(
+        audit_stdout.contains("expected=rafters") && audit_stdout.contains("actual=kelex"),
+        "audit details should name expected/actual repos, got: {audit_stdout}"
+    );
 }
 
 #[test]
