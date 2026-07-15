@@ -189,11 +189,29 @@ impl Database {
     /// (`019f198b`). If [`live_identity_root_id`](Self::live_identity_root_id)
     /// finds one already, the insert is refused with
     /// `LegionError::IdentityRootExists` before any row is written. This
-    /// check is unconditional -- it does not look at `--force` or any
-    /// other flag, because every caller (CLI `reflect` today, any future
-    /// MCP tool or hook-invoked call tomorrow) converges here. Bootstrap
-    /// (no live root yet) and explicit chaining (`meta.parent_id =
-    /// Some(_)`, e.g. `--follows`) are both unaffected.
+    /// check is unconditional with respect to caller intent -- it does
+    /// not look at `--force` or any other flag, because every caller (CLI
+    /// `reflect` today, any future MCP tool or hook-invoked call
+    /// tomorrow) converges here. Bootstrap (no live root yet) and
+    /// explicit chaining (`meta.parent_id = Some(_)`, e.g. `--follows`)
+    /// are both unaffected.
+    ///
+    /// This is an application-level check-then-insert, not a database
+    /// constraint: two concurrent `legion` processes racing this method
+    /// for the same repo could both read "no live root" before either
+    /// writes, and both succeed, producing the very state this guard
+    /// exists to prevent. `legion` is a per-invocation CLI with no long-
+    /// lived writer serializing access, so this window is real, not
+    /// theoretical. A DB-level `UNIQUE` partial index would close it
+    /// structurally, but cannot be added here: it would fail its own
+    /// migration on any already-leaked database (domain=identity rows
+    /// with `parent_id IS NULL` already duplicated, e.g. `019f198b`'s
+    /// repo before hand-repair) -- and retroactive cleanup of existing
+    /// duplicates is explicitly out of scope for this change. This guard
+    /// closes the write-time gap for the overwhelmingly common
+    /// single-process case; the concurrent-write race is a known,
+    /// documented gap for a future change to close once a cleanup path
+    /// exists.
     pub fn insert_reflection_with_meta(
         &self,
         repo: &str,
@@ -311,10 +329,22 @@ impl Database {
     /// second domain=identity, parent_id IS NULL row" for any reader that
     /// does not yet filter `archived_at` (the banner reader, until #782),
     /// which is exactly the two-roots bug this issue closes. Swap is the
-    /// explicit "replace everything" path, so it clears the slate
-    /// completely, including any pre-existing leaked duplicates from
-    /// before this fix landed -- the plain insert guard only ever sees
-    /// (and blocks against) one at a time.
+    /// explicit "replace everything" path, so it clears every *root* row,
+    /// including any pre-existing leaked duplicates from before this fix
+    /// landed -- the plain insert guard only ever sees (and blocks
+    /// against) one at a time.
+    ///
+    /// Deliberately NOT cascading: only the root row(s) are deleted, not
+    /// their `--follows` chain children. A replaced root's old chain
+    /// children (if any) survive as now-dangling `parent_id` references,
+    /// exactly like `legion forget --id <root>` already leaves them today
+    /// (`delete_reflection` is a single-row delete with no cascade). This
+    /// keeps swap's delete semantics consistent with the one delete
+    /// primitive that already exists, rather than inventing new cascade
+    /// behavior no other code path has. Full old-chain retirement is a
+    /// call for whichever future feature actually builds replacement
+    /// chains on top of this (`whoami --generate`, #784) to make against
+    /// its own real requirements, not a guess made here.
     ///
     /// `new_root_text` becomes the new root (`parent_id = None`).
     /// `chained_texts`, if any, are inserted afterward as a chain: the
