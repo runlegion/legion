@@ -45,6 +45,11 @@ pub(crate) fn handle_push(repo: String, branch: Option<String>) -> error::Result
     let checkout_path = entry.path.clone();
     let head_sha = entry.head_sha.clone();
 
+    // Opened before the push (not after) so a DB-open failure fails fast
+    // rather than masking the actual push result behind a DB error once the
+    // push has already happened.
+    let database = open_db()?;
+
     info!(
         "[legion] pushing '{target_branch}' from {}",
         checkout_path.display()
@@ -56,7 +61,6 @@ pub(crate) fn handle_push(repo: String, branch: Option<String>) -> error::Result
     // point of routing pushes through this command instead of raw `git
     // push`, so a hook-blocked push must leave a row just as a successful
     // one does. The error (if any) propagates AFTER the row is written.
-    let database = open_db()?;
     let details = serde_json::json!({
         "checkout": checkout_path.display().to_string(),
         "head_sha": head_sha,
