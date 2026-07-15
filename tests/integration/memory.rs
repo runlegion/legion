@@ -293,16 +293,25 @@ fn whoami_subcommand_filters_to_identity_domain() {
 
 #[test]
 fn whoami_subcommand_respects_limit() {
+    // Regression coverage for the `--limit` flag on the shared
+    // `format_capped_banner` path that `whoami` and `whatami` both use.
+    // Cannot exercise this through `whoami` itself anymore: since #785,
+    // domain=identity allows at most one live (parent_id-less) root per
+    // repo, so a second or third `--whoami` write is refused before it
+    // ever reaches this rendering path. `whatami` (domain=workflow) shares
+    // the exact same `get_domain_roots` / `format_capped_banner` code and
+    // is not identity-guarded, so it proves `--limit` still caps multiple
+    // root rows correctly.
     let dir = tempfile::tempdir().unwrap();
 
     for i in 0..3 {
-        let text = format!("identity reflection {i}");
-        run_ok(
-            legion_cmd(dir.path()).args(["reflect", "--repo", "test", "--whoami", "--text", &text]),
-        );
+        let text = format!("workflow reflection {i}");
+        run_ok(legion_cmd(dir.path()).args([
+            "reflect", "--repo", "test", "--domain", "workflow", "--text", &text,
+        ]));
     }
 
-    let stdout = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "test", "--limit", "1"]));
+    let stdout = run_ok(legion_cmd(dir.path()).args(["whatami", "--repo", "test", "--limit", "1"]));
     let bullet_count = stdout.lines().filter(|l| l.starts_with("- ")).count();
     assert_eq!(
         bullet_count, 1,
@@ -312,17 +321,18 @@ fn whoami_subcommand_respects_limit() {
 
 #[test]
 fn whoami_subcommand_emits_banner_and_chain_pointer() {
+    // Pre-#785 this test also seeded a second, standalone (unchained)
+    // identity root in the same repo to prove the chain pointer appears
+    // only next to the chained one. Since #785, a repo can have at most
+    // one live identity root, so that second root can no longer be
+    // created via the CLI at all -- the mixed chained/unchained-entries
+    // rendering case is unit-tested directly against `format_whoami` in
+    // `src/recall.rs` (`format_whoami_worst_case_size_with_drops_and_first_entry_borrow`
+    // and friends), which does not go through the DB and is unaffected by
+    // this guard. This test now only proves the end-to-end wiring
+    // (`whoami` -> `get_identity_roots` -> `is_in_chain` -> `format_whoami`)
+    // for the single live root that can exist.
     let dir = tempfile::tempdir().unwrap();
-
-    // Standalone identity reflection -- no chain.
-    run_ok(legion_cmd(dir.path()).args([
-        "reflect",
-        "--repo",
-        "test",
-        "--whoami",
-        "--text",
-        "standalone identity",
-    ]));
 
     // Chain head: identity reflection plus a follow-up that links via --follows.
     let head_id = run_ok(legion_cmd(dir.path()).args([
@@ -366,8 +376,224 @@ fn whoami_subcommand_emits_banner_and_chain_pointer() {
         .count();
     assert_eq!(
         chain_lines, 1,
-        "expected exactly one chain pointer (only the chained reflection), got {chain_lines}: {stdout}"
+        "expected exactly one chain pointer (the only root, which is chained), got {chain_lines}: {stdout}"
     );
+}
+
+// --- #785: DB-layer identity-root insert guard ---
+
+#[test]
+fn reflect_whoami_second_root_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let first_id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--whoami",
+        "--text",
+        "first identity",
+    ]))
+    .trim()
+    .to_owned();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--whoami",
+        "--text",
+        "second identity",
+    ]));
+    assert!(
+        stderr.contains(&first_id),
+        "expected the existing root's id in stderr, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--follows"),
+        "expected --follows guidance in stderr, got: {stderr}"
+    );
+
+    // The rejected write must not have replaced the root.
+    let stdout = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "test"]));
+    assert!(stdout.contains("first identity"));
+    assert!(!stdout.contains("second identity"));
+}
+
+#[test]
+fn reflect_domain_identity_second_root_rejected() {
+    // Same guard, exercised via the raw --domain identity spelling instead
+    // of --whoami, proving both CLI spellings hit the one DB-layer guard.
+    let dir = tempfile::tempdir().unwrap();
+
+    let first_id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "identity",
+        "--text",
+        "first identity",
+    ]))
+    .trim()
+    .to_owned();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "identity",
+        "--text",
+        "second identity",
+    ]));
+    assert!(
+        stderr.contains(&first_id),
+        "expected the existing root's id in stderr, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--follows"),
+        "expected --follows guidance in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn reflect_whoami_follows_existing_root_still_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let root_id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--whoami",
+        "--text",
+        "root identity",
+    ]))
+    .trim()
+    .to_owned();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--whoami",
+        "--follows",
+        &root_id,
+        "--text",
+        "supporting detail",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "test"]));
+    assert!(stdout.contains("root identity"));
+    assert!(
+        stdout.contains(&format!("legion chain --id {root_id}")),
+        "expected a chain pointer once a --follows child exists, got: {stdout}"
+    );
+}
+
+#[test]
+fn reflect_whoami_force_does_not_bypass_second_root_guard() {
+    // Regression test for the hypothesized historical bypass: the deleted
+    // pre-whoami-rewrite hook's own comment claimed --force alone safely
+    // "replaces" identity wholesale. It never did at the DB layer (--force
+    // only ever skipped the near-duplicate embedding check), and the guard
+    // introduced here does not look at --force at all.
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--whoami",
+        "--text",
+        "root identity",
+    ]));
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--whoami",
+        "--force",
+        "--text",
+        "attempted rewrite",
+    ]));
+    assert!(
+        stderr.contains("already has a live identity root"),
+        "expected the identity-root guard error, got: {stderr}"
+    );
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "test"]));
+    assert!(stdout.contains("root identity"));
+    assert!(!stdout.contains("attempted rewrite"));
+}
+
+#[test]
+fn reflect_forget_then_reflect_whoami_replaces_root() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let root_id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--whoami",
+        "--text",
+        "old identity",
+    ]))
+    .trim()
+    .to_owned();
+
+    run_ok(legion_cmd(dir.path()).args(["forget", "--id", &root_id, "--repo", "test"]));
+
+    run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--whoami",
+        "--text",
+        "new identity",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "test"]));
+    assert!(stdout.contains("new identity"));
+    assert!(!stdout.contains("old identity"));
+}
+
+#[test]
+fn reflect_checkpoint_shaped_text_into_identity_second_root_rejected() {
+    // The exact leaked-content shape from the bug report (a
+    // [CHECKPOINT]-shaped reflection landing in domain=identity) is now
+    // structurally blocked regardless of wording, once a root exists.
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--whoami",
+        "--text",
+        "real identity",
+    ]));
+
+    let checkpoint_text =
+        "[CHECKPOINT]\nActive: refactoring the sync layer\nNext: land the migration";
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "identity",
+        "--text",
+        checkpoint_text,
+    ]));
+    assert!(
+        stderr.contains("already has a live identity root"),
+        "expected the identity-root guard error, got: {stderr}"
+    );
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "test"]));
+    assert!(stdout.contains("real identity"));
+    assert!(!stdout.contains("CHECKPOINT"));
 }
 
 #[test]

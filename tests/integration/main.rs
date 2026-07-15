@@ -21,6 +21,7 @@ mod mcp;
 mod memory;
 mod mesh;
 mod module_graph;
+mod push;
 mod serve;
 mod spec_gen;
 mod sym_tree;

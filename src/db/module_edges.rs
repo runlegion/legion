@@ -92,46 +92,56 @@ impl Database {
         Ok(())
     }
 
-    /// Return every edge whose importer is `from_path` -- "what does this
-    /// file import" -- ordered by specifier for stable output.
+    /// Return every edge whose importer matches `from_path` -- "what does
+    /// this file import" -- ordered by specifier for stable output.
     ///
-    /// Not yet wired to a CLI surface -- #710 only populates the table via
-    /// `legion index` (see `handle_index` in `src/cli/index_cmd.rs`). No
-    /// issue is filed yet for the query commands (`sym imports` /
-    /// `sym importers`, or similar) that would call this; this is the query
-    /// API they will use once one is. Exercised directly by this module's
-    /// tests in the meantime.
-    #[allow(dead_code)]
+    /// `from_path` matches exactly OR as a path suffix, mirroring `sym list
+    /// --file`'s semantics (`sym::query_symbols`, `src/sym.rs:303-306`): the
+    /// SQL filter narrows to `repo` only, and the exact/suffix match runs
+    /// Rust-side via `retain` (same shape as `list_css_symbols`,
+    /// `src/db/css_symbols.rs:193-195`) so a bare `Button.tsx` resolves
+    /// instead of silent-empty. This bypasses the `module_edges` indexes --
+    /// accepted at per-repo sizes (#772).
+    ///
+    /// Backs `sym imports` (`src/cli/index_cmd.rs`).
     pub fn list_module_edges_from(&self, repo: &str, from_path: &str) -> Result<Vec<ImportEdge>> {
         let mut stmt = self.conn.prepare(
             "SELECT repo, from_path, specifier, to_path
              FROM module_edges
-             WHERE repo = ?1 AND from_path = ?2
+             WHERE repo = ?1
              ORDER BY specifier",
         )?;
-        let rows = stmt
-            .query_map(rusqlite::params![repo, from_path], row_to_edge)?
+        let mut rows = stmt
+            .query_map(rusqlite::params![repo], row_to_edge)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.retain(|e| e.from == from_path || e.from.ends_with(from_path));
         Ok(rows)
     }
 
-    /// Return every edge that resolved to `to_path` -- "what imports this
-    /// file" -- ordered by importer path for stable output. Edges with
-    /// `to_path IS NULL` (unresolved/external) never match; there is
-    /// nothing to look up an importee for.
+    /// Return every edge that resolved to a `to_path` matching `to_path` --
+    /// "what imports this file" -- ordered by importer path for stable
+    /// output. Edges with `to_path IS NULL` (unresolved/external) never
+    /// match; there is nothing to look up an importee for.
     ///
-    /// Not yet wired to a CLI surface; see `list_module_edges_from`.
-    #[allow(dead_code)]
+    /// `to_path` matches exactly OR as a path suffix; see
+    /// `list_module_edges_from`'s doc comment for the matching rationale
+    /// and the SQL/Rust split it uses.
+    ///
+    /// Backs `sym importers` (`src/cli/index_cmd.rs`).
     pub fn list_module_edges_to(&self, repo: &str, to_path: &str) -> Result<Vec<ImportEdge>> {
         let mut stmt = self.conn.prepare(
             "SELECT repo, from_path, specifier, to_path
              FROM module_edges
-             WHERE repo = ?1 AND to_path = ?2
+             WHERE repo = ?1
              ORDER BY from_path",
         )?;
-        let rows = stmt
-            .query_map(rusqlite::params![repo, to_path], row_to_edge)?
+        let mut rows = stmt
+            .query_map(rusqlite::params![repo], row_to_edge)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.retain(|e| {
+            e.to.as_deref()
+                .is_some_and(|t| t == to_path || t.ends_with(to_path))
+        });
         Ok(rows)
     }
 
@@ -380,5 +390,97 @@ mod tests {
         let got = db.list_module_edges_from("alpha", "src/a.ts").unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].repo, "alpha");
+    }
+
+    #[test]
+    fn list_from_matches_a_path_suffix() {
+        let db = test_db();
+        db.upsert_module_edges(
+            "r",
+            &["src/components/Button.tsx"],
+            &[edge(
+                "r",
+                "src/components/Button.tsx",
+                "./icon",
+                Some("src/components/Icon.tsx"),
+            )],
+        )
+        .unwrap();
+
+        let got = db.list_module_edges_from("r", "Button.tsx").unwrap();
+        assert_eq!(
+            got.len(),
+            1,
+            "a bare basename suffix must resolve, not silent-empty, got {got:?}"
+        );
+        assert_eq!(got[0].from, "src/components/Button.tsx");
+    }
+
+    #[test]
+    fn list_to_matches_a_path_suffix() {
+        let db = test_db();
+        db.upsert_module_edges(
+            "r",
+            &["src/a.ts"],
+            &[edge(
+                "r",
+                "src/a.ts",
+                "./components/Icon",
+                Some("src/components/Icon.tsx"),
+            )],
+        )
+        .unwrap();
+
+        let got = db.list_module_edges_to("r", "Icon.tsx").unwrap();
+        assert_eq!(
+            got.len(),
+            1,
+            "a bare basename suffix must resolve, not silent-empty, got {got:?}"
+        );
+        assert_eq!(got[0].from, "src/a.ts");
+    }
+
+    #[test]
+    fn suffix_match_returns_every_ambiguous_hit() {
+        let db = test_db();
+        db.upsert_module_edges(
+            "r",
+            &["src/a.ts", "src/b.ts", "src/c.ts"],
+            &[
+                edge(
+                    "r",
+                    "src/a.ts",
+                    "../shared/Button",
+                    Some("src/shared/Button.tsx"),
+                ),
+                edge(
+                    "r",
+                    "src/b.ts",
+                    "../widgets/Button",
+                    Some("src/widgets/Button.tsx"),
+                ),
+                edge("r", "src/c.ts", "./unrelated", Some("src/unrelated.ts")),
+            ],
+        )
+        .unwrap();
+
+        // A suffix ambiguous between two distinct files must return both,
+        // each row still tagged with its own resolved path (#772).
+        let got = db.list_module_edges_to("r", "Button.tsx").unwrap();
+        assert_eq!(got.len(), 2, "expected both ambiguous matches, got {got:?}");
+        let tos: Vec<&str> = got.iter().filter_map(|e| e.to.as_deref()).collect();
+        assert!(tos.contains(&"src/shared/Button.tsx"));
+        assert!(tos.contains(&"src/widgets/Button.tsx"));
+    }
+
+    #[test]
+    fn list_to_never_matches_an_unresolved_edge() {
+        let db = test_db();
+        db.upsert_module_edges("r", &["src/a.ts"], &[edge("r", "src/a.ts", "lodash", None)])
+            .unwrap();
+
+        // An unresolved/external edge has no `to_path` at all -- no suffix
+        // (however short) may accidentally match a NULL column.
+        assert!(db.list_module_edges_to("r", "lodash").unwrap().is_empty());
     }
 }

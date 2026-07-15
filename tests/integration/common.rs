@@ -197,7 +197,7 @@ static ISOLATED_GIT_CONFIG: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
 /// global state. The backing tempdir is deliberately leaked (`mem::forget`):
 /// it must outlive every test in this binary, and process exit reclaims it
 /// like any other tempfile.
-fn isolated_git_config_paths() -> &'static (PathBuf, PathBuf) {
+pub fn isolated_git_config_paths() -> &'static (PathBuf, PathBuf) {
     ISOLATED_GIT_CONFIG.get_or_init(|| {
         let dir = tempfile::tempdir().expect("create isolated git config dir");
         let global = dir.path().join("global.gitconfig");
