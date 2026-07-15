@@ -4,6 +4,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{audit, git_head_commit_and_branch, open_db, read_file_or_stdin};
+use crate::db::quality_gates::QualityGateInput;
 use crate::verify::GateResult;
 use crate::{board, card_parse, db, error, kanban, pr_view, pr_write, search, worksource};
 
@@ -590,14 +591,14 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
             .to_string();
 
             let database = open_db()?;
-            let row = database.record_quality_gate(
-                &branch,
-                &commit_hash,
-                "legion-pr-write",
-                gate_result,
-                report.findings.len() as u64,
-                Some(&details),
-            )?;
+            let row = database.record_quality_gate(&QualityGateInput {
+                branch: &branch,
+                commit_hash: &commit_hash,
+                skill: "legion-pr-write",
+                result: gate_result,
+                findings_count: report.findings.len() as u64,
+                details: Some(&details),
+            })?;
             crate::gate_trust::emit_gate_trust(&database, &row);
 
             if report.ok {

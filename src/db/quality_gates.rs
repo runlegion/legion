@@ -63,47 +63,54 @@ fn parse_result_from_db(s: String) -> std::result::Result<GateResult, rusqlite::
     })
 }
 
+/// Input for recording a quality gate result (#787).
+///
+/// Groups the positional argument list of `record_quality_gate` into a
+/// single struct, following the `db::AuditInput` precedent, so future
+/// additions (e.g. provenance/void columns, findings linkage) add a field
+/// instead of extending a positional signature.
+pub struct QualityGateInput<'a> {
+    pub branch: &'a str,
+    pub commit_hash: &'a str,
+    pub skill: &'a str,
+    pub result: GateResult,
+    pub findings_count: u64,
+    pub details: Option<&'a str>,
+}
+
 impl Database {
     /// Record a quality gate result for the given commit and skill.
     ///
     /// Multiple rows for the same (commit_hash, skill) pair are allowed --
     /// `get_quality_gate` returns the most recent one. This lets agents
     /// re-run the skill after fixing issues without losing the history.
-    pub fn record_quality_gate(
-        &self,
-        branch: &str,
-        commit_hash: &str,
-        skill: &str,
-        result: GateResult,
-        findings_count: u64,
-        details: Option<&str>,
-    ) -> Result<QualityGateRow> {
+    pub fn record_quality_gate(&self, input: &QualityGateInput<'_>) -> Result<QualityGateRow> {
         let id = Uuid::now_v7().to_string();
         let created_at = Utc::now().to_rfc3339();
-        let result_str: &str = result.as_str();
+        let result_str: &str = input.result.as_str();
         self.conn.execute(
             "INSERT INTO quality_gates \
              (id, branch, commit_hash, skill, result, findings_count, details, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 &id,
-                branch,
-                commit_hash,
-                skill,
+                input.branch,
+                input.commit_hash,
+                input.skill,
                 result_str,
-                findings_count as i64,
-                details,
+                input.findings_count as i64,
+                input.details,
                 &created_at,
             ],
         )?;
         Ok(QualityGateRow {
             id,
-            branch: branch.to_owned(),
-            commit_hash: commit_hash.to_owned(),
-            skill: skill.to_owned(),
-            result,
-            findings_count,
-            details: details.map(str::to_owned),
+            branch: input.branch.to_owned(),
+            commit_hash: input.commit_hash.to_owned(),
+            skill: input.skill.to_owned(),
+            result: input.result,
+            findings_count: input.findings_count,
+            details: input.details.map(str::to_owned),
             created_at,
         })
     }
@@ -367,6 +374,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    use crate::db::quality_gates::QualityGateInput;
     use crate::db::testutil::test_db;
     use crate::verify::GateResult;
 
@@ -374,14 +382,14 @@ mod tests {
     fn quality_gate_insert_and_lookup() {
         let db = test_db();
         let row = db
-            .record_quality_gate(
-                "feat/test-branch",
-                "abc1234def5678",
-                "legion-simplify",
-                GateResult::Clean,
-                0,
-                None,
-            )
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/test-branch",
+                commit_hash: "abc1234def5678",
+                skill: "legion-simplify",
+                result: GateResult::Clean,
+                findings_count: 0,
+                details: None,
+            })
             .unwrap();
         assert!(!row.id.is_empty());
         assert_eq!(row.branch, "feat/test-branch");
@@ -412,14 +420,14 @@ mod tests {
     #[test]
     fn quality_gate_missing_skill_returns_none() {
         let db = test_db();
-        db.record_quality_gate(
-            "main",
-            "abc1234",
-            "legion-simplify",
-            GateResult::Clean,
-            0,
-            None,
-        )
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "abc1234",
+            skill: "legion-simplify",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
         .unwrap();
         // Different skill on the same commit should not match.
         let result = db.get_quality_gate("abc1234", "legion-review").unwrap();
@@ -430,16 +438,23 @@ mod tests {
     fn quality_gate_multiple_skills_on_same_commit() {
         let db = test_db();
         let hash = "deadbeef12345";
-        db.record_quality_gate("main", hash, "legion-simplify", GateResult::Clean, 0, None)
-            .unwrap();
-        db.record_quality_gate(
-            "main",
-            hash,
-            "legion-review",
-            GateResult::Issues,
-            2,
-            Some("{}"),
-        )
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: hash,
+            skill: "legion-simplify",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: hash,
+            skill: "legion-review",
+            result: GateResult::Issues,
+            findings_count: 2,
+            details: Some("{}"),
+        })
         .unwrap();
 
         let simplify = db
@@ -461,11 +476,25 @@ mod tests {
         let db = test_db();
         let hash = "cafecafe99";
         // First run: issues found.
-        db.record_quality_gate("main", hash, "legion-simplify", GateResult::Issues, 3, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: hash,
+            skill: "legion-simplify",
+            result: GateResult::Issues,
+            findings_count: 3,
+            details: None,
+        })
+        .unwrap();
         // Second run after fixing: clean.
-        db.record_quality_gate("main", hash, "legion-simplify", GateResult::Clean, 0, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: hash,
+            skill: "legion-simplify",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
 
         let gate = db
             .get_quality_gate(hash, "legion-simplify")
@@ -483,14 +512,14 @@ mod tests {
         let db = test_db();
         let details = r#"{"result":"issues","findings_count":1,"findings":[]}"#;
         let row = db
-            .record_quality_gate(
-                "feat/x",
-                "hash123",
-                "legion-simplify",
-                GateResult::Issues,
-                1,
-                Some(details),
-            )
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "hash123",
+                skill: "legion-simplify",
+                result: GateResult::Issues,
+                findings_count: 1,
+                details: Some(details),
+            })
             .unwrap();
         assert_eq!(row.details.as_deref(), Some(details));
 
@@ -508,10 +537,24 @@ mod tests {
         // done` may run on a different commit than verify did.
         let db = test_db();
         let skill = "legion-verify:card-7";
-        db.record_quality_gate("feat/x", "commit-old", skill, GateResult::Issues, 1, None)
-            .unwrap();
-        db.record_quality_gate("main", "commit-new", skill, GateResult::Clean, 0, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "feat/x",
+            commit_hash: "commit-old",
+            skill,
+            result: GateResult::Issues,
+            findings_count: 1,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "commit-new",
+            skill,
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
 
         let latest = db
             .get_latest_quality_gate_by_skill(skill)
@@ -548,27 +591,27 @@ mod tests {
     fn list_quality_gates_newest_first() {
         use crate::db::quality_gates::QualityGateFilter;
         let db = test_db();
-        db.record_quality_gate(
-            "main",
-            "hash-a",
-            "legion-simplify",
-            GateResult::Clean,
-            0,
-            None,
-        )
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "hash-a",
+            skill: "legion-simplify",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
         .unwrap();
         // Force a strictly later timestamp so ORDER BY created_at DESC is
         // deterministic; two back-to-back inserts can otherwise land in the
         // same sub-second RFC3339 bucket (same fix as the filter_by_since test).
         std::thread::sleep(std::time::Duration::from_millis(1));
-        db.record_quality_gate(
-            "main",
-            "hash-b",
-            "legion-simplify",
-            GateResult::Issues,
-            2,
-            None,
-        )
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "hash-b",
+            skill: "legion-simplify",
+            result: GateResult::Issues,
+            findings_count: 2,
+            details: None,
+        })
         .unwrap();
 
         let rows = db
@@ -584,10 +627,24 @@ mod tests {
     fn list_quality_gates_filter_by_skill() {
         use crate::db::quality_gates::QualityGateFilter;
         let db = test_db();
-        db.record_quality_gate("main", "h1", "legion-simplify", GateResult::Clean, 0, None)
-            .unwrap();
-        db.record_quality_gate("main", "h2", "legion-review", GateResult::Issues, 1, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h1",
+            skill: "legion-simplify",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h2",
+            skill: "legion-review",
+            result: GateResult::Issues,
+            findings_count: 1,
+            details: None,
+        })
+        .unwrap();
 
         let rows = db
             .list_quality_gates(&QualityGateFilter {
@@ -603,12 +660,33 @@ mod tests {
     fn list_quality_gates_filter_by_result() {
         use crate::db::quality_gates::QualityGateFilter;
         let db = test_db();
-        db.record_quality_gate("main", "h1", "legion-simplify", GateResult::Clean, 0, None)
-            .unwrap();
-        db.record_quality_gate("main", "h2", "legion-simplify", GateResult::Issues, 3, None)
-            .unwrap();
-        db.record_quality_gate("main", "h3", "legion-review", GateResult::Clean, 0, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h1",
+            skill: "legion-simplify",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h2",
+            skill: "legion-simplify",
+            result: GateResult::Issues,
+            findings_count: 3,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h3",
+            skill: "legion-review",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
 
         let rows = db
             .list_quality_gates(&QualityGateFilter {
@@ -625,10 +703,24 @@ mod tests {
     fn list_quality_gates_filter_by_branch() {
         use crate::db::quality_gates::QualityGateFilter;
         let db = test_db();
-        db.record_quality_gate("feat/foo", "h1", "s", GateResult::Clean, 0, None)
-            .unwrap();
-        db.record_quality_gate("main", "h2", "s", GateResult::Clean, 0, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "feat/foo",
+            commit_hash: "h1",
+            skill: "s",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h2",
+            skill: "s",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
 
         let rows = db
             .list_quality_gates(&QualityGateFilter {
@@ -649,12 +741,26 @@ mod tests {
         // since the DB stores RFC3339 strings and sorts lexicographically we can
         // insert rows and capture their timestamps to build the filter.
         let row_a = db
-            .record_quality_gate("main", "h-old", "s", GateResult::Clean, 0, None)
+            .record_quality_gate(&QualityGateInput {
+                branch: "main",
+                commit_hash: "h-old",
+                skill: "s",
+                result: GateResult::Clean,
+                findings_count: 0,
+                details: None,
+            })
             .unwrap();
         // Sleep briefly so the second row has a strictly later timestamp.
         std::thread::sleep(std::time::Duration::from_millis(10));
         let row_b = db
-            .record_quality_gate("main", "h-new", "s", GateResult::Issues, 1, None)
+            .record_quality_gate(&QualityGateInput {
+                branch: "main",
+                commit_hash: "h-new",
+                skill: "s",
+                result: GateResult::Issues,
+                findings_count: 1,
+                details: None,
+            })
             .unwrap();
 
         // Filter with since = row_b.created_at -- only row_b should match.
@@ -683,15 +789,43 @@ mod tests {
     fn quality_gate_stats_counts_and_catch_rate() {
         let db = test_db();
         // 3 runs for legion-simplify: 1 clean, 2 issues.
-        db.record_quality_gate("main", "h1", "legion-simplify", GateResult::Clean, 0, None)
-            .unwrap();
-        db.record_quality_gate("main", "h2", "legion-simplify", GateResult::Issues, 5, None)
-            .unwrap();
-        db.record_quality_gate("main", "h3", "legion-simplify", GateResult::Issues, 3, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h1",
+            skill: "legion-simplify",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h2",
+            skill: "legion-simplify",
+            result: GateResult::Issues,
+            findings_count: 5,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h3",
+            skill: "legion-simplify",
+            result: GateResult::Issues,
+            findings_count: 3,
+            details: None,
+        })
+        .unwrap();
         // 1 run for legion-review: 1 clean, findings = 0.
-        db.record_quality_gate("main", "h4", "legion-review", GateResult::Clean, 0, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h4",
+            skill: "legion-review",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
 
         let stats = db.quality_gate_stats(None, None).unwrap();
         assert_eq!(stats.len(), 2, "expected two skill rows");
@@ -726,10 +860,24 @@ mod tests {
     #[test]
     fn quality_gate_stats_filter_by_skill() {
         let db = test_db();
-        db.record_quality_gate("main", "h1", "legion-simplify", GateResult::Issues, 2, None)
-            .unwrap();
-        db.record_quality_gate("main", "h2", "legion-review", GateResult::Clean, 0, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h1",
+            skill: "legion-simplify",
+            result: GateResult::Issues,
+            findings_count: 2,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h2",
+            skill: "legion-review",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
 
         let stats = db
             .quality_gate_stats(Some("legion-simplify"), None)
@@ -742,10 +890,24 @@ mod tests {
     #[test]
     fn quality_gate_stats_catch_rate_all_clean() {
         let db = test_db();
-        db.record_quality_gate("main", "h1", "s", GateResult::Clean, 0, None)
-            .unwrap();
-        db.record_quality_gate("main", "h2", "s", GateResult::Clean, 0, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h1",
+            skill: "s",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h2",
+            skill: "s",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: None,
+        })
+        .unwrap();
 
         let stats = db.quality_gate_stats(None, None).unwrap();
         assert_eq!(stats.len(), 1);
@@ -755,10 +917,24 @@ mod tests {
     #[test]
     fn quality_gate_stats_catch_rate_all_issues() {
         let db = test_db();
-        db.record_quality_gate("main", "h1", "s", GateResult::Issues, 1, None)
-            .unwrap();
-        db.record_quality_gate("main", "h2", "s", GateResult::Issues, 1, None)
-            .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h1",
+            skill: "s",
+            result: GateResult::Issues,
+            findings_count: 1,
+            details: None,
+        })
+        .unwrap();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "main",
+            commit_hash: "h2",
+            skill: "s",
+            result: GateResult::Issues,
+            findings_count: 1,
+            details: None,
+        })
+        .unwrap();
 
         let stats = db.quality_gate_stats(None, None).unwrap();
         assert_eq!(stats.len(), 1);
