@@ -177,7 +177,10 @@ pub(crate) fn git_changed_files(base: Option<&str>) -> Result<ChangedFiles, erro
         ));
     }
 
-    let resolved_base: Option<String> = if let Some(explicit) = base {
+    // Resolved directly to a `String` (not `Option<String>` + a later
+    // `.expect`) so the type system -- not a runtime assertion -- proves
+    // every path either yields a real base or returns early.
+    let base_ref: String = if let Some(explicit) = base {
         // An explicit --base must resolve to a real ref. No fallback, no
         // vacuous pass -- a typo'd or unmerged base ref is a hard error so
         // the gate never runs against an accidentally empty diff.
@@ -196,7 +199,7 @@ pub(crate) fn git_changed_files(base: Option<&str>) -> Result<ChangedFiles, erro
                  {stderr}"
             )));
         }
-        Some(explicit.to_owned())
+        explicit.to_owned()
     } else {
         // Probe each candidate base ref. Collect the first one that resolves.
         let candidates: [&str; 2] = ["main", "origin/main"];
@@ -216,7 +219,7 @@ pub(crate) fn git_changed_files(base: Option<&str>) -> Result<ChangedFiles, erro
             }
         }
 
-        let Some(base_ref) = found else {
+        let Some(found_ref) = found else {
             // Neither main nor origin/main exists. This is legitimate only
             // when HEAD itself has no parent (initial commit / orphan
             // branch). Probe for a parent commit; if there is one, the
@@ -256,12 +259,8 @@ pub(crate) fn git_changed_files(base: Option<&str>) -> Result<ChangedFiles, erro
                 base: None,
             });
         };
-        Some(base_ref.to_owned())
+        found_ref.to_owned()
     };
-
-    // resolved_base is always Some at this point -- both branches above
-    // either set it or return early.
-    let base_ref = resolved_base.expect("resolved_base set on every non-early-return path");
 
     // Run the three-dot diff with core.quotePath=false so non-ASCII paths
     // are returned as-is (no octal escaping) and match heading paths exactly.
@@ -298,36 +297,50 @@ pub(crate) fn git_changed_files(base: Option<&str>) -> Result<ChangedFiles, erro
         }
         let mut fields = line.split('\t');
         let status = fields.next().unwrap_or("");
-        if let Some(similarity) = status.strip_prefix('R') {
-            // Rename line: `R<nn>\t<old_path>\t<new_path>`.
+        // Rename (`R<nn>`) and copy (`C<nn>`) lines share the same
+        // three-field shape (`<status>\t<old>\t<new>`); RENAME_SIMILARITY
+        // never passes `-C` on the command line, so a `C` line should not
+        // occur in practice, but a future call site or an unusual git build
+        // must not silently misparse one as a plain `<status>\t<path>` line
+        // and grab the wrong (source, not destination) field. Only `R100`
+        // gets the zero-delta auto-clear -- this issue scopes that exclusion
+        // to true renames, not copies (a copy leaves the source in place, so
+        // even a byte-identical one is not risk-free the way a pure move is).
+        if let Some(similarity) = status
+            .strip_prefix('R')
+            .or_else(|| status.strip_prefix('C'))
+        {
+            let is_rename = status.starts_with('R');
             let old_path = fields.next();
             let new_path = fields.next();
             match (old_path, new_path) {
                 (Some(old_path), Some(new_path)) => {
-                    if similarity == "100" {
+                    if is_rename && similarity == "100" {
                         // Zero-delta move: excluded from the coverage set,
                         // recorded for the audit trail.
                         cleared_renames.push((old_path.to_owned(), new_path.to_owned()));
                     } else {
-                        // Content delta: the new path carries the diff that
-                        // needs review. (The old path no longer exists in
-                        // the tree -- there is nothing further to review
-                        // "at" it once the rename is detected as such.)
+                        // Content delta (rename) or any copy: the new path
+                        // carries the diff that needs review. (For a rename,
+                        // the old path no longer exists in the tree -- there
+                        // is nothing further to review "at" it once the
+                        // rename is detected as such.)
                         files.insert(new_path.to_owned());
                     }
                 }
                 _ => {
                     return Err(error::LegionError::WorkSource(format!(
-                        "git diff --name-status produced a malformed rename line \
-                         (expected 'R<nn>\\t<old>\\t<new>'): {line:?}"
+                        "git diff --name-status produced a malformed rename/copy line \
+                         (expected '{{R,C}}<nn>\\t<old>\\t<new>'): {line:?}"
                     )));
                 }
             }
         } else {
-            // Non-rename line (A/M/D/T/...): `<status>\t<path>`. An
-            // undetected rename below RENAME_SIMILARITY surfaces here as a
-            // separate D line and A line -- both paths land in the coverage
-            // set, exactly like any other unrelated delete + add pair.
+            // Non-rename, non-copy line (A/M/D/T/...): `<status>\t<path>`.
+            // An undetected rename below RENAME_SIMILARITY surfaces here as
+            // a separate D line and A line -- both paths land in the
+            // coverage set, exactly like any other unrelated delete + add
+            // pair.
             if let Some(path) = fields.next() {
                 files.insert(path.to_owned());
             }
