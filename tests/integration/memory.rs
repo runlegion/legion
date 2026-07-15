@@ -910,17 +910,34 @@ fn recall_domain_archives_reaches_persisted_reflections() {
     .to_string();
     assert_uuid_format(&id);
 
+    // A second, still-hot reflection in the same domain -- lets
+    // --include-archives (Both mode) below prove it merges hot and cold
+    // rather than just re-testing the Cold-only path a second time.
+    run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "checkpoint",
+        "--text",
+        "hot checkpoint beat",
+    ]));
+
     run_ok(legion_cmd(dir.path()).args(["forget", "--id", &id, "--persist"]));
 
-    // Hot --domain (default) must not surface it.
+    // Hot --domain (default) must not surface the persisted one.
     let hot =
         run_ok(legion_cmd(dir.path()).args(["recall", "--repo", "test", "--domain", "checkpoint"]));
     assert!(
         !hot.contains("persisted checkpoint beat"),
         "persisted reflection leaked into hot --domain recall: {hot}"
     );
+    assert!(
+        hot.contains("hot checkpoint beat"),
+        "hot reflection missing from hot --domain recall: {hot}"
+    );
 
-    // --domain --archives must reach it.
+    // --domain --archives (Cold-only) must reach ONLY the persisted one.
     let cold = run_ok(legion_cmd(dir.path()).args([
         "recall",
         "--repo",
@@ -932,6 +949,24 @@ fn recall_domain_archives_reaches_persisted_reflections() {
     assert!(
         cold.contains("persisted checkpoint beat"),
         "--domain --archives did not reach the persisted reflection: {cold}"
+    );
+    assert!(
+        !cold.contains("hot checkpoint beat"),
+        "--domain --archives (Cold-only) leaked the hot reflection: {cold}"
+    );
+
+    // --domain --include-archives (Both mode) must reach BOTH.
+    let both = run_ok(legion_cmd(dir.path()).args([
+        "recall",
+        "--repo",
+        "test",
+        "--domain",
+        "checkpoint",
+        "--include-archives",
+    ]));
+    assert!(
+        both.contains("persisted checkpoint beat") && both.contains("hot checkpoint beat"),
+        "--domain --include-archives did not merge hot and cold: {both}"
     );
 }
 
@@ -951,21 +986,47 @@ fn recall_latest_archives_reaches_persisted_reflections() {
     .to_string();
     assert_uuid_format(&id);
 
+    // A second, still-hot reflection -- lets --include-archives (Both
+    // mode) below prove it merges hot and cold rather than just
+    // re-testing the Cold-only path a second time.
+    run_ok(legion_cmd(dir.path()).args(["reflect", "--repo", "test", "--text", "hot latest beat"]));
+
     run_ok(legion_cmd(dir.path()).args(["forget", "--id", &id, "--persist"]));
 
-    // Hot --latest (default) must not surface it.
+    // Hot --latest (default) must not surface the persisted one.
     let hot = run_ok(legion_cmd(dir.path()).args(["recall", "--repo", "test", "--latest"]));
     assert!(
         !hot.contains("persisted latest beat"),
         "persisted reflection leaked into hot --latest recall: {hot}"
     );
+    assert!(
+        hot.contains("hot latest beat"),
+        "hot reflection missing from hot --latest recall: {hot}"
+    );
 
-    // --latest --archives must reach it.
+    // --latest --archives (Cold-only) must reach ONLY the persisted one.
     let cold =
         run_ok(legion_cmd(dir.path()).args(["recall", "--repo", "test", "--latest", "--archives"]));
     assert!(
         cold.contains("persisted latest beat"),
         "--latest --archives did not reach the persisted reflection: {cold}"
+    );
+    assert!(
+        !cold.contains("hot latest beat"),
+        "--latest --archives (Cold-only) leaked the hot reflection: {cold}"
+    );
+
+    // --latest --include-archives (Both mode) must reach BOTH.
+    let both = run_ok(legion_cmd(dir.path()).args([
+        "recall",
+        "--repo",
+        "test",
+        "--latest",
+        "--include-archives",
+    ]));
+    assert!(
+        both.contains("persisted latest beat") && both.contains("hot latest beat"),
+        "--latest --include-archives did not merge hot and cold: {both}"
     );
 }
 

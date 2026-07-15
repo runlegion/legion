@@ -384,6 +384,17 @@ pub(crate) fn handle_recall(
     // corpus is a different feature than this issue's DB-join filter, not
     // a caller-side wiring gap. Warn loudly there so an operator does not
     // silently get hot-only results from --cosine-only --archives.
+    //
+    // This condition does not need to also check `domain.is_none() &&
+    // !latest`: clap's `conflicts_with` on the `domain`/`latest`/
+    // `cosine_only` args (src/cli/mod.rs) is enforced bidirectionally, so
+    // `cosine_only` can never be `true` here while `domain` is `Some` or
+    // `latest` is `true` -- confirmed empirically (`recall --domain x
+    // --cosine-only` and `recall --latest --cosine-only` both refuse to
+    // parse). If `cosine_only` reaches this point, the `if let`/`else if`
+    // chain below is guaranteed to fall through to the `cosine_only`
+    // branch, so the warning is never a false alarm for a run that
+    // actually takes the --domain or --latest path.
     if (archives || include_archives) && cosine_only {
         eprintln!(
             "[legion] warning: --archives / --include-archives do not apply to --cosine-only, which ranks purely by embedding similarity with no archive-mode filter. This run uses hot-only results."
