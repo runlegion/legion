@@ -343,7 +343,10 @@ fn contains_forbidden_phrase(text: &str) -> bool {
 ///    failed -- the backup file written in step 4 is the recovery path.
 /// 7. Sync the search index for the new root, new children, and every
 ///    retired id (`swap_identity_root` only touches the database, the
-///    same split-write `reflect_from_text_with_meta` already has).
+///    same split-write `reflect_from_text_with_meta` already has). All
+///    of step 7 is best-effort warn-not-fail: the swap committed in
+///    step 5, so from here on the database is the truth and `legion
+///    reindex` is the recovery path for any index straggler.
 pub fn apply(
     db: &Database,
     index: &SearchIndex,
@@ -355,6 +358,19 @@ pub fn apply(
     validate_manifest(manifest)?;
 
     let old_rows = db.get_reflections_by_domain(repo, "identity", IDENTITY_BACKUP_LIMIT)?;
+    if old_rows.len() == IDENTITY_BACKUP_LIMIT {
+        // A corpus at exactly the cap almost certainly means rows beyond
+        // it were cut off by the SQL LIMIT -- and both the backup and the
+        // retirement pass below operate only on what was captured. Make
+        // the boundary loud instead of silently protecting (and retiring)
+        // a truncated set.
+        eprintln!(
+            "[legion whoami --generate --apply] WARNING: identity corpus for '{repo}' hit the \
+             backup scan cap ({IDENTITY_BACKUP_LIMIT} rows) -- rows beyond the cap are neither \
+             backed up nor retired by this apply. Audit `legion recall --repo {repo} --domain \
+             identity` before trusting this run's backup."
+        );
+    }
     let would_retire: Vec<String> = old_rows.iter().map(|r| r.id.clone()).collect();
     let backup_path = backup_dir.join(format!("identity-backup-{repo}-{}.json", Uuid::now_v7()));
 
@@ -372,9 +388,15 @@ pub fn apply(
     let chained_texts: Vec<&str> = manifest.chain.iter().map(String::as_str).collect();
     let swap = db.swap_identity_root(repo, manifest.root.trim(), &chained_texts, "self")?;
 
-    index.add(&swap.root.id, repo, &swap.root.text)?;
+    // Post-commit index writes are best-effort, same as the retirement
+    // pass below: the DB swap has already committed, so an index-side
+    // failure here must warn (recovery: `legion reindex`) rather than
+    // report the whole apply as failed -- a hard error would tell the
+    // calling agent the apply did not happen when `whoami` already shows
+    // the new root, inviting a re-run that churns identity ids.
+    warn_on_index_add_failure(index, &swap.root.id, repo, &swap.root.text);
     for child in &swap.children {
-        index.add(&child.id, repo, &child.text)?;
+        warn_on_index_add_failure(index, &child.id, repo, &child.text);
     }
 
     let retired_ids =
@@ -389,6 +411,23 @@ pub fn apply(
         backup_path,
         retired_ids,
     }))
+}
+
+/// Best-effort tantivy add for a row already committed to the database
+/// by `swap_identity_root`, warning (not failing) on error -- the new
+/// identity is already live in the DB, so an index straggler must not
+/// make `apply` report failure. `legion reindex` is the recovery path.
+fn warn_on_index_add_failure(index: &SearchIndex, id: &str, repo: &str, text: &str) {
+    if let Err(e) = index.add(id, repo, text) {
+        eprintln!(
+            "[legion whoami --generate --apply] WARNING: the identity swap committed but the \
+             tantivy index add failed for new row {id}.\n\
+             The new identity is live in the database (whoami shows it) but will not surface in \
+             BM25 recall results\n\
+             until the index is rebuilt. Run `legion reindex` to reconcile. Do NOT re-run apply.\n\
+             Underlying error: {e}"
+        );
+    }
 }
 
 /// Best-effort tantivy delete for an id already removed from the
@@ -903,11 +942,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_removes_swap_deleted_root_from_search_index_not_just_the_database() {
+    fn apply_removes_all_retired_ids_from_search_index_not_just_the_database() {
         // Seed via reflect_from_text_with_meta (not insert_reflection_with_meta
-        // directly) so the old root actually lands in the search index too,
+        // directly) so the old rows actually land in the search index too,
         // the same as every real `legion reflect --whoami` write -- a
         // DB-only fixture would never exercise the index-sync path at all.
+        // Covers BOTH retirement branches: the swap-deleted root (index-only
+        // sync -- swap_identity_root never touches tantivy) and the leftover
+        // chain child (full db+index delete in retire_old_identity_rows).
         let (db, index, dir) = test_storage();
         let root_id = crate::reflect::reflect_from_text_with_meta(
             &db,
@@ -921,6 +963,18 @@ mod tests {
             },
         )
         .unwrap();
+        let child_id = crate::reflect::reflect_from_text_with_meta(
+            &db,
+            &index,
+            "legion",
+            "an old distinctive chapter about zanzibar gateways",
+            &ReflectionMeta {
+                domain: Some("identity".to_string()),
+                tags: None,
+                parent_id: Some(root_id.clone()),
+            },
+        )
+        .unwrap();
 
         let backup_dir = dir.path().join("backups");
         let manifest = IdentityManifest {
@@ -929,18 +983,52 @@ mod tests {
         };
         apply(&db, &index, "legion", &manifest, &backup_dir, false).unwrap();
 
-        // swap_identity_root deletes the old root from the database only
-        // (it never touches tantivy); apply() must still sync the index
-        // for every retired id, including the swap's own deletions, or
-        // the old root persists as a ghost document in BM25 results.
-        let hits = index
+        let root_hits = index
             .search("legion", "distinctive careful engineering", 10)
             .unwrap();
-        let hit_ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        let root_hit_ids: Vec<&str> = root_hits.iter().map(|h| h.id.as_str()).collect();
         assert!(
-            !hit_ids.contains(&root_id.as_str()),
-            "old root must not still be findable in the search index: {hit_ids:?}"
+            !root_hit_ids.contains(&root_id.as_str()),
+            "swap-deleted old root must not still be findable in the search index: {root_hit_ids:?}"
         );
+
+        let child_hits = index
+            .search("legion", "distinctive zanzibar gateways", 10)
+            .unwrap();
+        let child_hit_ids: Vec<&str> = child_hits.iter().map(|h| h.id.as_str()).collect();
+        assert!(
+            !child_hit_ids.contains(&child_id.as_str()),
+            "retired leftover chain child must not still be findable in the search index: {child_hit_ids:?}"
+        );
+    }
+
+    #[test]
+    fn apply_with_no_preexisting_identity_rows_bootstraps_cleanly() {
+        // Plausible first-run state: no prior identity at all. The apply
+        // must bootstrap (swap_identity_root handles the no-prior-root
+        // case), retire nothing, and still write a (empty-corpus) backup.
+        let (db, index, dir) = test_storage();
+        let backup_dir = dir.path().join("backups");
+        let manifest = IdentityManifest {
+            root: "first ever root".to_string(),
+            chain: vec!["first chapter".to_string()],
+        };
+        let result = apply(&db, &index, "legion", &manifest, &backup_dir, false).unwrap();
+        let outcome = match result {
+            ApplyResult::Applied(o) => o,
+            ApplyResult::Planned(_) => panic!("expected Applied"),
+        };
+
+        assert_eq!(outcome.new_ids.len(), 2);
+        assert!(outcome.retired_ids.is_empty());
+
+        let backed_up: Vec<Reflection> =
+            serde_json::from_str(&std::fs::read_to_string(&outcome.backup_path).unwrap()).unwrap();
+        assert!(backed_up.is_empty());
+
+        let roots = db.get_identity_roots("legion", 50).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].text, "first ever root");
     }
 
     #[test]
@@ -999,5 +1087,51 @@ mod tests {
             .get_reflections_by_domain("legion", "identity", 500)
             .unwrap();
         assert_eq!(before.len(), after.len());
+    }
+
+    // -- retire_old_identity_rows: db-delete failure is warn-not-fail -------
+
+    #[test]
+    fn retire_old_identity_rows_warns_and_continues_when_a_db_delete_fails() {
+        // Exercises the `Err` branch of `db.delete_reflection` inside
+        // `retire_old_identity_rows` directly, rather than through `apply`
+        // -- there is no in-process way to force that specific race (the
+        // row vanishing between apply's initial capture and this cleanup
+        // pass) through the public API. A synthetic `Reflection` whose id
+        // was never actually inserted reproduces the same `Err` path
+        // deterministically: `delete_reflection` returns
+        // `LegionError::ReflectionNotFound` for any id it can't find,
+        // which is exactly the shape a genuine race would also produce.
+        let (db, index, dir) = test_storage();
+        let backup_path = dir.path().join("backups/unused.json");
+
+        let ghost_row = Reflection {
+            id: "00000000-0000-7000-8000-000000000000".to_string(),
+            repo: "legion".to_string(),
+            text: "never actually inserted".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: None,
+            audience: "self".to_string(),
+            domain: Some("identity".to_string()),
+            tags: None,
+            recall_count: 0,
+            last_recalled_at: None,
+            parent_id: None,
+        };
+
+        // Must not panic despite the delete failing, and must not report
+        // the ghost id as retired -- it was never actually removed.
+        let retired_ids = retire_old_identity_rows(
+            &db,
+            &index,
+            std::slice::from_ref(&ghost_row),
+            &[],
+            &backup_path,
+        );
+
+        assert!(
+            !retired_ids.contains(&ghost_row.id),
+            "a row whose delete failed must not be reported as retired: {retired_ids:?}"
+        );
     }
 }
