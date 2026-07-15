@@ -1,17 +1,20 @@
-//! CLI end-to-end tests for the module-graph wiring in `legion index` (#710).
+//! CLI end-to-end tests for the module-graph wiring in `legion index` (#710)
+//! and the `sym imports`/`sym importers` query surface (#772).
 //!
 //! `src/graph.rs` and `src/db/module_edges.rs` carry their own unit tests for
-//! the parse/resolve logic and the persistence API in isolation; these tests
-//! exercise the actual binary surface -- a real `legion index <repo>` run
-//! over a small TS fixture must populate `module_edges`, honoring tsconfig
-//! `paths` and recording unresolved specifiers as `to_path = NULL` rather
-//! than dropping them. No CLI query surface exists yet (see
-//! `Database::list_module_edges_from`'s doc comment), so assertions read the
-//! `module_edges` table directly out of the data dir's `legion.db`.
+//! the parse/resolve logic and the persistence API in isolation; the first
+//! group of tests below exercises the actual binary surface -- a real
+//! `legion index <repo>` run over a small TS fixture must populate
+//! `module_edges`, honoring tsconfig `paths` and recording unresolved
+//! specifiers as `to_path = NULL` rather than dropping them -- and reads the
+//! `module_edges` table directly out of the data dir's `legion.db`. The
+//! second group drives `sym imports`/`sym importers` through the compiled
+//! binary against that same indexed data (mirrors `css_symbols.rs`'s shape
+//! for #744).
 
 use rusqlite::Connection;
 
-use crate::common::{legion_cmd, run_ok};
+use crate::common::{legion_cmd, run_fail, run_ok, run_ok_stderr};
 
 /// Seed a watch.toml in the data dir pointing at `repos` (name, workdir).
 /// Mirrors `sym_tree::seed_watch_toml` -- forward-slash normalized so a
@@ -169,4 +172,223 @@ fn index_with_no_ts_files_leaves_module_edges_empty() {
 
     let edges = edges_for_repo(data_dir.path(), "docsonly");
     assert!(edges.is_empty(), "expected no module edges, got {edges:?}");
+}
+
+/// Seed a small TS fixture (a resolved edge, an unresolved/external edge,
+/// and an ambiguous basename shared by two files under different
+/// directories), index it, and return the data dir. Shared setup for the
+/// `sym imports`/`sym importers` CLI tests below (#772).
+fn seed_and_index_import_graph(repo: &str) -> tempfile::TempDir {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    std::fs::create_dir_all(repo_dir.path().join("src/components")).expect("mkdir components");
+    std::fs::create_dir_all(repo_dir.path().join("src/widgets")).expect("mkdir widgets");
+    std::fs::create_dir_all(repo_dir.path().join("src/pages")).expect("mkdir pages");
+    std::fs::write(
+        repo_dir.path().join("src/index.ts"),
+        "import { widget } from './widgets/widget';\n\
+         import unresolved from 'some-external-package-that-does-not-exist';\n\
+         export { widget, unresolved };\n",
+    )
+    .expect("write index.ts");
+    std::fs::write(
+        repo_dir.path().join("src/widgets/widget.ts"),
+        "export const widget = 1;\n",
+    )
+    .expect("write widget.ts");
+    // Two distinct Button files under different directories, both importing
+    // the same widget and both themselves imported by a page -- so a bare
+    // "Button.tsx" suffix query is ambiguous whether asked as an importer
+    // (`sym imports`) or as an importee (`sym importers`).
+    std::fs::write(
+        repo_dir.path().join("src/components/Button.tsx"),
+        "import { widget } from '../widgets/widget';\nexport const Button = () => widget;\n",
+    )
+    .expect("write components/Button.tsx");
+    std::fs::write(
+        repo_dir.path().join("src/widgets/Button.tsx"),
+        "import { widget } from './widget';\nexport const Button2 = () => widget;\n",
+    )
+    .expect("write widgets/Button.tsx");
+    std::fs::write(
+        repo_dir.path().join("src/pages/Home.tsx"),
+        "import { Button } from '../components/Button';\nexport const Home = () => Button;\n",
+    )
+    .expect("write pages/Home.tsx");
+    std::fs::write(
+        repo_dir.path().join("src/pages/Other.tsx"),
+        "import { Button2 } from '../widgets/Button';\nexport const Other = () => Button2;\n",
+    )
+    .expect("write pages/Other.tsx");
+    seed_watch_toml(data_dir.path(), &[(repo, repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", repo]));
+    drop(repo_dir);
+    data_dir
+}
+
+#[test]
+fn sym_imports_prints_resolved_and_unresolved_edges_in_text_format() {
+    let data_dir = seed_and_index_import_graph("importsq");
+
+    let out = run_ok(legion_cmd(data_dir.path()).args(["sym", "imports", "src/index.ts"]));
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("./widgets/widget\tsrc/index.ts -> src/widgets/widget.ts\t")),
+        "expected the resolved widget edge, got:\n{out}"
+    );
+    assert!(
+        out.lines().any(|l| {
+            l.starts_with("some-external-package-that-does-not-exist\tsrc/index.ts -> unresolved\t")
+        }),
+        "the unresolved/external edge must be shown as 'unresolved', not dropped, got:\n{out}"
+    );
+}
+
+#[test]
+fn sym_imports_json_wraps_entries_with_snapshot_freshness() {
+    let data_dir = seed_and_index_import_graph("importsqjson");
+
+    let out = run_ok(legion_cmd(data_dir.path()).args([
+        "sym",
+        "imports",
+        "src/index.ts",
+        "--repo",
+        "importsqjson",
+        "--json",
+    ]));
+    let envelope: serde_json::Value =
+        serde_json::from_str(out.trim()).expect("stdout is a JSON envelope object");
+    let entries = envelope["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 2, "expected both edges, got {entries:?}");
+    assert!(
+        entries.iter().any(
+            |e| e["specifier"] == "some-external-package-that-does-not-exist" && e["to"].is_null()
+        ),
+        "unresolved edge must serialize to as JSON null, got {entries:?}"
+    );
+
+    let snapshots = envelope["snapshots"].as_array().expect("snapshots array");
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "explicit --repo yields exactly one snapshot: {snapshots:?}"
+    );
+    assert_eq!(snapshots[0]["repo"], "importsqjson");
+}
+
+#[test]
+fn sym_importers_finds_every_file_importing_a_shared_module() {
+    let data_dir = seed_and_index_import_graph("importersq");
+
+    let out = run_ok(legion_cmd(data_dir.path()).args(["sym", "importers", "widget.ts"]));
+    assert!(
+        out.lines()
+            .any(|l| l.contains("src/index.ts -> src/widgets/widget.ts")),
+        "expected src/index.ts as an importer, got:\n{out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.contains("src/components/Button.tsx -> src/widgets/widget.ts")),
+        "expected src/components/Button.tsx as an importer, got:\n{out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.contains("src/widgets/Button.tsx -> src/widgets/widget.ts")),
+        "expected src/widgets/Button.tsx as an importer, got:\n{out}"
+    );
+}
+
+#[test]
+fn sym_importers_ambiguous_suffix_returns_every_match() {
+    let data_dir = seed_and_index_import_graph("importersqambig");
+
+    // "Button.tsx" is a bare basename shared by two distinct importee files
+    // under different directories (src/components/Button.tsx and
+    // src/widgets/Button.tsx), each imported by its own page -- both edges
+    // must be returned, not just one (#772).
+    let out = run_ok(legion_cmd(data_dir.path()).args(["sym", "importers", "Button.tsx"]));
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected one importer edge per ambiguous Button.tsx file, got:\n{out}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("-> src/components/Button.tsx"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("-> src/widgets/Button.tsx"))
+    );
+}
+
+#[test]
+fn sym_imports_indexed_but_no_matching_edges_is_a_clean_empty_exit() {
+    let data_dir = seed_and_index_import_graph("importsqempty");
+
+    // widget.ts has no imports of its own -- indexed, genuinely empty.
+    let stdout =
+        run_ok(legion_cmd(data_dir.path()).args(["sym", "imports", "src/widgets/widget.ts"]));
+    assert_eq!(stdout, "", "empty result must not print any rows");
+
+    let stderr = run_ok_stderr(legion_cmd(data_dir.path()).args([
+        "sym",
+        "imports",
+        "src/widgets/widget.ts",
+    ]));
+    assert!(
+        stderr.contains("[legion] no imports found"),
+        "expected the no-imports-found line, got: {stderr}"
+    );
+}
+
+#[test]
+fn sym_imports_never_indexed_repo_fails_loudly_not_silently_empty() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    std::fs::write(repo_dir.path().join("README.md"), "# hi\n").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("importsqnever", repo_dir.path())]);
+    // Deliberately never run `legion index` -- no file_inventory rows exist.
+
+    let (_, stderr) = run_fail(legion_cmd(data_dir.path()).args([
+        "sym",
+        "imports",
+        "anything.ts",
+        "--repo",
+        "importsqnever",
+    ]));
+    assert!(
+        stderr.contains("legion index importsqnever"),
+        "expected the message to name the fixing command, got: {stderr}"
+    );
+}
+
+/// A repo indexed cleanly but with zero js/ts/jsx/tsx files (pure docs, or
+/// pure Rust) must NOT be reported as never-indexed just because
+/// `module_edges` is empty for it -- that would be the exact misroute
+/// `css_symbol_no_index_message` exists to prevent for `--lang css`, mirrored
+/// here without the extension narrowing (Build Notes, #772).
+#[test]
+fn sym_imports_indexed_repo_with_no_ts_files_is_empty_not_never_indexed() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    std::fs::write(repo_dir.path().join("README.md"), "# hi\n").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("importsqdocsonly", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "importsqdocsonly"]));
+
+    let stderr = run_ok_stderr(legion_cmd(data_dir.path()).args([
+        "sym",
+        "imports",
+        "anything.ts",
+        "--repo",
+        "importsqdocsonly",
+    ]));
+    assert!(
+        stderr.contains("[legion] no imports found"),
+        "an indexed repo with no ts files must be a clean empty result, not a \
+         never-indexed error, got: {stderr}"
+    );
 }
