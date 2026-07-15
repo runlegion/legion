@@ -55,6 +55,22 @@ assert_contains "lists the accepted card title" "$out" 'Ship the thing'
 assert_contains "names bypass env" "$out" 'LEGION_SKIP_STOP_BLOCK=1'
 assert_contains "surfaces the board-derived goal" "$out" 'GOAL: ship the thing'
 
+echo "==> stop hook BLOCKS (decision:block) on a delegated card that is no longer live (#778)"
+out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" \
+  | FAKE_KANBAN_DELEGATED_DEAD="Ship the delegated thing" bash "$STOP_HOOK")
+assert_contains "delegated block decision present" "$out" '"decision": "block"'
+assert_contains "lists the not-live delegated card title" "$out" 'Ship the delegated thing'
+assert_contains "delegated block names the undelegate escape" "$out" 'legion kanban undelegate --id <id>'
+assert_contains "names bypass env on the delegated gate too" "$out" 'LEGION_SKIP_STOP_BLOCK=1'
+
+echo "==> stop hook does NOT block when no delegated card needs attention"
+out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"no-delegated-session\"}" | bash "$STOP_HOOK")
+assert_not_contains "no dead-delegated card -> no block from gate 1b" "$out" 'delegated to a watch-spawned attempt'
+# That call fell through to the reflection nudge and touched the shared
+# per-CWD marker; clear it so the dedicated nudge tests below still see a
+# clean slate (same cleanup discipline used throughout this file).
+rm -f "/tmp/legion-reflected-${CWD_HASH}"
+
 echo "==> clean board: stop nudges for reflection via additionalContext (#569)"
 # No FAKE_KANBAN_ACCEPTED -> in-progress gate does not fire -> reflection path.
 # It must emit hookSpecificOutput.additionalContext, NOT decision:block.

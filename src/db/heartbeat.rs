@@ -89,6 +89,29 @@ impl Database {
         Ok(())
     }
 
+    /// Whether the watch daemon has beaten within the last `stale_after_secs`
+    /// seconds, across any host (#778). A cheap boolean sibling of the
+    /// richer `alive | stale | absent` classification `legion watch status`
+    /// prints (`cli::watch::classify_beat`) -- callers that only need a
+    /// yes/no gate (the delegated-liveness predicate in `wake.rs`) don't
+    /// need the age breakdown. An unparseable `updated_at` reads as NOT
+    /// alive (fail closed), matching `classify_beat`'s `i64::MAX` coercion.
+    pub fn watch_heartbeat_alive(&self, stale_after_secs: u64) -> Result<bool> {
+        let beat = match self.get_watch_heartbeat(None)? {
+            Some(b) => b,
+            None => return Ok(false),
+        };
+        let age_secs: i64 = chrono::DateTime::parse_from_rfc3339(&beat.updated_at)
+            .ok()
+            .map(|ts| {
+                chrono::Utc::now()
+                    .signed_duration_since(ts.with_timezone(&chrono::Utc))
+                    .num_seconds()
+            })
+            .unwrap_or(i64::MAX);
+        Ok(age_secs >= 0 && (age_secs as u64) < stale_after_secs)
+    }
+
     /// Read the heartbeat row for a specific host, or any host when `host` is `None`.
     ///
     /// When `host` is `None`, returns the most recently updated row across all hosts.
@@ -226,6 +249,64 @@ mod tests {
         assert_eq!(
             beat.host, "host-y",
             "None should return the most recently updated host"
+        );
+    }
+
+    // -- watch_heartbeat_alive (#778) -----------------------------------------
+
+    #[test]
+    fn watch_heartbeat_alive_false_when_no_row() {
+        let db = test_db();
+        assert!(
+            !db.watch_heartbeat_alive(120).unwrap(),
+            "no heartbeat ever written -> not alive"
+        );
+    }
+
+    #[test]
+    fn watch_heartbeat_alive_true_for_fresh_beat() {
+        let db = test_db();
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .unwrap();
+        assert!(
+            db.watch_heartbeat_alive(120).unwrap(),
+            "a beat written just now is within any sane stale window"
+        );
+    }
+
+    #[test]
+    fn watch_heartbeat_alive_false_for_stale_beat() {
+        let db = test_db();
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .unwrap();
+        // Backdate the beat past the stale window.
+        let old = (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339();
+        db.conn
+            .execute(
+                "UPDATE watch_heartbeat SET updated_at = ?1 WHERE host = 'host-a'",
+                rusqlite::params![old],
+            )
+            .unwrap();
+        assert!(
+            !db.watch_heartbeat_alive(120).unwrap(),
+            "a beat 300s old must read as stale under a 120s window"
+        );
+    }
+
+    #[test]
+    fn watch_heartbeat_alive_false_for_unparseable_timestamp() {
+        let db = test_db();
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE watch_heartbeat SET updated_at = 'not-a-timestamp' WHERE host = 'host-a'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            !db.watch_heartbeat_alive(120).unwrap(),
+            "a corrupt timestamp must fail closed (not alive), never panic"
         );
     }
 }

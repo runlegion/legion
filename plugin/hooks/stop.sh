@@ -1,7 +1,7 @@
 #!/bin/bash
 # Legion Stop hook.
 #
-# Two-layer enforcement on every Stop event:
+# Three-layer enforcement on every Stop event:
 #
 # 1. IN-PROGRESS GATE (#461 -> #523). If the agent has an Accepted
 #    (in-progress) kanban card for this repo, block the Stop until it
@@ -13,6 +13,14 @@
 #    blocker moves a card to Blocked, excluded here by construction. No silent
 #    abandonment of picked-up work. The board-derived goal (#525) rides along.
 #
+# 1b. DELEGATED WORK LIVENESS GATE (#778). A card in `delegated` is invisible
+#    to gate 1's Accepted-only select by construction -- sound only while an
+#    unfakeable liveness signal (watch daemon heartbeat + a linked, in-flight
+#    wake_attempts row) backs it. This re-checks that signal directly against
+#    the DB and blocks the same way when it no longer holds, covering the one
+#    case the auto-revert sweep cannot reach on its own: the watch daemon
+#    itself being down.
+#
 # 2. REFLECTION PROMPT. If work happened this session and the reflection
 #    hasn't fired yet, nudge for one via hookSpecificOutput.additionalContext
 #    (#569) -- non-error feedback that continues the turn so the agent acts on
@@ -20,7 +28,7 @@
 #    incurs. One-shot per session ($MARKER) + stop_hook_active guarded. Skip
 #    when nothing was learned.
 #
-# Bypass: LEGION_SKIP_STOP_BLOCK=1 env skips both gates. Writes a
+# Bypass: LEGION_SKIP_STOP_BLOCK=1 env skips all three gates. Writes a
 # telemetry row via `legion telemetry record-bypass` so the escape is
 # visible to #440's summary.
 
@@ -89,9 +97,9 @@ fi
 # proportionate signal. Reaper observes EOF and continues regardless.
 # Rationale + per-gate decisions in docs/decisions/2026-05-watch-pty-env-audit.md.
 #
-# Forward-compatible: LEGION_SPAWN_SOURCE is not set by anything in the
-# legion code today; #489 introduces the PTY spawn branch that stamps
-# it. Until then this block is dead code that proves out the wire-up.
+# LEGION_SPAWN_SOURCE=watch-pty is stamped on every PTY spawn by
+# src/watch/spawn.rs's SpawnMode::Pty branch (#489, live at HEAD) -- this
+# is not a forward-compat stub, it fires on every real watch-spawned wake.
 if [ "${LEGION_SPAWN_SOURCE:-}" = "watch-pty" ]; then
   if [ -x "$LEGION" ] && [ -n "$SESSION_ID" ]; then
     "$LEGION" telemetry record-bypass \
@@ -152,6 +160,54 @@ To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_
 
 ${GOAL}"
     fi
+
+    emit_block "$REASON"
+    exit 0
+  fi
+fi
+
+# ---------- (1b) Delegated work liveness gate (#778) ----------
+#
+# A card in `delegated` is invisible to the Accepted gate above BY
+# CONSTRUCTION (it selects `.status == "accepted"` only). That is safe ONLY
+# while the delegation is verifiably live: the watch daemon's heartbeat is
+# fresh AND the card's linked wake_attempts row is in an in-flight state --
+# the exact predicate `legion kanban delegate` required to enter the state,
+# and the one `tick_health`'s auto-revert sweep uses to leave it (one shared
+# predicate, `Database::delegated_card_is_live`, not one per call site that
+# could silently disagree -- the #679 lesson). `legion kanban
+# delegated-needs-attention` re-runs that predicate directly against the DB
+# and lists any delegated card that fails it.
+#
+# tick_health normally reverts a dead delegation back to Accepted within one
+# health tick, which would make the gate above fire on its own. This check
+# covers the gap that leaves open: the watch daemon itself may be the thing
+# that died, in which case nothing is left running to perform that revert --
+# this hook is the only remaining backstop, so it re-checks liveness itself
+# rather than trusting the card's current status.
+#
+# Fail-open matches gate (1) above at the shell-call layer only (a broken
+# legion binary or missing jq must never trap the agent). The liveness
+# ANSWER itself is fail-closed inside the subcommand: a missing link, a
+# terminal attempt, or a stale/absent daemon heartbeat all read as
+# needs-attention, never as "safe to stop" -- an ambiguous state must never
+# be interpreted as safe.
+if command -v jq >/dev/null 2>&1 && [ -x "$LEGION" ]; then
+  DEAD_DELEGATED=$("$LEGION" kanban delegated-needs-attention --repo "$REPO" --json 2>/dev/null \
+    | jq -r '"- " + (.title // .text // .id)' 2>/dev/null)
+
+  if [ -n "$DEAD_DELEGATED" ]; then
+    REASON="You delegated work on the board to a watch-spawned attempt, but it is no longer verifiably live (the attempt finished or died, or the watch daemon itself is not running) and cannot stop yet:
+
+${DEAD_DELEGATED}
+
+Move each card to a real state before stopping:
+- resume it yourself: legion kanban undelegate --id <id>
+- re-delegate to a fresh live attempt: legion kanban delegate --id <id> --attempt-id <attempt>
+- technical blocker: legion kanban block --id <id> --reason '...'
+- needs a human decision: legion kanban need-input --id <id>
+
+To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_STOP_BLOCK=1. The bypass writes one row to bypass.jsonl."
 
     emit_block "$REASON"
     exit 0

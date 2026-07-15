@@ -460,6 +460,27 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Get every card currently in `Delegated` (#778): the delegated-work
+    /// liveness sweep target. `repo` filters to one board (`to_repo`,
+    /// matching how `get_cards` scopes inbound work) when `Some`; `None`
+    /// scans every repo, which is what `tick_health`'s auto-revert sweep
+    /// needs since a single watch daemon can service many repos. One query
+    /// handles both: `?1 IS NULL` short-circuits the filter when `repo` is
+    /// `None` (rusqlite binds `Option<&str>` as SQL NULL).
+    pub fn get_delegated_cards(&self, repo: Option<&str>) -> Result<Vec<crate::kanban::Card>> {
+        let sql = format!(
+            "SELECT {} FROM tasks \
+             WHERE (?1 IS NULL OR to_repo = ?1) AND status = 'delegated' AND deleted_at IS NULL \
+             ORDER BY {}, sort_order ASC, created_at ASC",
+            Self::CARD_COLUMNS,
+            Self::PRIORITY_ORDER
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![repo], crate::kanban::map_card_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     /// Atomically pick the next pending card for a repo and accept it.
     ///
     /// Selects highest priority, then lowest sort_order, then oldest.
@@ -545,6 +566,7 @@ impl Database {
             CardStatus::Pending => None,
             CardStatus::NeedsInput => None,
             CardStatus::Blocked => None,
+            CardStatus::Delegated => None,
         }
     }
 
@@ -1368,6 +1390,88 @@ mod tests {
         assert!(Database::requirement_status_for_card_status(CardStatus::Pending).is_none());
         assert!(Database::requirement_status_for_card_status(CardStatus::NeedsInput).is_none());
         assert!(Database::requirement_status_for_card_status(CardStatus::Blocked).is_none());
+        assert!(Database::requirement_status_for_card_status(CardStatus::Delegated).is_none());
+    }
+
+    // -- get_delegated_cards (#778) -------------------------------------------
+
+    #[test]
+    fn get_delegated_cards_returns_only_delegated_status() {
+        let db = test_db();
+        let delegated_id = db
+            .insert_card(
+                "legion",
+                "legion",
+                "delegated card",
+                None,
+                crate::kanban::Priority::Med,
+                None,
+                None,
+                None,
+                None,
+                None,
+                crate::kanban::CardStatus::Delegated,
+            )
+            .unwrap();
+        db.insert_card(
+            "legion",
+            "legion",
+            "accepted card",
+            None,
+            crate::kanban::Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+            crate::kanban::CardStatus::Accepted,
+        )
+        .unwrap();
+
+        let delegated = db.get_delegated_cards(None).unwrap();
+        assert_eq!(delegated.len(), 1);
+        assert_eq!(delegated[0].id, delegated_id);
+    }
+
+    #[test]
+    fn get_delegated_cards_filters_by_repo_when_given() {
+        let db = test_db();
+        let legion_id = db
+            .insert_card(
+                "legion",
+                "legion",
+                "delegated in legion",
+                None,
+                crate::kanban::Priority::Med,
+                None,
+                None,
+                None,
+                None,
+                None,
+                crate::kanban::CardStatus::Delegated,
+            )
+            .unwrap();
+        db.insert_card(
+            "legion",
+            "huttspawn",
+            "delegated in huttspawn",
+            None,
+            crate::kanban::Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+            crate::kanban::CardStatus::Delegated,
+        )
+        .unwrap();
+
+        let scoped = db.get_delegated_cards(Some("legion")).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, legion_id);
+
+        let all = db.get_delegated_cards(None).unwrap();
+        assert_eq!(all.len(), 2, "None scans every repo");
     }
 
     /// Transactional sync: transitioning a bound card to "done" updates BOTH

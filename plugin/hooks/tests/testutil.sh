@@ -162,6 +162,8 @@ finish_tests() {
 #   FAKE_SYM_REFS_JSON       `sym refs --json` body (default [])
 #   FAKE_RECALL              `recall` body (default empty)
 #   FAKE_KANBAN_ACCEPTED     `kanban list` -> one accepted card titled this
+#   FAKE_KANBAN_DELEGATED_DEAD  `kanban delegated-needs-attention` -> one
+#                            not-live delegated card titled this (#778)
 #   FAKE_GOAL                `goal` body
 #   FAKE_WHOAMI_BODY         `whoami` body below the standard banner header
 #   FAKE_PREDICTION_ID       `uncertainty emit` row id (pred-fixed-1)
@@ -245,6 +247,8 @@ case "${1:-}" in
   kanban)
     if [ "${2:-}" = "list" ] && [ -n "${FAKE_KANBAN_ACCEPTED:-}" ]; then
       printf '{"status":"accepted","id":"42","title":"%s"}\n' "$FAKE_KANBAN_ACCEPTED"
+    elif [ "${2:-}" = "delegated-needs-attention" ] && [ -n "${FAKE_KANBAN_DELEGATED_DEAD:-}" ]; then
+      printf '{"status":"delegated","id":"43","title":"%s"}\n' "$FAKE_KANBAN_DELEGATED_DEAD"
     fi
     ;;
   goal)

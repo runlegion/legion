@@ -256,6 +256,12 @@ impl WatchLoop {
         // on the AgentTracker's live children; a row whose pid was never
         // tracked by *this* daemon instance is invisible to the tracker).
         reap_dead_pid_attempts(&self.db, &self.host, self.log_prefix);
+        // #778: auto-revert delegated cards whose attempt is no longer live.
+        // Runs AFTER the two reapers above so an attempt that just went
+        // terminal this tick is already reflected in wake_attempts.state --
+        // reap-before-mutate, the same ordering lesson #679's own reaper
+        // finalization fix (f45e7e5) encoded for lease release vs heartbeat.
+        reap_delegated_cards(&self.db, self.log_prefix);
         if let Err(e) = self.db.heartbeat_persona_leases(&self.host, self.lease_ttl) {
             eprintln!("{} lease heartbeat error: {e}", self.log_prefix);
         }
@@ -442,6 +448,67 @@ fn reap_dead_pid_attempts(db: &Database, host: &str, log_prefix: &str) {
             eprintln!(
                 "{log_prefix} dead-pid reaper: failed to mark {} as failed: {e}",
                 attempt.attempt_id
+            );
+        }
+    }
+}
+
+/// Auto-revert `Delegated` cards whose linked wake attempt is no longer
+/// live (#778): a card sub-state that is sound only while an unfakeable
+/// liveness signal backs it must not be able to outlive that signal.
+/// Scans every repo (not just this daemon's own spawns) because a
+/// delegated card can be linked to an attempt claimed by any host in the
+/// cluster -- the point of the check is "is the work still happening
+/// anywhere," not "did I personally spawn it."
+///
+/// Uses the same `delegated_card_is_live` predicate the entry gate
+/// (`kanban::delegate_card`) and the stop.sh subcommand both read, so all
+/// three agree by construction (the #679 "one predicate" lesson). The
+/// revert is telemetried: a descriptive note lands on the card (readable
+/// via `legion kanban view`) and an INFO line is logged, so a silent
+/// abandonment never has zero trace -- consistent with the dead-pid
+/// reaper immediately above.
+///
+/// An error from the DB scan or a single card's revert is logged and
+/// swallowed; the health tick must never abort over one bad row.
+fn reap_delegated_cards(db: &Database, log_prefix: &str) {
+    let delegated = match db.get_delegated_cards(None) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{log_prefix} delegated reaper: scan error: {e}");
+            return;
+        }
+    };
+
+    for card in delegated {
+        let live =
+            match db.delegated_card_is_live(&card.id, crate::kanban::DELEGATION_STALE_AFTER_SECS) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "{log_prefix} delegated reaper: liveness check error for card {}: {e}",
+                        card.id
+                    );
+                    continue;
+                }
+            };
+        if live {
+            continue;
+        }
+
+        eprintln!(
+            "{log_prefix} delegated reaper: card {} (repo {}) no longer live -- reverting to accepted",
+            card.id, card.to_repo
+        );
+
+        if let Err(e) = crate::kanban::undelegate_card(
+            db,
+            &card.id,
+            Some("auto-reverted: delegated attempt no longer live"),
+        ) {
+            eprintln!(
+                "{log_prefix} delegated reaper: failed to revert card {}: {e}",
+                card.id
             );
         }
     }
@@ -1089,6 +1156,117 @@ mod tests {
             row.state.as_str(),
             "running",
             "no-pid running row must be left in running state"
+        );
+    }
+
+    // -- delegated-card reaper (#778) -----------------------------------------
+
+    fn insert_delegated_card(db: &Database, repo: &str, text: &str) -> String {
+        db.insert_card(
+            "kelex",
+            repo,
+            text,
+            None,
+            crate::kanban::Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+            crate::kanban::CardStatus::Delegated,
+        )
+        .expect("insert delegated card")
+    }
+
+    #[test]
+    fn reap_delegated_cards_reverts_when_attempt_went_terminal() {
+        let (db, _index, _dir) = test_storage();
+        db.upsert_watch_heartbeat("test-host", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+
+        let card_id = insert_delegated_card(&db, "test-repo", "delegated, then died");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "test-persona", "test-repo", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        db.set_wake_attempt_card(&attempt_id, &card_id)
+            .expect("link");
+        db.record_wake_attempt_outcome(&attempt_id, "ok", "productive")
+            .expect("terminal");
+
+        reap_delegated_cards(&db, "[test]");
+
+        let card = db
+            .get_card_by_id(&card_id)
+            .expect("get")
+            .expect("card exists");
+        assert_eq!(
+            card.status,
+            crate::kanban::CardStatus::Accepted,
+            "a delegated card whose attempt went terminal must auto-revert to accepted"
+        );
+        assert!(
+            card.note
+                .as_deref()
+                .is_some_and(|n| n.contains("no longer live")),
+            "revert must be telemetried via the card note; got: {:?}",
+            card.note
+        );
+    }
+
+    #[test]
+    fn reap_delegated_cards_leaves_live_delegation_alone() {
+        let (db, _index, _dir) = test_storage();
+        db.upsert_watch_heartbeat("test-host", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+
+        let card_id = insert_delegated_card(&db, "test-repo", "delegated, still running");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "test-persona", "test-repo", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        db.set_wake_attempt_card(&attempt_id, &card_id)
+            .expect("link");
+
+        reap_delegated_cards(&db, "[test]");
+
+        let card = db
+            .get_card_by_id(&card_id)
+            .expect("get")
+            .expect("card exists");
+        assert_eq!(
+            card.status,
+            crate::kanban::CardStatus::Delegated,
+            "a delegated card with a live attempt must not be touched"
+        );
+    }
+
+    #[test]
+    fn reap_delegated_cards_reverts_when_daemon_heartbeat_is_absent() {
+        let (db, _index, _dir) = test_storage();
+        // No upsert_watch_heartbeat call.
+
+        let card_id = insert_delegated_card(&db, "test-repo", "no heartbeat at all");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "test-persona", "test-repo", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        db.set_wake_attempt_card(&attempt_id, &card_id)
+            .expect("link");
+
+        reap_delegated_cards(&db, "[test]");
+
+        let card = db
+            .get_card_by_id(&card_id)
+            .expect("get")
+            .expect("card exists");
+        assert_eq!(
+            card.status,
+            crate::kanban::CardStatus::Accepted,
+            "an in-flight attempt with no daemon heartbeat is still not verifiably live"
         );
     }
 }

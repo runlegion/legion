@@ -141,6 +141,29 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Column migrations for `wake_attempts`.
+pub(super) fn migrate(conn: &Connection) -> Result<()> {
+    // Migration: card_id linkage for delegated cards (#778). Nullable --
+    // the overwhelming majority of wake_attempts rows are plain auto-wake
+    // spawns with no delegated card behind them. Set once by
+    // `Database::set_wake_attempt_card` when `kanban::delegate_card` links
+    // an Accepted card to a live attempt; read back by
+    // `Database::delegated_card_is_live` (the entry gate, the tick_health
+    // auto-revert sweep, and the stop.sh delegated-liveness subcommand all
+    // share that one predicate, per the #679 "one predicate" lesson --
+    // LIVE_LEASE_WHERE above is the sibling precedent for wake leases).
+    // No REFERENCES clause -- PRAGMA foreign_keys is not enabled globally,
+    // matching `tasks.document_id` (Migration 16, src/db/kanban.rs).
+    if !Database::has_column(conn, "wake_attempts", "card_id")? {
+        conn.execute_batch("ALTER TABLE wake_attempts ADD COLUMN card_id TEXT;")?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_wake_attempts_card_id \
+             ON wake_attempts(card_id) WHERE card_id IS NOT NULL;",
+        )?;
+    }
+    Ok(())
+}
+
 impl Database {
     /// Try to acquire a persona wake lease. Returns `Ok(true)` on success,
     /// `Ok(false)` when a live lease for `(persona_id, signal_id)` is already
@@ -357,6 +380,17 @@ impl Database {
 // `map_wake_attempt_row` and the new `impl Database` block since the
 // surrounding db.rs is mostly live.
 
+/// Column list shared by every `wake_attempts` SELECT, matching
+/// `map_wake_attempt_row`'s positional `row.get(N)` calls. Factored out
+/// (#778) once a fifth call site needed the same fifteen-plus-`card_id`
+/// list `list_local_orphans` / `get_wake_attempt` / `recent_wake_attempts`
+/// already carried independently -- mirrors `Database::CARD_COLUMNS`
+/// (src/db/kanban.rs), the sibling precedent for cards.
+const WAKE_ATTEMPT_COLUMNS: &str = "attempt_id, persona_id, repo_name, signal_ids, state, \
+     acquired_by_host, acquired_at, spawned_pid, spawned_at, \
+     exit_observed_at, exited_at, exit_status, outcome, \
+     deleted_at, updated_at, card_id";
+
 #[allow(dead_code)]
 fn map_wake_attempt_row(
     row: &rusqlite::Row<'_>,
@@ -390,6 +424,7 @@ fn map_wake_attempt_row(
         outcome: row.get(12)?,
         deleted_at: row.get(13)?,
         updated_at: row.get(14)?,
+        card_id: row.get(15)?,
     })
 }
 
@@ -597,17 +632,14 @@ impl Database {
         &self,
         self_host: &str,
     ) -> Result<Vec<crate::wake_attempts::WakeAttempt>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT attempt_id, persona_id, repo_name, signal_ids, state, \
-                    acquired_by_host, acquired_at, spawned_pid, spawned_at, \
-                    exit_observed_at, exited_at, exit_status, outcome, \
-                    deleted_at, updated_at \
-             FROM wake_attempts \
+        let sql = format!(
+            "SELECT {WAKE_ATTEMPT_COLUMNS} FROM wake_attempts \
              WHERE acquired_by_host = ?1 \
                AND state IN ('claimed', 'spawning', 'running', 'exiting') \
                AND deleted_at IS NULL \
-             ORDER BY acquired_at ASC",
-        )?;
+             ORDER BY acquired_at ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         Ok(stmt
             .query_map(rusqlite::params![self_host], map_wake_attempt_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -619,18 +651,128 @@ impl Database {
         &self,
         attempt_id: &str,
     ) -> Result<Option<crate::wake_attempts::WakeAttempt>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT attempt_id, persona_id, repo_name, signal_ids, state, \
-                    acquired_by_host, acquired_at, spawned_pid, spawned_at, \
-                    exit_observed_at, exited_at, exit_status, outcome, \
-                    deleted_at, updated_at \
-             FROM wake_attempts \
-             WHERE attempt_id = ?1",
-        )?;
+        let sql = format!("SELECT {WAKE_ATTEMPT_COLUMNS} FROM wake_attempts WHERE attempt_id = ?1");
+        let mut stmt = self.conn.prepare(&sql)?;
         let row = stmt
             .query_row(rusqlite::params![attempt_id], map_wake_attempt_row)
             .optional()?;
         Ok(row)
+    }
+
+    /// Link a wake_attempts row to the kanban card it is delegated work
+    /// for (#778). A metadata write, not an FSM transition -- the caller
+    /// (`kanban::delegate_card`) is responsible for having already checked
+    /// the attempt is live and unclaimed before calling this. Returns
+    /// `WakeAttemptNotFound` when the row is absent or soft-deleted, same
+    /// contract as `set_wake_attempt_pid`.
+    pub fn set_wake_attempt_card(&self, attempt_id: &str, card_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE wake_attempts \
+             SET card_id = ?1, updated_at = ?2 \
+             WHERE attempt_id = ?3 AND deleted_at IS NULL",
+            rusqlite::params![card_id, &now, attempt_id],
+        )?;
+        if updated == 1 {
+            Ok(())
+        } else {
+            Err(LegionError::WakeAttemptNotFound(attempt_id.to_string()))
+        }
+    }
+
+    /// Clear the `card_id` link on whatever wake_attempts row currently
+    /// points at `card_id` (#778 review fix -- see `kanban::undelegate_card`
+    /// for why this must run on every Undelegate, not just some). Matches
+    /// by `card_id`, not by `attempt_id`, so the caller does not need to
+    /// have looked the linked row up first. A no-op, not an error, when
+    /// nothing is currently linked -- `Undelegate` on a card that was never
+    /// actually delegated (shouldn't happen given the FSM, but this is a
+    /// plain UPDATE, not an FSM transition) must not fail the caller.
+    pub fn clear_wake_attempt_card(&self, card_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE wake_attempts SET card_id = NULL, updated_at = ?1 \
+             WHERE card_id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![&now, card_id],
+        )?;
+        Ok(())
+    }
+
+    /// Find a live, not-yet-claimed-by-a-card wake_attempts row for a repo
+    /// -- the auto-discovery path `kanban::delegate_card` falls back to
+    /// when the caller does not pass `--attempt-id` explicitly. Newest
+    /// (`spawned_at DESC`) wins when more than one is in flight; callers
+    /// that need a specific one among several should pass `--attempt-id`.
+    pub fn find_live_wake_attempt_for_repo(
+        &self,
+        repo_name: &str,
+    ) -> Result<Option<crate::wake_attempts::WakeAttempt>> {
+        let sql = format!(
+            "SELECT {WAKE_ATTEMPT_COLUMNS} FROM wake_attempts \
+             WHERE repo_name = ?1 \
+               AND card_id IS NULL \
+               AND state IN ('claimed', 'spawning', 'running', 'exiting') \
+               AND deleted_at IS NULL \
+             ORDER BY spawned_at DESC \
+             LIMIT 1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row = stmt
+            .query_row(rusqlite::params![repo_name], map_wake_attempt_row)
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Fetch the wake_attempts row linked to a card, if any (#778). Most
+    /// recent by `updated_at` when more than one row was ever linked
+    /// (re-delegation after a manual undelegate) -- only one is meaningful
+    /// at a time since `delegate_card` only ever sets `card_id` on a
+    /// currently-live, currently-unclaimed row.
+    pub fn get_wake_attempt_by_card(
+        &self,
+        card_id: &str,
+    ) -> Result<Option<crate::wake_attempts::WakeAttempt>> {
+        let sql = format!(
+            "SELECT {WAKE_ATTEMPT_COLUMNS} FROM wake_attempts \
+             WHERE card_id = ?1 AND deleted_at IS NULL \
+             ORDER BY updated_at DESC \
+             LIMIT 1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row = stmt
+            .query_row(rusqlite::params![card_id], map_wake_attempt_row)
+            .optional()?;
+        Ok(row)
+    }
+
+    /// The single definition of "this card's delegated work is still
+    /// live" (#778, mirroring the #679 `LIVE_LEASE_WHERE` lesson: one
+    /// shared predicate, not one per call site that can silently
+    /// diverge). Composed of two independent halves, BOTH required:
+    ///
+    /// 1. The watch daemon's heartbeat is fresh (`watch_heartbeat_alive`).
+    ///    `tick_health`'s auto-revert sweep runs *inside* that daemon, so a
+    ///    stale/absent heartbeat means nothing is left to keep the linked
+    ///    wake_attempts row honest -- treating a daemon-down attempt as
+    ///    live would let a genuinely dead delegation coast on a frozen
+    ///    "running" row forever.
+    /// 2. The card's linked wake_attempts row (via `get_wake_attempt_by_card`)
+    ///    exists and is in an in-flight FSM state.
+    ///
+    /// Absence of either signal reads as NOT live -- this is a fail-closed
+    /// predicate by construction (`Option::None` and a stale heartbeat both
+    /// fall through to `Ok(false)`, never `Ok(true)`), because it backs the
+    /// entry gate, the auto-revert sweep, AND the stop.sh last-line-of-
+    /// defense check -- an ambiguous "maybe" must never read as "safe to
+    /// stop."
+    pub fn delegated_card_is_live(&self, card_id: &str, stale_after_secs: u64) -> Result<bool> {
+        if !self.watch_heartbeat_alive(stale_after_secs)? {
+            return Ok(false);
+        }
+        match self.get_wake_attempt_by_card(card_id)? {
+            Some(attempt) => Ok(attempt.state.is_in_flight()),
+            None => Ok(false),
+        }
     }
 }
 
@@ -644,16 +786,13 @@ impl Database {
         &self,
         limit: u32,
     ) -> Result<Vec<crate::wake_attempts::WakeAttempt>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT attempt_id, persona_id, repo_name, signal_ids, state, \
-                    acquired_by_host, acquired_at, spawned_pid, spawned_at, \
-                    exit_observed_at, exited_at, exit_status, outcome, \
-                    deleted_at, updated_at \
-             FROM wake_attempts \
+        let sql = format!(
+            "SELECT {WAKE_ATTEMPT_COLUMNS} FROM wake_attempts \
              WHERE deleted_at IS NULL \
              ORDER BY updated_at DESC \
-             LIMIT ?1",
-        )?;
+             LIMIT ?1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         Ok(stmt
             .query_map(rusqlite::params![limit as i64], map_wake_attempt_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1148,6 +1287,28 @@ mod tests {
         assert_eq!(indices, 2);
     }
 
+    /// Mirrors `migration_document_id_column_is_idempotent_on_reopen`
+    /// (src/db/kanban.rs): a real file-backed DB re-opened a second time
+    /// must not fail the has_column-guarded ALTER for `wake_attempts.card_id`.
+    #[test]
+    fn wake_attempts_card_id_migration_is_idempotent_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_card_id_idempotent.db");
+
+        let db1 = Database::open(&db_path).unwrap();
+        let id = wake_id("reopen");
+        db1.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        drop(db1);
+
+        let db2 = Database::open(&db_path).expect("second open must not fail");
+        let row = db2
+            .get_wake_attempt(&id)
+            .unwrap()
+            .expect("row survives reopen");
+        assert!(row.card_id.is_none(), "card_id defaults to NULL");
+    }
+
     #[test]
     fn enqueue_wake_attempt_inserts_queued_row() {
         use crate::wake_attempts::WakeAttemptState;
@@ -1438,6 +1599,152 @@ mod tests {
             .mark_wake_attempt_exit_observed("no-such")
             .expect_err("missing row must error");
         assert!(matches!(err, LegionError::WakeAttemptNotFound(_)));
+    }
+
+    // -- card_id linkage + delegated liveness (#778) -------------------------
+
+    #[test]
+    fn set_wake_attempt_card_links_and_is_readable_back() {
+        let db = test_db();
+        let id = wake_id("link");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+
+        db.set_wake_attempt_card(&id, "card-1").unwrap();
+
+        let row = db.get_wake_attempt(&id).unwrap().expect("row");
+        assert_eq!(row.card_id.as_deref(), Some("card-1"));
+
+        let by_card = db
+            .get_wake_attempt_by_card("card-1")
+            .unwrap()
+            .expect("linked row found by card_id");
+        assert_eq!(by_card.attempt_id, id);
+    }
+
+    #[test]
+    fn set_wake_attempt_card_errors_on_missing_row() {
+        let db = test_db();
+        let err = db
+            .set_wake_attempt_card("no-such", "card-1")
+            .expect_err("missing row must error");
+        assert!(matches!(err, LegionError::WakeAttemptNotFound(_)));
+    }
+
+    #[test]
+    fn get_wake_attempt_by_card_returns_none_when_unlinked() {
+        let db = test_db();
+        let id = wake_id("unlinked");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        assert!(db.get_wake_attempt_by_card("card-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn find_live_wake_attempt_for_repo_finds_unclaimed_in_flight_row() {
+        let db = test_db();
+        let id = wake_id("find");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+
+        let found = db
+            .find_live_wake_attempt_for_repo("legion")
+            .unwrap()
+            .expect("in-flight, unclaimed-by-card row must be found");
+        assert_eq!(found.attempt_id, id);
+    }
+
+    #[test]
+    fn find_live_wake_attempt_for_repo_skips_rows_already_linked_to_a_card() {
+        let db = test_db();
+        let id = wake_id("already-linked");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        db.set_wake_attempt_card(&id, "card-1").unwrap();
+
+        assert!(
+            db.find_live_wake_attempt_for_repo("legion")
+                .unwrap()
+                .is_none(),
+            "a row already claimed by a card must not be handed out again"
+        );
+    }
+
+    #[test]
+    fn find_live_wake_attempt_for_repo_skips_terminal_rows() {
+        let db = test_db();
+        let id = wake_id("terminal");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        db.record_wake_attempt_outcome(&id, "ok", "productive")
+            .unwrap();
+
+        assert!(
+            db.find_live_wake_attempt_for_repo("legion")
+                .unwrap()
+                .is_none(),
+            "a terminal row is not live"
+        );
+    }
+
+    #[test]
+    fn delegated_card_is_live_false_when_daemon_heartbeat_absent() {
+        let db = test_db();
+        let id = wake_id("no-heartbeat");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        db.set_wake_attempt_card(&id, "card-1").unwrap();
+
+        // Attempt is genuinely in-flight, but no watch daemon has ever
+        // beaten -- the predicate must still read false (fail closed):
+        // nothing is left to keep the row honest.
+        assert!(!db.delegated_card_is_live("card-1", 120).unwrap());
+    }
+
+    #[test]
+    fn delegated_card_is_live_true_when_both_halves_hold() {
+        let db = test_db();
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .unwrap();
+        let id = wake_id("live");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        db.set_wake_attempt_card(&id, "card-1").unwrap();
+
+        assert!(db.delegated_card_is_live("card-1", 120).unwrap());
+    }
+
+    #[test]
+    fn delegated_card_is_live_false_when_attempt_went_terminal() {
+        let db = test_db();
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .unwrap();
+        let id = wake_id("died");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        db.set_wake_attempt_card(&id, "card-1").unwrap();
+        db.record_wake_attempt_outcome(&id, "error", "died")
+            .unwrap();
+
+        assert!(
+            !db.delegated_card_is_live("card-1", 120).unwrap(),
+            "a heartbeat-alive daemon with a terminal attempt is still not live"
+        );
+    }
+
+    #[test]
+    fn delegated_card_is_live_false_when_card_has_no_linked_attempt() {
+        let db = test_db();
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .unwrap();
+        assert!(!db.delegated_card_is_live("no-such-card", 120).unwrap());
     }
 
     #[test]

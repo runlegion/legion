@@ -182,6 +182,9 @@ pub enum LegionError {
     #[error("invalid gate result: '{0}' (expected 'clean' or 'issues')")]
     InvalidGateResult(String),
 
+    #[error("delegation refused: {0}")]
+    DelegationRefused(String),
+
     /// Signals that the process should exit with a specific non-zero code.
     ///
     /// Used by CLI handlers that have already printed a user-facing message
@@ -287,5 +290,11 @@ mod tests {
         assert!(err.to_string().contains("bad"));
         assert!(err.to_string().contains("clean"));
         assert!(err.to_string().contains("issues"));
+    }
+
+    #[test]
+    fn delegation_refused_display() {
+        let err = LegionError::DelegationRefused("no live attempt".to_string());
+        assert_eq!(err.to_string(), "delegation refused: no live attempt");
     }
 }

@@ -19,6 +19,15 @@ pub enum CardStatus {
     NeedsInput,
     InReview,
     Blocked,
+    /// Work handed off to a live watch-spawned wake attempt (#778). A
+    /// sub-state of "in progress," not a terminal or human-blocked state:
+    /// the agent that accepted the card is not the one doing the work right
+    /// now, but the card is not abandoned either, because entry is gated on
+    /// an unfakeable liveness signal (see `kanban::delegate_card`) and
+    /// `tick_health` auto-reverts to `Accepted` the moment that signal goes
+    /// dark. Named for the stance ("running elsewhere"), not "awaiting"
+    /// (a snooze button that primes dormancy -- see reflection 019e98f4).
+    Delegated,
     Done,
     Cancelled,
 }
@@ -32,6 +41,7 @@ impl fmt::Display for CardStatus {
             Self::NeedsInput => write!(f, "needs-input"),
             Self::InReview => write!(f, "in-review"),
             Self::Blocked => write!(f, "blocked"),
+            Self::Delegated => write!(f, "delegated"),
             Self::Done => write!(f, "done"),
             Self::Cancelled => write!(f, "cancelled"),
         }
@@ -49,6 +59,7 @@ impl FromStr for CardStatus {
             "needs-input" => Ok(Self::NeedsInput),
             "in-review" => Ok(Self::InReview),
             "blocked" => Ok(Self::Blocked),
+            "delegated" => Ok(Self::Delegated),
             "done" => Ok(Self::Done),
             "cancelled" => Ok(Self::Cancelled),
             other => Err(LegionError::InvalidCardStatus(other.to_string())),
@@ -66,6 +77,7 @@ impl CardStatus {
             Self::NeedsInput => "Needs Input",
             Self::InReview => "In Review",
             Self::Blocked => "Blocked",
+            Self::Delegated => "Delegated",
             Self::Done => "Done",
             Self::Cancelled => "Cancelled",
         }
@@ -152,6 +164,16 @@ pub enum Action {
     Block,
     /// blocked -> accepted
     Unblock,
+    /// accepted -> delegated (work handed off to a live watch-spawned wake
+    /// attempt; #778). Mirrors Block/Unblock's shape -- entry is refused by
+    /// the caller (`kanban::delegate_card`) unless a liveness predicate
+    /// holds, so this transition itself stays unconditional at the FSM
+    /// layer, same as Block never questions the reason.
+    Delegate,
+    /// delegated -> accepted. Fired either manually (the agent resumes the
+    /// card itself) or programmatically by `tick_health`'s auto-revert sweep
+    /// when the delegated attempt is no longer live.
+    Undelegate,
     /// needs-input | in-review -> accepted
     Resume,
     /// accepted | in-review -> done
@@ -173,6 +195,8 @@ pub fn transition(current: CardStatus, action: Action) -> Result<CardStatus> {
         (CardStatus::Accepted, Action::Block) => CardStatus::Blocked,
         (CardStatus::Accepted, Action::Done) => CardStatus::Done,
         (CardStatus::Blocked, Action::Unblock) => CardStatus::Accepted,
+        (CardStatus::Accepted, Action::Delegate) => CardStatus::Delegated,
+        (CardStatus::Delegated, Action::Undelegate) => CardStatus::Accepted,
         (CardStatus::NeedsInput, Action::Resume) => CardStatus::Accepted,
         // Verify (#520) runs after review and can find an unprovable criterion;
         // routing the card from InReview to NeedsInput lets a human adjudicate
@@ -207,6 +231,7 @@ mod tests {
             CardStatus::NeedsInput,
             CardStatus::InReview,
             CardStatus::Blocked,
+            CardStatus::Delegated,
             CardStatus::Done,
             CardStatus::Cancelled,
         ] {
@@ -221,6 +246,7 @@ mod tests {
         assert_eq!(CardStatus::Pending.label(), "Ready");
         assert_eq!(CardStatus::Accepted.label(), "In Progress");
         assert_eq!(CardStatus::NeedsInput.label(), "Needs Input");
+        assert_eq!(CardStatus::Delegated.label(), "Delegated");
     }
 
     // --- State machine tests ---
@@ -261,6 +287,66 @@ mod tests {
         assert_eq!(result.expect("unblock"), CardStatus::Accepted);
     }
 
+    // --- Delegated state (#778) ---
+
+    #[test]
+    fn delegate_from_accepted() {
+        let result = transition(CardStatus::Accepted, Action::Delegate);
+        assert_eq!(result.expect("delegate"), CardStatus::Delegated);
+    }
+
+    #[test]
+    fn undelegate_from_delegated() {
+        let result = transition(CardStatus::Delegated, Action::Undelegate);
+        assert_eq!(result.expect("undelegate"), CardStatus::Accepted);
+    }
+
+    #[test]
+    fn cannot_delegate_from_non_accepted_states() {
+        for status in [
+            CardStatus::Backlog,
+            CardStatus::Pending,
+            CardStatus::NeedsInput,
+            CardStatus::InReview,
+            CardStatus::Blocked,
+            CardStatus::Delegated,
+            CardStatus::Done,
+            CardStatus::Cancelled,
+        ] {
+            let result = transition(status, Action::Delegate);
+            assert!(
+                result.is_err(),
+                "delegate should be rejected from {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cannot_undelegate_from_non_delegated_states() {
+        for status in [
+            CardStatus::Backlog,
+            CardStatus::Pending,
+            CardStatus::Accepted,
+            CardStatus::NeedsInput,
+            CardStatus::InReview,
+            CardStatus::Blocked,
+            CardStatus::Done,
+            CardStatus::Cancelled,
+        ] {
+            let result = transition(status, Action::Undelegate);
+            assert!(
+                result.is_err(),
+                "undelegate should be rejected from {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_from_delegated() {
+        let result = transition(CardStatus::Delegated, Action::Cancel);
+        assert_eq!(result.expect("cancel"), CardStatus::Cancelled);
+    }
+
     #[test]
     fn resume_from_needs_input() {
         let result = transition(CardStatus::NeedsInput, Action::Resume);
@@ -294,6 +380,7 @@ mod tests {
             CardStatus::NeedsInput,
             CardStatus::InReview,
             CardStatus::Blocked,
+            CardStatus::Delegated,
         ] {
             let result = transition(status, Action::Cancel);
             assert_eq!(result.expect("cancel"), CardStatus::Cancelled);
