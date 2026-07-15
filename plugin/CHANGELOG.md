@@ -1,5 +1,219 @@
 # Legion Changelog
 
+## 0.21.0
+
+The sanctioned-path release. Twenty-five PRs since 0.20.0, with one through-line: guards
+that used to live in agent discipline or text-matching hooks move into the tools
+themselves. `legion push` retires raw `git push` from agent doctrine -- it resolves the
+branch's own checkout and refuses main and force by construction, so the
+push-from-own-checkout rule is enforced rather than remembered. The identity-root guard
+moves from a defeatable Bash hook into the DB insert path. `pr merge` stops trusting
+absence-of-red: it now refuses actively failing check-runs, and `pr checks` pins its
+answer to the PR's actual head SHA instead of whatever `gh pr checks` felt like echoing.
+`pr edit`, `issue list`, and `pr create --closes` close the remaining everyday reasons to
+shell out to `gh`, and `sym imports`/`sym importers` finally wire a query surface onto the
+0.19.0 module graph. Two new workflow states make previously informal conditions
+machine-checked: `Delegated` (bound to live wake-attempt liveness, never a free
+self-set label) and the spec-revision protocol (an unratified deviation from a card's
+frozen acceptance criteria now hard-blocks `legion verify`). Minor release: two additive
+schema migrations (the new `replan_records` table and a nullable `wake_attempts.card_id`
+column -- no existing table's columns touched), a raft of net-new CLI subcommands, and no
+wire-format break; where existing surfaces changed behavior they only got stricter
+(`pr merge` refuses more, forced dashboard card moves fail loudly on document-sync
+failure) -- deliberate gate-tightening, not format changes.
+
+### New
+
+- **`legion push` -- in-band audited git push** (PR #795, #791): the sanctioned push path
+  for agents, retiring raw `git push` from doctrine. `push --repo <name> [--branch <b>]`
+  resolves the checkout that has the target branch checked out via `git worktree list
+  --porcelain` and pushes FROM that checkout, because the pre-push hook reviews the CWD's
+  checked-out branch, not the ref being pushed -- pushing branch B from a checkout sitting
+  on A silently reviews A's diff. Refuses `main`/`master` and any flag- or refspec-shaped
+  `--branch` value by construction (no `--force` flag exists), sets upstream on every push
+  (`-u origin <branch>`, a no-op after the first), and audit-logs every attempt -- success
+  or hook-blocked failure -- with the branch, resolved checkout, and head SHA. The audit DB
+  is opened before the push, not after, so a DB-open failure fails fast instead of masking
+  the push result and losing the row.
+- **`legion pr edit` -- correct a live PR's title/body in place** (PR #793, #776):
+  `pr edit --repo <name> --number <n> [--title <t>] [--body-file <f>] [--issue <n>]`
+  replaces the old close-and-recreate dance via a new `edit-pr` worksource verb. A
+  `--body-file` body runs the same structural validation as `pr write-check` and
+  re-records the legion-pr-write gate for local HEAD -- refused, not recorded, when local
+  HEAD does not match the PR's own head SHA, so the gate never attests a commit this
+  checkout was not on. The shared load-issue/validate/record-gate block is factored into
+  one function used by both `write-check` and `edit`.
+- **`sym imports` / `sym importers` -- the module graph gets its query surface** (PR #794,
+  #772): thin readers over `Database::list_module_edges_from/_to`, the reader pair 0.19.0
+  shipped dead-code with the `module_edges` table. Both share one implementation
+  (repo-scope loop, freshness computation, human/`--json` output); `--json` wraps results
+  in the 0.20.0 `{snapshots, entries}` freshness envelope, matching `sym tree` rather than
+  the bare-array shape. Never-indexed detection keys off `file_inventory` rows for the
+  repo -- not `module_edges` rowcount, which is js/ts-only and would false-error a cleanly
+  indexed pure-Rust repo. Unresolved/external edges print as "unresolved" instead of being
+  dropped (surfacing a dangling import is the point), suffix matching mirrors `sym list
+  --file`, and an empty `file` argument is rejected up front -- it previously
+  suffix-matched every edge in scope as a silent full-table dump.
+- **`CardStatus::Delegated` -- delegation bound to wake-attempt liveness** (PR #797,
+  #778): a new card state for work handed off to a live watch-spawned wake attempt, with
+  `legion kanban delegate/undelegate/delegated-needs-attention`. Entry and exit share one
+  fail-closed predicate (`delegated_card_is_live`: fresh watch heartbeat AND an in-flight
+  linked `wake_attempts` row) so Delegated can never be a free self-set label: the watch
+  tick auto-reverts the card to Accepted the moment either half goes dark, and a new
+  stop.sh gate re-checks the same predicate directly against the DB as the backstop for
+  the one case the daemon-driven sweep cannot reach -- the watch daemon itself being down.
+  Schema: a `has_column`-guarded nullable `wake_attempts.card_id` column plus partial
+  index, set when `delegate_card` links an Accepted card to a live attempt.
+- **Spec-revision protocol -- `ReplanRequest`, `ReplanRecord`, and a verify deviation
+  gate** (PR #766, #554): when an agent concludes a card's frozen acceptance criteria are
+  wrong, incomplete, or unachievable as written, `legion kanban replan-request --id --reason`
+  stops the work (Accepted -> NeedsInput, a distinct audit action from generic
+  needs-input) instead of improvising around the AC; after a human ratifies the revision,
+  `legion kanban replan-record` stores it in the new `replan_records` table. `legion
+  verify --deviation <reason>` consults the card's latest record: an asserted deviation
+  with no ratified record hard-blocks as improvisation, while a ratified one lets verify
+  audit against the revised criteria as normal.
+- **`legion uncertainty witness-gate` -- decorrelated ground truth for gate trust** (PR
+  #770, #694): an operator who actually knows whether a recorded gate verdict was correct
+  (pre-push diff read, post-merge bug report) can now witness the `legion.gate` prediction
+  directly -- looked up by the same `(skill, commit)` fingerprint `quality-gate list`
+  prints, never an opaque prediction id, erroring when no emitted prediction matches.
+  Unlike the automatic legion-review witness (whose clean-on-approve positive direction
+  skews optimistic), an external source is trustworthy in BOTH directions. The same PR
+  fixed an outcome-direction inversion caught in review: `--correct` is scored relative to
+  whichever verdict the gate recorded, so a correct issues catch (the diff was NOT clean)
+  reprojects to Escalated/0.0 rather than being misfiled as Shipped/1.0 and corrupting the
+  calibration signal. The known clean-verdict undercount is now bounded rather than
+  hand-waved: every silently-missed prediction eventually surfaces in `uncertainty
+  orphans --surface legion.gate`.
+- **`pr merge` enqueues on merge-queue base branches** (PR #768, #630): `merge_pr` now
+  reports whether the PR was merged or queued. A queued PR has not actually merged -- the
+  queue completes it asynchronously, possibly after re-running CI -- so the kanban-done
+  transition and issue-close side effects are skipped rather than fired prematurely, the
+  audit row records `queued` and the *effective* branch-deletion outcome (the queue path
+  never passes `--delete-branch`), and the output says "enqueued", not "merged". Non-queue
+  repos behave exactly as before.
+- **`legion issue list` -- enumerate work-source issues in-band** (PR #759, #750): backlog
+  grooming no longer needs the `gh` the no-gh hook blocks. A new `list-issues` plugin verb
+  (deliberately distinct from the `list` verb `sync` uses, so sync's behavior cannot shift
+  as a side effect) serves `--state open|closed|all`, `--label`, and `--json`, audited
+  like the other worksource verbs. Review hardening made it fail closed everywhere an
+  empty answer could lie: a gh auth/rate-limit/repo failure surfaces as an error instead
+  of an empty array, a blank repo config errors instead of printing `[]`, plugin stderr
+  warnings are relayed on success, and hitting the row limit warns rather than silently
+  truncating.
+- **`pr create --closes` -- the closing keyword stops being manual** (PR #758, #751):
+  repeatable `--closes <n | owner/repo#n>` appends an idempotent `Closes #N` line per
+  issue unless a recognized closing keyword for that exact issue is already present --
+  detection requires the keyword immediately adjacent to each reference, because GitHub
+  only auto-closes the first issue of a comma-joined group ("Closes #1, #751" does not
+  close #751). `pr write-check --issue N` now warns (v1: warn, not fail) when the body
+  lacks a closing keyword. Fixes the wave-5 drift where shipped issues stayed open after
+  merge because nothing injected the keyword.
+- **Release toolchain generalized via `release.toml`** (PR #769, #741): `scripts/release.sh`
+  and `scripts/sync-version.sh` read the version-of-record file and dotted field, changelog
+  path, propagation targets, branch, and tag/commit templates from a per-repo `release.toml`
+  (parsed generically with `legion sym etc extract`) instead of hardcoding legion's layout.
+  Any repo with `legion` on PATH adopts the flow by dropping in its own config; legion's
+  own release is byte-identical by default.
+- **Stop-gate background-work + fix-loop doctrine design doc** (PR #790, #788):
+  `docs/plans/2026-07-14-stop-gate-background-and-fixloop-doctrine.md`, the design
+  groundwork for the wave-2 stop-gate work. Doc only; no behavior shipped.
+
+### Fixed
+
+- **`pr merge` refuses actively failing check-runs, not just absent ones** (PR #792,
+  #761): the merge arm gated on zero-check-runs (#736) but let a present-and-failing
+  check through unnoticed -- a red required check could merge via legion on repos with
+  admin-bypass branch protection. It now classifies checks with the same
+  `ExternalPRCheck::is_failing()` that `pr checks` uses and refuses, naming the failing
+  checks. `--merge-despite-failures` is an audited operator override mirroring
+  `--skip-gates`: it writes an audit row naming the failing checks before merging, and
+  does not touch the zero-runs refusal, which still fires first.
+- **`pr checks` pinned to the PR head SHA; zero runs fail closed** (PR #757, #736): `gh pr
+  checks` was observed live echoing a parent commit's green suite when the head commit
+  itself had zero check runs -- a false 7/7 SUCCESS for an untested commit that `pr merge`
+  gates on. The worksource now resolves the PR's `headRefOid` and queries that exact SHA's
+  check-runs and legacy status API directly (merged, so third-party CI on the old API
+  still surfaces), paginates check-runs correctly, and wraps the response with the head
+  SHA so an empty list names the commit it is empty for. `pr checks` and `pr merge` both
+  refuse with the same "no runs for head <sha>" message instead of reading an empty list
+  as nothing-failing.
+- **Identity roots guarded at the DB layer; the pre-whoami-rewrite hook is deleted** (PR
+  #796, #785): the only guard against a second, unparented `domain=identity` reflection
+  was a Bash PreToolUse hook that pattern-matched command text and waved `--force`
+  through -- exactly how a checkpoint-shaped reflection landed as a second orphan root and
+  outranked the real identity in the boot banner. `insert_reflection_with_meta` now
+  refuses a second live identity root unconditionally (`IdentityRootExists`; bootstrap and
+  `--follows` chaining unaffected), and `swap_identity_root` is the one sanctioned replace
+  path: a single transaction that deletes every live identity root for the repo --
+  including previously leaked duplicates -- and inserts the new root plus optional chained
+  children, rolling back atomically. Not yet wired to a CLI surface (#784 consumes it).
+  The hook and its test are deleted: the DB guard makes its denial redundant, and its
+  command-string matching was defeatable by any wrapper or alias.
+- **One liveness predicate for lease list and release; reaper finalization decoupled** (PR
+  #775, #679): the release paths checked only `deleted_at` while `leases list` also
+  required `expires_at > now`, so an expired-but-undeleted lease was invisible to list yet
+  still "releasable". A single shared `LIVE_LEASE_WHERE` predicate now backs list, the
+  operator release, and release-by-host. Deliberately NOT applied to
+  `release_persona_lease_if_owner`: that is the reaper's own-row finalization write, and
+  gating it on `expires_at` (as the first commit did, caught in PR review) let an
+  already-expired owned row survive reap and get its TTL pushed forward by the same tick's
+  heartbeat -- resurrecting it as a permanent ghost in `leases list`, the exact display
+  bug being fixed, via a different path.
+- **`force_move_card` syncs the bound document in the same transaction** (PR #755, #753):
+  the dashboard's drag-and-drop move was a bare non-transactional UPDATE that left a
+  linked spec document's status wherever it was, silently drifting from the governed
+  transition path. The shared doc-sync logic is extracted into `sync_bound_document`, and
+  a forced move now reads the card's `document_id` and runs the identical sync inside one
+  transaction -- a sync failure (dangling document id, unparseable payload) rolls back the
+  card move too, matching the governed path's guarantee, where it previously succeeded
+  silently.
+- **Worksource deserialization errors name the operation** (PR #754, #720): a serde
+  failure on a plugin response surfaced only the offending field ("missing field
+  `labels`") with no clue which of a dozen verbs produced it. The op string every call
+  site already passes as `args[0]` is threaded through a new `decode_plugin_output` --
+  the sole JSON-decode boundary -- so every verb's failure reads "list-sub-issues: missing
+  field `labels`".
+- **Subagent-stop nudge restates the deliverable before checkpointing** (PR #760, #752):
+  the SubagentStop hook's injected context continues the SUBAGENT's own turn -- its next
+  message is what the Task tool hands the parent as the final result. The old prompt made
+  the subagent answer the nudge instead of its task, stranding the real deliverable in a
+  turn the parent could never see. The prompt now orders the subagent to restate its
+  complete deliverable first and append the checkpoint note after, and the legion-explore
+  and issue-writer agent definitions carry the matching "your final message is your only
+  output channel" instruction.
+- **Simplify validator refinements** (PR #767, #669): three review-driven fixes to the
+  simplify articulation gate. The no-base-ref/no-parent vacuous pass now prints a loud
+  stderr warning instead of passing invisibly; the changed-file check covers exact-path
+  renames; and `simplify_check` no longer shares pr-write's `strip_evidence_lines` --
+  in simplify articulation an `Evidence:` line IS the within-file locator, so stripping it
+  silently discarded a legitimate entry's substance before the word count.
+
+### Changed
+
+- **`recall-first.sh` no longer decides Explore spawns** (PR #763, #672): its
+  deny-the-spawn Explore branch overlapped the no-harness block and is retired --
+  `no-harness-explore.sh` is the sole Explore decider, and `recall-first.sh` is unwired
+  from the Agent matcher in hooks.json, keeping only its WebFetch/WebSearch
+  recall-injection role.
+- **Explicit 2s `busy_timeout` on every `Database::open` connection** (PR #756, #721):
+  CLI connections previously leaned on rusqlite's undocumented bundled 5s default while
+  `sync_actor` set its own explicit 2s; every connection is now pinned to the same
+  explicit value, with a behavioral test proving a concurrent open+write retries instead
+  of failing `SQLITE_BUSY` immediately.
+- **`QualityGateInput` struct replaces `record_quality_gate`'s positional args** (PR #789,
+  #787): pure refactor, zero behavior change -- rows written are byte-identical. Follows
+  the `db::AuditInput` precedent so the three in-flight gate-ledger issues (#779, #780,
+  #773) each add a field instead of extending a six-argument positional signature.
+- **Test-infrastructure hardening** (PR #765, #740; PR #762, #675; PR #774, #773): fixture
+  git invocations are fully isolated (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` pinned to
+  empty files, `GIT_DIR`/`GIT_WORK_TREE` pinned to the fixture) and the integration suite
+  opens with a config-corruption guard that repairs a damaged real `.git/config` and fails
+  loud; the daemon kill orchestration gains a DI-seam smoke test; and the wave-5/6/7
+  review-finding dispositions land as small cleanups across the github worksource,
+  inventory, and test common code.
+
 ## 0.20.0
 
 The field-report release. All three changes trace to a single bullpen post (019f355c): a
