@@ -294,6 +294,18 @@ impl Database {
     /// bootstrap or replacement) while the shared banner reader behind
     /// `get_identity_roots` does not filter `archived_at` yet (tracked
     /// separately as #782). This function does not wait for that fix.
+    ///
+    /// The asymmetry this creates -- an archived root plus a fresh root
+    /// both satisfying `get_identity_roots`'s current predicate -- is not
+    /// reachable through any production write path today: `legion
+    /// reflect` always stores identity reflections with `audience =
+    /// "self"` (hardcoded; there is no `--audience` flag), and the only
+    /// writer of `archived_at` on the `reflections` table
+    /// (`Database::archive_read_posts`, `src/db/board.rs`) is scoped to
+    /// `audience = 'team'`. Verified in
+    /// `insert_reflection_with_meta_ignores_archived_root_for_guard`,
+    /// which asserts the two-root state directly rather than leaving it
+    /// implicit.
     fn live_identity_root_id(&self, repo: &str) -> Result<Option<String>> {
         self.conn
             .query_row(
@@ -1265,6 +1277,19 @@ mod tests {
         // build note), independently of get_identity_roots (which does
         // not filter archived_at yet -- #782). An archived root must not
         // block a fresh bootstrap insert.
+        //
+        // Documenting the consequence, not just the guard's own behavior:
+        // once this insert succeeds, get_identity_roots("legion", ..) DOES
+        // return both rows (asserted below) -- the pre-#782 banner reader
+        // would show two roots again if an identity reflection were ever
+        // archived. No current write path can do that: `legion reflect`
+        // always stores identity reflections with audience="self"
+        // (hardcoded, no --audience flag exists), and the only production
+        // writer of `archived_at` on the reflections table
+        // (`Database::archive_read_posts`, src/db/board.rs) is scoped to
+        // `audience = 'team'`. This test's archive step is a raw UPDATE
+        // simulating a future/hypothetical writer, not a reachable path
+        // today.
         let db = test_db();
         let root = db
             .insert_reflection_with_meta(
@@ -1298,6 +1323,19 @@ mod tests {
             .unwrap();
         assert!(fresh.parent_id.is_none());
         assert_ne!(fresh.id, root.id);
+
+        // The archived root and the fresh root now BOTH satisfy
+        // get_identity_roots's current (pre-#782) predicate -- this is
+        // the documented, accepted asymmetry, made visible here rather
+        // than left implicit.
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(
+            roots.len(),
+            2,
+            "pre-#782, get_identity_roots does not filter archived_at, so \
+             an archived root and a fresh root both surface -- tracked, not \
+             regressed, by this guard"
+        );
     }
 
     #[test]
