@@ -743,6 +743,15 @@ fn run_sym_edges(
 ) -> error::Result<()> {
     use std::io::Write;
 
+    // An empty `file` argument is a suffix of every path (`"".ends_with("")`
+    // and `s.ends_with("")` are both always true), so without this guard the
+    // suffix match in `list_module_edges_from`/`_to` would silently return
+    // every edge in scope instead of erroring on a clearly-wrong query.
+    if file.trim().is_empty() {
+        eprintln!("[legion] file argument must not be empty");
+        return Err(error::LegionError::ExitWith(2));
+    }
+
     if !module_edges_indexed(database, repo.as_deref())? {
         eprintln!("{}", module_edges_no_index_message(repo.as_deref()));
         return Err(error::LegionError::ExitWith(1));

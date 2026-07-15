@@ -226,6 +226,72 @@ fn seed_and_index_import_graph(repo: &str) -> tempfile::TempDir {
     data_dir
 }
 
+/// Cross-repo (`--repo` omitted): two separately-indexed repos, each with
+/// its own `widget.ts` importer, share one data dir. `sym imports`/`sym
+/// importers` with no `--repo` must aggregate across both -- the least
+/// exercised path, since every other test above pins `--repo` explicitly
+/// (#772 review finding).
+#[test]
+fn sym_imports_cross_repo_aggregates_across_every_indexed_repo() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+
+    let repo_a_dir = tempfile::tempdir().expect("repo a dir");
+    std::fs::write(
+        repo_a_dir.path().join("index.ts"),
+        "import { w } from './widget';\nexport { w };\n",
+    )
+    .expect("write repo a index.ts");
+    std::fs::write(repo_a_dir.path().join("widget.ts"), "export const w = 1;\n")
+        .expect("write repo a widget.ts");
+
+    let repo_b_dir = tempfile::tempdir().expect("repo b dir");
+    std::fs::write(
+        repo_b_dir.path().join("index.ts"),
+        "import { w } from './widget';\nexport { w };\n",
+    )
+    .expect("write repo b index.ts");
+    std::fs::write(repo_b_dir.path().join("widget.ts"), "export const w = 1;\n")
+        .expect("write repo b widget.ts");
+
+    seed_watch_toml(
+        data_dir.path(),
+        &[
+            ("crossrepo_a", repo_a_dir.path()),
+            ("crossrepo_b", repo_b_dir.path()),
+        ],
+    );
+    run_ok(legion_cmd(data_dir.path()).args(["index", "crossrepo_a"]));
+    run_ok(legion_cmd(data_dir.path()).args(["index", "crossrepo_b"]));
+
+    // `sym importers widget.ts` with no --repo must find the importer in
+    // both repos, each row tagged with its own repo.
+    let out = run_ok(legion_cmd(data_dir.path()).args(["sym", "importers", "widget.ts"]));
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected one importer edge per repo, got:\n{out}"
+    );
+    assert!(lines.iter().any(|l| l.ends_with("[crossrepo_a]")));
+    assert!(lines.iter().any(|l| l.ends_with("[crossrepo_b]")));
+
+    // The --json envelope's freshness snapshots must cover both repos too,
+    // not just the first one encountered.
+    let json_out =
+        run_ok(legion_cmd(data_dir.path()).args(["sym", "importers", "widget.ts", "--json"]));
+    let envelope: serde_json::Value =
+        serde_json::from_str(json_out.trim()).expect("stdout is a JSON envelope object");
+    let snapshots = envelope["snapshots"].as_array().expect("snapshots array");
+    let snapshot_repos: std::collections::HashSet<&str> = snapshots
+        .iter()
+        .filter_map(|s| s["repo"].as_str())
+        .collect();
+    assert!(
+        snapshot_repos.contains("crossrepo_a") && snapshot_repos.contains("crossrepo_b"),
+        "cross-repo snapshots must cover both indexed repos, got {snapshots:?}"
+    );
+}
+
 #[test]
 fn sym_imports_prints_resolved_and_unresolved_edges_in_text_format() {
     let data_dir = seed_and_index_import_graph("importsq");
@@ -342,6 +408,26 @@ fn sym_imports_indexed_but_no_matching_edges_is_a_clean_empty_exit() {
     assert!(
         stderr.contains("[legion] no imports found"),
         "expected the no-imports-found line, got: {stderr}"
+    );
+}
+
+/// An empty `file` argument is a suffix of every path -- without an explicit
+/// guard, `""` would silently match and dump every edge in scope instead of
+/// erroring on a clearly-wrong query (#772 review finding).
+#[test]
+fn sym_imports_empty_file_argument_errors_instead_of_dumping_everything() {
+    let data_dir = seed_and_index_import_graph("importsqemptyarg");
+
+    let (_, stderr) = run_fail(legion_cmd(data_dir.path()).args(["sym", "imports", ""]));
+    assert!(
+        stderr.contains("file argument must not be empty"),
+        "expected the empty-argument guard to fire, got: {stderr}"
+    );
+
+    let (_, stderr) = run_fail(legion_cmd(data_dir.path()).args(["sym", "importers", ""]));
+    assert!(
+        stderr.contains("file argument must not be empty"),
+        "expected the empty-argument guard to fire for importers too, got: {stderr}"
     );
 }
 
