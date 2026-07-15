@@ -149,6 +149,7 @@ impl Database {
         board::migrate(conn)?;
         kanban::migrate(conn)?;
         schedules::migrate(conn)?;
+        wake::migrate(conn)?;
         Ok(())
     }
 

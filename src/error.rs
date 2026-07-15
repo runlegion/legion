@@ -192,6 +192,9 @@ pub enum LegionError {
     #[error("invalid gate result: '{0}' (expected 'clean' or 'issues')")]
     InvalidGateResult(String),
 
+    #[error("delegation refused: {0}")]
+    DelegationRefused(String),
+
     #[error("branch '{branch}' not found in any worktree checkout (searched: {searched})")]
     PushBranchNotFound { branch: String, searched: String },
 
@@ -306,6 +309,12 @@ mod tests {
         assert!(err.to_string().contains("bad"));
         assert!(err.to_string().contains("clean"));
         assert!(err.to_string().contains("issues"));
+    }
+
+    #[test]
+    fn delegation_refused_display() {
+        let err = LegionError::DelegationRefused("no live attempt".to_string());
+        assert_eq!(err.to_string(), "delegation refused: no live attempt");
     }
 
     #[test]

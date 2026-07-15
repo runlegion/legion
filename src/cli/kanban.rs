@@ -143,6 +143,54 @@ pub(crate) enum KanbanAction {
         id: String,
     },
 
+    /// Delegate an Accepted card to a live, watch-spawned wake attempt (#778).
+    ///
+    /// Entry is refused unless the watch daemon's heartbeat is fresh AND a
+    /// live (in-flight) wake_attempts row for this card's repo exists -- a
+    /// self-set label with no process behind it is exactly the bypass this
+    /// state must never become. `tick_health` auto-reverts the card back to
+    /// Accepted the moment that attempt finishes or dies.
+    Delegate {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+
+        /// Wake attempt id to delegate to. When omitted, the single live,
+        /// not-yet-delegated wake attempt for the card's repo is used;
+        /// with more than one candidate in flight this must be given
+        /// explicitly to disambiguate.
+        #[arg(long)]
+        attempt_id: Option<String>,
+    },
+
+    /// Manually resume a delegated card (returns to in-progress).
+    ///
+    /// Normally unnecessary -- `tick_health` auto-reverts a delegated card
+    /// once its attempt is no longer live -- but available for an agent
+    /// that wants to resume the work itself before that sweep runs.
+    Undelegate {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// List delegated cards whose linked attempt is NOT verifiably live
+    /// (#778): the watch daemon heartbeat is stale/absent, or the linked
+    /// wake_attempts row is missing or terminal. Used by `stop.sh`'s
+    /// delegated-liveness gate as the fail-closed last-line-of-defense for
+    /// the case `tick_health`'s own auto-revert cannot reach -- the watch
+    /// daemon itself being down. An empty result means every delegated
+    /// card for the repo is either accounted for or genuinely still live.
+    DelegatedNeedsAttention {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// Emit JSONL (one summary object per line) instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Mark a card for review
     Review {
         /// Card ID
@@ -804,6 +852,40 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
         KanbanAction::Unblock { id } => {
             kanban::transition_card(&database, &id, kanban::Action::Unblock, None)?;
             println!("{id}");
+        }
+        KanbanAction::Delegate { id, attempt_id } => {
+            kanban::delegate_card(
+                &database,
+                &id,
+                attempt_id.as_deref(),
+                kanban::DELEGATION_STALE_AFTER_SECS,
+            )?;
+            println!("{id}");
+        }
+        KanbanAction::Undelegate { id } => {
+            kanban::undelegate_card(&database, &id, None)?;
+            println!("{id}");
+        }
+        KanbanAction::DelegatedNeedsAttention { repo, json } => {
+            let delegated = database.get_delegated_cards(Some(&repo))?;
+            let mut needs_attention = Vec::new();
+            for card in delegated {
+                if !database
+                    .delegated_card_is_live(&card.id, kanban::DELEGATION_STALE_AFTER_SECS)?
+                {
+                    needs_attention.push(card);
+                }
+            }
+            if json {
+                let output = kanban::format_card_list_json(&needs_attention)?;
+                print!("{output}");
+            } else if needs_attention.is_empty() {
+                info!("[legion] no delegated cards need attention for {repo}");
+            } else {
+                let output =
+                    kanban::format_card_list(&needs_attention, &repo, kanban::Direction::Inbound);
+                print!("{output}");
+            }
         }
         KanbanAction::Review { id } => {
             kanban::transition_card(&database, &id, kanban::Action::Review, None)?;

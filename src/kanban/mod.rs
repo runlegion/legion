@@ -243,6 +243,124 @@ pub fn view_card(db: &Database, id: &str) -> Result<Card> {
         .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
 }
 
+/// Staleness window for the watch daemon heartbeat used by delegated-card
+/// liveness checks (#778). Matches `legion watch status`'s own default
+/// (`cli::watch::WatchAction::Status::stale_after_secs`) so an operator
+/// reading "alive" from `legion watch status` and a delegated card being
+/// allowed to enter/stay in `Delegated` agree on the same window.
+pub const DELEGATION_STALE_AFTER_SECS: u64 = 120;
+
+/// Delegate an Accepted card to a live, watch-spawned wake attempt (#778).
+///
+/// Entry into `Delegated` is refused unless BOTH halves of
+/// `Database::delegated_card_is_live`'s predicate would hold immediately
+/// after linking: the watch daemon's heartbeat is fresh, and the named (or
+/// auto-discovered) wake_attempts row is in an in-flight FSM state for this
+/// card's repo. A `Delegated` that could be entered without a live process
+/// behind it is exactly the "free self-set label" bypass the issue forbids
+/// -- this function is the one place that check happens before the card
+/// ever leaves `Accepted`.
+///
+/// `attempt_id`, when `Some`, names the wake_attempts row explicitly (the
+/// caller already knows which attempt is doing the work). When `None`, the
+/// single live, not-yet-linked-to-any-card attempt for the card's `to_repo`
+/// is used (`Database::find_live_wake_attempt_for_repo`); with more than one
+/// candidate in flight, the caller must disambiguate via `--attempt-id`.
+pub fn delegate_card(
+    db: &Database,
+    id: &str,
+    attempt_id: Option<&str>,
+    stale_after_secs: u64,
+) -> Result<Card> {
+    let card = db
+        .get_card_by_id(id)?
+        .ok_or_else(|| LegionError::CardNotFound(id.to_string()))?;
+
+    let attempt = match attempt_id {
+        Some(aid) => db.get_wake_attempt(aid)?.ok_or_else(|| {
+            LegionError::DelegationRefused(format!("wake attempt '{aid}' not found"))
+        })?,
+        None => db
+            .find_live_wake_attempt_for_repo(&card.to_repo)?
+            .ok_or_else(|| {
+                LegionError::DelegationRefused(format!(
+                    "no live, unclaimed wake attempt found for repo '{}' -- \
+                 pass --attempt-id explicitly",
+                    card.to_repo
+                ))
+            })?,
+    };
+
+    if attempt.repo_name != card.to_repo {
+        return Err(LegionError::DelegationRefused(format!(
+            "wake attempt '{}' is for repo '{}', not '{}'",
+            attempt.attempt_id, attempt.repo_name, card.to_repo
+        )));
+    }
+    if !attempt.state.is_in_flight() {
+        return Err(LegionError::DelegationRefused(format!(
+            "wake attempt '{}' is not live (state={})",
+            attempt.attempt_id,
+            attempt.state.as_str()
+        )));
+    }
+    if let Some(existing) = attempt.card_id.as_deref()
+        && existing != id
+    {
+        return Err(LegionError::DelegationRefused(format!(
+            "wake attempt '{}' is already delegated to card '{existing}'",
+            attempt.attempt_id
+        )));
+    }
+    if !db.watch_heartbeat_alive(stale_after_secs)? {
+        return Err(LegionError::DelegationRefused(
+            "watch daemon heartbeat is stale or absent -- delegation requires \
+             an actively running `legion watch`"
+                .to_string(),
+        ));
+    }
+
+    // Transition BEFORE linking (review fix, #778): `transition_card` is the
+    // only check here that validates `card.status == Accepted`. Linking the
+    // attempt first meant a delegate call against a Pending/Blocked/InReview
+    // card would still burn the attempt (`set_wake_attempt_card` commits,
+    // then `transition_card` fails) -- silently poisoning
+    // `find_live_wake_attempt_for_repo`'s `card_id IS NULL` filter for that
+    // attempt's remaining lifetime with no card ever reaching `Delegated` to
+    // let the reaper clear it. Ordered this way, a transition failure never
+    // touches the attempt row at all; and if the write order flips on some
+    // future edit and `set_wake_attempt_card` itself fails after a
+    // successful transition, the card is `Delegated` with no link, which
+    // `delegated_card_is_live` reads as not-live -- `tick_health` reverts it
+    // next tick instead of leaking a silent bypass.
+    let updated = transition_card(
+        db,
+        id,
+        Action::Delegate,
+        Some(&format!("delegated to wake attempt {}", attempt.attempt_id)),
+    )?;
+    db.set_wake_attempt_card(&attempt.attempt_id, id)?;
+    Ok(updated)
+}
+
+/// Undelegate a card (#778): the inverse of `delegate_card`. Transitions
+/// `Delegated -> Accepted` and clears the `card_id` link on whatever
+/// wake_attempts row was pointing at this card, so a resolved delegation can
+/// never leave a stale link behind (review fix: a prior version left the
+/// link in place, and `get_wake_attempt_by_card`'s `updated_at DESC`
+/// disambiguation could then resurrect a long-dead attempt as "the" linked
+/// one once a fresh re-delegation to a different attempt aged past it,
+/// causing a spurious auto-revert of a genuinely live delegation).
+///
+/// Used by both the manual `legion kanban undelegate` CLI path and
+/// `tick_health`'s auto-revert sweep, so the two can never diverge on
+/// whether the link gets cleared.
+pub fn undelegate_card(db: &Database, id: &str, note: Option<&str>) -> Result<Card> {
+    let card = transition_card(db, id, Action::Undelegate, note)?;
+    db.clear_wake_attempt_card(id)?;
+    Ok(card)
+}
+
 /// Bind a document to a card (manual path; spec-gen uses the atomic insert).
 ///
 /// Fails when the card is already bound, the document does not exist or is
@@ -601,6 +719,271 @@ mod tests {
 
         let card = transition_card(&db, &id, Action::Unblock, None).expect("unblock");
         assert_eq!(card.status, CardStatus::Accepted);
+    }
+
+    // -- delegate_card (#778) -------------------------------------------------
+
+    #[test]
+    fn delegate_card_happy_path_auto_discovers_live_attempt() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "delegate me", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "legion", "legion", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "host-a")
+            .expect("claim");
+
+        let card = delegate_card(&db, &id, None, DELEGATION_STALE_AFTER_SECS).expect("delegate");
+        assert_eq!(card.status, CardStatus::Delegated);
+
+        let linked = db
+            .get_wake_attempt_by_card(&id)
+            .expect("lookup")
+            .expect("linked attempt");
+        assert_eq!(linked.attempt_id, attempt_id);
+    }
+
+    #[test]
+    fn delegate_card_explicit_attempt_id_picks_the_named_row() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "delegate me", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+
+        // Two live attempts in flight for the same repo -- auto-discovery
+        // would be ambiguous, so the caller must name one.
+        let attempt_a = uuid::Uuid::now_v7().to_string();
+        let attempt_b = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_a, "legion", "legion", &[])
+            .expect("enqueue a");
+        db.try_claim_wake_attempt(&attempt_a, "host-a")
+            .expect("claim a");
+        db.enqueue_wake_attempt(&attempt_b, "legion", "legion", &[])
+            .expect("enqueue b");
+        db.try_claim_wake_attempt(&attempt_b, "host-a")
+            .expect("claim b");
+
+        let card = delegate_card(&db, &id, Some(&attempt_b), DELEGATION_STALE_AFTER_SECS)
+            .expect("delegate");
+        assert_eq!(card.status, CardStatus::Delegated);
+        let linked = db
+            .get_wake_attempt_by_card(&id)
+            .expect("lookup")
+            .expect("linked attempt");
+        assert_eq!(linked.attempt_id, attempt_b);
+    }
+
+    #[test]
+    fn delegate_card_refuses_when_no_live_attempt_exists() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "no attempt", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+
+        let err = delegate_card(&db, &id, None, DELEGATION_STALE_AFTER_SECS)
+            .expect_err("no live attempt must refuse");
+        assert!(matches!(err, LegionError::DelegationRefused(_)));
+
+        // The refusal must not have moved the card off Accepted.
+        let card = view_card(&db, &id).expect("view");
+        assert_eq!(card.status, CardStatus::Accepted);
+    }
+
+    #[test]
+    fn delegate_card_refuses_when_heartbeat_is_absent() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "no heartbeat", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "legion", "legion", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "host-a")
+            .expect("claim");
+
+        // No upsert_watch_heartbeat call: the daemon has never beaten.
+        let err = delegate_card(&db, &id, None, DELEGATION_STALE_AFTER_SECS)
+            .expect_err("absent heartbeat must refuse even with a live attempt");
+        assert!(matches!(err, LegionError::DelegationRefused(_)));
+    }
+
+    #[test]
+    fn delegate_card_refuses_when_named_attempt_is_for_a_different_repo() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "cross-repo", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "huttspawn", "huttspawn", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "host-a")
+            .expect("claim");
+
+        let err = delegate_card(&db, &id, Some(&attempt_id), DELEGATION_STALE_AFTER_SECS)
+            .expect_err("mismatched repo must refuse");
+        assert!(matches!(err, LegionError::DelegationRefused(_)));
+    }
+
+    #[test]
+    fn delegate_card_refuses_when_attempt_already_delegated_elsewhere() {
+        let (db, _index, _dir) = test_storage();
+
+        let first = create_and_assign(&db, "kelex", "legion", "first", Priority::Med);
+        transition_card(&db, &first, Action::Accept, None).expect("accept first");
+        let second = create_and_assign(&db, "kelex", "legion", "second", Priority::Med);
+        transition_card(&db, &second, Action::Accept, None).expect("accept second");
+
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "legion", "legion", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "host-a")
+            .expect("claim");
+
+        delegate_card(&db, &first, Some(&attempt_id), DELEGATION_STALE_AFTER_SECS)
+            .expect("first delegation succeeds");
+
+        let err = delegate_card(&db, &second, Some(&attempt_id), DELEGATION_STALE_AFTER_SECS)
+            .expect_err("second card must not steal the same attempt");
+        assert!(matches!(err, LegionError::DelegationRefused(_)));
+    }
+
+    /// Review regression (#778): `delegate_card` must not link the attempt
+    /// before validating the card is `Accepted` -- linking first would burn
+    /// the attempt (excluded from auto-discovery forever via `card_id IS
+    /// NULL`) on every failed delegate call against a non-Accepted card.
+    #[test]
+    fn delegate_card_does_not_poison_attempt_when_card_is_not_accepted() {
+        let (db, _index, _dir) = test_storage();
+
+        // Pending, not Accepted -- transition_card must refuse Delegate here.
+        let id = create_and_assign(&db, "kelex", "legion", "still pending", Priority::Med);
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "legion", "legion", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "host-a")
+            .expect("claim");
+
+        let err = delegate_card(&db, &id, Some(&attempt_id), DELEGATION_STALE_AFTER_SECS)
+            .expect_err("delegate on a Pending card must be refused");
+        assert!(matches!(err, LegionError::InvalidCardTransition { .. }));
+
+        // The attempt must be untouched -- still unlinked and still
+        // discoverable by a future, valid delegation.
+        let attempt = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get")
+            .expect("row exists");
+        assert!(
+            attempt.card_id.is_none(),
+            "a failed delegate must not poison the attempt's card_id link"
+        );
+        let discoverable = db
+            .find_live_wake_attempt_for_repo("legion")
+            .expect("find")
+            .expect("still auto-discoverable");
+        assert_eq!(discoverable.attempt_id, attempt_id);
+    }
+
+    /// Review regression (#778): `undelegate_card` must clear the attempt's
+    /// `card_id` link, not just move the card's status.
+    #[test]
+    fn undelegate_card_clears_the_attempt_link() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "to undelegate", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "legion", "legion", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "host-a")
+            .expect("claim");
+        delegate_card(&db, &id, Some(&attempt_id), DELEGATION_STALE_AFTER_SECS).expect("delegate");
+
+        let card = undelegate_card(&db, &id, None).expect("undelegate");
+        assert_eq!(card.status, CardStatus::Accepted);
+
+        assert!(
+            db.get_wake_attempt_by_card(&id).expect("lookup").is_none(),
+            "no attempt should still be linked to the card after undelegate"
+        );
+        let attempt = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get")
+            .expect("row exists");
+        assert!(
+            attempt.card_id.is_none(),
+            "the formerly-linked attempt's card_id must be cleared"
+        );
+    }
+
+    /// Review regression (#778): without clearing the link on undelegate, a
+    /// terminal old attempt (A) could later out-rank a genuinely live new
+    /// attempt (B) in `get_wake_attempt_by_card`'s `updated_at DESC`
+    /// disambiguation once A's terminal-outcome write landed after B's link
+    /// -- causing a spurious auto-revert of a live delegation. This proves
+    /// `delegated_card_is_live` reads B, not the long-cleared A, regardless
+    /// of write-order timing between the two.
+    #[test]
+    fn redelegate_after_undelegate_is_not_confused_by_the_old_attempt() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "redelegate", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+
+        let attempt_a = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_a, "legion", "legion", &[])
+            .expect("enqueue a");
+        db.try_claim_wake_attempt(&attempt_a, "host-a")
+            .expect("claim a");
+        delegate_card(&db, &id, Some(&attempt_a), DELEGATION_STALE_AFTER_SECS)
+            .expect("delegate to a");
+        undelegate_card(&db, &id, None).expect("undelegate from a");
+
+        let attempt_b = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_b, "legion", "legion", &[])
+            .expect("enqueue b");
+        db.try_claim_wake_attempt(&attempt_b, "host-a")
+            .expect("claim b");
+        delegate_card(&db, &id, Some(&attempt_b), DELEGATION_STALE_AFTER_SECS)
+            .expect("delegate to b");
+
+        // A settles to terminal AFTER B was linked -- if the link had not
+        // been cleared on undelegate, A's fresher updated_at would win the
+        // by-card disambiguation and read as the (terminal) linked attempt.
+        db.record_wake_attempt_outcome(&attempt_a, "ok", "productive")
+            .expect("a terminates");
+
+        let linked = db
+            .get_wake_attempt_by_card(&id)
+            .expect("lookup")
+            .expect("b is linked");
+        assert_eq!(linked.attempt_id, attempt_b, "must resolve to b, not a");
+        assert!(
+            db.delegated_card_is_live(&id, DELEGATION_STALE_AFTER_SECS)
+                .expect("liveness check"),
+            "the live delegation to b must read as live, unaffected by a's terminal outcome"
+        );
     }
 
     #[test]
