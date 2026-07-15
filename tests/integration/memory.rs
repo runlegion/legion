@@ -708,6 +708,253 @@ fn forget_rejects_wrong_repo_safety_check() {
 }
 
 #[test]
+fn forget_persist_archives_out_of_hot_recall_but_reachable_via_archives() {
+    // #782: `forget --id X --persist` moves the row to the #457 cold tier
+    // instead of deleting it -- absent from hot recall, present via
+    // `--archives`.
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "kelex",
+        "--text",
+        "spent-but-historic mapping rule",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&id);
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["forget", "--id", &id, "--persist"]));
+    assert!(
+        stdout.contains("persisted reflection"),
+        "expected persist confirmation, got: {stdout}"
+    );
+
+    // Hot (default) recall must no longer surface it.
+    let hot = run_ok(legion_cmd(dir.path()).args([
+        "recall",
+        "--repo",
+        "kelex",
+        "--context",
+        "mapping rule",
+    ]));
+    assert!(
+        !hot.contains("spent-but-historic"),
+        "persisted reflection leaked into hot recall: {hot}"
+    );
+
+    // `--archives` (cold-only, the deep-dive) must still reach it -- the
+    // row and its search index entry both survive persist.
+    let cold = run_ok(legion_cmd(dir.path()).args([
+        "recall",
+        "--repo",
+        "kelex",
+        "--context",
+        "mapping rule",
+        "--archives",
+    ]));
+    assert!(
+        cold.contains("spent-but-historic"),
+        "persisted reflection not reachable via --archives: {cold}"
+    );
+
+    // The successful persist is audited distinctly from a permanent forget.
+    let audit_stdout =
+        run_ok(legion_cmd(dir.path()).args(["audit", "--action", "archive-reflection", "--json"]));
+    assert!(
+        audit_stdout.contains("\"outcome\": \"success\""),
+        "successful persist should be audited, got: {audit_stdout}"
+    );
+}
+
+#[test]
+fn forget_persist_rejects_wrong_repo_safety_check() {
+    // The --repo safety guard applies to --persist exactly as it does to
+    // a permanent forget -- it is a flag on the same command, not a
+    // reimplementation.
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "kelex",
+        "--text",
+        "doomed persist attempt",
+    ]))
+    .trim()
+    .to_string();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "forget",
+        "--id",
+        &id,
+        "--repo",
+        "rafters",
+        "--persist",
+    ]));
+    assert!(
+        stderr.contains("repo safety check failed"),
+        "expected safety check error, got: {stderr}"
+    );
+
+    // Reflection must still be live and hot -- the rejected persist must
+    // not have archived it.
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "recall",
+        "--repo",
+        "kelex",
+        "--context",
+        "doomed persist",
+    ]));
+    assert!(
+        stdout.contains("doomed persist attempt"),
+        "reflection should still be hot after rejected persist, got: {stdout}"
+    );
+}
+
+#[test]
+fn forget_persist_drops_identity_root_from_whoami() {
+    // AC: the persisted reflection no longer appears in whoami.
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--whoami",
+        "--text",
+        "superseded identity root",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&id);
+
+    let before = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "test"]));
+    assert!(before.contains("superseded identity root"));
+
+    run_ok(legion_cmd(dir.path()).args(["forget", "--id", &id, "--persist"]));
+
+    let after = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "test"]));
+    assert!(
+        !after.contains("superseded identity root"),
+        "persisted identity root must not surface in whoami: {after}"
+    );
+}
+
+#[test]
+fn forget_persist_drops_workflow_root_from_whatami() {
+    // AC: the persisted reflection no longer appears in whatami --
+    // whatami reads domain=workflow roots through the same
+    // get_domain_roots backer whoami uses.
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "workflow",
+        "--text",
+        "superseded operating rule",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&id);
+
+    let before = run_ok(legion_cmd(dir.path()).args(["whatami", "--repo", "test"]));
+    assert!(before.contains("superseded operating rule"));
+
+    run_ok(legion_cmd(dir.path()).args(["forget", "--id", &id, "--persist"]));
+
+    let after = run_ok(legion_cmd(dir.path()).args(["whatami", "--repo", "test"]));
+    assert!(
+        !after.contains("superseded operating rule"),
+        "persisted workflow root must not surface in whatami: {after}"
+    );
+}
+
+#[test]
+fn recall_domain_archives_reaches_persisted_reflections() {
+    // Closes the #457 gap this issue owns: --domain combined with
+    // --archives used to silently ignore the archive-mode filter (v1
+    // scope note at src/cli/memory.rs). Post-#782, a persisted
+    // domain-scoped reflection is invisible hot but reachable cold.
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "checkpoint",
+        "--text",
+        "persisted checkpoint beat",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&id);
+
+    run_ok(legion_cmd(dir.path()).args(["forget", "--id", &id, "--persist"]));
+
+    // Hot --domain (default) must not surface it.
+    let hot =
+        run_ok(legion_cmd(dir.path()).args(["recall", "--repo", "test", "--domain", "checkpoint"]));
+    assert!(
+        !hot.contains("persisted checkpoint beat"),
+        "persisted reflection leaked into hot --domain recall: {hot}"
+    );
+
+    // --domain --archives must reach it.
+    let cold = run_ok(legion_cmd(dir.path()).args([
+        "recall",
+        "--repo",
+        "test",
+        "--domain",
+        "checkpoint",
+        "--archives",
+    ]));
+    assert!(
+        cold.contains("persisted checkpoint beat"),
+        "--domain --archives did not reach the persisted reflection: {cold}"
+    );
+}
+
+#[test]
+fn recall_latest_archives_reaches_persisted_reflections() {
+    // Same #457 gap, the --latest half.
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--text",
+        "persisted latest beat",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&id);
+
+    run_ok(legion_cmd(dir.path()).args(["forget", "--id", &id, "--persist"]));
+
+    // Hot --latest (default) must not surface it.
+    let hot = run_ok(legion_cmd(dir.path()).args(["recall", "--repo", "test", "--latest"]));
+    assert!(
+        !hot.contains("persisted latest beat"),
+        "persisted reflection leaked into hot --latest recall: {hot}"
+    );
+
+    // --latest --archives must reach it.
+    let cold =
+        run_ok(legion_cmd(dir.path()).args(["recall", "--repo", "test", "--latest", "--archives"]));
+    assert!(
+        cold.contains("persisted latest beat"),
+        "--latest --archives did not reach the persisted reflection: {cold}"
+    );
+}
+
+#[test]
 fn verbose_shows_confirmation() {
     let dir = tempfile::tempdir().unwrap();
 

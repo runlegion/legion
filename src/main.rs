@@ -131,7 +131,7 @@ fn run() -> error::Result<()> {
             force,
             dedupe_mode,
         )?,
-        Commands::Forget { id, repo } => cli::memory::handle_forget(id, repo)?,
+        Commands::Forget { id, repo, persist } => cli::memory::handle_forget(id, repo, persist)?,
         Commands::Recall {
             repo,
             context,

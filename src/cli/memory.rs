@@ -235,27 +235,34 @@ pub(crate) fn handle_reflect(
     Ok(())
 }
 
-pub(crate) fn handle_forget(id: String, repo: Option<String>) -> error::Result<()> {
+pub(crate) fn handle_forget(id: String, repo: Option<String>, persist: bool) -> error::Result<()> {
     let (database, index) = open_db_and_index()?;
 
     // Peek at the reflection first so we can run the optional
     // --repo safety check AND print a summary of what is about
-    // to be deleted. The actual delete goes through
-    // `delete_reflection` which re-verifies the id exists.
+    // to be forgotten. The actual write goes through
+    // `delete_reflection` / `archive_reflection`, which re-verify the
+    // id exists.
     let existing = database
         .get_reflection_by_id(&id)?
         .ok_or_else(|| error::LegionError::ReflectionNotFound(id.clone()))?;
 
-    // Every audit row for this command shares action/target_type/
-    // target_ref/task_id/source_type. Build them through one closure
-    // so the three call sites (rejected / success / partial) only
-    // name the three things that actually differ.
+    // Every audit row for this command shares target_type/target_ref/
+    // task_id/source_type; only the action differs by disposition
+    // (permanent delete vs. #782's archive). Build audit rows through
+    // one closure so the three call sites (rejected / success / partial)
+    // only name the three things that actually differ.
+    let action = if persist {
+        "archive-reflection"
+    } else {
+        "delete-reflection"
+    };
     let write_audit = |agent: &str, outcome: &str, details: Option<&str>| {
         audit(
             &database,
             &db::AuditInput {
                 agent,
-                action: "delete-reflection",
+                action,
                 target_type: "reflection",
                 target_ref: &id,
                 task_id: None,
@@ -279,6 +286,29 @@ pub(crate) fn handle_forget(id: String, repo: Option<String>) -> error::Result<(
             actual: existing.repo.clone(),
             expected: expected_repo.clone(),
         });
+    }
+
+    if persist {
+        // Archive: the row and its tantivy index entry both survive
+        // (#782). No index write here -- unlike the permanent-delete
+        // path below, there is no index-side counterpart to reconcile;
+        // the search index returns ids regardless of archive state, and
+        // the DB join step is what applies the archive-mode filter.
+        let archived = database.archive_reflection(&id)?;
+        write_audit(&archived.repo, "success", None);
+
+        let preview: String = archived.text.chars().take(80).collect();
+        let ellipsis = if archived.text.chars().count() > 80 {
+            "..."
+        } else {
+            ""
+        };
+        println!(
+            "persisted reflection {} ({}): {}{} -- archived, out of hot recall/whoami/whatami, \
+             still reachable via `recall --archives` / `--include-archives`.",
+            id, archived.repo, preview, ellipsis
+        );
+        return Ok(());
     }
 
     // Delete from SQLite first. The audit entry is written AFTER
@@ -346,20 +376,24 @@ pub(crate) fn handle_recall(
         recall::ArchiveMode::Hot
     };
 
-    // v1 scope: --archives / --include-archives only affect
-    // the BM25/hybrid path. Warn loudly when combined with the
-    // other variants so an operator does not silently get
-    // hot-only results from --latest --archives.
-    if (archives || include_archives) && (latest || cosine_only || domain.is_some()) {
+    // #782 closed the --domain / --latest half of the #457 coverage gap:
+    // both now thread the resolved archive mode through to their DB
+    // backers. --cosine-only remains out of scope -- it ranks purely by
+    // embedding similarity against `get_embeddings`, which has no
+    // archive-mode parameter, and cosine ranking over a mixed hot+cold
+    // corpus is a different feature than this issue's DB-join filter, not
+    // a caller-side wiring gap. Warn loudly there so an operator does not
+    // silently get hot-only results from --cosine-only --archives.
+    if (archives || include_archives) && cosine_only {
         eprintln!(
-            "[legion] warning: --archives / --include-archives currently apply only to the BM25/hybrid recall path. Combined with --latest / --domain / --cosine-only, this run uses hot-only results. Extending coverage is tracked as a #457 follow-up."
+            "[legion] warning: --archives / --include-archives do not apply to --cosine-only, which ranks purely by embedding similarity with no archive-mode filter. This run uses hot-only results."
         );
     }
 
     let mut result = if let Some(ref dom) = domain {
-        recall::recall_by_domain(&database, &repo, dom, limit)?
+        recall::recall_by_domain(&database, &repo, dom, limit, mode)?
     } else if latest {
-        recall::recall_latest(&database, &repo, limit)?
+        recall::recall_latest(&database, &repo, limit, mode)?
     } else if cosine_only {
         // --cosine-only requires the embed model; error if unavailable.
         let model = embed::EmbedModel::load().map_err(|e| {

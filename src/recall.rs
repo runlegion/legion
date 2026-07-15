@@ -521,8 +521,17 @@ pub fn consult(
 /// Useful for session-start hooks where no meaningful search context
 /// is available yet. Returns results ordered newest first. Uses SQL
 /// LIMIT for efficiency instead of fetching all and truncating.
-pub fn recall_latest(db: &Database, repo: &str, limit: usize) -> Result<RecallResult> {
-    let latest = db.get_latest_self_reflections(repo, limit)?;
+///
+/// `mode` closes the #457/#782 coverage gap: `legion recall --latest
+/// --archives` now reaches persisted (`forget --persist`) reflections
+/// instead of silently staying hot-only.
+pub fn recall_latest(
+    db: &Database,
+    repo: &str,
+    limit: usize,
+    mode: ArchiveMode,
+) -> Result<RecallResult> {
+    let latest = db.get_latest_self_reflections(repo, limit, mode)?;
 
     let reflections: Vec<RecalledReflection> = latest
         .into_iter()
@@ -546,13 +555,18 @@ pub fn recall_latest(db: &Database, repo: &str, limit: usize) -> Result<RecallRe
 ///
 /// Used for reserved domains like `identity` and `snooze` that are injected
 /// on every session start. Pure SQL lookup, no BM25 or cosine involved.
+///
+/// `mode` closes the #457/#782 coverage gap: `legion recall --domain <d>
+/// --archives` now reaches persisted (`forget --persist`) reflections
+/// instead of silently staying hot-only.
 pub fn recall_by_domain(
     db: &Database,
     repo: &str,
     domain: &str,
     limit: usize,
+    mode: ArchiveMode,
 ) -> Result<RecallResult> {
-    let matched = db.get_reflections_by_domain(repo, domain, limit)?;
+    let matched = db.get_reflections_by_domain(repo, domain, limit, mode)?;
 
     let reflections: Vec<RecalledReflection> = matched
         .into_iter()
