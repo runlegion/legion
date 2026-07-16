@@ -764,7 +764,12 @@ mod tests {
             .insert_reflection_with_meta("kelex", "hello team", "team", &ReflectionMeta::default())
             .expect("insert");
         index
-            .add(&reflection.id, "kelex", "hello team")
+            .add(
+                &reflection.id,
+                "kelex",
+                "hello team",
+                &reflection.created_at,
+            )
             .expect("index");
 
         // Verify the DB has the post. test_storage() uses "test.db" in the same dir.

@@ -775,9 +775,14 @@ async fn api_search(
 
     let limit = params.limit.unwrap_or(10).min(50);
 
+    // #786 threads an optional TimeRange through every recall/consult/
+    // bullpen/surface entry point; this HTTP search endpoint is out of
+    // this issue's scope (CLI-only per the interface spec) and keeps its
+    // pre-#786 unbounded behavior via TimeRange::default().
+    let range = crate::timerange::TimeRange::default();
     let hits = match &params.repo {
-        Some(repo) => index.search(repo, q, limit),
-        None => index.search_all(q, limit),
+        Some(repo) => index.search(repo, q, limit, &range),
+        None => index.search_all(q, limit, &range),
     };
     let hits = hits.map_err(|e| ServeError::internal("search error", e))?;
 

@@ -787,21 +787,27 @@ impl Database {
     /// [`get_reflections_by_domain`](Self::get_reflections_by_domain) (#782)
     /// -- the DB backer for `recall::recall_latest`, which is how `recall
     /// --latest --archives` reaches persisted (`forget --persist`)
-    /// reflections.
+    /// reflections. `range` applies #786's `created_at` predicate directly
+    /// in the WHERE clause (`TimeRange::default()` is unbounded, a no-op).
     pub fn get_latest_self_reflections(
         &self,
         repo: &str,
         limit: usize,
         mode: crate::recall::ArchiveMode,
+        range: &crate::timerange::TimeRange,
     ) -> Result<Vec<Reflection>> {
         let where_clause = archive_mode_where_clause(mode);
+        let range_clause = crate::timerange::TimeRange::sql_clause(3);
         let sql = format!(
             "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE repo = ?1 AND audience = 'self' \
-             AND deleted_at IS NULL {where_clause} ORDER BY created_at DESC LIMIT ?2"
+             AND deleted_at IS NULL {where_clause}{range_clause} ORDER BY created_at DESC LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
 
-        let rows = stmt.query_map(rusqlite::params![repo, limit], map_reflection_row)?;
+        let rows = stmt.query_map(
+            rusqlite::params![repo, limit, range.since_bound()?, range.until_bound()?],
+            map_reflection_row,
+        )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }
@@ -821,22 +827,36 @@ impl Database {
     /// `--archives` combined with `--domain` silently fell back to hot-only.
     ///
     /// [`get_reflection_by_id_in_mode`]: Self::get_reflection_by_id_in_mode
+    ///
+    /// `range` applies #786's `created_at` predicate directly in the WHERE
+    /// clause (`TimeRange::default()` is unbounded, a no-op).
     pub fn get_reflections_by_domain(
         &self,
         repo: &str,
         domain: &str,
         limit: usize,
         mode: crate::recall::ArchiveMode,
+        range: &crate::timerange::TimeRange,
     ) -> Result<Vec<Reflection>> {
         let where_clause = archive_mode_where_clause(mode);
+        let range_clause = crate::timerange::TimeRange::sql_clause(4);
         let sql = format!(
             "SELECT {REFLECTION_COLUMNS} \
-             FROM reflections WHERE repo = ?1 AND domain = ?2 AND deleted_at IS NULL {where_clause} \
+             FROM reflections WHERE repo = ?1 AND domain = ?2 AND deleted_at IS NULL {where_clause}{range_clause} \
              ORDER BY created_at DESC LIMIT ?3"
         );
         let mut stmt = self.conn.prepare(&sql)?;
 
-        let rows = stmt.query_map(rusqlite::params![repo, domain, limit], map_reflection_row)?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                repo,
+                domain,
+                limit,
+                range.since_bound()?,
+                range.until_bound()?
+            ],
+            map_reflection_row,
+        )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }
@@ -906,15 +926,39 @@ impl Database {
     /// Get recently extended learning chains.
     ///
     /// Returns reflections that have a parent_id and were created within
-    /// the last N hours, indicating a chain was recently extended.
-    pub fn get_recent_chain_extensions(&self, hours: i64) -> Result<Vec<Reflection>> {
-        let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+    /// the last N hours (or, when `range` is bounded, within `range`
+    /// instead -- an explicit `--since`/`--until`/`--on` OVERRIDES the
+    /// `hours` cutoff rather than composing with it, matching
+    /// `get_recent_board_posts`'s surface-query carve-out; #786).
+    pub fn get_recent_chain_extensions(
+        &self,
+        hours: i64,
+        range: &crate::timerange::TimeRange,
+    ) -> Result<Vec<Reflection>> {
+        if range.is_unbounded() {
+            let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+            let sql = format!(
+                "SELECT {REFLECTION_COLUMNS} \
+                 FROM reflections WHERE parent_id IS NOT NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map([&cutoff], map_reflection_row)?;
+            return rows
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(LegionError::Database);
+        }
+
+        let range_clause = crate::timerange::TimeRange::sql_clause(1);
         let sql = format!(
             "SELECT {REFLECTION_COLUMNS} \
-             FROM reflections WHERE parent_id IS NOT NULL AND deleted_at IS NULL AND created_at > ?1 ORDER BY created_at DESC"
+             FROM reflections WHERE parent_id IS NOT NULL AND deleted_at IS NULL{range_clause} \
+             ORDER BY created_at DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([&cutoff], map_reflection_row)?;
+        let rows = stmt.query_map(
+            rusqlite::params![range.since_bound()?, range.until_bound()?],
+            map_reflection_row,
+        )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }
@@ -1898,20 +1942,39 @@ mod tests {
             .unwrap();
         db.archive_reflection(&cold.id).expect("archive");
 
+        let default_range = crate::timerange::TimeRange::default();
         let hot_only = db
-            .get_reflections_by_domain("legion", "checkpoint", 10, crate::recall::ArchiveMode::Hot)
+            .get_reflections_by_domain(
+                "legion",
+                "checkpoint",
+                10,
+                crate::recall::ArchiveMode::Hot,
+                &default_range,
+            )
             .unwrap();
         assert_eq!(hot_only.len(), 1);
         assert_eq!(hot_only[0].id, hot.id);
 
         let cold_only = db
-            .get_reflections_by_domain("legion", "checkpoint", 10, crate::recall::ArchiveMode::Cold)
+            .get_reflections_by_domain(
+                "legion",
+                "checkpoint",
+                10,
+                crate::recall::ArchiveMode::Cold,
+                &default_range,
+            )
             .unwrap();
         assert_eq!(cold_only.len(), 1);
         assert_eq!(cold_only[0].id, cold.id);
 
         let both = db
-            .get_reflections_by_domain("legion", "checkpoint", 10, crate::recall::ArchiveMode::Both)
+            .get_reflections_by_domain(
+                "legion",
+                "checkpoint",
+                10,
+                crate::recall::ArchiveMode::Both,
+                &default_range,
+            )
             .unwrap();
         assert_eq!(both.len(), 2);
     }
@@ -1927,22 +1990,38 @@ mod tests {
             .unwrap();
         db.archive_reflection(&cold.id).expect("archive");
 
+        let default_range = crate::timerange::TimeRange::default();
         let hot_only = db
-            .get_latest_self_reflections("legion", 10, crate::recall::ArchiveMode::Hot)
+            .get_latest_self_reflections(
+                "legion",
+                10,
+                crate::recall::ArchiveMode::Hot,
+                &default_range,
+            )
             .unwrap();
         let hot_ids: Vec<&str> = hot_only.iter().map(|r| r.id.as_str()).collect();
         assert!(hot_ids.contains(&hot.id.as_str()));
         assert!(!hot_ids.contains(&cold.id.as_str()));
 
         let cold_only = db
-            .get_latest_self_reflections("legion", 10, crate::recall::ArchiveMode::Cold)
+            .get_latest_self_reflections(
+                "legion",
+                10,
+                crate::recall::ArchiveMode::Cold,
+                &default_range,
+            )
             .unwrap();
         let cold_ids: Vec<&str> = cold_only.iter().map(|r| r.id.as_str()).collect();
         assert!(cold_ids.contains(&cold.id.as_str()));
         assert!(!cold_ids.contains(&hot.id.as_str()));
 
         let both = db
-            .get_latest_self_reflections("legion", 10, crate::recall::ArchiveMode::Both)
+            .get_latest_self_reflections(
+                "legion",
+                10,
+                crate::recall::ArchiveMode::Both,
+                &default_range,
+            )
             .unwrap();
         assert_eq!(both.len(), 2);
     }

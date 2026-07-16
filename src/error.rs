@@ -237,6 +237,13 @@ pub enum LegionError {
     /// legitimate use of `process::exit` in the binary.
     #[error("")]
     ExitWith(i32),
+
+    /// A `--since`/`--until`/`--on` date filter value did not match the
+    /// accepted grammar (#786). Raised at the CLI/API boundary by
+    /// `TimeRange::parse` -- nothing reaches the query layer with an
+    /// unparsed date.
+    #[error("unparseable date '{input}' -- accepted: YYYY-MM-DD, <N>d, <N>w, today, yesterday")]
+    InvalidDateFilter { input: String },
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;

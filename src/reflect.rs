@@ -95,7 +95,7 @@ pub fn reflect_from_text_with_meta(
     }
 
     let reflection = db.insert_reflection_with_meta(repo, trimmed, "self", meta)?;
-    index.add(&reflection.id, repo, trimmed)?;
+    index.add(&reflection.id, repo, trimmed, &reflection.created_at)?;
 
     Ok(reflection.id)
 }
@@ -117,6 +117,12 @@ mod tests {
     use super::*;
     use crate::testutil::test_storage;
 
+    /// Unbounded `TimeRange` for tests that do not exercise #786 date
+    /// filtering.
+    fn no_range() -> crate::timerange::TimeRange {
+        crate::timerange::TimeRange::default()
+    }
+
     #[test]
     fn reflect_from_text_stores_in_db_and_index() {
         let (db, index, _dir) = test_storage();
@@ -126,7 +132,7 @@ mod tests {
         assert_eq!(reflections.len(), 1);
         assert_eq!(reflections[0].text, "mapping rules are fragile");
 
-        let results = index.search("kelex", "mapping", 5).unwrap();
+        let results = index.search("kelex", "mapping", 5, &no_range()).unwrap();
         assert_eq!(results.len(), 1);
     }
 
@@ -231,8 +237,12 @@ mod tests {
         assert_eq!(platform[0].text, legion[0].text);
         assert_ne!(platform[0].id, legion[0].id);
 
-        let platform_search = index.search("platform", "cross-repo", 5).unwrap();
-        let legion_search = index.search("legion", "cross-repo", 5).unwrap();
+        let platform_search = index
+            .search("platform", "cross-repo", 5, &no_range())
+            .unwrap();
+        let legion_search = index
+            .search("legion", "cross-repo", 5, &no_range())
+            .unwrap();
         assert_eq!(platform_search.len(), 1);
         assert_eq!(legion_search.len(), 1);
     }
@@ -251,7 +261,9 @@ mod tests {
         let (db, index, _idx_dir) = test_storage();
         reflect_from_transcript(&db, &index, "kelex", &transcript).unwrap();
 
-        let results = index.search("kelex", "binary parsing", 5).unwrap();
+        let results = index
+            .search("kelex", "binary parsing", 5, &no_range())
+            .unwrap();
         assert_eq!(results.len(), 1);
 
         let reflections = db.get_reflections_by_repo("kelex").unwrap();

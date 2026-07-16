@@ -243,13 +243,25 @@ impl Database {
         Ok(count)
     }
 
-    /// Get pending tasks assigned to a repo (for surface output).
-    pub fn get_pending_tasks_for_repo(&self, repo: &str) -> Result<Vec<crate::task::Task>> {
-        let mut stmt = self.conn.prepare(
+    /// Get pending tasks assigned to a repo (for surface output). `range`
+    /// applies #786's `created_at` predicate directly in the WHERE clause
+    /// (`TimeRange::default()` is unbounded, a no-op).
+    pub fn get_pending_tasks_for_repo(
+        &self,
+        repo: &str,
+        range: &crate::timerange::TimeRange,
+    ) -> Result<Vec<crate::task::Task>> {
+        let range_clause = crate::timerange::TimeRange::sql_clause(2);
+        let sql = format!(
             "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-             FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL ORDER BY created_at DESC",
+             FROM tasks WHERE to_repo = ?1 AND status = 'pending' AND deleted_at IS NULL{range_clause} \
+             ORDER BY created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params![repo, range.since_bound()?, range.until_bound()?],
+            crate::task::map_task_row,
         )?;
-        let rows = stmt.query_map([repo], crate::task::map_task_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }

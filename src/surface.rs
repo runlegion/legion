@@ -1,6 +1,7 @@
 use crate::db::{self, Database, Reflection};
 use crate::error::Result;
 use crate::task;
+use crate::timerange::TimeRange;
 
 /// Truncate text to a maximum number of characters, adding "..." if truncated.
 fn truncate_text(text: &str, max_chars: usize) -> String {
@@ -28,14 +29,17 @@ const MAX_CHAIN_EXTENSIONS: usize = 3;
 /// Gather cross-repo highlights for a given repo.
 ///
 /// Returns up to 5 recent bullpen posts, 3 high-value cross-repo reflections,
-/// and 3 recently extended learning chains.
-pub fn surface(db: &Database, repo: &str) -> Result<SurfaceResult> {
-    let mut recent_posts = db.get_recent_board_posts(24)?;
+/// and 3 recently extended learning chains. `range` (#786) threads
+/// `--since`/`--until`/`--on` into all four underlying queries; unbounded
+/// (`TimeRange::default()`) preserves the pre-#786 24h-lookback defaults
+/// for the recency-windowed ones.
+pub fn surface(db: &Database, repo: &str, range: &TimeRange) -> Result<SurfaceResult> {
+    let mut recent_posts = db.get_recent_board_posts(24, range)?;
     recent_posts.truncate(MAX_RECENT_POSTS);
-    let high_value = db.get_high_value_cross_repo(repo, 3)?;
-    let mut chain_extensions = db.get_recent_chain_extensions(24)?;
+    let high_value = db.get_high_value_cross_repo(repo, 3, range)?;
+    let mut chain_extensions = db.get_recent_chain_extensions(24, range)?;
     chain_extensions.truncate(MAX_CHAIN_EXTENSIONS);
-    let pending_tasks = task::get_pending_inbound(db, repo)?;
+    let pending_tasks = task::get_pending_inbound(db, repo, range)?;
 
     Ok(SurfaceResult {
         recent_posts,
@@ -124,7 +128,7 @@ mod tests {
     #[test]
     fn surface_empty_database() {
         let (db, _index, _dir) = test_storage();
-        let result = surface(&db, "kelex").unwrap();
+        let result = surface(&db, "kelex", &TimeRange::default()).unwrap();
         assert!(result.recent_posts.is_empty());
         assert!(result.high_value.is_empty());
         assert!(result.chain_extensions.is_empty());
@@ -136,7 +140,7 @@ mod tests {
         db.insert_reflection("rafters", "fresh insight", "team")
             .unwrap();
 
-        let result = surface(&db, "kelex").unwrap();
+        let result = surface(&db, "kelex", &TimeRange::default()).unwrap();
         assert_eq!(result.recent_posts.len(), 1);
         assert_eq!(result.recent_posts[0].text, "fresh insight");
     }
@@ -150,7 +154,7 @@ mod tests {
         db.boost_reflection(&r.id).unwrap();
         db.boost_reflection(&r.id).unwrap();
 
-        let result = surface(&db, "kelex").unwrap();
+        let result = surface(&db, "kelex", &TimeRange::default()).unwrap();
         assert_eq!(result.high_value.len(), 1);
         assert_eq!(result.high_value[0].text, "valuable pattern");
         assert_eq!(result.high_value[0].recall_count, 2);
@@ -164,7 +168,7 @@ mod tests {
             .unwrap();
         db.boost_reflection(&r.id).unwrap();
 
-        let result = surface(&db, "kelex").unwrap();
+        let result = surface(&db, "kelex", &TimeRange::default()).unwrap();
         assert!(result.high_value.is_empty());
     }
 
@@ -181,7 +185,7 @@ mod tests {
         db.insert_reflection_with_meta("kelex", "builds on root", "self", &meta)
             .unwrap();
 
-        let result = surface(&db, "kelex").unwrap();
+        let result = surface(&db, "kelex", &TimeRange::default()).unwrap();
         assert_eq!(result.chain_extensions.len(), 1);
         assert_eq!(result.chain_extensions[0].text, "builds on root");
     }
@@ -204,7 +208,7 @@ mod tests {
         task::create_task(&db, "kelex", "legion", "implement search", None, "high")
             .expect("create task");
 
-        let result = surface(&db, "legion").expect("surface");
+        let result = surface(&db, "legion", &TimeRange::default()).expect("surface");
         assert_eq!(result.pending_tasks.len(), 1);
         assert_eq!(result.pending_tasks[0].text, "implement search");
     }
@@ -222,7 +226,7 @@ mod tests {
         )
         .expect("create task");
 
-        let result = surface(&db, "legion").expect("surface");
+        let result = surface(&db, "legion", &TimeRange::default()).expect("surface");
         let output = format_surface(&result, "legion");
         assert!(output.contains("Task from kelex"));
         assert!(output.contains("implement search"));
@@ -235,7 +239,7 @@ mod tests {
         db.insert_reflection("rafters", "test post", "team")
             .unwrap();
 
-        let result = surface(&db, "kelex").unwrap();
+        let result = surface(&db, "kelex", &TimeRange::default()).unwrap();
         let output = format_surface(&result, "kelex");
         assert!(output.contains("[Synapse] For kelex:"));
         assert!(output.contains("[rafters]"));
