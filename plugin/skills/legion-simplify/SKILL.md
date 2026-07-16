@@ -111,14 +111,16 @@ Error paths propagate via `?`. No stringly-typed state. Verdict: clean.
      --articulation-file /tmp/simplify-<branch>.md \
      --findings-json '[{"file": "src/foo.rs", "line": 42, "severity": "MED", "summary": "duplicate WHERE-clause construction"}]'
    ```
-   `--findings-json` is optional and omitted for a clean verdict with nothing to track.
-   `--findings-count` is the number of real structural findings you recorded (0 for a clean
-   verdict). The validator resolves the changed-file set from git, checks every file has a
-   non-boilerplate entry, then records the gate for HEAD.
-   - Clean -> the gate is recorded; proceed to pr-write. **Refused instead** when a HIGH/MED
+   `--findings-json` is optional and MUST be omitted (or empty) for a `--result clean` call --
+   passing findings alongside `--result clean` in the same call is refused (#773, see below), not
+   silently accepted. `--findings-count` is the number of real structural findings you recorded
+   (0 for a clean verdict). The validator resolves the changed-file set from git, checks every
+   file has a non-boilerplate entry, then records the gate for HEAD.
+   - Clean -> the gate is recorded; proceed to pr-write. **Refused instead** when: this same call's
+     `--findings-json` is non-empty (a clean verdict cannot carry its own findings), OR a HIGH/MED
      finding from a PRIOR run on this branch is still PENDING (neither a later commit touched its
-     file nor was it explicitly dispositioned), or a LOW finding is still un-acked (#773) -- see
-     "Finding resolution" below.
+     file nor was it explicitly dispositioned), OR a prior LOW finding is still un-acked (#773) --
+     see "Finding resolution" below.
    - Refused (coverage/substance) -> the output names the gap (an unaddressed file, a boilerplate
      entry). Fix it by actually reading that file and writing real reasoning -- do not pad to clear
      the check. Re-run.
@@ -140,9 +142,10 @@ in the findings ledger as PENDING until one of:
   `legion quality-gate finding-ack --branch <branch> --skill legion-simplify --reason "formatting only, deferred"`.
 
 Find finding ids with `legion quality-gate finding-list --branch <branch> --skill legion-simplify`.
-A `clean` verdict is refused until the PENDING set for this branch+skill is empty -- writing a
-finding down and then recording clean on a later commit without resolving or dispositioning it is
-exactly the hand-wave this closes.
+A `clean` verdict is refused until the PENDING set for this branch+skill is empty AND this call's
+own `--findings-json` is empty -- writing a finding down and then recording clean on a LATER commit
+without resolving or dispositioning it is one hand-wave this closes; recording clean in the SAME
+call you report the finding in is the other, and is refused just as hard.
 
 ## Pass Criteria for `legion pr create`
 

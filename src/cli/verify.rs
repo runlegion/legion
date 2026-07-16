@@ -285,19 +285,36 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
 
             let database = open_db()?;
 
-            // #773: reconcile the PENDING finding ledger against this commit
-            // first (a fix landed in an earlier commit must not still read as
+            // #773: extract THIS call's own structured findings BEFORE the
+            // refusal check runs. legion-review's `approved` decision records
+            // `--result clean` in the SAME call as any surviving non-blocking
+            // findings (SKILL.md: "surviving MEDs named in the sign-off") --
+            // a clean call that itself carries findings must be refused by
+            // that call, not merely by some future one. Best-effort: a
+            // malformed `--details-json` (or one with no `findings` key at
+            // all, the common case for most skills) yields zero findings here
+            // rather than failing the record outright.
+            let raw_findings: Vec<finding_gate::RawFinding> = details_json
+                .as_deref()
+                .and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+                .map(|v| finding_gate::extract_findings_from_value(&v))
+                .unwrap_or_default();
+
+            // Reconcile the PENDING finding ledger against this commit first
+            // (a fix landed in an earlier commit must not still read as
             // pending), then -- only when this run claims `clean` -- refuse
-            // unless every non-trivial finding is resolved/dispositioned and
-            // every LOW finding is batch-acked. Runs for every skill, not
-            // just legion-review: a skill with no findings ever recorded
-            // simply has an empty pending set, so this is a no-op for it.
+            // unless every PRIOR non-trivial finding is resolved/dispositioned,
+            // every prior LOW finding is batch-acked, AND this run itself
+            // reports zero findings. Runs for every skill, not just
+            // legion-review: a skill with no findings ever recorded simply has
+            // an empty pending set, so this is a no-op for it.
             reconcile_and_refuse_if_findings_pending(
                 &database,
                 &branch,
                 &skill,
                 &commit_hash,
                 gate_result == GateResult::Clean,
+                &raw_findings,
             )?;
 
             let row = database.record_quality_gate(&QualityGateInput {
@@ -316,18 +333,12 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // catching issues means simplify's clean verdict was wrong.
             crate::gate_trust::maybe_witness_from_review(&database, &row);
 
-            // #773: extract structured findings from the `findings` array
-            // inside `--details-json`, the legion-review contract
-            // (`{"decision": ..., "findings": [...], ...}`). A skill with no
-            // such key (or no --details-json at all) contributes zero
-            // findings here -- harmless, since findings_count above stays the
-            // authoritative count for that run either way.
-            if let Some(details) = details_json.as_deref()
-                && let Ok(value) = serde_json::from_str::<serde_json::Value>(details)
-            {
-                let raw_findings = finding_gate::extract_findings_from_value(&value);
-                persist_raw_findings(&database, &row, &raw_findings);
-            }
+            // #773: persist the findings extracted above, now that the gate
+            // row (and its id) exists. Only reached once the refusal check
+            // above has already passed -- a refused clean call never
+            // persists its findings; the caller re-runs with `--result
+            // issues` to persist them, then dispositions/acks.
+            persist_raw_findings(&database, &row, &raw_findings);
 
             println!("{}", row.id);
         }
@@ -461,13 +472,18 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
 
             // #773: same reconcile-then-refuse gate as the Record arm, run
             // here since legion-simplify records clean exclusively through
-            // Check (Record refuses a clean result for it, #780).
+            // Check (Record refuses a clean result for it, #780). Also mirrors
+            // the Record arm in considering THIS run's own `raw_findings`
+            // (parsed above from `--findings-json`) -- a clean verdict
+            // reported alongside real findings must be refused by the same
+            // call that reports them, not just a later one.
             reconcile_and_refuse_if_findings_pending(
                 &database,
                 &branch,
                 &skill,
                 &commit_hash,
                 gate_result == GateResult::Clean,
+                &raw_findings,
             )?;
 
             let row = database.record_quality_gate(&QualityGateInput {
@@ -568,7 +584,9 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
 /// present. Shared by every finding print site (#773) so the `:<line>`
 /// formatting has one source instead of repeating
 /// `line.map(|l| format!(":{l}")).unwrap_or_default()` at each call site.
-fn file_loc(file: &str, line: Option<i64>) -> String {
+/// Generic over the line type so both the persisted `i64` (`QualityGateFinding`)
+/// and the not-yet-persisted `u32` (`finding_gate::RawFinding`) share it.
+fn file_loc(file: &str, line: Option<impl std::fmt::Display>) -> String {
     match line {
         Some(l) => format!("{file}:{l}"),
         None => file.to_owned(),
@@ -580,20 +598,31 @@ fn file_loc(file: &str, line: Option<i64>) -> String {
 /// Always reconciles the PENDING set for `branch`/`skill` against
 /// `head_commit` first (a fix landed in an earlier commit resolves the
 /// finding before it can block anything). When `requesting_clean` is true,
-/// refuses the caller with a non-zero exit unless the post-reconcile PENDING
-/// set is empty -- no HIGH/MED finding left unresolved/undispositioned, and
-/// no LOW finding left un-acked. The predicate is branch+skill scoped and
-/// deliberately cross-commit: a `clean` run itself never has any of its own
-/// findings pending (it has none), so this only ever blocks on findings
-/// accumulated from PRIOR gate runs on the same branch -- which is the
-/// entire point (a finding written down on commit N must not evaporate just
-/// because commit N+1 reports clean).
+/// refuses the caller with a non-zero exit unless BOTH:
+///   - the post-reconcile PENDING set (findings from PRIOR gate runs on this
+///     branch+skill) is empty -- no HIGH/MED left unresolved/undispositioned,
+///     no LOW left un-acked, and
+///   - `current_raw_findings` (THIS call's own structured findings, parsed by
+///     the caller from `--details-json`/`--findings-json` before this
+///     function runs) is empty.
+///
+/// The second half is not optional bookkeeping: legion-review's `approved`
+/// decision records `--result clean` in the SAME call as any surviving
+/// non-blocking findings (its SKILL.md: "surviving MEDs named in the
+/// sign-off"), so a same-run reading of the predicate would let exactly the
+/// finding this issue exists to catch sail through on its very first gate
+/// call. A finding just extracted in this call has by definition not yet
+/// been through resolve/disposition/ack, so its mere presence blocks --
+/// there is no severity carve-out here the way there is for the PENDING set
+/// (LOW still blocks a same-call clean; it becomes ack-able only once
+/// persisted, which a refused call never does).
 fn reconcile_and_refuse_if_findings_pending(
     database: &db::Database,
     branch: &str,
     skill: &str,
     head_commit: &str,
     requesting_clean: bool,
+    current_raw_findings: &[finding_gate::RawFinding],
 ) -> error::Result<()> {
     if let Err(e) =
         finding_gate::reconcile_pending_findings(database, None, branch, skill, head_commit)
@@ -605,12 +634,13 @@ fn reconcile_and_refuse_if_findings_pending(
     }
     let pending = database.list_pending_findings(branch, skill)?;
     let refusal = finding_gate::evaluate_refusal(&pending);
-    if refusal.blocks() {
+    if refusal.blocks() || !current_raw_findings.is_empty() {
         eprintln!(
             "[legion] error: cannot record a clean gate for skill '{skill}' on branch '{branch}' \
-             -- {} non-trivial finding(s) and {} LOW finding(s) remain undispositioned (#773):",
-            refusal.blocking.len(),
-            refusal.trivial_unacked.len()
+             -- {} pending finding(s) from prior run(s) and {} finding(s) reported by THIS run \
+             remain unresolved/undispositioned (#773):",
+            refusal.blocking.len() + refusal.trivial_unacked.len(),
+            current_raw_findings.len(),
         );
         for f in refusal
             .blocking
@@ -618,18 +648,28 @@ fn reconcile_and_refuse_if_findings_pending(
             .chain(refusal.trivial_unacked.iter())
         {
             eprintln!(
-                "  - [{}] {} {} (id {})",
+                "  - [prior run, {}] {} {} (id {})",
                 f.severity.as_str(),
                 file_loc(&f.file, f.line),
                 f.summary,
                 f.id,
             );
         }
+        for f in current_raw_findings {
+            eprintln!(
+                "  - [this run, {}] {} {}",
+                f.severity,
+                file_loc(&f.file, f.line),
+                f.summary,
+            );
+        }
         eprintln!(
-            "\nResolve by touching the flagged file in a later commit, disposition one with \
-             'legion quality-gate finding-disposition --id <id> --reason \"...\"', or batch-ack \
-             LOW findings with 'legion quality-gate finding-ack --branch {branch} --skill {skill} \
-             --reason \"...\"'."
+            "\nA clean verdict cannot carry its own findings, nor leave a prior finding \
+             unresolved. Re-run with '--result issues' (same findings payload) to persist them, \
+             then disposition/ack them -- 'legion quality-gate finding-disposition --id <id> \
+             --reason \"...\"' for one, or 'legion quality-gate finding-ack --branch {branch} \
+             --skill {skill} --reason \"...\"' to batch-clear LOW findings -- or wait for a fix \
+             commit to resolve them automatically, then re-run '--result clean'."
         );
         return Err(error::LegionError::ExitWith(1));
     }
@@ -649,6 +689,18 @@ fn persist_raw_findings(
     gate: &QualityGateRow,
     raw_findings: &[finding_gate::RawFinding],
 ) {
+    if raw_findings.is_empty() {
+        return;
+    }
+    // #773: a re-run that reports the same still-open finding (identical
+    // file+severity+summary) must not pile up a fresh duplicate PENDING row
+    // every time -- two review passes over an unfixed MED would otherwise
+    // leave two rows to disposition instead of one. `unwrap_or_default`
+    // degrades to "no known duplicates" on a query failure rather than
+    // blocking the insert below on this best-effort dedup check.
+    let existing_pending = database
+        .list_pending_findings(&gate.branch, &gate.skill)
+        .unwrap_or_default();
     for rf in raw_findings {
         let severity: FindingSeverity = rf.severity.parse().unwrap_or_else(|_| {
             eprintln!(
@@ -658,6 +710,12 @@ fn persist_raw_findings(
             );
             FindingSeverity::Med
         });
+        let already_pending = existing_pending
+            .iter()
+            .any(|f| f.file == rf.file && f.severity == severity && f.summary == rf.summary);
+        if already_pending {
+            continue;
+        }
         if let Err(e) = database.insert_finding(&NewFindingInput {
             gate_id: &gate.id,
             branch: &gate.branch,
@@ -1349,6 +1407,7 @@ mod tests {
             "legion-simplify",
             "commit-a",
             true,
+            &[],
         )
         .unwrap_err();
         assert!(matches!(err, error::LegionError::ExitWith(1)));
@@ -1377,6 +1436,7 @@ mod tests {
             "legion-simplify",
             "commit-a",
             true,
+            &[],
         )
         .unwrap_err();
         assert!(matches!(err, error::LegionError::ExitWith(1)));
@@ -1408,6 +1468,7 @@ mod tests {
             "legion-simplify",
             "commit-a",
             true,
+            &[],
         )
         .expect("clean should be allowed once the pending finding is dispositioned");
     }
@@ -1423,6 +1484,7 @@ mod tests {
             "legion-simplify",
             "commit-a",
             true,
+            &[],
         )
         .expect("no pending findings should never refuse");
     }
@@ -1450,6 +1512,7 @@ mod tests {
             "legion-simplify",
             "commit-a",
             false,
+            &[],
         )
         .expect("an issues (non-clean) request must never be refused by the pending set");
     }
@@ -1488,8 +1551,267 @@ mod tests {
             "legion-simplify",
             "commit-a",
             true,
+            &[],
         )
         .expect("findings on another branch/skill must not block this one");
+    }
+
+    /// THE central case (#773): a clean request that itself carries a
+    /// finding must be refused by that SAME call, not merely a future one.
+    /// This is legion-review's `approved` decision recording `--result
+    /// clean` in the same invocation as any surviving non-blocking findings
+    /// (its SKILL.md: "surviving MEDs named in the sign-off") -- the pending
+    /// set is empty (nothing persisted yet), so only checking the pending
+    /// set would let this sail through.
+    #[test]
+    fn reconcile_and_refuse_blocks_clean_when_current_call_carries_a_finding() {
+        let db = test_db();
+        let current = vec![finding_gate::RawFinding {
+            file: "src/foo.rs".to_string(),
+            line: Some(10),
+            severity: "MED".to_string(),
+            summary: "unchecked input".to_string(),
+        }];
+
+        let err = reconcile_and_refuse_if_findings_pending(
+            &db,
+            "feat/x",
+            "legion-review",
+            "commit-a",
+            true,
+            &current,
+        )
+        .unwrap_err();
+        assert!(matches!(err, error::LegionError::ExitWith(1)));
+    }
+
+    /// The same-call refusal blocks on a LOW finding too -- a freshly
+    /// extracted finding has never been through batch-ack, so its severity
+    /// does not exempt it (mirrors `evaluate_refusal_low_blocks_until_acked`
+    /// for the PENDING-set case).
+    #[test]
+    fn reconcile_and_refuse_blocks_clean_when_current_call_carries_a_low_finding() {
+        let db = test_db();
+        let current = vec![finding_gate::RawFinding {
+            file: "src/foo.rs".to_string(),
+            line: None,
+            severity: "LOW".to_string(),
+            summary: "naming nit".to_string(),
+        }];
+
+        let err = reconcile_and_refuse_if_findings_pending(
+            &db,
+            "feat/x",
+            "legion-review",
+            "commit-a",
+            true,
+            &current,
+        )
+        .unwrap_err();
+        assert!(matches!(err, error::LegionError::ExitWith(1)));
+    }
+
+    /// A same-call finding does NOT block an `issues` request -- only a
+    /// `clean` claim triggers the refusal (mirrors
+    /// `reconcile_and_refuse_does_not_block_issues_result` for the
+    /// PENDING-set case).
+    #[test]
+    fn reconcile_and_refuse_current_call_findings_do_not_block_issues_result() {
+        let db = test_db();
+        let current = vec![finding_gate::RawFinding {
+            file: "src/foo.rs".to_string(),
+            line: Some(10),
+            severity: "HIGH".to_string(),
+            summary: "unchecked input".to_string(),
+        }];
+
+        reconcile_and_refuse_if_findings_pending(
+            &db,
+            "feat/x",
+            "legion-review",
+            "commit-a",
+            false,
+            &current,
+        )
+        .expect("an issues (non-clean) request must never be refused by this run's findings");
+    }
+
+    /// A clean call with an empty pending set AND an empty current-findings
+    /// slice is allowed -- the ordinary case (a genuinely clean run, or a
+    /// prior-commit fix already reconciled away everything).
+    #[test]
+    fn reconcile_and_refuse_allows_clean_with_no_pending_and_no_current_findings() {
+        let db = test_db();
+        reconcile_and_refuse_if_findings_pending(
+            &db,
+            "feat/x",
+            "legion-review",
+            "commit-a",
+            true,
+            &[],
+        )
+        .expect("no pending and no current findings should never refuse");
+    }
+
+    /// The regression end to end: simplify reports MED on commit A
+    /// (`--result issues`, persisted), fixes it and commits B, then requests
+    /// `--result clean` with no `--findings-json` on B -- reconcile resolves
+    /// the commit-A finding via the real git fixture, and the second call is
+    /// allowed. Mirrors the scenario named in review.
+    #[test]
+    fn reconcile_and_refuse_issues_then_fix_then_clean_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        // Minimal isolated git fixture -- mirrors finding_gate's own test
+        // helper (duplicated here for the same reason that file documents:
+        // a `#[cfg(test)]`-private helper in a sibling module is not
+        // importable across module boundaries without a shared export this
+        // one extra call site does not justify).
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .args(
+                    [
+                        "-c",
+                        "user.name=Legion Test Fixture",
+                        "-c",
+                        "user.email=legion-test-fixture@example.invalid",
+                        "-c",
+                        "commit.gpgsign=false",
+                    ]
+                    .iter()
+                    .chain(args.iter()),
+                )
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("foo.rs"), "fn foo() {}\n").unwrap();
+        git(&["add", "foo.rs"]);
+        git(&["commit", "-q", "-m", "initial"]);
+        let commit_a = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+
+        let db = test_db();
+        db.insert_finding(&NewFindingInput {
+            gate_id: "gate-a",
+            branch: "feat/x",
+            skill: "legion-simplify",
+            origin_commit: &commit_a,
+            file: "foo.rs",
+            line: Some(1),
+            severity: FindingSeverity::Med,
+            summary: "duplicate logic",
+        })
+        .unwrap();
+
+        std::fs::write(dir.path().join("foo.rs"), "fn foo() { /* fixed */ }\n").unwrap();
+        git(&["add", "foo.rs"]);
+        git(&["commit", "-q", "-m", "fix foo"]);
+        let commit_b = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+
+        // reconcile_pending_findings shells to plain `git log` against the
+        // process cwd; point it at the fixture explicitly instead of
+        // mutating the real process cwd (a parallel-test hazard).
+        finding_gate::reconcile_pending_findings(
+            &db,
+            Some(dir.path()),
+            "feat/x",
+            "legion-simplify",
+            &commit_b,
+        )
+        .unwrap();
+
+        // Now the CLI-level helper (process-cwd git) sees an already-resolved
+        // finding and allows clean with no current findings.
+        reconcile_and_refuse_if_findings_pending(
+            &db,
+            "feat/x",
+            "legion-simplify",
+            &commit_b,
+            true,
+            &[],
+        )
+        .expect("the commit-A finding should already be resolved by the fixture reconcile above");
+    }
+
+    /// `persist_raw_findings` deduplicates: a re-run reporting the exact
+    /// same still-open finding (identical file+severity+summary) does not
+    /// pile up a second PENDING row.
+    #[test]
+    fn persist_raw_findings_dedupes_identical_pending_finding_across_reruns() {
+        let db = test_db();
+        let gate = db
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "commit-a",
+                skill: "legion-review",
+                result: GateResult::Issues,
+                findings_count: 1,
+                details: None,
+                provenance: GateProvenance::Asserted,
+                base: None,
+            })
+            .unwrap();
+        let raw = vec![finding_gate::RawFinding {
+            file: "src/foo.rs".to_string(),
+            line: Some(12),
+            severity: "MED".to_string(),
+            summary: "unchecked input".to_string(),
+        }];
+
+        persist_raw_findings(&db, &gate, &raw);
+        persist_raw_findings(&db, &gate, &raw);
+
+        let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "re-persisting an identical finding must not create a duplicate row"
+        );
+    }
+
+    /// A genuinely different finding (different summary) on the same file
+    /// is NOT deduplicated away -- only an exact file+severity+summary match
+    /// is treated as "the same still-open finding".
+    #[test]
+    fn persist_raw_findings_does_not_dedupe_distinct_findings_on_the_same_file() {
+        let db = test_db();
+        let gate = db
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "commit-a",
+                skill: "legion-review",
+                result: GateResult::Issues,
+                findings_count: 2,
+                details: None,
+                provenance: GateProvenance::Asserted,
+                base: None,
+            })
+            .unwrap();
+        let raw = vec![
+            finding_gate::RawFinding {
+                file: "src/foo.rs".to_string(),
+                line: Some(12),
+                severity: "MED".to_string(),
+                summary: "unchecked input".to_string(),
+            },
+            finding_gate::RawFinding {
+                file: "src/foo.rs".to_string(),
+                line: Some(40),
+                severity: "MED".to_string(),
+                summary: "duplicate WHERE-clause construction".to_string(),
+            },
+        ];
+
+        persist_raw_findings(&db, &gate, &raw);
+
+        let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        assert_eq!(pending.len(), 2);
     }
 
     /// `persist_raw_findings` inserts one row per raw finding, tied to the

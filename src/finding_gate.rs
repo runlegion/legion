@@ -16,12 +16,18 @@
 //!   - Resolution + refusal: `reconcile_pending_findings` (git-log-based
 //!     resolution detection: a commit after a finding's origin that touches
 //!     the flagged file resolves it) and `evaluate_refusal` (the pure
-//!     predicate a `clean` verdict must clear -- no non-trivial finding
-//!     pending, no un-acked LOW finding). The predicate is branch+skill
-//!     scoped and cross-commit BY DESIGN: a clean run itself has zero new
-//!     findings, so a same-run-only reading would make the gate vacuous, and
-//!     "a subsequent commit resolves it" only means anything measured against
-//!     prior gate runs on the same branch.
+//!     predicate a `clean` verdict must clear against the PENDING set left
+//!     over from PRIOR gate runs on this branch+skill -- no non-trivial
+//!     finding pending, no un-acked LOW finding). This module's predicate is
+//!     necessarily cross-commit (a fix landed on an earlier commit resolves a
+//!     finding raised there), but it is NOT sufficient by itself: the CALLER
+//!     (`cli::verify::reconcile_and_refuse_if_findings_pending`) additionally
+//!     refuses a clean verdict that carries findings of its OWN in the same
+//!     call -- legion-review's `approved` decision records `--result clean`
+//!     in the very call that reports any surviving non-blocking findings, so
+//!     a same-run finding is not hypothetical and this module's cross-commit
+//!     predicate alone would let it straight through. See that function's
+//!     doc comment for the combined check.
 
 use std::process::Command;
 use std::str::FromStr;

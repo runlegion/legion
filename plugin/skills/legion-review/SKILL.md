@@ -73,17 +73,28 @@ without guessing.
    The gate is keyed on HEAD, so a new commit after review invalidates it -- re-run after
    fixes, exactly like the simplify gate.
 
-   **`--result clean` is refused (#773)** when a HIGH/MED finding from a PRIOR review run on this
-   branch is still PENDING (neither a later commit touched its file nor was it explicitly
-   dispositioned), or a LOW finding is still un-acked. Reconciliation runs automatically at record
-   time -- a fix already landed in an earlier commit clears itself. For anything still open:
-   `legion quality-gate finding-disposition --id <finding-id> --reason "won't fix: ..."` for a
-   single finding, or `legion quality-gate finding-ack --branch <branch> --skill legion-review
-   --reason "..."` to batch-clear a sweep of LOW findings. `legion quality-gate finding-list
-   --branch <branch> --skill legion-review` lists ids and current status. An `approved` decision
-   with non-blocking findings that are neither fixed nor dispositioned is exactly the hand-wave
-   this refusal exists to stop -- do not treat `approved` as license to skip step 5's ledger
-   bookkeeping just because the decision itself does not require a fix-and-re-review round.
+   **`--result clean` is refused (#773) in TWO cases, and the `approved && non-blocking findings`
+   case -- the one this issue exists to close -- is the first, not the second:**
+   1. **This same call's `findings[]` is non-empty.** An `approved` decision that still names
+      surviving LOW/MED findings in its sign-off must NOT be recorded with `--result clean` in
+      the same breath as reporting them -- record `--result issues` first (identical
+      `--details-json`, so the findings are persisted), then disposition or batch-ack each one,
+      THEN re-run `--result clean` with `findings[]` empty (or omit `--details-json`'s
+      `findings` key entirely). A clean call cannot carry its own findings, full stop -- there is
+      no "but they're only LOW" exception at this step.
+   2. A HIGH/MED finding from a PRIOR review run on this branch is still PENDING (neither a later
+      commit touched its file nor was it explicitly dispositioned), or a prior LOW finding is
+      still un-acked. Reconciliation against git log runs automatically at record time -- a fix
+      already landed in an earlier commit clears itself before this check runs.
+
+   For anything still open in either case: `legion quality-gate finding-disposition --id
+   <finding-id> --reason "won't fix: ..."` for a single finding, or `legion quality-gate
+   finding-ack --branch <branch> --skill legion-review --reason "..."` to batch-clear a sweep of
+   LOW findings. `legion quality-gate finding-list --branch <branch> --skill legion-review` lists
+   ids and current status. An `approved` decision with non-blocking findings that are neither
+   fixed nor dispositioned is exactly the hand-wave this refusal exists to stop -- do not treat
+   `approved` as license to skip the disposition/ack step just because the decision itself does
+   not require a fix-and-re-review round.
 
 6. **Report.** Emit the consolidated REVIEW REPORT (the agent definition's format): decision,
    per-dimension one-liners, surviving findings with file:line and fix suggestions, refuted
