@@ -141,6 +141,21 @@ fn generate_gathers_claimed_and_given_halves() {
             .contains("Persistence is a discipline"),
         "expected the full file body, got: {claimed:?}"
     );
+
+    // given-half: the cross-agent "rafters" reflection about "legion"
+    // must surface via the real recall::consult (BM25-or-hybrid) path --
+    // asserted end-to-end, not just via the unit-level gather_given_half
+    // tests, since this is the only place the real consult wiring
+    // (including whichever embed-model branch this environment takes) is
+    // exercised through the actual binary.
+    let given = bundle["given"].as_array().expect("given array");
+    assert!(
+        given.iter().any(|g| g["repo"] == "rafters"
+            && g["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("careful about identity invariants"))),
+        "expected the cross-repo rafters reflection in given: {given:?}"
+    );
 }
 
 #[test]
