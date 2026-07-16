@@ -105,6 +105,9 @@ pub enum LegionError {
     #[error("etc error: {0}")]
     Etc(String),
 
+    #[error("whoami --generate error: {0}")]
+    WhoamiGenerate(String),
+
     #[error("watch already running (pid {0})")]
     WatchAlreadyRunning(u32),
 
