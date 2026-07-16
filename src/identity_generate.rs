@@ -310,6 +310,23 @@ fn contains_forbidden_phrase(text: &str) -> bool {
     text.to_lowercase().contains("what i am")
 }
 
+/// Reduce an arbitrary string to a safe single filename component:
+/// every char outside `[A-Za-z0-9._-]` becomes `-`. `repo` flows into
+/// the backup filename, and `Path::join` would interpret a `/` (or a
+/// `..` segment) in it as path structure, silently relocating the
+/// recovery file outside `backup_dir`.
+fn sanitize_filename_component(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 /// Apply mode: replace `repo`'s identity chain with `manifest`.
 ///
 /// 1. `validate_manifest(manifest)` -- first gate, before any read or
@@ -372,7 +389,11 @@ pub fn apply(
         );
     }
     let would_retire: Vec<String> = old_rows.iter().map(|r| r.id.clone()).collect();
-    let backup_path = backup_dir.join(format!("identity-backup-{repo}-{}.json", Uuid::now_v7()));
+    let backup_path = backup_dir.join(format!(
+        "identity-backup-{}-{}.json",
+        sanitize_filename_component(repo),
+        Uuid::now_v7()
+    ));
 
     if dry_run {
         return Ok(ApplyResult::Planned(ApplyPlan {
@@ -1029,6 +1050,49 @@ mod tests {
         let roots = db.get_identity_roots("legion", 50).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].text, "first ever root");
+    }
+
+    #[test]
+    fn apply_backup_path_stays_inside_backup_dir_for_hostile_repo_name() {
+        // `repo` flows into the backup filename; a value carrying path
+        // separators must not relocate the recovery file outside
+        // backup_dir (Path::join would treat `/` as structure).
+        let (db, index, dir) = test_storage();
+        let backup_dir = dir.path().join("backups");
+        let manifest = IdentityManifest {
+            root: "new root".to_string(),
+            chain: vec![],
+        };
+        let result = apply(
+            &db,
+            &index,
+            "../../escape/attempt",
+            &manifest,
+            &backup_dir,
+            false,
+        )
+        .unwrap();
+        let outcome = match result {
+            ApplyResult::Applied(o) => o,
+            ApplyResult::Planned(_) => panic!("expected Applied"),
+        };
+
+        assert!(
+            outcome.backup_path.parent() == Some(backup_dir.as_path()),
+            "backup must be a direct child of backup_dir, got {}",
+            outcome.backup_path.display()
+        );
+        assert!(outcome.backup_path.exists());
+    }
+
+    #[test]
+    fn sanitize_filename_component_neutralizes_separators() {
+        assert_eq!(
+            sanitize_filename_component("../../etc/passwd"),
+            "..-..-etc-passwd"
+        );
+        assert_eq!(sanitize_filename_component("legion"), "legion");
+        assert_eq!(sanitize_filename_component("my repo\\x"), "my-repo-x");
     }
 
     #[test]
