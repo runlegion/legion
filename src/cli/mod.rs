@@ -105,27 +105,38 @@ pub(crate) enum Commands {
         dedupe_mode: DedupeMode,
     },
 
-    /// Permanently delete a reflection by id.
+    /// Permanently delete a reflection by id, or (with --persist) archive
+    /// it instead.
     ///
-    /// Destructive. No soft-delete, no undo. Removes the row from both
-    /// the SQLite reflections table and the tantivy search index. Used
-    /// to retire stale workaround reflections, demonstrably-wrong
-    /// reflections, or personal data that should not persist in the
-    /// corpus.
+    /// Default (no --persist): destructive. No soft-delete, no undo.
+    /// Removes the row from both the SQLite reflections table and the
+    /// tantivy search index. Used to retire stale workaround reflections,
+    /// demonstrably-wrong reflections, or personal data that should not
+    /// persist in the corpus.
     ///
     /// The optional `--repo` flag is a safety check: when provided,
-    /// the delete is refused unless the reflection's actual repo
-    /// matches. Prevents accidentally nuking the wrong reflection when
-    /// working with a similarly-shaped id.
+    /// the delete (or archive) is refused unless the reflection's actual
+    /// repo matches. Prevents accidentally nuking the wrong reflection
+    /// when working with a similarly-shaped id.
     Forget {
-        /// Reflection id to delete.
+        /// Reflection id to forget.
         #[arg(long)]
         id: String,
 
-        /// Optional safety check: refuse the delete unless the
+        /// Optional safety check: refuse the operation unless the
         /// reflection's repo matches this value.
         #[arg(long)]
         repo: Option<String>,
+
+        /// Archive instead of delete (#782): moves the reflection to
+        /// #457's cold tier. The row and search index entry survive --
+        /// it drops out of hot `recall` / `whoami` / `whatami` but stays
+        /// reachable via `recall --archives` / `--include-archives`
+        /// (including the `--domain` and `--latest` paths). One-way
+        /// today: legion ships no un-persist verb yet, matching
+        /// `document`'s archive (also writer-only).
+        #[arg(long)]
+        persist: bool,
     },
 
     /// Recall relevant reflections for the current context
@@ -165,14 +176,15 @@ pub(crate) enum Commands {
 
         /// Search ONLY archived reflections (the deep-dive). Default mode
         /// is hot-only; this flag inverts. Mutually exclusive with
-        /// --include-archives. v1 only affects the BM25/hybrid path;
-        /// --latest, --domain, --cosine-only stay hot-mode regardless.
+        /// --include-archives. Applies to the BM25/hybrid, --domain, and
+        /// --latest paths (#782); --cosine-only stays hot-mode regardless
+        /// (it ranks by embedding similarity with no archive-mode join).
         /// See #457.
         #[arg(long)]
         archives: bool,
 
         /// Search BOTH hot and archived reflections. Mutually exclusive
-        /// with --archives. Same v1 scope caveat as --archives.
+        /// with --archives. Same --cosine-only scope caveat as --archives.
         #[arg(long, conflicts_with = "archives")]
         include_archives: bool,
     },
