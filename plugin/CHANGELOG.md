@@ -1,5 +1,110 @@
 # Legion Changelog
 
+## 0.22.0
+
+The provenance release. Four PRs since 0.21.0, all pulling the same direction: rows and
+verdicts that used to be taken at face value now carry their origin story. A quality-gate
+row knows whether its verdict was VALIDATED by a check or merely ASSERTED by whoever
+recorded it, and a known-false row can be retired with a reason instead of deleted or
+left to lie; a gate row records the base ref its coverage set was actually diffed
+against, so a stacked branch stops being audited against a diff it never made; a
+reflection can be archived -- retired but recoverable -- instead of the previous choice
+between permanent delete and permanent presence; and the identity-chain rebuild proven by
+hand on legion becomes `whoami --generate`, a guarded transactional command instead of a
+remembered procedure. Minor release: five additive `has_column`-guarded columns on
+`quality_gates` (`provenance`, `voided_at`, `void_reason`, `superseded_by`, `base` -- no
+existing column touched), net-new CLI surface (`quality-gate void`, `check --base`,
+`forget --persist`, `whoami --generate`), and no wire-format break; the one existing
+surface that changed behavior only got stricter (`quality-gate record` now refuses a
+manufactured clean).
+
+### New
+
+- **Gate-ledger provenance, void tombstones, and the validator registry** (PR #801,
+  #780): every `quality_gates` row now carries `provenance` -- VALIDATED (earned through
+  `quality-gate check`'s articulation validator) or ASSERTED (self-reported via `record`)
+  -- plus a void/supersede tombstone (`voided_at`/`void_reason`/`superseded_by`),
+  mirroring the `deleted_at` pattern on tasks/reflections/schedules. `quality-gate record
+  --result clean` is refused outright for a skill that has a check validator
+  (`legion-simplify`, `legion-pr-write`): a clean verdict for those skills can only be
+  earned through `check`. The new `gate_registry` module is the single source of truth
+  for that list, replacing two independently hardcoded copies in `cli/pr.rs` and
+  `cli/verify.rs`; skills with no validator (`legion-review`, the card-keyed
+  `legion-verify:<card_id>`) are asserted by necessity and unaffected. Defense in depth:
+  `emit_gate_trust` skips ingestion of an asserted-clean row for a check-gated skill, so
+  a manufactured clean that reaches the ledger outside the CLI refusal (a pre-#780
+  historical row, a future direct caller) still never counts as gate-trust ground truth.
+  `legion quality-gate void --id <id> --reason <why> [--superseded-by <id>]` retires a
+  known-false row without erasing it: voided rows drop out of the live gate lookups
+  (`pr create`'s gate check, the ->Done gate) and `stats`, but stay visible in `list`
+  with a VOID marker -- voiding annotates the ledger, it never deletes from it.
+- **`quality-gate check --base <ref>` -- stacked branches diff against their actual
+  parent** (PR #800, #779): the simplify coverage set was hardcoded to `main...HEAD`, so
+  a branch stacked on another feature branch was audited against every commit back to
+  main -- files it never touched. `--base` overrides the diff base (three-dot merge-base
+  range preserved), and the resolved base is recorded on the gate row's new `base` column
+  on every check -- flag or default resolution alike -- so a too-narrow base stays
+  auditable after the fact rather than vanishing into the verdict. An unresolvable
+  `--base` is a hard error, same as the no-base-ref case.
+- **Pure renames auto-clear from the simplify coverage set** (PR #800, #779):
+  `git_changed_files` moves from `--name-only` to `--name-status -M50%` (an explicit
+  similarity pin, immune to ambient `diff.renames` config), which is what lets a pure
+  move be told apart from a move that also changed content. An `R100` zero-delta rename
+  is auto-cleared -- there is nothing at the new path to simplify -- while an `R<100`
+  rename stays in scope under its new path. Cleared renames are listed as
+  `(old_path, new_path)` pairs in the gate's details JSON (`cleared_renames` /
+  `cleared_renames_count`) so the auto-clear is audited, not silent. Review hardening:
+  hypothetical `C<nn>` copy lines share the rename branch's destination-path parsing but
+  are never auto-cleared (a copy leaves its source in place).
+- **`forget --persist` -- archive a reflection instead of deleting it** (PR #802, #782):
+  `forget --repo <r> --id <id> --persist` is the manual soft-archive verb alongside
+  forget's existing permanent delete, reusing the #457 `archived_at`/`ArchiveMode`
+  machinery end to end rather than growing a parallel disposition --
+  `Database::archive_reflection` is an idempotent `archived_at` writer mirroring
+  `archive_document`'s COALESCE contract, and `delete_reflection` is untouched. The same
+  PR closes the #457 coverage gap the issue named as must-ship-together: `recall
+  --archives`/`--include-archives` now thread `ArchiveMode` through the `--domain` and
+  `--latest` paths, which previously stayed silently hot-only (a shared
+  `archive_mode_where_clause` helper keeps the three predicates from drifting).
+  `--cosine-only` stays out of scope by design (it ranks by embedding similarity with no
+  archive-mode DB join) and now says so with an explicit warning. Both the accepted and
+  the rejected-wrong-repo persist paths write audit rows.
+- **`whoami --generate` -- the identity rebuild becomes a tool** (PR #803, #784): the
+  by-hand identity-chain rebuild proven on legion and smugglr on 2026-07-14 is now a
+  repeatable command. Gather mode (`whoami --generate --repo <r> --vault-repo <v>
+  --byline <names>`) deterministically packages the source material as JSON: the claimed
+  half (files in the vault repo whose frontmatter `author` field -- not filename --
+  matches a requested byline, full body included, across md/mdx/astro) and the given half
+  (cross-agent reflections via hybrid consult, over-fetched 3x so self-repo rows can be
+  filtered without under-filling). The binary authors no prose -- the calling agent
+  synthesizes an `IdentityManifest` and applies it with `--generate --apply --from-file
+  <manifest.json>` (`--dry-run` reports the plan without writing). Apply does not
+  insert-then-delete: it consumes #785's `swap_identity_root`, an atomic transaction with
+  no two-live-roots or zero-root window, then explicitly retires any leftover old-chain
+  rows the swap does not cascade to -- DB and search index both -- after backing up the
+  full pre-existing identity corpus to a JSON file (loud warning if the corpus hits the
+  500-row backup cap instead of silently truncating; repo name sanitized in the backup
+  filename so it cannot path-traverse out of the backup dir). Post-commit index adds are
+  best-effort by design: once the DB swap has committed, a tantivy straggler warns with
+  reindex-recovery guidance rather than reporting a committed apply as failed and
+  inviting id-churning re-runs.
+
+### Fixed
+
+- **Boot banner could surface an archived identity/workflow root** (PR #802, #782):
+  `get_domain_roots` -- the shared backer for `whoami` and `whatami` -- did not filter
+  `archived_at`, so an archived root still counted as live and could outrank the real
+  chain in the boot banner; the #785 identity-root guard's own liveness check already had
+  to work around the asymmetry. It now unconditionally filters `archived_at IS NULL`,
+  matching the guard's predicate, so an archived orphan (including one left behind by an
+  identity swap) can never resurface as a root.
+- **Landing-order compile break between #802 and #803** (carried as a hotfix in PR #800):
+  #802 widened `get_reflections_by_domain` with an `ArchiveMode` parameter while #803's
+  new `identity_generate.rs` was written against the old signature -- individually green,
+  jointly broken. Five call sites gained `ArchiveMode::Both`, which is also the correct
+  semantic for apply's pre-swap scan: the backup and retirement pass should protect the
+  full identity corpus, archived rows included, not just the hot half.
+
 ## 0.21.0
 
 The sanctioned-path release. Twenty-five PRs since 0.20.0, with one through-line: guards
