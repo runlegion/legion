@@ -10,6 +10,7 @@ mod documents;
 mod embed;
 mod error;
 mod etc;
+mod gate_registry;
 mod gate_trust;
 mod graph;
 mod health;

@@ -960,6 +960,12 @@ fn pr_view_surfaces_malformed_plugin_json_as_worksource_error() {
 // ---------------------------------------------------------------------------
 
 /// `legion quality-gate record` writes a row and prints a UUIDv7 on stdout.
+///
+/// Uses "legion-review" -- a skill with no check validator -- rather than
+/// "legion-simplify": since #780, `record --result clean` is refused for a
+/// check-gated skill (see `quality_gate_record_refuses_clean_for_check_gated_skill`
+/// below), and this test exercises the generic record mechanics, not that
+/// distinction.
 #[test]
 fn quality_gate_record_prints_id() {
     let dir = tempfile::tempdir().unwrap();
@@ -968,9 +974,59 @@ fn quality_gate_record_prints_id() {
         "quality-gate",
         "record",
         "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&id);
+}
+
+/// #780: `quality-gate record --result clean` is refused for a skill with a
+/// check validator (legion-simplify, legion-pr-write) -- a clean gate for
+/// those can only be earned via `quality-gate check`.
+#[test]
+fn quality_gate_record_refuses_clean_for_check_gated_skill() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
         "legion-simplify",
         "--result",
         "clean",
+    ]));
+    assert!(
+        stderr.contains("check validator"),
+        "expected a check-validator refusal message, got: {stderr}"
+    );
+
+    // No row was written -- the refusal happens before the DB touch.
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&stdout).expect("expected JSON array");
+    assert!(
+        arr.is_empty(),
+        "a refused record must not write a row, got: {arr:?}"
+    );
+}
+
+/// #780: `record --result issues` is still allowed for a check-gated skill --
+/// only a manufactured "clean" is the ground-truth risk.
+#[test]
+fn quality_gate_record_allows_issues_for_check_gated_skill() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "issues",
+        "--findings-count",
+        "1",
     ]))
     .trim()
     .to_string();
@@ -2017,6 +2073,12 @@ fn quality_gate_list_empty_json_prints_empty_array() {
 }
 
 /// `legion quality-gate list` shows recorded rows in the human table.
+///
+/// legion-simplify records "issues" and legion-review records "clean": since
+/// #780, `record --result clean` is refused for a check-gated skill
+/// (legion-simplify has one), so the mix is swapped from a legion-simplify
+/// row's usual verdict -- this test only cares that both result strings
+/// render, not which skill carries which.
 #[test]
 fn quality_gate_list_shows_recorded_rows() {
     let dir = tempfile::tempdir().unwrap();
@@ -2028,7 +2090,9 @@ fn quality_gate_list_shows_recorded_rows() {
         "--skill",
         "legion-simplify",
         "--result",
-        "clean",
+        "issues",
+        "--findings-count",
+        "3",
     ]));
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
@@ -2036,9 +2100,7 @@ fn quality_gate_list_shows_recorded_rows() {
         "--skill",
         "legion-review",
         "--result",
-        "issues",
-        "--findings-count",
-        "3",
+        "clean",
     ]));
 
     let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list"]));
@@ -2065,13 +2127,16 @@ fn quality_gate_list_shows_recorded_rows() {
 fn quality_gate_list_filter_by_skill() {
     let dir = tempfile::tempdir().unwrap();
 
+    // legion-simplify records "issues" (#780: "clean" is refused for a
+    // check-gated skill via `record`) -- irrelevant to this test, which
+    // filters on skill name, not result.
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
         "record",
         "--skill",
         "legion-simplify",
         "--result",
-        "clean",
+        "issues",
     ]));
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
@@ -2148,6 +2213,132 @@ fn quality_gate_list_invalid_result_value_exits_nonzero() {
     );
 }
 
+// --- quality-gate void tests (#780) ---
+
+/// `legion quality-gate void` marks a row voided with a reason, and the
+/// voided row is still visible (with `voided_at`/`void_reason` populated) in
+/// `quality-gate list --json` -- voiding annotates the ledger, it never
+/// deletes from it.
+#[test]
+fn quality_gate_void_marks_row_and_stays_visible_in_list() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+    ]))
+    .trim()
+    .to_string();
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "void",
+        "--id",
+        &id,
+        "--reason",
+        "manufactured clean, no articulation ever ran",
+    ]));
+    assert!(
+        stdout.contains(&id),
+        "expected the void confirmation to name the row id, got: {stdout}"
+    );
+
+    let list_stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_str(&list_stdout).expect("expected JSON array");
+    assert_eq!(arr.len(), 1, "voiding must not delete the row from history");
+    assert!(
+        !arr[0]["voided_at"].is_null(),
+        "expected voided_at to be set, got: {arr:?}"
+    );
+    assert_eq!(
+        arr[0]["void_reason"].as_str().unwrap(),
+        "manufactured clean, no articulation ever ran"
+    );
+
+    // The human table marks it too.
+    let table_stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list"]));
+    assert!(
+        table_stdout.contains("VOID"),
+        "expected the human table to mark the voided row, got: {table_stdout}"
+    );
+}
+
+/// `legion quality-gate void --superseded-by` links a voided row to its
+/// replacement.
+#[test]
+fn quality_gate_void_links_superseding_row() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let old_id = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+    ]))
+    .trim()
+    .to_string();
+    let new_id = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+    ]))
+    .trim()
+    .to_string();
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "void",
+        "--id",
+        &old_id,
+        "--reason",
+        "superseded by a re-run",
+        "--superseded-by",
+        &new_id,
+    ]));
+    assert!(
+        stdout.contains(&new_id),
+        "expected the void output to name the superseding row, got: {stdout}"
+    );
+
+    let list_stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_str(&list_stdout).expect("expected JSON array");
+    let voided = arr
+        .iter()
+        .find(|r| r["id"].as_str() == Some(old_id.as_str()))
+        .expect("voided row should still be listed");
+    assert_eq!(voided["superseded_by"].as_str().unwrap(), new_id);
+}
+
+/// `legion quality-gate void` with an unknown id exits non-zero.
+#[test]
+fn quality_gate_void_missing_id_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "void",
+        "--id",
+        "no-such-id",
+        "--reason",
+        "test",
+    ]));
+    assert!(
+        stderr.contains("no-such-id"),
+        "expected the error to name the missing id, got: {stderr}"
+    );
+}
+
 /// `legion quality-gate list --json` emits a JSON array with all fields including details.
 #[test]
 fn quality_gate_list_json_emits_array_with_details() {
@@ -2208,16 +2399,21 @@ fn quality_gate_stats_empty_json_prints_empty_array() {
 }
 
 /// `legion quality-gate stats` shows per-skill aggregates in the human table.
+///
+/// Uses "legion-review" -- a mixed clean/issues run pair recorded via
+/// `record` -- rather than "legion-simplify": #780 refuses `record --result
+/// clean` for a check-gated skill, and legion-review has no check validator,
+/// so it is the real skill this recording pattern is legitimate for.
 #[test]
 fn quality_gate_stats_shows_per_skill_aggregates() {
     let dir = tempfile::tempdir().unwrap();
 
-    // 2 runs for legion-simplify: 1 clean, 1 issues (1 finding).
+    // 2 runs for legion-review: 1 clean, 1 issues (1 finding).
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
         "record",
         "--skill",
-        "legion-simplify",
+        "legion-review",
         "--result",
         "clean",
     ]));
@@ -2225,7 +2421,7 @@ fn quality_gate_stats_shows_per_skill_aggregates() {
         "quality-gate",
         "record",
         "--skill",
-        "legion-simplify",
+        "legion-review",
         "--result",
         "issues",
         "--findings-count",
@@ -2234,7 +2430,7 @@ fn quality_gate_stats_shows_per_skill_aggregates() {
 
     let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "stats"]));
     assert!(
-        stdout.contains("legion-simplify"),
+        stdout.contains("legion-review"),
         "expected skill row in stats output, got: {stdout}"
     );
     // 2 runs total.
@@ -2297,13 +2493,16 @@ fn quality_gate_stats_json_shape() {
 fn quality_gate_stats_filter_by_skill() {
     let dir = tempfile::tempdir().unwrap();
 
+    // legion-simplify records "issues" (#780: "clean" is refused for a
+    // check-gated skill via `record`) -- irrelevant to this test, which
+    // filters on skill name, not result.
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
         "record",
         "--skill",
         "legion-simplify",
         "--result",
-        "clean",
+        "issues",
     ]));
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",

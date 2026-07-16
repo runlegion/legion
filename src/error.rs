@@ -192,6 +192,12 @@ pub enum LegionError {
     #[error("invalid gate result: '{0}' (expected 'clean' or 'issues')")]
     InvalidGateResult(String),
 
+    #[error("invalid gate provenance: '{0}' (expected 'validated' or 'asserted')")]
+    InvalidGateProvenance(String),
+
+    #[error("quality gate row not found: {0}")]
+    QualityGateNotFound(String),
+
     #[error("delegation refused: {0}")]
     DelegationRefused(String),
 
@@ -309,6 +315,20 @@ mod tests {
         assert!(err.to_string().contains("bad"));
         assert!(err.to_string().contains("clean"));
         assert!(err.to_string().contains("issues"));
+    }
+
+    #[test]
+    fn invalid_gate_provenance_display() {
+        let err = LegionError::InvalidGateProvenance("bad".to_string());
+        assert!(err.to_string().contains("bad"));
+        assert!(err.to_string().contains("validated"));
+        assert!(err.to_string().contains("asserted"));
+    }
+
+    #[test]
+    fn quality_gate_not_found_display() {
+        let err = LegionError::QualityGateNotFound("gate-id-1".to_string());
+        assert!(err.to_string().contains("gate-id-1"));
     }
 
     #[test]

@@ -66,6 +66,68 @@ impl FromStr for GateResult {
     }
 }
 
+/// Provenance of a recorded quality-gate row (#780): whether the verdict was
+/// structurally VALIDATED (a coverage-and-substance articulation passed
+/// `quality-gate check`) or merely ASSERTED (written via `quality-gate
+/// record`, with no validator backing the claim).
+///
+/// This is the distinction gate-trust and audits need to tell a proven clean
+/// gate apart from a self-reported one: the cross-repo ledger the
+/// uncertainty engine (#694) treats as calibration ground truth cannot
+/// afford to let an unvalidated "clean" claim count the same as a validated
+/// one, or a manufactured row silently poisons the very rubber-stamp
+/// measurement it exists to produce.
+///
+/// Stored as lowercase string in `quality_gates.provenance`, mirroring
+/// `GateResult`'s Display/FromStr/serde symmetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GateProvenance {
+    /// Recorded via `quality-gate check`: the structural validator (coverage
+    /// of every changed file + non-boilerplate substance) passed before this
+    /// row was written.
+    Validated,
+    /// Recorded via `quality-gate record`: no validator ran. Legitimate --
+    /// and the only option -- for skills with no check validator
+    /// (`legion-review`, a `legion-verify:<card_id>` verdict: asserted by
+    /// necessity, since no validator exists for either). For a skill that
+    /// DOES have a check validator (`gate_registry::has_check_validator`),
+    /// a `clean` result under this provenance is refused at the CLI layer
+    /// and, as defense in depth, never ingested by gate-trust even if a row
+    /// reaches the ledger some other way (a pre-#780 historical row, or a
+    /// future caller that bypasses the CLI).
+    Asserted,
+}
+
+impl GateProvenance {
+    /// The serialized column value. Display and the SQL write path both
+    /// delegate here so the wire form has exactly one source.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Validated => "validated",
+            Self::Asserted => "asserted",
+        }
+    }
+}
+
+impl fmt::Display for GateProvenance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for GateProvenance {
+    type Err = LegionError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "validated" => Ok(Self::Validated),
+            "asserted" => Ok(Self::Asserted),
+            other => Err(LegionError::InvalidGateProvenance(other.to_string())),
+        }
+    }
+}
+
 /// Build the quality-gate skill key for a verify verdict on `card_id`.
 ///
 /// The key is single-sourced here so that the handler that writes the gate
@@ -612,6 +674,30 @@ mod tests {
         assert!("Clean".parse::<GateResult>().is_err());
         assert!("CLEAN".parse::<GateResult>().is_err());
         assert!("".parse::<GateResult>().is_err());
+    }
+
+    // --- GateProvenance tests (#780) ---
+
+    #[test]
+    fn gate_provenance_display_roundtrip() {
+        for p in [GateProvenance::Validated, GateProvenance::Asserted] {
+            let s = p.to_string();
+            let parsed = s.parse::<GateProvenance>().expect("parse should succeed");
+            assert_eq!(p, parsed, "display/parse roundtrip failed for {p}");
+        }
+    }
+
+    #[test]
+    fn gate_provenance_display_values() {
+        assert_eq!(GateProvenance::Validated.to_string(), "validated");
+        assert_eq!(GateProvenance::Asserted.to_string(), "asserted");
+    }
+
+    #[test]
+    fn gate_provenance_parse_invalid_returns_err() {
+        assert!("unknown".parse::<GateProvenance>().is_err());
+        assert!("Validated".parse::<GateProvenance>().is_err());
+        assert!("".parse::<GateProvenance>().is_err());
     }
 
     // --- verify_gate_key tests ---
