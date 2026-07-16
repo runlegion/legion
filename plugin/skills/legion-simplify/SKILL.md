@@ -96,29 +96,69 @@ Error paths propagate via `?`. No stringly-typed state. Verdict: clean.
 2. For EACH changed file: read it, review its hunks against the categories above, and write its
    `### <path>` entry with real reasoning.
 3. Write the articulation to a file (e.g. `/tmp/simplify-<branch>.md`).
-4. Validate and record:
+4. If your verdict has real findings (`--result issues`), also write them as structured JSON --
+   one object per finding, `{"file": "<path>", "line": <int or null>, "severity": "HIGH"|"MED"|"LOW",
+   "summary": "<one-line problem statement>"}`. This is separate from the prose articulation: the
+   articulation is for a human/reviewer to read, the structured array is what the finding-resolution
+   ledger (#773) tracks toward resolved-or-dispositioned. The prose is NOT parsed for findings --
+   only this array is.
+5. Validate and record:
    ```bash
    legion quality-gate check \
      --skill legion-simplify \
      --result <clean|issues> \
      --findings-count <N> \
-     --articulation-file /tmp/simplify-<branch>.md
+     --articulation-file /tmp/simplify-<branch>.md \
+     --findings-json '[{"file": "src/foo.rs", "line": 42, "severity": "MED", "summary": "duplicate WHERE-clause construction"}]'
    ```
-   `--findings-count` is the number of real structural findings you recorded (0 for a clean
-   verdict). The validator resolves the changed-file set from git, checks every file has a
-   non-boilerplate entry, then records the gate for HEAD.
-   - Clean -> the gate is recorded; proceed to pr-write.
-   - Refused -> the output names the gap (an unaddressed file, a boilerplate entry). Fix it by
-     actually reading that file and writing real reasoning -- do not pad to clear the check. Re-run.
-5. If your verdict is `issues`, fix the findings, then re-run from step 1 on the new HEAD (the
+   `--findings-json` is optional and MUST be omitted (or empty) for a `--result clean` call --
+   passing findings alongside `--result clean` in the same call is refused (#773, see below), not
+   silently accepted. `--findings-count` is the number of real structural findings you recorded
+   (0 for a clean verdict). The validator resolves the changed-file set from git, checks every
+   file has a non-boilerplate entry, then records the gate for HEAD.
+   - Clean -> the gate is recorded; proceed to pr-write. **Refused instead** when: this same call's
+     `--findings-json` is non-empty (a clean verdict cannot carry its own findings), OR a HIGH/MED
+     finding from a PRIOR run on this branch is still PENDING (neither a later commit touched its
+     file nor was it explicitly dispositioned), OR a prior LOW finding is still un-acked (#773) --
+     see "Finding resolution" below.
+   - Refused (coverage/substance) -> the output names the gap (an unaddressed file, a boilerplate
+     entry). Fix it by actually reading that file and writing real reasoning -- do not pad to clear
+     the check. Re-run.
+6. If your verdict is `issues`, fix the findings, then re-run from step 1 on the new HEAD (the
    gate is HEAD-keyed) until the articulation is clean.
+
+## Finding resolution (#773)
+
+A finding you record via `--findings-json` does not evaporate once the gate is recorded. It lives
+in the findings ledger as PENDING until one of:
+
+- **Resolved automatically** -- a later commit on this branch touches the flagged file. Detected
+  by git log at the next `quality-gate check`/`record` call; you do not need to do anything extra
+  beyond committing the fix. **Coarse by design:** this is file-level, not content-aware -- ANY
+  commit that touches the flagged file resolves the finding, even an unrelated edit elsewhere in
+  it, not only one that fixes the specific problem. On an active branch a file gets re-touched for
+  many reasons, so a finding can auto-resolve without ever being deliberately addressed. If that
+  matters for a specific finding, disposition or batch-ack it explicitly instead of relying on
+  auto-resolution to be a stand-in for "someone looked at this."
+- **Dispositioned** -- you decide not to fix it and say why:
+  `legion quality-gate finding-disposition --id <finding-id> --reason "won't fix: intentional, see X"`.
+- **Batch-acked** -- for a sweep of LOW/cosmetic findings only, one shared reason clears all of
+  them at once (no per-item ceremony):
+  `legion quality-gate finding-ack --branch <branch> --skill legion-simplify --reason "formatting only, deferred"`.
+
+Find finding ids with `legion quality-gate finding-list --branch <branch> --skill legion-simplify`.
+A `clean` verdict is refused until the PENDING set for this branch+skill is empty AND this call's
+own `--findings-json` is empty -- writing a finding down and then recording clean on a LATER commit
+without resolving or dispositioning it is one hand-wave this closes; recording clean in the SAME
+call you report the finding in is the other, and is refused just as hard.
 
 ## Pass Criteria for `legion pr create`
 
 `legion pr create` checks the DB before opening the PR. The gate passes only when a gate row
 exists for the current HEAD commit hash with `result = "clean"`. Because the gate is recorded
 only by `legion quality-gate check`, a clean row now means an accepted per-file articulation
-exists -- not merely that someone typed "clean".
+exists -- not merely that someone typed "clean" -- AND that no prior finding on this branch is
+still sitting unresolved and undispositioned (#773).
 
 ## Notes
 
@@ -128,4 +168,4 @@ exists -- not merely that someone typed "clean".
   plausible-sounding wrong one -- that stays the reviewer's job, same division of labor as
   `legion pr write-check`. It can tell when an entry is empty, boilerplate, or points at
   nothing locatable, and it refuses those.
-- If you commit again after a clean gate, the gate no longer matches HEAD -- re-run step 4.
+- If you commit again after a clean gate, the gate no longer matches HEAD -- re-run step 5.
