@@ -2331,8 +2331,9 @@ mod tests {
 
         db.retag_reflection(&stored, None).unwrap();
 
+        let default_range = crate::timerange::TimeRange::default();
         let results = index
-            .search("legion", "SIGKILLs unsigned binaries", 5)
+            .search("legion", "SIGKILLs unsigned binaries", 5, &default_range)
             .unwrap();
         assert_eq!(
             results.len(),
