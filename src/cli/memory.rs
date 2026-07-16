@@ -293,7 +293,13 @@ pub(crate) fn handle_retag(id: String, set_domain: String) -> error::Result<()> 
         }
         Err(e) => return Err(e),
     };
-    write_audit("success");
+
+    // `retag_reflection` no-ops (no write, no guard check) when the
+    // requested domain equals the current one. Audit and report that
+    // honestly as "noop" rather than "success" -- a success outcome would
+    // claim a mutation that never happened.
+    let is_noop = old_domain == retagged.domain;
+    write_audit(if is_noop { "noop" } else { "success" });
 
     let preview: String = retagged.text.chars().take(80).collect();
     let ellipsis = if retagged.text.chars().count() > 80 {
@@ -301,15 +307,26 @@ pub(crate) fn handle_retag(id: String, set_domain: String) -> error::Result<()> 
     } else {
         ""
     };
-    println!(
-        "retagged reflection {} ({}): domain {} -> {}: {}{} -- still hot and recallable; id, chain, and recall_count unchanged.",
-        id,
-        retagged.repo,
-        old_domain.as_deref().unwrap_or("none"),
-        retagged.domain.as_deref().unwrap_or("none"),
-        preview,
-        ellipsis
-    );
+    if is_noop {
+        println!(
+            "reflection {} ({}) is already domain {}: {}{} -- no change.",
+            id,
+            retagged.repo,
+            retagged.domain.as_deref().unwrap_or("none"),
+            preview,
+            ellipsis
+        );
+    } else {
+        println!(
+            "retagged reflection {} ({}): domain {} -> {}: {}{} -- still hot and recallable; id, chain, and recall_count unchanged.",
+            id,
+            retagged.repo,
+            old_domain.as_deref().unwrap_or("none"),
+            retagged.domain.as_deref().unwrap_or("none"),
+            preview,
+            ellipsis
+        );
+    }
     Ok(())
 }
 

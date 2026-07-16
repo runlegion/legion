@@ -1160,6 +1160,47 @@ fn reflect_retag_set_domain_none_clears_domain_and_recall_by_domain_stops_matchi
 }
 
 #[test]
+fn reflect_retag_to_current_domain_is_a_reported_noop() {
+    // retag_reflection short-circuits (no write, no guard check) when the
+    // requested domain equals the current one. The CLI must report this
+    // honestly as a no-op, not as a successful mutation, and the audit
+    // trail must say the same.
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "lesson",
+        "--text",
+        "already the right domain",
+    ]))
+    .trim()
+    .to_string();
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "retag",
+        "--id",
+        &id,
+        "--set-domain",
+        "lesson",
+    ]));
+    assert!(
+        stdout.contains("no change") && !stdout.contains("retagged reflection"),
+        "same-domain retag should report as a no-op, not a mutation: {stdout}"
+    );
+
+    let audit_stdout =
+        run_ok(legion_cmd(dir.path()).args(["audit", "--action", "retag-reflection", "--json"]));
+    assert!(
+        audit_stdout.contains("\"outcome\": \"noop\""),
+        "no-op retag should be audited as noop, not success, got: {audit_stdout}"
+    );
+}
+
+#[test]
 fn recall_domain_archives_reaches_persisted_reflections() {
     // Closes the #457 gap this issue owns: --domain combined with
     // --archives used to silently ignore the archive-mode filter (v1
