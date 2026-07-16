@@ -201,6 +201,21 @@ pub enum LegionError {
     #[error("quality gate row not found: {0}")]
     QualityGateNotFound(String),
 
+    #[error("invalid finding severity: '{0}' (expected 'high', 'med', or 'low')")]
+    InvalidFindingSeverity(String),
+
+    #[error("invalid finding status: '{0}' (expected 'pending', 'resolved', or 'dispositioned')")]
+    InvalidFindingStatus(String),
+
+    #[error("quality gate finding not found: {0}")]
+    FindingNotFound(String),
+
+    #[error(
+        "finding {0} is already RESOLVED (a later commit demonstrably touched the flagged \
+         file) -- a resolved finding needs no disposition"
+    )]
+    FindingAlreadyResolved(String),
+
     #[error("delegation refused: {0}")]
     DelegationRefused(String),
 
@@ -332,6 +347,33 @@ mod tests {
     fn quality_gate_not_found_display() {
         let err = LegionError::QualityGateNotFound("gate-id-1".to_string());
         assert!(err.to_string().contains("gate-id-1"));
+    }
+
+    #[test]
+    fn invalid_finding_severity_display() {
+        let err = LegionError::InvalidFindingSeverity("critical".to_string());
+        assert!(err.to_string().contains("critical"));
+        assert!(err.to_string().contains("high"));
+    }
+
+    #[test]
+    fn invalid_finding_status_display() {
+        let err = LegionError::InvalidFindingStatus("waived".to_string());
+        assert!(err.to_string().contains("waived"));
+        assert!(err.to_string().contains("pending"));
+    }
+
+    #[test]
+    fn finding_not_found_display() {
+        let err = LegionError::FindingNotFound("finding-1".to_string());
+        assert!(err.to_string().contains("finding-1"));
+    }
+
+    #[test]
+    fn finding_already_resolved_display() {
+        let err = LegionError::FindingAlreadyResolved("finding-2".to_string());
+        assert!(err.to_string().contains("finding-2"));
+        assert!(err.to_string().contains("RESOLVED"));
     }
 
     #[test]

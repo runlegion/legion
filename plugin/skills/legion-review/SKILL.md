@@ -63,8 +63,27 @@ without guessing.
      --details-json '<JSON: decision, findings[], refuted_count, dimensions_run>'
    ```
 
+   `findings[]`'s schema is pinned (#773) -- each entry MUST be
+   `{"file": "<path>", "line": <int or null>, "severity": "HIGH"|"MED"|"LOW", "summary": "<one-line
+   problem statement>"}`. This is what the finding-resolution ledger extracts and tracks toward
+   resolved-or-dispositioned; an entry missing any of these keys is silently dropped from the
+   ledger (the gate's own `--findings-count` stays the source of truth for the run, but that
+   individual finding will never surface for disposition).
+
    The gate is keyed on HEAD, so a new commit after review invalidates it -- re-run after
    fixes, exactly like the simplify gate.
+
+   **`--result clean` is refused (#773)** when a HIGH/MED finding from a PRIOR review run on this
+   branch is still PENDING (neither a later commit touched its file nor was it explicitly
+   dispositioned), or a LOW finding is still un-acked. Reconciliation runs automatically at record
+   time -- a fix already landed in an earlier commit clears itself. For anything still open:
+   `legion quality-gate finding-disposition --id <finding-id> --reason "won't fix: ..."` for a
+   single finding, or `legion quality-gate finding-ack --branch <branch> --skill legion-review
+   --reason "..."` to batch-clear a sweep of LOW findings. `legion quality-gate finding-list
+   --branch <branch> --skill legion-review` lists ids and current status. An `approved` decision
+   with non-blocking findings that are neither fixed nor dispositioned is exactly the hand-wave
+   this refusal exists to stop -- do not treat `approved` as license to skip step 5's ledger
+   bookkeeping just because the decision itself does not require a fix-and-re-review round.
 
 6. **Report.** Emit the consolidated REVIEW REPORT (the agent definition's format): decision,
    per-dimension one-liners, surviving findings with file:line and fix suggestions, refuted

@@ -11,6 +11,7 @@ mod autonomy;
 mod board;
 pub mod css_symbols;
 mod documents;
+pub(crate) mod findings;
 mod health;
 mod heartbeat;
 pub mod inventory;
@@ -131,6 +132,7 @@ impl Database {
         health::create_tables(conn)?;
         audit::create_tables(conn)?;
         quality_gates::create_tables(conn)?;
+        findings::create_tables(conn)?;
         statusline_samples::create_tables(conn)?;
         wake::create_tables(conn)?;
         scip::create_tables(conn)?;
