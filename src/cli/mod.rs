@@ -1047,6 +1047,8 @@ pub(crate) enum ReflectAction {
         id: String,
 
         /// New domain name, or the literal `none` to clear the domain.
+        /// `none` is a reserved sentinel: a domain literally named "none"
+        /// cannot be set or targeted through this flag.
         #[arg(long)]
         set_domain: String,
     },

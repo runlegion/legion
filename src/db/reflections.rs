@@ -2700,4 +2700,52 @@ mod tests {
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].id, identity_root.id);
     }
+
+    #[test]
+    fn retag_reflection_last_workflow_root_into_identity_source_guard_wins() {
+        // Pins the guard ORDER for a target that trips both guards at
+        // once: the sole live workflow root, retagged into identity while
+        // a live identity root already exists. The source-domain
+        // zero-root guard is checked first in `retag_reflection`, so this
+        // must fail as RetagLastWorkflowRoot (protecting the source),
+        // not IdentityRootExists (the target-side guard) -- and either
+        // way the row must be left untouched.
+        let db = test_db();
+        let identity_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the live identity root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let sole_workflow_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the only workflow root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let err = db
+            .retag_reflection(&sole_workflow_root.id, Some("identity"))
+            .unwrap_err();
+        assert!(matches!(err, LegionError::RetagLastWorkflowRoot { .. }));
+
+        let unchanged = db
+            .get_reflection_by_id(&sole_workflow_root.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.domain.as_deref(), Some("workflow"));
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, identity_root.id);
+    }
 }
