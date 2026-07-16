@@ -105,7 +105,7 @@ pub struct FindingFilter {
 fn parse_severity_from_db(s: String) -> std::result::Result<FindingSeverity, rusqlite::Error> {
     s.parse().map_err(|e: LegionError| {
         rusqlite::Error::FromSqlConversionFailure(
-            8,
+            7,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::other(e.to_string())),
         )
@@ -550,6 +550,40 @@ mod tests {
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].file, "src/b.rs");
+    }
+
+    /// `branch` and `skill` filters combine with AND semantics, not just
+    /// each in isolation -- a row matching only one of the two must not
+    /// appear when both are supplied.
+    #[test]
+    fn list_findings_filters_by_branch_and_skill_combined() {
+        let db = test_db();
+        // Matches both filters.
+        db.insert_finding(&input("gate-1", "src/match.rs", FindingSeverity::High))
+            .unwrap();
+        // Matches branch only (different skill).
+        let mut other_skill = input("gate-2", "src/other-skill.rs", FindingSeverity::High);
+        other_skill.skill = "legion-review";
+        db.insert_finding(&other_skill).unwrap();
+        // Matches skill only (different branch).
+        let mut other_branch = input("gate-3", "src/other-branch.rs", FindingSeverity::High);
+        other_branch.branch = "feat/other";
+        db.insert_finding(&other_branch).unwrap();
+        // Matches neither.
+        let mut neither = input("gate-4", "src/neither.rs", FindingSeverity::High);
+        neither.branch = "feat/other";
+        neither.skill = "legion-review";
+        db.insert_finding(&neither).unwrap();
+
+        let rows = db
+            .list_findings(&FindingFilter {
+                branch: Some("feat/x".to_string()),
+                skill: Some("legion-simplify".to_string()),
+                status: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].file, "src/match.rs");
     }
 
     #[test]

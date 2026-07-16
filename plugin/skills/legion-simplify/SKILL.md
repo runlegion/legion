@@ -134,7 +134,12 @@ in the findings ledger as PENDING until one of:
 
 - **Resolved automatically** -- a later commit on this branch touches the flagged file. Detected
   by git log at the next `quality-gate check`/`record` call; you do not need to do anything extra
-  beyond committing the fix.
+  beyond committing the fix. **Coarse by design:** this is file-level, not content-aware -- ANY
+  commit that touches the flagged file resolves the finding, even an unrelated edit elsewhere in
+  it, not only one that fixes the specific problem. On an active branch a file gets re-touched for
+  many reasons, so a finding can auto-resolve without ever being deliberately addressed. If that
+  matters for a specific finding, disposition or batch-ack it explicitly instead of relying on
+  auto-resolution to be a stand-in for "someone looked at this."
 - **Dispositioned** -- you decide not to fix it and say why:
   `legion quality-gate finding-disposition --id <finding-id> --reason "won't fix: intentional, see X"`.
 - **Batch-acked** -- for a sweep of LOW/cosmetic findings only, one shared reason clears all of

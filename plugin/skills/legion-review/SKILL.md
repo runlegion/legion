@@ -85,7 +85,10 @@ without guessing.
    2. A HIGH/MED finding from a PRIOR review run on this branch is still PENDING (neither a later
       commit touched its file nor was it explicitly dispositioned), or a prior LOW finding is
       still un-acked. Reconciliation against git log runs automatically at record time -- a fix
-      already landed in an earlier commit clears itself before this check runs.
+      already landed in an earlier commit clears itself before this check runs. **Resolution is
+      file-level, not content-aware**: ANY later commit touching the flagged file clears it, even
+      an unrelated edit -- on an active branch this can auto-resolve a finding nobody deliberately
+      addressed. Disposition explicitly if that distinction matters for a given finding.
 
    For anything still open in either case: `legion quality-gate finding-disposition --id
    <finding-id> --reason "won't fix: ..."` for a single finding, or `legion quality-gate

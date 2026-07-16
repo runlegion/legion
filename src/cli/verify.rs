@@ -291,14 +291,30 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // findings (SKILL.md: "surviving MEDs named in the sign-off") --
             // a clean call that itself carries findings must be refused by
             // that call, not merely by some future one. Best-effort: a
-            // malformed `--details-json` (or one with no `findings` key at
-            // all, the common case for most skills) yields zero findings here
-            // rather than failing the record outright.
-            let raw_findings: Vec<finding_gate::RawFinding> = details_json
-                .as_deref()
-                .and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok())
-                .map(|v| finding_gate::extract_findings_from_value(&v))
-                .unwrap_or_default();
+            // missing `findings` key (the common case for most skills, and
+            // for a genuinely clean legion-review run) yields zero findings
+            // here without complaint. A malformed `--details-json` payload
+            // (present but not valid JSON) ALSO yields zero findings -- this
+            // is a fail-open gap review flagged (a corrupted skill invocation
+            // could theoretically mask real findings) -- but is now loud on
+            // stderr rather than silent, so the caller sees it instead of the
+            // clean gate silently passing with no trace of why nothing was
+            // extracted.
+            let raw_findings: Vec<finding_gate::RawFinding> = match details_json.as_deref() {
+                Some(d) => match serde_json::from_str::<serde_json::Value>(d) {
+                    Ok(v) => finding_gate::extract_findings_from_value(&v),
+                    Err(e) => {
+                        eprintln!(
+                            "[legion] warning: --details-json present but failed to parse as \
+                             JSON ({e}) -- 0 findings extracted from it. If this call intended \
+                             to report findings, they will NOT be tracked by the \
+                             finding-resolution ledger (#773); fix the JSON and re-run."
+                        );
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
+            };
 
             // Reconcile the PENDING finding ledger against this commit first
             // (a fix landed in an earlier commit must not still read as
