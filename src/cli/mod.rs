@@ -187,6 +187,22 @@ pub(crate) enum Commands {
         /// with --archives. Same --cosine-only scope caveat as --archives.
         #[arg(long, conflicts_with = "archives")]
         include_archives: bool,
+
+        /// Only include reflections created on or after this date
+        /// (YYYY-MM-DD, <N>d, <N>w, today, yesterday). Applies as a hard
+        /// `created_at` predicate before ranking, in every recall mode
+        /// (#786).
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Only include reflections created on or before this date (same
+        /// grammar as --since).
+        #[arg(long, conflicts_with = "on")]
+        until: Option<String>,
+
+        /// Exactly this date; sugar for --since X --until X.
+        #[arg(long, conflicts_with_all = ["since", "until"])]
+        on: Option<String>,
     },
 
     /// Find reflections similar to a given reflection by cosine similarity
@@ -243,6 +259,21 @@ pub(crate) enum Commands {
         /// always human-formatted today).
         #[arg(long)]
         json: bool,
+
+        /// Only include reflections created on or after this date
+        /// (YYYY-MM-DD, <N>d, <N>w, today, yesterday). Reflection mode
+        /// only (#786); has no effect on --symbol.
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Only include reflections created on or before this date (same
+        /// grammar as --since).
+        #[arg(long, conflicts_with = "on")]
+        until: Option<String>,
+
+        /// Exactly this date; sugar for --since X --until X.
+        #[arg(long, conflicts_with_all = ["since", "until"])]
+        on: Option<String>,
     },
 
     /// Configure Claude Code hooks for legion
@@ -427,6 +458,22 @@ pub(crate) enum Commands {
         /// pass this flag, see #362).
         #[arg(long)]
         include_resolved: bool,
+
+        /// Only include posts created on or after this date (YYYY-MM-DD,
+        /// <N>d, <N>w, today, yesterday). Applies to the `--repo` bullpen
+        /// listing path (#786); has no effect on `--count`, `--archive`,
+        /// or `--archived`.
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Only include posts created on or before this date (same
+        /// grammar as --since).
+        #[arg(long, conflicts_with = "on")]
+        until: Option<String>,
+
+        /// Exactly this date; sugar for --since X --until X.
+        #[arg(long, conflicts_with_all = ["since", "until"])]
+        on: Option<String>,
     },
 
     /// Surface cross-repo highlights for a session start
@@ -434,6 +481,24 @@ pub(crate) enum Commands {
         /// Repository name
         #[arg(long)]
         repo: String,
+
+        /// Only include highlights created on or after this date
+        /// (YYYY-MM-DD, <N>d, <N>w, today, yesterday). Applies across all
+        /// four surfaced queries (recent posts, high-value cross-repo,
+        /// chain extensions, pending tasks) except the recent-posts board
+        /// query's 24h default, which an explicit range overrides rather
+        /// than composes with (#786).
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Only include highlights created on or before this date (same
+        /// grammar as --since).
+        #[arg(long, conflicts_with = "on")]
+        until: Option<String>,
+
+        /// Exactly this date; sugar for --since X --until X.
+        #[arg(long, conflicts_with_all = ["since", "until"])]
+        on: Option<String>,
     },
 
     /// Print identity reflections for a repo (alias for recall --domain identity)

@@ -45,6 +45,7 @@ mod telemetry;
 #[cfg(test)]
 mod testutil;
 mod timefmt;
+mod timerange;
 mod uncertainty;
 mod usage;
 mod verbs;
@@ -145,6 +146,9 @@ fn run() -> error::Result<()> {
             domain,
             archives,
             include_archives,
+            since,
+            until,
+            on,
         } => cli::memory::handle_recall(
             repo,
             context,
@@ -156,6 +160,9 @@ fn run() -> error::Result<()> {
             domain,
             archives,
             include_archives,
+            since,
+            until,
+            on,
         )?,
         Commands::Similar {
             id,
@@ -170,7 +177,10 @@ fn run() -> error::Result<()> {
             symbol,
             limit,
             json,
-        } => cli::memory::handle_consult(context, symbol, limit, json)?,
+            since,
+            until,
+            on,
+        } => cli::memory::handle_consult(context, symbol, limit, json, since, until, on)?,
         Commands::Post {
             repo,
             text,
@@ -205,6 +215,9 @@ fn run() -> error::Result<()> {
             archived,
             include_stale,
             include_resolved,
+            since,
+            until,
+            on,
         } => cli::signal::handle_bullpen(
             repo,
             count,
@@ -214,6 +227,9 @@ fn run() -> error::Result<()> {
             archived,
             include_stale,
             include_resolved,
+            since,
+            until,
+            on,
         )?,
         Commands::Index {
             repo,
@@ -235,7 +251,12 @@ fn run() -> error::Result<()> {
         Commands::McpHealth { wait } => cli::misc::handle_mcp_health(wait)?,
         Commands::Now { banner: _, json } => cli::misc::handle_now(json)?,
         Commands::Init { force } => cli::misc::handle_init(force)?,
-        Commands::Surface { repo } => cli::misc::handle_surface(repo)?,
+        Commands::Surface {
+            repo,
+            since,
+            until,
+            on,
+        } => cli::misc::handle_surface(repo, since, until, on)?,
         Commands::Whoami {
             repo,
             limit,

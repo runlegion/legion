@@ -47,7 +47,7 @@ pub fn post_from_text_with_meta(
     }
 
     let reflection = db.insert_reflection_with_meta(repo, trimmed, "team", meta)?;
-    index.add(&reflection.id, repo, trimmed)?;
+    index.add(&reflection.id, repo, trimmed, &reflection.created_at)?;
 
     Ok(reflection.id)
 }
@@ -94,20 +94,29 @@ pub fn bullpen_filtered(
     reader_repo: &str,
     filter: BullpenFilter,
 ) -> Result<Vec<Reflection>> {
-    bullpen_filtered_with_decay(db, reader_repo, filter, false, false)
+    bullpen_filtered_with_decay(
+        db,
+        reader_repo,
+        filter,
+        false,
+        false,
+        &crate::timerange::TimeRange::default(),
+    )
 }
 
 /// Like `bullpen_filtered` but with opt-in switches for past-TTL posts (#376)
 /// and resolved threads (#362). Operator review only -- agents must not pass
-/// either as `true`.
+/// either as `true`. `range` applies #786's `--since`/`--until`/`--on`
+/// filter (`TimeRange::default()` is unbounded, a no-op).
 pub fn bullpen_filtered_with_decay(
     db: &Database,
     reader_repo: &str,
     filter: BullpenFilter,
     include_stale: bool,
     include_resolved: bool,
+    range: &crate::timerange::TimeRange,
 ) -> Result<Vec<Reflection>> {
-    let posts = db.get_board_posts_filtered_full(include_stale, include_resolved)?;
+    let posts = db.get_board_posts_filtered_full(include_stale, include_resolved, range)?;
 
     match filter {
         BullpenFilter::All => {
@@ -216,7 +225,14 @@ mod tests {
         )
         .expect("post");
 
-        let result = recall::consult_bm25(&db, &index, "token generation", 5).expect("consult");
+        let result = recall::consult_bm25(
+            &db,
+            &index,
+            "token generation",
+            5,
+            &crate::timerange::TimeRange::default(),
+        )
+        .expect("consult");
         assert_eq!(result.reflections.len(), 1);
         assert!(result.reflections[0].text.contains("token generation"));
     }
@@ -460,7 +476,14 @@ mod tests {
         archive_read_posts(&db).expect("archive");
 
         // consult searches all reflections regardless of archive status
-        let result = recall::consult_bm25(&db, &index, "tokens", 5).expect("consult");
+        let result = recall::consult_bm25(
+            &db,
+            &index,
+            "tokens",
+            5,
+            &crate::timerange::TimeRange::default(),
+        )
+        .expect("consult");
         assert_eq!(result.reflections.len(), 1);
         assert!(result.reflections[0].text.contains("tokens"));
     }

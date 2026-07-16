@@ -13,6 +13,13 @@ serde_json = "1"
 uuid = { version = "1", features = ["v7"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
+
+# Date-only parsing for --since/--until/--on (#786). jiff's civil::Date is
+# the calendar-date type the issue's TimeRange interface specifies; its
+# TimeZone::system()/to_zoned() give panic-free local<->UTC conversion for
+# turning a boundary date into the UTC instant `created_at` is compared
+# against, without hand-rolling DST-aware arithmetic on top of chrono.
+jiff = "0.2"
 directories = "5"
 dirs = "5"
 model2vec-rs = "0.1"

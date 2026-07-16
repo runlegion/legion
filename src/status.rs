@@ -50,7 +50,8 @@ pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
     let active_task_count = tasks.len();
     let blocked_task_count = tasks.iter().filter(|t| t.status == "blocked").count();
     let your_work = your_work_items(&tasks, repo);
-    let posts: Vec<Reflection> = db.get_recent_board_posts(LOOKBACK_HOURS)?;
+    let posts: Vec<Reflection> =
+        db.get_recent_board_posts(LOOKBACK_HOURS, &crate::timerange::TimeRange::default())?;
     let (team_needs, seen_ids) = get_team_needs(&posts, repo);
     let what_changed = get_what_changed(&posts, repo, &seen_ids);
 
@@ -110,7 +111,10 @@ pub struct DoneResult {
 
 /// Find agents who mentioned being blocked on this repo in recent bullpen posts.
 pub fn find_blocked_agents(db: &Database, repo: &str) -> Result<Vec<String>> {
-    let posts: Vec<Reflection> = db.get_recent_board_posts(NEEDS_LOOKBACK_HOURS)?;
+    let posts: Vec<Reflection> = db.get_recent_board_posts(
+        NEEDS_LOOKBACK_HOURS,
+        &crate::timerange::TimeRange::default(),
+    )?;
     let repo_lower: String = repo.to_lowercase();
     let blocked_pattern: String = format!("blocked on {}", repo_lower);
     let waiting_pattern: String = format!("waiting on {}", repo_lower);
@@ -134,7 +138,10 @@ pub fn find_blocked_agents(db: &Database, repo: &str) -> Result<Vec<String>> {
 /// Gather focused team needs for a repo (wider lookback, more items than status).
 /// Used by `legion needs` when an agent is idle and looking for ways to help.
 pub fn get_needs(db: &Database, repo: &str) -> Result<Vec<StatusItem>> {
-    let posts: Vec<Reflection> = db.get_recent_board_posts(NEEDS_LOOKBACK_HOURS)?;
+    let posts: Vec<Reflection> = db.get_recent_board_posts(
+        NEEDS_LOOKBACK_HOURS,
+        &crate::timerange::TimeRange::default(),
+    )?;
     let (items, _seen_ids) = get_team_needs_with_limit(&posts, repo, MAX_NEEDS_FOCUSED);
     Ok(items)
 }
@@ -638,7 +645,7 @@ mod tests {
     }
 
     fn get_posts(db: &Database) -> Vec<Reflection> {
-        db.get_recent_board_posts(24)
+        db.get_recent_board_posts(24, &crate::timerange::TimeRange::default())
             .expect("get_recent_board_posts")
     }
 

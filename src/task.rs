@@ -117,9 +117,15 @@ fn priority_tag(priority: &str) -> String {
     }
 }
 
-/// Get pending inbound tasks for a repo (used by surface).
-pub fn get_pending_inbound(db: &Database, repo: &str) -> Result<Vec<Task>> {
-    db.get_pending_tasks_for_repo(repo)
+/// Get pending inbound tasks for a repo (used by surface). `range` applies
+/// #786's `created_at` predicate (`TimeRange::default()` is unbounded, a
+/// no-op).
+pub fn get_pending_inbound(
+    db: &Database,
+    repo: &str,
+    range: &crate::timerange::TimeRange,
+) -> Result<Vec<Task>> {
+    db.get_pending_tasks_for_repo(repo, range)
 }
 
 /// Count pending inbound tasks for a repo (used by bullpen --count).
@@ -314,7 +320,8 @@ mod tests {
             create_task(&db, "rafters", "legion", "accepted one", None, "med").expect("create");
         accept_task(&db, &id2).expect("accept");
 
-        let pending = get_pending_inbound(&db, "legion").expect("pending");
+        let pending = get_pending_inbound(&db, "legion", &crate::timerange::TimeRange::default())
+            .expect("pending");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].text, "pending one");
     }
@@ -346,7 +353,8 @@ mod tests {
         create_task(&db, "kelex", "legion", "task two", None, "high").expect("create");
 
         let count = count_pending_inbound(&db, "legion").expect("count");
-        let tasks = get_pending_inbound(&db, "legion").expect("get");
+        let tasks = get_pending_inbound(&db, "legion", &crate::timerange::TimeRange::default())
+            .expect("get");
         assert_eq!(
             count,
             tasks.len() as u64,
@@ -367,7 +375,8 @@ mod tests {
         )
         .expect("create");
 
-        let pending = get_pending_inbound(&db, "legion").expect("pending");
+        let pending = get_pending_inbound(&db, "legion", &crate::timerange::TimeRange::default())
+            .expect("pending");
         let output = format_pending_for_surface(&pending);
         assert!(output.contains("Task from kelex"));
         assert!(output.contains("surface task"));

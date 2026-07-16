@@ -251,9 +251,13 @@ fn gather_given_half(
     let query = format!("{repo} {}", bylines.join(" "));
     let fetch_limit = GIVEN_HALF_LIMIT * GIVEN_HALF_FETCH_MULTIPLIER;
 
+    // Identity generation gathers cross-agent source material regardless
+    // of when it was written -- unbounded, matching this consult's
+    // pre-#786 behavior.
+    let range = crate::timerange::TimeRange::default();
     let recalled = match embed_model {
-        Some(model) => recall::consult(db, index, model, &query, fetch_limit)?,
-        None => recall::consult_bm25(db, index, &query, fetch_limit)?,
+        Some(model) => recall::consult(db, index, model, &query, fetch_limit, &range)?,
+        None => recall::consult_bm25(db, index, &query, fetch_limit, &range)?,
     };
 
     Ok(recalled
@@ -379,6 +383,7 @@ pub fn apply(
         "identity",
         IDENTITY_BACKUP_LIMIT,
         crate::recall::ArchiveMode::Both,
+        &crate::timerange::TimeRange::default(),
     )?;
     if old_rows.len() == IDENTITY_BACKUP_LIMIT {
         // A corpus at exactly the cap almost certainly means rows beyond
@@ -420,9 +425,15 @@ pub fn apply(
     // report the whole apply as failed -- a hard error would tell the
     // calling agent the apply did not happen when `whoami` already shows
     // the new root, inviting a re-run that churns identity ids.
-    warn_on_index_add_failure(index, &swap.root.id, repo, &swap.root.text);
+    warn_on_index_add_failure(
+        index,
+        &swap.root.id,
+        repo,
+        &swap.root.text,
+        &swap.root.created_at,
+    );
     for child in &swap.children {
-        warn_on_index_add_failure(index, &child.id, repo, &child.text);
+        warn_on_index_add_failure(index, &child.id, repo, &child.text, &child.created_at);
     }
 
     let retired_ids =
@@ -443,8 +454,14 @@ pub fn apply(
 /// by `swap_identity_root`, warning (not failing) on error -- the new
 /// identity is already live in the DB, so an index straggler must not
 /// make `apply` report failure. `legion reindex` is the recovery path.
-fn warn_on_index_add_failure(index: &SearchIndex, id: &str, repo: &str, text: &str) {
-    if let Err(e) = index.add(id, repo, text) {
+fn warn_on_index_add_failure(
+    index: &SearchIndex,
+    id: &str,
+    repo: &str,
+    text: &str,
+    created_at: &str,
+) {
+    if let Err(e) = index.add(id, repo, text, created_at) {
         eprintln!(
             "[legion whoami --generate --apply] WARNING: the identity swap committed but the \
              tantivy index add failed for new row {id}.\n\
@@ -855,7 +872,13 @@ mod tests {
         )
         .unwrap();
         let before = db
-            .get_reflections_by_domain("legion", "identity", 500, crate::recall::ArchiveMode::Both)
+            .get_reflections_by_domain(
+                "legion",
+                "identity",
+                500,
+                crate::recall::ArchiveMode::Both,
+                &crate::timerange::TimeRange::default(),
+            )
             .unwrap();
 
         let backup_dir = dir.path().join("backups");
@@ -868,7 +891,13 @@ mod tests {
 
         assert!(!backup_dir.exists());
         let after = db
-            .get_reflections_by_domain("legion", "identity", 500, crate::recall::ArchiveMode::Both)
+            .get_reflections_by_domain(
+                "legion",
+                "identity",
+                500,
+                crate::recall::ArchiveMode::Both,
+                &crate::timerange::TimeRange::default(),
+            )
             .unwrap();
         assert_eq!(before.len(), after.len());
     }
@@ -1010,7 +1039,12 @@ mod tests {
         apply(&db, &index, "legion", &manifest, &backup_dir, false).unwrap();
 
         let root_hits = index
-            .search("legion", "distinctive careful engineering", 10)
+            .search(
+                "legion",
+                "distinctive careful engineering",
+                10,
+                &crate::timerange::TimeRange::default(),
+            )
             .unwrap();
         let root_hit_ids: Vec<&str> = root_hits.iter().map(|h| h.id.as_str()).collect();
         assert!(
@@ -1019,7 +1053,12 @@ mod tests {
         );
 
         let child_hits = index
-            .search("legion", "distinctive zanzibar gateways", 10)
+            .search(
+                "legion",
+                "distinctive zanzibar gateways",
+                10,
+                &crate::timerange::TimeRange::default(),
+            )
             .unwrap();
         let child_hit_ids: Vec<&str> = child_hits.iter().map(|h| h.id.as_str()).collect();
         assert!(
@@ -1134,7 +1173,13 @@ mod tests {
         )
         .unwrap();
         let before = db
-            .get_reflections_by_domain("legion", "identity", 500, crate::recall::ArchiveMode::Both)
+            .get_reflections_by_domain(
+                "legion",
+                "identity",
+                500,
+                crate::recall::ArchiveMode::Both,
+                &crate::timerange::TimeRange::default(),
+            )
             .unwrap();
 
         let backup_dir = dir.path().join("backups");
@@ -1153,7 +1198,13 @@ mod tests {
         assert!(!plan.backup_path.exists());
 
         let after = db
-            .get_reflections_by_domain("legion", "identity", 500, crate::recall::ArchiveMode::Both)
+            .get_reflections_by_domain(
+                "legion",
+                "identity",
+                500,
+                crate::recall::ArchiveMode::Both,
+                &crate::timerange::TimeRange::default(),
+            )
             .unwrap();
         assert_eq!(before.len(), after.len());
     }

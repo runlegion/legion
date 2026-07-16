@@ -687,7 +687,12 @@ pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> err
         "team",
         &db::ReflectionMeta::default(),
     )?;
-    if let Err(e) = index.add(&reflection.id, &reflection.repo, &announcement) {
+    if let Err(e) = index.add(
+        &reflection.id,
+        &reflection.repo,
+        &announcement,
+        &reflection.created_at,
+    ) {
         eprintln!("[legion] search index add failed: {e}");
     }
     info!("[legion] done: {text}");
@@ -703,7 +708,12 @@ pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> err
             "team",
             &db::ReflectionMeta::default(),
         )?;
-        if let Err(e) = index.add(&notify_ref.id, &notify_ref.repo, &notify_text) {
+        if let Err(e) = index.add(
+            &notify_ref.id,
+            &notify_ref.repo,
+            &notify_text,
+            &notify_ref.created_at,
+        ) {
             eprintln!("[legion] search index add failed: {e}");
         }
         info!("[legion] notified {agent} (was blocked on {repo})");

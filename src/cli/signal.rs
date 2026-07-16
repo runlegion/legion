@@ -197,8 +197,16 @@ pub(crate) fn handle_bullpen(
     archived: bool,
     include_stale: bool,
     include_resolved: bool,
+    since: Option<String>,
+    until: Option<String>,
+    on: Option<String>,
 ) -> error::Result<()> {
     let database = open_db()?;
+
+    // #786: applies to the --repo listing path only, per --since/--until/
+    // --on's help text; --count/--archive/--archived ignore it.
+    let range =
+        crate::timerange::TimeRange::parse(since.as_deref(), until.as_deref(), on.as_deref())?;
 
     if archive {
         let count = board::archive_read_posts(&database)?;
@@ -233,10 +241,11 @@ pub(crate) fn handle_bullpen(
                 filter,
                 include_stale,
                 include_resolved,
+                &range,
             )?;
             let mut output = board::format_bullpen(&posts);
             if filter == board::BullpenFilter::All {
-                let pending_tasks = task::get_pending_inbound(&database, &repo)?;
+                let pending_tasks = task::get_pending_inbound(&database, &repo, &range)?;
                 let task_output = task::format_pending_for_surface(&pending_tasks);
                 output.push_str(&task_output);
             }

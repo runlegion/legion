@@ -1,14 +1,17 @@
+use std::ops::Bound;
 use std::path::Path;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
 use tantivy::schema::{
-    Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value,
+    DateOptions, DateTimePrecision, Field, IndexRecordOption, STORED, STRING, Schema,
+    TextFieldIndexing, TextOptions, Type, Value,
 };
-use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
+use tantivy::{DateTime, Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 
 use crate::db::Reflection;
 use crate::error::{LegionError, Result};
+use crate::timerange::TimeRange;
 
 /// Maximum number of retries when acquiring the Tantivy index writer.
 /// Another process (e.g., a concurrent hook) may hold the lock briefly.
@@ -27,6 +30,7 @@ pub struct SearchIndex {
     id_field: Field,
     repo_field: Field,
     text_field: Field,
+    created_at_field: Field,
 }
 
 /// A single search result with its document ID and BM25 relevance score.
@@ -47,6 +51,13 @@ impl SearchIndex {
     /// - `id`: STRING | STORED -- exact match, retrievable after search
     /// - `repo`: STRING -- exact match filtering per repository
     /// - `text`: TEXT -- tokenized with English stemmer, BM25 scored
+    /// - `created_at`: DATE (second precision, indexed, not stored) -- the
+    ///   `--since`/`--until`/`--on` range predicate (#786), composed into
+    ///   the same `BooleanQuery` as the repo filter so date-valid documents
+    ///   never compete with out-of-range ones for a BM25 result-window
+    ///   cutoff (the failure mode the `--archives` over-fetch-and-post-
+    ///   filter pattern has; deliberately not reused here, see #786 build
+    ///   notes).
     pub fn open(path: &Path) -> Result<Self> {
         let mut schema_builder = Schema::builder();
 
@@ -60,12 +71,37 @@ impl SearchIndex {
         );
         let text_field = schema_builder.add_text_field("text", text_options);
 
+        let date_options =
+            DateOptions::from(tantivy::schema::INDEXED).set_precision(DateTimePrecision::Seconds);
+        let created_at_field = schema_builder.add_date_field("created_at", date_options);
+
         let schema = schema_builder.build();
 
         std::fs::create_dir_all(path).map_err(|e| LegionError::Search(e.to_string()))?;
 
         let index = match Index::open_in_dir(path) {
-            Ok(idx) => idx,
+            Ok(idx) if idx.schema() == schema => idx,
+            Ok(_mismatched) => {
+                // #786: the on-disk index predates the `created_at` field.
+                // `Index::open_in_dir` trusts whatever schema is recorded
+                // in the existing meta.json regardless of the schema this
+                // function just built in memory -- opening succeeds, but
+                // the `Field` handles above (assigned by call order on the
+                // in-memory builder) do not exist in the on-disk schema.
+                // Writing a document that references the extra field then
+                // corrupts the write (observed empirically: a fastfield
+                // writer panic on an out-of-bounds field index, caught by
+                // tantivy's writer thread and surfaced as a commit error
+                // -- not a crash, but every `legion reflect`/`post` would
+                // fail until reindexed). Treat a schema mismatch the same
+                // as corruption: wipe and recreate empty. `legion reindex`
+                // repopulates from the database, the source of truth, same
+                // recovery path as the corrupted-index branch below.
+                eprintln!(
+                    "[legion] search index schema changed (created_at field added, #786), rebuilding empty -- run `legion reindex` to repopulate"
+                );
+                Self::recreate_index(path, schema.clone())?
+            }
             Err(open_err) => {
                 // Directory may be empty (new) or corrupted -- either way, create fresh.
                 match Index::create_in_dir(path, schema.clone()) {
@@ -84,6 +120,7 @@ impl SearchIndex {
             id_field,
             repo_field,
             text_field,
+            created_at_field,
         })
     }
 
@@ -101,13 +138,16 @@ impl SearchIndex {
     /// Add a document to the search index and commit immediately.
     ///
     /// Each document consists of an id (stored for retrieval), a repo name
-    /// (for filtering), and the reflection text (for BM25 scoring).
+    /// (for filtering), the reflection text (for BM25 scoring), and its
+    /// `created_at` timestamp (RFC3339, matching the `reflections` table --
+    /// see [`Self::open`]'s doc comment for why it lives in the index
+    /// rather than being joined in afterward).
     ///
     /// Retries up to [`WRITER_RETRIES`] times with exponential backoff when
     /// the writer lock is held by another process (e.g., a concurrent hook).
     /// Commits after each write. The reflection corpus is tiny, so the
     /// per-write commit overhead is negligible.
-    pub fn add(&self, id: &str, repo: &str, text: &str) -> Result<()> {
+    pub fn add(&self, id: &str, repo: &str, text: &str, created_at: &str) -> Result<()> {
         let mut writer: IndexWriter = self.acquire_writer()?;
 
         writer
@@ -115,6 +155,7 @@ impl SearchIndex {
                 self.id_field => id,
                 self.repo_field => repo,
                 self.text_field => text,
+                self.created_at_field => parse_rfc3339_to_tantivy_date(created_at)?,
             ))
             .map_err(|e| LegionError::Search(e.to_string()))?;
 
@@ -179,7 +220,9 @@ impl SearchIndex {
     ///
     /// Clears the existing index contents first, then bulk-inserts all
     /// provided reflections. Used by the `reindex` command to recover
-    /// from index/database desync or corruption.
+    /// from index/database desync or corruption -- and, after #786, to
+    /// repopulate `created_at` for every existing reflection when
+    /// `SearchIndex::open` wipes an index that predates that field.
     pub fn rebuild(&self, reflections: &[Reflection]) -> Result<()> {
         let mut writer: IndexWriter = self.acquire_writer()?;
 
@@ -193,6 +236,7 @@ impl SearchIndex {
                     self.id_field => r.id.as_str(),
                     self.repo_field => r.repo.as_str(),
                     self.text_field => r.text.as_str(),
+                    self.created_at_field => parse_rfc3339_to_tantivy_date(&r.created_at)?,
                 ))
                 .map_err(|e| LegionError::Search(e.to_string()))?;
         }
@@ -206,33 +250,54 @@ impl SearchIndex {
 
     /// Search for reflections matching a query within a specific repo.
     ///
-    /// Combines an exact-match filter on `repo` with a BM25-scored query
-    /// on the `text` field. Returns up to `limit` results ordered by
-    /// descending relevance score.
+    /// Combines an exact-match filter on `repo`, an optional `created_at`
+    /// range predicate (`range`; `TimeRange::default()` is unbounded, the
+    /// whole-store case -- see `timerange` module docs, #786), and a
+    /// BM25-scored query on the `text` field. Returns up to `limit`
+    /// results ordered by descending relevance score.
     ///
     /// Returns an empty vec if the query string is empty or whitespace-only.
-    pub fn search(&self, repo: &str, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.execute_query(query, Some(repo), limit)
+    pub fn search(
+        &self,
+        repo: &str,
+        query: &str,
+        limit: usize,
+        range: &TimeRange,
+    ) -> Result<Vec<SearchResult>> {
+        self.execute_query(query, Some(repo), limit, range)
     }
 
     /// Search for reflections matching a query across ALL repositories.
     ///
     /// Unlike `search`, this method does not filter by repo. It runs a
-    /// BM25-scored query on the `text` field across every indexed document.
-    /// Returns up to `limit` results ordered by descending relevance score.
+    /// BM25-scored query on the `text` field across every indexed document,
+    /// composed with the same optional `created_at` range predicate as
+    /// `search` (#786). Returns up to `limit` results ordered by
+    /// descending relevance score.
     ///
     /// Returns an empty vec if the query string is empty or whitespace-only.
-    pub fn search_all(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.execute_query(query, None, limit)
+    pub fn search_all(
+        &self,
+        query: &str,
+        limit: usize,
+        range: &TimeRange,
+    ) -> Result<Vec<SearchResult>> {
+        self.execute_query(query, None, limit, range)
     }
 
-    /// Shared search implementation. When `repo` is Some, results are filtered
-    /// to that repository; when None, all repositories are searched.
+    /// Shared search implementation. When `repo` is Some, results are
+    /// filtered to that repository; when None, all repositories are
+    /// searched. `range` composes a `created_at` bound into the same
+    /// `BooleanQuery` as the repo filter -- applied at the index level,
+    /// before `TopDocs` collection, so an unbounded fetch never has to
+    /// silently drop date-valid documents that ranked below a limit-sized
+    /// cutoff (#786).
     fn execute_query(
         &self,
         query: &str,
         repo: Option<&str>,
         limit: usize,
+        range: &TimeRange,
     ) -> Result<Vec<SearchResult>> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
@@ -253,16 +318,22 @@ impl SearchIndex {
             .parse_query(trimmed)
             .map_err(|e| LegionError::Search(e.to_string()))?;
 
-        let final_query: Box<dyn tantivy::query::Query> = match repo {
-            Some(repo_name) => {
-                let repo_term = Term::from_field_text(self.repo_field, repo_name);
-                let repo_query = TermQuery::new(repo_term, IndexRecordOption::Basic);
-                Box::new(BooleanQuery::new(vec![
-                    (Occur::Must, Box::new(repo_query)),
-                    (Occur::Must, text_query),
-                ]))
-            }
-            None => text_query,
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, text_query)];
+
+        if let Some(repo_name) = repo {
+            let repo_term = Term::from_field_text(self.repo_field, repo_name);
+            let repo_query = TermQuery::new(repo_term, IndexRecordOption::Basic);
+            clauses.push((Occur::Must, Box::new(repo_query)));
+        }
+
+        if let Some(range_query) = self.date_range_query(range)? {
+            clauses.push((Occur::Must, range_query));
+        }
+
+        let final_query: Box<dyn Query> = if clauses.len() == 1 {
+            clauses.pop().expect("just checked len == 1").1
+        } else {
+            Box::new(BooleanQuery::new(clauses))
         };
 
         let top_docs = searcher
@@ -289,11 +360,61 @@ impl SearchIndex {
 
         Ok(results)
     }
+
+    /// Build a `created_at` range query from `range`, or `None` when `range`
+    /// is unbounded (`TimeRange::default()`) -- the whole-store case takes
+    /// no extra clause rather than an always-true one, so an unbounded call
+    /// costs nothing extra at query time.
+    fn date_range_query(&self, range: &TimeRange) -> Result<Option<Box<dyn Query>>> {
+        if range.is_unbounded() {
+            return Ok(None);
+        }
+
+        let lower = match range.since_bound()? {
+            Some(bound) => Bound::Included(Term::from_field_date(
+                self.created_at_field,
+                parse_rfc3339_to_tantivy_date(&bound)?,
+            )),
+            None => Bound::Unbounded,
+        };
+        let upper = match range.until_bound()? {
+            Some(bound) => Bound::Excluded(Term::from_field_date(
+                self.created_at_field,
+                parse_rfc3339_to_tantivy_date(&bound)?,
+            )),
+            None => Bound::Unbounded,
+        };
+
+        Ok(Some(Box::new(RangeQuery::new_term_bounds(
+            "created_at".to_string(),
+            Type::Date,
+            &lower,
+            &upper,
+        ))))
+    }
+}
+
+/// Parse an RFC3339 timestamp (the `created_at` shape stored throughout
+/// this crate, e.g. `chrono::Utc::now().to_rfc3339()`) into a Tantivy
+/// `DateTime`. Shared by document indexing (`add`/`rebuild`) and range
+/// query construction (`date_range_query`) so both sides of the `created_at`
+/// comparison go through the same conversion and cannot drift.
+fn parse_rfc3339_to_tantivy_date(input: &str) -> Result<DateTime> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(input)
+        .map_err(|e| LegionError::Search(format!("invalid created_at timestamp '{input}': {e}")))?;
+    let nanos = parsed.timestamp_nanos_opt().ok_or_else(|| {
+        LegionError::Search(format!("created_at timestamp out of range: '{input}'"))
+    })?;
+    Ok(DateTime::from_timestamp_nanos(nanos))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fixed `created_at` used by tests that do not exercise date
+    /// filtering -- any valid RFC3339 timestamp works.
+    const T: &str = "2026-01-01T00:00:00+00:00";
 
     /// Create a SearchIndex backed by a temporary directory.
     ///
@@ -312,17 +433,21 @@ mod tests {
             "id-1",
             "kelex",
             "mapping rules are fragile when adding new Zod types",
+            T,
         )
         .unwrap();
         idx.add(
             "id-2",
             "kelex",
             "discriminated unions inside arrays are where complexity hides",
+            T,
         )
         .unwrap();
-        idx.add("id-3", "kelex", "the CLI flag parser is straightforward")
+        idx.add("id-3", "kelex", "the CLI flag parser is straightforward", T)
             .unwrap();
-        let results = idx.search("kelex", "Zod type mapping", 5).unwrap();
+        let results = idx
+            .search("kelex", "Zod type mapping", 5, &TimeRange::default())
+            .unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].id, "id-1");
     }
@@ -330,11 +455,13 @@ mod tests {
     #[test]
     fn search_filters_by_repo() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "kelex", "schema introspection is complex")
+        idx.add("id-1", "kelex", "schema introspection is complex", T)
             .unwrap();
-        idx.add("id-2", "rafters", "schema tokens need attention")
+        idx.add("id-2", "rafters", "schema tokens need attention", T)
             .unwrap();
-        let results = idx.search("kelex", "schema", 5).unwrap();
+        let results = idx
+            .search("kelex", "schema", 5, &TimeRange::default())
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "id-1");
     }
@@ -347,27 +474,32 @@ mod tests {
                 &format!("id-{i}"),
                 "test",
                 &format!("reflection about testing {i}"),
+                T,
             )
             .unwrap();
         }
-        let results = idx.search("test", "testing", 3).unwrap();
+        let results = idx
+            .search("test", "testing", 3, &TimeRange::default())
+            .unwrap();
         assert_eq!(results.len(), 3);
     }
 
     #[test]
     fn search_empty_query_returns_empty() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "kelex", "some reflection").unwrap();
-        let results = idx.search("kelex", "", 5).unwrap();
+        idx.add("id-1", "kelex", "some reflection", T).unwrap();
+        let results = idx.search("kelex", "", 5, &TimeRange::default()).unwrap();
         assert!(results.is_empty());
     }
 
     #[test]
     fn stemming_matches_variants() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "test", "nested arrays in the codegen templates")
+        idx.add("id-1", "test", "nested arrays in the codegen templates", T)
             .unwrap();
-        let results = idx.search("test", "nesting array codegen", 5).unwrap();
+        let results = idx
+            .search("test", "nesting array codegen", 5, &TimeRange::default())
+            .unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].id, "id-1");
     }
@@ -375,13 +507,13 @@ mod tests {
     #[test]
     fn search_all_returns_results_from_multiple_repos() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "kelex", "schema introspection is complex")
+        idx.add("id-1", "kelex", "schema introspection is complex", T)
             .unwrap();
-        idx.add("id-2", "rafters", "schema tokens need attention")
+        idx.add("id-2", "rafters", "schema tokens need attention", T)
             .unwrap();
-        idx.add("id-3", "platform", "schema validation with Zod")
+        idx.add("id-3", "platform", "schema validation with Zod", T)
             .unwrap();
-        let results = idx.search_all("schema", 10).unwrap();
+        let results = idx.search_all("schema", 10, &TimeRange::default()).unwrap();
         assert_eq!(results.len(), 3);
         let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&"id-1"));
@@ -392,15 +524,23 @@ mod tests {
     #[test]
     fn search_all_ranks_by_relevance() {
         let (idx, _dir) = test_index();
-        idx.add("id-weak", "kelex", "the CLI flag parser is straightforward")
-            .unwrap();
+        idx.add(
+            "id-weak",
+            "kelex",
+            "the CLI flag parser is straightforward",
+            T,
+        )
+        .unwrap();
         idx.add(
             "id-strong",
             "rafters",
             "mapping rules are fragile when adding new Zod types for mapping",
+            T,
         )
         .unwrap();
-        let results = idx.search_all("mapping", 10).unwrap();
+        let results = idx
+            .search_all("mapping", 10, &TimeRange::default())
+            .unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].id, "id-strong");
         // BM25 scores must be in descending order
@@ -412,19 +552,23 @@ mod tests {
     #[test]
     fn search_all_empty_query_returns_empty() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "kelex", "some reflection").unwrap();
-        let results = idx.search_all("", 5).unwrap();
+        idx.add("id-1", "kelex", "some reflection", T).unwrap();
+        let results = idx.search_all("", 5, &TimeRange::default()).unwrap();
         assert!(results.is_empty());
-        let results = idx.search_all("   ", 5).unwrap();
+        let results = idx.search_all("   ", 5, &TimeRange::default()).unwrap();
         assert!(results.is_empty());
     }
 
     fn test_reflection(id: &str, repo: &str, text: &str) -> Reflection {
+        test_reflection_at(id, repo, text, T)
+    }
+
+    fn test_reflection_at(id: &str, repo: &str, text: &str, created_at: &str) -> Reflection {
         Reflection {
             id: id.into(),
             repo: repo.into(),
             text: text.into(),
-            created_at: "2026-01-01T00:00:00Z".into(),
+            created_at: created_at.into(),
             updated_at: None,
             audience: "self".into(),
             domain: None,
@@ -442,23 +586,29 @@ mod tests {
             "id-keep",
             "kelex",
             "keep this reflection about mapping rules",
+            T,
         )
         .unwrap();
         idx.add(
             "id-gone",
             "kelex",
             "doomed reflection about mapping rules that should vanish",
+            T,
         )
         .unwrap();
 
         // Both documents visible before the delete.
-        let before = idx.search("kelex", "mapping rules", 10).unwrap();
+        let before = idx
+            .search("kelex", "mapping rules", 10, &TimeRange::default())
+            .unwrap();
         assert_eq!(before.len(), 2);
 
         idx.delete("id-gone").unwrap();
 
         // After delete, only the kept document surfaces -- no ghost for id-gone.
-        let after = idx.search("kelex", "mapping rules", 10).unwrap();
+        let after = idx
+            .search("kelex", "mapping rules", 10, &TimeRange::default())
+            .unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, "id-keep");
     }
@@ -466,11 +616,13 @@ mod tests {
     #[test]
     fn delete_nonexistent_id_is_noop() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "kelex", "reflection one").unwrap();
+        idx.add("id-1", "kelex", "reflection one", T).unwrap();
         // Deleting a term that never existed should not error.
         idx.delete("id-does-not-exist").unwrap();
         // Existing document still retrievable.
-        let results = idx.search("kelex", "reflection", 5).unwrap();
+        let results = idx
+            .search("kelex", "reflection", 5, &TimeRange::default())
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "id-1");
     }
@@ -478,7 +630,7 @@ mod tests {
     #[test]
     fn rebuild_replaces_index_contents() {
         let (idx, _dir) = test_index();
-        idx.add("id-old", "test", "old reflection that should be gone")
+        idx.add("id-old", "test", "old reflection that should be gone", T)
             .unwrap();
 
         let reflections = vec![
@@ -488,22 +640,28 @@ mod tests {
         idx.rebuild(&reflections).unwrap();
 
         // Old document should be gone
-        let old = idx.search("test", "old reflection", 5).unwrap();
+        let old = idx
+            .search("test", "old reflection", 5, &TimeRange::default())
+            .unwrap();
         assert!(old.is_empty());
 
         // New documents should be present
-        let results = idx.search_all("reflection", 10).unwrap();
+        let results = idx
+            .search_all("reflection", 10, &TimeRange::default())
+            .unwrap();
         assert_eq!(results.len(), 2);
     }
 
     #[test]
     fn rebuild_empty_clears_index() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "test", "something searchable").unwrap();
+        idx.add("id-1", "test", "something searchable", T).unwrap();
 
         idx.rebuild(&[]).unwrap();
 
-        let results = idx.search_all("searchable", 10).unwrap();
+        let results = idx
+            .search_all("searchable", 10, &TimeRange::default())
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -521,8 +679,10 @@ mod tests {
 
         // Should recover by recreating
         let idx = SearchIndex::open(path).expect("recovery open");
-        idx.add("id-1", "test", "works after recovery").unwrap();
-        let results = idx.search("test", "recovery", 5).unwrap();
+        idx.add("id-1", "test", "works after recovery", T).unwrap();
+        let results = idx
+            .search("test", "recovery", 5, &TimeRange::default())
+            .unwrap();
         assert_eq!(results.len(), 1);
     }
 
@@ -534,10 +694,183 @@ mod tests {
                 &format!("id-{i}"),
                 &format!("repo-{}", i % 3),
                 &format!("reflection about testing {i}"),
+                T,
             )
             .unwrap();
         }
-        let results = idx.search_all("testing", 3).unwrap();
+        let results = idx.search_all("testing", 3, &TimeRange::default()).unwrap();
         assert_eq!(results.len(), 3);
+    }
+
+    // -- #786: created_at range filtering --------------------------------
+
+    #[test]
+    fn search_filters_by_date_range() {
+        let (idx, _dir) = test_index();
+        idx.add(
+            "id-old",
+            "kelex",
+            "mapping rules apply",
+            "2026-01-01T00:00:00+00:00",
+        )
+        .unwrap();
+        idx.add(
+            "id-mid",
+            "kelex",
+            "mapping rules apply",
+            "2026-06-15T00:00:00+00:00",
+        )
+        .unwrap();
+        idx.add(
+            "id-new",
+            "kelex",
+            "mapping rules apply",
+            "2026-12-31T00:00:00+00:00",
+        )
+        .unwrap();
+
+        let range = TimeRange::parse(Some("2026-06-01"), Some("2026-06-30"), None).unwrap();
+        let results = idx.search("kelex", "mapping rules", 10, &range).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "id-mid");
+    }
+
+    #[test]
+    fn search_all_filters_by_date_range() {
+        let (idx, _dir) = test_index();
+        idx.add(
+            "id-old",
+            "kelex",
+            "reflection text here",
+            "2026-01-01T00:00:00+00:00",
+        )
+        .unwrap();
+        idx.add(
+            "id-new",
+            "rafters",
+            "reflection text here",
+            "2026-12-31T00:00:00+00:00",
+        )
+        .unwrap();
+
+        let range = TimeRange::parse(Some("2026-12-01"), None, None).unwrap();
+        let results = idx.search_all("reflection", 10, &range).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "id-new");
+    }
+
+    #[test]
+    fn search_on_date_includes_whole_local_day() {
+        let (idx, _dir) = test_index();
+        // A row created late in the local day of 2026-07-14 (per the
+        // system timezone, matching TimeRange's own conversion) must
+        // still match `--on 2026-07-14`.
+        let range = TimeRange::parse(None, None, Some("2026-07-14")).unwrap();
+        let late_in_day = range.until_bound().unwrap().unwrap();
+        // until_bound is the EXCLUSIVE next-day boundary; back off a
+        // second to land inside the requested day regardless of what UTC
+        // offset the system timezone applies.
+        let inside = chrono::DateTime::parse_from_rfc3339(&late_in_day)
+            .unwrap()
+            .checked_sub_signed(chrono::Duration::seconds(1))
+            .unwrap()
+            .to_rfc3339();
+
+        idx.add("id-in", "kelex", "some reflection text", &inside)
+            .unwrap();
+        idx.add(
+            "id-out",
+            "kelex",
+            "some reflection text",
+            &late_in_day, // exactly at the exclusive boundary: excluded
+        )
+        .unwrap();
+
+        let results = idx.search("kelex", "reflection text", 10, &range).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "id-in");
+    }
+
+    #[test]
+    fn unbounded_range_returns_everything() {
+        let (idx, _dir) = test_index();
+        idx.add(
+            "id-1",
+            "kelex",
+            "reflection alpha",
+            "2020-01-01T00:00:00+00:00",
+        )
+        .unwrap();
+        idx.add(
+            "id-2",
+            "kelex",
+            "reflection beta",
+            "2030-01-01T00:00:00+00:00",
+        )
+        .unwrap();
+
+        let results = idx
+            .search_all("reflection", 10, &TimeRange::default())
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn schema_mismatch_rebuilds_empty_instead_of_corrupting_writes() {
+        // Simulate an index built before #786 (no created_at field): a
+        // 3-field schema written directly with tantivy, bypassing
+        // SearchIndex::open entirely.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        {
+            let mut sb = Schema::builder();
+            let id_field = sb.add_text_field("id", STRING | STORED);
+            let repo_field = sb.add_text_field("repo", STRING);
+            let text_options = TextOptions::default().set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("en_stem")
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+            );
+            let text_field = sb.add_text_field("text", text_options);
+            let old_schema = sb.build();
+            let old_index = Index::create_in_dir(path, old_schema).expect("create old index");
+            let mut writer: IndexWriter = old_index.writer(15_000_000).expect("writer");
+            writer
+                .add_document(doc!(
+                    id_field => "pre-786",
+                    repo_field => "kelex",
+                    text_field => "a reflection from before the schema change",
+                ))
+                .expect("add old-shape doc");
+            writer.commit().expect("commit old index");
+        }
+
+        // Opening with the new (4-field) schema must not panic or return
+        // an error -- it detects the mismatch and rebuilds empty.
+        let idx = SearchIndex::open(path).expect("open after schema change");
+
+        // Writes must succeed post-rebuild (this is the failure this test
+        // guards: pre-fix, add() after a mismatched open corrupted the
+        // commit).
+        idx.add("id-1", "kelex", "a fresh reflection", T)
+            .expect("add after schema rebuild must not fail");
+        let results = idx
+            .search("kelex", "fresh reflection", 5, &TimeRange::default())
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "id-1");
+
+        // The pre-786 document did not survive the rebuild (expected: the
+        // rebuild starts empty; `legion reindex` is the documented
+        // recovery path to repopulate from the database).
+        let old = idx
+            .search(
+                "kelex",
+                "before the schema change",
+                5,
+                &TimeRange::default(),
+            )
+            .unwrap();
+        assert!(old.is_empty());
     }
 }

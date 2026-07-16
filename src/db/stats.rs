@@ -57,18 +57,31 @@ impl Database {
     /// Get high-value reflections from other repos (by recall_count).
     ///
     /// Returns reflections with recall_count > 0 from repos other than
-    /// the given one, ordered by recall_count descending.
+    /// the given one, ordered by recall_count descending. `range` applies
+    /// #786's `created_at` predicate directly in the WHERE clause
+    /// (`TimeRange::default()` is unbounded, a no-op).
     pub fn get_high_value_cross_repo(
         &self,
         exclude_repo: &str,
         limit: usize,
+        range: &crate::timerange::TimeRange,
     ) -> Result<Vec<Reflection>> {
+        let range_clause = crate::timerange::TimeRange::sql_clause(3);
         let sql = format!(
             "SELECT {REFLECTION_COLUMNS} \
-             FROM reflections WHERE repo != ?1 AND recall_count > 0 AND deleted_at IS NULL ORDER BY recall_count DESC LIMIT ?2"
+             FROM reflections WHERE repo != ?1 AND recall_count > 0 AND deleted_at IS NULL{range_clause} \
+             ORDER BY recall_count DESC LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params![exclude_repo, limit], map_reflection_row)?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                exclude_repo,
+                limit,
+                range.since_bound()?,
+                range.until_bound()?
+            ],
+            map_reflection_row,
+        )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
     }

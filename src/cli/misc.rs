@@ -162,10 +162,17 @@ pub(crate) fn handle_init(force: bool) -> error::Result<()> {
     Ok(())
 }
 
-pub(crate) fn handle_surface(repo: String) -> error::Result<()> {
+pub(crate) fn handle_surface(
+    repo: String,
+    since: Option<String>,
+    until: Option<String>,
+    on: Option<String>,
+) -> error::Result<()> {
     let database = open_db()?;
+    let range =
+        crate::timerange::TimeRange::parse(since.as_deref(), until.as_deref(), on.as_deref())?;
 
-    let result = surface::surface(&database, &repo)?;
+    let result = surface::surface(&database, &repo, &range)?;
     let output = surface::format_surface(&result, &repo);
     if !output.is_empty() {
         print!("{output}");

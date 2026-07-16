@@ -6,6 +6,7 @@ use crate::db::Database;
 use crate::embed::{self, EmbedModel};
 use crate::error::Result;
 use crate::search::{SearchIndex, SearchResult};
+use crate::timerange::TimeRange;
 
 /// Minimum cosine similarity for a cosine-only candidate (no BM25 match).
 /// Prevents noise from weak semantic matches when BM25 found nothing.
@@ -283,33 +284,44 @@ pub enum ArchiveMode {
 
 /// Join one search hit with the database and apply boost/decay weighting.
 ///
-/// Returns `None` when the archive-mode filter rejects the row: the search
-/// index returns ids regardless of archive state, so a miss here is an
-/// expected silent skip, not a desync warning. Shared by the BM25 and
-/// hybrid paths so their join, weighted-score and skip behavior cannot
-/// drift apart.
+/// Returns `None` when the archive-mode filter rejects the row, OR when
+/// `range` rejects it (#786) -- the search index returns ids regardless of
+/// archive state or `created_at`, so either miss here is an expected
+/// silent skip, not a desync warning. Shared by the BM25 and hybrid paths
+/// so their join, weighted-score and skip behavior cannot drift apart.
+///
+/// The `range` check here is redundant-but-harmless for BM25-sourced ids
+/// (already filtered at the Tantivy query level, see `search.rs`'s
+/// `date_range_query`) and load-bearing for cosine-sourced-only
+/// candidates in the hybrid path (`merge_hybrid_scores`'s `all_ids`, which
+/// come from `Database::get_embeddings` -- an unbounded, un-filtered
+/// corpus scan, so checking here is not the "post-filter over a
+/// limit-truncated fetch" anti-pattern that silently under-returns).
 fn join_and_score(
     db: &Database,
     id: &str,
     base_score: f32,
     mode: ArchiveMode,
+    range: &TimeRange,
 ) -> Result<Option<RecalledReflection>> {
-    Ok(db
-        .get_reflection_by_id_in_mode(id, mode)?
-        .map(|reflection| {
-            let score = weighted_score(
-                base_score,
-                reflection.recall_count,
-                &reflection.last_recalled_at,
-            );
-            RecalledReflection {
-                id: reflection.id,
-                repo: reflection.repo,
-                text: reflection.text,
-                score,
-                created_at: reflection.created_at,
-            }
-        }))
+    let Some(reflection) = db.get_reflection_by_id_in_mode(id, mode)? else {
+        return Ok(None);
+    };
+    if !range.contains(&reflection.created_at)? {
+        return Ok(None);
+    }
+    let score = weighted_score(
+        base_score,
+        reflection.recall_count,
+        &reflection.last_recalled_at,
+    );
+    Ok(Some(RecalledReflection {
+        id: reflection.id,
+        repo: reflection.repo,
+        text: reflection.text,
+        score,
+        created_at: reflection.created_at,
+    }))
 }
 
 /// Sort reflections by descending weighted score.
@@ -331,11 +343,12 @@ fn join_search_results(
     db: &Database,
     search_results: &[SearchResult],
     mode: ArchiveMode,
+    range: &TimeRange,
 ) -> Result<Vec<RecalledReflection>> {
     let mut reflections = Vec::with_capacity(search_results.len());
 
     for sr in search_results {
-        if let Some(reflection) = join_and_score(db, &sr.id, sr.score, mode)? {
+        if let Some(reflection) = join_and_score(db, &sr.id, sr.score, mode, range)? {
             reflections.push(reflection);
         }
     }
@@ -347,14 +360,18 @@ fn join_search_results(
 
 /// Query reflections relevant to the given context.
 ///
-/// Searches the Tantivy index filtered by `repo` and ranked by BM25,
-/// then joins each result with the SQLite database to retrieve full
-/// reflection data (text, created_at), scoped by archive mode (#457).
-/// The search index returns ids regardless of archive state; the mode
-/// filter applies at the DB join step so cold-only or both modes return
-/// the correct partition. The search index limit is raised when mode is
-/// Cold to compensate for hot rows being filtered out, but the final
-/// result is still capped at the requested limit.
+/// Searches the Tantivy index filtered by `repo`, `range` (#786's
+/// `created_at` predicate -- `TimeRange::default()` is unbounded), and
+/// ranked by BM25, then joins each result with the SQLite database to
+/// retrieve full reflection data (text, created_at), scoped by archive
+/// mode (#457). The search index returns ids regardless of archive state;
+/// the mode filter applies at the DB join step so cold-only or both modes
+/// return the correct partition. The search index limit is raised when
+/// mode is Cold to compensate for hot rows being filtered out, but the
+/// final result is still capped at the requested limit. The date range,
+/// unlike archive mode, is applied INSIDE the Tantivy query (not at the
+/// join step) so it composes with the archive-mode over-fetch without a
+/// second, compounding over-fetch -- see `search.rs`'s `date_range_query`.
 ///
 /// Returns results ordered by descending relevance score.
 pub fn recall_bm25(
@@ -364,6 +381,7 @@ pub fn recall_bm25(
     context: &str,
     limit: usize,
     mode: ArchiveMode,
+    range: &TimeRange,
 ) -> Result<RecallResult> {
     // Over-fetch from the search index when filtering archived rows out
     // so a heavily archived corpus does not silently return < limit.
@@ -373,8 +391,8 @@ pub fn recall_bm25(
         ArchiveMode::Hot | ArchiveMode::Cold => limit.saturating_mul(4),
         ArchiveMode::Both => limit,
     };
-    let search_results = index.search(repo, context, index_limit)?;
-    let mut reflections = join_search_results(db, &search_results, mode)?;
+    let search_results = index.search(repo, context, index_limit, range)?;
+    let mut reflections = join_search_results(db, &search_results, mode, range)?;
     reflections.truncate(limit);
 
     Ok(RecallResult {
@@ -399,6 +417,7 @@ fn merge_hybrid_scores(
     query_embedding: &[f32],
     limit: usize,
     mode: ArchiveMode,
+    range: &TimeRange,
 ) -> Result<Vec<RecalledReflection>> {
     let mut bm25_scores: HashMap<String, f32> = HashMap::new();
     let mut max_bm25: f32 = 0.0;
@@ -437,7 +456,7 @@ fn merge_hybrid_scores(
 
         let bm25_normalized = bm25_raw / bm25_norm_factor;
         let hybrid = 0.6 * bm25_normalized + 0.4 * cosine;
-        if let Some(reflection) = join_and_score(db, id, hybrid, mode)? {
+        if let Some(reflection) = join_and_score(db, id, hybrid, mode, range)? {
             reflections.push(reflection);
         }
     }
@@ -453,6 +472,7 @@ fn merge_hybrid_scores(
 /// Combines BM25 text search with semantic cosine similarity for better
 /// recall on paraphrased or conceptually related queries. Uses the formula:
 /// `score = 0.6 * bm25_norm + 0.4 * cosine_sim` (then applies boost/decay).
+#[allow(clippy::too_many_arguments)]
 pub fn recall(
     db: &Database,
     index: &SearchIndex,
@@ -461,12 +481,13 @@ pub fn recall(
     context: &str,
     limit: usize,
     mode: ArchiveMode,
+    range: &TimeRange,
 ) -> Result<RecallResult> {
     let index_limit = match mode {
         ArchiveMode::Hot | ArchiveMode::Cold => limit.saturating_mul(4),
         ArchiveMode::Both => limit * 3,
     };
-    let bm25_results = index.search(repo, context, index_limit)?;
+    let bm25_results = index.search(repo, context, index_limit, range)?;
     let query_embedding = embed_model.encode_one(context)?;
     let embeddings = db.get_embeddings(Some(repo))?;
     let reflections = merge_hybrid_scores(
@@ -476,6 +497,7 @@ pub fn recall(
         &query_embedding,
         limit,
         mode,
+        range,
     )?;
 
     Ok(RecallResult {
@@ -496,8 +518,9 @@ pub fn consult(
     embed_model: &EmbedModel,
     context: &str,
     limit: usize,
+    range: &TimeRange,
 ) -> Result<RecallResult> {
-    let bm25_results = index.search_all(context, limit * 3)?;
+    let bm25_results = index.search_all(context, limit * 3, range)?;
     let query_embedding = embed_model.encode_one(context)?;
     let embeddings = db.get_embeddings(None)?;
     let reflections = merge_hybrid_scores(
@@ -507,6 +530,7 @@ pub fn consult(
         &query_embedding,
         limit,
         ArchiveMode::Hot,
+        range,
     )?;
 
     Ok(RecallResult {
@@ -524,14 +548,16 @@ pub fn consult(
 ///
 /// `mode` closes the #457/#782 coverage gap: `legion recall --latest
 /// --archives` now reaches persisted (`forget --persist`) reflections
-/// instead of silently staying hot-only.
+/// instead of silently staying hot-only. `range` applies #786's
+/// `created_at` predicate directly in the DB backer's WHERE clause.
 pub fn recall_latest(
     db: &Database,
     repo: &str,
     limit: usize,
     mode: ArchiveMode,
+    range: &TimeRange,
 ) -> Result<RecallResult> {
-    let latest = db.get_latest_self_reflections(repo, limit, mode)?;
+    let latest = db.get_latest_self_reflections(repo, limit, mode, range)?;
 
     let reflections: Vec<RecalledReflection> = latest
         .into_iter()
@@ -558,15 +584,17 @@ pub fn recall_latest(
 ///
 /// `mode` closes the #457/#782 coverage gap: `legion recall --domain <d>
 /// --archives` now reaches persisted (`forget --persist`) reflections
-/// instead of silently staying hot-only.
+/// instead of silently staying hot-only. `range` applies #786's
+/// `created_at` predicate directly in the DB backer's WHERE clause.
 pub fn recall_by_domain(
     db: &Database,
     repo: &str,
     domain: &str,
     limit: usize,
     mode: ArchiveMode,
+    range: &TimeRange,
 ) -> Result<RecallResult> {
-    let matched = db.get_reflections_by_domain(repo, domain, limit, mode)?;
+    let matched = db.get_reflections_by_domain(repo, domain, limit, mode, range)?;
 
     let reflections: Vec<RecalledReflection> = matched
         .into_iter()
@@ -596,14 +624,15 @@ pub fn consult_bm25(
     index: &SearchIndex,
     context: &str,
     limit: usize,
+    range: &TimeRange,
 ) -> Result<RecallResult> {
-    let search_results = index.search_all(context, limit)?;
+    let search_results = index.search_all(context, limit, range)?;
     // consult searches across the whole corpus regardless of archive
     // state -- a question asked of "all reflections" should find
     // archived bullpen posts the same as fresh ones. Pin Both so the
     // archive-mode default of Hot does not narrow consult's surface
     // when it should not.
-    let reflections = join_search_results(db, &search_results, ArchiveMode::Both)?;
+    let reflections = join_search_results(db, &search_results, ArchiveMode::Both, range)?;
 
     Ok(RecallResult {
         reflections,
@@ -618,6 +647,13 @@ pub fn consult_bm25(
 /// queries, or when debugging hybrid weight tuning. Requires the embed model;
 /// returns an error if unavailable. Applies the same boost/decay weighting as
 /// the hybrid path so results are comparable.
+///
+/// `range` applies #786's `created_at` predicate in-memory against each
+/// already-fetched candidate (via `TimeRange::contains`) rather than in
+/// SQL -- safe here because `Database::get_embeddings` is an unbounded,
+/// un-limited corpus scan (no result-window cutoff to silently drop
+/// date-valid rows below), the same reasoning `join_and_score` documents
+/// for the hybrid path's cosine-sourced candidates.
 pub fn recall_cosine_only(
     db: &Database,
     embed_model: &EmbedModel,
@@ -625,6 +661,7 @@ pub fn recall_cosine_only(
     context: &str,
     limit: usize,
     min_score: Option<f32>,
+    range: &TimeRange,
 ) -> Result<RecallResult> {
     let query_embedding = embed_model.encode_one(context)?;
     let embeddings = db.get_embeddings(Some(repo))?;
@@ -641,7 +678,9 @@ pub fn recall_cosine_only(
             continue;
         }
 
-        if let Some(reflection) = db.get_reflection_by_id(id)? {
+        if let Some(reflection) = db.get_reflection_by_id(id)?
+            && range.contains(&reflection.created_at)?
+        {
             let score = weighted_score(
                 cosine,
                 reflection.recall_count,
@@ -821,6 +860,12 @@ mod tests {
     use crate::reflect::reflect_from_text;
     use crate::testutil::test_storage;
 
+    /// Unbounded `TimeRange` for tests that do not exercise #786 date
+    /// filtering.
+    fn no_range() -> TimeRange {
+        TimeRange::default()
+    }
+
     #[test]
     fn recall_returns_ranked_results() {
         let (db, index, _dir) = test_storage();
@@ -848,6 +893,7 @@ mod tests {
             "Zod type mapping",
             5,
             ArchiveMode::Hot,
+            &no_range(),
         )
         .expect("recall");
         assert!(result.reflections.len() >= 2);
@@ -859,7 +905,8 @@ mod tests {
         let (db, index, _dir) = test_storage();
         reflect_from_text(&db, &index, "kelex", "some reflection").expect("reflect");
 
-        let result = recall_bm25(&db, &index, "kelex", "", 5, ArchiveMode::Hot).expect("recall");
+        let result = recall_bm25(&db, &index, "kelex", "", 5, ArchiveMode::Hot, &no_range())
+            .expect("recall");
         assert!(result.reflections.is_empty());
     }
 
@@ -871,8 +918,16 @@ mod tests {
                 .expect("reflect");
         }
 
-        let result =
-            recall_bm25(&db, &index, "test", "testing", 3, ArchiveMode::Hot).expect("recall");
+        let result = recall_bm25(
+            &db,
+            &index,
+            "test",
+            "testing",
+            3,
+            ArchiveMode::Hot,
+            &no_range(),
+        )
+        .expect("recall");
         assert_eq!(result.reflections.len(), 3);
     }
 
@@ -882,14 +937,27 @@ mod tests {
 
         // Add directly to index without DB entry to simulate desync
         index
-            .add("orphan-id", "kelex", "orphan reflection text")
+            .add(
+                "orphan-id",
+                "kelex",
+                "orphan reflection text",
+                "2026-01-01T00:00:00+00:00",
+            )
             .expect("add to index");
 
         // Add a proper entry through reflect_from_text
         reflect_from_text(&db, &index, "kelex", "properly stored reflection").expect("reflect");
 
-        let result =
-            recall_bm25(&db, &index, "kelex", "reflection", 10, ArchiveMode::Hot).expect("recall");
+        let result = recall_bm25(
+            &db,
+            &index,
+            "kelex",
+            "reflection",
+            10,
+            ArchiveMode::Hot,
+            &no_range(),
+        )
+        .expect("recall");
 
         // Only the properly stored one should appear
         for r in &result.reflections {
@@ -903,8 +971,16 @@ mod tests {
         reflect_from_text(&db, &index, "kelex", "Zod schema mapping").expect("reflect kelex");
         reflect_from_text(&db, &index, "rafters", "Zod token generation").expect("reflect rafters");
 
-        let result =
-            recall_bm25(&db, &index, "kelex", "Zod", 10, ArchiveMode::Hot).expect("recall");
+        let result = recall_bm25(
+            &db,
+            &index,
+            "kelex",
+            "Zod",
+            10,
+            ArchiveMode::Hot,
+            &no_range(),
+        )
+        .expect("recall");
         assert_eq!(result.reflections.len(), 1);
         assert!(result.reflections[0].text.contains("mapping"));
     }
@@ -914,8 +990,16 @@ mod tests {
         let (db, index, _dir) = test_storage();
         reflect_from_text(&db, &index, "kelex", "test reflection").expect("reflect");
 
-        let result =
-            recall_bm25(&db, &index, "kelex", "test", 5, ArchiveMode::Hot).expect("recall");
+        let result = recall_bm25(
+            &db,
+            &index,
+            "kelex",
+            "test",
+            5,
+            ArchiveMode::Hot,
+            &no_range(),
+        )
+        .expect("recall");
         assert_eq!(result.repo, "kelex");
         assert_eq!(result.query, "test");
     }
@@ -1025,7 +1109,7 @@ mod tests {
         reflect_from_text(&db, &index, "platform", "Zod validation at the edge")
             .expect("reflect platform");
 
-        let result = consult_bm25(&db, &index, "Zod", 10).expect("consult");
+        let result = consult_bm25(&db, &index, "Zod", 10, &no_range()).expect("consult");
         // Should match kelex and platform but not rafters
         assert!(result.reflections.len() >= 2);
         let repos: Vec<&str> = result.reflections.iter().map(|r| r.repo.as_str()).collect();
@@ -1038,7 +1122,7 @@ mod tests {
         let (db, index, _dir) = test_storage();
         reflect_from_text(&db, &index, "kelex", "schema introspection logic").expect("reflect");
 
-        let result = consult_bm25(&db, &index, "schema", 5).expect("consult");
+        let result = consult_bm25(&db, &index, "schema", 5, &no_range()).expect("consult");
         assert_eq!(result.reflections.len(), 1);
         assert_eq!(result.reflections[0].repo, "kelex");
         assert_eq!(result.repo, "(all)");
@@ -1049,7 +1133,7 @@ mod tests {
         let (db, index, _dir) = test_storage();
         reflect_from_text(&db, &index, "kelex", "some reflection text").expect("reflect");
 
-        let result = consult_bm25(&db, &index, "", 5).expect("consult");
+        let result = consult_bm25(&db, &index, "", 5, &no_range()).expect("consult");
         assert!(result.reflections.is_empty());
     }
 
@@ -1165,7 +1249,16 @@ mod tests {
         db.boost_reflection(second_id).unwrap();
         db.boost_reflection(second_id).unwrap();
 
-        let result = recall_bm25(&db, &index, "kelex", "Zod", 5, ArchiveMode::Hot).expect("recall");
+        let result = recall_bm25(
+            &db,
+            &index,
+            "kelex",
+            "Zod",
+            5,
+            ArchiveMode::Hot,
+            &no_range(),
+        )
+        .expect("recall");
         assert!(result.reflections.len() >= 2);
         // The boosted reflection should have a higher weighted score
         let boosted = result

@@ -363,8 +363,18 @@ pub(crate) fn handle_recall(
     domain: Option<String>,
     archives: bool,
     include_archives: bool,
+    since: Option<String>,
+    until: Option<String>,
+    on: Option<String>,
 ) -> error::Result<()> {
     let database = open_db()?;
+
+    // #786: parsed once at the CLI boundary, threaded verbatim to every
+    // query-layer path below. An unparseable value returns
+    // LegionError::InvalidDateFilter here -- nothing reaches the query
+    // layer with an unparsed date.
+    let range =
+        crate::timerange::TimeRange::parse(since.as_deref(), until.as_deref(), on.as_deref())?;
 
     // Resolve archive mode (#457). Mutually-exclusive flags
     // enforced at the clap layer via conflicts_with.
@@ -402,21 +412,23 @@ pub(crate) fn handle_recall(
     }
 
     let mut result = if let Some(ref dom) = domain {
-        recall::recall_by_domain(&database, &repo, dom, limit, mode)?
+        recall::recall_by_domain(&database, &repo, dom, limit, mode, &range)?
     } else if latest {
-        recall::recall_latest(&database, &repo, limit, mode)?
+        recall::recall_latest(&database, &repo, limit, mode, &range)?
     } else if cosine_only {
         // --cosine-only requires the embed model; error if unavailable.
         let model = embed::EmbedModel::load().map_err(|e| {
             error::LegionError::Embedding(format!("--cosine-only requires embedding model: {e}"))
         })?;
-        recall::recall_cosine_only(&database, &model, &repo, &context, limit, min_score)?
+        recall::recall_cosine_only(&database, &model, &repo, &context, limit, min_score, &range)?
     } else {
         let index = search::SearchIndex::open(&data_dir()?.join("index"))?;
         // Try hybrid (BM25 + cosine) recall, fall back to BM25-only
         match try_load_embed_model() {
-            Some(model) => recall::recall(&database, &index, &model, &repo, &context, limit, mode)?,
-            None => recall::recall_bm25(&database, &index, &repo, &context, limit, mode)?,
+            Some(model) => recall::recall(
+                &database, &index, &model, &repo, &context, limit, mode, &range,
+            )?,
+            None => recall::recall_bm25(&database, &index, &repo, &context, limit, mode, &range)?,
         }
     };
     // Apply min-score filter on hybrid/latest paths (cosine-only applies it inline).
@@ -460,15 +472,22 @@ pub(crate) fn handle_consult(
     symbol: Option<String>,
     limit: usize,
     json: bool,
+    since: Option<String>,
+    until: Option<String>,
+    on: Option<String>,
 ) -> error::Result<()> {
     let database = open_db()?;
+    // #786: reflection mode only, per --since/--until/--on's help text;
+    // --symbol mode never consults this value.
+    let range =
+        crate::timerange::TimeRange::parse(since.as_deref(), until.as_deref(), on.as_deref())?;
 
     match (context, symbol) {
         (Some(ctx), None) => {
             let index = search::SearchIndex::open(&data_dir()?.join("index"))?;
             let result = match try_load_embed_model() {
-                Some(model) => recall::consult(&database, &index, &model, &ctx, limit)?,
-                None => recall::consult_bm25(&database, &index, &ctx, limit)?,
+                Some(model) => recall::consult(&database, &index, &model, &ctx, limit, &range)?,
+                None => recall::consult_bm25(&database, &index, &ctx, limit, &range)?,
             };
             let output = recall::format_for_consult(&result);
             if output.is_empty() {
