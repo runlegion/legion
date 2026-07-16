@@ -1201,6 +1201,62 @@ fn reflect_retag_to_current_domain_is_a_reported_noop() {
 }
 
 #[test]
+fn reflect_retag_into_identity_bootstraps_promotion_end_to_end() {
+    // The success path of the inverse (retag-into-identity) guard was
+    // only DB-tested; drive it through the real binary end to end. A
+    // repo with no live identity root yet may retag an existing
+    // reflection into domain=identity freely -- it then surfaces in
+    // whoami like any reflection stored with --whoami would.
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "lesson",
+        "--text",
+        "candidate for promotion to identity root",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&id);
+
+    // No identity root yet -- whoami is silent.
+    let before = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "test"]));
+    assert!(
+        before.is_empty(),
+        "expected empty whoami before promotion, got: {before}"
+    );
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "retag",
+        "--id",
+        &id,
+        "--set-domain",
+        "identity",
+    ]));
+    assert!(
+        stdout.contains("retagged reflection") && stdout.contains("lesson -> identity"),
+        "expected retag confirmation naming the promotion, got: {stdout}"
+    );
+
+    let after = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "test"]));
+    assert!(
+        after.contains("candidate for promotion to identity root"),
+        "promoted reflection should now surface in whoami: {after}"
+    );
+
+    let audit_stdout =
+        run_ok(legion_cmd(dir.path()).args(["audit", "--action", "retag-reflection", "--json"]));
+    assert!(
+        audit_stdout.contains("\"outcome\": \"success\"") && audit_stdout.contains("to=identity"),
+        "successful promotion retag should be audited, got: {audit_stdout}"
+    );
+}
+
+#[test]
 fn recall_domain_archives_reaches_persisted_reflections() {
     // Closes the #457 gap this issue owns: --domain combined with
     // --archives used to silently ignore the archive-mode filter (v1
