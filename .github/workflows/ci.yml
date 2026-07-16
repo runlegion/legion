@@ -6,6 +6,10 @@ on:
   # Run on every PR regardless of base branch so stacked PRs (whose base
   # is a sibling feat/* branch, not main) still gate on CI before merge.
   pull_request:
+  # Required by the GitHub merge queue (enabled 2026-07-16): queued PRs
+  # trigger CI via merge_group, not pull_request -- without this event
+  # every queued PR stalls with no checks reporting. See #814.
+  merge_group:
 
 env:
   CARGO_TERM_COLOR: always
