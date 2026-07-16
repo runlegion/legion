@@ -316,8 +316,13 @@ pub fn reconcile_pending_findings(
                 }
             }
             Err(e) => eprintln!(
-                "[legion] warning: resolution check failed for finding {} ({}): {e}",
-                finding.id, finding.file
+                "[legion] warning: resolution check failed for finding {} ({}): {e} -- this \
+                 finding stays PENDING and will keep blocking a clean verdict for branch \
+                 '{branch}' skill '{skill}' until it resolves. If '{}' is no longer a reachable \
+                 commit (branch history was rewritten via rebase/amend/force-push), git-log \
+                 resolution can never succeed for it -- disposition it explicitly instead: \
+                 'legion quality-gate finding-disposition --id {} --reason \"...\"'.",
+                finding.id, finding.file, finding.origin_commit, finding.id
             ),
         }
     }

@@ -592,4 +592,28 @@ mod tests {
         let rows = db.list_findings(&FindingFilter::default()).unwrap();
         assert!(rows.is_empty());
     }
+
+    /// `list_findings` orders newest first (matches `list_quality_gates`'s
+    /// own newest-first convention) -- the audit surface (#773 AC4) reads
+    /// top-down as "most recent first", not insertion order.
+    #[test]
+    fn list_findings_newest_first() {
+        let db = test_db();
+        db.insert_finding(&input("gate-1", "src/older.rs", FindingSeverity::High))
+            .unwrap();
+        // Force a strictly later timestamp, same technique
+        // `quality_gates.rs`'s own `list_quality_gates_newest_first` test
+        // uses for the same sub-second RFC3339 bucket collision risk.
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        db.insert_finding(&input("gate-2", "src/newer.rs", FindingSeverity::High))
+            .unwrap();
+
+        let rows = db.list_findings(&FindingFilter::default()).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].file, "src/newer.rs",
+            "the newer row must sort first"
+        );
+        assert_eq!(rows[1].file, "src/older.rs");
+    }
 }

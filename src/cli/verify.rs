@@ -708,20 +708,38 @@ fn persist_raw_findings(
     if raw_findings.is_empty() {
         return;
     }
-    // #773: a re-run that reports the same still-open finding (identical
-    // file+severity+summary) must not pile up a fresh duplicate PENDING row
-    // every time -- two review passes over an unfixed MED would otherwise
-    // leave two rows to disposition instead of one. `unwrap_or_default`
-    // degrades to "no known duplicates" on a query failure rather than
-    // blocking the insert below on this best-effort dedup check. `seen_this_call`
-    // extends the same key to duplicates WITHIN one `raw_findings` batch (a
-    // single malformed/duplicated `--findings-json` payload listing the same
-    // triple twice), not just across separate calls -- `existing_pending`
-    // alone cannot catch that, since neither copy is in the DB yet when the
-    // loop checks it.
-    let existing_pending = database
-        .list_pending_findings(&gate.branch, &gate.skill)
-        .unwrap_or_default();
+    // #773: a re-run that reports the same still-open OR already-waived
+    // finding (identical file+severity+summary) must not pile up a fresh
+    // duplicate PENDING row every time. Two dedup targets, deliberately not
+    // just one:
+    //   - PENDING: two review passes over an unfixed MED would otherwise
+    //     leave two rows to disposition instead of one.
+    //   - DISPOSITIONED: a finding explicitly waived ("won't fix:
+    //     intentional") must STAY waived if the same run keeps reporting it
+    //     -- checking PENDING alone would resurrect a fresh PENDING row the
+    //     moment the reviewer honestly re-lists the same MED they already
+    //     agreed not to fix, silently undoing the disposition and re-blocking
+    //     clean on a decision that was already made. RESOLVED is
+    //     deliberately excluded: a finding that recurs identically after
+    //     being fix-resolved is a regression worth a fresh PENDING row, not
+    //     something to suppress.
+    // `unwrap_or_default` degrades to "no known duplicates" on a query
+    // failure rather than blocking the insert below on this best-effort
+    // dedup check. `seen_this_call` extends the same key to duplicates
+    // WITHIN one `raw_findings` batch (a single malformed/duplicated
+    // `--findings-json` payload listing the same triple twice), not just
+    // across separate calls -- `existing_open` alone cannot catch that,
+    // since neither copy is in the DB yet when the loop checks it.
+    let existing_open: Vec<QualityGateFinding> = database
+        .list_findings(&FindingFilter {
+            branch: Some(gate.branch.clone()),
+            skill: Some(gate.skill.clone()),
+            status: None,
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| f.status != FindingStatus::Resolved)
+        .collect();
     let mut seen_this_call: std::collections::HashSet<(String, FindingSeverity, String)> =
         std::collections::HashSet::new();
     for rf in raw_findings {
@@ -734,10 +752,10 @@ fn persist_raw_findings(
             FindingSeverity::Med
         });
         let key = (rf.file.clone(), severity, rf.summary.clone());
-        let already_pending = existing_pending
+        let already_open = existing_open
             .iter()
             .any(|f| f.file == rf.file && f.severity == severity && f.summary == rf.summary);
-        if already_pending || !seen_this_call.insert(key) {
+        if already_open || !seen_this_call.insert(key) {
             continue;
         }
         if let Err(e) = database.insert_finding(&NewFindingInput {
@@ -1871,6 +1889,110 @@ mod tests {
             pending.len(),
             1,
             "a duplicated entry within one batch must not double-insert"
+        );
+    }
+
+    /// Regression guard (pre-push review HIGH): a finding explicitly
+    /// dispositioned ("won't fix: intentional") must STAY dispositioned when
+    /// a later run reports the identical (file, severity, summary) again --
+    /// dedup must check DISPOSITIONED rows too, not only PENDING ones, or a
+    /// waiver silently resurrects as a fresh blocking PENDING row.
+    #[test]
+    fn persist_raw_findings_does_not_resurrect_a_dispositioned_finding() {
+        let db = test_db();
+        let gate = db
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "commit-a",
+                skill: "legion-review",
+                result: GateResult::Issues,
+                findings_count: 1,
+                details: None,
+                provenance: GateProvenance::Asserted,
+                base: None,
+            })
+            .unwrap();
+        let raw = vec![finding_gate::RawFinding {
+            file: "src/foo.rs".to_string(),
+            line: Some(12),
+            severity: "LOW".to_string(),
+            summary: "naming nit".to_string(),
+        }];
+        persist_raw_findings(&db, &gate, &raw);
+        let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        assert_eq!(pending.len(), 1);
+        db.dispose_finding(&pending[0].id, "won't fix: intentional")
+            .unwrap();
+
+        // A later run re-reports the exact same finding (e.g. an honest
+        // reviewer re-listing the same LOW they already agreed to waive).
+        persist_raw_findings(&db, &gate, &raw);
+
+        let still_pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        assert!(
+            still_pending.is_empty(),
+            "re-reporting an already-dispositioned finding must not resurrect it as PENDING, \
+             got {still_pending:?}"
+        );
+        let all = db
+            .list_findings(&FindingFilter {
+                branch: Some("feat/x".to_string()),
+                skill: Some("legion-review".to_string()),
+                status: None,
+            })
+            .unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "the disposition must still be the only row for this finding"
+        );
+        assert_eq!(all[0].status, FindingStatus::Dispositioned);
+    }
+
+    /// A finding that recurs identically AFTER being RESOLVED (fix landed,
+    /// then the same problem reappears) is treated as a fresh finding, not
+    /// deduped away -- a genuine regression deserves its own PENDING row,
+    /// unlike the dispositioned case above.
+    #[test]
+    fn persist_raw_findings_does_not_dedupe_against_a_resolved_finding() {
+        let db = test_db();
+        let gate = db
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "commit-a",
+                skill: "legion-simplify",
+                result: GateResult::Issues,
+                findings_count: 1,
+                details: None,
+                provenance: GateProvenance::Validated,
+                base: None,
+            })
+            .unwrap();
+        let raw = vec![finding_gate::RawFinding {
+            file: "src/foo.rs".to_string(),
+            line: Some(12),
+            severity: "MED".to_string(),
+            summary: "duplicate WHERE-clause construction".to_string(),
+        }];
+        persist_raw_findings(&db, &gate, &raw);
+        let pending = db
+            .list_pending_findings("feat/x", "legion-simplify")
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        db.mark_finding_resolved(&pending[0].id, "commit-fix")
+            .unwrap();
+
+        // The identical problem recurs -- a regression, not the same
+        // still-open finding.
+        persist_raw_findings(&db, &gate, &raw);
+
+        let now_pending = db
+            .list_pending_findings("feat/x", "legion-simplify")
+            .unwrap();
+        assert_eq!(
+            now_pending.len(),
+            1,
+            "a recurrence after RESOLVED must be tracked as a new PENDING finding"
         );
     }
 
