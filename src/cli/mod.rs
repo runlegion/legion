@@ -105,27 +105,38 @@ pub(crate) enum Commands {
         dedupe_mode: DedupeMode,
     },
 
-    /// Permanently delete a reflection by id.
+    /// Permanently delete a reflection by id, or (with --persist) archive
+    /// it instead.
     ///
-    /// Destructive. No soft-delete, no undo. Removes the row from both
-    /// the SQLite reflections table and the tantivy search index. Used
-    /// to retire stale workaround reflections, demonstrably-wrong
-    /// reflections, or personal data that should not persist in the
-    /// corpus.
+    /// Default (no --persist): destructive. No soft-delete, no undo.
+    /// Removes the row from both the SQLite reflections table and the
+    /// tantivy search index. Used to retire stale workaround reflections,
+    /// demonstrably-wrong reflections, or personal data that should not
+    /// persist in the corpus.
     ///
     /// The optional `--repo` flag is a safety check: when provided,
-    /// the delete is refused unless the reflection's actual repo
-    /// matches. Prevents accidentally nuking the wrong reflection when
-    /// working with a similarly-shaped id.
+    /// the delete (or archive) is refused unless the reflection's actual
+    /// repo matches. Prevents accidentally nuking the wrong reflection
+    /// when working with a similarly-shaped id.
     Forget {
-        /// Reflection id to delete.
+        /// Reflection id to forget.
         #[arg(long)]
         id: String,
 
-        /// Optional safety check: refuse the delete unless the
+        /// Optional safety check: refuse the operation unless the
         /// reflection's repo matches this value.
         #[arg(long)]
         repo: Option<String>,
+
+        /// Archive instead of delete (#782): moves the reflection to
+        /// #457's cold tier. The row and search index entry survive --
+        /// it drops out of hot `recall` / `whoami` / `whatami` but stays
+        /// reachable via `recall --archives` / `--include-archives`
+        /// (including the `--domain` and `--latest` paths). One-way
+        /// today: legion ships no un-persist verb yet, matching
+        /// `document`'s archive (also writer-only).
+        #[arg(long)]
+        persist: bool,
     },
 
     /// Recall relevant reflections for the current context
@@ -165,14 +176,15 @@ pub(crate) enum Commands {
 
         /// Search ONLY archived reflections (the deep-dive). Default mode
         /// is hot-only; this flag inverts. Mutually exclusive with
-        /// --include-archives. v1 only affects the BM25/hybrid path;
-        /// --latest, --domain, --cosine-only stay hot-mode regardless.
+        /// --include-archives. Applies to the BM25/hybrid, --domain, and
+        /// --latest paths (#782); --cosine-only stays hot-mode regardless
+        /// (it ranks by embedding similarity with no archive-mode join).
         /// See #457.
         #[arg(long)]
         archives: bool,
 
         /// Search BOTH hot and archived reflections. Mutually exclusive
-        /// with --archives. Same v1 scope caveat as --archives.
+        /// with --archives. Same --cosine-only scope caveat as --archives.
         #[arg(long, conflicts_with = "archives")]
         include_archives: bool,
     },
@@ -430,9 +442,42 @@ pub(crate) enum Commands {
         #[arg(long)]
         repo: String,
 
-        /// Maximum number of identity reflections to return
+        /// Maximum number of identity reflections to return (plain listing
+        /// mode only; ignored when --generate is set)
         #[arg(long, default_value_t = 50)]
         limit: usize,
+
+        /// Enter generate mode: gather claimed-half (self-authored) and
+        /// given-half (cross-agent) source material for an identity rebuild
+        /// (default), or write an authored replacement (with --apply).
+        #[arg(long)]
+        generate: bool,
+
+        /// Repo (must be present in watch.toml) holding the agent's bylined
+        /// writing. Required with --generate unless --apply is also set.
+        #[arg(long, requires = "generate")]
+        vault_repo: Option<String>,
+
+        /// Comma-separated byline(s)/author name(s) to match against each
+        /// candidate file's frontmatter `author` field. Required with
+        /// --generate unless --apply is also set.
+        #[arg(long, value_delimiter = ',', requires = "generate")]
+        byline: Vec<String>,
+
+        /// Switch --generate into apply mode: perform the guarded swap from
+        /// an authored manifest instead of gathering source material.
+        #[arg(long, requires = "generate")]
+        apply: bool,
+
+        /// Path to the authored manifest (JSON: IdentityManifest shape).
+        /// Required with --apply.
+        #[arg(long, requires = "apply")]
+        from_file: Option<PathBuf>,
+
+        /// Compute and report the apply plan without writing or deleting
+        /// anything. Apply mode only.
+        #[arg(long, requires = "apply")]
+        dry_run: bool,
     },
 
     /// Print the operating contract for a repo -- how I operate, distinct from

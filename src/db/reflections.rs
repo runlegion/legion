@@ -68,7 +68,6 @@ pub struct ReflectionMeta {
 
 /// Result of [`Database::swap_identity_root`]: the ids removed, the new
 /// root, and any chained children inserted after it (in chain order).
-#[allow(dead_code)] // consumed by #784 (whoami --generate), not yet landed
 pub struct IdentitySwapResult {
     pub deleted_ids: Vec<String>,
     pub root: Reflection,
@@ -163,6 +162,20 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
                  ON reflections(audience, created_at) WHERE deleted_at IS NULL;",
     )?;
     Ok(())
+}
+
+/// SQL fragment applying an archive-mode filter (#457/#782), shared by
+/// every reflections read that takes an [`ArchiveMode`](crate::recall::ArchiveMode)
+/// parameter -- [`Database::get_reflection_by_id_in_mode`],
+/// [`Database::get_reflections_by_domain`], and
+/// [`Database::get_latest_self_reflections`]. One definition means the
+/// three modes (Hot/Cold/Both) cannot drift out of sync across callers.
+fn archive_mode_where_clause(mode: crate::recall::ArchiveMode) -> &'static str {
+    match mode {
+        crate::recall::ArchiveMode::Hot => "AND archived_at IS NULL",
+        crate::recall::ArchiveMode::Cold => "AND archived_at IS NOT NULL",
+        crate::recall::ArchiveMode::Both => "",
+    }
 }
 
 impl Database {
@@ -289,23 +302,15 @@ impl Database {
     /// "Live" here means `domain = 'identity' AND parent_id IS NULL AND
     /// deleted_at IS NULL AND archived_at IS NULL` -- a standalone query,
     /// not a call to [`get_identity_roots`](Self::get_identity_roots),
-    /// because the guard's liveness definition must include the
-    /// `archived_at` filter now (an archived root must not block a new
-    /// bootstrap or replacement) while the shared banner reader behind
-    /// `get_identity_roots` does not filter `archived_at` yet (tracked
-    /// separately as #782). This function does not wait for that fix.
-    ///
-    /// The asymmetry this creates -- an archived root plus a fresh root
-    /// both satisfying `get_identity_roots`'s current predicate -- is not
-    /// reachable through any production write path today: `legion
-    /// reflect` always stores identity reflections with `audience =
-    /// "self"` (hardcoded; there is no `--audience` flag), and the only
-    /// writer of `archived_at` on the `reflections` table
-    /// (`Database::archive_read_posts`, `src/db/board.rs`) is scoped to
-    /// `audience = 'team'`. Verified in
-    /// `insert_reflection_with_meta_ignores_archived_root_for_guard`,
-    /// which asserts the two-root state directly rather than leaving it
-    /// implicit.
+    /// kept as its own predicate (rather than reused) because the guard
+    /// fires on every `insert_reflection_with_meta` call and does not need
+    /// `get_identity_roots`'s ordering guarantees or full row projection.
+    /// Both predicates now agree on `archived_at IS NULL` (#782 added the
+    /// same filter to [`get_domain_roots`](Self::get_domain_roots), which
+    /// `get_identity_roots` wraps), so there is no longer an asymmetry
+    /// between what blocks a new bootstrap and what the banner shows.
+    /// `insert_reflection_with_meta_ignores_archived_root_for_guard`
+    /// exercises the guard's own archived-root bypass directly.
     fn live_identity_root_id(&self, repo: &str) -> Result<Option<String>> {
         // ORDER BY pins which id surfaces in the IdentityRootExists error
         // message when more than one live root already exists (reachable
@@ -344,15 +349,16 @@ impl Database {
     /// Deletes every row matching `domain = 'identity' AND parent_id IS
     /// NULL AND deleted_at IS NULL` for `repo` -- deliberately not
     /// filtering `archived_at` the way the insert guard's
-    /// [`live_identity_root_id`](Self::live_identity_root_id) does. An
-    /// archived orphan left behind by a swap would still satisfy "a
-    /// second domain=identity, parent_id IS NULL row" for any reader that
-    /// does not yet filter `archived_at` (the banner reader, until #782),
-    /// which is exactly the two-roots bug this issue closes. Swap is the
-    /// explicit "replace everything" path, so it clears every *root* row,
-    /// including any pre-existing leaked duplicates from before this fix
-    /// landed -- the plain insert guard only ever sees (and blocks
-    /// against) one at a time.
+    /// [`live_identity_root_id`](Self::live_identity_root_id) does. Since
+    /// #782, `get_domain_roots` (which `get_identity_roots` wraps, and
+    /// which backs the whoami/whatami banners) also filters
+    /// `archived_at IS NULL`, so an archived orphan left behind by a swap
+    /// no longer resurfaces in the banner either way -- but swap still
+    /// clears it here rather than leaving a dangling archived duplicate
+    /// row around. Swap is the explicit "replace everything" path, so it
+    /// clears every *root* row, including any pre-existing leaked
+    /// duplicates from before the #785 guard landed -- the plain insert
+    /// guard only ever sees (and blocks against) one at a time.
     ///
     /// Deliberately NOT cascading: only the root row(s) are deleted, not
     /// their `--follows` chain children. A replaced root's old chain
@@ -369,7 +375,6 @@ impl Database {
     /// `new_root_text` becomes the new root (`parent_id = None`).
     /// `chained_texts`, if any, are inserted afterward as a chain: the
     /// first follows the new root, each subsequent one follows the last.
-    #[allow(dead_code)] // consumed by #784 (whoami --generate), not yet landed
     pub fn swap_identity_root(
         &self,
         repo: &str,
@@ -627,11 +632,7 @@ impl Database {
         id: &str,
         mode: crate::recall::ArchiveMode,
     ) -> Result<Option<Reflection>> {
-        let where_clause = match mode {
-            crate::recall::ArchiveMode::Hot => "AND archived_at IS NULL",
-            crate::recall::ArchiveMode::Cold => "AND archived_at IS NOT NULL",
-            crate::recall::ArchiveMode::Both => "",
-        };
+        let where_clause = archive_mode_where_clause(mode);
         let sql = format!(
             "SELECT {REFLECTION_COLUMNS} \
              FROM reflections WHERE id = ?1 AND deleted_at IS NULL {where_clause}"
@@ -677,6 +678,55 @@ impl Database {
             return Err(LegionError::ReflectionNotFound(id.to_string()));
         }
         Ok(reflection)
+    }
+
+    /// Archive a reflection: `legion forget --id X --persist`'s writer.
+    ///
+    /// Sets `archived_at` (and refreshes `updated_at`), moving the row into
+    /// #457's cold tier without deleting it -- the opposite disposition
+    /// from [`delete_reflection`](Self::delete_reflection), which is
+    /// permanent. An archived reflection drops out of hot `recall` /
+    /// `whoami` / `whatami` (both now filter `archived_at IS NULL`, the
+    /// latter two unconditionally via [`get_domain_roots`](Self::get_domain_roots))
+    /// but stays reachable through `recall --archives` / `--include-archives`,
+    /// across every recall path after #782 (BM25/hybrid via
+    /// [`get_reflection_by_id_in_mode`](Self::get_reflection_by_id_in_mode),
+    /// `--domain` via [`get_reflections_by_domain`](Self::get_reflections_by_domain),
+    /// `--latest` via [`get_latest_self_reflections`](Self::get_latest_self_reflections)).
+    /// The row also stays in the tantivy search index untouched -- unlike
+    /// `delete_reflection`, there is no index-side counterpart to call.
+    ///
+    /// Idempotent: `COALESCE(archived_at, ?1)` preserves the original
+    /// archive timestamp on a repeat call, matching
+    /// `Database::archive_document`'s contract for the documents table.
+    ///
+    /// One-way today: legion ships no un-persist verb, the same shape as
+    /// `document`'s archive (also writer-only, no unarchive command). The
+    /// row and its `archived_at` timestamp are ordinary column state, not
+    /// a destructive rewrite, so restoring visibility is a future `legion
+    /// forget --id X --unpersist` (or equivalent) away whenever that need
+    /// materializes -- nothing here forecloses it structurally, it is
+    /// simply not built yet.
+    ///
+    /// Returns `LegionError::ReflectionNotFound` if the id does not match
+    /// any live (non-soft-deleted) row, mirroring `delete_reflection`.
+    pub fn archive_reflection(&self, id: &str) -> Result<Reflection> {
+        // Fetch first so a missing id produces a clear error rather than a
+        // silent zero-row UPDATE, matching delete_reflection's shape.
+        self.get_reflection_by_id(id)?
+            .ok_or_else(|| LegionError::ReflectionNotFound(id.to_string()))?;
+
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE reflections SET archived_at = COALESCE(archived_at, ?1), updated_at = ?1 \
+             WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now, id],
+        )?;
+
+        // Re-fetch: get_reflection_by_id does not filter archived_at, so
+        // the now-archived row is still visible to it.
+        self.get_reflection_by_id(id)?
+            .ok_or_else(|| LegionError::ReflectionNotFound(id.to_string()))
     }
 
     /// Soft-delete a reflection by setting its deleted_at timestamp.
@@ -732,9 +782,22 @@ impl Database {
     ///
     /// More efficient than `get_reflections_by_repo` when only a small
     /// number of results are needed, since the database handles the LIMIT.
-    pub fn get_latest_self_reflections(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
+    ///
+    /// `mode` applies the same archive-mode filter as
+    /// [`get_reflections_by_domain`](Self::get_reflections_by_domain) (#782)
+    /// -- the DB backer for `recall::recall_latest`, which is how `recall
+    /// --latest --archives` reaches persisted (`forget --persist`)
+    /// reflections.
+    pub fn get_latest_self_reflections(
+        &self,
+        repo: &str,
+        limit: usize,
+        mode: crate::recall::ArchiveMode,
+    ) -> Result<Vec<Reflection>> {
+        let where_clause = archive_mode_where_clause(mode);
         let sql = format!(
-            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE repo = ?1 AND audience = 'self' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?2"
+            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE repo = ?1 AND audience = 'self' \
+             AND deleted_at IS NULL {where_clause} ORDER BY created_at DESC LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
 
@@ -748,15 +811,28 @@ impl Database {
     /// Bypasses search entirely -- pure SQL lookup by domain. Used for
     /// reserved domains like `identity` and `snooze` that get injected
     /// on every session start without needing a search query.
+    ///
+    /// `mode` applies the same archive-mode filter as [`get_reflection_by_id_in_mode`]
+    /// (#457/#782): Hot excludes archived rows (the default), Cold returns
+    /// only archived rows, Both applies no archive filter. This is the DB
+    /// backer for `recall::recall_by_domain`, which is how `recall --domain
+    /// <d> --archives` reaches persisted (`forget --persist`) reflections --
+    /// before #782 this function had no mode parameter at all, so
+    /// `--archives` combined with `--domain` silently fell back to hot-only.
+    ///
+    /// [`get_reflection_by_id_in_mode`]: Self::get_reflection_by_id_in_mode
     pub fn get_reflections_by_domain(
         &self,
         repo: &str,
         domain: &str,
         limit: usize,
+        mode: crate::recall::ArchiveMode,
     ) -> Result<Vec<Reflection>> {
+        let where_clause = archive_mode_where_clause(mode);
         let sql = format!(
             "SELECT {REFLECTION_COLUMNS} \
-             FROM reflections WHERE repo = ?1 AND domain = ?2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3"
+             FROM reflections WHERE repo = ?1 AND domain = ?2 AND deleted_at IS NULL {where_clause} \
+             ORDER BY created_at DESC LIMIT ?3"
         );
         let mut stmt = self.conn.prepare(&sql)?;
 
@@ -773,6 +849,13 @@ impl Database {
     /// Fetch the root reflections (no parent) for a repo in a given domain,
     /// newest first. Backs the SessionStart boot banners: `whoami`
     /// (domain=identity, who I am) and `whatami` (domain=workflow, how I operate).
+    ///
+    /// Unconditionally filters `archived_at IS NULL` (#782): a `forget
+    /// --persist`-ed root must not surface in either banner. This is
+    /// deliberately NOT parameterized by archive mode the way
+    /// [`get_reflections_by_domain`](Self::get_reflections_by_domain) is --
+    /// the boot banners have no "show archived roots too" use case, so
+    /// there is no caller that would ever pass anything but hot-only here.
     pub fn get_domain_roots(
         &self,
         repo: &str,
@@ -781,7 +864,8 @@ impl Database {
     ) -> Result<Vec<Reflection>> {
         let sql = format!(
             "SELECT {REFLECTION_COLUMNS} \
-             FROM reflections WHERE repo = ?1 AND domain = ?2 AND parent_id IS NULL AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?3"
+             FROM reflections WHERE repo = ?1 AND domain = ?2 AND parent_id IS NULL \
+             AND deleted_at IS NULL AND archived_at IS NULL ORDER BY created_at DESC LIMIT ?3"
         );
         let mut stmt = self.conn.prepare(&sql)?;
 
@@ -1282,22 +1366,10 @@ mod tests {
     #[test]
     fn insert_reflection_with_meta_ignores_archived_root_for_guard() {
         // The guard's own liveness read filters archived_at IS NULL (#785
-        // build note), independently of get_identity_roots (which does
-        // not filter archived_at yet -- #782). An archived root must not
-        // block a fresh bootstrap insert.
-        //
-        // Documenting the consequence, not just the guard's own behavior:
-        // once this insert succeeds, get_identity_roots("legion", ..) DOES
-        // return both rows (asserted below) -- the pre-#782 banner reader
-        // would show two roots again if an identity reflection were ever
-        // archived. No current write path can do that: `legion reflect`
-        // always stores identity reflections with audience="self"
-        // (hardcoded, no --audience flag exists), and the only production
-        // writer of `archived_at` on the reflections table
-        // (`Database::archive_read_posts`, src/db/board.rs) is scoped to
-        // `audience = 'team'`. This test's archive step is a raw UPDATE
-        // simulating a future/hypothetical writer, not a reachable path
-        // today.
+        // build note). An archived root must not block a fresh bootstrap
+        // insert -- exercised here through the real writer, `forget
+        // --persist`'s `archive_reflection` (#782), rather than a raw
+        // UPDATE simulating a hypothetical one.
         let db = test_db();
         let root = db
             .insert_reflection_with_meta(
@@ -1310,13 +1382,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let now = Utc::now().to_rfc3339();
-        db.conn
-            .execute(
-                "UPDATE reflections SET archived_at = ?1 WHERE id = ?2",
-                rusqlite::params![&now, &root.id],
-            )
-            .unwrap();
+        db.archive_reflection(&root.id).unwrap();
 
         let fresh = db
             .insert_reflection_with_meta(
@@ -1332,18 +1398,17 @@ mod tests {
         assert!(fresh.parent_id.is_none());
         assert_ne!(fresh.id, root.id);
 
-        // The archived root and the fresh root now BOTH satisfy
-        // get_identity_roots's current (pre-#782) predicate -- this is
-        // the documented, accepted asymmetry, made visible here rather
-        // than left implicit.
+        // Since #782, get_domain_roots (which get_identity_roots wraps)
+        // also filters archived_at IS NULL, so the archived root no
+        // longer resurfaces alongside the fresh one -- the two-roots
+        // asymmetry this test used to document is closed.
         let roots = db.get_identity_roots("legion", 10).unwrap();
         assert_eq!(
             roots.len(),
-            2,
-            "pre-#782, get_identity_roots does not filter archived_at, so \
-             an archived root and a fresh root both surface -- tracked, not \
-             regressed, by this guard"
+            1,
+            "archived root must not surface in get_identity_roots post-#782"
         );
+        assert_eq!(roots[0].id, fresh.id);
     }
 
     #[test]
@@ -1674,6 +1739,212 @@ mod tests {
             "expected ReflectionNotFound, got {:?}",
             result
         );
+    }
+
+    #[test]
+    fn archive_reflection_sets_archived_at_and_survives_the_row() {
+        let db = test_db();
+        let r = db
+            .insert_reflection("legion", "spent-but-historic lesson", "self")
+            .unwrap();
+
+        // Hidden nowhere yet: plain get and Hot mode both see it.
+        assert!(db.get_reflection_by_id(&r.id).unwrap().is_some());
+        assert!(
+            db.get_reflection_by_id_in_mode(&r.id, crate::recall::ArchiveMode::Hot)
+                .unwrap()
+                .is_some()
+        );
+
+        let archived = db.archive_reflection(&r.id).expect("archive");
+        assert_eq!(archived.id, r.id);
+        assert_eq!(archived.text, "spent-but-historic lesson");
+
+        // Row survives (unlike delete_reflection) -- plain get still finds it.
+        assert!(db.get_reflection_by_id(&r.id).unwrap().is_some());
+
+        // Hot mode (hot recall / whoami / whatami) no longer sees it;
+        // Cold mode (--archives) does.
+        assert!(
+            db.get_reflection_by_id_in_mode(&r.id, crate::recall::ArchiveMode::Hot)
+                .unwrap()
+                .is_none(),
+            "archived reflection must drop out of hot mode"
+        );
+        assert!(
+            db.get_reflection_by_id_in_mode(&r.id, crate::recall::ArchiveMode::Cold)
+                .unwrap()
+                .is_some(),
+            "archived reflection must be reachable in cold mode"
+        );
+        assert!(
+            db.get_reflection_by_id_in_mode(&r.id, crate::recall::ArchiveMode::Both)
+                .unwrap()
+                .is_some(),
+            "archived reflection must be reachable in both mode"
+        );
+    }
+
+    #[test]
+    fn archive_reflection_is_idempotent() {
+        // Matches archive_document's idempotency contract: a repeat
+        // archive call preserves the original archived_at rather than
+        // bumping it, exercised via the actual DB timestamp so a
+        // regression to plain `SET archived_at = ?1` (no COALESCE) is
+        // caught even though both calls trip the same public assertions.
+        let db = test_db();
+        let r = db
+            .insert_reflection("legion", "archive twice", "self")
+            .unwrap();
+
+        db.archive_reflection(&r.id).expect("first archive");
+        let first_ts: String = db
+            .conn
+            .query_row(
+                "SELECT archived_at FROM reflections WHERE id = ?1",
+                [&r.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        db.archive_reflection(&r.id).expect("second archive");
+        let second_ts: String = db
+            .conn
+            .query_row(
+                "SELECT archived_at FROM reflections WHERE id = ?1",
+                [&r.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            first_ts, second_ts,
+            "repeat archive must not overwrite the original archived_at"
+        );
+    }
+
+    #[test]
+    fn archive_reflection_nonexistent_returns_not_found() {
+        let db = test_db();
+        let result = db.archive_reflection("no-such-id");
+        assert!(
+            matches!(result, Err(LegionError::ReflectionNotFound(_))),
+            "expected ReflectionNotFound, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn get_domain_roots_excludes_archived_roots() {
+        // Direct coverage of #782's shared liveness fix for the shape
+        // whoami/whatami actually inject: an archived root must not
+        // surface in get_domain_roots (get_identity_roots's, and
+        // whatami's domain=workflow read's, shared backer).
+        let db = test_db();
+        let live_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "live operating rule",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let archived_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "superseded operating rule",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        db.archive_reflection(&archived_root.id).expect("archive");
+
+        let roots = db.get_domain_roots("legion", "workflow", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, live_root.id);
+    }
+
+    #[test]
+    fn get_reflections_by_domain_respects_archive_mode() {
+        let db = test_db();
+        let hot = db
+            .insert_reflection_with_meta(
+                "legion",
+                "hot domain reflection",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("checkpoint".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let cold = db
+            .insert_reflection_with_meta(
+                "legion",
+                "persisted domain reflection",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("checkpoint".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        db.archive_reflection(&cold.id).expect("archive");
+
+        let hot_only = db
+            .get_reflections_by_domain("legion", "checkpoint", 10, crate::recall::ArchiveMode::Hot)
+            .unwrap();
+        assert_eq!(hot_only.len(), 1);
+        assert_eq!(hot_only[0].id, hot.id);
+
+        let cold_only = db
+            .get_reflections_by_domain("legion", "checkpoint", 10, crate::recall::ArchiveMode::Cold)
+            .unwrap();
+        assert_eq!(cold_only.len(), 1);
+        assert_eq!(cold_only[0].id, cold.id);
+
+        let both = db
+            .get_reflections_by_domain("legion", "checkpoint", 10, crate::recall::ArchiveMode::Both)
+            .unwrap();
+        assert_eq!(both.len(), 2);
+    }
+
+    #[test]
+    fn get_latest_self_reflections_respects_archive_mode() {
+        let db = test_db();
+        let hot = db
+            .insert_reflection("legion", "hot latest", "self")
+            .unwrap();
+        let cold = db
+            .insert_reflection("legion", "persisted latest", "self")
+            .unwrap();
+        db.archive_reflection(&cold.id).expect("archive");
+
+        let hot_only = db
+            .get_latest_self_reflections("legion", 10, crate::recall::ArchiveMode::Hot)
+            .unwrap();
+        let hot_ids: Vec<&str> = hot_only.iter().map(|r| r.id.as_str()).collect();
+        assert!(hot_ids.contains(&hot.id.as_str()));
+        assert!(!hot_ids.contains(&cold.id.as_str()));
+
+        let cold_only = db
+            .get_latest_self_reflections("legion", 10, crate::recall::ArchiveMode::Cold)
+            .unwrap();
+        let cold_ids: Vec<&str> = cold_only.iter().map(|r| r.id.as_str()).collect();
+        assert!(cold_ids.contains(&cold.id.as_str()));
+        assert!(!cold_ids.contains(&hot.id.as_str()));
+
+        let both = db
+            .get_latest_self_reflections("legion", 10, crate::recall::ArchiveMode::Both)
+            .unwrap();
+        assert_eq!(both.len(), 2);
     }
 
     #[test]

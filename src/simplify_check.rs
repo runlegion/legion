@@ -356,23 +356,13 @@ mod tests {
 
     #[test]
     fn refuses_rename_when_old_path_entry_missing() {
-        // `git_changed_files` now runs `git diff --name-status -M50%`
-        // (#779), not `--name-only`: a rename detected at or above the
-        // pinned 50% similarity surfaces as a single `R<nn>\t<old>\t<new>`
-        // line, and `git_changed_files` puts the R100 (zero-delta) case
-        // through R100 auto-clear or, for R<100 (content delta), just the
-        // new path into the coverage set. A rename that falls BELOW the
-        // pinned similarity is still undetected as a rename at the git
-        // level and is reported as two independent lines -- a delete of the
-        // old path and an add of the new path -- exactly as it was under
-        // `--name-only`. This test constructs that latter (still-relevant)
-        // case directly against `validate_articulation`, which is agnostic
-        // to where the changed-file set came from: it only sees two
-        // unrelated paths in the set. Coverage must be exact-path: an
-        // articulation addressing only the new path still leaves the old
-        // path uncovered, and the gate refuses by name -- an agent cannot
-        // clear this by adding more prose about the new path, since the old
-        // path simply will not match.
+        // Renames below git's similarity threshold are reported by
+        // `git diff --name-only` as a delete of the old path plus an add of
+        // the new path (two separate entries), not a single rename line.
+        // Coverage must be exact-path: an articulation addressing only the
+        // new path still leaves the old path uncovered, and the gate refuses
+        // by name -- an agent cannot clear this by adding more prose about
+        // the new path, since the old path simply will not match.
         let files = changed(&["src/old_name.rs", "src/new_name.rs"]);
         let only_new_path = "### src/new_name.rs\n\
              Renamed from old_name.rs and reviewed for duplicate logic, stringly-typed \

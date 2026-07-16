@@ -10,9 +10,11 @@ mod documents;
 mod embed;
 mod error;
 mod etc;
+mod gate_registry;
 mod gate_trust;
 mod graph;
 mod health;
+mod identity_generate;
 mod init;
 mod inventory;
 #[allow(dead_code)] // Items used by tests + pending surface/status/serve migration
@@ -131,7 +133,7 @@ fn run() -> error::Result<()> {
             force,
             dedupe_mode,
         )?,
-        Commands::Forget { id, repo } => cli::memory::handle_forget(id, repo)?,
+        Commands::Forget { id, repo, persist } => cli::memory::handle_forget(id, repo, persist)?,
         Commands::Recall {
             repo,
             context,
@@ -234,7 +236,24 @@ fn run() -> error::Result<()> {
         Commands::Now { banner: _, json } => cli::misc::handle_now(json)?,
         Commands::Init { force } => cli::misc::handle_init(force)?,
         Commands::Surface { repo } => cli::misc::handle_surface(repo)?,
-        Commands::Whoami { repo, limit } => cli::misc::handle_whoami(repo, limit)?,
+        Commands::Whoami {
+            repo,
+            limit,
+            generate,
+            vault_repo,
+            byline,
+            apply,
+            from_file,
+            dry_run,
+        } => {
+            if !generate {
+                cli::misc::handle_whoami(repo, limit)?
+            } else if apply {
+                cli::misc::handle_whoami_apply(repo, from_file, dry_run)?
+            } else {
+                cli::misc::handle_whoami_generate(repo, vault_repo, byline)?
+            }
+        }
         Commands::Whatami { repo, limit } => cli::misc::handle_whatami(repo, limit)?,
         Commands::Stats { repo } => cli::misc::handle_stats(repo)?,
         Commands::Telemetry { action } => cli::ops::handle_telemetry(action)?,

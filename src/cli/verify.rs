@@ -11,8 +11,8 @@ use crate::db::quality_gates::{
     QualityGateFilter, QualityGateInput, QualityGateRow, QualityGateStats,
 };
 use crate::gate_trust::emit_gate_trust;
-use crate::verify::GateResult;
-use crate::{error, kanban, simplify_check, verify};
+use crate::verify::{GateProvenance, GateResult};
+use crate::{error, gate_registry, kanban, simplify_check, verify};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum QualityGateAction {
@@ -21,6 +21,15 @@ pub(crate) enum QualityGateAction {
     /// Reads git HEAD and branch automatically. The skill runner calls this
     /// after inspecting the diff. `legion pr create` checks the gate before
     /// calling the work source so the result cannot be faked via a file flag.
+    ///
+    /// The row is recorded with ASSERTED provenance (#780): no validator
+    /// backs it. For a skill with a check validator
+    /// (`gate_registry::has_check_validator` -- `legion-simplify`,
+    /// `legion-pr-write`), `--result clean` is REFUSED here -- a clean
+    /// verdict for those skills can only be earned via `quality-gate check`,
+    /// which validates a substantive articulation before recording. Skills
+    /// with no check validator (`legion-review`, a `legion-verify:<card_id>`
+    /// verdict) are unaffected: `record` is their only, legitimate path.
     Record {
         /// Skill name (e.g., "legion-simplify")
         #[arg(long)]
@@ -89,27 +98,19 @@ pub(crate) enum QualityGateAction {
     /// Validate a simplify articulation file before recording the gate (#665).
     ///
     /// Resolves the changed-file set from
-    /// `git -c core.quotePath=false diff --name-status -M50% <base>...HEAD`
-    /// (three-dot merge-base range; `<base>` is `--base` when given, else
-    /// `main`, falling back to `origin/main...HEAD` when `main` is absent).
+    /// `git -c core.quotePath=false diff --name-only main...HEAD` (three-dot
+    /// merge-base range; falls back to origin/main...HEAD when main is absent).
     /// If no base ref resolves and HEAD has a parent commit, this hard-errors
-    /// rather than recording a gate against an empty set; an explicit
-    /// `--base` that does not resolve is likewise a hard error (#779). Pure
-    /// (zero-delta, R100) renames are auto-cleared from the coverage set --
-    /// their old/new path pairs are recorded in the gate's `details` JSON
-    /// instead of requiring an articulation entry, since a byte-identical
-    /// move carries no simplification risk by construction. Renames with a
-    /// content delta (R<100) still require an entry under the new path.
-    /// Parses the articulation file -- markdown with one `### <path>`
-    /// heading per changed file followed by prose -- and refuses when:
+    /// rather than recording a gate against an empty set. Parses
+    /// the articulation file -- markdown with one `### <path>` heading per
+    /// changed file followed by prose -- and refuses when:
     ///   - Coverage gap: a changed file has no `### <path>` entry (reports
     ///     which files are unaddressed).
     ///   - Boilerplate / thin: an entry's prose is below the substance threshold
     ///     (reuses the same word-count heuristic as `pr write-check`).
     ///
     /// On pass: records a quality gate for HEAD under `--skill` with
-    /// `--result` as the gate outcome, and the resolved base ref on the
-    /// gate row's `base` column. On failure: lists each gap and exits
+    /// `--result` as the gate outcome. On failure: lists each gap and exits
     /// non-zero without recording a gate.
     ///
     /// Mirror of `legion pr write-check` for the simplify gate. The
@@ -133,19 +134,36 @@ pub(crate) enum QualityGateAction {
         /// Number of skill findings (default 0; used when --result is "issues").
         #[arg(long, default_value = "0")]
         findings_count: u64,
+    },
 
-        /// Override the base ref the changed-file set is diffed against
-        /// (default: `main`, falling back to `origin/main`). For stacked
-        /// branches whose parent is an unmerged feature branch, pass that
-        /// branch so the coverage set is scoped to what this branch actually
-        /// changed rather than everything since `main` (#779). Must resolve
-        /// to a real ref -- an unresolvable `--base` is a hard error, same as
-        /// the no-base-ref case with no override. The resolved base is
-        /// recorded on the gate row regardless of whether it came from this
-        /// flag or the default resolution, so a too-narrow base stays
-        /// visible in the audit trail.
+    /// Void a gate row: retire a known-false verdict without deleting it
+    /// from history (#780 tombstone pattern, mirroring `deleted_at` on
+    /// tasks/reflections/schedules).
+    ///
+    /// A voided row drops out of `get_quality_gate` /
+    /// `get_latest_quality_gate_by_skill` (so `pr create`'s gate check and
+    /// the ->Done gate can never resolve to it again) and out of
+    /// `quality-gate stats`, but stays visible in `quality-gate list` --
+    /// voiding annotates the ledger, it never erases it.
+    ///
+    /// Use `--superseded-by` once the genuine replacement row exists (e.g.
+    /// after re-running `quality-gate check` on the same commit) to link the
+    /// voided row to what replaced it.
+    Void {
+        /// Id of the gate row to void (from `quality-gate list` or the id
+        /// printed by `record`/`check`).
         #[arg(long)]
-        base: Option<String>,
+        id: String,
+
+        /// Why this row is known-false (required -- a void with no reason
+        /// is not an audit trail).
+        #[arg(long)]
+        reason: String,
+
+        /// Id of the row that supersedes this one, if a re-laid genuine row
+        /// already exists.
+        #[arg(long)]
+        superseded_by: Option<String>,
     },
 }
 
@@ -158,6 +176,24 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             details_json,
         } => {
             let gate_result = GateResult::from_str(&result)?;
+
+            // #780: a "clean" verdict for a skill with a check validator can
+            // only be earned by passing that validator. Refusing here closes
+            // the exact loophole a manufactured-clean row exploits -- self-
+            // reporting "clean" via `record` for a skill whose real gate is
+            // `check`. Skills with no validator (legion-review, a
+            // legion-verify:<card_id> verdict) are asserted by necessity and
+            // unaffected.
+            if gate_result == GateResult::Clean && gate_registry::has_check_validator(&skill) {
+                eprintln!(
+                    "[legion] error: '{skill}' has a check validator -- a clean gate cannot be \
+                     recorded via 'quality-gate record'. Run 'quality-gate check --skill {skill} \
+                     --result clean ...' instead, which validates a substantive per-changed-file \
+                     articulation before recording."
+                );
+                return Err(error::LegionError::ExitWith(1));
+            }
+
             let (commit_hash, branch) = git_head_commit_and_branch()?;
 
             let database = open_db()?;
@@ -168,7 +204,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 result: gate_result,
                 findings_count,
                 details: details_json.as_deref(),
-                base: None,
+                provenance: GateProvenance::Asserted,
             })?;
             emit_gate_trust(&database, &row);
             // Phase 2b: a downstream legion-review verdict witnesses the
@@ -224,23 +260,19 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             result,
             articulation_file,
             findings_count,
-            base,
         } => {
             // Parse and validate the result flag before touching the FS.
             let gate_result: GateResult = GateResult::from_str(&result)?;
 
-            // Resolve the changed-file set from git. `--base` overrides the
-            // default main/origin-main resolution (#779); an unresolvable
-            // `--base` hard-errors rather than falling back silently. Pure
-            // (R100) renames are cleared from `files` and carried separately
-            // in `cleared_renames` for the audit trail.
-            let changed = git_changed_files(base.as_deref())?;
+            // Resolve the changed-file set from git. Falls back gracefully
+            // when main is not present locally.
+            let changed_files = git_changed_files()?;
 
             // Read the articulation from --articulation-file or stdin.
             let articulation =
                 read_file_or_stdin(articulation_file.as_deref(), "--articulation-file")?;
 
-            let report = simplify_check::validate_articulation(&changed.files, &articulation);
+            let report = simplify_check::validate_articulation(&changed_files, &articulation);
 
             // The gate is only recorded when the articulation passes the
             // structural validator. A failed articulation exits non-zero
@@ -270,23 +302,12 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // flag is informational, and the skill runner may not always surface
             // a count. The gate result is what matters for `legion pr create`.
             let (commit_hash, branch) = git_head_commit_and_branch()?;
-            // Cleared (R100) renames are excluded from `report`'s coverage
-            // requirement but still surfaced here -- count + pairs -- so the
-            // exclusion is auditable rather than silent (#779).
-            let cleared_renames_json: Vec<serde_json::Value> = changed
-                .cleared_renames
-                .iter()
-                .map(|(old, new)| serde_json::json!({"old": old, "new": new}))
-                .collect();
             let details = serde_json::json!({
                 "skill": skill,
                 "result": result,
                 "entry_count": report.entry_count,
                 "findings_count": findings_count,
                 "articulation": articulation,
-                "base": changed.base,
-                "cleared_renames_count": cleared_renames_json.len(),
-                "cleared_renames": cleared_renames_json,
             })
             .to_string();
 
@@ -298,19 +319,32 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 result: gate_result,
                 findings_count,
                 details: Some(&details),
-                base: changed.base.as_deref(),
+                provenance: GateProvenance::Validated,
             })?;
             emit_gate_trust(&database, &row);
 
             println!(
                 "[legion] simplify-check articulation accepted for skill '{skill}' \
-                 (result '{result}', {} file entries, {findings_count} skill findings, \
-                 base '{}', {} rename(s) auto-cleared). Gate id: {}",
-                report.entry_count,
-                changed.base.as_deref().unwrap_or("<none>"),
-                changed.cleared_renames.len(),
-                row.id,
+                 (result '{result}', {} file entries, {findings_count} skill findings). \
+                 Gate id: {}",
+                report.entry_count, row.id,
             );
+        }
+
+        QualityGateAction::Void {
+            id,
+            reason,
+            superseded_by,
+        } => {
+            let database = open_db()?;
+            let row = database.void_quality_gate(&id, &reason, superseded_by.as_deref())?;
+            println!(
+                "[legion] voided gate {} (skill '{}', commit {}): {}",
+                row.id, row.skill, row.commit_hash, reason
+            );
+            if let Some(sup) = &row.superseded_by {
+                println!("  superseded by: {sup}");
+            }
         }
     }
     Ok(())
@@ -319,29 +353,42 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
 /// Print gate rows as a human-readable table to stdout.
 ///
 /// Columns: id (first 8 chars), branch, commit (first 8 chars), skill,
-/// result, findings, created_at. An empty slice prints nothing.
+/// result, findings, provenance, void, created_at. An empty slice prints
+/// nothing.
+///
+/// PROVENANCE and VOID surface #780's audit distinction on the table a human
+/// actually reads by default: PROVENANCE separates a structurally VALIDATED
+/// clean from a merely ASSERTED one, and VOID marks a row retired as
+/// known-false ("-" for a live row, "VOID" for a voided one) so a retired
+/// row never visually blends in with a live one. `--json` (see
+/// `QualityGateRow`'s `Serialize`) already carries the full
+/// `voided_at`/`void_reason`/`superseded_by` detail for tooling; this table
+/// is the quick-glance surface.
 fn print_gate_table(rows: &[QualityGateRow]) {
     if rows.is_empty() {
         return;
     }
     println!(
-        "{:<8}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  CREATED",
-        "ID", "BRANCH", "COMMIT", "SKILL", "RESULT", "FINDINGS"
+        "{:<8}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {:<9}  {:<4}  CREATED",
+        "ID", "BRANCH", "COMMIT", "SKILL", "RESULT", "FINDINGS", "PROVENANCE", "VOID"
     );
-    println!("{}", "-".repeat(100));
+    println!("{}", "-".repeat(130));
     for row in rows {
         let id_short: String = row.id.chars().take(8).collect();
         let branch_trunc: String = row.branch.chars().take(20).collect();
         let commit_short: String = row.commit_hash.chars().take(8).collect();
         let skill_trunc: String = row.skill.chars().take(22).collect();
+        let void_marker = if row.voided_at.is_some() { "VOID" } else { "-" };
         println!(
-            "{:<8}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {}",
+            "{:<8}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {:<9}  {:<4}  {}",
             id_short,
             branch_trunc,
             commit_short,
             skill_trunc,
             row.result.as_str(),
             row.findings_count,
+            row.provenance.as_str(),
+            void_marker,
             row.created_at,
         );
     }
@@ -482,7 +529,9 @@ pub(crate) fn handle_verify(
             result: GateResult::Issues,
             findings_count: 1,
             details: Some(&details),
-            base: None,
+            // legion-verify has no check validator -- asserted by necessity
+            // (#780), same as every other verify-recorded row below.
+            provenance: GateProvenance::Asserted,
         })?;
         eprintln!("[legion] verify BLOCKED for card {card}: {reason}");
         return Err(error::LegionError::ExitWith(1));
@@ -539,7 +588,8 @@ pub(crate) fn handle_verify(
         result: gate_result,
         findings_count: findings,
         details: Some(&details),
-        base: None,
+        // legion-verify has no check validator -- asserted by necessity (#780).
+        provenance: GateProvenance::Asserted,
     })?;
 
     match decision {
@@ -821,7 +871,7 @@ mod tests {
                 result: GateResult::Clean,
                 findings_count: 0,
                 details: Some(&serde_json::json!({"articulation": articulation}).to_string()),
-                base: None,
+                provenance: GateProvenance::Validated,
             })
             .expect("record_quality_gate failed");
         assert!(!row.id.is_empty());

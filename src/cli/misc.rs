@@ -4,10 +4,11 @@
 use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
-use crate::cli::util::open_db;
+use crate::cli::memory::try_load_embed_model;
+use crate::cli::util::{open_db, open_db_and_index};
 use crate::{
-    daemon, error, init, kanban, mcp, now, recall, serve, stats, status, statusline, surface, task,
-    watch, worksource,
+    daemon, error, identity_generate, init, kanban, mcp, now, recall, serve, stats, status,
+    statusline, surface, task, watch, worksource,
 };
 
 #[derive(Subcommand)]
@@ -189,6 +190,64 @@ pub(crate) fn handle_whoami(repo: String, limit: usize) -> error::Result<()> {
     }
     let output = recall::format_whoami(&repo, &entries);
     print!("{output}");
+    Ok(())
+}
+
+/// `legion whoami --generate`: gather claimed-half + given-half source
+/// material and print it as JSON for the calling agent to synthesize into
+/// an `IdentityManifest` by hand. Flag validation (both `--vault-repo` and
+/// a non-empty `--byline` required) returns `LegionError::WhoamiGenerate`
+/// naming the missing flag(s), per this command's error-handling contract.
+pub(crate) fn handle_whoami_generate(
+    repo: String,
+    vault_repo: Option<String>,
+    byline: Vec<String>,
+) -> error::Result<()> {
+    let vault_repo = vault_repo.ok_or_else(|| {
+        error::LegionError::WhoamiGenerate(
+            "--vault-repo is required with --generate (unless --apply is also set)".to_string(),
+        )
+    })?;
+    if byline.is_empty() {
+        return Err(error::LegionError::WhoamiGenerate(
+            "at least one --byline is required with --generate (unless --apply is also set)"
+                .to_string(),
+        ));
+    }
+
+    let (database, index) = open_db_and_index()?;
+    let embed_model = try_load_embed_model();
+    let bundle = identity_generate::gather(
+        &database,
+        &index,
+        embed_model.as_ref(),
+        &repo,
+        &vault_repo,
+        &byline,
+    )?;
+    println!("{}", serde_json::to_string_pretty(&bundle)?);
+    Ok(())
+}
+
+/// `legion whoami --generate --apply`: read an authored `IdentityManifest`
+/// from `--from-file` and perform the guarded identity-chain swap (or, with
+/// `--dry-run`, report the plan without writing or deleting anything).
+pub(crate) fn handle_whoami_apply(
+    repo: String,
+    from_file: Option<std::path::PathBuf>,
+    dry_run: bool,
+) -> error::Result<()> {
+    let from_file = from_file.ok_or_else(|| {
+        error::LegionError::WhoamiGenerate("--from-file is required with --apply".to_string())
+    })?;
+    let manifest_text = std::fs::read_to_string(&from_file)?;
+    let manifest: identity_generate::IdentityManifest = serde_json::from_str(&manifest_text)?;
+
+    let (database, index) = open_db_and_index()?;
+    let backup_dir = data_dir()?.join("identity-backups");
+    let result =
+        identity_generate::apply(&database, &index, &repo, &manifest, &backup_dir, dry_run)?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
