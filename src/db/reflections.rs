@@ -729,6 +729,138 @@ impl Database {
             .ok_or_else(|| LegionError::ReflectionNotFound(id.to_string()))
     }
 
+    /// Re-tag a live reflection's domain in place: `legion reflect retag
+    /// --id X --set-domain <name|none>`'s writer (#783).
+    ///
+    /// A single-column UPDATE (plus the usual `updated_at` refresh): the
+    /// id, chain links (`parent_id`), recall_count, text, and archive
+    /// state are untouched by construction. `domain` has no presence in
+    /// the tantivy index (schema is id/repo/text only, src/search.rs), so
+    /// there is no index-side write to reconcile -- in-place metadata
+    /// mutation here is the same shape as [`store_embedding`],
+    /// [`boost_reflection`], and [`archive_reflection`]. The append-only
+    /// doctrine protects identity TEXT content, not classification
+    /// columns.
+    ///
+    /// TTL (`expires_at`/`evergreen`) is deliberately NOT recomputed:
+    /// those columns only ever get values for `audience = 'team'` bullpen
+    /// posts (`compute_post_ttl` returns `(None, false)` for everything
+    /// else), and retag's clients are self reflections feeding the
+    /// whatami banner. Re-deriving a team post's TTL from its new domain
+    /// is a bullpen-lifecycle concern out of scope here.
+    ///
+    /// Zero-root guard (#783 build note): #785's identity-root guard
+    /// fires on INSERT only, never UPDATE, so an unguarded retag would be
+    /// a third uncoordinated path to a zero-identity (or zero-operating-
+    /// contract) state. Refused when the target is the LAST live root of
+    /// a protected domain -- `parent_id IS NULL AND domain IN
+    /// ('identity','workflow')` with no other live (`deleted_at IS NULL
+    /// AND archived_at IS NULL`, the #782 liveness predicate -- an
+    /// archived root is not cover for retagging the last hot one) root in
+    /// the same repo+domain. Deliberately count-based rather than
+    /// refusing every root-shaped row: whatami's clutter case is MANY
+    /// live workflow roots, and a blanket refusal would make the issue's
+    /// own primary use case (retag a long-tail workflow root off the
+    /// banner) impossible. For identity the healthy state is exactly one
+    /// root (#785), so root-shaped and last-root coincide there. The
+    /// identity refusal directs to `whoami --generate` (the sanctioned
+    /// replace path, #784); the workflow refusal suggests `forget
+    /// --persist` or writing the replacement root first.
+    ///
+    /// Retagging INTO `identity` is held to #785's insert-guard invariant
+    /// from the other direction: a parentless target becoming a second
+    /// live identity root is refused with the same
+    /// [`LegionError::IdentityRootExists`] the insert path raises --
+    /// otherwise retag would be an UPDATE-shaped bypass of that guard too.
+    ///
+    /// A no-op retag (new domain equals the current one) returns the row
+    /// unchanged without writing, so it neither trips the guards nor
+    /// churns `updated_at`.
+    ///
+    /// Not wrapped in a transaction: the guard's `query_row` and the
+    /// `UPDATE` are two round trips, so two concurrent `legion` processes
+    /// could each read "another live root exists" and both retag,
+    /// zeroing the domain between them. This is the same class of gap
+    /// `insert_reflection_with_meta`'s own guard documents and accepts:
+    /// `legion` is a per-invocation CLI with no long-lived writer
+    /// serializing access, so the window is real but narrow (two
+    /// concurrent retags of roots in the same repo+domain), and a
+    /// `BEGIN IMMEDIATE` transaction would close it structurally if this
+    /// ever proves more than theoretical.
+    ///
+    /// Returns `LegionError::ReflectionNotFound` if the id does not match
+    /// any live (non-soft-deleted) row, mirroring `archive_reflection`.
+    ///
+    /// [`store_embedding`]: Self::store_embedding
+    /// [`boost_reflection`]: Self::boost_reflection
+    /// [`archive_reflection`]: Self::archive_reflection
+    pub fn retag_reflection(&self, id: &str, new_domain: Option<&str>) -> Result<Reflection> {
+        let existing = self
+            .get_reflection_by_id(id)?
+            .ok_or_else(|| LegionError::ReflectionNotFound(id.to_string()))?;
+
+        if existing.domain.as_deref() == new_domain {
+            return Ok(existing);
+        }
+
+        // Zero-root guard: is the target the last live root of a
+        // protected domain? One query owns the whole predicate: the
+        // target's own root-shape + liveness, and the absence of any
+        // other live root in the same repo+domain.
+        let protected_domain: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT t.domain FROM reflections t \
+                 WHERE t.id = ?1 AND t.parent_id IS NULL \
+                   AND t.domain IN ('identity', 'workflow') \
+                   AND t.deleted_at IS NULL AND t.archived_at IS NULL \
+                   AND NOT EXISTS (\
+                     SELECT 1 FROM reflections o \
+                     WHERE o.repo = t.repo AND o.domain = t.domain \
+                       AND o.parent_id IS NULL AND o.id <> t.id \
+                       AND o.deleted_at IS NULL AND o.archived_at IS NULL)",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(domain) = protected_domain {
+            return Err(match domain.as_str() {
+                "identity" => LegionError::RetagLastIdentityRoot {
+                    id: id.to_string(),
+                    repo: existing.repo.clone(),
+                },
+                _ => LegionError::RetagLastWorkflowRoot {
+                    id: id.to_string(),
+                    repo: existing.repo.clone(),
+                },
+            });
+        }
+
+        // Inverse guard: retagging a parentless row INTO identity would
+        // mint a second live identity root, bypassing #785's insert
+        // guard via UPDATE. The no-op early return above guarantees the
+        // target's current domain is not 'identity' here, so any live
+        // root found is necessarily a different row.
+        if new_domain == Some("identity")
+            && existing.parent_id.is_none()
+            && let Some(existing_id) = self.live_identity_root_id(&existing.repo)?
+        {
+            return Err(LegionError::IdentityRootExists {
+                repo: existing.repo.clone(),
+                existing_id,
+            });
+        }
+
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE reflections SET domain = ?1, updated_at = ?2 WHERE id = ?3 AND deleted_at IS NULL",
+            rusqlite::params![new_domain, &now, id],
+        )?;
+
+        self.get_reflection_by_id(id)?
+            .ok_or_else(|| LegionError::ReflectionNotFound(id.to_string()))
+    }
+
     /// Soft-delete a reflection by setting its deleted_at timestamp.
     ///
     /// Unlike `delete_reflection` (hard delete), this preserves the row for
@@ -2053,5 +2185,646 @@ mod tests {
             !deleted_again,
             "soft_delete_reflection on already-deleted should return false"
         );
+    }
+
+    // -- retag_reflection (#783) --
+
+    #[test]
+    fn retag_reflection_updates_domain_preserves_id_chain_and_recall_count() {
+        let db = test_db();
+        let parent = db
+            .insert_reflection_with_meta(
+                "legion",
+                "root of a chain",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let child = db
+            .insert_reflection_with_meta(
+                "legion",
+                "a diluting long-tail lesson",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    parent_id: Some(parent.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        db.boost_reflection(&child.id).unwrap();
+        db.boost_reflection(&child.id).unwrap();
+
+        let retagged = db.retag_reflection(&child.id, Some("lesson")).unwrap();
+
+        assert_eq!(retagged.id, child.id, "id must be preserved");
+        assert_eq!(
+            retagged.parent_id.as_deref(),
+            Some(parent.id.as_str()),
+            "chain link must be preserved"
+        );
+        assert_eq!(
+            retagged.recall_count, 2,
+            "recall_count must be preserved across retag"
+        );
+        assert_eq!(retagged.domain.as_deref(), Some("lesson"));
+
+        // Retag must not archive the row -- distinct from forget --persist.
+        // `archived_at` is not part of the public Reflection projection, so
+        // read it directly.
+        let archived_at: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT archived_at FROM reflections WHERE id = ?1",
+                [&child.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            archived_at.is_none(),
+            "retag must not archive the row -- distinct from forget --persist"
+        );
+
+        // Fetching independently confirms the UPDATE actually persisted,
+        // not just the returned struct.
+        let fetched = db.get_reflection_by_id(&child.id).unwrap().unwrap();
+        assert_eq!(fetched.domain.as_deref(), Some("lesson"));
+        assert_eq!(fetched.recall_count, 2);
+
+        // Still reachable via the chain.
+        let chain = db.get_chain(&child.id).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].id, parent.id);
+        assert_eq!(chain[1].id, child.id);
+    }
+
+    #[test]
+    fn retag_reflection_set_domain_none_clears_domain() {
+        let db = test_db();
+        let r = db
+            .insert_reflection_with_meta(
+                "legion",
+                "a chained lesson under workflow",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    parent_id: None,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // Give the repo a second live workflow root so this one is not
+        // the last, and retag it to no-domain (CLI's --set-domain none).
+        db.insert_reflection_with_meta(
+            "legion",
+            "another workflow root that stays put",
+            "self",
+            &ReflectionMeta {
+                domain: Some("workflow".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let retagged = db.retag_reflection(&r.id, None).unwrap();
+        assert!(retagged.domain.is_none());
+
+        let fetched = db.get_reflection_by_id(&r.id).unwrap().unwrap();
+        assert!(fetched.domain.is_none());
+    }
+
+    #[test]
+    fn retag_reflection_leaves_no_tantivy_presence_by_construction() {
+        // `domain` is not part of the search schema (id/repo/text only,
+        // src/search.rs), so a DB-only retag must not require any index
+        // write for recall-by-context to keep finding the reflection.
+        // Exercised end-to-end (DB write + BM25 search) rather than just
+        // asserted from the schema comment.
+        let (db, index, _dir) = crate::testutil::test_storage();
+        let stored = crate::reflect::reflect_from_text_with_meta(
+            &db,
+            &index,
+            "legion",
+            "macOS SIGKILLs unsigned binaries under gatekeeper",
+            &ReflectionMeta {
+                domain: Some("workflow".into()),
+                parent_id: Some(
+                    db.insert_reflection_with_meta(
+                        "legion",
+                        "workflow chain root",
+                        "self",
+                        &ReflectionMeta {
+                            domain: Some("workflow".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+                    .id,
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        db.retag_reflection(&stored, None).unwrap();
+
+        let results = index
+            .search("legion", "SIGKILLs unsigned binaries", 5)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "retag must not disturb the search index -- recall-by-context still finds it"
+        );
+        assert_eq!(results[0].id, stored);
+    }
+
+    #[test]
+    fn retag_reflection_nonexistent_id_errors() {
+        let db = test_db();
+        let err = db
+            .retag_reflection("nonexistent-id", Some("lesson"))
+            .unwrap_err();
+        assert!(matches!(err, LegionError::ReflectionNotFound(_)));
+    }
+
+    #[test]
+    fn retag_reflection_refuses_last_identity_root() {
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the only identity root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let err = db.retag_reflection(&root.id, None).unwrap_err();
+        assert!(matches!(err, LegionError::RetagLastIdentityRoot { .. }));
+
+        // Refused: the row is untouched.
+        let unchanged = db.get_reflection_by_id(&root.id).unwrap().unwrap();
+        assert_eq!(unchanged.domain.as_deref(), Some("identity"));
+    }
+
+    #[test]
+    fn retag_reflection_refuses_last_workflow_root() {
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the only workflow root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let err = db.retag_reflection(&root.id, None).unwrap_err();
+        assert!(matches!(err, LegionError::RetagLastWorkflowRoot { .. }));
+    }
+
+    #[test]
+    fn retag_reflection_allows_workflow_root_when_other_roots_remain() {
+        // The primary use case (#783's Problem statement): a repo with many
+        // long-tail domain=workflow roots diluting whatami. Retagging one
+        // of many away must succeed -- only the LAST one is guarded.
+        let db = test_db();
+        let clutter = db
+            .insert_reflection_with_meta(
+                "legion",
+                "macOS SIGKILLs unsigned binaries -- long-tail lesson",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        db.insert_reflection_with_meta(
+            "legion",
+            "the real operating contract root",
+            "self",
+            &ReflectionMeta {
+                domain: Some("workflow".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let retagged = db.retag_reflection(&clutter.id, None).unwrap();
+        assert!(retagged.domain.is_none());
+
+        // whatami's backer (get_domain_roots) no longer surfaces it.
+        let roots = db.get_domain_roots("legion", "workflow", 50).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_ne!(roots[0].id, clutter.id);
+    }
+
+    #[test]
+    fn retag_reflection_allows_identity_root_when_other_roots_remain() {
+        // Mirrors the workflow case: legacy/synced-in duplicate identity
+        // roots (bypassing #785's insert guard) are not "the last root",
+        // so retagging one away is allowed -- only zeroing the domain
+        // entirely is refused.
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "first identity root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let duplicate_id = insert_raw_orphan_identity(&db, "legion", "leaked duplicate root");
+
+        let retagged = db.retag_reflection(&duplicate_id, None).unwrap();
+        assert!(retagged.domain.is_none());
+
+        // The real root is untouched and still the sole identity root.
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, root.id);
+    }
+
+    #[test]
+    fn retag_reflection_does_not_guard_non_root_identity_or_workflow_reflections() {
+        // Chain children are excluded from whatami/whoami entirely
+        // (get_domain_roots filters parent_id IS NULL), so retagging one
+        // cannot zero the boot banner -- the guard must not fire for them
+        // even when they are the only child in the domain.
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "identity root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let child = db
+            .insert_reflection_with_meta(
+                "legion",
+                "chained identity beat",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    parent_id: Some(root.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let retagged = db.retag_reflection(&child.id, Some("lesson")).unwrap();
+        assert_eq!(retagged.domain.as_deref(), Some("lesson"));
+    }
+
+    #[test]
+    fn retag_reflection_does_not_guard_other_domains() {
+        let db = test_db();
+        let r = db
+            .insert_reflection_with_meta(
+                "legion",
+                "a color-tokens root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("color-tokens".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let retagged = db.retag_reflection(&r.id, None).unwrap();
+        assert!(retagged.domain.is_none());
+    }
+
+    #[test]
+    fn retag_reflection_noop_when_domain_unchanged_skips_guard_and_write() {
+        // Retagging the sole live workflow root to its OWN current domain
+        // is a no-op: it must succeed (not trip the zero-root guard) and
+        // must not churn updated_at, since no write happens.
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the only workflow root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let original_updated_at = root.updated_at.clone();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let retagged = db.retag_reflection(&root.id, Some("workflow")).unwrap();
+
+        assert_eq!(retagged.domain.as_deref(), Some("workflow"));
+        assert_eq!(
+            retagged.updated_at, original_updated_at,
+            "no-op retag must not write, so updated_at is untouched"
+        );
+    }
+
+    #[test]
+    fn retag_reflection_into_identity_refuses_when_live_root_already_exists() {
+        // Retagging a parentless, non-identity reflection INTO domain
+        // 'identity' while a live identity root already exists would mint
+        // a second live root via UPDATE -- exactly the state #785's insert
+        // guard exists to prevent. retag must be held to the same
+        // invariant from this direction too.
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the real identity root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let other = db
+            .insert_reflection_with_meta(
+                "legion",
+                "an unrelated workflow lesson",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // A second live workflow root so retagging `other` away from
+        // 'workflow' does not ALSO trip the zero-root guard on its
+        // current (source) domain -- this test targets the inverse
+        // (target-domain) guard specifically.
+        db.insert_reflection_with_meta(
+            "legion",
+            "another workflow root that stays put",
+            "self",
+            &ReflectionMeta {
+                domain: Some("workflow".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let err = db
+            .retag_reflection(&other.id, Some("identity"))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            LegionError::IdentityRootExists { existing_id, .. } if existing_id == root.id
+        ));
+
+        // Refused: the row is untouched.
+        let unchanged = db.get_reflection_by_id(&other.id).unwrap().unwrap();
+        assert_eq!(unchanged.domain.as_deref(), Some("workflow"));
+    }
+
+    #[test]
+    fn retag_reflection_into_identity_allowed_when_repo_has_no_live_root() {
+        // Bootstrap case: a repo with no live identity root yet may
+        // retag an existing reflection into domain=identity freely --
+        // this is the "no live root" branch #785's own insert guard
+        // takes for a fresh repo.
+        let db = test_db();
+        // Unguarded source domain (not identity/workflow) so only the
+        // target-domain (identity) branch of the guard is exercised.
+        let r = db
+            .insert_reflection_with_meta(
+                "fresh-repo",
+                "candidate for promotion to identity root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("lesson".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let retagged = db.retag_reflection(&r.id, Some("identity")).unwrap();
+        assert_eq!(retagged.domain.as_deref(), Some("identity"));
+    }
+
+    #[test]
+    fn retag_reflection_archived_root_is_not_cover_for_last_hot_one() {
+        // The guard's "other live roots exist" cover uses the #782
+        // liveness predicate (deleted_at IS NULL AND archived_at IS
+        // NULL): an archived workflow root does not feed whatami, so it
+        // must not license retagging the last HOT root away.
+        let db = test_db();
+        let archived = db
+            .insert_reflection_with_meta(
+                "legion",
+                "old archived contract",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        db.archive_reflection(&archived.id).unwrap();
+        let hot = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the sole hot contract root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let err = db.retag_reflection(&hot.id, None).unwrap_err();
+        assert!(matches!(err, LegionError::RetagLastWorkflowRoot { .. }));
+    }
+
+    #[test]
+    fn retag_reflection_allows_archived_sole_root() {
+        // An archived root is already out of the banner (get_domain_roots
+        // filters archived_at IS NULL), so retagging it cannot change the
+        // live-root count -- the guard's target-liveness condition must
+        // let it through even when it is the only root of its domain.
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "archived former contract root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        db.archive_reflection(&root.id).unwrap();
+
+        let retagged = db.retag_reflection(&root.id, Some("lesson")).unwrap();
+        assert_eq!(retagged.domain.as_deref(), Some("lesson"));
+    }
+
+    #[test]
+    fn retag_reflection_into_workflow_creates_an_additional_root_freely() {
+        // Unlike retagging INTO identity, there is no "at most one live
+        // workflow root" invariant to protect from the other direction --
+        // a repo growing a second (or Nth) live workflow root is exactly
+        // the normal, expected state (#783's own clutter scenario), so
+        // retag must not guard this direction at all.
+        let db = test_db();
+        let existing_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "existing workflow root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let candidate = db
+            .insert_reflection_with_meta(
+                "legion",
+                "a lesson promoted to a new workflow root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("lesson".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let retagged = db
+            .retag_reflection(&candidate.id, Some("workflow"))
+            .unwrap();
+        assert_eq!(retagged.domain.as_deref(), Some("workflow"));
+
+        let roots = db.get_domain_roots("legion", "workflow", 50).unwrap();
+        let ids: Vec<&str> = roots.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(roots.len(), 2);
+        assert!(ids.contains(&existing_root.id.as_str()));
+        assert!(ids.contains(&candidate.id.as_str()));
+    }
+
+    #[test]
+    fn retag_reflection_chain_child_into_identity_allowed_despite_live_root() {
+        // The inverse (retag-into-identity) guard only fires for a
+        // parentless target (existing.parent_id.is_none()): a chain child
+        // becoming domain=identity does not mint a second live ROOT (it
+        // has a parent, so get_identity_roots / get_domain_roots would
+        // never surface it), so it must not be blocked by
+        // IdentityRootExists the way a parentless retag-into-identity is.
+        let db = test_db();
+        let identity_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the live identity root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let workflow_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "a workflow root with a child",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let child = db
+            .insert_reflection_with_meta(
+                "legion",
+                "chain child, not root-shaped",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    parent_id: Some(workflow_root.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let retagged = db.retag_reflection(&child.id, Some("identity")).unwrap();
+        assert_eq!(retagged.domain.as_deref(), Some("identity"));
+
+        // The real identity root is untouched and still the sole one.
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, identity_root.id);
+    }
+
+    #[test]
+    fn retag_reflection_last_workflow_root_into_identity_source_guard_wins() {
+        // Pins the guard ORDER for a target that trips both guards at
+        // once: the sole live workflow root, retagged into identity while
+        // a live identity root already exists. The source-domain
+        // zero-root guard is checked first in `retag_reflection`, so this
+        // must fail as RetagLastWorkflowRoot (protecting the source),
+        // not IdentityRootExists (the target-side guard) -- and either
+        // way the row must be left untouched.
+        let db = test_db();
+        let identity_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the live identity root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let sole_workflow_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the only workflow root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let err = db
+            .retag_reflection(&sole_workflow_root.id, Some("identity"))
+            .unwrap_err();
+        assert!(matches!(err, LegionError::RetagLastWorkflowRoot { .. }));
+
+        let unchanged = db
+            .get_reflection_by_id(&sole_workflow_root.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.domain.as_deref(), Some("workflow"));
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, identity_root.id);
     }
 }

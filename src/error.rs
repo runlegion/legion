@@ -70,6 +70,24 @@ pub enum LegionError {
     )]
     IdentityRootExists { repo: String, existing_id: String },
 
+    #[error(
+        "refusing to retag {id}: it is the last live identity root for '{repo}'. Retagging it \
+         would leave the repo with zero identity -- the same failure #785 guards against on \
+         insert, which never fires on UPDATE; this refusal closes that third path. To replace \
+         the identity deliberately, use `legion whoami --repo {repo} --generate` (gather, then \
+         --apply), which swaps the root atomically."
+    )]
+    RetagLastIdentityRoot { id: String, repo: String },
+
+    #[error(
+        "refusing to retag {id}: it is the last live workflow root for '{repo}'. Retagging it \
+         would leave the repo with zero operating contract (an empty whatami banner). If the \
+         content is genuinely dead, archive it instead (`legion forget --id {id} --persist`); \
+         if you are replacing the contract, store the new root first (`legion reflect --repo \
+         {repo} --domain workflow --text \"...\"`), then retag this one."
+    )]
+    RetagLastWorkflowRoot { id: String, repo: String },
+
     #[error("invalid card status: {0}")]
     InvalidCardStatus(String),
 

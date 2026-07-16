@@ -66,7 +66,13 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Commands {
     /// Store a reflection from a completed session
+    #[command(subcommand_negates_reqs = true)]
     Reflect {
+        /// Maintenance verbs over existing reflections (e.g. `retag`).
+        /// When present, the storage flags below are ignored.
+        #[command(subcommand)]
+        action: Option<ReflectAction>,
+
         /// Repository name(s), comma-separated (e.g., "myrepo" or "frontend,backend")
         #[arg(long, value_delimiter = ',', required = true)]
         repo: Vec<String>,
@@ -1077,5 +1083,38 @@ pub(crate) enum Commands {
         /// matches this value are used as input.
         #[arg(long)]
         repo: String,
+    },
+}
+
+/// Maintenance verbs nested under `legion reflect` (#783). The bare
+/// `legion reflect --repo ... --text ...` storage form stays the default;
+/// `subcommand_negates_reqs` on the parent lets these verbs parse without
+/// the storage flags.
+#[derive(Subcommand)]
+pub(crate) enum ReflectAction {
+    /// Move a live reflection between domains in place (#783): changes
+    /// (or clears) `domain` WITHOUT archiving, deleting, or re-issuing
+    /// the id -- the reflection stays hot and recall-by-context still
+    /// finds it, it just stops (or starts) feeding the domain's banner
+    /// (`whatami` reads domain=workflow roots, `whoami` domain=identity).
+    /// Distinct from `forget --persist`, which moves the row to the cold
+    /// tier; retag keeps it hot. Id, chain links, and recall_count are
+    /// preserved.
+    ///
+    /// Refuses to retag the LAST live root of a protected domain
+    /// (`identity`/`workflow`): #785's zero-identity guard fires on
+    /// INSERT only, and retag must not become an UPDATE-shaped third
+    /// path to a repo with no identity or no operating contract. Replace
+    /// an identity root deliberately via `whoami --generate` instead.
+    Retag {
+        /// Reflection id to retag.
+        #[arg(long)]
+        id: String,
+
+        /// New domain name, or the literal `none` to clear the domain.
+        /// `none` is a reserved sentinel: a domain literally named "none"
+        /// cannot be set or targeted through this flag.
+        #[arg(long)]
+        set_domain: String,
     },
 }
