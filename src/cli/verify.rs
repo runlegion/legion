@@ -498,10 +498,9 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             let database = open_db()?;
             let finding = database.dispose_finding(&id, &reason)?;
             println!(
-                "[legion] dispositioned finding {} ({}{}): {}",
+                "[legion] dispositioned finding {} ({}): {}",
                 finding.id,
-                finding.file,
-                finding.line.map(|l| format!(":{l}")).unwrap_or_default(),
+                file_loc(&finding.file, finding.line),
                 reason
             );
         }
@@ -518,12 +517,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 acked.len()
             );
             for f in &acked {
-                println!(
-                    "  - {} ({}{})",
-                    f.id,
-                    f.file,
-                    f.line.map(|l| format!(":{l}")).unwrap_or_default()
-                );
+                println!("  - {} ({})", f.id, file_loc(&f.file, f.line));
             }
         }
 
@@ -570,6 +564,17 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
     Ok(())
 }
 
+/// Format a finding's location as `<file>` or `<file>:<line>` when a line is
+/// present. Shared by every finding print site (#773) so the `:<line>`
+/// formatting has one source instead of repeating
+/// `line.map(|l| format!(":{l}")).unwrap_or_default()` at each call site.
+fn file_loc(file: &str, line: Option<i64>) -> String {
+    match line {
+        Some(l) => format!("{file}:{l}"),
+        None => file.to_owned(),
+    }
+}
+
 /// The finding-resolution gate (#773), shared by the Record and Check arms.
 ///
 /// Always reconciles the PENDING set for `branch`/`skill` against
@@ -613,10 +618,9 @@ fn reconcile_and_refuse_if_findings_pending(
             .chain(refusal.trivial_unacked.iter())
         {
             eprintln!(
-                "  - [{}] {}{} {} (id {})",
+                "  - [{}] {} {} (id {})",
                 f.severity.as_str(),
-                f.file,
-                f.line.map(|l| format!(":{l}")).unwrap_or_default(),
+                file_loc(&f.file, f.line),
                 f.summary,
                 f.id,
             );
@@ -688,11 +692,7 @@ fn print_findings_table(rows: &[QualityGateFinding]) {
         let id_short: String = row.id.chars().take(8).collect();
         let branch_trunc: String = row.branch.chars().take(20).collect();
         let skill_trunc: String = row.skill.chars().take(16).collect();
-        let file_loc = match row.line {
-            Some(l) => format!("{}:{}", row.file, l),
-            None => row.file.clone(),
-        };
-        let file_trunc: String = file_loc.chars().take(30).collect();
+        let file_trunc: String = file_loc(&row.file, row.line).chars().take(30).collect();
         println!(
             "{:<8}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  {}",
             id_short,

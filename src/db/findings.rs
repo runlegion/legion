@@ -122,7 +122,7 @@ fn parse_status_from_db(s: String) -> std::result::Result<FindingStatus, rusqlit
     })
 }
 
-/// Shared row-mapping closure for the 13-column `SELECT ... FROM
+/// Shared row-mapping closure for the 14-column `SELECT ... FROM
 /// quality_gate_findings` shape every read path here uses.
 fn row_to_finding(
     row: &rusqlite::Row<'_>,
