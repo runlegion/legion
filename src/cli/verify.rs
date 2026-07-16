@@ -316,6 +316,24 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 None => Vec::new(),
             };
 
+            // #773: a self-contradiction check that closes the remaining
+            // fail-open gap without imposing hard-refusal on every malformed
+            // `--details-json` (most skills never set a `findings` key at
+            // all, and that legitimate case must keep passing). See
+            // `findings_count_contradicts_extraction`'s doc comment.
+            if findings_count_contradicts_extraction(gate_result, findings_count, &raw_findings) {
+                eprintln!(
+                    "[legion] error: cannot record a clean gate for skill '{skill}' -- \
+                     --findings-count {findings_count} but 0 findings were extracted from \
+                     --details-json (#773). This means either --details-json is missing/malformed \
+                     for a run that claims real findings, or its `findings` array does not match \
+                     the {{file, line, severity, summary}} schema. Fix --details-json so the \
+                     findings it claims are actually tracked, or pass --findings-count 0 if there \
+                     truly are none."
+                );
+                return Err(error::LegionError::ExitWith(1));
+            }
+
             // Reconcile the PENDING finding ledger against this commit first
             // (a fix landed in an earlier commit must not still read as
             // pending), then -- only when this run claims `clean` -- refuse
@@ -419,6 +437,21 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 Some(raw) => finding_gate::parse_findings_array(raw)?,
                 None => Vec::new(),
             };
+
+            // #773: same self-contradiction guard as the Record arm --
+            // `--findings-json` already hard-errors on malformed JSON above,
+            // so this mainly catches the "omitted --findings-json entirely
+            // while --findings-count claims real findings" case on a clean
+            // request, for symmetry and defense in depth.
+            if findings_count_contradicts_extraction(gate_result, findings_count, &raw_findings) {
+                eprintln!(
+                    "[legion] error: cannot record a clean gate for skill '{skill}' -- \
+                     --findings-count {findings_count} but --findings-json extracted none (#773). \
+                     Pass the findings via --findings-json so they are tracked, or pass \
+                     --findings-count 0 if there truly are none."
+                );
+                return Err(error::LegionError::ExitWith(1));
+            }
 
             // Resolve the changed-file set from git. `--base` overrides the
             // default main/origin-main resolution (#779); an unresolvable
@@ -594,6 +627,26 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
         }
     }
     Ok(())
+}
+
+/// True when a `clean` request's own asserted `findings_count` contradicts
+/// what was actually extracted into `raw_findings` -- the skill claims N>0
+/// findings via `--findings-count` but ledger extraction produced none.
+/// Refusing on this closes the fail-open gap a totally-malformed or
+/// entirely-mismatched-schema `--details-json`/`--findings-json` payload
+/// would otherwise leave open (extraction degrades to an empty vec rather
+/// than erroring, since a missing `findings` key is the legitimate common
+/// case for most skills) WITHOUT imposing hard-refusal on every malformed
+/// payload -- only when the skill's own count says findings should exist and
+/// none were found is there no ambiguity that something was dropped versus
+/// never existed. Shared, pure, and unit-testable by both the `Record` and
+/// `Check` arms.
+fn findings_count_contradicts_extraction(
+    gate_result: GateResult,
+    findings_count: u64,
+    raw_findings: &[finding_gate::RawFinding],
+) -> bool {
+    gate_result == GateResult::Clean && findings_count > 0 && raw_findings.is_empty()
 }
 
 /// Format a finding's location as `<file>` or `<file>:<line>` when a line is
@@ -1423,6 +1476,53 @@ mod tests {
     }
 
     // --- finding-resolution gate wiring tests (#773) ---
+
+    // -- findings_count_contradicts_extraction (pure predicate) --
+
+    #[test]
+    fn findings_count_contradicts_extraction_true_when_count_positive_and_extraction_empty() {
+        assert!(findings_count_contradicts_extraction(
+            GateResult::Clean,
+            3,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn findings_count_contradicts_extraction_false_when_count_zero() {
+        assert!(!findings_count_contradicts_extraction(
+            GateResult::Clean,
+            0,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn findings_count_contradicts_extraction_false_when_extraction_non_empty() {
+        let raw = vec![finding_gate::RawFinding {
+            file: "src/foo.rs".to_string(),
+            line: None,
+            severity: "MED".to_string(),
+            summary: "x".to_string(),
+        }];
+        assert!(!findings_count_contradicts_extraction(
+            GateResult::Clean,
+            1,
+            &raw
+        ));
+    }
+
+    #[test]
+    fn findings_count_contradicts_extraction_false_for_issues_result() {
+        // The self-contradiction check only ever applies to a `clean`
+        // request -- an `issues` request with a mismatched count is a
+        // separate (unenforced, informational-field) concern, not this gate.
+        assert!(!findings_count_contradicts_extraction(
+            GateResult::Issues,
+            3,
+            &[]
+        ));
+    }
 
     /// `reconcile_and_refuse_if_findings_pending` refuses a `clean` request
     /// when a HIGH finding from a prior run on the same branch+skill is
