@@ -102,25 +102,68 @@ pub(crate) fn read_file_or_stdin(
     }
 }
 
-/// List files changed between main (or origin/main) and HEAD.
+/// Similarity threshold pinned on every `git diff -M` invocation in
+/// [`git_changed_files`] (#779). Passed explicitly on the command line so the
+/// coverage set never drifts with a repo's (or a contributor's global)
+/// `diff.renames` config -- an ambient config change must not silently widen
+/// or narrow what the simplify gate treats as a "pure" rename. 50% matches
+/// git's own long-standing default for `-M` with no argument.
+const RENAME_SIMILARITY: &str = "-M50%";
+
+/// The changed-file set resolved by [`git_changed_files`], plus the audit
+/// trail the R100 auto-clear (#779) requires.
+pub(crate) struct ChangedFiles {
+    /// Paths the simplify articulation must cover: every added/modified/
+    /// deleted/type-changed path, the new-path side of any rename with a
+    /// content delta (`R<100`), and both sides of an undetected rename
+    /// (below [`RENAME_SIMILARITY`], which git reports as a plain delete +
+    /// add pair rather than a single `R` line).
+    pub(crate) files: std::collections::HashSet<String>,
+    /// `(old_path, new_path)` pairs for every pure (`R100`, zero-delta)
+    /// rename excluded from `files`. Git's own rename detection guarantees
+    /// these carry no simplification risk -- content is byte-identical, only
+    /// the path moved -- but the pairs are surfaced here (rather than simply
+    /// dropped) so the exclusion is auditable, not silent (field case: a
+    /// 509-file strangler PR where 406 were verbatim moves).
+    pub(crate) cleared_renames: Vec<(String, String)>,
+    /// The base ref the diff actually ran against: the resolved `main` /
+    /// `origin/main` fallback, the caller's explicit `--base` override, or
+    /// `None` in the vacuous initial-commit case where no diff ran at all.
+    /// Recorded on the gate row so a too-narrow base stays visible in the
+    /// audit trail rather than disappearing once the coverage set looks
+    /// clean (#779).
+    pub(crate) base: Option<String>,
+}
+
+/// List files changed between `base` (or, when `None`, `main`/`origin/main`)
+/// and HEAD, auto-clearing pure renames from the coverage set.
 ///
-/// Uses `git diff -c core.quotePath=false --name-only main...HEAD` (three-dot
-/// merge-base range) so that files changed only on main since the branch point
-/// do not appear in the set. Falls back to `origin/main...HEAD` when `main` is
-/// absent locally.
+/// Uses `git diff -c core.quotePath=false --name-status -M50% <base>...HEAD`
+/// (three-dot merge-base range, explicit similarity pin -- see
+/// [`RENAME_SIMILARITY`]) so that files changed only on the base ref since the
+/// branch point do not appear in the set. When `base` is `None`, falls back
+/// to `origin/main...HEAD` when `main` is absent locally (the pre-#779
+/// default-resolution behavior, unchanged).
 ///
-/// Before trying the diff, each candidate base ref is probed with
-/// `git rev-parse --verify <ref>`. When a ref resolves but the diff command
-/// still fails, that is a hard error (the environment is broken, not a
-/// legitimate no-base situation). When neither ref resolves AND HEAD has no
-/// parent commit (initial commit), an empty set is returned so the gate passes
-/// vacuously. In any other failure mode this function returns `Err` so the
-/// caller can refuse to record a gate rather than silently accepting vacuous
-/// coverage.
+/// When `base` is `Some`, it is probed with `git rev-parse --verify <ref>`
+/// and any failure to resolve is a hard error -- an explicit `--base` that
+/// does not name a real ref must never silently fall back to the default
+/// resolution or vacuously pass, matching the existing no-base-ref behavior
+/// for the auto-detected case. When `base` is `None` and neither `main` nor
+/// `origin/main` resolves AND HEAD has no parent commit (initial commit), an
+/// empty set is returned so the gate passes vacuously. In any other failure
+/// mode this function returns `Err` so the caller can refuse to record a gate
+/// rather than silently accepting vacuous coverage.
+///
+/// `--name-status` (rather than `--name-only`) is what makes the R100
+/// auto-clear possible: it reports renames as `R<similarity>\t<old>\t<new>`
+/// instead of collapsing a detected rename down to just the new path, so a
+/// zero-delta (`R100`) move can be told apart from one that also touched
+/// content (`R<100`).
 ///
 /// Used by `legion quality-gate check` to build the coverage set the
 /// articulation must address.
-pub(crate) fn git_changed_files() -> Result<std::collections::HashSet<String>, error::LegionError> {
+pub(crate) fn git_changed_files(base: Option<&str>) -> Result<ChangedFiles, error::LegionError> {
     // Probe whether git is available at all first.
     let probe = std::process::Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -134,66 +177,105 @@ pub(crate) fn git_changed_files() -> Result<std::collections::HashSet<String>, e
         ));
     }
 
-    // Probe each candidate base ref. Collect the ones that resolve.
-    let candidates: [&str; 2] = ["main", "origin/main"];
-    let mut resolved_base: Option<&str> = None;
-    for candidate in candidates {
+    // Resolved directly to a `String` (not `Option<String>` + a later
+    // `.expect`) so the type system -- not a runtime assertion -- proves
+    // every path either yields a real base or returns early.
+    let base_ref: String = if let Some(explicit) = base {
+        // An explicit --base must resolve to a real ref. No fallback, no
+        // vacuous pass -- a typo'd or unmerged base ref is a hard error so
+        // the gate never runs against an accidentally empty diff.
         let verify = std::process::Command::new("git")
-            .args(["rev-parse", "--verify", candidate])
+            .args(["rev-parse", "--verify", explicit])
             .output()
             .map_err(|e| {
                 error::LegionError::WorkSource(format!(
-                    "failed to probe git ref '{candidate}': {e}"
+                    "failed to probe --base ref '{explicit}': {e}"
                 ))
             })?;
-        if verify.status.success() {
-            resolved_base = Some(candidate);
-            break;
+        if !verify.status.success() {
+            let stderr = String::from_utf8_lossy(&verify.stderr);
+            return Err(error::LegionError::WorkSource(format!(
+                "--base ref '{explicit}' does not resolve (git rev-parse --verify failed): \
+                 {stderr}"
+            )));
         }
-    }
+        explicit.to_owned()
+    } else {
+        // Probe each candidate base ref. Collect the first one that resolves.
+        let candidates: [&str; 2] = ["main", "origin/main"];
+        let mut found: Option<&str> = None;
+        for candidate in candidates {
+            let verify = std::process::Command::new("git")
+                .args(["rev-parse", "--verify", candidate])
+                .output()
+                .map_err(|e| {
+                    error::LegionError::WorkSource(format!(
+                        "failed to probe git ref '{candidate}': {e}"
+                    ))
+                })?;
+            if verify.status.success() {
+                found = Some(candidate);
+                break;
+            }
+        }
 
-    let Some(base_ref) = resolved_base else {
-        // Neither main nor origin/main exists. This is legitimate only when
-        // HEAD itself has no parent (initial commit / orphan branch). Probe
-        // for a parent commit; if there is one, the branch just has an unusual
-        // base-ref name, which is a hard error rather than vacuous-pass.
-        let parent = std::process::Command::new("git")
-            .args(["rev-parse", "--verify", "HEAD~1"])
-            .output()
-            .map_err(|e| error::LegionError::WorkSource(format!("failed to probe HEAD~1: {e}")))?;
-        if parent.status.success() {
-            // HEAD has a parent but no known base ref -- refuse rather than
-            // vacuously pass. An agent running on an unusual default branch
-            // (master, develop, etc.) must configure the base ref.
-            return Err(error::LegionError::WorkSource(
-                "could not find base ref 'main' or 'origin/main' and HEAD has a parent commit; \
-                 the simplify gate cannot determine the changed-file set. \
-                 Ensure 'main' or 'origin/main' exists in this repo."
-                    .to_owned(),
-            ));
-        }
-        // HEAD has no parent: genuine initial commit, vacuously valid. This is
-        // unreachable in the normal branch-off-main workflow (HEAD always has
-        // a parent once `main` exists), but note it on stderr rather than
-        // passing silently -- a vacuous pass should never be invisible to
-        // whoever is watching the gate run.
-        eprintln!(
-            "[legion] no base ref ('main' or 'origin/main') found and HEAD has no parent \
-             commit -- treating this as the initial commit. The changed-file set is empty \
-             and any articulation is accepted vacuously."
-        );
-        return Ok(std::collections::HashSet::new());
+        let Some(found_ref) = found else {
+            // Neither main nor origin/main exists. This is legitimate only
+            // when HEAD itself has no parent (initial commit / orphan
+            // branch). Probe for a parent commit; if there is one, the
+            // branch just has an unusual base-ref name, which is a hard
+            // error rather than vacuous-pass.
+            let parent = std::process::Command::new("git")
+                .args(["rev-parse", "--verify", "HEAD~1"])
+                .output()
+                .map_err(|e| {
+                    error::LegionError::WorkSource(format!("failed to probe HEAD~1: {e}"))
+                })?;
+            if parent.status.success() {
+                // HEAD has a parent but no known base ref -- refuse rather
+                // than vacuously pass. An agent running on an unusual
+                // default branch (master, develop, etc.) must configure the
+                // base ref (or pass --base explicitly).
+                return Err(error::LegionError::WorkSource(
+                    "could not find base ref 'main' or 'origin/main' and HEAD has a parent \
+                     commit; the simplify gate cannot determine the changed-file set. \
+                     Ensure 'main' or 'origin/main' exists in this repo, or pass --base."
+                        .to_owned(),
+                ));
+            }
+            // HEAD has no parent: genuine initial commit, vacuously valid.
+            // This is unreachable in the normal branch-off-main workflow
+            // (HEAD always has a parent once `main` exists), but note it on
+            // stderr rather than passing silently -- a vacuous pass should
+            // never be invisible to whoever is watching the gate run.
+            eprintln!(
+                "[legion] no base ref ('main' or 'origin/main') found and HEAD has no parent \
+                 commit -- treating this as the initial commit. The changed-file set is empty \
+                 and any articulation is accepted vacuously."
+            );
+            return Ok(ChangedFiles {
+                files: std::collections::HashSet::new(),
+                cleared_renames: Vec::new(),
+                base: None,
+            });
+        };
+        found_ref.to_owned()
     };
 
     // Run the three-dot diff with core.quotePath=false so non-ASCII paths
     // are returned as-is (no octal escaping) and match heading paths exactly.
+    // --name-status -M<pinned similarity> reports renames as their own
+    // `R<nn>\t<old>\t<new>` lines instead of collapsing them to the new path
+    // alone, which is what lets the parse below tell a pure move (R100) apart
+    // from a rename that also touched content (R<100).
     let refspec = format!("{base_ref}...HEAD");
     let out = std::process::Command::new("git")
         .args([
             "-c",
             "core.quotePath=false",
             "diff",
-            "--name-only",
+            "--name-status",
+            RENAME_SIMILARITY,
             &refspec,
         ])
         .output()
@@ -201,18 +283,75 @@ pub(crate) fn git_changed_files() -> Result<std::collections::HashSet<String>, e
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(error::LegionError::WorkSource(format!(
-            "git diff --name-only {refspec} failed (base ref '{base_ref}' resolved \
+            "git diff --name-status {refspec} failed (base ref '{base_ref}' resolved \
              but diff did not): {stderr}"
         )));
     }
 
-    let set: std::collections::HashSet<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_owned)
-        .collect();
-    Ok(set)
+    let mut files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cleared_renames: Vec<(String, String)> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let status = fields.next().unwrap_or("");
+        // Rename (`R<nn>`) and copy (`C<nn>`) lines share the same
+        // three-field shape (`<status>\t<old>\t<new>`); RENAME_SIMILARITY
+        // never passes `-C` on the command line, so a `C` line should not
+        // occur in practice, but a future call site or an unusual git build
+        // must not silently misparse one as a plain `<status>\t<path>` line
+        // and grab the wrong (source, not destination) field. Only `R100`
+        // gets the zero-delta auto-clear -- this issue scopes that exclusion
+        // to true renames, not copies (a copy leaves the source in place, so
+        // even a byte-identical one is not risk-free the way a pure move is).
+        if let Some(similarity) = status
+            .strip_prefix('R')
+            .or_else(|| status.strip_prefix('C'))
+        {
+            let is_rename = status.starts_with('R');
+            let old_path = fields.next();
+            let new_path = fields.next();
+            match (old_path, new_path) {
+                (Some(old_path), Some(new_path)) => {
+                    if is_rename && similarity == "100" {
+                        // Zero-delta move: excluded from the coverage set,
+                        // recorded for the audit trail.
+                        cleared_renames.push((old_path.to_owned(), new_path.to_owned()));
+                    } else {
+                        // Content delta (rename) or any copy: the new path
+                        // carries the diff that needs review. (For a rename,
+                        // the old path no longer exists in the tree -- there
+                        // is nothing further to review "at" it once the
+                        // rename is detected as such.)
+                        files.insert(new_path.to_owned());
+                    }
+                }
+                _ => {
+                    return Err(error::LegionError::WorkSource(format!(
+                        "git diff --name-status produced a malformed rename/copy line \
+                         (expected '{{R,C}}<nn>\\t<old>\\t<new>'): {line:?}"
+                    )));
+                }
+            }
+        } else {
+            // Non-rename, non-copy line (A/M/D/T/...): `<status>\t<path>`.
+            // An undetected rename below RENAME_SIMILARITY surfaces here as
+            // a separate D line and A line -- both paths land in the
+            // coverage set, exactly like any other unrelated delete + add
+            // pair.
+            if let Some(path) = fields.next() {
+                files.insert(path.to_owned());
+            }
+        }
+    }
+
+    Ok(ChangedFiles {
+        files,
+        cleared_renames,
+        base: Some(base_ref),
+    })
 }
 
 pub(crate) fn format_age(d: std::time::Duration) -> String {

@@ -2616,6 +2616,15 @@ fn quality_gate_check_passing_articulation_records_gate_row() {
         "expected exactly one gate row, got: {list_out}"
     );
     assert_eq!(arr[0]["result"].as_str().unwrap(), "clean");
+    // #779: the resolved base is recorded even on the default (no --base)
+    // path, not only on an explicit override -- "which base the
+    // articulation covered" must be visible for every gate, not just the
+    // unusual ones.
+    assert_eq!(
+        arr[0]["base"].as_str(),
+        Some("main"),
+        "expected the default-resolved base 'main' recorded on the gate row, got: {list_out}"
+    );
 }
 
 /// quality-gate check: a failing articulation (missing coverage) exits non-zero
@@ -2894,5 +2903,332 @@ fn quality_gate_check_non_ascii_path_roundtrips_correctly() {
     assert!(
         stdout.contains("accepted"),
         "expected acceptance for non-ASCII path, got: {stdout}"
+    );
+}
+
+// --- quality-gate check --base override + R100 auto-clear tests (#779) ---
+
+/// Build a substantive articulation covering an arbitrary `path` with enough
+/// prose and a located-evidence line to clear both structural bars.
+fn good_articulation_for(path: &str) -> String {
+    format!(
+        "### {path}\n\
+         Checked for duplicate logic, unnecessary abstraction, stringly-typed state, \
+         hand-rolled standard library dupes, copy-paste variation, and error swallowing. \
+         No issues found: the single declaration in this file has one responsibility.\n\
+         Evidence: {path}:1 the lone declaration.\n"
+    )
+}
+
+/// `--base` overrides the default main/origin-main resolution: a stacked
+/// branch (`feat/child`, based on the still-unmerged `feat/base-branch`, not
+/// `main`) diffed with `--base feat/base-branch` sees only the child's own
+/// changes, and the resolved base is recorded on the gate row.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_base_override_scopes_to_stacked_branch_and_is_recorded() {
+    let _config_guard = RealRepoConfigGuard::new();
+    let repo = tempfile::tempdir().unwrap();
+    let rp = repo.path();
+
+    run_git_fixture(rp, &["init", "-b", "main"]);
+    std::fs::write(rp.join("README.md"), "seed\n").unwrap();
+    run_git_fixture(rp, &["add", "README.md"]);
+    run_git_fixture(rp, &["commit", "-m", "seed"]);
+
+    // Intermediate, still-unmerged base branch.
+    run_git_fixture(rp, &["checkout", "-b", "feat/base-branch"]);
+    std::fs::write(rp.join("base_only.rs"), "// base branch content\n").unwrap();
+    run_git_fixture(rp, &["add", "base_only.rs"]);
+    run_git_fixture(rp, &["commit", "-m", "base branch work"]);
+
+    // Child branch stacked on top of the (unmerged) base branch.
+    run_git_fixture(rp, &["checkout", "-b", "feat/child"]);
+    std::fs::write(rp.join("child_only.rs"), "// child branch content\n").unwrap();
+    run_git_fixture(rp, &["add", "child_only.rs"]);
+    run_git_fixture(rp, &["commit", "-m", "child branch work"]);
+
+    let data_dir = tempfile::tempdir().unwrap();
+    // Articulation covers ONLY child_only.rs -- correct when scoped to
+    // feat/base-branch...HEAD, but would leave base_only.rs (and README.md)
+    // uncovered against the default main...HEAD range.
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), good_articulation_for("child_only.rs")).unwrap();
+
+    let stdout = run_ok(legion_cmd(data_dir.path()).current_dir(rp).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+        "--base",
+        "feat/base-branch",
+    ]));
+    assert!(
+        stdout.contains("accepted"),
+        "expected acceptance scoped to the stacked base, got: {stdout}"
+    );
+
+    // The resolved base is recorded on the gate row.
+    let list_out = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-simplify",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
+    let arr = rows.as_array().expect("expected array");
+    assert_eq!(
+        arr.len(),
+        1,
+        "expected exactly one gate row, got: {list_out}"
+    );
+    assert_eq!(
+        arr[0]["base"].as_str(),
+        Some("feat/base-branch"),
+        "expected the --base override recorded on the gate row, got: {list_out}"
+    );
+}
+
+/// `--base` naming a ref that does not resolve is a hard error: no fallback
+/// to the default main/origin-main resolution, no gate recorded.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_base_unresolvable_ref_hard_errors() {
+    let _config_guard = RealRepoConfigGuard::new();
+    let repo = setup_git_repo_with_feature_branch();
+    let data_dir = tempfile::tempdir().unwrap();
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), good_articulation_for_foo()).unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(data_dir.path()).current_dir(repo.path()).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+        "--base",
+        "no-such-ref-at-all",
+    ]));
+    assert!(
+        stderr.contains("no-such-ref-at-all") && stderr.contains("does not resolve"),
+        "expected an unresolvable --base error naming the ref, got: {stderr}"
+    );
+
+    let list_out = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-simplify",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
+    assert_eq!(
+        rows.as_array().unwrap().len(),
+        0,
+        "expected zero gate rows after an unresolvable --base, got: {list_out}"
+    );
+}
+
+/// A pure (R100, zero-delta) rename is auto-cleared from the coverage set: an
+/// articulation with no entry for the renamed file still passes, and the
+/// rename pair is recorded in the gate's `details` JSON for audit.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_pure_rename_auto_cleared_and_recorded() {
+    let _config_guard = RealRepoConfigGuard::new();
+    let repo = tempfile::tempdir().unwrap();
+    let rp = repo.path();
+
+    run_git_fixture(rp, &["init", "-b", "main"]);
+    std::fs::write(
+        rp.join("mod.rs"),
+        "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    )
+    .unwrap();
+    run_git_fixture(rp, &["add", "mod.rs"]);
+    run_git_fixture(rp, &["commit", "-m", "seed"]);
+
+    run_git_fixture(rp, &["checkout", "-b", "feat/pure-rename"]);
+    run_git_fixture(rp, &["mv", "mod.rs", "renamed.rs"]);
+    run_git_fixture(rp, &["commit", "-m", "pure rename, no content change"]);
+
+    let data_dir = tempfile::tempdir().unwrap();
+    // No entries at all -- a zero-delta rename requires none.
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), "# No entries needed\n").unwrap();
+
+    let stdout = run_ok(legion_cmd(data_dir.path()).current_dir(rp).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+    ]));
+    assert!(
+        stdout.contains("accepted") && stdout.contains("1 rename(s) auto-cleared"),
+        "expected acceptance noting one auto-cleared rename, got: {stdout}"
+    );
+
+    let list_out = run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "list",
+        "--skill",
+        "legion-simplify",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
+    let arr = rows.as_array().expect("expected array");
+    assert_eq!(
+        arr.len(),
+        1,
+        "expected exactly one gate row, got: {list_out}"
+    );
+    let details: serde_json::Value =
+        serde_json::from_str(arr[0]["details"].as_str().expect("details string"))
+            .expect("details JSON");
+    assert_eq!(details["cleared_renames_count"].as_u64(), Some(1));
+    let cleared = details["cleared_renames"]
+        .as_array()
+        .expect("cleared_renames array");
+    assert_eq!(cleared.len(), 1);
+    assert_eq!(cleared[0]["old"].as_str(), Some("mod.rs"));
+    assert_eq!(cleared[0]["new"].as_str(), Some("renamed.rs"));
+}
+
+/// The R100 auto-clear must not depend on the repo's ambient `diff.renames`
+/// config: with `diff.renames=false` set LOCALLY on the fixture repo (a
+/// config a contributor or CI image could plausibly carry), a pure rename is
+/// still detected and cleared because `--name-status -M50%` is pinned
+/// explicitly on the command line (#779 Build Notes: "do not inherit
+/// ambient diff.renames config"). Without the explicit pin, this same rename
+/// would surface as an untracked `D`/`A` pair and never clear.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_pure_rename_cleared_despite_diff_renames_false_config() {
+    let _config_guard = RealRepoConfigGuard::new();
+    let repo = tempfile::tempdir().unwrap();
+    let rp = repo.path();
+
+    run_git_fixture(rp, &["init", "-b", "main"]);
+    std::fs::write(
+        rp.join("mod.rs"),
+        "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    )
+    .unwrap();
+    run_git_fixture(rp, &["add", "mod.rs"]);
+    run_git_fixture(rp, &["commit", "-m", "seed"]);
+
+    // Local config override -- writes to this fixture repo's own
+    // .git/config only (GIT_DIR is scoped to `rp` by fixture_git_command).
+    run_git_fixture(rp, &["config", "diff.renames", "false"]);
+
+    run_git_fixture(rp, &["checkout", "-b", "feat/pure-rename-vs-config"]);
+    run_git_fixture(rp, &["mv", "mod.rs", "renamed.rs"]);
+    run_git_fixture(
+        rp,
+        &["commit", "-m", "pure rename under diff.renames=false"],
+    );
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), "# No entries needed\n").unwrap();
+
+    let stdout = run_ok(legion_cmd(data_dir.path()).current_dir(rp).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+    ]));
+    assert!(
+        stdout.contains("accepted") && stdout.contains("1 rename(s) auto-cleared"),
+        "expected the rename to still auto-clear despite diff.renames=false, got: {stdout}"
+    );
+}
+
+/// A rename with a content delta (R<100) is NOT cleared: the new path still
+/// requires an articulation entry, but the old path (which no longer exists
+/// in the tree) does not.
+#[cfg(unix)]
+#[test]
+fn quality_gate_check_rename_with_delta_requires_new_path_not_old_path() {
+    let _config_guard = RealRepoConfigGuard::new();
+    let repo = tempfile::tempdir().unwrap();
+    let rp = repo.path();
+
+    run_git_fixture(rp, &["init", "-b", "main"]);
+    std::fs::write(
+        rp.join("mod.rs"),
+        "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
+    )
+    .unwrap();
+    run_git_fixture(rp, &["add", "mod.rs"]);
+    run_git_fixture(rp, &["commit", "-m", "seed"]);
+
+    run_git_fixture(rp, &["checkout", "-b", "feat/rename-with-delta"]);
+    run_git_fixture(rp, &["mv", "mod.rs", "renamed.rs"]);
+    std::fs::write(
+        rp.join("renamed.rs"),
+        "line1\nCHANGED\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nnewline\n",
+    )
+    .unwrap();
+    run_git_fixture(rp, &["add", "renamed.rs"]);
+    run_git_fixture(rp, &["commit", "-m", "rename with content delta"]);
+
+    let data_dir = tempfile::tempdir().unwrap();
+
+    // First: an empty articulation refuses, naming renamed.rs (not mod.rs).
+    let empty_artic = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(empty_artic.path(), "# No entries\n").unwrap();
+    let (_stdout, stderr) = run_fail(legion_cmd(data_dir.path()).current_dir(rp).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        empty_artic.path().to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("renamed.rs"),
+        "expected missing-coverage naming renamed.rs, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("mod.rs"),
+        "the old path must not be required once the rename is detected, got: {stderr}"
+    );
+
+    // Then: an articulation covering only the new path passes.
+    let good_artic = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(good_artic.path(), good_articulation_for("renamed.rs")).unwrap();
+    let stdout = run_ok(legion_cmd(data_dir.path()).current_dir(rp).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "clean",
+        "--articulation-file",
+        good_artic.path().to_str().unwrap(),
+    ]));
+    assert!(
+        stdout.contains("accepted") && stdout.contains("0 rename(s) auto-cleared"),
+        "expected acceptance with zero auto-cleared renames (delta rename stays in scope), \
+         got: {stdout}"
     );
 }

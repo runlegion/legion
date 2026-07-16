@@ -372,6 +372,7 @@ mod tests {
             voided_at: None,
             void_reason: None,
             superseded_by: None,
+            base: None,
         }
     }
 

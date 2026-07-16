@@ -374,7 +374,12 @@ pub fn apply(
 ) -> Result<ApplyResult> {
     validate_manifest(manifest)?;
 
-    let old_rows = db.get_reflections_by_domain(repo, "identity", IDENTITY_BACKUP_LIMIT)?;
+    let old_rows = db.get_reflections_by_domain(
+        repo,
+        "identity",
+        IDENTITY_BACKUP_LIMIT,
+        crate::recall::ArchiveMode::Both,
+    )?;
     if old_rows.len() == IDENTITY_BACKUP_LIMIT {
         // A corpus at exactly the cap almost certainly means rows beyond
         // it were cut off by the SQL LIMIT -- and both the backup and the
@@ -850,7 +855,7 @@ mod tests {
         )
         .unwrap();
         let before = db
-            .get_reflections_by_domain("legion", "identity", 500)
+            .get_reflections_by_domain("legion", "identity", 500, crate::recall::ArchiveMode::Both)
             .unwrap();
 
         let backup_dir = dir.path().join("backups");
@@ -863,7 +868,7 @@ mod tests {
 
         assert!(!backup_dir.exists());
         let after = db
-            .get_reflections_by_domain("legion", "identity", 500)
+            .get_reflections_by_domain("legion", "identity", 500, crate::recall::ArchiveMode::Both)
             .unwrap();
         assert_eq!(before.len(), after.len());
     }
@@ -1129,7 +1134,7 @@ mod tests {
         )
         .unwrap();
         let before = db
-            .get_reflections_by_domain("legion", "identity", 500)
+            .get_reflections_by_domain("legion", "identity", 500, crate::recall::ArchiveMode::Both)
             .unwrap();
 
         let backup_dir = dir.path().join("backups");
@@ -1148,7 +1153,7 @@ mod tests {
         assert!(!plan.backup_path.exists());
 
         let after = db
-            .get_reflections_by_domain("legion", "identity", 500)
+            .get_reflections_by_domain("legion", "identity", 500, crate::recall::ArchiveMode::Both)
             .unwrap();
         assert_eq!(before.len(), after.len());
     }
