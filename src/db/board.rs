@@ -694,11 +694,18 @@ impl Database {
 
     /// Get recent bullpen posts (within last N hours by default).
     ///
-    /// `range` (#786), when bounded, OVERRIDES the `hours` cutoff entirely
-    /// rather than composing with it -- an explicit `--since`/`--until`/
-    /// `--on` on `legion surface` replaces the hardcoded recency window,
-    /// it does not narrow it further. `TimeRange::default()` (unbounded)
-    /// preserves the pre-#786 `hours`-cutoff behavior exactly.
+    /// `range` (#786), when bounded, OVERRIDES the `hours` RECENCY cutoff
+    /// entirely rather than composing with it -- an explicit `--since`/
+    /// `--until`/`--on` on `legion surface` replaces the hardcoded recency
+    /// window, it does not narrow it further. `TimeRange::default()`
+    /// (unbounded) preserves the pre-#786 `hours`-cutoff behavior exactly.
+    ///
+    /// The decay/TTL filter (`evergreen = 1 OR expires_at > now`, #376) is
+    /// a SEPARATE axis from recency and applies in BOTH branches: a
+    /// `--since 30d` query should still hide posts an agent would never
+    /// see via the normal bullpen (matching `get_board_posts_filtered_full`'s
+    /// `include_stale`-gated default), not silently resurface expired
+    /// non-evergreen posts just because a date range was given.
     pub fn get_recent_board_posts(
         &self,
         hours: i64,
@@ -722,15 +729,17 @@ impl Database {
                 .map_err(LegionError::Database);
         }
 
-        let range_clause = crate::timerange::TimeRange::sql_clause(1);
+        let now_str = Utc::now().to_rfc3339();
+        let range_clause = crate::timerange::TimeRange::sql_clause(2);
         let sql = format!(
             "SELECT {REFLECTION_COLUMNS} \
              FROM reflections WHERE {ACTIVE_TEAM_POST_WHERE} \
+             AND (evergreen = 1 OR expires_at > ?1) \
              AND resolved_at IS NULL{range_clause} ORDER BY created_at DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            rusqlite::params![range.since_bound()?, range.until_bound()?],
+            rusqlite::params![now_str, range.since_bound()?, range.until_bound()?],
             map_reflection_row,
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1430,6 +1439,65 @@ mod tests {
             .get_board_posts_filtered_full(false, true, &crate::timerange::TimeRange::default())
             .unwrap();
         assert_eq!(with_resolved.len(), 1);
+    }
+
+    #[test]
+    fn get_recent_board_posts_range_overrides_hours_cutoff() {
+        // A post created well outside the `hours` recency window must
+        // still surface when an explicit --since/--until range covers it
+        // (#786): the range OVERRIDES the hardcoded cutoff, it does not
+        // narrow it.
+        let db = test_db();
+        let old_ts = "2020-01-01T12:00:00+00:00";
+        let far_future_expiry = "2099-01-01T00:00:00+00:00";
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, audience, expires_at) \
+                 VALUES ('01000000-0000-7000-8000-00000000000a', 'kelex', 'ancient post', ?1, 'team', ?2)",
+                rusqlite::params![old_ts, far_future_expiry],
+            )
+            .unwrap();
+
+        // Default 24h lookback: the ancient post is invisible.
+        let recent = db
+            .get_recent_board_posts(24, &crate::timerange::TimeRange::default())
+            .unwrap();
+        assert!(recent.is_empty());
+
+        // Explicit range covering 2020-01-01: the same post surfaces.
+        let range =
+            crate::timerange::TimeRange::parse(Some("2019-12-31"), Some("2020-01-02"), None)
+                .unwrap();
+        let ranged = db.get_recent_board_posts(24, &range).unwrap();
+        assert_eq!(ranged.len(), 1);
+        assert_eq!(ranged[0].text, "ancient post");
+    }
+
+    #[test]
+    fn get_recent_board_posts_bounded_range_still_excludes_expired_posts() {
+        // The decay/TTL filter (#376) is a separate axis from recency and
+        // must still apply when an explicit range is given -- an explicit
+        // --since must not resurrect posts the normal (unbounded) bullpen
+        // already treats as expired.
+        let db = test_db();
+        let old_ts = "2020-01-01T12:00:00+00:00";
+        let already_expired = "2020-01-02T00:00:00+00:00";
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, audience, expires_at) \
+                 VALUES ('01000000-0000-7000-8000-00000000000b', 'kelex', 'stale post', ?1, 'team', ?2)",
+                rusqlite::params![old_ts, already_expired],
+            )
+            .unwrap();
+
+        let range =
+            crate::timerange::TimeRange::parse(Some("2019-12-31"), Some("2020-01-02"), None)
+                .unwrap();
+        let ranged = db.get_recent_board_posts(24, &range).unwrap();
+        assert!(
+            ranged.is_empty(),
+            "an explicit date range must not bypass the #376 decay/TTL filter"
+        );
     }
 
     #[test]
