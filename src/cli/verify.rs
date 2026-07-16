@@ -776,20 +776,32 @@ fn persist_raw_findings(
     //     deliberately excluded: a finding that recurs identically after
     //     being fix-resolved is a regression worth a fresh PENDING row, not
     //     something to suppress.
-    // `unwrap_or_default` degrades to "no known duplicates" on a query
-    // failure rather than blocking the insert below on this best-effort
-    // dedup check. `seen_this_call` extends the same key to duplicates
-    // WITHIN one `raw_findings` batch (a single malformed/duplicated
-    // `--findings-json` payload listing the same triple twice), not just
-    // across separate calls -- `existing_open` alone cannot catch that,
-    // since neither copy is in the DB yet when the loop checks it.
+    // A query failure degrades to "no known duplicates" rather than blocking
+    // the insert below on this best-effort dedup check -- but unlike every
+    // other degrade-and-continue path in this function, that failure is now
+    // logged (previously silent), since a silent dedup-lookup failure could
+    // otherwise resurrect an already-DISPOSITIONED finding with no trace of
+    // why. `seen_this_call` extends the same key to duplicates WITHIN one
+    // `raw_findings` batch (a single malformed/duplicated `--findings-json`
+    // payload listing the same triple twice), not just across separate calls
+    // -- `existing_open` alone cannot catch that, since neither copy is in
+    // the DB yet when the loop checks it.
     let existing_open: Vec<QualityGateFinding> = database
         .list_findings(&FindingFilter {
             branch: Some(gate.branch.clone()),
             skill: Some(gate.skill.clone()),
             status: None,
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "[legion] warning: dedup lookup failed for branch '{}' skill '{}' ({e}) -- \
+                 proceeding as if no existing findings are open; a re-reported finding may insert \
+                 a duplicate PENDING row this call instead of being recognized as already \
+                 tracked (#773).",
+                gate.branch, gate.skill
+            );
+            Vec::new()
+        })
         .into_iter()
         .filter(|f| f.status != FindingStatus::Resolved)
         .collect();
