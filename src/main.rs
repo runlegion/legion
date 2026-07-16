@@ -113,6 +113,7 @@ fn run() -> error::Result<()> {
 
     match cli.command {
         Commands::Reflect {
+            action,
             repo,
             text,
             transcript,
@@ -122,17 +123,22 @@ fn run() -> error::Result<()> {
             follows,
             force,
             dedupe_mode,
-        } => cli::memory::handle_reflect(
-            repo,
-            text,
-            transcript,
-            domain,
-            whoami,
-            tags,
-            follows,
-            force,
-            dedupe_mode,
-        )?,
+        } => match action {
+            Some(cli::ReflectAction::Retag { id, set_domain }) => {
+                cli::memory::handle_retag(id, set_domain)?
+            }
+            None => cli::memory::handle_reflect(
+                repo,
+                text,
+                transcript,
+                domain,
+                whoami,
+                tags,
+                follows,
+                force,
+                dedupe_mode,
+            )?,
+        },
         Commands::Forget { id, repo, persist } => cli::memory::handle_forget(id, repo, persist)?,
         Commands::Recall {
             repo,

@@ -235,6 +235,84 @@ pub(crate) fn handle_reflect(
     Ok(())
 }
 
+/// `legion reflect retag --id X --set-domain <name|none>` (#783): move a
+/// live reflection between domains in place. The literal `none` clears
+/// the domain. Pure DB metadata write -- `domain` has no tantivy
+/// presence, so unlike `forget` there is no index side to reconcile and
+/// `open_db` suffices.
+pub(crate) fn handle_retag(id: String, set_domain: String) -> error::Result<()> {
+    let database = open_db()?;
+
+    let new_domain = if set_domain == "none" {
+        None
+    } else {
+        Some(set_domain.as_str())
+    };
+
+    // Peek first so the audit row and the confirmation line can name the
+    // old domain, matching handle_forget's peek-then-write shape.
+    let existing = database
+        .get_reflection_by_id(&id)?
+        .ok_or_else(|| error::LegionError::ReflectionNotFound(id.clone()))?;
+    let old_domain = existing.domain.clone();
+
+    let details = format!(
+        "from={} to={}",
+        old_domain.as_deref().unwrap_or("none"),
+        new_domain.unwrap_or("none")
+    );
+    let write_audit = |outcome: &str| {
+        audit(
+            &database,
+            &db::AuditInput {
+                agent: &existing.repo,
+                action: "retag-reflection",
+                target_type: "reflection",
+                target_ref: &id,
+                task_id: None,
+                source_type: "legion",
+                details: Some(&details),
+                outcome,
+            },
+        );
+    };
+
+    let retagged = match database.retag_reflection(&id, new_domain) {
+        Ok(r) => r,
+        Err(
+            e @ (error::LegionError::RetagLastIdentityRoot { .. }
+            | error::LegionError::RetagLastWorkflowRoot { .. }
+            | error::LegionError::IdentityRootExists { .. }),
+        ) => {
+            // Guard refusals are forensically relevant for the same
+            // reason handle_forget audits its --repo rejections: we want
+            // a trace of every attempt to mutate a root, not just the
+            // ones that landed.
+            write_audit("rejected");
+            return Err(e);
+        }
+        Err(e) => return Err(e),
+    };
+    write_audit("success");
+
+    let preview: String = retagged.text.chars().take(80).collect();
+    let ellipsis = if retagged.text.chars().count() > 80 {
+        "..."
+    } else {
+        ""
+    };
+    println!(
+        "retagged reflection {} ({}): domain {} -> {}: {}{} -- still hot and recallable; id, chain, and recall_count unchanged.",
+        id,
+        retagged.repo,
+        old_domain.as_deref().unwrap_or("none"),
+        retagged.domain.as_deref().unwrap_or("none"),
+        preview,
+        ellipsis
+    );
+    Ok(())
+}
+
 pub(crate) fn handle_forget(id: String, repo: Option<String>, persist: bool) -> error::Result<()> {
     let (database, index) = open_db_and_index()?;
 

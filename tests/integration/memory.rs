@@ -769,6 +769,173 @@ fn forget_persist_archives_out_of_hot_recall_but_reachable_via_archives() {
 }
 
 #[test]
+fn reflect_retag_moves_workflow_lesson_off_whatami_but_keeps_it_hot() {
+    // #783: `reflect retag --id X --set-domain none` takes a long-tail
+    // domain=workflow lesson out of the whatami banner WITHOUT archiving
+    // it -- recall-by-context still finds it hot, and the id survives.
+    let dir = tempfile::tempdir().unwrap();
+
+    let lesson_id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "kelex",
+        "--domain",
+        "workflow",
+        "--text",
+        "macOS SIGKILLs unsigned binaries -- long-tail lesson",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&lesson_id);
+    // A second workflow root so the zero-root guard does not fire.
+    run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "kelex",
+        "--domain",
+        "workflow",
+        "--text",
+        "the actual operating contract root",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "retag",
+        "--id",
+        &lesson_id,
+        "--set-domain",
+        "none",
+    ]));
+    assert!(
+        stdout.contains("retagged reflection") && stdout.contains("workflow -> none"),
+        "expected retag confirmation naming the domain move, got: {stdout}"
+    );
+
+    // Off the whatami banner (domain=workflow roots)...
+    let whatami = run_ok(legion_cmd(dir.path()).args(["whatami", "--repo", "kelex"]));
+    assert!(
+        !whatami.contains("SIGKILLs unsigned"),
+        "retagged lesson still feeds whatami: {whatami}"
+    );
+    assert!(
+        whatami.contains("operating contract root"),
+        "remaining workflow root should still feed whatami: {whatami}"
+    );
+
+    // ...but still hot and recallable by context (distinct from
+    // forget --persist, which would need --archives to reach it).
+    let hot = run_ok(legion_cmd(dir.path()).args([
+        "recall",
+        "--repo",
+        "kelex",
+        "--context",
+        "SIGKILL unsigned binaries",
+    ]));
+    assert!(
+        hot.contains("SIGKILLs unsigned"),
+        "retagged lesson must stay in hot recall: {hot}"
+    );
+
+    // Audited with the domain move in the details.
+    let audit_stdout =
+        run_ok(legion_cmd(dir.path()).args(["audit", "--action", "retag-reflection", "--json"]));
+    assert!(
+        audit_stdout.contains("\"outcome\": \"success\"")
+            && audit_stdout.contains("from=workflow to=none"),
+        "successful retag should be audited with the move, got: {audit_stdout}"
+    );
+}
+
+#[test]
+fn reflect_retag_refuses_last_workflow_root_and_audits_rejection() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "kelex",
+        "--domain",
+        "workflow",
+        "--text",
+        "the one and only operating contract",
+    ]))
+    .trim()
+    .to_string();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "reflect",
+        "retag",
+        "--id",
+        &id,
+        "--set-domain",
+        "none",
+    ]));
+    assert!(
+        stderr.contains("last live workflow root"),
+        "expected zero-root refusal, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--persist"),
+        "workflow refusal should suggest forget --persist, got: {stderr}"
+    );
+
+    // Refused: the banner is untouched.
+    let whatami = run_ok(legion_cmd(dir.path()).args(["whatami", "--repo", "kelex"]));
+    assert!(
+        whatami.contains("one and only operating contract"),
+        "refused retag must leave whatami intact: {whatami}"
+    );
+
+    // Root-mutation refusals are forensically relevant, like forget's.
+    let audit_stdout =
+        run_ok(legion_cmd(dir.path()).args(["audit", "--action", "retag-reflection", "--json"]));
+    assert!(
+        audit_stdout.contains("\"outcome\": \"rejected\""),
+        "refused retag should be audited, got: {audit_stdout}"
+    );
+}
+
+#[test]
+fn reflect_retag_refuses_last_identity_root_directing_to_whoami_generate() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "kelex",
+        "--whoami",
+        "--text",
+        "I am the kelex mapping agent",
+    ]))
+    .trim()
+    .to_string();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "reflect",
+        "retag",
+        "--id",
+        &id,
+        "--set-domain",
+        "lesson",
+    ]));
+    assert!(
+        stderr.contains("last live identity root"),
+        "expected zero-identity refusal, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("whoami --repo kelex --generate"),
+        "identity refusal must direct to the whoami --generate flow, got: {stderr}"
+    );
+
+    // Refused: whoami is untouched.
+    let whoami = run_ok(legion_cmd(dir.path()).args(["whoami", "--repo", "kelex"]));
+    assert!(
+        whoami.contains("kelex mapping agent"),
+        "refused retag must leave whoami intact: {whoami}"
+    );
+}
+
+#[test]
 fn forget_persist_rejects_wrong_repo_safety_check() {
     // The --repo safety guard applies to --persist exactly as it does to
     // a permanent forget -- it is a flag on the same command, not a
@@ -886,6 +1053,109 @@ fn forget_persist_drops_workflow_root_from_whatami() {
     assert!(
         !after.contains("superseded operating rule"),
         "persisted workflow root must not surface in whatami: {after}"
+    );
+}
+
+#[test]
+fn reflect_retag_preserves_id_chain_and_recall_count() {
+    // AC2 (#783): id, chain (--follows) links, and recall_count survive
+    // retag -- exercised through the CLI end to end, not just the DB layer.
+    let dir = tempfile::tempdir().unwrap();
+
+    let root_id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "workflow",
+        "--text",
+        "chain root lesson",
+    ]))
+    .trim()
+    .to_string();
+    let child_id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "workflow",
+        "--text",
+        "chain child lesson",
+        "--follows",
+        &root_id,
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&child_id);
+
+    run_ok(legion_cmd(dir.path()).args(["boost", "--id", &child_id]));
+    run_ok(legion_cmd(dir.path()).args(["boost", "--id", &child_id]));
+
+    let retag_stdout = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "retag",
+        "--id",
+        &child_id,
+        "--set-domain",
+        "lesson",
+    ]));
+    // Id is unchanged -- it's named right back in the confirmation line.
+    assert!(
+        retag_stdout.contains(&child_id),
+        "retag output should echo the same id: {retag_stdout}"
+    );
+
+    // Chain link survives: `chain --id <child>` still walks back to root.
+    let chain_stdout = run_ok(legion_cmd(dir.path()).args(["chain", "--id", &child_id]));
+    assert!(
+        chain_stdout.contains("chain root lesson") && chain_stdout.contains("chain child lesson"),
+        "chain must survive retag: {chain_stdout}"
+    );
+
+    // recall_count survives: boost again and confirm stats reflect 3 total
+    // recalls (2 before retag + 1 after) rather than resetting to 1.
+    run_ok(legion_cmd(dir.path()).args(["boost", "--id", &child_id]));
+    let audit_stdout =
+        run_ok(legion_cmd(dir.path()).args(["audit", "--action", "retag-reflection", "--json"]));
+    assert!(
+        audit_stdout.contains("\"outcome\": \"success\""),
+        "successful retag should be audited, got: {audit_stdout}"
+    );
+}
+
+#[test]
+fn reflect_retag_set_domain_none_clears_domain_and_recall_by_domain_stops_matching() {
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "workflow",
+        "--text",
+        "other workflow root",
+    ]));
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--domain",
+        "workflow",
+        "--text",
+        "lesson to clear",
+    ]))
+    .trim()
+    .to_string();
+
+    run_ok(legion_cmd(dir.path()).args(["reflect", "retag", "--id", &id, "--set-domain", "none"]));
+
+    let by_domain = run_ok(legion_cmd(dir.path()).args([
+        "recall", "--repo", "test", "--domain", "workflow", "--limit", "10",
+    ]));
+    assert!(
+        !by_domain.contains("lesson to clear"),
+        "reflection retagged to none must not match --domain workflow anymore: {by_domain}"
     );
 }
 
