@@ -697,10 +697,17 @@ fn persist_raw_findings(
     // every time -- two review passes over an unfixed MED would otherwise
     // leave two rows to disposition instead of one. `unwrap_or_default`
     // degrades to "no known duplicates" on a query failure rather than
-    // blocking the insert below on this best-effort dedup check.
+    // blocking the insert below on this best-effort dedup check. `seen_this_call`
+    // extends the same key to duplicates WITHIN one `raw_findings` batch (a
+    // single malformed/duplicated `--findings-json` payload listing the same
+    // triple twice), not just across separate calls -- `existing_pending`
+    // alone cannot catch that, since neither copy is in the DB yet when the
+    // loop checks it.
     let existing_pending = database
         .list_pending_findings(&gate.branch, &gate.skill)
         .unwrap_or_default();
+    let mut seen_this_call: std::collections::HashSet<(String, FindingSeverity, String)> =
+        std::collections::HashSet::new();
     for rf in raw_findings {
         let severity: FindingSeverity = rf.severity.parse().unwrap_or_else(|_| {
             eprintln!(
@@ -710,10 +717,11 @@ fn persist_raw_findings(
             );
             FindingSeverity::Med
         });
+        let key = (rf.file.clone(), severity, rf.summary.clone());
         let already_pending = existing_pending
             .iter()
             .any(|f| f.file == rf.file && f.severity == severity && f.summary == rf.summary);
-        if already_pending {
+        if already_pending || !seen_this_call.insert(key) {
             continue;
         }
         if let Err(e) = database.insert_finding(&NewFindingInput {
@@ -1812,6 +1820,42 @@ mod tests {
 
         let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
         assert_eq!(pending.len(), 2);
+    }
+
+    /// The dedup guard also catches a duplicate WITHIN a single batch, not
+    /// only across separate calls -- a malformed `--findings-json` payload
+    /// listing the identical triple twice must still land exactly one row.
+    #[test]
+    fn persist_raw_findings_dedupes_within_the_same_batch() {
+        let db = test_db();
+        let gate = db
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "commit-a",
+                skill: "legion-review",
+                result: GateResult::Issues,
+                findings_count: 2,
+                details: None,
+                provenance: GateProvenance::Asserted,
+                base: None,
+            })
+            .unwrap();
+        let duplicate = finding_gate::RawFinding {
+            file: "src/foo.rs".to_string(),
+            line: Some(12),
+            severity: "MED".to_string(),
+            summary: "unchecked input".to_string(),
+        };
+        let raw = vec![duplicate.clone(), duplicate];
+
+        persist_raw_findings(&db, &gate, &raw);
+
+        let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "a duplicated entry within one batch must not double-insert"
+        );
     }
 
     /// `persist_raw_findings` inserts one row per raw finding, tied to the

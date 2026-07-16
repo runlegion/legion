@@ -39,7 +39,7 @@ use crate::error::{LegionError, Result};
 /// Severity of a structured finding (#773). Stored as lowercase string in
 /// `quality_gate_findings.severity`, mirroring `GateResult`'s
 /// Display/FromStr/serde symmetry in `verify.rs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FindingSeverity {
     High,
