@@ -149,17 +149,37 @@ pub struct RawFinding {
 
 /// Pull the `findings` array out of a `--details-json` object, e.g. the
 /// legion-review contract (`{"decision": ..., "findings": [...], ...}`).
-/// Missing key, wrong shape, or an unparseable entry all degrade to "no
-/// finding from that slot" rather than failing the whole gate record --
-/// `findings_count` on the gate row itself stays the source of truth for how
-/// many findings a run reported; this ledger is additive audit substrate.
+/// Missing key or wrong top-level shape degrades to "no findings at all"
+/// silently -- the common case for most skills, which never set this key.
+/// An individual unparseable ENTRY within an otherwise-valid array degrades
+/// to "no finding from that slot" too (rather than failing the whole gate
+/// record), but is NOT silent: a length mismatch between the raw array and
+/// what parsed is logged to stderr, since a single mistyped entry
+/// (`"sumary"` for `"summary"`, a `"line"` that isn't a number) inside a
+/// `--result clean` call is otherwise the exact evaporation this ledger
+/// exists to close -- neither persisted nor seen by the same-call refusal
+/// check. `findings_count` on the gate row itself stays the source of truth
+/// for how many findings a run reported; this ledger is additive audit
+/// substrate.
 pub fn extract_findings_from_value(value: &serde_json::Value) -> Vec<RawFinding> {
     let Some(arr) = value.get("findings").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
-    arr.iter()
+    let extracted: Vec<RawFinding> = arr
+        .iter()
         .filter_map(|v| serde_json::from_value::<RawFinding>(v.clone()).ok())
-        .collect()
+        .collect();
+    if extracted.len() != arr.len() {
+        eprintln!(
+            "[legion] warning: {} of {} entries in --details-json's `findings` array failed to \
+             parse as {{file, line, severity, summary}} and were dropped (#773) -- a dropped \
+             finding is neither tracked nor blocks a clean verdict. Fix the malformed entries \
+             and re-run if this was not intentional.",
+            arr.len() - extracted.len(),
+            arr.len(),
+        );
+    }
+    extracted
 }
 
 /// Parse a bare JSON array of findings, e.g. `legion quality-gate check
@@ -685,6 +705,68 @@ mod tests {
         assert_eq!(
             refetched.resolved_by_commit.as_deref(),
             Some(fix_commit.as_str())
+        );
+    }
+
+    /// Regression guard (pre-push review HIGH, coverage gap): a genuine git
+    /// failure -- here, `origin_commit` that is not a real revision at all,
+    /// simulating an unreachable/rewritten commit -- must surface as `Err`,
+    /// never silently read as "nothing touched it" (empty `Ok(vec![])`).
+    #[test]
+    fn commits_touching_file_in_range_errors_on_unreachable_origin_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git_fixture(dir.path(), &["init", "-q"]);
+        let head = commit_file(dir.path(), "foo.rs", "fn foo() {}\n", "initial");
+
+        let result = commits_touching_file_in_range(
+            Some(dir.path()),
+            "0000000000000000000000000000000000dead",
+            &head,
+            "foo.rs",
+        );
+        assert!(
+            result.is_err(),
+            "an unreachable origin_commit must error, not silently resolve to empty"
+        );
+    }
+
+    /// Regression guard (pre-push review HIGH, coverage gap): when git
+    /// itself fails for one PENDING finding (unreachable `origin_commit`,
+    /// e.g. after a rebase/amend rewrote history), `reconcile_pending_findings`
+    /// must NOT propagate that as an error from the whole call -- it logs and
+    /// leaves that finding PENDING (fail closed: still blocks `clean`) so a
+    /// git failure on one stale finding never blocks the gate record/check
+    /// this call has nothing to do with.
+    #[test]
+    fn reconcile_pending_findings_leaves_finding_pending_on_unreachable_origin_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git_fixture(dir.path(), &["init", "-q"]);
+        let head = commit_file(dir.path(), "foo.rs", "fn foo() {}\n", "initial");
+
+        let db = test_db();
+        let raised = db
+            .insert_finding(&NewFindingInput {
+                gate_id: "gate-1",
+                branch: "feat/x",
+                skill: "legion-simplify",
+                origin_commit: "0000000000000000000000000000000000dead",
+                file: "foo.rs",
+                line: Some(1),
+                severity: FindingSeverity::High,
+                summary: "duplicate logic",
+            })
+            .unwrap();
+
+        let resolved_count =
+            reconcile_pending_findings(&db, Some(dir.path()), "feat/x", "legion-simplify", &head)
+                .expect("a per-finding git failure must not fail the whole reconcile call");
+        assert_eq!(resolved_count, 0);
+
+        let refetched = db.get_finding_by_id(&raised.id).unwrap().unwrap();
+        assert_eq!(
+            refetched.status,
+            FindingStatus::Pending,
+            "a finding whose resolution check errored must stay PENDING, not silently resolve"
         );
     }
 }
