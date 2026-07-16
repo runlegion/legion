@@ -1,5 +1,72 @@
 # Legion Changelog
 
+## 0.23.0
+
+The backlog-closeout release. Three PRs since 0.22.0 -- wave 3, the last of the original
+twelve-issue backlog. Review findings become rows a gate can refuse against instead of
+prose that evaporates when the transcript scrolls; recall, consult, bullpen, and surface
+learn to answer "what happened last week" as a query instead of a client-side sieve; and
+a mis-domained reflection can be moved to the right domain without dying and being
+reborn under a new id. Minor release: one additive table (`quality_gate_findings`, keyed
+to `quality_gates.id` -- no existing table touched), net-new CLI surface (`quality-gate
+finding-disposition`/`finding-ack`/`finding-list`, `reflect retag`,
+`--since`/`--until`/`--on`, `check --findings-json`), and one additive Tantivy schema
+change: `created_at` becomes a fourth indexed field alongside id/repo/text. That index
+change has an operational step: an on-disk index built before this release is detected
+at open and rebuilt empty with a loud warning rather than corrupting subsequent writes
+-- run `legion reindex` once after upgrading, or text-search-backed recall runs against
+an empty index until you do.
+
+### New
+
+- **Finding-resolution gate: findings ledger, git-log resolution, clean-refusal**
+  (PR #807, #773): review and simplify findings now persist as structured rows in the
+  new `quality_gate_findings` table (file, line, severity, status, disposition reason,
+  resolving commit -- keyed to the gate row that raised them) instead of living only in
+  the prose of a gate's details. Extraction is structured-only by design:
+  legion-review's `--details-json` `findings[]` key and a new `--findings-json` flag on
+  the simplify Check path are the two entry points; prose conventions like "Verdict:
+  finding (duplication, MED)" are deliberately not parsed. Resolution is git-log-based
+  -- a commit after a finding's origin that touches the flagged file marks it RESOLVED,
+  reconciled unconditionally at the top of every `record`/`check` so a fix landed
+  earlier is never mistaken for still-pending. The gate then refuses a `clean` verdict
+  for a (branch, skill) while any HIGH/MED finding is pending or any LOW finding is
+  un-acked -- including findings the same call carries, not just leftovers from prior
+  runs -- composing with #780's asserted-clean refusal on the same arms. New surface:
+  `finding-disposition` (retire one finding with a recorded reason), `finding-ack`
+  (batch, LOW-only), `finding-list` (the audit view). Honest deviation from the issue:
+  resolution detection is file-granularity, not file:line -- `git log -L` line tracking
+  is fragile as unrelated edits shift line numbers, so "resolved" means a later commit
+  touched the flagged file (the same granularity the simplify coverage set already
+  uses), and a disposition with a reason remains the precise instrument when that is
+  too coarse.
+- **First-class date filtering on recall, consult, bullpen, and surface** (PR #808,
+  #786): `--since`/`--until`/`--on` accept `YYYY-MM-DD`, `<N>d`, `<N>w`, `today`, and
+  `yesterday`, parsed by a new `TimeRange` type (src/timerange.rs) into a `created_at`
+  window threaded as one optional parameter from the CLI down to the query layer.
+  Tantivy gains `created_at` as an indexed date field with real range queries composed
+  into the existing BooleanQuery, so a date-valid BM25/hybrid hit is filtered in the
+  engine rather than post-filtered out of a capped result window; SQL paths (recall
+  `--latest`/`--domain`, bullpen, and all four of surface's queries) take the predicate
+  directly in their WHERE clause. `--archives` composes with date filtering with no
+  stacked post-filter. Review hardening: an explicit range on `surface` overrides the
+  recency (hours) cutoff but not the #376 TTL/decay filter -- recency and staleness are
+  separate axes, and expired non-evergreen posts stay hidden under a date range just as
+  they do without one.
+- **`reflect retag` -- move a reflection between domains in place** (PR #809, #783):
+  `reflect retag --id <id> --set-domain <name|none>` is a single-column UPDATE on
+  `domain` -- id, chain links (`parent_id`), and recall_count are preserved by
+  construction, and since `domain` has no presence in the Tantivy index,
+  recall-by-context finds the row immediately after retag with no reindex step. The
+  #785 insert-time identity-root guard never fires on UPDATE, so retag carries its own
+  sibling: it refuses to strip `identity` or `workflow` off the LAST live root of that
+  domain for a repo -- a count-based check, not a blanket root-shape refusal, so the
+  issue's own clutter case (many long-tail workflow roots) can still be retagged away
+  one at a time -- and retagging INTO `identity` is held to the same one-live-root
+  invariant from the other direction. Identity refusals direct to `whoami --generate`.
+  A no-op retag (requested domain already matches) audits and reports as a no-op
+  instead of a mutation-implying false success.
+
 ## 0.22.0
 
 The provenance release. Four PRs since 0.21.0, all pulling the same direction: rows and
