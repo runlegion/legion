@@ -777,6 +777,17 @@ impl Database {
     /// unchanged without writing, so it neither trips the guards nor
     /// churns `updated_at`.
     ///
+    /// Not wrapped in a transaction: the guard's `query_row` and the
+    /// `UPDATE` are two round trips, so two concurrent `legion` processes
+    /// could each read "another live root exists" and both retag,
+    /// zeroing the domain between them. This is the same class of gap
+    /// `insert_reflection_with_meta`'s own guard documents and accepts:
+    /// `legion` is a per-invocation CLI with no long-lived writer
+    /// serializing access, so the window is real but narrow (two
+    /// concurrent retags of roots in the same repo+domain), and a
+    /// `BEGIN IMMEDIATE` transaction would close it structurally if this
+    /// ever proves more than theoretical.
+    ///
     /// Returns `LegionError::ReflectionNotFound` if the id does not match
     /// any live (non-soft-deleted) row, mirroring `archive_reflection`.
     ///
@@ -2592,5 +2603,101 @@ mod tests {
 
         let retagged = db.retag_reflection(&root.id, Some("lesson")).unwrap();
         assert_eq!(retagged.domain.as_deref(), Some("lesson"));
+    }
+
+    #[test]
+    fn retag_reflection_into_workflow_creates_an_additional_root_freely() {
+        // Unlike retagging INTO identity, there is no "at most one live
+        // workflow root" invariant to protect from the other direction --
+        // a repo growing a second (or Nth) live workflow root is exactly
+        // the normal, expected state (#783's own clutter scenario), so
+        // retag must not guard this direction at all.
+        let db = test_db();
+        let existing_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "existing workflow root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let candidate = db
+            .insert_reflection_with_meta(
+                "legion",
+                "a lesson promoted to a new workflow root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("lesson".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let retagged = db
+            .retag_reflection(&candidate.id, Some("workflow"))
+            .unwrap();
+        assert_eq!(retagged.domain.as_deref(), Some("workflow"));
+
+        let roots = db.get_domain_roots("legion", "workflow", 50).unwrap();
+        let ids: Vec<&str> = roots.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(roots.len(), 2);
+        assert!(ids.contains(&existing_root.id.as_str()));
+        assert!(ids.contains(&candidate.id.as_str()));
+    }
+
+    #[test]
+    fn retag_reflection_chain_child_into_identity_allowed_despite_live_root() {
+        // The inverse (retag-into-identity) guard only fires for a
+        // parentless target (existing.parent_id.is_none()): a chain child
+        // becoming domain=identity does not mint a second live ROOT (it
+        // has a parent, so get_identity_roots / get_domain_roots would
+        // never surface it), so it must not be blocked by
+        // IdentityRootExists the way a parentless retag-into-identity is.
+        let db = test_db();
+        let identity_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "the live identity root",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("identity".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let workflow_root = db
+            .insert_reflection_with_meta(
+                "legion",
+                "a workflow root with a child",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let child = db
+            .insert_reflection_with_meta(
+                "legion",
+                "chain child, not root-shaped",
+                "self",
+                &ReflectionMeta {
+                    domain: Some("workflow".into()),
+                    parent_id: Some(workflow_root.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let retagged = db.retag_reflection(&child.id, Some("identity")).unwrap();
+        assert_eq!(retagged.domain.as_deref(), Some("identity"));
+
+        // The real identity root is untouched and still the sole one.
+        let roots = db.get_identity_roots("legion", 10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, identity_root.id);
     }
 }
