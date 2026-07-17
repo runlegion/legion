@@ -262,6 +262,13 @@ pub enum LegionError {
     /// unparsed date.
     #[error("unparseable date '{input}' -- accepted: YYYY-MM-DD, <N>d, <N>w, today, yesterday")]
     InvalidDateFilter { input: String },
+
+    /// `legion kanban defer --until <input>` parsed to a time that is not
+    /// after now (#816). Names both the raw input and the resolved wake_at
+    /// so a stale absolute date or a same-day `today` is diagnosable from
+    /// the error alone.
+    #[error("cannot defer: '{input}' resolved to {wake_at}, which is not in the future")]
+    DeferWakeAtInPast { input: String, wake_at: String },
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
@@ -435,5 +442,17 @@ mod tests {
             stderr: "! [rejected]".to_string(),
         };
         assert!(err.to_string().contains("! [rejected]"));
+    }
+
+    #[test]
+    fn defer_wake_at_in_past_display() {
+        let err = LegionError::DeferWakeAtInPast {
+            input: "yesterday".to_string(),
+            wake_at: "2026-07-01T00:00:00+00:00".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("yesterday"));
+        assert!(msg.contains("2026-07-01T00:00:00+00:00"));
+        assert!(msg.contains("not in the future"));
     }
 }

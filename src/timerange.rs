@@ -167,6 +167,48 @@ fn day_start_utc(date: Date) -> Result<String> {
     ))
 }
 
+/// Parse a single forward-looking point in time for scheduling callers
+/// (`legion kanban defer --until`, #816), reusing the same token shapes as
+/// [`parse_date`]'s grammar (`YYYY-MM-DD`, `<N>d`, `<N>w`, `today`) but
+/// applying the relative forms FORWARD (`checked_add`) instead of backward.
+///
+/// This is deliberately a sibling of `parse_date`, not a shared call into
+/// it: `parse_date` filters `created_at` on historical records, so its
+/// relative forms subtract from today (`<N>d` = N days ago). A defer target
+/// is inherently forward-looking -- reusing `parse_date` verbatim would
+/// silently compute `--until 3d` as three days in the past. `yesterday` is
+/// deliberately not accepted here (nonsensical for a future wake time); the
+/// literal absolute/relative token shapes are otherwise identical so the
+/// grammar itself is never invented twice.
+///
+/// Returns the UTC RFC3339 timestamp for local midnight of the resolved
+/// date (day granularity only, matching `TimeRange`'s own precision --
+/// callers needing minute-level scheduling are out of scope for #816).
+/// Callers are responsible for rejecting a resolved time that has already
+/// passed (e.g. `today`, always local midnight, is always in the past by
+/// the time this returns) -- this function only parses the grammar.
+pub fn parse_point_in_time(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    let invalid = || LegionError::InvalidDateFilter {
+        input: input.to_string(),
+    };
+    let today = || Zoned::now().date();
+
+    let date: Date = if trimmed == "today" {
+        today()
+    } else if let Some(digits) = trimmed.strip_suffix('d') {
+        let n: i64 = digits.parse().map_err(|_| invalid())?;
+        today().checked_add(n.days()).map_err(|_| invalid())?
+    } else if let Some(digits) = trimmed.strip_suffix('w') {
+        let n: i64 = digits.parse().map_err(|_| invalid())?;
+        today().checked_add(n.weeks()).map_err(|_| invalid())?
+    } else {
+        trimmed.parse::<Date>().map_err(|_| invalid())?
+    };
+
+    day_start_utc(date)
+}
+
 /// Parse one `--since`/`--until`/`--on` value against the accepted
 /// grammar: `YYYY-MM-DD`, `<N>d`, `<N>w`, `today`, `yesterday`.
 fn parse_date(input: &str) -> Result<Date> {
@@ -312,5 +354,58 @@ mod tests {
         let clause = TimeRange::sql_clause(3);
         assert!(clause.contains("?3 IS NULL OR created_at >= ?3"));
         assert!(clause.contains("?4 IS NULL OR created_at < ?4"));
+    }
+
+    // --- parse_point_in_time (#816) ---
+
+    #[test]
+    fn point_in_time_parses_absolute_date() {
+        let ts = parse_point_in_time("2099-01-01").expect("parse");
+        assert!(ts.starts_with("2099-01-01") || ts.starts_with("2098-12-31"));
+    }
+
+    #[test]
+    fn point_in_time_relative_days_is_forward_not_backward() {
+        // <N>d must resolve to N days from now, not N days ago -- the
+        // opposite direction of TimeRange::parse's own `<N>d`.
+        let today = Zoned::now().date();
+        let forward = parse_point_in_time("3d").expect("parse");
+        let expected = day_start_utc(today.checked_add(3.days()).unwrap()).unwrap();
+        assert_eq!(forward, expected);
+
+        let backward_would_be = day_start_utc(today.checked_sub(3.days()).unwrap()).unwrap();
+        assert_ne!(
+            forward, backward_would_be,
+            "3d must not resolve backward like TimeRange::parse's <N>d does"
+        );
+    }
+
+    #[test]
+    fn point_in_time_relative_weeks_is_forward() {
+        let today = Zoned::now().date();
+        let forward = parse_point_in_time("2w").expect("parse");
+        let expected = day_start_utc(today.checked_add(2.weeks()).unwrap()).unwrap();
+        assert_eq!(forward, expected);
+    }
+
+    #[test]
+    fn point_in_time_today_resolves_to_local_midnight() {
+        let today = Zoned::now().date();
+        let ts = parse_point_in_time("today").expect("parse");
+        assert_eq!(ts, day_start_utc(today).unwrap());
+    }
+
+    #[test]
+    fn point_in_time_rejects_yesterday() {
+        // Not part of the forward grammar -- nonsensical for a future wake time.
+        let err = parse_point_in_time("yesterday").unwrap_err();
+        assert!(matches!(err, LegionError::InvalidDateFilter { .. }));
+    }
+
+    #[test]
+    fn point_in_time_rejects_garbage() {
+        let err = parse_point_in_time("not-a-date").unwrap_err();
+        assert!(matches!(err, LegionError::InvalidDateFilter { .. }));
+        assert!(err.to_string().contains("not-a-date"));
     }
 }

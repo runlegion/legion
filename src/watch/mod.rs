@@ -262,6 +262,8 @@ impl WatchLoop {
         // reap-before-mutate, the same ordering lesson #679's own reaper
         // finalization fix (f45e7e5) encoded for lease release vs heartbeat.
         reap_delegated_cards(&self.db, self.log_prefix);
+        // #816: wake deferred cards whose wake_at has passed.
+        reap_deferred_cards(&self.db, &self.host, self.log_prefix);
         if let Err(e) = self.db.heartbeat_persona_leases(&self.host, self.lease_ttl) {
             eprintln!("{} lease heartbeat error: {e}", self.log_prefix);
         }
@@ -508,6 +510,78 @@ fn reap_delegated_cards(db: &Database, log_prefix: &str) {
         ) {
             eprintln!(
                 "{log_prefix} delegated reaper: failed to revert card {}: {e}",
+                card.id
+            );
+        }
+    }
+}
+
+/// Wake `Deferred` cards whose `wake_at` has passed (#816): reverts each to
+/// its pre-defer status via `kanban::undefer_card` (the SAME function the
+/// manual `legion kanban undefer` CLI path uses -- one revert function, not
+/// one per call site, mirroring the #679 lesson the delegated reaper above
+/// already applies via `undelegate_card`) and posts a wake-worthy `routing`
+/// signal naming the card to its owner (`to_repo`).
+///
+/// The signal is authored as `host`, not a repo name: the recipient-side
+/// self-address filter (`get_unhandled_signals_for_repo`'s `r.repo !=
+/// ?repo_param`) drops a signal whose author equals its own repo, and
+/// legion's own kanban board routinely has `to_repo == "legion"` -- an
+/// author fixed to a real repo name (e.g. "legion") would silently never
+/// wake that repo's own deferred cards. A machine hostname lives in a
+/// different namespace from project repo names, so it cannot collide with
+/// a legitimate `to_repo`. The signal is inserted directly via
+/// `insert_reflection_with_meta` (no search index) rather than through
+/// `board::post_from_text_with_meta` -- `WatchLoop` carries no `SearchIndex`
+/// handle, and the wake mechanism itself reads directly from the
+/// `reflections` table, not the search index (mirrors `QuotaPanicGate::
+/// check_and_post`'s identical unindexed system post).
+///
+/// An error from the DB scan, a single card's revert, or a single card's
+/// wake signal is logged and swallowed; the health tick must never abort
+/// over one bad row.
+fn reap_deferred_cards(db: &Database, host: &str, log_prefix: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let due = match db.get_deferred_cards_due(&now) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{log_prefix} deferred reaper: scan error: {e}");
+            return;
+        }
+    };
+
+    for card in due {
+        let reverted =
+            match crate::kanban::undefer_card(db, &card.id, Some("auto-woken: wake_at reached")) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "{log_prefix} deferred reaper: failed to revert card {}: {e}",
+                        card.id
+                    );
+                    continue;
+                }
+            };
+
+        eprintln!(
+            "{log_prefix} deferred reaper: card {} (repo {}) wake_at reached -- reverted to {}",
+            card.id, card.to_repo, reverted.status
+        );
+
+        let summary = crate::card_parse::truncate_chars(&card.text, 100);
+        let note = format!(
+            "card {} \"{summary}\" is back in {}",
+            card.id, reverted.status
+        );
+        let text = crate::signal::format_signal(&card.to_repo, "routing", None, Some(&note), &[]);
+        if let Err(e) = db.insert_reflection_with_meta(
+            host,
+            &text,
+            "team",
+            &crate::db::ReflectionMeta::default(),
+        ) {
+            eprintln!(
+                "{log_prefix} deferred reaper: wake signal failed for card {}: {e}",
                 card.id
             );
         }
@@ -1267,6 +1341,151 @@ mod tests {
             card.status,
             crate::kanban::CardStatus::Accepted,
             "an in-flight attempt with no daemon heartbeat is still not verifiably live"
+        );
+    }
+
+    // -- deferred-card reaper (#816) -------------------------------------------
+
+    fn insert_deferred_card(db: &Database, repo: &str, text: &str, wake_at: &str) -> String {
+        let id = db
+            .insert_card(
+                "kelex",
+                repo,
+                text,
+                None,
+                crate::kanban::Priority::Med,
+                None,
+                None,
+                None,
+                None,
+                None,
+                crate::kanban::CardStatus::Deferred,
+            )
+            .expect("insert deferred card");
+        db.set_card_defer_fields(&id, wake_at, "accepted")
+            .expect("set defer fields");
+        id
+    }
+
+    #[test]
+    fn reap_deferred_cards_reverts_and_wakes_when_due() {
+        let (db, _index, _dir) = test_storage();
+        let card_id =
+            insert_deferred_card(&db, "test-repo", "past due", "2020-01-01T00:00:00+00:00");
+
+        reap_deferred_cards(&db, "test-host", "[test]");
+
+        let card = db
+            .get_card_by_id(&card_id)
+            .expect("get")
+            .expect("card exists");
+        assert_eq!(
+            card.status,
+            crate::kanban::CardStatus::Accepted,
+            "a due deferred card must revert to its pre-defer status"
+        );
+        assert!(card.wake_at.is_none(), "wake_at must be cleared on revert");
+        assert!(
+            card.pre_defer_status.is_none(),
+            "pre_defer_status must be cleared on revert"
+        );
+
+        let pending = find_pending_signals(&db, "test-repo", &["test-repo".to_string()], None)
+            .expect("find pending");
+        assert_eq!(
+            pending.len(),
+            1,
+            "the card's owner must have a pending wake signal"
+        );
+        assert!(
+            pending[0].1.contains(&card_id),
+            "the wake signal must name the card: {}",
+            pending[0].1
+        );
+    }
+
+    #[test]
+    fn reap_deferred_cards_leaves_future_wake_at_alone() {
+        let (db, _index, _dir) = test_storage();
+        let card_id =
+            insert_deferred_card(&db, "test-repo", "not due yet", "2099-01-01T00:00:00+00:00");
+
+        reap_deferred_cards(&db, "test-host", "[test]");
+
+        let card = db
+            .get_card_by_id(&card_id)
+            .expect("get")
+            .expect("card exists");
+        assert_eq!(
+            card.status,
+            crate::kanban::CardStatus::Deferred,
+            "a not-yet-due deferred card must be left alone"
+        );
+
+        let pending = find_pending_signals(&db, "test-repo", &["test-repo".to_string()], None)
+            .expect("find pending");
+        assert!(
+            pending.is_empty(),
+            "no wake signal should be sent before wake_at"
+        );
+    }
+
+    /// The wake signal's author must never collide with the recipient
+    /// (`to_repo`), since `find_pending_signals`/`get_unhandled_signals_for_repo`
+    /// drop any signal whose author equals the repo being polled -- and
+    /// legion's own board routinely has `to_repo == "legion"`. Using the
+    /// deferred card's OWN `to_repo` as the author (the bug a naive fixed
+    /// `"legion"` sender would reproduce) would silently swallow the wake;
+    /// this test pins that the chosen author (the watch host) never does.
+    #[test]
+    fn reap_deferred_cards_wakes_owner_even_when_to_repo_is_legion() {
+        let (db, _index, _dir) = test_storage();
+        let card_id =
+            insert_deferred_card(&db, "legion", "dogfood defer", "2020-01-01T00:00:00+00:00");
+
+        reap_deferred_cards(&db, "test-host", "[test]");
+
+        let pending = find_pending_signals(&db, "legion", &["legion".to_string()], None)
+            .expect("find pending");
+        assert_eq!(
+            pending.len(),
+            1,
+            "a deferred card owned by 'legion' must still wake its owner; got: {pending:?}"
+        );
+        assert!(pending[0].1.contains(&card_id));
+    }
+
+    /// Full `tick_health` integration: a deferred card with a past wake_at
+    /// is reverted and its owner woken by a single tick, not just by
+    /// calling `reap_deferred_cards` directly. Proves the sweep is actually
+    /// wired into the health tick, not just unit-testable in isolation.
+    #[test]
+    fn watch_loop_tick_health_wakes_due_deferred_card() {
+        let (db, _index, _dir) = test_storage();
+        let card_id = insert_deferred_card(
+            &db,
+            "test-repo",
+            "tick wakes me",
+            "2020-01-01T00:00:00+00:00",
+        );
+
+        let mut state = test_watch_loop(db, "[legion test]");
+        state.tick_health();
+
+        let card = state
+            .db
+            .get_card_by_id(&card_id)
+            .expect("get")
+            .expect("card exists");
+        assert_eq!(card.status, crate::kanban::CardStatus::Accepted);
+
+        let pending =
+            find_pending_signals(&state.db, "test-repo", &["test-repo".to_string()], None)
+                .expect("find pending");
+        assert_eq!(
+            pending.len(),
+            1,
+            "tick_health must wake the deferred card's owner"
         );
     }
 }

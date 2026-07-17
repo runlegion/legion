@@ -114,6 +114,27 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
              ON tasks(document_id) WHERE document_id IS NOT NULL;",
         )?;
     }
+
+    // Migration 17: kanban defer -- card-level scheduled wake (#816).
+    // `wake_at` (RFC3339, matching `created_at`'s format) is the time the
+    // deferred card wakes; `pre_defer_status` is the status the card was in
+    // immediately before deferring, so the revert target (Accepted or
+    // Pending -- Defer is legal from either) is data-dependent, not fixed
+    // by the state machine alone. Both TEXT NULL; only set while a card is
+    // Deferred, cleared on revert.
+    if !Database::has_column(conn, "tasks", "wake_at")? {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN wake_at TEXT;")?;
+    }
+    if !Database::has_column(conn, "tasks", "pre_defer_status")? {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN pre_defer_status TEXT;")?;
+    }
+    // Partial index: `tick_health`'s sweep polls "deferred cards due now"
+    // every health tick (src/watch/mod.rs), so this predicate runs
+    // constantly on every board regardless of how many cards are deferred.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_deferred_wake_at \
+         ON tasks(wake_at) WHERE status = 'deferred';",
+    )?;
     Ok(())
 }
 
@@ -302,12 +323,12 @@ impl Database {
     ///  3  text           11  source_type      19 solution
     ///  4  context        12  sort_order       20 acceptance
     ///  5  priority       13  created_at       21 document_id
-    ///  6  status         14  updated_at
-    ///  7  note           15  assigned_at
+    ///  6  status         14  updated_at       22 wake_at
+    ///  7  note           15  assigned_at      23 pre_defer_status
     const CARD_COLUMNS: &'static str = "id, from_repo, to_repo, text, context, priority, status, note, \
          labels, parent_card_id, source_url, source_type, sort_order, \
          created_at, updated_at, assigned_at, started_at, completed_at, \
-         problem, solution, acceptance, document_id";
+         problem, solution, acceptance, document_id, wake_at, pre_defer_status";
 
     /// SQL fragment for consistent priority ordering across all card queries.
     const PRIORITY_ORDER: &'static str = "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 \
@@ -398,13 +419,18 @@ impl Database {
         scope: crate::kanban::CardScope,
     ) -> Result<Vec<crate::kanban::Card>> {
         // Status predicate for the requested slice of the board. WorkingSet is the
-        // default consumer view (active work); Backlog is the raw inbox; All keeps
-        // every non-deleted row. Status literals match CardStatus::Display.
+        // default consumer view (active work); Backlog is the raw inbox; Deferred
+        // is the consciously-separate "put off until later" bucket (#816 -- a
+        // deferred card must be visible somewhere, never silently uncounted, so
+        // it gets its own scope rather than folding into WorkingSet or vanishing
+        // between Backlog and All); All keeps every non-deleted row. Status
+        // literals match CardStatus::Display.
         let status_filter = match scope {
             crate::kanban::CardScope::WorkingSet => {
-                " AND status NOT IN ('backlog', 'done', 'cancelled')"
+                " AND status NOT IN ('backlog', 'done', 'cancelled', 'deferred')"
             }
             crate::kanban::CardScope::Backlog => " AND status = 'backlog'",
+            crate::kanban::CardScope::Deferred => " AND status = 'deferred'",
             crate::kanban::CardScope::All => "",
         };
         let sql = match direction {
@@ -493,6 +519,61 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// Get every `Deferred` card whose `wake_at` has passed (#816): the
+    /// scheduled-wake sweep target for `tick_health`. Scans every repo (no
+    /// `repo` filter), the same "one watch daemon can service many boards"
+    /// reasoning `get_delegated_cards` documents for its own sweep use.
+    pub fn get_deferred_cards_due(&self, now: &str) -> Result<Vec<crate::kanban::Card>> {
+        let sql = format!(
+            "SELECT {} FROM tasks \
+             WHERE status = 'deferred' AND wake_at IS NOT NULL AND wake_at <= ?1 \
+             AND deleted_at IS NULL \
+             ORDER BY {}, sort_order ASC, created_at ASC",
+            Self::CARD_COLUMNS,
+            Self::PRIORITY_ORDER
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([now], crate::kanban::map_card_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Stamp `wake_at`/`pre_defer_status` on a card entering (or
+    /// re-entering) `Deferred` (#816). Called by `kanban::defer_card` right
+    /// after the status transition commits, mirroring how `delegate_card`
+    /// links the wake_attempts row after `transition_card` succeeds.
+    pub fn set_card_defer_fields(
+        &self,
+        id: &str,
+        wake_at: &str,
+        pre_defer_status: &str,
+    ) -> Result<()> {
+        let rows = self.conn.execute(
+            "UPDATE tasks SET wake_at = ?1, pre_defer_status = ?2 WHERE id = ?3 AND deleted_at IS NULL",
+            rusqlite::params![wake_at, pre_defer_status, id],
+        )?;
+        if rows == 0 {
+            return Err(LegionError::CardNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Clear `wake_at`/`pre_defer_status` on a card leaving `Deferred`
+    /// (#816). Called by `kanban::undefer_card` (both the manual CLI path
+    /// and `tick_health`'s auto-wake sweep) so a resolved defer never
+    /// leaves a stale wake_at behind -- mirroring
+    /// `clear_wake_attempt_card`'s role for `undelegate_card`.
+    pub fn clear_card_defer_fields(&self, id: &str) -> Result<()> {
+        let rows = self.conn.execute(
+            "UPDATE tasks SET wake_at = NULL, pre_defer_status = NULL WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+        )?;
+        if rows == 0 {
+            return Err(LegionError::CardNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     /// Atomically pick the next pending card for a repo and accept it.
     ///
     /// Selects highest priority, then lowest sort_order, then oldest.
@@ -579,6 +660,10 @@ impl Database {
             CardStatus::NeedsInput => None,
             CardStatus::Blocked => None,
             CardStatus::Delegated => None,
+            // Deferred carries no spec meaning either -- the bound document
+            // (if any) stays exactly where the pre-defer status left it;
+            // deferring and later waking do not move the spec's own status.
+            CardStatus::Deferred => None,
         }
     }
 
@@ -1403,6 +1488,7 @@ mod tests {
         assert!(Database::requirement_status_for_card_status(CardStatus::NeedsInput).is_none());
         assert!(Database::requirement_status_for_card_status(CardStatus::Blocked).is_none());
         assert!(Database::requirement_status_for_card_status(CardStatus::Delegated).is_none());
+        assert!(Database::requirement_status_for_card_status(CardStatus::Deferred).is_none());
     }
 
     // -- get_delegated_cards (#778) -------------------------------------------
@@ -1484,6 +1570,172 @@ mod tests {
 
         let all = db.get_delegated_cards(None).unwrap();
         assert_eq!(all.len(), 2, "None scans every repo");
+    }
+
+    // -- kanban defer (#816) --------------------------------------------------
+
+    #[test]
+    fn migration_wake_at_and_pre_defer_status_columns_are_idempotent_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_defer_idempotent.db");
+
+        let db1 = Database::open(&db_path).expect("first open");
+        let id = insert_test_card(&db1);
+        let card = db1.get_card_by_id(&id).expect("get").expect("exists");
+        assert!(card.wake_at.is_none());
+        assert!(card.pre_defer_status.is_none());
+        drop(db1);
+
+        // Second open must not fail even though both columns already exist.
+        let db2 = Database::open(&db_path).expect("second open must not fail");
+        let card2 = db2.get_card_by_id(&id).expect("get").expect("exists");
+        assert!(card2.wake_at.is_none());
+    }
+
+    #[test]
+    fn set_and_clear_card_defer_fields_round_trip() {
+        let db = test_db();
+        let id = insert_test_card(&db);
+
+        db.set_card_defer_fields(&id, "2099-01-01T00:00:00+00:00", "accepted")
+            .expect("set defer fields");
+        let card = db.get_card_by_id(&id).expect("get").expect("exists");
+        assert_eq!(card.wake_at.as_deref(), Some("2099-01-01T00:00:00+00:00"));
+        assert_eq!(card.pre_defer_status.as_deref(), Some("accepted"));
+
+        db.clear_card_defer_fields(&id).expect("clear defer fields");
+        let card = db.get_card_by_id(&id).expect("get").expect("exists");
+        assert!(card.wake_at.is_none());
+        assert!(card.pre_defer_status.is_none());
+    }
+
+    #[test]
+    fn set_card_defer_fields_reports_not_found() {
+        let db = test_db();
+        let err = db
+            .set_card_defer_fields("nonexistent-id", "2099-01-01T00:00:00+00:00", "accepted")
+            .unwrap_err();
+        assert!(matches!(err, LegionError::CardNotFound(_)));
+    }
+
+    #[test]
+    fn get_deferred_cards_due_only_returns_deferred_with_past_wake_at() {
+        let db = test_db();
+
+        // Due: deferred, wake_at in the past.
+        let due_id = db
+            .insert_card(
+                "legion",
+                "legion",
+                "due for wake",
+                None,
+                crate::kanban::Priority::Med,
+                None,
+                None,
+                None,
+                None,
+                None,
+                crate::kanban::CardStatus::Deferred,
+            )
+            .unwrap();
+        db.set_card_defer_fields(&due_id, "2020-01-01T00:00:00+00:00", "accepted")
+            .unwrap();
+
+        // Not due: deferred, wake_at in the future.
+        let future_id = db
+            .insert_card(
+                "legion",
+                "legion",
+                "not due yet",
+                None,
+                crate::kanban::Priority::Med,
+                None,
+                None,
+                None,
+                None,
+                None,
+                crate::kanban::CardStatus::Deferred,
+            )
+            .unwrap();
+        db.set_card_defer_fields(&future_id, "2099-01-01T00:00:00+00:00", "accepted")
+            .unwrap();
+
+        // Not deferred at all -- must never appear regardless of wake_at.
+        db.insert_card(
+            "legion",
+            "legion",
+            "plain accepted card",
+            None,
+            crate::kanban::Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+            crate::kanban::CardStatus::Accepted,
+        )
+        .unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let due = db.get_deferred_cards_due(&now).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, due_id);
+    }
+
+    #[test]
+    fn get_cards_working_set_excludes_deferred() {
+        let db = test_db();
+        let deferred_id = db
+            .insert_card(
+                "legion",
+                "legion",
+                "deferred card",
+                None,
+                crate::kanban::Priority::Med,
+                None,
+                None,
+                None,
+                None,
+                None,
+                crate::kanban::CardStatus::Deferred,
+            )
+            .unwrap();
+        db.insert_card(
+            "legion",
+            "legion",
+            "accepted card",
+            None,
+            crate::kanban::Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+            crate::kanban::CardStatus::Accepted,
+        )
+        .unwrap();
+
+        let working_set = db
+            .get_cards(
+                "legion",
+                crate::kanban::Direction::Inbound,
+                crate::kanban::CardScope::WorkingSet,
+            )
+            .unwrap();
+        assert_eq!(working_set.len(), 1, "WorkingSet must exclude Deferred");
+        assert!(working_set.iter().all(|c| c.id != deferred_id));
+
+        // But it must still be visible via the dedicated Deferred scope --
+        // never silently uncounted (#798's lesson applied to a new status).
+        let deferred_scope = db
+            .get_cards(
+                "legion",
+                crate::kanban::Direction::Inbound,
+                crate::kanban::CardScope::Deferred,
+            )
+            .unwrap();
+        assert_eq!(deferred_scope.len(), 1);
+        assert_eq!(deferred_scope[0].id, deferred_id);
     }
 
     /// Transactional sync: transitioning a bound card to "done" updates BOTH

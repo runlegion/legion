@@ -661,3 +661,167 @@ fn kanban_reconcile_dry_run_on_empty_db_is_quiet_success() {
         "expected shipped-pending empty-state line, got: {stdout}"
     );
 }
+
+// --- kanban defer / undefer (#816) ---
+
+#[test]
+fn kanban_defer_excludes_card_from_working_set_but_keeps_it_visible() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "kanban", "create", "--from", "sean", "--to", "kelex", "--text", "defer me",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(dir.path()).args(["kanban", "assign", "--id", &id, "--to", "kelex"]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "accept", "--id", &id]));
+
+    run_ok(legion_cmd(dir.path()).args(["kanban", "defer", "--id", &id, "--until", "2099-01-01"]));
+
+    // Bare (WorkingSet) list must no longer show the deferred card.
+    let stdout = run_ok(legion_cmd(dir.path()).args(["kanban", "list", "--repo", "kelex"]));
+    assert!(
+        !stdout.contains("defer me"),
+        "WorkingSet must exclude a Deferred card, got: {stdout}"
+    );
+
+    // But --deferred must still show it -- never silently uncounted (#798's
+    // lesson applied to the new status).
+    let stdout =
+        run_ok(legion_cmd(dir.path()).args(["kanban", "list", "--repo", "kelex", "--deferred"]));
+    assert!(
+        stdout.contains("defer me"),
+        "--deferred must show the deferred card, got: {stdout}"
+    );
+
+    // And --all must include it too.
+    let stdout =
+        run_ok(legion_cmd(dir.path()).args(["kanban", "list", "--repo", "kelex", "--all"]));
+    assert!(stdout.contains("defer me"));
+}
+
+#[test]
+fn kanban_defer_refuses_past_until() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "kanban",
+        "create",
+        "--from",
+        "sean",
+        "--to",
+        "kelex",
+        "--text",
+        "cannot defer to the past",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(dir.path()).args(["kanban", "assign", "--id", &id, "--to", "kelex"]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "accept", "--id", &id]));
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "kanban",
+        "defer",
+        "--id",
+        &id,
+        "--until",
+        "2020-01-01",
+    ]));
+    assert!(
+        stderr.contains("not in the future"),
+        "expected the past-wake_at refusal naming the parsed value, got: {stderr}"
+    );
+}
+
+#[test]
+fn kanban_defer_refuses_unparseable_until() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "kanban",
+        "create",
+        "--from",
+        "sean",
+        "--to",
+        "kelex",
+        "--text",
+        "bad grammar",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(dir.path()).args(["kanban", "assign", "--id", &id, "--to", "kelex"]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "accept", "--id", &id]));
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "kanban",
+        "defer",
+        "--id",
+        &id,
+        "--until",
+        "not-a-date",
+    ]));
+    assert!(
+        stderr.contains("unparseable date"),
+        "expected InvalidDateFilter guidance, got: {stderr}"
+    );
+}
+
+#[test]
+fn kanban_undefer_reverts_card_to_working_set() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "kanban",
+        "create",
+        "--from",
+        "sean",
+        "--to",
+        "kelex",
+        "--text",
+        "wake me up early",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(dir.path()).args(["kanban", "assign", "--id", &id, "--to", "kelex"]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "accept", "--id", &id]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "defer", "--id", &id, "--until", "2099-01-01"]));
+
+    run_ok(legion_cmd(dir.path()).args(["kanban", "undefer", "--id", &id]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["kanban", "list", "--repo", "kelex"]));
+    assert!(
+        stdout.contains("wake me up early"),
+        "WorkingSet must show the card again after undefer, got: {stdout}"
+    );
+    assert!(stdout.contains("[accepted]"), "got: {stdout}");
+}
+
+#[test]
+fn kanban_defer_refuses_from_needs_input() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "kanban",
+        "create",
+        "--from",
+        "sean",
+        "--to",
+        "kelex",
+        "--text",
+        "not deferrable",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(dir.path()).args(["kanban", "assign", "--id", &id, "--to", "kelex"]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "accept", "--id", &id]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "need-input", "--id", &id]));
+
+    run_fail(legion_cmd(dir.path()).args([
+        "kanban",
+        "defer",
+        "--id",
+        &id,
+        "--until",
+        "2099-01-01",
+    ]));
+}
