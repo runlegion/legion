@@ -110,12 +110,16 @@ pub(crate) enum KanbanAction {
         json: bool,
 
         /// Show all cards, including Backlog and terminal (Done/Cancelled)
-        #[arg(long, conflicts_with = "backlog")]
+        #[arg(long, conflicts_with_all = ["backlog", "deferred"])]
         all: bool,
 
         /// Show only the raw Backlog (the unconsented inbox)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "deferred")]
         backlog: bool,
+
+        /// Show only Deferred cards (put off until a future wake_at, #816)
+        #[arg(long)]
+        deferred: bool,
     },
 
     /// Accept a pending card (move to in-progress)
@@ -169,6 +173,46 @@ pub(crate) enum KanbanAction {
     /// once its attempt is no longer live -- but available for an agent
     /// that wants to resume the work itself before that sweep runs.
     Undelegate {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Defer a card to a future time (#816): put it off until `--until`,
+    /// excluding it from the Stop in-progress gate and the active
+    /// (WorkingSet) listing until then. Legal from Accepted or Pending;
+    /// re-defer (updating `--until`) is legal from Deferred itself.
+    /// `tick_health` wakes the owner and reverts the card automatically
+    /// once `--until` passes; `legion kanban undefer` does the same
+    /// manually, ahead of schedule.
+    ///
+    /// Liveness caveat (same limitation as `legion kanban delegate`, #778):
+    /// the auto-wake only fires while `legion watch` (standalone or the
+    /// daemon) is running for this card's repo. If no watch process is
+    /// alive when `--until` passes, the card stays Deferred past its wake
+    /// time until one starts and runs a health tick -- use `legion kanban
+    /// undefer` to wake it manually if that matters before then.
+    Defer {
+        /// Card ID
+        #[arg(long)]
+        id: String,
+
+        /// When to wake: `YYYY-MM-DD`, `<N>d`, `<N>w`, or `today`, reusing
+        /// #786's `TimeRange` token shapes applied FORWARD from now (not
+        /// the backward-from-today direction `--since`/`--until` use
+        /// elsewhere). Must resolve to a future time -- a past or
+        /// same-instant result is refused, naming the parsed value.
+        #[arg(long)]
+        until: String,
+    },
+
+    /// Manually wake a deferred card early (returns to whichever status it
+    /// was deferred from -- Accepted or Pending).
+    ///
+    /// Normally unnecessary -- `tick_health` auto-reverts a deferred card
+    /// once `wake_at` passes -- but available for an agent or operator that
+    /// wants the work back before then.
+    Undefer {
         /// Card ID
         #[arg(long)]
         id: String,
@@ -818,17 +862,23 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
             json,
             all,
             backlog,
+            deferred,
         } => {
             let direction = if from {
                 kanban::Direction::Outbound
             } else {
                 kanban::Direction::Inbound
             };
-            // Default to the working set; --all and --backlog widen/redirect.
+            // Default to the working set; --all, --backlog, and --deferred
+            // widen/redirect. Deferred is its own scope (#816) -- excluded
+            // from WorkingSet, consciously visible here rather than folded
+            // into --all/--backlog.
             let scope = if all {
                 kanban::CardScope::All
             } else if backlog {
                 kanban::CardScope::Backlog
+            } else if deferred {
+                kanban::CardScope::Deferred
             } else {
                 kanban::CardScope::WorkingSet
             };
@@ -874,6 +924,22 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
         }
         KanbanAction::Undelegate { id } => {
             kanban::undelegate_card(&database, &id, None)?;
+            println!("{id}");
+        }
+        KanbanAction::Defer { id, until } => {
+            let wake_at = crate::timerange::parse_point_in_time(&until)?;
+            let now = chrono::Utc::now().to_rfc3339();
+            if wake_at <= now {
+                return Err(error::LegionError::DeferWakeAtInPast {
+                    input: until,
+                    wake_at,
+                });
+            }
+            kanban::defer_card(&database, &id, &wake_at, None)?;
+            println!("{id}");
+        }
+        KanbanAction::Undefer { id } => {
+            kanban::undefer_card(&database, &id, None)?;
             println!("{id}");
         }
         KanbanAction::DelegatedNeedsAttention { repo, json } => {

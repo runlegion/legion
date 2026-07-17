@@ -28,6 +28,16 @@ pub enum CardStatus {
     /// dark. Named for the stance ("running elsewhere"), not "awaiting"
     /// (a snooze button that primes dormancy -- see reflection 019e98f4).
     Delegated,
+    /// Deliberately put off until a future time (#816). Reachable from
+    /// `Accepted` or `Pending` -- unlike `Delegated`, the revert target on
+    /// wake is data-dependent (whichever of the two the card was in before
+    /// deferring), stored on the card as `pre_defer_status` rather than
+    /// fixed in this enum. `tick_health`'s sweep (mirroring #778's
+    /// delegated-reaper site) reverts the card and wakes its owner once
+    /// `wake_at` passes; `legion kanban undefer` does the same manually.
+    /// Excluded from `CardScope::WorkingSet` and the Stop in-progress gate
+    /// -- deferred work is consciously not "in progress right now."
+    Deferred,
     Done,
     Cancelled,
 }
@@ -42,6 +52,7 @@ impl fmt::Display for CardStatus {
             Self::InReview => write!(f, "in-review"),
             Self::Blocked => write!(f, "blocked"),
             Self::Delegated => write!(f, "delegated"),
+            Self::Deferred => write!(f, "deferred"),
             Self::Done => write!(f, "done"),
             Self::Cancelled => write!(f, "cancelled"),
         }
@@ -60,6 +71,7 @@ impl FromStr for CardStatus {
             "in-review" => Ok(Self::InReview),
             "blocked" => Ok(Self::Blocked),
             "delegated" => Ok(Self::Delegated),
+            "deferred" => Ok(Self::Deferred),
             "done" => Ok(Self::Done),
             "cancelled" => Ok(Self::Cancelled),
             other => Err(LegionError::InvalidCardStatus(other.to_string())),
@@ -78,6 +90,7 @@ impl CardStatus {
             Self::InReview => "In Review",
             Self::Blocked => "Blocked",
             Self::Delegated => "Delegated",
+            Self::Deferred => "Deferred",
             Self::Done => "Done",
             Self::Cancelled => "Cancelled",
         }
@@ -174,6 +187,17 @@ pub enum Action {
     /// card itself) or programmatically by `tick_health`'s auto-revert sweep
     /// when the delegated attempt is no longer live.
     Undelegate,
+    /// accepted | pending -> deferred (#816). Also legal from `Deferred`
+    /// itself (re-defer: updates `wake_at`, keeps the original
+    /// `pre_defer_status`). Refused from every other status, including
+    /// `Done`/`Cancelled`.
+    Defer,
+    /// deferred -> (accepted | pending), whichever the card was in before
+    /// deferring. Fired either manually (`legion kanban undefer`) or
+    /// programmatically by `tick_health`'s sweep once `wake_at` passes. The
+    /// concrete target is data-dependent (stored `pre_defer_status`), not
+    /// fixed by this action alone -- see `kanban::undefer_card`.
+    Undefer,
     /// needs-input | in-review -> accepted
     Resume,
     /// accepted | in-review -> done
@@ -197,6 +221,20 @@ pub fn transition(current: CardStatus, action: Action) -> Result<CardStatus> {
         (CardStatus::Blocked, Action::Unblock) => CardStatus::Accepted,
         (CardStatus::Accepted, Action::Delegate) => CardStatus::Delegated,
         (CardStatus::Delegated, Action::Undelegate) => CardStatus::Accepted,
+        (CardStatus::Accepted, Action::Defer) => CardStatus::Deferred,
+        (CardStatus::Pending, Action::Defer) => CardStatus::Deferred,
+        // Re-defer: legal from Deferred itself so `kanban::defer_card` can
+        // update `wake_at` in place without an intervening undefer.
+        (CardStatus::Deferred, Action::Defer) => CardStatus::Deferred,
+        // The concrete revert target is data-dependent (Accepted or Pending,
+        // whichever the card was deferred FROM) and lives in the card's
+        // stored `pre_defer_status`, which this pure (status, action)
+        // function has no access to. `Accepted` here is only the FSM
+        // legality answer for "is Undefer legal from Deferred" -- callers
+        // (`kanban::undefer_card`, the tick_health sweep) use this solely as
+        // a gate and independently read `pre_defer_status` for the actual
+        // write target. See `kanban::undefer_card`'s doc comment.
+        (CardStatus::Deferred, Action::Undefer) => CardStatus::Accepted,
         (CardStatus::NeedsInput, Action::Resume) => CardStatus::Accepted,
         // Verify (#520) runs after review and can find an unprovable criterion;
         // routing the card from InReview to NeedsInput lets a human adjudicate
@@ -232,6 +270,7 @@ mod tests {
             CardStatus::InReview,
             CardStatus::Blocked,
             CardStatus::Delegated,
+            CardStatus::Deferred,
             CardStatus::Done,
             CardStatus::Cancelled,
         ] {
@@ -247,6 +286,7 @@ mod tests {
         assert_eq!(CardStatus::Accepted.label(), "In Progress");
         assert_eq!(CardStatus::NeedsInput.label(), "Needs Input");
         assert_eq!(CardStatus::Delegated.label(), "Delegated");
+        assert_eq!(CardStatus::Deferred.label(), "Deferred");
     }
 
     // --- State machine tests ---
@@ -310,6 +350,7 @@ mod tests {
             CardStatus::InReview,
             CardStatus::Blocked,
             CardStatus::Delegated,
+            CardStatus::Deferred,
             CardStatus::Done,
             CardStatus::Cancelled,
         ] {
@@ -330,6 +371,7 @@ mod tests {
             CardStatus::NeedsInput,
             CardStatus::InReview,
             CardStatus::Blocked,
+            CardStatus::Deferred,
             CardStatus::Done,
             CardStatus::Cancelled,
         ] {
@@ -344,6 +386,78 @@ mod tests {
     #[test]
     fn cancel_from_delegated() {
         let result = transition(CardStatus::Delegated, Action::Cancel);
+        assert_eq!(result.expect("cancel"), CardStatus::Cancelled);
+    }
+
+    // --- Deferred state (#816) ---
+
+    #[test]
+    fn defer_from_accepted() {
+        let result = transition(CardStatus::Accepted, Action::Defer);
+        assert_eq!(result.expect("defer"), CardStatus::Deferred);
+    }
+
+    #[test]
+    fn defer_from_pending() {
+        let result = transition(CardStatus::Pending, Action::Defer);
+        assert_eq!(result.expect("defer"), CardStatus::Deferred);
+    }
+
+    #[test]
+    fn redefer_from_deferred_is_legal() {
+        let result = transition(CardStatus::Deferred, Action::Defer);
+        assert_eq!(result.expect("re-defer"), CardStatus::Deferred);
+    }
+
+    #[test]
+    fn undefer_from_deferred_is_legal() {
+        // The FSM-level answer is Accepted; the concrete revert target
+        // (Accepted vs Pending) is resolved by `kanban::undefer_card` from
+        // the card's stored `pre_defer_status`, not by this pure function.
+        let result = transition(CardStatus::Deferred, Action::Undefer);
+        assert_eq!(result.expect("undefer"), CardStatus::Accepted);
+    }
+
+    #[test]
+    fn cannot_defer_from_non_accepted_non_pending_states() {
+        for status in [
+            CardStatus::Backlog,
+            CardStatus::NeedsInput,
+            CardStatus::InReview,
+            CardStatus::Blocked,
+            CardStatus::Delegated,
+            CardStatus::Done,
+            CardStatus::Cancelled,
+        ] {
+            let result = transition(status, Action::Defer);
+            assert!(result.is_err(), "defer should be rejected from {status:?}");
+        }
+    }
+
+    #[test]
+    fn cannot_undefer_from_non_deferred_states() {
+        for status in [
+            CardStatus::Backlog,
+            CardStatus::Pending,
+            CardStatus::Accepted,
+            CardStatus::NeedsInput,
+            CardStatus::InReview,
+            CardStatus::Blocked,
+            CardStatus::Delegated,
+            CardStatus::Done,
+            CardStatus::Cancelled,
+        ] {
+            let result = transition(status, Action::Undefer);
+            assert!(
+                result.is_err(),
+                "undefer should be rejected from {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_from_deferred() {
+        let result = transition(CardStatus::Deferred, Action::Cancel);
         assert_eq!(result.expect("cancel"), CardStatus::Cancelled);
     }
 
@@ -381,6 +495,7 @@ mod tests {
             CardStatus::InReview,
             CardStatus::Blocked,
             CardStatus::Delegated,
+            CardStatus::Deferred,
         ] {
             let result = transition(status, Action::Cancel);
             assert_eq!(result.expect("cancel"), CardStatus::Cancelled);

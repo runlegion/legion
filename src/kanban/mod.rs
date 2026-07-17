@@ -43,6 +43,14 @@ pub struct Card {
     /// `verification.acceptance` block overrides `tasks.acceptance` as the
     /// source of acceptance criteria for `legion verify`.
     pub document_id: Option<String>,
+    /// Scheduled wake time (RFC3339), set while `status == Deferred` (#816).
+    /// `None` for a card that has never been deferred or has since woken.
+    pub wake_at: Option<String>,
+    /// The status this card was in immediately before deferring (#816):
+    /// `Defer` is legal from both `Accepted` and `Pending`, so the revert
+    /// target on wake is data-dependent and stored here rather than fixed
+    /// by the state machine. `None` outside of `Deferred`.
+    pub pre_defer_status: Option<String>,
 }
 
 /// Per-agent workload summary for the dashboard agent strip.
@@ -87,6 +95,8 @@ pub fn map_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
         solution: row.get(19)?,
         acceptance: row.get(20)?,
         document_id: row.get(21)?,
+        wake_at: row.get(22)?,
+        pre_defer_status: row.get(23)?,
     })
 }
 
@@ -102,12 +112,17 @@ pub enum Direction {
 /// Which slice of the board to return when listing cards.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CardScope {
-    /// Active work only: Pending, Accepted, NeedsInput, InReview, Blocked.
-    /// Excludes Backlog (pre-consensus) and terminal (Done, Cancelled). This is
-    /// the default for `kanban list` and the SessionStart "Current work" banner.
+    /// Active work only: Pending, Accepted, NeedsInput, InReview, Blocked,
+    /// Delegated. Excludes Backlog (pre-consensus), Deferred (consciously
+    /// put off, #816), and terminal (Done, Cancelled). This is the default
+    /// for `kanban list` and the SessionStart "Current work" banner.
     WorkingSet,
     /// The raw, unconsented inbox: Backlog cards only.
     Backlog,
+    /// Cards deliberately put off until a future time (#816): the dedicated
+    /// visibility bucket for `Deferred`, since it is excluded from
+    /// `WorkingSet` and must never be silently uncounted (the #798 lesson).
+    Deferred,
     /// Everything non-deleted, regardless of status.
     All,
 }
@@ -359,6 +374,105 @@ pub fn undelegate_card(db: &Database, id: &str, note: Option<&str>) -> Result<Ca
     let card = transition_card(db, id, Action::Undelegate, note)?;
     db.clear_wake_attempt_card(id)?;
     Ok(card)
+}
+
+/// Defer a card to a future `wake_at` (#816).
+///
+/// Legal from `Accepted` or `Pending` (validated by `transition`), and
+/// legal as a re-defer from `Deferred` itself (updates `wake_at` in place).
+/// `wake_at` must already be validated as a future RFC3339 timestamp by the
+/// caller (the CLI layer parses `--until` and refuses a past time before
+/// this is ever reached; see `LegionError::DeferWakeAtInPast`).
+///
+/// `pre_defer_status` -- the revert target `undefer_card` and the
+/// `tick_health` sweep will use -- is captured from the card's CURRENT
+/// status on first defer. On re-defer (current status already `Deferred`)
+/// the existing stored value is kept, not overwritten with `"deferred"`:
+/// a chain of `defer` calls must always revert to the ORIGINAL pre-defer
+/// status, never to the deferred state itself.
+///
+/// The status transition and the `wake_at`/`pre_defer_status` stamp write
+/// together via `Database::set_card_deferred` (#816 review fix, HIGH): an
+/// earlier version wrote them as two separate steps, so a crash between
+/// them could leave a `Deferred` card with `wake_at = NULL` --
+/// permanently un-reapable, since `get_deferred_cards_due` requires
+/// `wake_at IS NOT NULL`.
+pub fn defer_card(db: &Database, id: &str, wake_at: &str, note: Option<&str>) -> Result<Card> {
+    let card = db
+        .get_card_by_id(id)?
+        .ok_or_else(|| LegionError::CardNotFound(id.to_string()))?;
+
+    // Validates the action is legal from the card's current status (errors
+    // for anything other than Accepted/Pending/Deferred).
+    transition(card.status, Action::Defer)?;
+
+    let pre_defer_status: String = if card.status == CardStatus::Deferred {
+        card.pre_defer_status.clone().ok_or_else(|| {
+            LegionError::WorkSource(format!(
+                "card '{id}' is Deferred but has no stored pre_defer_status -- data integrity error"
+            ))
+        })?
+    } else {
+        card.status.to_string()
+    };
+
+    db.set_card_deferred(id, note, wake_at, &pre_defer_status)?;
+    db.get_card_by_id(id)?
+        .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
+}
+
+/// Undefer a card (#816): the inverse of `defer_card`. Reverts `Deferred`
+/// to whichever status the card was deferred FROM -- `Accepted` or
+/// `Pending`, read from the card's own `pre_defer_status` -- and clears
+/// both defer fields so a resolved defer never leaves a stale `wake_at`
+/// behind (mirroring `undelegate_card`'s `clear_wake_attempt_card` call).
+///
+/// The pure `transition` function only knows a single (conservative)
+/// target for `(Deferred, Undefer)`; the real target is data-dependent (see
+/// `kanban::state`'s doc comment on that match arm), so this function reads
+/// `pre_defer_status` directly rather than trusting `transition`'s return
+/// value for the write.
+///
+/// Used by both the manual `legion kanban undefer` CLI path and
+/// `tick_health`'s auto-wake sweep, so the two can never diverge on how the
+/// revert target is computed or on clearing the link (the #679 "one
+/// predicate, not one per call site" lesson, mirrored from
+/// `undelegate_card`).
+///
+/// A `Deferred` card with no stored `pre_defer_status` is a hard error, not
+/// a silent guess (#816 review fix, MED): an earlier version fell back to
+/// `"accepted"`, which disagreed with `defer_card`'s own integrity check
+/// (the same corruption is an error there) and would silently mis-revert a
+/// card actually deferred from `Pending`. `defer_card` now writes
+/// `wake_at`/`pre_defer_status` atomically with the status transition, so
+/// this case should be unreachable in practice; erroring here keeps that an
+/// enforced invariant rather than an assumption.
+pub fn undefer_card(db: &Database, id: &str, note: Option<&str>) -> Result<Card> {
+    let card = db
+        .get_card_by_id(id)?
+        .ok_or_else(|| LegionError::CardNotFound(id.to_string()))?;
+
+    // Validates the action is legal from the card's current status.
+    transition(card.status, Action::Undefer)?;
+
+    let pre_defer_status = card.pre_defer_status.as_deref().ok_or_else(|| {
+        LegionError::WorkSource(format!(
+            "card '{id}' is Deferred but has no stored pre_defer_status -- data integrity error"
+        ))
+    })?;
+    let target = CardStatus::from_str(pre_defer_status)?;
+
+    db.transition_card_status_with_sync(
+        id,
+        &target.to_string(),
+        note,
+        timestamp_for_action(&Action::Undefer),
+        card.document_id.as_deref(),
+        Some(&card.status.to_string()),
+    )?;
+    db.clear_card_defer_fields(id)?;
+    db.get_card_by_id(id)?
+        .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
 }
 
 /// Bind a document to a card (manual path; spec-gen uses the atomic insert).
@@ -984,6 +1098,147 @@ mod tests {
                 .expect("liveness check"),
             "the live delegation to b must read as live, unaffected by a's terminal outcome"
         );
+    }
+
+    // -- defer_card / undefer_card (#816) -------------------------------------
+
+    #[test]
+    fn defer_card_from_accepted_stores_wake_at_and_pre_defer_status() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "defer me", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+
+        let card = defer_card(&db, &id, "2099-01-01T00:00:00+00:00", None).expect("defer");
+        assert_eq!(card.status, CardStatus::Deferred);
+        assert_eq!(card.wake_at.as_deref(), Some("2099-01-01T00:00:00+00:00"));
+        assert_eq!(card.pre_defer_status.as_deref(), Some("accepted"));
+    }
+
+    #[test]
+    fn defer_card_from_pending_stores_pending_as_pre_defer_status() {
+        let (db, _index, _dir) = test_storage();
+
+        // create_and_assign leaves the card Pending (not yet Accepted).
+        let id = create_and_assign(&db, "kelex", "legion", "defer while ready", Priority::Med);
+
+        let card = defer_card(&db, &id, "2099-01-01T00:00:00+00:00", None).expect("defer");
+        assert_eq!(card.status, CardStatus::Deferred);
+        assert_eq!(
+            card.pre_defer_status.as_deref(),
+            Some("pending"),
+            "a card deferred from Pending must revert to Pending, not Accepted"
+        );
+    }
+
+    #[test]
+    fn defer_card_refuses_from_needs_input() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "not deferrable", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        transition_card(&db, &id, Action::NeedInput, None).expect("need-input");
+
+        let err = defer_card(&db, &id, "2099-01-01T00:00:00+00:00", None)
+            .expect_err("defer from needs-input must be refused");
+        assert!(matches!(err, LegionError::InvalidCardTransition { .. }));
+    }
+
+    #[test]
+    fn redefer_updates_wake_at_and_keeps_original_pre_defer_status() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "redefer me", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        defer_card(&db, &id, "2099-01-01T00:00:00+00:00", None).expect("first defer");
+
+        // Re-defer with a later wake_at -- must stay Deferred, update
+        // wake_at, and keep pre_defer_status as the ORIGINAL "accepted",
+        // not overwrite it with "deferred".
+        let card = defer_card(&db, &id, "2100-06-01T00:00:00+00:00", None).expect("second defer");
+        assert_eq!(card.status, CardStatus::Deferred);
+        assert_eq!(card.wake_at.as_deref(), Some("2100-06-01T00:00:00+00:00"));
+        assert_eq!(card.pre_defer_status.as_deref(), Some("accepted"));
+    }
+
+    #[test]
+    fn undefer_card_reverts_to_accepted_and_clears_defer_fields() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "undefer me", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        defer_card(&db, &id, "2099-01-01T00:00:00+00:00", None).expect("defer");
+
+        let card = undefer_card(&db, &id, None).expect("undefer");
+        assert_eq!(card.status, CardStatus::Accepted);
+        assert!(card.wake_at.is_none());
+        assert!(card.pre_defer_status.is_none());
+    }
+
+    #[test]
+    fn undefer_card_reverts_to_pending_when_deferred_from_pending() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "undefer to pending", Priority::Med);
+        defer_card(&db, &id, "2099-01-01T00:00:00+00:00", None).expect("defer from pending");
+
+        let card = undefer_card(&db, &id, None).expect("undefer");
+        assert_eq!(
+            card.status,
+            CardStatus::Pending,
+            "must revert to Pending, the status it was deferred from"
+        );
+    }
+
+    #[test]
+    fn undefer_card_refuses_when_not_deferred() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "not deferred", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+
+        let err = undefer_card(&db, &id, None).expect_err("undefer on non-deferred must refuse");
+        assert!(matches!(err, LegionError::InvalidCardTransition { .. }));
+    }
+
+    /// Review regression (#816, MED): `undefer_card` must hard-error on a
+    /// `Deferred` card with no stored `pre_defer_status`, not silently
+    /// guess `"accepted"`. `defer_card`'s atomic `set_card_deferred` write
+    /// makes this state unreachable through normal defer/undefer traffic,
+    /// so it is constructed here via `force_move_card` (the FSM-bypassing
+    /// admin path) the same way `defer_card`'s own integrity check is
+    /// exercised: both sibling functions must treat the same corruption
+    /// the same way, symmetrically, per the review finding.
+    #[test]
+    fn undefer_card_refuses_when_pre_defer_status_is_missing() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "corrupted defer", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        // Bypass the FSM to land in Deferred with no wake_at/pre_defer_status
+        // stamped -- the exact corruption defer_card's atomic write prevents
+        // in practice, reproduced here to prove undefer_card refuses it.
+        force_move(&db, &id, CardStatus::Deferred, None).expect("force move to deferred");
+
+        let err = undefer_card(&db, &id, None)
+            .expect_err("undefer on a Deferred card with no pre_defer_status must refuse");
+        assert!(
+            matches!(err, LegionError::WorkSource(_)),
+            "expected a data-integrity WorkSource error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn defer_card_refuses_from_done() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "already done", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        transition_card(&db, &id, Action::Done, None).expect("done");
+
+        let err = defer_card(&db, &id, "2099-01-01T00:00:00+00:00", None)
+            .expect_err("defer on a Done card must be refused");
+        assert!(matches!(err, LegionError::InvalidCardTransition { .. }));
     }
 
     #[test]

@@ -84,10 +84,19 @@ pub fn format_card_list(cards: &[Card], repo: &str, direction: Direction) -> Str
             .as_deref()
             .map(|u| format!(" <{}>", u))
             .unwrap_or_default();
+        // #816 review (MED): a deferred card's wake_at must be visible in
+        // the same list output that shows every other card -- the #798
+        // lesson (a status detail that only lives in `view`/`--json` is
+        // half-visible) applied to the new field, not just the new status.
+        let wake_part = c
+            .wake_at
+            .as_deref()
+            .map(|w| format!(" [wakes:{}]", crate::db::format_date(w)))
+            .unwrap_or_default();
         let date = crate::db::format_date(&c.created_at);
         output.push_str(&format!(
-            "- [{}] {}{}{} ({}, {}{}) {}\n",
-            c.status, c.text, prio, source_part, peer, date, note_part, c.id
+            "- [{}] {}{}{}{} ({}, {}{}) {}\n",
+            c.status, c.text, prio, source_part, wake_part, peer, date, note_part, c.id
         ));
 
         if let Some(summary) = crate::card_parse::card_summary(
@@ -118,6 +127,8 @@ pub struct CardSummary {
     pub updated_at: String,
     pub labels: Vec<String>,
     pub source_url: Option<String>,
+    /// Scheduled wake time (#816), present only while `status == deferred`.
+    pub wake_at: Option<String>,
 }
 
 /// Derive a display title from the card text field.
@@ -154,6 +165,12 @@ pub fn format_card_view(card: &Card) -> String {
     ));
     out.push_str(&format!("Created: {}\n", card.created_at));
     out.push_str(&format!("Updated: {}\n", card.updated_at));
+
+    // #816 review (MED): visible in `view` alongside every other status
+    // detail, not only reachable through `--json`.
+    if let Some(ref wake_at) = card.wake_at {
+        out.push_str(&format!("Wake at: {}\n", wake_at));
+    }
 
     if let Some(ref labels) = card.labels
         && !labels.is_empty()
@@ -212,6 +229,7 @@ pub fn format_card_list_json(cards: &[Card]) -> crate::error::Result<String> {
             updated_at: card.updated_at.clone(),
             labels: labels_to_vec(card.labels.as_deref()),
             source_url: card.source_url.clone(),
+            wake_at: card.wake_at.clone(),
         };
         out.push_str(&serde_json::to_string(&summary)?);
         out.push('\n');
@@ -294,6 +312,8 @@ mod tests {
             solution: None,
             acceptance: None,
             document_id: None,
+            wake_at: None,
+            pre_defer_status: None,
         };
         let output = format_work_card(&card);
         assert!(output.contains("Priority: high"));
@@ -335,6 +355,8 @@ mod tests {
             solution: None,
             acceptance: None,
             document_id: None,
+            wake_at: None,
+            pre_defer_status: None,
         };
         let output = format_work_card(&card);
         assert!(output.contains("minimal card"));
@@ -368,6 +390,8 @@ mod tests {
             solution: None,
             acceptance: ac.map(str::to_string),
             document_id: None,
+            wake_at: None,
+            pre_defer_status: None,
         };
 
         // An Accepted card with AC becomes the goal, listing its criteria.
@@ -416,6 +440,8 @@ mod tests {
             solution: Some("Fix them".to_string()),
             acceptance: Some("Tests pass\nClipy clean".to_string()),
             document_id: None,
+            wake_at: None,
+            pre_defer_status: None,
         };
         let output = format_card_view(&card);
         assert!(output.contains("Test Card"), "title derived correctly");
@@ -455,11 +481,160 @@ mod tests {
             solution: None,
             acceptance: None,
             document_id: None,
+            wake_at: None,
+            pre_defer_status: None,
         };
         let output = format_card_view(&card);
         assert!(output.contains("## Context"), "context section present");
         assert!(output.contains("raw context text"));
         assert!(!output.contains("## Problem"), "no problem section");
+    }
+
+    // -- wake_at visibility (#816 review, MED: a deferred card's wake time
+    // must be visible in list/view output, not only reachable via
+    // view --json's full-struct serialization) --------------------------
+
+    #[test]
+    fn format_card_view_shows_wake_at_when_deferred() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "defer me",
+            None,
+            Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+        transition_card(&db, &id, Action::Assign, None).expect("assign");
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        let card = defer_card(&db, &id, "2099-01-01T00:00:00+00:00", None).expect("defer");
+
+        let output = format_card_view(&card);
+        assert!(
+            output.contains("Wake at: 2099-01-01T00:00:00+00:00"),
+            "expected wake_at in view output, got: {output}"
+        );
+    }
+
+    #[test]
+    fn format_card_view_omits_wake_at_when_not_deferred() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "never deferred",
+            None,
+            Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+        let card = db.get_card_by_id(&id).expect("get").expect("exists");
+
+        let output = format_card_view(&card);
+        assert!(!output.contains("Wake at:"), "got: {output}");
+    }
+
+    #[test]
+    fn format_card_list_shows_wake_at_when_deferred() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "defer me too",
+            None,
+            Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+        transition_card(&db, &id, Action::Assign, None).expect("assign");
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        defer_card(&db, &id, "2099-06-15T00:00:00+00:00", None).expect("defer");
+
+        let cards = list_cards(&db, "kelex", Direction::Inbound, CardScope::Deferred)
+            .expect("list deferred");
+        let output = format_card_list(&cards, "kelex", Direction::Inbound);
+        assert!(
+            output.contains("[wakes:2099-06-15]"),
+            "expected date-only wake marker in list output, got: {output}"
+        );
+    }
+
+    #[test]
+    fn format_card_list_json_includes_wake_at() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_card(
+            &db,
+            "sean",
+            "kelex",
+            "json defer",
+            None,
+            Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+        transition_card(&db, &id, Action::Assign, None).expect("assign");
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        defer_card(&db, &id, "2099-03-03T00:00:00+00:00", None).expect("defer");
+
+        let cards = list_cards(&db, "kelex", Direction::Inbound, CardScope::Deferred)
+            .expect("list deferred");
+        let output = format_card_list_json(&cards).expect("json");
+        let line = output.lines().next().expect("has output");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+        assert_eq!(
+            parsed["wake_at"].as_str(),
+            Some("2099-03-03T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn format_card_list_json_wake_at_is_null_when_not_deferred() {
+        let (db, _index, _dir) = test_storage();
+
+        create_card(
+            &db,
+            "sean",
+            "kelex",
+            "not deferred",
+            None,
+            Priority::Med,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create");
+
+        let cards = list_cards(&db, "kelex", Direction::Inbound, CardScope::All).expect("list");
+        let output = format_card_list_json(&cards).expect("json");
+        let line = output.lines().next().expect("has output");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+        assert!(parsed["wake_at"].is_null());
     }
 
     #[test]
@@ -487,6 +662,8 @@ mod tests {
             solution: None,
             acceptance: None,
             document_id: None,
+            wake_at: None,
+            pre_defer_status: None,
         };
         let json = format_card_json(&card).expect("json");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");

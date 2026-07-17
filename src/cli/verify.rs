@@ -1219,6 +1219,8 @@ mod tests {
             solution: None,
             acceptance: acceptance.map(str::to_string),
             document_id: doc_id.map(str::to_string),
+            wake_at: None,
+            pre_defer_status: None,
         }
     }
 
