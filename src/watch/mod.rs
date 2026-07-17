@@ -1373,8 +1373,8 @@ mod tests {
                 crate::kanban::CardStatus::Deferred,
             )
             .expect("insert deferred card");
-        db.set_card_defer_fields(&id, wake_at, "accepted")
-            .expect("set defer fields");
+        db.set_card_deferred(&id, None, wake_at, "accepted")
+            .expect("set deferred");
         id
     }
 

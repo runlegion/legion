@@ -538,19 +538,36 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
-    /// Stamp `wake_at`/`pre_defer_status` on a card entering (or
-    /// re-entering) `Deferred` (#816). Called by `kanban::defer_card` right
-    /// after the status transition commits, mirroring how `delegate_card`
-    /// links the wake_attempts row after `transition_card` succeeds.
-    pub fn set_card_defer_fields(
+    /// Atomically transition a card to `Deferred` and stamp `wake_at`/
+    /// `pre_defer_status` (#816 review fix, HIGH): the previous shape called
+    /// `transition_card_status_with_sync` and a separate field-stamp as two
+    /// writes. A crash (or a `set_card_defer_fields`-style error) between
+    /// them left a `Deferred` card with `wake_at = NULL` -- and
+    /// `get_deferred_cards_due`'s `wake_at IS NOT NULL` filter permanently
+    /// excludes such a row from the sweep, unlike `Delegated`'s equivalent
+    /// partial-failure window (`get_delegated_cards` has no link-presence
+    /// filter, so it stays reapable either way). A single `UPDATE` statement
+    /// is atomic by construction (SQLite commits or rolls back one
+    /// statement as a unit even outside an explicit transaction), so this
+    /// closes the gap without needing `unchecked_transaction`.
+    ///
+    /// `kanban::defer_card` is the only caller; it does not sync a bound
+    /// document the way `transition_card_status_with_sync` does for other
+    /// transitions, because `requirement_status_for_card_status` maps
+    /// `Deferred` to `None` (deferring carries no spec meaning).
+    pub fn set_card_deferred(
         &self,
         id: &str,
+        note: Option<&str>,
         wake_at: &str,
         pre_defer_status: &str,
     ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
         let rows = self.conn.execute(
-            "UPDATE tasks SET wake_at = ?1, pre_defer_status = ?2 WHERE id = ?3 AND deleted_at IS NULL",
-            rusqlite::params![wake_at, pre_defer_status, id],
+            "UPDATE tasks SET status = 'deferred', note = COALESCE(?1, note), \
+             wake_at = ?2, pre_defer_status = ?3, updated_at = ?4 \
+             WHERE id = ?5 AND deleted_at IS NULL",
+            rusqlite::params![note, wake_at, pre_defer_status, now, id],
         )?;
         if rows == 0 {
             return Err(LegionError::CardNotFound(id.to_string()));
@@ -1593,13 +1610,14 @@ mod tests {
     }
 
     #[test]
-    fn set_and_clear_card_defer_fields_round_trip() {
+    fn set_card_deferred_and_clear_defer_fields_round_trip() {
         let db = test_db();
         let id = insert_test_card(&db);
 
-        db.set_card_defer_fields(&id, "2099-01-01T00:00:00+00:00", "accepted")
-            .expect("set defer fields");
+        db.set_card_deferred(&id, None, "2099-01-01T00:00:00+00:00", "accepted")
+            .expect("set deferred");
         let card = db.get_card_by_id(&id).expect("get").expect("exists");
+        assert_eq!(card.status.to_string(), "deferred");
         assert_eq!(card.wake_at.as_deref(), Some("2099-01-01T00:00:00+00:00"));
         assert_eq!(card.pre_defer_status.as_deref(), Some("accepted"));
 
@@ -1610,10 +1628,27 @@ mod tests {
     }
 
     #[test]
-    fn set_card_defer_fields_reports_not_found() {
+    fn set_card_deferred_sets_note_and_reports_not_found() {
         let db = test_db();
+        let id = insert_test_card(&db);
+
+        db.set_card_deferred(
+            &id,
+            Some("deferred for now"),
+            "2099-01-01T00:00:00+00:00",
+            "accepted",
+        )
+        .expect("set deferred with note");
+        let card = db.get_card_by_id(&id).expect("get").expect("exists");
+        assert_eq!(card.note.as_deref(), Some("deferred for now"));
+
         let err = db
-            .set_card_defer_fields("nonexistent-id", "2099-01-01T00:00:00+00:00", "accepted")
+            .set_card_deferred(
+                "nonexistent-id",
+                None,
+                "2099-01-01T00:00:00+00:00",
+                "accepted",
+            )
             .unwrap_err();
         assert!(matches!(err, LegionError::CardNotFound(_)));
     }
@@ -1638,7 +1673,7 @@ mod tests {
                 crate::kanban::CardStatus::Deferred,
             )
             .unwrap();
-        db.set_card_defer_fields(&due_id, "2020-01-01T00:00:00+00:00", "accepted")
+        db.set_card_deferred(&due_id, None, "2020-01-01T00:00:00+00:00", "accepted")
             .unwrap();
 
         // Not due: deferred, wake_at in the future.
@@ -1657,7 +1692,7 @@ mod tests {
                 crate::kanban::CardStatus::Deferred,
             )
             .unwrap();
-        db.set_card_defer_fields(&future_id, "2099-01-01T00:00:00+00:00", "accepted")
+        db.set_card_deferred(&future_id, None, "2099-01-01T00:00:00+00:00", "accepted")
             .unwrap();
 
         // Not deferred at all -- must never appear regardless of wake_at.

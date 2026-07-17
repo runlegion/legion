@@ -390,6 +390,13 @@ pub fn undelegate_card(db: &Database, id: &str, note: Option<&str>) -> Result<Ca
 /// the existing stored value is kept, not overwritten with `"deferred"`:
 /// a chain of `defer` calls must always revert to the ORIGINAL pre-defer
 /// status, never to the deferred state itself.
+///
+/// The status transition and the `wake_at`/`pre_defer_status` stamp write
+/// together via `Database::set_card_deferred` (#816 review fix, HIGH): an
+/// earlier version wrote them as two separate steps, so a crash between
+/// them could leave a `Deferred` card with `wake_at = NULL` --
+/// permanently un-reapable, since `get_deferred_cards_due` requires
+/// `wake_at IS NOT NULL`.
 pub fn defer_card(db: &Database, id: &str, wake_at: &str, note: Option<&str>) -> Result<Card> {
     let card = db
         .get_card_by_id(id)?
@@ -409,8 +416,7 @@ pub fn defer_card(db: &Database, id: &str, wake_at: &str, note: Option<&str>) ->
         card.status.to_string()
     };
 
-    transition_card(db, id, Action::Defer, note)?;
-    db.set_card_defer_fields(id, wake_at, &pre_defer_status)?;
+    db.set_card_deferred(id, note, wake_at, &pre_defer_status)?;
     db.get_card_by_id(id)?
         .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
 }
@@ -432,6 +438,15 @@ pub fn defer_card(db: &Database, id: &str, wake_at: &str, note: Option<&str>) ->
 /// revert target is computed or on clearing the link (the #679 "one
 /// predicate, not one per call site" lesson, mirrored from
 /// `undelegate_card`).
+///
+/// A `Deferred` card with no stored `pre_defer_status` is a hard error, not
+/// a silent guess (#816 review fix, MED): an earlier version fell back to
+/// `"accepted"`, which disagreed with `defer_card`'s own integrity check
+/// (the same corruption is an error there) and would silently mis-revert a
+/// card actually deferred from `Pending`. `defer_card` now writes
+/// `wake_at`/`pre_defer_status` atomically with the status transition, so
+/// this case should be unreachable in practice; erroring here keeps that an
+/// enforced invariant rather than an assumption.
 pub fn undefer_card(db: &Database, id: &str, note: Option<&str>) -> Result<Card> {
     let card = db
         .get_card_by_id(id)?
@@ -440,7 +455,11 @@ pub fn undefer_card(db: &Database, id: &str, note: Option<&str>) -> Result<Card>
     // Validates the action is legal from the card's current status.
     transition(card.status, Action::Undefer)?;
 
-    let pre_defer_status = card.pre_defer_status.as_deref().unwrap_or("accepted");
+    let pre_defer_status = card.pre_defer_status.as_deref().ok_or_else(|| {
+        LegionError::WorkSource(format!(
+            "card '{id}' is Deferred but has no stored pre_defer_status -- data integrity error"
+        ))
+    })?;
     let target = CardStatus::from_str(pre_defer_status)?;
 
     db.transition_card_status_with_sync(
@@ -1180,6 +1199,33 @@ mod tests {
 
         let err = undefer_card(&db, &id, None).expect_err("undefer on non-deferred must refuse");
         assert!(matches!(err, LegionError::InvalidCardTransition { .. }));
+    }
+
+    /// Review regression (#816, MED): `undefer_card` must hard-error on a
+    /// `Deferred` card with no stored `pre_defer_status`, not silently
+    /// guess `"accepted"`. `defer_card`'s atomic `set_card_deferred` write
+    /// makes this state unreachable through normal defer/undefer traffic,
+    /// so it is constructed here via `force_move_card` (the FSM-bypassing
+    /// admin path) the same way `defer_card`'s own integrity check is
+    /// exercised: both sibling functions must treat the same corruption
+    /// the same way, symmetrically, per the review finding.
+    #[test]
+    fn undefer_card_refuses_when_pre_defer_status_is_missing() {
+        let (db, _index, _dir) = test_storage();
+
+        let id = create_and_assign(&db, "kelex", "legion", "corrupted defer", Priority::Med);
+        transition_card(&db, &id, Action::Accept, None).expect("accept");
+        // Bypass the FSM to land in Deferred with no wake_at/pre_defer_status
+        // stamped -- the exact corruption defer_card's atomic write prevents
+        // in practice, reproduced here to prove undefer_card refuses it.
+        force_move(&db, &id, CardStatus::Deferred, None).expect("force move to deferred");
+
+        let err = undefer_card(&db, &id, None)
+            .expect_err("undefer on a Deferred card with no pre_defer_status must refuse");
+        assert!(
+            matches!(err, LegionError::WorkSource(_)),
+            "expected a data-integrity WorkSource error, got: {err:?}"
+        );
     }
 
     #[test]
