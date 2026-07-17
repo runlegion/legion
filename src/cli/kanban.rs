@@ -185,6 +185,13 @@ pub(crate) enum KanbanAction {
     /// `tick_health` wakes the owner and reverts the card automatically
     /// once `--until` passes; `legion kanban undefer` does the same
     /// manually, ahead of schedule.
+    ///
+    /// Liveness caveat (same limitation as `legion kanban delegate`, #778):
+    /// the auto-wake only fires while `legion watch` (standalone or the
+    /// daemon) is running for this card's repo. If no watch process is
+    /// alive when `--until` passes, the card stays Deferred past its wake
+    /// time until one starts and runs a health tick -- use `legion kanban
+    /// undefer` to wake it manually if that matters before then.
     Defer {
         /// Card ID
         #[arg(long)]

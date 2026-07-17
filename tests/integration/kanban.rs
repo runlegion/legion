@@ -686,18 +686,32 @@ fn kanban_defer_excludes_card_from_working_set_but_keeps_it_visible() {
     );
 
     // But --deferred must still show it -- never silently uncounted (#798's
-    // lesson applied to the new status).
+    // lesson applied to the new status) -- AND its wake_at must be visible
+    // right there in list output, not only reachable via `view`/`--json`
+    // (review MED: a deferred card whose wake time is invisible is
+    // half-visible).
     let stdout =
         run_ok(legion_cmd(dir.path()).args(["kanban", "list", "--repo", "kelex", "--deferred"]));
     assert!(
         stdout.contains("defer me"),
         "--deferred must show the deferred card, got: {stdout}"
     );
+    assert!(
+        stdout.contains("[wakes:2099-01-01]"),
+        "list output must show the wake_at date, got: {stdout}"
+    );
 
     // And --all must include it too.
     let stdout =
         run_ok(legion_cmd(dir.path()).args(["kanban", "list", "--repo", "kelex", "--all"]));
     assert!(stdout.contains("defer me"));
+
+    // `kanban view` must also surface it.
+    let stdout = run_ok(legion_cmd(dir.path()).args(["kanban", "view", "--id", &id]));
+    assert!(
+        stdout.contains("Wake at:"),
+        "kanban view must show Wake at:, got: {stdout}"
+    );
 }
 
 #[test]

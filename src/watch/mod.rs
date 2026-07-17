@@ -540,6 +540,17 @@ fn reap_delegated_cards(db: &Database, log_prefix: &str) {
 /// An error from the DB scan, a single card's revert, or a single card's
 /// wake signal is logged and swallowed; the health tick must never abort
 /// over one bad row.
+///
+/// Liveness caveat (same honest limitation `#778`'s delegated reaper
+/// carries, review-requested for this sweep too): this only fires while
+/// `legion watch` (standalone or the daemon) is actually running for the
+/// repo -- `tick_health` is this function's only caller. A card deferred
+/// while no watch process is alive for its repo sits in `Deferred` past its
+/// `wake_at` until one starts and runs a health tick; nothing else polls
+/// for due wakes. Unlike `Delegated`, there is no `stop.sh` backstop for
+/// this gap -- Deferred does not block Stop by design, so a late wake is a
+/// missed page, not a stuck agent. `legion kanban undefer` is the manual
+/// escape hatch if an operator notices a card overdue.
 fn reap_deferred_cards(db: &Database, host: &str, log_prefix: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     let due = match db.get_deferred_cards_due(&now) {
