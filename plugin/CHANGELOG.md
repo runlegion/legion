@@ -1,5 +1,64 @@
 # Legion Changelog
 
+## 0.24.0
+
+The scheduled-wake release. Two PRs since 0.23.0. A kanban card can now be consciously
+put off until a future date and comes back on its own: `legion kanban defer` parks a
+card as Deferred -- out of the working set and out of the Stop in-progress gate -- and
+the watch health tick reverts it and pages its owner once the wake time passes. The
+smaller change is process, not code: the repo now merges through a GitHub merge queue
+with required checks. Minor release: a new status in the kanban state machine plus
+net-new CLI surface (`kanban defer`/`undefer`, `list --deferred`), two additive
+`has_column`-guarded columns on `tasks` (`wake_at`, `pre_defer_status` -- no existing
+column touched) and one partial index, migrated automatically on open; no wire-format
+break.
+
+### New
+
+- **`legion kanban defer --id <id> --until <when>` -- card-level scheduled wake**
+  (PR #817, #816): a new `CardStatus::Deferred` mirrors #778's Delegated pattern.
+  Defer is legal from Accepted or Pending -- the revert target varies, so it is stored
+  on the card as `pre_defer_status` rather than fixed in the state machine -- and
+  re-defer from Deferred updates `wake_at` in place. `--until` reuses #786's
+  `TimeRange` token grammar (`YYYY-MM-DD`, `<N>d`, `<N>w`, `today`) via a new
+  forward-looking sibling parser, `timerange::parse_point_in_time`: `TimeRange`'s own
+  relative forms compute backward from today for historical filtering, so reusing that
+  parser verbatim would silently resolve every relative `--until` to the past; a wake
+  time that has already passed is refused outright, naming the parsed value. Deferred
+  is excluded from `CardScope::WorkingSet` (and therefore from stop.sh's accepted-only
+  gate) but is never silently uncounted, per the #798 lesson: it gets its own `list
+  --deferred` scope, and `wake_at` is visible in `list` (a `[wakes:YYYY-MM-DD]`
+  marker), `view` (`Wake at:` line), and `list --json`. Review hardening worth naming:
+  the original shape wrote the status transition and `wake_at`/`pre_defer_status` as
+  two separate DB calls, leaving a crash window that could strand a Deferred card with
+  `wake_at = NULL` -- permanently invisible to the sweep's `wake_at IS NOT NULL`
+  filter. The write is now `Database::set_card_deferred`, a single UPDATE that sets
+  all three fields atomically, and `undefer` errors on a missing `pre_defer_status`
+  (symmetric with defer's own integrity check) instead of silently guessing
+  "accepted" and mis-reverting a card deferred from Pending.
+- **Auto-wake sweep in the watch health tick** (PR #817, #816): `tick_health` gains
+  `reap_deferred_cards` alongside #778's delegated reaper. A due card is reverted
+  through the same `undefer_card` function the manual `legion kanban undefer` path
+  uses, and a wake-worthy `routing` signal goes to the card's owner. That signal is
+  deliberately authored as the watch host, not a repo name: legion's own board
+  routinely has `to_repo == "legion"`, and the recipient-side self-address filter
+  drops any signal whose author equals the polled repo -- a fixed repo-name author
+  would silently never wake legion's own deferred cards. Honest liveness caveat,
+  documented on the sweep and in `defer`'s CLI help: the auto-wake only fires while
+  `legion watch` is running for the card's repo, and Deferred has no stop.sh backstop
+  the way Delegated does -- it does not block Stop by design, so a late wake is a
+  missed page, not a stuck agent; `legion kanban undefer` wakes a card manually if
+  that matters before a watch tick runs.
+
+### Changed
+
+- **CI gates the GitHub merge queue** (PR #815, #814): the CI workflow gains a
+  `merge_group` trigger. The repo merges through a GitHub merge queue with required
+  checks as of 2026-07-16, and queued PRs trigger CI via `merge_group`, not
+  `pull_request` -- without the event, every queued PR stalls with no checks
+  reporting. Four lines of YAML, but contributor-facing process: PRs now land through
+  the queue rather than by direct merge.
+
 ## 0.23.0
 
 The backlog-closeout release. Three PRs since 0.22.0 -- wave 3, the last of the original
