@@ -246,6 +246,32 @@ pub enum LegionError {
     #[error("git push failed: {stderr}")]
     PushFailed { stderr: String },
 
+    /// `legion push --delete` refused to delete `main`/`master` (#799). No
+    /// override exists for this refusal -- unlike the unmerged-branch case,
+    /// there is no flag that recovers this path.
+    #[error(
+        "refusing to delete '{branch}': agents never delete main/master -- no override exists \
+         for this refusal"
+    )]
+    PushDeleteRefusedProtectedRef { branch: String },
+
+    /// `legion push --delete` refused a branch not fully merged (via
+    /// `git merge-base --is-ancestor`) into the remote default branch (#799).
+    /// `tips` names the commits reachable from the branch but not the
+    /// default branch (`git rev-list <default>..<branch>`, char-bounded).
+    /// `--force-unmerged` overrides this refusal.
+    #[error(
+        "refusing to delete '{branch}': not fully merged into the default branch (commits not \
+         in default: {tips}) -- pass --force-unmerged to override (operator-facing, not agent \
+         doctrine)"
+    )]
+    PushDeleteRefusedUnmerged { branch: String, tips: String },
+
+    /// The underlying `git push origin --delete` failed (#799); `stderr` is
+    /// git's own relayed failure text.
+    #[error("git push --delete failed: {stderr}")]
+    PushDeleteRemoteFailure { stderr: String },
+
     /// Signals that the process should exit with a specific non-zero code.
     ///
     /// Used by CLI handlers that have already printed a user-facing message
@@ -442,6 +468,36 @@ mod tests {
             stderr: "! [rejected]".to_string(),
         };
         assert!(err.to_string().contains("! [rejected]"));
+    }
+
+    #[test]
+    fn push_delete_refused_protected_ref_display() {
+        let err = LegionError::PushDeleteRefusedProtectedRef {
+            branch: "main".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("main"));
+        assert!(msg.contains("no override exists"));
+    }
+
+    #[test]
+    fn push_delete_refused_unmerged_display() {
+        let err = LegionError::PushDeleteRefusedUnmerged {
+            branch: "feat/x".to_string(),
+            tips: "abc1234, def5678".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("feat/x"));
+        assert!(msg.contains("abc1234, def5678"));
+        assert!(msg.contains("--force-unmerged"));
+    }
+
+    #[test]
+    fn push_delete_remote_failure_display() {
+        let err = LegionError::PushDeleteRemoteFailure {
+            stderr: "! [remote rejected]".to_string(),
+        };
+        assert!(err.to_string().contains("! [remote rejected]"));
     }
 
     #[test]

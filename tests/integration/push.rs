@@ -360,3 +360,330 @@ fn push_underlying_git_failure_surfaces_error_and_audits_failure() {
         "expected a failure-outcome audit row for the failed push, got: {audit_out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `legion push --delete` (#799).
+// ---------------------------------------------------------------------------
+
+/// Push `branch` (already committed locally) straight to `origin` with a
+/// raw fixture `git push` -- setup plumbing, not the command under test.
+fn push_branch_to_remote(lp: &Path, branch: &str) {
+    run_git_fixture(lp, &["push", "-q", "origin", branch]);
+}
+
+/// Fast-forward `main` to include `branch`'s commits and push the result to
+/// `origin`, leaving the checkout on `main`. Used to build a genuinely
+/// merged branch: the delete command's merge-check is real ancestry
+/// (`git merge-base --is-ancestor`), so a fixture claiming "merged" must
+/// actually merge, not just sit as an unmerged sibling.
+fn merge_into_main_and_push(lp: &Path, branch: &str) {
+    run_git_fixture(lp, &["checkout", "-q", "main"]);
+    run_git_fixture(lp, &["merge", "-q", "--ff-only", branch]);
+    run_git_fixture(lp, &["push", "-q", "origin", "main"]);
+}
+
+/// Happy path: deleting a branch that is genuinely merged (via a real
+/// fast-forward merge, not just fetched-and-assumed) into `origin/main`
+/// succeeds, removes the ref from the remote, and writes a success audit
+/// row naming a real (non-null) `merged_into` sha.
+#[cfg(unix)]
+#[test]
+fn push_delete_removes_merged_branch_from_remote() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path());
+    push_branch_to_remote(local.path(), "feat/x");
+    merge_into_main_and_push(local.path(), "feat/x");
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(push_cmd(data_dir.path(), local.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--delete",
+        "--branch",
+        "feat/x",
+    ]));
+    assert!(stdout.contains("feat/x"), "got: {stdout}");
+
+    assert!(
+        !rev_parse(remote.path(), "refs/heads/feat/x")
+            .status
+            .success(),
+        "expected feat/x to be gone from the remote after push --delete"
+    );
+
+    let audit_out =
+        run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "push-delete", "--json"]));
+    assert!(
+        audit_out.contains("\"action\": \"push-delete\""),
+        "got: {audit_out}"
+    );
+    assert!(
+        audit_out.contains("\"outcome\": \"success\""),
+        "got: {audit_out}"
+    );
+    assert!(
+        !audit_out.contains("merged_into\\\":null"),
+        "expected a real (non-null) merged_into sha for a genuinely merged branch, got: \
+         {audit_out}"
+    );
+}
+
+/// `main`/`master` are refused unconditionally in delete mode too, with no
+/// override -- the refusal fires before any remote interaction.
+#[cfg(unix)]
+#[test]
+fn push_delete_refuses_main() {
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path());
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(push_cmd(data_dir.path(), local.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--delete",
+        "--branch",
+        "main",
+    ]));
+    assert!(
+        stderr.contains("main") && stderr.to_lowercase().contains("no override"),
+        "expected a no-override refusal naming main, got: {stderr}"
+    );
+}
+
+/// A branch pushed to the remote but never merged into `main` is refused,
+/// naming the commit(s) not in the default branch, and the remote ref is
+/// left untouched. The refusal is audited as a failure.
+#[cfg(unix)]
+#[test]
+fn push_delete_refuses_unmerged_branch_naming_tips() {
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path());
+    push_branch_to_remote(local.path(), "feat/x");
+    run_git_fixture(local.path(), &["checkout", "-q", "main"]);
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(push_cmd(data_dir.path(), local.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--delete",
+        "--branch",
+        "feat/x",
+    ]));
+    assert!(
+        stderr.to_lowercase().contains("not fully merged"),
+        "expected an unmerged refusal, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--force-unmerged"),
+        "expected the override flag named as the escape hatch, got: {stderr}"
+    );
+
+    assert!(
+        rev_parse(remote.path(), "refs/heads/feat/x")
+            .status
+            .success(),
+        "expected feat/x to still exist on the remote -- the refusal must precede any delete"
+    );
+
+    let audit_out =
+        run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "push-delete", "--json"]));
+    assert!(
+        audit_out.contains("\"outcome\": \"failure\""),
+        "expected a failure-outcome audit row for the unmerged refusal, got: {audit_out}"
+    );
+}
+
+/// `--force-unmerged` overrides the unmerged refusal, deletes the remote
+/// branch anyway, and is audited under a distinct action
+/// (`push-delete-force-unmerged`) with `merged_into` left null -- the
+/// override never fabricates a merge that did not happen.
+#[cfg(unix)]
+#[test]
+fn push_delete_force_unmerged_overrides_and_uses_distinct_audit_action() {
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path());
+    push_branch_to_remote(local.path(), "feat/x");
+    run_git_fixture(local.path(), &["checkout", "-q", "main"]);
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let stdout = run_ok(push_cmd(data_dir.path(), local.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--delete",
+        "--branch",
+        "feat/x",
+        "--force-unmerged",
+    ]));
+    assert!(stdout.contains("feat/x"), "got: {stdout}");
+
+    assert!(
+        !rev_parse(remote.path(), "refs/heads/feat/x")
+            .status
+            .success(),
+        "expected feat/x to be gone from the remote after the forced delete"
+    );
+
+    let audit_out = run_ok(legion_cmd(data_dir.path()).args([
+        "audit",
+        "--action",
+        "push-delete-force-unmerged",
+        "--json",
+    ]));
+    assert!(
+        audit_out.contains("\"action\": \"push-delete-force-unmerged\""),
+        "expected the distinct force-unmerged action, got: {audit_out}"
+    );
+    assert!(
+        audit_out.contains("\"outcome\": \"success\""),
+        "got: {audit_out}"
+    );
+    assert!(
+        audit_out.contains("merged_into\\\":null"),
+        "expected merged_into to stay null -- the branch was never actually merged, only \
+         force-deleted, got: {audit_out}"
+    );
+}
+
+/// The merged-check reads the freshly fetched remote default branch, not a
+/// stale local view: local `main` is deliberately rolled back behind
+/// `origin/main` (which still contains the merge) after the merge is
+/// pushed, and the delete must still succeed by trusting `origin/main`.
+#[cfg(unix)]
+#[test]
+fn push_delete_merged_check_uses_remote_state_not_stale_local() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path());
+    push_branch_to_remote(local.path(), "feat/x");
+    merge_into_main_and_push(local.path(), "feat/x");
+
+    // Roll local main back behind the merge it just pushed -- origin/main
+    // still has it, local main no longer does.
+    run_git_fixture(local.path(), &["reset", "-q", "--hard", "HEAD~1"]);
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(push_cmd(data_dir.path(), local.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--delete",
+        "--branch",
+        "feat/x",
+    ]));
+    assert!(stdout.contains("feat/x"), "got: {stdout}");
+
+    assert!(
+        !rev_parse(remote.path(), "refs/heads/feat/x")
+            .status
+            .success(),
+        "expected feat/x to be deleted from the remote based on origin/main's real state, \
+         despite local main being stale"
+    );
+}
+
+/// A merged branch that is still checked out in a clean linked worktree is
+/// pruned locally after the remote delete: the worktree is removed and the
+/// local branch is deleted.
+#[cfg(unix)]
+#[test]
+fn push_delete_prunes_clean_worktree_and_local_branch() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path());
+    push_branch_to_remote(local.path(), "feat/x");
+    merge_into_main_and_push(local.path(), "feat/x");
+
+    let linked_parent = tempfile::tempdir().unwrap();
+    let linked_path = linked_parent.path().join("linked-checkout");
+    run_git_fixture(
+        local.path(),
+        &["worktree", "add", linked_path.to_str().unwrap(), "feat/x"],
+    );
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(push_cmd(data_dir.path(), local.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--delete",
+        "--branch",
+        "feat/x",
+    ]));
+    assert!(
+        stdout.contains("local branch deleted"),
+        "expected the confirmation to report the local prune, got: {stdout}"
+    );
+    assert!(
+        !linked_path.exists(),
+        "expected the linked worktree directory to be removed"
+    );
+
+    let branch_check = std::process::Command::new("git")
+        .current_dir(local.path())
+        .args(["rev-parse", "--verify", "refs/heads/feat/x"])
+        .output()
+        .expect("git rev-parse must spawn");
+    assert!(
+        !branch_check.status.success(),
+        "expected the local feat/x branch ref to be gone"
+    );
+}
+
+/// A dirty linked worktree is left behind rather than force-removed: the
+/// worktree directory and the local branch both survive, and the
+/// confirmation reports what was left.
+#[cfg(unix)]
+#[test]
+fn push_delete_leaves_dirty_worktree_behind() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path());
+    push_branch_to_remote(local.path(), "feat/x");
+    merge_into_main_and_push(local.path(), "feat/x");
+
+    let linked_parent = tempfile::tempdir().unwrap();
+    let linked_path = linked_parent.path().join("linked-checkout");
+    run_git_fixture(
+        local.path(),
+        &["worktree", "add", linked_path.to_str().unwrap(), "feat/x"],
+    );
+    // Dirty the linked worktree with an uncommitted change.
+    std::fs::write(linked_path.join("uncommitted.txt"), "dirty\n").unwrap();
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(push_cmd(data_dir.path(), local.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--delete",
+        "--branch",
+        "feat/x",
+    ]));
+    assert!(
+        stdout.to_lowercase().contains("left behind") && stdout.contains("uncommitted"),
+        "expected the confirmation to report the dirty worktree was left behind, got: {stdout}"
+    );
+    assert!(
+        linked_path.exists(),
+        "expected the dirty worktree to survive (never force-removed)"
+    );
+    assert!(
+        linked_path.join("uncommitted.txt").exists(),
+        "expected the uncommitted change to still be present"
+    );
+
+    let branch_check = std::process::Command::new("git")
+        .current_dir(local.path())
+        .args(["rev-parse", "--verify", "refs/heads/feat/x"])
+        .output()
+        .expect("git rev-parse must spawn");
+    assert!(
+        branch_check.status.success(),
+        "expected the local feat/x branch ref to survive since its worktree is dirty"
+    );
+}

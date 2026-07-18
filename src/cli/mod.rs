@@ -843,15 +843,17 @@ pub(crate) enum Commands {
         action: PrAction,
     },
 
-    /// Push a branch to origin -- the sanctioned in-band push path (#791).
+    /// Push a branch to origin -- the sanctioned in-band push path (#791),
+    /// or delete a remote branch via `--delete` (#799).
     ///
-    /// Resolves the checkout that has `--branch` checked out via `git
-    /// worktree list --porcelain` and runs the push FROM that checkout, so
-    /// the push-from-own-checkout doctrine is enforced by the tool instead
-    /// of agent discipline: the pre-push hook reviews the CWD's checked-out
-    /// branch, not the ref being pushed, so pushing a ref from the wrong
-    /// checkout silently reviews (or blocks on) the wrong diff. Hard errors
-    /// if no checkout has the branch, naming the worktrees it searched.
+    /// PUSH (default mode): resolves the checkout that has `--branch`
+    /// checked out via `git worktree list --porcelain` and runs the push
+    /// FROM that checkout, so the push-from-own-checkout doctrine is
+    /// enforced by the tool instead of agent discipline: the pre-push hook
+    /// reviews the CWD's checked-out branch, not the ref being pushed, so
+    /// pushing a ref from the wrong checkout silently reviews (or blocks on)
+    /// the wrong diff. Hard errors if no checkout has the branch, naming the
+    /// worktrees it searched.
     ///
     /// Refuses to push `main`/`master` (Sean merges; agents never push main)
     /// and refuses any `--branch` value shaped like a git flag or a
@@ -861,14 +863,47 @@ pub(crate) enum Commands {
     /// origin <branch>`) on every push, which is a no-op after the first.
     /// Every attempt (success or failure) is audit-logged with the branch,
     /// resolved checkout path, and head SHA.
+    ///
+    /// DELETE mode (`--delete`): before reaching for this, check whether
+    /// `legion pr merge` already covers your case -- it deletes the PR
+    /// branch by default on merge (`--keep-branch` to retain it). This
+    /// command exists for the gap: branches merged OUTSIDE legion's merge
+    /// path, and stale branches that were never merged at all.
+    ///
+    /// Fetches `origin` first and checks merge status against the fresh
+    /// remote-tracking ref (never a possibly-stale local view), refusing to
+    /// delete a branch not fully merged into the remote default branch
+    /// unless `--force-unmerged` is given. `main`/`master` are refused
+    /// unconditionally -- no override exists for that refusal. On a
+    /// successful remote delete, also deletes the local branch and prunes
+    /// any worktree checkout of it, but ONLY if that checkout is clean;
+    /// otherwise reports what was left behind rather than force-removing it.
+    /// Every attempt is audit-logged (action `push-delete`, or
+    /// `push-delete-force-unmerged` when the override flag is present --
+    /// that flag is operator-facing, not agent doctrine).
     Push {
         /// Repository name (identifies the calling agent for the audit log)
         #[arg(long)]
         repo: String,
 
-        /// Branch to push. Defaults to the CWD's checked-out branch.
+        /// Branch to push (or, with `--delete`, to remove from origin).
+        /// Defaults to the CWD's checked-out branch.
         #[arg(long)]
         branch: Option<String>,
+
+        /// Delete `--branch` from origin instead of pushing to it (#799).
+        /// Prefer `legion pr merge`'s default branch deletion when the
+        /// branch merged through legion's own PR path.
+        #[arg(long)]
+        delete: bool,
+
+        /// Operator-facing override: delete `--branch` even though it is
+        /// not fully merged into the remote default branch. Only valid with
+        /// `--delete`. Audit-logged under a distinct action
+        /// (`push-delete-force-unmerged`) so an unmerged deletion is never
+        /// indistinguishable from a routine one in the audit trail.
+        #[arg(long)]
+        force_unmerged: bool,
     },
 
     /// View the audit log of work source actions

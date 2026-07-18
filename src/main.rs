@@ -298,7 +298,12 @@ fn run() -> error::Result<()> {
         Commands::Schedule { action } => cli::schedule::handle(action)?,
         Commands::Issue { action } => cli::issue::handle(action)?,
         Commands::Pr { action } => cli::pr::handle(action)?,
-        Commands::Push { repo, branch } => cli::push::handle_push(repo, branch)?,
+        Commands::Push {
+            repo,
+            branch,
+            delete,
+            force_unmerged,
+        } => cli::push::handle_push(repo, branch, delete, force_unmerged)?,
         Commands::Comment { repo, number, body } => cli::issue::handle_comment(repo, number, body)?,
         Commands::Audit {
             repo,
