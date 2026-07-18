@@ -322,13 +322,14 @@ fn relay_and_capture_stderr(pipe: impl std::io::Read) -> String {
 // ---------------------------------------------------------------------------
 
 /// Outcome of a successful delete attempt, carried out of [`attempt_delete`]
-/// into the audit details. `merged_into_sha` is `Some` only when the branch
-/// was verified as an ancestor of the default branch before deletion --
-/// never set on the `--force-unmerged` override path, so the audit trail
-/// never claims a merge that did not happen.
+/// into the audit details. `merged_into_sha` is `Some` only when ancestry
+/// into the default branch was actually verified before deletion,
+/// regardless of whether `--force-unmerged` was also passed -- so the audit
+/// trail never claims a merge that did not happen, even on a run that used
+/// the override.
 struct DeleteAttempt {
     merged_into_sha: Option<String>,
-    default_branch_sha: Option<String>,
+    default_branch_sha: String,
 }
 
 /// `legion push --delete`: delete `target_branch` from `origin`, refusing
@@ -376,7 +377,10 @@ fn handle_push_delete(
     let attempt = attempt_delete(&target_branch, force_unmerged);
 
     let (merged_into, default_branch_sha) = match &attempt {
-        Ok(a) => (a.merged_into_sha.clone(), a.default_branch_sha.clone()),
+        Ok(a) => (
+            a.merged_into_sha.clone(),
+            Some(a.default_branch_sha.clone()),
+        ),
         Err(_) => (None, None),
     };
     let details = serde_json::json!({
@@ -442,7 +446,7 @@ fn attempt_delete(branch: &str, force_unmerged: bool) -> error::Result<DeleteAtt
 
     Ok(DeleteAttempt {
         merged_into_sha: merged.then_some(default_sha.clone()),
-        default_branch_sha: Some(default_sha),
+        default_branch_sha: default_sha,
     })
 }
 
