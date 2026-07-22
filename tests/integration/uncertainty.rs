@@ -167,6 +167,75 @@ fn uncertainty_calibration_empty_initially() {
     assert!(arr.is_empty());
 }
 
+#[test]
+fn uncertainty_roll_empty_db_is_noop() {
+    // #359: `legion uncertainty roll` on a fresh DB must not error, and
+    // must report all-zero counts rather than crash on the empty case.
+    let dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(legion_cmd(dir.path()).args(["uncertainty", "roll", "--json"]));
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["predictions_swept"], 0);
+    assert_eq!(parsed["cohorts_rolled"], 0);
+    assert_eq!(parsed["buckets_written"], 0);
+    assert_eq!(parsed["predictions_scored"], 0);
+}
+
+#[test]
+fn uncertainty_roll_produces_a_calibration_snapshot() {
+    // #359 end-to-end: emit -> witness -> roll -> calibration read shows
+    // the freshly-rolled snapshot for that cohort.
+    let dir = tempfile::tempdir().unwrap();
+    let emit = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "emit",
+        "--surface",
+        "legion.roll-test",
+        "--feature-key",
+        "scip.refactor",
+        "--input-fingerprint",
+        "fp-roll-1",
+        "--model",
+        "claude-opus-4-7",
+        "--model-version",
+        "4.7",
+        "--claimed-confidence",
+        "0.9",
+        "--payload",
+        r#"{"predicted_tokens":1000}"#,
+    ]));
+    let emit_out: serde_json::Value = serde_json::from_str(emit.trim()).unwrap();
+    let id = emit_out["id"].as_str().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "witness",
+        id,
+        "--outcome-label",
+        "shipped",
+        "--outcome-correctness",
+        "0.9",
+    ]));
+
+    let roll_stdout = run_ok(legion_cmd(dir.path()).args(["uncertainty", "roll", "--json"]));
+    let roll_out: serde_json::Value = serde_json::from_str(roll_stdout.trim()).unwrap();
+    assert_eq!(roll_out["cohorts_rolled"], 1);
+    assert_eq!(roll_out["buckets_written"], 1);
+    assert_eq!(roll_out["predictions_scored"], 1);
+
+    let calibration_stdout = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "calibration",
+        "--surface",
+        "legion.roll-test",
+        "--json",
+    ]));
+    let snaps: serde_json::Value = serde_json::from_str(calibration_stdout.trim()).unwrap();
+    let arr = snaps.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["prediction_count"], 1);
+    assert_eq!(arr[0]["brier_score"], 0.0);
+}
+
 // Gated on #[cfg(unix)] because the test spawns bash to run the hook
 // scripts directly. Same gate pattern other shell-script-bearing tests
 // in this file use. Windows CI still runs every cargo-only test in the
