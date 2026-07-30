@@ -116,13 +116,23 @@ pub(crate) enum UncertaintyAction {
         /// witness path look up the matching prediction without an id.
         #[arg(long)]
         input_fingerprint: String,
-        /// Model that produced the prediction (e.g. `claude-opus-4-7`).
+        /// Model that produced the prediction (e.g. `claude-opus-5`).
+        /// Optional (#831): when omitted, resolved from the most recent
+        /// statusline sample for `--session-id`. A caller-supplied default
+        /// here rots silently every time the harness changes its default
+        /// model, mislabelling every row it writes, so callers that cannot
+        /// know the model should omit this rather than guess.
         #[arg(long)]
-        model: String,
+        model: Option<String>,
         /// Model version string. Free-form; calibration cohorts include it
-        /// to detect regressions across releases.
+        /// to detect regressions across releases. When omitted it is
+        /// derived from the resolved model id.
         #[arg(long)]
-        model_version: String,
+        model_version: Option<String>,
+        /// Session whose live model should be used when `--model` is
+        /// omitted. Hook callers pass the session id from their payload.
+        #[arg(long)]
+        session_id: Option<String>,
         /// Claimed probability of shipping without iteration. [0.0, 1.0].
         #[arg(long)]
         claimed_confidence: f64,
@@ -317,10 +327,32 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
             input_fingerprint,
             model,
             model_version,
+            session_id,
             claimed_confidence,
             payload,
             orphan_ttl_days,
         } => {
+            // Resolution order, first hit wins (#831): an explicit --model,
+            // then the live model for --session-id, then an explicit unknown
+            // marker. Never a hardcoded fallback id -- that is the defect
+            // this closes, because it mislabels rows into a real cohort and
+            // is unfilterable afterwards.
+            let resolved_model = match model {
+                Some(m) => m,
+                None => session_id
+                    .as_deref()
+                    .and_then(|sid| match database.latest_model_for_session(sid) {
+                        Ok(found) => found,
+                        Err(e) => {
+                            eprintln!("[legion uncertainty emit] model lookup failed: {e}");
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| uncertainty::types::UNKNOWN_MODEL.to_owned()),
+            };
+            let resolved_version = model_version
+                .unwrap_or_else(|| uncertainty::types::model_version_from_id(&resolved_model));
+
             let confidence = match uncertainty::types::Confidence::from_f64(claimed_confidence) {
                 Ok(c) => c,
                 Err(e) => {
@@ -339,8 +371,8 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
                 surface,
                 feature_key,
                 input_fingerprint,
-                model,
-                model_version,
+                model: resolved_model,
+                model_version: resolved_version,
                 claimed_confidence: confidence,
                 prediction_payload: payload_value,
                 orphan_after: uncertainty::storage::orphan_after_from_ttl(orphan_ttl_days),

@@ -932,6 +932,87 @@ mod tests {
         assert_eq!(got.model.as_deref(), Some("claude-opus-4-7"));
     }
 
+    /// #831: the uncertainty emit path resolves the producing model through
+    /// this accessor instead of a hardcoded default. It must pick the newest
+    /// sample for the requested session and nobody else's.
+    #[test]
+    fn db_latest_model_for_session_picks_newest_and_scopes_to_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("legion.db")).unwrap();
+
+        let sample = |session: &str, at: &str, model: Option<&str>| RateLimitSample {
+            id: Uuid::now_v7().to_string(),
+            hostname: "puck".into(),
+            session_id: session.into(),
+            sampled_at: at.into(),
+            five_hour_pct: None,
+            five_hour_resets_at: None,
+            seven_day_pct: None,
+            seven_day_resets_at: None,
+            model: model.map(Into::into),
+        };
+
+        db.insert_rate_limit_sample(&sample(
+            "sess-1",
+            "2026-07-01T00:00:00Z",
+            Some("claude-opus-4-7"),
+        ))
+        .unwrap();
+        db.insert_rate_limit_sample(&sample(
+            "sess-1",
+            "2026-07-30T00:00:00Z",
+            Some("claude-opus-5"),
+        ))
+        .unwrap();
+        // A different session must not leak into sess-1's answer.
+        db.insert_rate_limit_sample(&sample(
+            "sess-2",
+            "2026-07-31T00:00:00Z",
+            Some("claude-sonnet-4-6"),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            db.latest_model_for_session("sess-1").unwrap().as_deref(),
+            Some("claude-opus-5"),
+        );
+        assert_eq!(
+            db.latest_model_for_session("unknown-session").unwrap(),
+            None,
+        );
+    }
+
+    /// A newer sample carrying no model must not shadow an older one that
+    /// does -- otherwise a single null render would push the emit path onto
+    /// the unknown marker despite the session's model being known.
+    #[test]
+    fn db_latest_model_for_session_skips_null_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("legion.db")).unwrap();
+
+        let sample = |at: &str, model: Option<&str>| RateLimitSample {
+            id: Uuid::now_v7().to_string(),
+            hostname: "puck".into(),
+            session_id: "sess-1".into(),
+            sampled_at: at.into(),
+            five_hour_pct: None,
+            five_hour_resets_at: None,
+            seven_day_pct: None,
+            seven_day_resets_at: None,
+            model: model.map(Into::into),
+        };
+
+        db.insert_rate_limit_sample(&sample("2026-07-01T00:00:00Z", Some("claude-opus-5")))
+            .unwrap();
+        db.insert_rate_limit_sample(&sample("2026-07-30T00:00:00Z", None))
+            .unwrap();
+
+        assert_eq!(
+            db.latest_model_for_session("sess-1").unwrap().as_deref(),
+            Some("claude-opus-5"),
+        );
+    }
+
     #[test]
     fn db_usage_sample_insert_succeeds() {
         let dir = tempfile::tempdir().unwrap();

@@ -183,6 +183,31 @@ impl Database {
         }
     }
 
+    /// Most recent non-null model id observed for a session (#831).
+    ///
+    /// The statusline render is the only place legion sees the live model
+    /// id, so this is the authoritative answer to "what is producing this
+    /// session's work". Hooks have no model field on their stdin payload,
+    /// which is why the uncertainty emit path resolves through here rather
+    /// than accepting a caller-supplied default that rots when the harness
+    /// changes its default model.
+    ///
+    /// Rows with a NULL model are skipped rather than terminating the
+    /// search: an older sample carrying a real id is a better answer than
+    /// the newest sample carrying none.
+    pub fn latest_model_for_session(&self, session_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model FROM rate_limit_samples \
+             WHERE deleted_at IS NULL AND session_id = ?1 AND model IS NOT NULL \
+             ORDER BY sampled_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![session_id])?;
+        match rows.next().map_err(LegionError::Database)? {
+            Some(row) => Ok(row.get::<_, Option<String>>(0)?),
+            None => Ok(None),
+        }
+    }
+
     /// Most recent rate-limit sample per hostname.
     ///
     /// Returns one row per host, picking the newest `sampled_at` for each.
