@@ -58,4 +58,42 @@ echo "==> uncovered repo passes through"
 out=$(printf '%s' '{"tool_input":{"command":"gh pr merge 1"},"cwd":"/tmp/uncovered-repo","session_id":"test"}' | bash "$HOOK")
 assert_empty "gh allowed in a repo legion does not cover" "$out"
 
+
+# --- #828: exact redirect instead of a fixed menu ----------------------------
+
+assert_suggests() {
+  local desc="$1" cmd="$2" needle="$3"
+  assert_contains "$desc" "$(run_hook "$cmd")" "$needle"
+}
+
+echo "==> translates the verb the agent actually typed"
+assert_suggests "pr view"     '"gh pr view 42"'     'legion pr view --repo legion-test --number 42'
+assert_suggests "pr checks"   '"gh pr checks 42"'   'legion pr checks --repo legion-test --number 42'
+assert_suggests "pr comments" '"gh pr comments 42"' 'legion pr comments --repo legion-test --number 42'
+assert_suggests "pr merge"    '"gh pr merge 123"'   'legion pr merge --repo legion-test --number 123'
+assert_suggests "pr list"     '"gh pr list"'        'legion pr list --repo legion-test'
+assert_suggests "issue view"  '"gh issue view 7"'   'legion issue view --repo legion-test --number 7'
+assert_suggests "issue list"  '"gh issue list"'     'legion issue list --repo legion-test'
+
+echo "==> maps verbs whose legion name differs"
+assert_suggests "pr comment -> legion comment" '"gh pr comment 42 --body x"' 'legion comment --repo legion-test --number 42'
+assert_suggests "run list -> pr checks"        '"gh run list"'               'legion pr checks --repo legion-test'
+assert_suggests "pr diff -> pr view"           '"gh pr diff 42"'             'legion pr view --repo legion-test --number 42'
+
+echo "==> reads the number from the --number flag form too"
+assert_suggests "flag-form number" '"gh pr view --number 99"' '--number 99'
+
+echo "==> no number given leaves a visible placeholder, not a wrong number"
+assert_suggests "placeholder when absent" '"gh pr view"' '--number <n>'
+
+echo "==> unmapped shapes point at group help and invent nothing"
+assert_suggests "gh api falls back"   '"gh api /repos/x/y"' 'legion --help'
+assert_suggests "unknown pr verb"     '"gh pr sync"'        'legion pr --help'
+out_api=$(run_hook '"gh api /repos/x/y"')
+assert_not_contains "no fabricated translation for gh api" "$out_api" 'legion api'
+
+echo "==> the old fixed menu is gone"
+out_view=$(run_hook '"gh pr view 42"')
+assert_not_contains "does not print the 8-verb catalog" "$out_view" 'legion pr review --repo <name>'
+
 finish_tests
