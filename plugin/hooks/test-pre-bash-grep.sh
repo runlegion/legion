@@ -161,4 +161,61 @@ echo "==> LEGION_REPO precedence: env overrides basename(cwd)"
 out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"repo-env-t"}' | LEGION_REPO=uncovered-elsewhere bash "$HOOK")
 assert_empty "LEGION_REPO redirects the coverage gate" "$out"
 
+
+# --- #829: searches spelled as git subcommands ------------------------------
+#
+# Both enforcement points matched on the first token only, so `git grep`
+# and friends slipped past unblocked AND uncounted. These assert the
+# detector now names each shape, and that ordinary `git log` still passes.
+
+echo "==> detects git-spelled searches"
+assert_eq "git grep detected" \
+  "$(legion_prequery_bash_binary 'git grep -n foo -- src')" "git grep"
+assert_eq "git ls-files detected" \
+  "$(legion_prequery_bash_binary 'git ls-files "*.rs"')" "git ls-files"
+assert_eq "git log -S detected" \
+  "$(legion_prequery_bash_binary 'git log -S find_plugin --oneline')" "git log -S"
+assert_eq "git log -G detected" \
+  "$(legion_prequery_bash_binary 'git log -G regex_thing')" "git log -G"
+assert_eq "git log --grep detected" \
+  "$(legion_prequery_bash_binary 'git log --grep worksource')" "git log --grep"
+
+echo "==> resolves git by basename and past global options"
+assert_eq "absolute path git" \
+  "$(legion_prequery_bash_binary '/opt/homebrew/bin/git grep foo')" "git grep"
+assert_eq "global -C before subcommand" \
+  "$(legion_prequery_bash_binary 'git -C /tmp/x grep foo')" "git grep"
+assert_eq "global --no-pager" \
+  "$(legion_prequery_bash_binary 'git --no-pager grep foo')" "git grep"
+
+echo "==> ordinary git log is not a search"
+assert_eq "git log --oneline passes" \
+  "$(legion_prequery_bash_binary 'git log --oneline')" ""
+assert_eq "git log -p passes" \
+  "$(legion_prequery_bash_binary 'git log -p HEAD~3')" ""
+assert_eq "bare git log passes" \
+  "$(legion_prequery_bash_binary 'git log')" ""
+assert_eq "git status passes" \
+  "$(legion_prequery_bash_binary 'git status')" ""
+assert_eq "git commit passes" \
+  "$(legion_prequery_bash_binary 'git commit -m grep')" ""
+
+echo "==> extracts the pattern from each git shape"
+assert_eq "git grep positional" \
+  "$(legion_prequery_git_pattern 'git grep -n find_plugin -- src' 'git grep')" "find_plugin"
+assert_eq "git ls-files glob" \
+  "$(legion_prequery_git_pattern 'git ls-files *.rs' 'git ls-files')" "*.rs"
+assert_eq "git log -S detached value" \
+  "$(legion_prequery_git_pattern 'git log -S find_plugin' 'git log -S')" "find_plugin"
+assert_eq "git log -S attached value" \
+  "$(legion_prequery_git_pattern 'git log -Sfind_plugin' 'git log -S')" "find_plugin"
+assert_eq "git log --grep equals form" \
+  "$(legion_prequery_git_pattern 'git log --grep=worksource' 'git log --grep')" "worksource"
+assert_eq "git log --grep detached form" \
+  "$(legion_prequery_git_pattern 'git log --grep worksource' 'git log --grep')" "worksource"
+
+echo "==> git shapes are classified as such"
+legion_prequery_is_git_shape "git grep" && echo "  PASS: git grep is a git shape" || echo "  FAIL: git grep is a git shape"
+legion_prequery_is_git_shape "grep" && echo "  FAIL: plain grep misclassified" || echo "  PASS: plain grep is not a git shape"
+
 finish_tests

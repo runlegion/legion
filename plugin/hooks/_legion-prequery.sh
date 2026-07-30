@@ -48,16 +48,136 @@ fi
 
 # legion_prequery_bash_binary CMD -- echo the leading search binary name
 # (grep|rg|ag|ack|find|fd) on match, empty on miss.
+#
+# Also recognizes SEARCHES SPELLED AS GIT SUBCOMMANDS (#829). Both
+# enforcement points -- the operator's permissions.deny and this hook --
+# historically matched on the FIRST token only, so `git grep` slipped past
+# both: the first token is `git`, which is in neither list. Verified live
+# on 2026-07-30, `git grep`, `git ls-files`, `git log -S` and
+# `git log --grep` all returned results with the full stack active.
+#
+# The measurement consequence is the worse half: a bypass row is only
+# written when a hook FIRES and the agent escapes via the sentinel. This
+# never fired, so those searches were not merely unblocked, they were
+# uncounted -- and `etc-summary` (#713) is the primary success metric for
+# the sym-etc epic (#704).
+#
+# Multi-word labels ("git grep") are returned deliberately: they read
+# correctly in the redirect messages and callers already quote the value.
 legion_prequery_bash_binary() {
   local cmd="$1"
   local trimmed="${cmd#"${cmd%%[![:space:]]*}"}"
   case "$trimmed" in
-    grep\ *|grep) echo grep ;;
-    rg\ *|rg)     echo rg ;;
-    ag\ *|ag)     echo ag ;;
-    ack\ *|ack)   echo ack ;;
-    find\ *|find) echo find ;;
-    fd\ *|fd)     echo fd ;;
+    grep\ *|grep) echo grep; return ;;
+    rg\ *|rg)     echo rg;   return ;;
+    ag\ *|ag)     echo ag;   return ;;
+    ack\ *|ack)   echo ack;  return ;;
+    find\ *|find) echo find; return ;;
+    fd\ *|fd)     echo fd;   return ;;
+  esac
+
+  # Git-spelled searches. Resolve the binary by basename so an absolute
+  # path invocation is caught too, matching no-gh.sh's hardening.
+  local toks=()
+  IFS=' ' read -ra toks <<<"$trimmed"
+  [ "${#toks[@]}" -ge 2 ] || return 0
+  [ "${toks[0]##*/}" = "git" ] || return 0
+
+  # Walk git's own global options to reach the subcommand. Options taking
+  # a value consume the following token.
+  local i=1 sub=""
+  while [ "$i" -lt "${#toks[@]}" ]; do
+    case "${toks[$i]}" in
+      -C|-c|--git-dir|--work-tree|--namespace) i=$((i + 2)) ;;
+      -*) i=$((i + 1)) ;;
+      *) sub="${toks[$i]}"; break ;;
+    esac
+  done
+
+  case "$sub" in
+    grep)     echo "git grep" ;;
+    ls-files) echo "git ls-files" ;;
+    log)
+      # `git log` is a search ONLY with a content or message predicate.
+      # Every other shape (--oneline, -p, a bare range) is ordinary
+      # history reading and must pass through untouched.
+      local t
+      for t in "${toks[@]}"; do
+        case "$t" in
+          -S|-S*) echo "git log -S"; return ;;
+          -G|-G*) echo "git log -G"; return ;;
+          --grep|--grep=*) echo "git log --grep"; return ;;
+        esac
+      done
+      ;;
+  esac
+}
+
+# legion_prequery_is_git_shape BINARY -- true when BINARY is one of the
+# git-spelled search labels. Callers use this to skip the argv-position
+# assumptions that hold for single-token binaries.
+legion_prequery_is_git_shape() {
+  case "$1" in
+    "git grep"|"git ls-files"|"git log -S"|"git log -G"|"git log --grep") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# legion_prequery_git_pattern CMD BINARY -- echo the search term for a
+# git-spelled search. Separate from the general extractor because the
+# pattern's argv position differs per shape: a positional after the
+# subcommand for grep/ls-files, a flag VALUE for the log predicates
+# (attached `-Sfoo` and detached `-S foo` both occur).
+legion_prequery_git_pattern() {
+  local cmd="$1" binary="$2"
+  local head="${cmd%%|*}"
+  head="${head%%>*}"; head="${head%%<*}"; head="${head%%;*}"; head="${head%%&&*}"
+
+  local toks=()
+  IFS=' ' read -ra toks <<<"$head"
+
+  local i t
+  case "$binary" in
+    "git log -S"|"git log -G"|"git log --grep")
+      local flag="${binary##* }"
+      for ((i = 0; i < ${#toks[@]}; i++)); do
+        t="${toks[$i]}"
+        case "$t" in
+          "$flag")
+            # Detached value: the next token.
+            [ $((i + 1)) -lt "${#toks[@]}" ] && printf '%s\n' "${toks[$((i + 1))]//\"/}"
+            return
+            ;;
+          "$flag"=*)
+            printf '%s\n' "${t#*=}" | tr -d '"'
+            return
+            ;;
+          "$flag"*)
+            # Attached value: -Sfoo.
+            printf '%s\n' "${t#"$flag"}" | tr -d '"'
+            return
+            ;;
+        esac
+      done
+      ;;
+    *)
+      # git grep / git ls-files: first non-flag token after the
+      # subcommand. `--` and pathspecs after it are not the pattern.
+      local seen_sub=0
+      local subword="${binary##* }"
+      for ((i = 1; i < ${#toks[@]}; i++)); do
+        t="${toks[$i]}"
+        if [ "$seen_sub" -eq 0 ]; then
+          [ "$t" = "$subword" ] && seen_sub=1
+          continue
+        fi
+        case "$t" in
+          --) return ;;
+          -*) continue ;;
+          *) printf '%s\n' "${t//\"/}"; return ;;
+        esac
+      done
+      ;;
   esac
 }
 
