@@ -7,7 +7,7 @@ description: |
   mapping makes you re-read your own diff as a reader and catch what you talked past while
   coding. Validate the body with `legion pr write-check`, which refuses an empty or
   boilerplate mapping and records the gate `legion pr create` requires. Run this after
-  `/legion-simplify`, before review.
+  `/legion:legion-simplify`, before review.
 version: 1.0.0
 user-invocable: true
 allowed-tools: Bash, Read, Write

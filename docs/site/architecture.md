@@ -755,10 +755,14 @@ Only a dangling `document_id` -- the bound document does not exist -- is a hard 
 
 The full quality pipeline for a branch is:
 
-1. `/legion-simplify` -- review for code quality (duplication, unnecessary abstraction, stringly-typed state). Records a `legion-simplify` gate via `legion quality-gate record`.
-2. `/legion-pr-write` -- compose the PR body mapping each acceptance criterion to the change that satisfies it, with evidence. Validates the body is non-empty and non-boilerplate via `legion pr write-check`. Records a `legion-pr-write` gate.
-3. `/legion-review` -- parallel dimension review (spec, correctness, quality, security) with adversarial refutation of HIGH/MED findings. Records a `legion-review` gate.
-4. `/legion-verify` -- per-criterion verdict (pass/fail/uncertain + evidence). Records a `legion-verify:<card>` gate.
+1. `/legion:legion-simplify` -- review for code quality (duplication, unnecessary abstraction, stringly-typed state). Records a `legion-simplify` gate via `legion quality-gate record`.
+2. `/legion:legion-pr-write` -- compose the PR body mapping each acceptance criterion to the change that satisfies it, with evidence. Validates the body is non-empty and non-boilerplate via `legion pr write-check`. Records a `legion-pr-write` gate.
+3. `/legion:legion-review` -- parallel dimension review (spec, correctness, quality, security) with adversarial refutation of HIGH/MED findings. Records a `legion-review` gate.
+4. `/legion:legion-verify` -- per-criterion verdict (pass/fail/uncertain + evidence). Records a `legion-verify:<card>` gate.
+
+The skill names carry the `legion:` plugin prefix. Claude Code 2.1.216 fixed plugin skills
+with a `name:` frontmatter field losing that prefix; the bare forms no longer resolve. The
+gate keys recorded in the database (`legion-simplify` and friends, above) are unaffected.
 
 ### PR create gate requirements
 

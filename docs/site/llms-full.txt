@@ -1537,27 +1537,27 @@ PLUGIN SKILLS
         doctrine. Order: recall -> consult -> then grep/glob/read.
         Allowed tools: Bash, Read.
 
-    legion-simplify     User-invocable (/legion-simplify).
+    legion-simplify     User-invocable (/legion:legion-simplify).
         Reviews the branch diff for duplicate logic, needless abstraction, and
         stringly-typed state. Emits structured JSON findings and records the
         simplify gate via `legion quality-gate record` that `legion pr create`
         requires. Run on every feature branch before the PR.
 
-    legion-pr-write     (v0.16.2) User-invocable (/legion-pr-write).
+    legion-pr-write     (v0.16.2) User-invocable (/legion:legion-pr-write).
         Composes the PR body as an articulation-as-verification forcing function:
         map each acceptance criterion to the change satisfying it with evidence;
         state what was deliberately not done; validate with
         `legion pr write-check`. Records a clean legion-pr-write gate on success.
-        Run after /legion-simplify, before review.
+        Run after /legion:legion-simplify, before review.
 
-    legion-review       (v0.17.2) User-invocable (/legion-review).
+    legion-review       (v0.17.2) User-invocable (/legion:legion-review).
         The review gate between pr-write and verify. Orchestrates parallel
         dimension agents (spec, correctness, quality, security) over the
         legion-review agent, adversarially refutes every HIGH/MED finding
         before it is reported, and records a HEAD-keyed legion-review quality
         gate via `legion quality-gate record`.
 
-    legion-verify       (v0.16.2) User-invocable (/legion-verify).
+    legion-verify       (v0.16.2) User-invocable (/legion:legion-verify).
         Final gate before Done: reads acceptance criteria plus diff plus test
         output, emits one pass/fail/uncertain verdict per criterion with cited
         evidence, recorded via `legion verify`. Run after review, before Done.
