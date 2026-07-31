@@ -137,6 +137,62 @@ legion_prequery_extract_pattern() {
   done
 }
 
+# legion_prequery_script_primitive TEXT -- echo the search SHAPE a script
+# is reaching for (#837), or empty when it is not doing a search.
+#
+#   tree    -- directory walk / listing      -> legion sym tree
+#   file    -- filename or glob matching     -> legion sym etc find-file
+#   content -- text search inside files      -> legion sym etc find-content
+#
+# Why this exists: every other enforcement point classifies by the leading
+# binary, and no first-token rule can catch `python tree.py` -- you cannot
+# tell what a script does from its invocation. Observed 2026-07-31: the
+# rafters agent wrote a Python script for a directory tree against an index
+# that had been rebuilt 42 seconds earlier.
+#
+# Detection is heuristic and deliberately biased toward MISSING rather than
+# over-firing. The consumer injects, never denies, so a false positive
+# costs one paragraph and a false negative costs only today's behaviour.
+# Order matters: `tree` is checked first because a walk usually also
+# contains a filename test, and the walk is the more specific signal.
+legion_prequery_script_primitive() {
+  local text="$1"
+
+  case "$text" in
+    *os.walk*|*os.scandir*|*os.listdir*|*readdirSync*|*fs.readdir*|*.rglob\(*|*walkdir*)
+      echo tree; return ;;
+  esac
+  case "$text" in
+    *fnmatch*|*glob.glob*|*.glob\(*|*endswith\(*|*path.match*)
+      echo file; return ;;
+  esac
+  case "$text" in
+    *re.search*|*re.findall*|*re.compile*|*.includes\(*|*subprocess*grep*)
+      echo content; return ;;
+  esac
+}
+
+# legion_prequery_script_interpreter CMD -- echo the interpreter name when
+# a Bash command leads with one, empty otherwise. Resolved by basename so
+# an absolute path is caught, matching no-gh.sh.
+legion_prequery_script_interpreter() {
+  local cmd="$1"
+  local trimmed="${cmd#"${cmd%%[![:space:]]*}"}"
+  local toks=()
+  IFS=' ' read -ra toks <<<"$trimmed"
+  [ "${#toks[@]}" -ge 1 ] || return 0
+
+  local first="${toks[0]##*/}"
+  case "$first" in
+    python|python3|node|bun|deno|ruby|perl) echo "$first"; return ;;
+    # Runner wrappers: the interpreter is the second token.
+    uv|pnpm|npx|yarn)
+      [ "${#toks[@]}" -ge 2 ] && echo "$first ${toks[1]}"
+      return
+      ;;
+  esac
+}
+
 # legion_prequery_is_symbol PATTERN -- exit 0 if pattern looks like a bare
 # symbol identifier (CamelCase or snake_case, length > 2, no regex
 # metachars). Exit 1 otherwise.
