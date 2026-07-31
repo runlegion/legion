@@ -226,6 +226,27 @@ impl Database {
         }
     }
 
+    /// Every gate row whose id STARTS WITH `prefix`, ordered by id (#840).
+    /// Anchored prefix, never a substring search; returns whole rows so the
+    /// caller's ambiguity error can name each candidate's skill and commit.
+    /// Mirror of `find_findings_by_id_prefix` -- the two are deliberately
+    /// not shared, since a helper taking a caller-supplied table name is a
+    /// SQL-injection shape this codebase should not introduce for six lines.
+    pub fn find_quality_gates_by_id_prefix(&self, prefix: &str) -> Result<Vec<QualityGateRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, branch, commit_hash, skill, result, findings_count, details, \
+                    created_at, provenance, voided_at, void_reason, superseded_by, base \
+             FROM quality_gates \
+             WHERE id LIKE ?1 || '%' ORDER BY id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![prefix], Self::row_to_gate)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(LegionError::Database)?);
+        }
+        Ok(out)
+    }
+
     /// Void a gate row: mark it `voided_at`/`void_reason` so a known-false
     /// verdict is retired without deleting history (#780). Optionally names
     /// the row that supersedes it -- typically a re-laid genuine row from a
@@ -239,46 +260,15 @@ impl Database {
     ///
     /// Errors with `LegionError::QualityGateNotFound` when `id` does not
     /// match any row -- voiding a typo'd id must fail loudly, not silently
-    /// no-op.
-    /// Resolve a gate id given in full OR as an unambiguous prefix (#839).
-    ///
-    /// Mirrors `Database::resolve_finding_id`. The two are deliberately not
-    /// shared: they query different tables and return different error
-    /// variants, so a common helper would need the table name and the
-    /// not-found constructor threaded through it -- more machinery than the
-    /// duplicated shape saves, and SQL built from a caller-supplied table
-    /// name is a footgun this codebase should not introduce for six lines.
-    fn resolve_gate_id(&self, id: &str) -> Result<String> {
-        if self.get_quality_gate_by_id(id)?.is_some() {
-            return Ok(id.to_owned());
-        }
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM quality_gates WHERE id LIKE ?1 || '%' ORDER BY id")?;
-        let matches: Vec<String> = stmt
-            .query_map(rusqlite::params![id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
-
-        match matches.len() {
-            0 => Err(LegionError::QualityGateNotFound(id.to_owned())),
-            1 => Ok(matches[0].clone()),
-            _ => Err(LegionError::AmbiguousId {
-                id: id.to_owned(),
-                candidates: matches,
-            }),
-        }
-    }
-
+    /// no-op. `id` is matched EXACTLY; prefix acceptance lives in the CLI
+    /// arm (`crate::cli::verify::resolve_gate_id`), for the same reason as
+    /// `dispose_finding` (#840).
     pub fn void_quality_gate(
         &self,
         id: &str,
         reason: &str,
         superseded_by: Option<&str>,
     ) -> Result<QualityGateRow> {
-        // Same defect class as #839's finding-disposition: `print_gate_table`
-        // shows the first 8 characters, so the id a human reads out of
-        // `quality-gate list` has to be accepted here too.
-        let id: &str = &self.resolve_gate_id(id)?;
         let now = Utc::now().to_rfc3339();
         let affected = self.conn.execute(
             "UPDATE quality_gates SET voided_at = ?1, void_reason = ?2, superseded_by = ?3 \
