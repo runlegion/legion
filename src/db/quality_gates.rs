@@ -240,12 +240,45 @@ impl Database {
     /// Errors with `LegionError::QualityGateNotFound` when `id` does not
     /// match any row -- voiding a typo'd id must fail loudly, not silently
     /// no-op.
+    /// Resolve a gate id given in full OR as an unambiguous prefix (#839).
+    ///
+    /// Mirrors `Database::resolve_finding_id`. The two are deliberately not
+    /// shared: they query different tables and return different error
+    /// variants, so a common helper would need the table name and the
+    /// not-found constructor threaded through it -- more machinery than the
+    /// duplicated shape saves, and SQL built from a caller-supplied table
+    /// name is a footgun this codebase should not introduce for six lines.
+    fn resolve_gate_id(&self, id: &str) -> Result<String> {
+        if self.get_quality_gate_by_id(id)?.is_some() {
+            return Ok(id.to_owned());
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM quality_gates WHERE id LIKE ?1 || '%' ORDER BY id")?;
+        let matches: Vec<String> = stmt
+            .query_map(rusqlite::params![id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+
+        match matches.len() {
+            0 => Err(LegionError::QualityGateNotFound(id.to_owned())),
+            1 => Ok(matches[0].clone()),
+            _ => Err(LegionError::AmbiguousId {
+                id: id.to_owned(),
+                candidates: matches,
+            }),
+        }
+    }
+
     pub fn void_quality_gate(
         &self,
         id: &str,
         reason: &str,
         superseded_by: Option<&str>,
     ) -> Result<QualityGateRow> {
+        // Same defect class as #839's finding-disposition: `print_gate_table`
+        // shows the first 8 characters, so the id a human reads out of
+        // `quality-gate list` has to be accepted here too.
+        let id: &str = &self.resolve_gate_id(id)?;
         let now = Utc::now().to_rfc3339();
         let affected = self.conn.execute(
             "UPDATE quality_gates SET voided_at = ?1, void_reason = ?2, superseded_by = ?3 \

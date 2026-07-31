@@ -225,8 +225,17 @@ pub enum LegionError {
     #[error("invalid finding status: '{0}' (expected 'pending', 'resolved', or 'dispositioned')")]
     InvalidFindingStatus(String),
 
-    #[error("quality gate finding not found: {0}")]
+    #[error(
+        "quality gate finding not found: {0} (tables print the first 8 characters; \
+         `quality-gate finding-list --json` carries the full id)"
+    )]
     FindingNotFound(String),
+
+    /// A partial id matched more than one row. Never resolved by picking
+    /// one: disposition and void are state changes, and silently retiring
+    /// the wrong row is worse than making the caller disambiguate.
+    #[error("id '{id}' is ambiguous ({} matches): {}", .candidates.len(), .candidates.join(", "))]
+    AmbiguousId { id: String, candidates: Vec<String> },
 
     #[error(
         "finding {0} is already RESOLVED (a later commit demonstrably touched the flagged \

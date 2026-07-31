@@ -844,22 +844,58 @@ fn persist_raw_findings(
 /// Print finding rows as a human-readable table to stdout (#773 AC4 audit
 /// surface). Columns: id (first 8 chars), branch, skill, file:line,
 /// severity, status, created_at. An empty slice prints nothing.
+/// Shortest prefix length that distinguishes every id in `ids`, floored at
+/// `MIN_ID_WIDTH` and capped at the full id length (#839).
+///
+/// A fixed 8-character truncation is ambiguous BY CONSTRUCTION here: legion
+/// ids are UUIDv7, whose leading 48 bits are a millisecond timestamp, so
+/// two findings recorded seconds apart share their first 8 hex characters.
+/// Printing a value the consuming verb must then reject as ambiguous is the
+/// defect this closes -- widen only as far as the displayed set requires, so
+/// the id a human copies out of the table always resolves.
+fn unique_id_width(ids: &[&str]) -> usize {
+    const MIN_ID_WIDTH: usize = 8;
+    let max_len = ids.iter().map(|i| i.chars().count()).max().unwrap_or(0);
+
+    for width in MIN_ID_WIDTH..=max_len {
+        let mut seen: Vec<String> = ids
+            .iter()
+            .map(|i| i.chars().take(width).collect::<String>())
+            .collect();
+        seen.sort();
+        let before = seen.len();
+        seen.dedup();
+        if seen.len() == before {
+            return width;
+        }
+    }
+    max_len.max(MIN_ID_WIDTH)
+}
+
 fn print_findings_table(rows: &[QualityGateFinding]) {
     if rows.is_empty() {
         return;
     }
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    let w = unique_id_width(&ids);
     println!(
-        "{:<8}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  CREATED",
-        "ID", "BRANCH", "SKILL", "FILE", "SEV", "STATUS"
+        "{:<w$}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  CREATED",
+        "ID",
+        "BRANCH",
+        "SKILL",
+        "FILE",
+        "SEV",
+        "STATUS",
+        w = w
     );
-    println!("{}", "-".repeat(130));
+    println!("{}", "-".repeat(122 + w));
     for row in rows {
-        let id_short: String = row.id.chars().take(8).collect();
+        let id_short: String = row.id.chars().take(w).collect();
         let branch_trunc: String = row.branch.chars().take(20).collect();
         let skill_trunc: String = row.skill.chars().take(16).collect();
         let file_trunc: String = file_loc(&row.file, row.line).chars().take(30).collect();
         println!(
-            "{:<8}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  {}",
+            "{:<w$}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  {}",
             id_short,
             branch_trunc,
             skill_trunc,
@@ -867,6 +903,7 @@ fn print_findings_table(rows: &[QualityGateFinding]) {
             row.severity.as_str(),
             row.status.as_str(),
             row.created_at,
+            w = w
         );
     }
 }
@@ -889,19 +926,32 @@ fn print_gate_table(rows: &[QualityGateRow]) {
     if rows.is_empty() {
         return;
     }
+    // Same UUIDv7 prefix-collision hazard as print_findings_table: `void
+    // --id` consumes what this prints, so widen until the displayed set is
+    // unambiguous (#839).
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    let w = unique_id_width(&ids);
     println!(
-        "{:<8}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {:<9}  {:<4}  CREATED",
-        "ID", "BRANCH", "COMMIT", "SKILL", "RESULT", "FINDINGS", "PROVENANCE", "VOID"
+        "{:<w$}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {:<9}  {:<4}  CREATED",
+        "ID",
+        "BRANCH",
+        "COMMIT",
+        "SKILL",
+        "RESULT",
+        "FINDINGS",
+        "PROVENANCE",
+        "VOID",
+        w = w
     );
-    println!("{}", "-".repeat(130));
+    println!("{}", "-".repeat(122 + w));
     for row in rows {
-        let id_short: String = row.id.chars().take(8).collect();
+        let id_short: String = row.id.chars().take(w).collect();
         let branch_trunc: String = row.branch.chars().take(20).collect();
         let commit_short: String = row.commit_hash.chars().take(8).collect();
         let skill_trunc: String = row.skill.chars().take(22).collect();
         let void_marker = if row.voided_at.is_some() { "VOID" } else { "-" };
         println!(
-            "{:<8}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {:<9}  {:<4}  {}",
+            "{:<w$}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {:<9}  {:<4}  {}",
             id_short,
             branch_trunc,
             commit_short,
@@ -911,6 +961,7 @@ fn print_gate_table(rows: &[QualityGateRow]) {
             row.provenance.as_str(),
             void_marker,
             row.created_at,
+            w = w
         );
     }
 }
@@ -1194,6 +1245,79 @@ mod tests {
     use crate::db::testutil::test_db;
     use crate::documents::DocumentMeta;
     use crate::kanban::{Card, CardStatus, Priority};
+
+    // --- #839: the printed id must be usable by the consuming verb --------
+
+    #[test]
+    fn unique_id_width_floors_at_eight() {
+        // Well-separated ids need no widening; 8 stays the default so the
+        // table does not grow for the common case.
+        let ids = vec!["aaaaaaaa1111", "bbbbbbbb2222", "cccccccc3333"];
+        assert_eq!(unique_id_width(&ids), 8);
+    }
+
+    #[test]
+    fn unique_id_width_widens_past_a_uuidv7_timestamp_collision() {
+        // The real shape from the shingle report: UUIDv7 ids recorded
+        // seconds apart share their leading timestamp hex, so 8 characters
+        // collide and the table must widen until they do not.
+        let ids = vec![
+            "019fb9cf-9b99-7473-95fa-ed4e5292c563",
+            "019fb9cf-e09a-7283-a28b-c85e82aa8f1a",
+        ];
+        let w = unique_id_width(&ids);
+        assert!(w > 8, "expected widening past 8, got {w}");
+        assert_ne!(&ids[0][..w], &ids[1][..w], "width {w} still collides");
+    }
+
+    #[test]
+    fn unique_id_width_degrades_to_the_full_id_when_a_batch_shares_24_chars() {
+        // A gate run that inserts several findings inside one millisecond
+        // holds both the UUIDv7 timestamp AND the random block fixed, so
+        // the ids can share 24 characters and diverge only in the tail.
+        // No FIXED truncation width survives that -- 12, 16 and 20 are all
+        // still ambiguous seven ways -- which is why the width is computed
+        // from the displayed set and is allowed to reach the full id.
+        let ids: Vec<String> = (0..7)
+            .map(|i| format!("019fb44e-1fc9-7a83-ab68-{:012x}", i))
+            .collect();
+        let refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+
+        for fixed in [12usize, 16, 20] {
+            let mut at_fixed: Vec<String> = refs
+                .iter()
+                .map(|i| i.chars().take(fixed).collect())
+                .collect();
+            at_fixed.sort();
+            at_fixed.dedup();
+            assert_eq!(
+                at_fixed.len(),
+                1,
+                "a fixed width of {fixed} should still collide for this batch"
+            );
+        }
+
+        let w = unique_id_width(&refs);
+        assert_eq!(w, 36, "must widen all the way to the full id");
+        let mut distinct: Vec<String> = refs.iter().map(|i| i.chars().take(w).collect()).collect();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 7, "all seven must be distinguishable");
+    }
+
+    #[test]
+    fn unique_id_width_handles_single_and_empty() {
+        assert_eq!(unique_id_width(&["019fb9cf-9b99-7473"]), 8);
+        assert_eq!(unique_id_width(&[]), 8);
+    }
+
+    #[test]
+    fn unique_id_width_never_exceeds_the_id_length() {
+        // Two ids identical for their whole length cannot be separated;
+        // the function must terminate at the full length rather than loop.
+        let ids = vec!["dupe", "dupe"];
+        assert_eq!(unique_id_width(&ids), 8);
+    }
 
     fn make_card(doc_id: Option<&str>, acceptance: Option<&str>) -> Card {
         Card {

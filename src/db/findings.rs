@@ -272,7 +272,43 @@ impl Database {
     /// through the same explicit id-scoped call, which this still permits --
     /// only a RESOLVED finding is refused, since silently overriding proof of
     /// a fix with a waiver would be the exact hole this table closes).
+    /// Resolve a finding id given in full OR as an unambiguous prefix (#839).
+    ///
+    /// `print_findings_table` shows the first 8 characters, and that was
+    /// the only place the CLI surfaced an id outside `--json`, so the value
+    /// a human read could never be passed back to `finding-disposition`.
+    /// A MED finding a reviewer wanted to record as wont-fix therefore had
+    /// no path at all: `--result clean` is refused while it is PENDING and
+    /// `finding-ack` is LOW-only, leaving only the coarse file-touch rule.
+    ///
+    /// Exact match wins before prefix matching, so a full id that happens
+    /// to prefix a longer one resolves to itself. Not reachable with
+    /// uniform-length UUIDv7 ids today, but the rule must not depend on
+    /// that staying true.
+    fn resolve_finding_id(&self, id: &str) -> Result<String> {
+        if self.get_finding_by_id(id)?.is_some() {
+            return Ok(id.to_owned());
+        }
+        // Anchored prefix, never a substring search: `LIKE ? || '%'`.
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM quality_gate_findings WHERE id LIKE ?1 || '%' ORDER BY id")?;
+        let matches: Vec<String> = stmt
+            .query_map(rusqlite::params![id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+
+        match matches.len() {
+            0 => Err(LegionError::FindingNotFound(id.to_owned())),
+            1 => Ok(matches[0].clone()),
+            _ => Err(LegionError::AmbiguousId {
+                id: id.to_owned(),
+                candidates: matches,
+            }),
+        }
+    }
+
     pub fn dispose_finding(&self, id: &str, reason: &str) -> Result<QualityGateFinding> {
+        let id: &str = &self.resolve_finding_id(id)?;
         let existing = self
             .get_finding_by_id(id)?
             .ok_or_else(|| LegionError::FindingNotFound(id.to_owned()))?;
@@ -393,6 +429,77 @@ mod tests {
         let fetched = db.get_finding_by_id(&row.id).unwrap().unwrap();
         assert_eq!(fetched.file, "src/foo.rs");
         assert_eq!(fetched.severity, FindingSeverity::Med);
+    }
+
+    // --- #839: dispose by the id the table actually prints ----------------
+
+    #[test]
+    fn dispose_finding_accepts_an_unambiguous_prefix() {
+        let db = test_db();
+        let row = db
+            .insert_finding(&input("gate-1", "src/foo.rs", FindingSeverity::Med))
+            .unwrap();
+        let prefix: String = row.id.chars().take(8).collect();
+
+        let disposed = db
+            .dispose_finding(&prefix, "won't fix: intentional")
+            .unwrap();
+        assert_eq!(disposed.id, row.id, "prefix must resolve to the full row");
+        assert_eq!(disposed.status, FindingStatus::Dispositioned);
+        assert_eq!(
+            disposed.disposition_reason.as_deref(),
+            Some("won't fix: intentional")
+        );
+    }
+
+    #[test]
+    fn dispose_finding_refuses_an_ambiguous_prefix_and_changes_nothing() {
+        let db = test_db();
+        let a = db
+            .insert_finding(&input("gate-1", "src/foo.rs", FindingSeverity::Med))
+            .unwrap();
+        let b = db
+            .insert_finding(&input("gate-1", "src/bar.rs", FindingSeverity::Med))
+            .unwrap();
+
+        // UUIDv7 ids minted in the same millisecond share a long prefix --
+        // the shingle case. Find one that genuinely matches both.
+        let shared: String =
+            a.id.chars()
+                .zip(b.id.chars())
+                .take_while(|(x, y)| x == y)
+                .map(|(x, _)| x)
+                .collect();
+        if shared.is_empty() {
+            return; // ids diverged at char 0; nothing ambiguous to test
+        }
+
+        let err = db.dispose_finding(&shared, "x").unwrap_err();
+        assert!(
+            matches!(err, LegionError::AmbiguousId { .. }),
+            "expected AmbiguousId, got {err:?}"
+        );
+        // Neither row may have moved.
+        assert_eq!(
+            db.get_finding_by_id(&a.id).unwrap().unwrap().status,
+            FindingStatus::Pending
+        );
+        assert_eq!(
+            db.get_finding_by_id(&b.id).unwrap().unwrap().status,
+            FindingStatus::Pending
+        );
+    }
+
+    #[test]
+    fn dispose_finding_unknown_id_still_reports_not_found() {
+        let db = test_db();
+        db.insert_finding(&input("gate-1", "src/foo.rs", FindingSeverity::Med))
+            .unwrap();
+        let err = db.dispose_finding("deadbeef", "x").unwrap_err();
+        assert!(
+            matches!(err, LegionError::FindingNotFound(_)),
+            "expected FindingNotFound, got {err:?}"
+        );
     }
 
     #[test]
