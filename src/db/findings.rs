@@ -150,6 +150,23 @@ fn row_to_finding(
 const SELECT_COLUMNS: &str = "id, gate_id, branch, skill, origin_commit, file, line, severity, \
      summary, status, disposition_reason, resolved_by_commit, created_at, updated_at";
 
+/// Escape SQL `LIKE` metacharacters in a user-supplied id prefix (#840).
+///
+/// The prefix paths exist precisely for HAND-TYPED input, and `_` matches
+/// any single character while `%` matches any run. A typo containing `_`
+/// that happened to match exactly one row would resolve and then be
+/// dispositioned or voided -- a state change on a row nobody named. A
+/// genuine copied id is unaffected: UUIDs are hex and dashes only.
+///
+/// Paired with `ESCAPE '\'` in every query that consumes this. The
+/// backslash itself is escaped first so it cannot smuggle in an escape.
+pub(super) fn escape_like_prefix(prefix: &str) -> String {
+    prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 impl Database {
     /// Insert a new PENDING finding extracted from a just-recorded gate row.
     pub fn insert_finding(&self, input: &NewFindingInput<'_>) -> Result<QualityGateFinding> {
@@ -216,9 +233,12 @@ impl Database {
     pub fn find_findings_by_id_prefix(&self, prefix: &str) -> Result<Vec<QualityGateFinding>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {SELECT_COLUMNS} FROM quality_gate_findings \
-             WHERE id LIKE ?1 || '%' ORDER BY id"
+             WHERE id LIKE ?1 || '%' ESCAPE '\\' ORDER BY id"
         ))?;
-        let rows = stmt.query_map(rusqlite::params![prefix], row_to_finding)?;
+        let rows = stmt.query_map(
+            rusqlite::params![escape_like_prefix(prefix)],
+            row_to_finding,
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row.map_err(LegionError::Database)?);
@@ -433,13 +453,18 @@ mod tests {
         let b = db
             .insert_finding(&input("gate-1", "src/bar.rs", FindingSeverity::Med))
             .unwrap();
-        // UUIDv7's leading 32 bits are the high half of a millisecond
-        // timestamp, so two findings from one gate run share 8 hex chars.
-        let prefix: String = a.id.chars().take(8).collect();
-        assert_eq!(
-            prefix,
-            b.id.chars().take(8).collect::<String>(),
-            "back-to-back UUIDv7 ids must share their leading timestamp hex"
+        // Derive the shared prefix from the ids themselves rather than
+        // assuming 8 characters: two inserts straddling a timestamp
+        // rollover would share fewer, and the assumption would flake.
+        let prefix: String =
+            a.id.chars()
+                .zip(b.id.chars())
+                .take_while(|(x, y)| x == y)
+                .map(|(x, _)| x)
+                .collect();
+        assert!(
+            !prefix.is_empty(),
+            "back-to-back UUIDv7 ids must share a leading timestamp run"
         );
 
         let matches = db.find_findings_by_id_prefix(&prefix).unwrap();
@@ -454,6 +479,38 @@ mod tests {
         // file:line to be choosable.
         assert!(matches.iter().any(|f| f.file == "src/foo.rs"));
         assert!(matches.iter().any(|f| f.file == "src/bar.rs"));
+    }
+
+    /// #840 review finding: these prefix paths exist for HAND-TYPED input,
+    /// and an unescaped `_` matches any single character under LIKE. A typo
+    /// that happened to match exactly one row would resolve and then be
+    /// dispositioned -- a state change on a row nobody named.
+    #[test]
+    fn id_prefix_treats_like_wildcards_as_literal_characters() {
+        let db = test_db();
+        let a = db
+            .insert_finding(&input("gate-1", "src/foo.rs", FindingSeverity::Med))
+            .unwrap();
+
+        // `_` as a wildcard would match the real id at that position; as a
+        // literal it matches nothing, because UUIDs carry no underscores.
+        let mut wild: String = a.id.chars().take(7).collect();
+        wild.push('_');
+        assert!(
+            db.find_findings_by_id_prefix(&wild).unwrap().is_empty(),
+            "underscore must be literal, not a single-character wildcard"
+        );
+
+        // `%` likewise: as a wildcard it would match every row.
+        assert!(
+            db.find_findings_by_id_prefix("%").unwrap().is_empty(),
+            "percent must be literal, not a match-everything wildcard"
+        );
+
+        // The honest prefix still resolves, so the escaping did not break
+        // the path it protects.
+        let real: String = a.id.chars().take(8).collect();
+        assert_eq!(db.find_findings_by_id_prefix(&real).unwrap().len(), 1);
     }
 
     #[test]

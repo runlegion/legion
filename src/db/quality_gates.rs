@@ -237,9 +237,12 @@ impl Database {
             "SELECT id, branch, commit_hash, skill, result, findings_count, details, \
                     created_at, provenance, voided_at, void_reason, superseded_by, base \
              FROM quality_gates \
-             WHERE id LIKE ?1 || '%' ORDER BY id",
+             WHERE id LIKE ?1 || '%' ESCAPE '\\' ORDER BY id",
         )?;
-        let rows = stmt.query_map(rusqlite::params![prefix], Self::row_to_gate)?;
+        let rows = stmt.query_map(
+            rusqlite::params![super::findings::escape_like_prefix(prefix)],
+            Self::row_to_gate,
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row.map_err(LegionError::Database)?);
