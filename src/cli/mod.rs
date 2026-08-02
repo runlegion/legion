@@ -880,9 +880,12 @@ pub(crate) enum Commands {
         /// Filter by action type. Known verbs:
         /// create-issue, close-issue, reopen-issue, edit-issue,
         /// create-pr, close-pr, review, merge, comment,
-        /// delete-card, update-card.
+        /// delete-card, update-card, push.
         /// Filter is an exact string match; additional verbs
         /// introduced by future subcommands work automatically.
+        /// `push` was written by `legion push` from #791 onward but was
+        /// missing from this list, so anyone auditing by the documented
+        /// verbs never looked for the rows that were already there.
         #[arg(long)]
         action: Option<String>,
 
