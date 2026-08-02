@@ -417,9 +417,14 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 // articulated criterion-to-work mapping the verify gate later
                 // audits). Each is recorded by its own skill on the current
                 // commit, so a post-gate commit invalidates them (re-run).
+                // The first element is the quality-gate DB key written by
+                // `legion quality-gate record --skill` and read by
+                // `get_quality_gate`; it must stay bare. Only the second --
+                // the invocation hint printed to the agent -- carries the
+                // `legion:` plugin prefix that Claude Code 2.1.216 restored.
                 for (skill, run_hint) in [
-                    ("legion-simplify", "/legion-simplify"),
-                    ("legion-pr-write", "/legion-pr-write"),
+                    ("legion-simplify", "/legion:legion-simplify"),
+                    ("legion-pr-write", "/legion:legion-pr-write"),
                 ] {
                     match database.get_quality_gate(&commit_hash, skill)? {
                         None => {
