@@ -150,6 +150,23 @@ fn row_to_finding(
 const SELECT_COLUMNS: &str = "id, gate_id, branch, skill, origin_commit, file, line, severity, \
      summary, status, disposition_reason, resolved_by_commit, created_at, updated_at";
 
+/// Escape SQL `LIKE` metacharacters in a user-supplied id prefix (#840).
+///
+/// The prefix paths exist precisely for HAND-TYPED input, and `_` matches
+/// any single character while `%` matches any run. A typo containing `_`
+/// that happened to match exactly one row would resolve and then be
+/// dispositioned or voided -- a state change on a row nobody named. A
+/// genuine copied id is unaffected: UUIDs are hex and dashes only.
+///
+/// Paired with `ESCAPE '\'` in every query that consumes this. The
+/// backslash itself is escaped first so it cannot smuggle in an escape.
+pub(super) fn escape_like_prefix(prefix: &str) -> String {
+    prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 impl Database {
     /// Insert a new PENDING finding extracted from a just-recorded gate row.
     pub fn insert_finding(&self, input: &NewFindingInput<'_>) -> Result<QualityGateFinding> {
@@ -203,6 +220,30 @@ impl Database {
             Some(Err(e)) => Err(LegionError::Database(e)),
             None => Ok(None),
         }
+    }
+
+    /// Every finding whose id STARTS WITH `prefix`, ordered by id (#840).
+    ///
+    /// Anchored with `LIKE ?1 || '%'`, never a substring search: a prefix is
+    /// what a human copies off the front of a printed id, so matching mid-id
+    /// would resolve ids nobody typed. Returns whole rows rather than ids
+    /// because the caller's ambiguity error has to name `file:line` -- ids
+    /// alone do not disambiguate findings minted in the same millisecond,
+    /// which share their leading 24 characters.
+    pub fn find_findings_by_id_prefix(&self, prefix: &str) -> Result<Vec<QualityGateFinding>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SELECT_COLUMNS} FROM quality_gate_findings \
+             WHERE id LIKE ?1 || '%' ESCAPE '\\' ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![escape_like_prefix(prefix)],
+            row_to_finding,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(LegionError::Database)?);
+        }
+        Ok(out)
     }
 
     /// PENDING findings for a (branch, skill) pair, oldest first -- the set
@@ -272,6 +313,12 @@ impl Database {
     /// through the same explicit id-scoped call, which this still permits --
     /// only a RESOLVED finding is refused, since silently overriding proof of
     /// a fix with a waiver would be the exact hole this table closes).
+    ///
+    /// `id` is matched EXACTLY. Prefix acceptance is a CLI-layer convenience
+    /// (`crate::cli::verify::resolve_finding_id`) deliberately kept out of
+    /// here, so the internal callers that already hold a full id --
+    /// `batch_ack_low_findings` and `finding_gate::reconcile_pending_findings`
+    /// -- cannot start resolving fuzzily by accident (#840).
     pub fn dispose_finding(&self, id: &str, reason: &str) -> Result<QualityGateFinding> {
         let existing = self
             .get_finding_by_id(id)?
@@ -393,6 +440,122 @@ mod tests {
         let fetched = db.get_finding_by_id(&row.id).unwrap().unwrap();
         assert_eq!(fetched.file, "src/foo.rs");
         assert_eq!(fetched.severity, FindingSeverity::Med);
+    }
+
+    // --- #840: the prefix read path the CLI resolver is built on ----------
+
+    #[test]
+    fn find_findings_by_id_prefix_returns_every_match_in_id_order() {
+        let db = test_db();
+        let a = db
+            .insert_finding(&input("gate-1", "src/foo.rs", FindingSeverity::Med))
+            .unwrap();
+        let b = db
+            .insert_finding(&input("gate-1", "src/bar.rs", FindingSeverity::Med))
+            .unwrap();
+        // Derive the shared prefix from the ids themselves rather than
+        // assuming 8 characters: two inserts straddling a timestamp
+        // rollover would share fewer, and the assumption would flake.
+        let prefix: String =
+            a.id.chars()
+                .zip(b.id.chars())
+                .take_while(|(x, y)| x == y)
+                .map(|(x, _)| x)
+                .collect();
+        assert!(
+            !prefix.is_empty(),
+            "back-to-back UUIDv7 ids must share a leading timestamp run"
+        );
+
+        let matches = db.find_findings_by_id_prefix(&prefix).unwrap();
+        assert_eq!(matches.len(), 2, "both findings must come back");
+        let mut expected = vec![a.id, b.id];
+        expected.sort();
+        assert_eq!(
+            matches.iter().map(|f| f.id.clone()).collect::<Vec<_>>(),
+            expected
+        );
+        // Whole rows, not bare ids -- the caller's ambiguity error needs
+        // file:line to be choosable.
+        assert!(matches.iter().any(|f| f.file == "src/foo.rs"));
+        assert!(matches.iter().any(|f| f.file == "src/bar.rs"));
+    }
+
+    /// #840 review finding: these prefix paths exist for HAND-TYPED input,
+    /// and an unescaped `_` matches any single character under LIKE. A typo
+    /// that happened to match exactly one row would resolve and then be
+    /// dispositioned -- a state change on a row nobody named.
+    #[test]
+    fn id_prefix_treats_like_wildcards_as_literal_characters() {
+        let db = test_db();
+        let a = db
+            .insert_finding(&input("gate-1", "src/foo.rs", FindingSeverity::Med))
+            .unwrap();
+
+        // `_` as a wildcard would match the real id at that position; as a
+        // literal it matches nothing, because UUIDs carry no underscores.
+        let mut wild: String = a.id.chars().take(7).collect();
+        wild.push('_');
+        assert!(
+            db.find_findings_by_id_prefix(&wild).unwrap().is_empty(),
+            "underscore must be literal, not a single-character wildcard"
+        );
+
+        // `%` likewise: as a wildcard it would match every row.
+        assert!(
+            db.find_findings_by_id_prefix("%").unwrap().is_empty(),
+            "percent must be literal, not a match-everything wildcard"
+        );
+
+        // The honest prefix still resolves, so the escaping did not break
+        // the path it protects.
+        let real: String = a.id.chars().take(8).collect();
+        assert_eq!(db.find_findings_by_id_prefix(&real).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn find_findings_by_id_prefix_is_anchored_not_a_substring_search() {
+        let db = test_db();
+        let row = db
+            .insert_finding(&input("gate-1", "src/foo.rs", FindingSeverity::Med))
+            .unwrap();
+        let middle: String = row.id.chars().skip(4).take(8).collect();
+        assert!(
+            db.find_findings_by_id_prefix(&middle).unwrap().is_empty(),
+            "a mid-id fragment must not match; only a leading prefix does"
+        );
+        assert!(
+            db.find_findings_by_id_prefix("no-such-id")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn dispose_finding_matches_the_id_exactly() {
+        // Prefix acceptance is the CLI resolver's job (see
+        // `cli::verify::resolve_finding_id`); this layer stays exact so the
+        // internal callers holding full ids cannot resolve fuzzily.
+        let db = test_db();
+        let row = db
+            .insert_finding(&input("gate-1", "src/foo.rs", FindingSeverity::Med))
+            .unwrap();
+
+        let prefix: String = row.id.chars().take(8).collect();
+        let err = db.dispose_finding(&prefix, "x").unwrap_err();
+        assert!(
+            matches!(err, LegionError::FindingNotFound(_)),
+            "expected FindingNotFound for a prefix, got {err:?}"
+        );
+
+        let disposed = db
+            .dispose_finding(&row.id, "won't fix: intentional")
+            .unwrap();
+        assert_eq!(disposed.status, FindingStatus::Dispositioned);
+        assert_eq!(
+            disposed.disposition_reason.as_deref(),
+            Some("won't fix: intentional")
+        );
     }
 
     #[test]

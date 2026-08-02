@@ -226,6 +226,30 @@ impl Database {
         }
     }
 
+    /// Every gate row whose id STARTS WITH `prefix`, ordered by id (#840).
+    /// Anchored prefix, never a substring search; returns whole rows so the
+    /// caller's ambiguity error can name each candidate's skill and commit.
+    /// Mirror of `find_findings_by_id_prefix` -- the two are deliberately
+    /// not shared, since a helper taking a caller-supplied table name is a
+    /// SQL-injection shape this codebase should not introduce for six lines.
+    pub fn find_quality_gates_by_id_prefix(&self, prefix: &str) -> Result<Vec<QualityGateRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, branch, commit_hash, skill, result, findings_count, details, \
+                    created_at, provenance, voided_at, void_reason, superseded_by, base \
+             FROM quality_gates \
+             WHERE id LIKE ?1 || '%' ESCAPE '\\' ORDER BY id",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![super::findings::escape_like_prefix(prefix)],
+            Self::row_to_gate,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(LegionError::Database)?);
+        }
+        Ok(out)
+    }
+
     /// Void a gate row: mark it `voided_at`/`void_reason` so a known-false
     /// verdict is retired without deleting history (#780). Optionally names
     /// the row that supersedes it -- typically a re-laid genuine row from a
@@ -239,7 +263,9 @@ impl Database {
     ///
     /// Errors with `LegionError::QualityGateNotFound` when `id` does not
     /// match any row -- voiding a typo'd id must fail loudly, not silently
-    /// no-op.
+    /// no-op. `id` is matched EXACTLY; prefix acceptance lives in the CLI
+    /// arm (`crate::cli::verify::resolve_gate_id`), for the same reason as
+    /// `dispose_finding` (#840).
     pub fn void_quality_gate(
         &self,
         id: &str,

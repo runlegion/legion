@@ -561,7 +561,8 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
 
         QualityGateAction::FindingDisposition { id, reason } => {
             let database = open_db()?;
-            let finding = database.dispose_finding(&id, &reason)?;
+            let full_id = resolve_finding_id(&database, &id)?;
+            let finding = database.dispose_finding(&full_id, &reason)?;
             println!(
                 "[legion] dispositioned finding {} ({}): {}",
                 finding.id,
@@ -616,7 +617,8 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             superseded_by,
         } => {
             let database = open_db()?;
-            let row = database.void_quality_gate(&id, &reason, superseded_by.as_deref())?;
+            let full_id = resolve_gate_id(&database, &id)?;
+            let row = database.void_quality_gate(&full_id, &reason, superseded_by.as_deref())?;
             println!(
                 "[legion] voided gate {} (skill '{}', commit {}): {}",
                 row.id, row.skill, row.commit_hash, reason
@@ -659,6 +661,68 @@ fn file_loc(file: &str, line: Option<impl std::fmt::Display>) -> String {
     match line {
         Some(l) => format!("{file}:{l}"),
         None => file.to_owned(),
+    }
+}
+
+/// Resolve a finding id given in full OR as an unambiguous prefix (#840).
+///
+/// Convenience, not the fix: the fix is that `finding-list` prints the whole
+/// id, so a copied id resolves on the exact-match path below and never
+/// reaches the prefix query. This layer only exists so a hand-typed short id
+/// still works when it happens to be unique.
+///
+/// Exact match is tried FIRST, so a full id that happens to be a prefix of a
+/// longer one resolves to itself. Not reachable with uniform-length UUIDv7
+/// ids today, but the rule must not depend on that staying true.
+///
+/// More than one match is an error naming every candidate with its
+/// `file:line`, never a silent pick -- disposition is a state change, and
+/// retiring the wrong finding is worse than making the caller disambiguate.
+/// Ambiguity must NOT collapse into `FindingNotFound`: telling a caller that
+/// an id which does exist was not found is the exact defect #840 closes, and
+/// reproducing it one layer up would not be a fix.
+fn resolve_finding_id(database: &db::Database, id: &str) -> error::Result<String> {
+    if database.get_finding_by_id(id)?.is_some() {
+        return Ok(id.to_owned());
+    }
+    let mut matches = database.find_findings_by_id_prefix(id)?;
+    match matches.len() {
+        0 => Err(error::LegionError::FindingNotFound(id.to_owned())),
+        1 => Ok(matches.remove(0).id),
+        _ => Err(error::LegionError::FindingIdAmbiguous {
+            prefix: id.to_owned(),
+            candidates: matches
+                .iter()
+                .map(|f| format!("{}  {}", f.id, file_loc(&f.file, f.line)))
+                .collect(),
+        }),
+    }
+}
+
+/// Resolve a gate id given in full OR as an unambiguous prefix (#840).
+/// Mirrors `resolve_finding_id`; candidates are named with the skill and
+/// commit `quality-gate list` already shows, since gate ids collide the same
+/// way finding ids do -- plus `created_at`, because re-running a skill on one
+/// commit is routine and leaves rows whose skill AND commit are identical.
+/// A candidate list nobody can choose from is the same dead end as no list.
+fn resolve_gate_id(database: &db::Database, id: &str) -> error::Result<String> {
+    if database.get_quality_gate_by_id(id)?.is_some() {
+        return Ok(id.to_owned());
+    }
+    let mut matches = database.find_quality_gates_by_id_prefix(id)?;
+    match matches.len() {
+        0 => Err(error::LegionError::QualityGateNotFound(id.to_owned())),
+        1 => Ok(matches.remove(0).id),
+        _ => Err(error::LegionError::QualityGateIdAmbiguous {
+            prefix: id.to_owned(),
+            candidates: matches
+                .iter()
+                .map(|g| {
+                    let commit: String = g.commit_hash.chars().take(8).collect();
+                    format!("{}  {}  {}  {}", g.id, g.skill, commit, g.created_at)
+                })
+                .collect(),
+        }),
     }
 }
 
@@ -842,40 +906,55 @@ fn persist_raw_findings(
 }
 
 /// Print finding rows as a human-readable table to stdout (#773 AC4 audit
-/// surface). Columns: id (first 8 chars), branch, skill, file:line,
-/// severity, status, created_at. An empty slice prints nothing.
+/// surface). Columns: id (full), branch, skill, file:line, severity, status,
+/// created (date). An empty slice prints nothing.
+///
+/// THE ID IS PRINTED IN FULL, and no truncation width may be reintroduced
+/// (#840). legion ids are UUIDv7: the leading 48 bits are a millisecond
+/// timestamp and, for ids minted inside one millisecond, the random block is
+/// held fixed too -- a live gate run put 7 findings behind a shared 24-char
+/// prefix. So 12, 16 and 20 are all still ambiguous, and how deep the
+/// collision runs is set by insert speed, meaning it gets WORSE on faster
+/// hardware, not better. Computing a width from the displayed rows fails for
+/// a subtler reason: `finding-list` filters by branch/skill/status while
+/// `resolve_finding_id` matches the WHOLE table, so a prefix unique among
+/// the rows shown can still be ambiguous against a row the filter hid.
+/// Printing all 36 characters is the only width that is correct by
+/// construction. CREATED gives up its wall-clock time to pay for it -- rows
+/// are already newest-first and `--json` carries the full timestamp.
 fn print_findings_table(rows: &[QualityGateFinding]) {
     if rows.is_empty() {
         return;
     }
     println!(
-        "{:<8}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  CREATED",
+        "{:<36}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  CREATED",
         "ID", "BRANCH", "SKILL", "FILE", "SEV", "STATUS"
     );
-    println!("{}", "-".repeat(130));
+    println!("{}", "-".repeat(142));
     for row in rows {
-        let id_short: String = row.id.chars().take(8).collect();
         let branch_trunc: String = row.branch.chars().take(20).collect();
         let skill_trunc: String = row.skill.chars().take(16).collect();
         let file_trunc: String = file_loc(&row.file, row.line).chars().take(30).collect();
+        let created_date: String = row.created_at.chars().take(10).collect();
         println!(
-            "{:<8}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  {}",
-            id_short,
+            "{:<36}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  {}",
+            row.id,
             branch_trunc,
             skill_trunc,
             file_trunc,
             row.severity.as_str(),
             row.status.as_str(),
-            row.created_at,
+            created_date,
         );
     }
 }
 
 /// Print gate rows as a human-readable table to stdout.
 ///
-/// Columns: id (first 8 chars), branch, commit (first 8 chars), skill,
-/// result, findings, provenance, void, created_at. An empty slice prints
-/// nothing.
+/// Columns: id (full), branch, commit (first 8 chars), skill, result,
+/// findings, provenance, void, created (date). An empty slice prints
+/// nothing. The id is printed in full for the same reason as
+/// `print_findings_table` -- `void --id` consumes what this prints.
 ///
 /// PROVENANCE and VOID surface #780's audit distinction on the table a human
 /// actually reads by default: PROVENANCE separates a structurally VALIDATED
@@ -890,19 +969,19 @@ fn print_gate_table(rows: &[QualityGateRow]) {
         return;
     }
     println!(
-        "{:<8}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {:<9}  {:<4}  CREATED",
+        "{:<36}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {:<9}  {:<4}  CREATED",
         "ID", "BRANCH", "COMMIT", "SKILL", "RESULT", "FINDINGS", "PROVENANCE", "VOID"
     );
-    println!("{}", "-".repeat(130));
+    println!("{}", "-".repeat(139));
     for row in rows {
-        let id_short: String = row.id.chars().take(8).collect();
         let branch_trunc: String = row.branch.chars().take(20).collect();
         let commit_short: String = row.commit_hash.chars().take(8).collect();
         let skill_trunc: String = row.skill.chars().take(22).collect();
         let void_marker = if row.voided_at.is_some() { "VOID" } else { "-" };
+        let created_date: String = row.created_at.chars().take(10).collect();
         println!(
-            "{:<8}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {:<9}  {:<4}  {}",
-            id_short,
+            "{:<36}  {:<20}  {:<8}  {:<22}  {:<6}  {:>8}  {:<9}  {:<4}  {}",
+            row.id,
             branch_trunc,
             commit_short,
             skill_trunc,
@@ -910,7 +989,7 @@ fn print_gate_table(rows: &[QualityGateRow]) {
             row.findings_count,
             row.provenance.as_str(),
             void_marker,
-            row.created_at,
+            created_date,
         );
     }
 }
@@ -1194,6 +1273,185 @@ mod tests {
     use crate::db::testutil::test_db;
     use crate::documents::DocumentMeta;
     use crate::kanban::{Card, CardStatus, Priority};
+
+    // --- #840: the printed id must be usable by the consuming verb --------
+
+    fn finding_input<'a>(gate_id: &'a str, file: &'a str) -> NewFindingInput<'a> {
+        NewFindingInput {
+            gate_id,
+            branch: "feat/x",
+            skill: "legion-simplify",
+            origin_commit: "commit-a",
+            file,
+            line: Some(42),
+            severity: FindingSeverity::Med,
+            summary: "duplicate logic in two match arms",
+        }
+    }
+
+    fn gate_input<'a>(skill: &'a str, commit: &'a str) -> QualityGateInput<'a> {
+        QualityGateInput {
+            branch: "feat/x",
+            commit_hash: commit,
+            skill,
+            result: GateResult::Issues,
+            findings_count: 1,
+            details: None,
+            provenance: GateProvenance::Validated,
+            base: None,
+        }
+    }
+
+    #[test]
+    fn resolve_finding_id_takes_a_full_id_and_an_unambiguous_prefix() {
+        let db = test_db();
+        let row = db
+            .insert_finding(&finding_input("gate-1", "src/foo.rs"))
+            .unwrap();
+
+        // The full id -- what the table now prints -- is the exact path.
+        assert_eq!(resolve_finding_id(&db, &row.id).unwrap(), row.id);
+        // A hand-typed short id still works while it is unique.
+        let prefix: String = row.id.chars().take(8).collect();
+        assert_eq!(resolve_finding_id(&db, &prefix).unwrap(), row.id);
+    }
+
+    #[test]
+    fn resolve_finding_id_refuses_a_shared_prefix_naming_choosable_candidates() {
+        let db = test_db();
+        let a = db
+            .insert_finding(&finding_input("gate-1", "src/foo.rs"))
+            .unwrap();
+        let b = db
+            .insert_finding(&finding_input("gate-1", "src/bar.rs"))
+            .unwrap();
+
+        // The shingle case: two findings persisted by one gate run. UUIDv7's
+        // leading hex is a millisecond timestamp, so the 8 characters the
+        // table used to print collide.
+        let prefix: String = a.id.chars().take(8).collect();
+        assert_eq!(
+            prefix,
+            b.id.chars().take(8).collect::<String>(),
+            "two findings from one gate run must share their leading 8 chars"
+        );
+
+        let err = resolve_finding_id(&db, &prefix).unwrap_err();
+        assert!(
+            matches!(err, error::LegionError::FindingIdAmbiguous { .. }),
+            "ambiguity must not collapse into not-found: got {err:?}"
+        );
+        // The candidate list has to be CHOOSABLE, not just present: full ids
+        // plus the file:line the caller already knows. Ids alone would be
+        // near-identical UUIDs and no help at all.
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&a.id) && msg.contains(&b.id),
+            "missing full ids: {msg}"
+        );
+        assert!(
+            msg.contains("src/foo.rs:42") && msg.contains("src/bar.rs:42"),
+            "candidates must carry file:line: {msg}"
+        );
+
+        // The refused call changed nothing, and each full id still works.
+        assert_eq!(
+            db.get_finding_by_id(&a.id).unwrap().unwrap().status,
+            FindingStatus::Pending
+        );
+        assert_eq!(
+            db.get_finding_by_id(&b.id).unwrap().unwrap().status,
+            FindingStatus::Pending
+        );
+        for id in [&a.id, &b.id] {
+            let full = resolve_finding_id(&db, id).unwrap();
+            let disposed = db.dispose_finding(&full, "won't fix: intentional").unwrap();
+            assert_eq!(disposed.status, FindingStatus::Dispositioned);
+        }
+    }
+
+    #[test]
+    fn resolve_finding_id_unknown_reports_not_found_naming_json() {
+        let db = test_db();
+        db.insert_finding(&finding_input("gate-1", "src/foo.rs"))
+            .unwrap();
+        let err = resolve_finding_id(&db, "deadbeef").unwrap_err();
+        assert!(
+            matches!(err, error::LegionError::FindingNotFound(_)),
+            "expected FindingNotFound, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("--json"),
+            "the escape hatch has to be named where the caller is stuck: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_gate_id_takes_a_prefix_and_refuses_ambiguity() {
+        let db = test_db();
+        let a = db
+            .record_quality_gate(&gate_input("legion-simplify", "commit-a"))
+            .unwrap();
+        let b = db
+            .record_quality_gate(&gate_input("legion-review", "commit-b"))
+            .unwrap();
+
+        assert_eq!(resolve_gate_id(&db, &a.id).unwrap(), a.id);
+
+        let prefix: String = a.id.chars().take(8).collect();
+        let err = resolve_gate_id(&db, &prefix).unwrap_err();
+        assert!(
+            matches!(err, error::LegionError::QualityGateIdAmbiguous { .. }),
+            "expected QualityGateIdAmbiguous, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&a.id) && msg.contains(&b.id),
+            "missing full ids: {msg}"
+        );
+        assert!(
+            msg.contains("legion-simplify") && msg.contains("legion-review"),
+            "gate candidates must carry their skill: {msg}"
+        );
+        assert!(
+            msg.contains("commit-a") && msg.contains("commit-b") && msg.contains(&a.created_at),
+            "gate candidates must carry commit and created_at: {msg}"
+        );
+
+        // The shortest prefix that separates the two rows is unique by
+        // construction, so it must resolve rather than error.
+        let unique_len =
+            a.id.chars()
+                .zip(b.id.chars())
+                .take_while(|(x, y)| x == y)
+                .count()
+                + 1;
+        let unique: String = a.id.chars().take(unique_len).collect();
+        assert_eq!(resolve_gate_id(&db, &unique).unwrap(), a.id);
+
+        // And the resolved id is what void consumes.
+        let voided = db
+            .void_quality_gate(
+                &resolve_gate_id(&db, &unique).unwrap(),
+                "false verdict",
+                None,
+            )
+            .unwrap();
+        assert!(voided.voided_at.is_some());
+    }
+
+    #[test]
+    fn resolve_gate_id_unknown_reports_not_found_naming_json() {
+        let db = test_db();
+        db.record_quality_gate(&gate_input("legion-simplify", "commit-a"))
+            .unwrap();
+        let err = resolve_gate_id(&db, "deadbeef").unwrap_err();
+        assert!(
+            matches!(err, error::LegionError::QualityGateNotFound(_)),
+            "expected QualityGateNotFound, got {err:?}"
+        );
+        assert!(err.to_string().contains("--json"), "{err}");
+    }
 
     fn make_card(doc_id: Option<&str>, acceptance: Option<&str>) -> Card {
         Card {
