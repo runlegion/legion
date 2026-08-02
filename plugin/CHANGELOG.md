@@ -1,5 +1,204 @@
 # Legion Changelog
 
+## 0.25.0
+
+The enforcement-coverage release. Seven PRs since 0.24.0, all from one investigation
+into what legion's blocking and measuring layers could actually see. Most of them are
+the same defect shape: an enforcement point or a metric that could not observe the
+thing it was named for, so its silence read as coverage. A raw `git push` was the last
+write path to origin that wrote no audit row; searches spelled as git subcommands
+(`git grep`, `git log -S`) slipped past both the deny list and the hook because every
+enforcement point matched on the leading binary; a script that walks a tree evades all
+of them by construction, since no first-token rule can tell what `python foo.py` does;
+the calibration ledger stamped every prediction with a model id nothing had set since
+the harness changed its default; and a test asserting
+`contains("/legion-simplify") || contains("legion-simplify")` stayed green through the
+rename in both directions, because the second branch matches either spelling. The two
+outliers are a printed id the verb consuming it refused to accept, and a `gh` denial
+that named 8 verbs of a 40-verb surface. Minor release: two net-new PreToolUse
+interception points (`no-git-push.sh`, and `pre-script-search.sh` -- the first legion
+hook to inspect Write/Edit content rather than a Bash command line), and a plain
+`git push` now resolves to `legion push` instead of running as typed. No schema
+migration and no wire-format change; the one CLI signature that moved
+(`legion uncertainty emit --model`) only widened, from required to optional.
+
+### New
+
+- **`git push` routes through `legion push` -- the last unaudited path to origin
+  closes** (PR #834, #827): `legion push` has existed since #791 so that the
+  push-from-own-checkout doctrine is enforced by the tool rather than by agent
+  discipline -- the pre-push hook reviews the CWD's checked-out branch, not the ref
+  being pushed, so a push issued from the wrong checkout silently reviews the wrong
+  diff. Adoption of that command was itself left to agent discipline: nothing
+  intercepted a raw `git push`, which writes no audit row at all, so the trail was only
+  as complete as every agent remembering. The new `no-git-push.sh` PreToolUse hook has
+  three outcomes. A plain push is REWRITTEN to `legion push --repo <r> [--branch <b>]`
+  via `updatedInput`, announced through `additionalContext` rather than swapped
+  silently -- a silent rewrite teaches nothing and the agent re-derives the same habit
+  next session. Anything `legion push` cannot express (force in any spelling, a refspec,
+  `--delete`, `--tags`, `--mirror`, `--prune`, `--all`) is DENIED naming the offending
+  flag, never rewritten, because translating it would drop the flag and run something
+  the agent did not ask for. Everything else passes through, fail-open. No recursion
+  guard is needed -- hooks fire on the agent's Bash tool calls, not on child processes,
+  so `legion push`'s own internal `git push` never re-enters; that is precisely why this
+  is a hook and not a PATH shim, since legion is itself a git consumer and a shim would
+  recurse. Parsing is argv-style with whole-token comparisons, per the
+  `pre-whoami-rewrite.sh` scar (019e2a5a), whose greedy `sed` matched the LAST `--repo`
+  in a command and let `--text` content corrupt a rewrite. The PR also adds `push` to
+  `legion audit --action`'s documented verb list: the rows have existed since #791, the
+  verb did not, so anyone auditing by the documented list never looked for them.
+- **`pre-script-search.sh` -- a script written to search gets pointed at sym** (PR #838,
+  #837): observed 2026-07-31, the rafters agent wrote a Python script to get a directory
+  tree while `legion sym tree --repo rafters` answered that directly, rafters was
+  legion-covered, and its index had been rebuilt 42 seconds earlier -- the capability was
+  live and adjacent, and nothing connected the agent to it. No existing enforcement point
+  can catch this, because every one classifies by the leading binary
+  (`grep|rg|ag|ack|find|fd`, plus the git shapes from #829) and `python tree.py` leads
+  with `python`. So the hook watches two moments instead of one: Write/Edit inspects the
+  content being written, which is the earlier and more useful catch since the nudge lands
+  before the script exists, and Bash inspects inline `-c`/`-e` code. A script invoked by
+  path carries no clue about its contents and is deliberately not opened at hook time.
+  Three shapes, one command each and never a menu (#828's lesson): a directory walk
+  routes to `sym tree`, a filename or glob match to `sym etc find-file`, a text search
+  to `sym etc find-content`. It INJECTS and never denies -- a script that searches may
+  also do real work this cannot replace, and refusing real work to prevent a redundant
+  listing is the worse trade, the same posture #829 takes for `git log --grep`.
+  Detection is heuristic and biased toward missing rather than over-firing, with
+  pass-through assertions covering the cases an over-eager `glob`/`open` matcher would
+  wrongly catch, such as structured JSON editing. The hook also refuses to fire in an
+  unindexed repo, since pointing at sym where there is no index is advice the agent
+  cannot take. Every detection writes a telemetry row: this class was a structural
+  blind spot in `etc-summary` (#713), and a metric that cannot see script-shaped
+  searches reads their absence as success.
+
+### Fixed
+
+- **Legion skill invocations carry the `legion:` plugin prefix** (PR #832, #830): Claude
+  Code 2.1.216 restored the plugin prefix on skills that declare a `name:` frontmatter
+  field. All five legion skills declare `name:`, so they moved from `/legion-simplify` to
+  `/legion:legion-simplify` on upgrade -- silently, no error, no deprecation -- and
+  nothing in the repo moved with them. The load-bearing instance was the runtime
+  remediation string in `legion pr create`: an agent blocked by the gate was told to run
+  a command that no longer resolves, at exactly the moment it was stuck. Run hints, skill
+  cross-references, and the published docs all move; the quality-gate DB keys
+  deliberately do not. `src/cli/pr.rs` now pairs `(gate_key, run_hint)` and only the hint
+  carries the prefix, so `get_quality_gate` and `quality-gate record --skill` still
+  resolve on the bare key and gates recorded before this change stay valid. The same PR
+  corrects the issue template's Dev Workflow, which was separately wrong in a way that
+  trapped implementers: step 3 named `/review-pr`, which resolves to nothing, and step 2
+  named `/simplify`, which resolves to the harness skill rather than legion's and
+  therefore records no `legion-simplify` gate -- so an agent following the template was
+  walked into `legion pr create` refusing its own PR. The existing test asserted
+  `contains("/legion-simplify") || contains("legion-simplify")`, whose second branch
+  matches either spelling, so it stayed green through the rename in both directions and
+  never guarded this; three assertions replace it, locking that the bare key appears, the
+  prefixed hint appears, and the bare hint does not.
+- **Searches spelled as git subcommands are detected** (PR #835, #829): both enforcement
+  points matched on the FIRST token only -- `permissions.deny` lists
+  `grep`/`rg`/`find`/`fd`/`ag`/`ack`, and `pre-bash-grep.sh` basenames the leading token
+  against the same set -- so for `git grep foo` the first token is `git` and neither
+  fired. Verified live on 2026-07-30 with the full stack active: `git grep -n`,
+  `git ls-files`, `git log -S` and `git log --grep` all returned results, two of them
+  additionally pre-approved by an operator allow-list entry for `Bash(git log:*)`.
+  The measurement consequence is the worse half: a bypass row is written only when a
+  hook FIRES and the agent escapes via the sentinel, so these searches were not merely
+  unblocked, they were uncounted, and `etc-summary` -- documented as the primary success
+  metric for the sym-etc epic (#704) -- was measuring a subset and reporting it as the
+  whole. `legion_prequery_bash_binary` now walks past git's own global options
+  (`-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace` consume their value) to reach
+  the subcommand, and pattern extraction gets its own git-shaped extractor because the
+  argv position differs per shape: a positional after the subcommand for
+  `grep`/`ls-files`, a flag value for the log predicates, in both the attached (`-Sfoo`)
+  and detached (`-S foo`) spellings. `git log` is classified as a search ONLY when it
+  carries `-S`, `-G`, or `--grep`; every other shape (`--oneline`, `-p`, a bare range)
+  is ordinary history reading and passes through untouched. `git log --grep` searches
+  commit messages, which sym does not index, so it is recognized -- it stops being
+  invisible to telemetry -- but it is explicitly never blocked and never redirected:
+  refusing a query the sanctioned surface structurally cannot answer is the exact
+  failure this ladder exists to avoid. It records its shape and passes through.
+- **`legion uncertainty emit` resolves the producing model instead of defaulting to 4.7**
+  (PR #833, #831): `uncertainty-emit-on-task.sh` read
+  `MODEL="${LEGION_AGENT_MODEL:-claude-opus-4-7}"`, and nothing set that env var, so the
+  default was always what got used. When Claude Code 2.1.219 made Opus 5 the default
+  Opus model, every prediction emitted since that upgrade was stamped `claude-opus-4-7`
+  and cohort-keyed into the 4.7 bucket -- silently, permanently, and in the direction
+  that makes two different models look like one cohort. Calibration is the one dataset
+  whose entire value is that the label matches the producer. Hook payloads carry no model
+  field (PostToolUse gives cwd, tool_name, session_id, stop_hook_active), so resolution
+  moves into the binary, where the DB is: `rate_limit_samples` already persists
+  `(session_id, model)` from the statusline render, and a new
+  `Database::latest_model_for_session` accessor reads the newest non-null model for a
+  session. `--model` and `--model-version` become optional and `--session-id` is added,
+  giving a first-hit-wins order -- explicit `--model`, then the live model for the
+  session, then an explicit `UNKNOWN_MODEL` marker that is deliberately not a plausible
+  model id, because a wrong-but-plausible default pollutes a real cohort and is
+  unfilterable afterwards while an explicit unknown is filterable and honest.
+  `--model-version` is derived from the resolved id via `model_version_from_id` (which
+  refuses to guess on an unrecognised shape) rather than defaulting to the string
+  "unknown" for every row, so `cohort_key`'s version component stops collapsing distinct
+  models into one bucket. The NULL-model skip in the accessor is deliberate: a newer
+  sample carrying no model must not shadow an older one that has it, or a single null
+  render would push a known session onto the unknown marker. Floating aliases in agent
+  frontmatter (`model: opus`) are unaffected -- they follow the harness; a pinned literal
+  id in a hook is the hazard, and the hook now carries a comment saying so.
+- **Printed quality-gate ids are usable by the verbs that consume them** (PR #841, #839,
+  #840): `finding-list` printed an 8-character id and `finding-disposition --id` rejected
+  it, so a recorded finding could not be retired through the documented path. That wedged
+  branches: `--result clean` is refused while a HIGH or MED finding is PENDING and
+  `finding-ack` is LOW-only, so a MED the reviewer legitimately wanted to record as
+  wont-fix had exactly one escape -- touching the flagged file so #773's coarse
+  file-touch rule auto-resolved it. Truncated ids are ambiguous by construction: legion
+  ids are UUIDv7, whose leading 48 bits are a millisecond timestamp, so two findings
+  recorded 18 seconds apart both rendered as `019fb9cf`, and a batch inserted inside one
+  millisecond holds the timestamp and the random block fixed and can share 24 characters
+  -- 12, 16 and 20 are all still ambiguous. The ID column therefore prints the full 36
+  characters unconditionally, with the budget reclaimed from CREATED (now `YYYY-MM-DD`;
+  rows are already `ORDER BY created_at DESC` and the wall-clock time remains in
+  `--json`). The consuming verbs meet it halfway: `finding-disposition --id` and
+  `quality-gate void --id` accept a full id or an unambiguous prefix, exact match winning
+  before prefix matching so a full id that happens to prefix a longer one resolves to
+  itself. More than one match is a distinct error naming every candidate by id AND
+  `file:line` -- never a silent pick, since both verbs are state changes and retiring the
+  wrong row is worse than making the caller disambiguate, and listing seven UUIDs that
+  share 24 leading characters is the same dead end one level down. Prefix resolution
+  stays a CLI-layer convenience so the internal callers that already hold a full id
+  (`batch_ack_low_findings`, `finding_gate::reconcile_pending_findings`) cannot start
+  matching fuzzily by accident. Review hardening: every prefix query runs `ESCAPE '\'`
+  against a prefix passed through `escape_like_prefix`, because `_` is a
+  single-character wildcard under `LIKE` and these paths exist precisely for hand-typed
+  input -- a typo containing `_` that matched exactly one row would have resolved and
+  then retired a row nobody named. `print_gate_table` and `void_quality_gate` carried the
+  identical defect one verb over and are fixed in the same PR; both not-found errors now
+  name `--json` as the recovery path, since that is the only rendering that ever carried
+  a full id.
+
+### Changed
+
+- **`gh` denials translate the command instead of printing a menu** (PR #836, #828): the
+  `no-gh.sh` deny message is the only place the legion work-source surface gets named to
+  an agent mid-task, and it printed a fixed list of 8 verbs against a surface of roughly
+  40 -- with every READ verb missing: `pr view`, `pr checks`, `pr comments`,
+  `pr reviews`, `issue view`. Those are exactly what an agent reaches for when reacting
+  to review feedback or checking CI, so the list was thinnest precisely where it was most
+  needed. `pre-bash-grep.sh` already established the better pattern -- resolve the
+  agent's actual query and hand back the specific answer instead of a catalog -- and this
+  applies it here: `gh pr view 42` now denies with `legion pr view --repo <r> --number 42`
+  and nothing else. An exact redirect also cannot drift into partiality the way an
+  enumeration does, so adding a legion verb no longer silently makes this message wrong.
+  Number extraction reads both the positional (`gh pr view 42`) and the flag form
+  (`--number 42`) and leaves a visible `<n>` placeholder when absent rather than guessing.
+  Unmapped shapes (`gh api`, an unknown verb) point at the GROUP help and invent nothing:
+  a fabricated command is worse than an honest "look here", because the agent runs it and
+  reads the error as legion being broken. The pointer is deliberately the group help
+  rather than a leaf subcommand's, since a leaf documents its own flags and hides its
+  siblings -- the one confusion this surface reproducibly causes, as when a probe agent
+  ran `legion pr list --help` and concluded `legion pr checks` did not exist, for a
+  command named exactly that. Scope honesty: of five probe agents run against this
+  surface, four found the legion commands unprompted by walking `legion --help` ->
+  `legion <group> --help`, including one handed the old 8-verb list. No probe was ever
+  blocked from a capability that exists -- this is a quality fix on a real design defect,
+  not a fix for a demonstrated outage.
+
 ## 0.24.0
 
 The scheduled-wake release. Two PRs since 0.23.0. A kanban card can now be consciously
