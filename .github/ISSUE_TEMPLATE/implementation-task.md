@@ -41,8 +41,8 @@ assignees: ''
 Each step is mandatory. Do not skip steps or combine them.
 
 1. **Build** -- Implement the feature. Write tests alongside code. Run `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check`. All must pass.
-2. **Simplify** -- Run `/simplify` on all changed files. Accept structural improvements, flatten unnecessary abstractions, remove dead code.
-3. **Review** -- Run `/review-pr` which launches parallel review agents (code review, silent failure hunter, type design analysis). Do not create the PR yet.
+2. **Simplify** -- Run `/legion:legion-simplify` on all changed files. Accept structural improvements, flatten unnecessary abstractions, remove dead code. This records the `legion-simplify` gate that `legion pr create` requires; the harness `/simplify` skill is a different tool and records no gate.
+3. **Review** -- Run `/legion:legion-review`, which fans out parallel review dimensions (spec-vs-diff, correctness, quality, security) and adversarially verifies each finding. Do not create the PR yet.
 4. **Fix** -- Address every issue the review found. Re-run tests after fixes.
 5. **PR** -- Create the PR. Reference this issue number.
 

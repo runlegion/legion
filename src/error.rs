@@ -216,7 +216,10 @@ pub enum LegionError {
     #[error("invalid gate provenance: '{0}' (expected 'validated' or 'asserted')")]
     InvalidGateProvenance(String),
 
-    #[error("quality gate row not found: {0}")]
+    #[error(
+        "quality gate row not found: {0} \
+         (`quality-gate list --json` carries the full id)"
+    )]
     QualityGateNotFound(String),
 
     #[error("invalid finding severity: '{0}' (expected 'high', 'med', or 'low')")]
@@ -225,8 +228,43 @@ pub enum LegionError {
     #[error("invalid finding status: '{0}' (expected 'pending', 'resolved', or 'dispositioned')")]
     InvalidFindingStatus(String),
 
-    #[error("quality gate finding not found: {0}")]
+    #[error(
+        "quality gate finding not found: {0} \
+         (`quality-gate finding-list --json` carries the full id)"
+    )]
     FindingNotFound(String),
+
+    /// A partial finding id matched more than one row. Never resolved by
+    /// picking one: disposition is a state change, and silently retiring the
+    /// wrong row is worse than making the caller disambiguate.
+    ///
+    /// Each candidate string carries the full id AND its `file:line`, because
+    /// findings recorded inside one millisecond share their leading 24
+    /// characters -- a list of ids alone would be seven near-identical UUIDs
+    /// the caller still could not choose between, which is the same dead end
+    /// this error exists to end.
+    #[error(
+        "finding id '{prefix}' is ambiguous ({} matches):\n  - {}",
+        .candidates.len(),
+        .candidates.join("\n  - ")
+    )]
+    FindingIdAmbiguous {
+        prefix: String,
+        candidates: Vec<String>,
+    },
+
+    /// A partial gate id matched more than one row. Same rule as
+    /// `FindingIdAmbiguous`; each candidate carries the full id plus its
+    /// skill and commit, the two fields `quality-gate list` already shows.
+    #[error(
+        "gate id '{prefix}' is ambiguous ({} matches):\n  - {}",
+        .candidates.len(),
+        .candidates.join("\n  - ")
+    )]
+    QualityGateIdAmbiguous {
+        prefix: String,
+        candidates: Vec<String>,
+    },
 
     #[error(
         "finding {0} is already RESOLVED (a later commit demonstrably touched the flagged \

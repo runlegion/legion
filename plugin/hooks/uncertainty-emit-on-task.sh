@@ -73,10 +73,27 @@ fi
 # Conservative defaults until #283 wires SCIP features.
 SURFACE="legion.task"
 FEATURE_KEY="task.generic"
-MODEL="${LEGION_AGENT_MODEL:-claude-opus-4-7}"
-MODEL_VERSION="${LEGION_AGENT_MODEL_VERSION:-unknown}"
 CLAIMED_CONFIDENCE="0.5"
 ORPHAN_TTL_DAYS="30"
+
+# Model resolution is the binary's job (#831). This hook has no model on
+# its stdin payload -- PostToolUse carries only cwd/tool_name/session_id --
+# so it passes --session-id and lets `legion uncertainty emit` resolve the
+# live model from the latest statusline sample.
+#
+# DO NOT reintroduce a literal model id here. This line previously read
+# `MODEL="${LEGION_AGENT_MODEL:-claude-opus-4-7}"`; nothing set that env
+# var, so when Claude Code 2.1.219 made Opus 5 the default every prediction
+# was stamped 4.7 and cohort-keyed into the 4.7 bucket. A pinned model id
+# in a hook rots on every harness default-model change, silently, in the
+# direction that makes two models look like one cohort.
+MODEL_ARGS=()
+if [ -n "${LEGION_AGENT_MODEL:-}" ]; then
+  MODEL_ARGS+=(--model "$LEGION_AGENT_MODEL")
+fi
+if [ -n "${LEGION_AGENT_MODEL_VERSION:-}" ]; then
+  MODEL_ARGS+=(--model-version "$LEGION_AGENT_MODEL_VERSION")
+fi
 
 PAYLOAD=$(jq -c -n --arg task_id "$TASK_ID" --arg subject "$SUBJECT" \
   '{task_id: $task_id, subject: $subject}')
@@ -85,8 +102,8 @@ EMIT_OUT=$("$LEGION" uncertainty emit \
   --surface "$SURFACE" \
   --feature-key "$FEATURE_KEY" \
   --input-fingerprint "$FINGERPRINT" \
-  --model "$MODEL" \
-  --model-version "$MODEL_VERSION" \
+  --session-id "$SESSION_ID" \
+  ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
   --claimed-confidence "$CLAIMED_CONFIDENCE" \
   --payload "$PAYLOAD" \
   --orphan-ttl-days "$ORPHAN_TTL_DAYS" 2>/dev/null)

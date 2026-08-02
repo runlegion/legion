@@ -62,6 +62,33 @@ emit_deny() {
   fi
 }
 
+# emit_rewrite CMD CTX [REASON] -- PreToolUse: allow the call but REPLACE
+# the tool's command with CMD via updatedInput (#827).
+#
+# The rewrite is only honest when the translation is LOSSLESS. A caller
+# that would have to drop a flag the target command cannot express must
+# emit_deny instead -- silently running something the agent did not ask
+# for is worse than refusing, because the agent reads the result as the
+# answer to its original question.
+#
+# CTX is mandatory rather than optional on purpose: a silent rewrite
+# teaches nothing, so the agent re-derives the same wrong habit next
+# session. Announcing the translation costs one line and the surface
+# gets learned.
+emit_rewrite() {
+  local cmd="$1" ctx="$2"
+  local reason="${3:-legion rewrote this to its audited equivalent}"
+  jq -n --arg cmd "$cmd" --arg ctx "$ctx" --arg reason "$reason" '{
+    "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "allow",
+      "permissionDecisionReason": $reason,
+      "updatedInput": { "command": $cmd },
+      "additionalContext": $ctx
+    }
+  }'
+}
+
 # emit_block REASON -- top-level decision:block. The documented refusal
 # shape for Stop events (hard gate with the harness 8-block cap as its
 # backstop). Do NOT use for PreToolUse -- that dialect is deprecated

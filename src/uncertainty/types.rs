@@ -394,9 +394,68 @@ pub fn cohort_key(surface: &str, model: &str, model_version: &str, c: Confidence
     )
 }
 
+/// Marker recorded when the producing model cannot be resolved (#831).
+///
+/// Deliberately not a plausible model id. A wrong-but-plausible default
+/// pollutes a real calibration cohort and is unfilterable after the fact;
+/// an explicit marker is filterable and honest about what is not known.
+pub const UNKNOWN_MODEL: &str = "unknown";
+
+/// Derive the `model_version` cohort component from a model id (#831).
+///
+/// `cohort_key` includes the version separately from the model id so a
+/// regression across releases of the same family is visible. Callers that
+/// resolve a model id at runtime have no separate version string to pass,
+/// so derive it: `claude-opus-4-7` -> `4.7`, `claude-opus-5` -> `5`.
+///
+/// Anything not matching the `claude-<family>-<version...>` shape yields
+/// `UNKNOWN_MODEL` rather than a guess, so an unrecognised id lands in a
+/// filterable bucket instead of silently minting a version that does not
+/// correspond to a release.
+pub fn model_version_from_id(model_id: &str) -> String {
+    // Strip the vendor and family prefix, leaving the version segments.
+    let rest = model_id
+        .strip_prefix("claude-")
+        .and_then(|s| s.split_once('-'))
+        .map(|(_family, version)| version);
+
+    match rest {
+        Some(v) if !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '-') => {
+            v.replace('-', ".")
+        }
+        _ => UNKNOWN_MODEL.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_version_derives_from_dashed_id() {
+        assert_eq!(model_version_from_id("claude-opus-4-7"), "4.7");
+        assert_eq!(model_version_from_id("claude-sonnet-4-6"), "4.6");
+    }
+
+    #[test]
+    fn model_version_handles_single_segment_release() {
+        // Opus 5 (CC 2.1.219) has no minor segment -- the shape this
+        // function existed to break on.
+        assert_eq!(model_version_from_id("claude-opus-5"), "5");
+    }
+
+    #[test]
+    fn model_version_refuses_to_guess_on_unrecognised_shape() {
+        // A date-suffixed or vendor-prefixed id is not a version we can
+        // derive; it must land in the filterable bucket, not invent one.
+        assert_eq!(
+            model_version_from_id("claude-haiku-4-5-20251001"),
+            "4.5.20251001"
+        );
+        assert_eq!(model_version_from_id("gpt-4"), UNKNOWN_MODEL);
+        assert_eq!(model_version_from_id("claude-opus"), UNKNOWN_MODEL);
+        assert_eq!(model_version_from_id(""), UNKNOWN_MODEL);
+    }
 
     fn fresh_input() -> PredictionInput {
         PredictionInput {

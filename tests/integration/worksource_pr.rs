@@ -1075,13 +1075,22 @@ fn pr_create_refuses_without_quality_gate() {
         "--title",
         "My PR",
     ]));
+    // The gate KEY stays bare -- it is the `quality_gates.skill` value written by
+    // `legion quality-gate record` and read by `get_quality_gate`.
     assert!(
-        stderr.contains("no clean legion-simplify gate") || stderr.contains("legion-simplify"),
-        "error should mention legion-simplify gate, got: {stderr}"
+        stderr.contains("no clean legion-simplify gate"),
+        "error should name the bare gate key, got: {stderr}"
+    );
+    // The invocation HINT carries the `legion:` plugin prefix. Claude Code 2.1.216
+    // restored the prefix on plugin skills declaring `name:` frontmatter, so the bare
+    // form no longer resolves and must not regress back into the hint.
+    assert!(
+        stderr.contains("/legion:legion-simplify"),
+        "error should guide toward the prefixed skill invocation, got: {stderr}"
     );
     assert!(
-        stderr.contains("/legion-simplify") || stderr.contains("legion-simplify"),
-        "error should guide toward the skill, got: {stderr}"
+        !stderr.contains("Run /legion-simplify"),
+        "run hint must not use the bare skill name, which no longer resolves: {stderr}"
     );
 }
 

@@ -66,9 +66,29 @@ if [ -z "$BINARY" ]; then
 fi
 
 # Extract the pattern. Empty extraction means we couldn't isolate one;
-# pass through rather than guessing.
-PATTERN=$(legion_prequery_extract_pattern "$COMMAND" "$BINARY")
+# pass through rather than guessing. Git-spelled searches (#829) put the
+# pattern in a different argv position per shape, so they use their own
+# extractor.
+if legion_prequery_is_git_shape "$BINARY"; then
+  PATTERN=$(legion_prequery_git_pattern "$COMMAND" "$BINARY")
+else
+  PATTERN=$(legion_prequery_extract_pattern "$COMMAND" "$BINARY")
+fi
 if [ -z "$PATTERN" ]; then
+  exit 0
+fi
+
+# `git log --grep` searches COMMIT MESSAGES, which sym does not index.
+# Recognizing it matters -- an unrecognized shape is invisible to the
+# bypass telemetry that grades whether the sanctioned surface answers
+# what agents actually ask (#713/#704). But blocking it, or redirecting
+# it to a sym command that structurally cannot serve it, is the exact
+# failure this ladder exists to avoid: refusing a query the sanctioned
+# surface has no answer for. Record the shape, then pass through.
+if [ "$BINARY" = "git log --grep" ]; then
+  legion_prequery_record_bypass \
+    "$REPO" "$SESSION_ID" "Bash" "$PATTERN" "git-log-grep: commit messages are not sym-indexed" \
+    "false" "false"
   exit 0
 fi
 

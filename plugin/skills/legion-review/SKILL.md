@@ -6,7 +6,7 @@ description: |
   security), adversarially verifies every HIGH/MED finding before reporting it, and records
   the result via `legion quality-gate record --skill legion-review` so downstream gates can
   require a clean review on HEAD. Run after `legion pr create`, before team sign-off and
-  /legion-verify.
+  /legion:legion-verify.
 version: 1.0.0
 user-invocable: true
 allowed-tools: Bash, Read, Task
@@ -112,9 +112,9 @@ no code is written or fixed by this skill -- the fix loop belongs to the impleme
 
 ## Relationship to the other gates
 
-- `/legion-simplify` reviews the diff's structure before the PR exists; this skill reviews
-  the PR against its spec after it exists.
+- `/legion:legion-simplify` reviews the diff's structure before the PR exists; this skill
+  reviews the PR against its spec after it exists.
 - `legion pr write-check` validates the implementer's own claim mapping; this skill validates
   the claims themselves against the diff, independently.
-- `/legion-verify` is the per-criterion evidence gate before Done; run it after this review
-  is clean and fixes (if any) have landed.
+- `/legion:legion-verify` is the per-criterion evidence gate before Done; run it after this
+  review is clean and fixes (if any) have landed.
