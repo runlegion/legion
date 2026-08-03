@@ -265,9 +265,16 @@ fn head_sha(checkout: &Path) -> error::Result<Option<String>> {
     }
 }
 
-/// First 8 characters of a commit hash, for the confirmation line.
+/// First 8 characters of a commit hash, for the confirmation line. Shorter
+/// input (should not happen for a real SHA) is returned as-is.
+///
+/// `get` (byte-index-checked) rather than a raw slice, matching the same
+/// choice and the same reasoning as `cli::index_cmd`'s 7-char display form:
+/// a real SHA is all-ASCII hex so byte 8 is always a char boundary, but the
+/// value arrives via `from_utf8_lossy` on git's stdout, and no code path
+/// here may assume it cannot panic.
 fn short_sha(sha: &str) -> &str {
-    &sha[..sha.len().min(8)]
+    sha.get(..8).unwrap_or(sha)
 }
 
 /// Quality-gate verdicts for the pre-commit HEAD, as the `gates` object on
