@@ -518,3 +518,49 @@ fn commit_underlying_git_failure_surfaces_and_audits() {
         "got: {audit_out}"
     );
 }
+
+/// The preflight must fire for every spelling git accepts as true, not just
+/// the literal `true`. `commit.gpgsign = yes` is valid git config; reading
+/// it as a raw string makes it read as "off", skips the preflight, and then
+/// signs for real during the commit -- surfacing the exact cryptic failure
+/// the preflight exists to replace, with nothing erroring to say why.
+#[cfg(unix)]
+#[test]
+fn commit_preflight_fires_for_every_truthy_gpgsign_spelling() {
+    let _guard = RealRepoConfigGuard::new();
+    for spelling in ["yes", "on", "1", "True"] {
+        let repo = setup_repo_with_staged_change();
+        let rp = repo.path();
+        run_git_fixture(rp, &["config", "commit.gpgsign", spelling]);
+        run_git_fixture(rp, &["config", "gpg.format", "ssh"]);
+        run_git_fixture(rp, &["config", "gpg.ssh.program", "/usr/bin/false"]);
+        run_git_fixture(
+            rp,
+            &[
+                "config",
+                "user.signingkey",
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyForFixtureUseOnly000000000",
+            ],
+        );
+        let data_dir = tempfile::tempdir().unwrap();
+        let before = head_sha(rp);
+
+        let (_stdout, stderr) = run_fail(commit_cmd(data_dir.path(), rp).args([
+            "commit",
+            "--repo",
+            "test-agent",
+            "--message",
+            GOOD_MESSAGE,
+        ]));
+
+        assert!(
+            stderr.contains("signing unavailable"),
+            "commit.gpgsign={spelling} must preflight, got: {stderr}"
+        );
+        assert_eq!(
+            before,
+            head_sha(rp),
+            "commit.gpgsign={spelling} must refuse before committing"
+        );
+    }
+}

@@ -326,6 +326,14 @@ fn gate_state(database: &db::Database, pre_sha: Option<&str>) -> serde_json::Val
 /// ref, index, or working-tree file, which is what "before touching
 /// anything" means in the sense that matters. `git commit --dry-run` is not
 /// an option: it never reaches the signer.
+///
+/// Accepted cost, stated here so it is not a mystery: an INTERACTIVE signer
+/// is invoked twice per commit -- once by this probe, once by the real
+/// commit -- so a pinentry prompt, a 1Password confirm dialog, or a
+/// touch-required hardware key asks twice. That is inherent to preflighting
+/// at all; you cannot ask a signer whether it can sign without asking it to
+/// sign. Invisible with a cached agent (the agent-driven case this verb is
+/// built for), a real per-commit tax otherwise.
 fn preflight_signer(checkout: &Path) -> error::Result<()> {
     if !signing_enabled(checkout) {
         return Ok(());
@@ -359,8 +367,17 @@ fn probe_signer(checkout: &Path, tree: &str, program: &str) -> error::Result<()>
 /// Whether `commit.gpgsign` is on. An absent key exits non-zero, which is
 /// "off" -- there is no signer to preflight, and this verb never turns
 /// signing on or off, it only reports what is configured.
+///
+/// Read as a bool through git rather than string-compared against "true":
+/// git's boolean parser also accepts `yes`, `on`, `1`, any case variant, and
+/// the bare-key form (`[commit]` / `gpgsign` with no value). Comparing the
+/// raw string means every one of those spellings reads as "off", skips the
+/// preflight, and then signs for real during the commit -- surfacing exactly
+/// the cryptic signer failure this verb exists to replace, with nothing
+/// erroring to say why. Same reasoning that routes the probe through
+/// `commit-tree`: delegate to git's own parser instead of reimplementing it.
 fn signing_enabled(checkout: &Path) -> bool {
-    git_config(checkout, "commit.gpgsign").as_deref() == Some("true")
+    git_config_bool(checkout, "commit.gpgsign") == Some(true)
 }
 
 /// Name of the program git would invoke to sign, for the error message.
@@ -377,14 +394,30 @@ fn signer_program(checkout: &Path) -> String {
     git_config(checkout, key).unwrap_or_else(|| default.to_string())
 }
 
-/// Read one git config value, `None` when unset or unreadable.
-/// `--type=bool` is not used: `signing_enabled` compares against "true" and
-/// the other reads are strings, so one accessor covers both.
+/// Read one git config value as a string, `None` when unset or unreadable.
+/// Used for the signer-program reads, which are genuinely strings.
 fn git_config(checkout: &Path, key: &str) -> Option<String> {
+    git_config_raw(checkout, key, &[])
+}
+
+/// Read one git config value as a boolean, letting git canonicalize it.
+/// `None` when unset or unreadable, so a caller can tell "off" from
+/// "no such key" if it ever needs to. See [`signing_enabled`] for why this
+/// is not a string comparison.
+fn git_config_bool(checkout: &Path, key: &str) -> Option<bool> {
+    Some(git_config_raw(checkout, key, &["--type", "bool"])? == "true")
+}
+
+/// Shared body of the two accessors above. `extra` carries the `--type`
+/// flag for the bool read and is empty for the string reads, which is the
+/// only way the two differ.
+fn git_config_raw(checkout: &Path, key: &str, extra: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(checkout)
-        .args(["config", "--get", key])
+        .args(["config", "--get"])
+        .args(extra)
+        .arg(key)
         .output()
         .ok()?;
     if !output.status.success() {
