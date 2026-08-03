@@ -284,10 +284,13 @@ pub enum LegionError {
     #[error("git push failed: {stderr}")]
     PushFailed { stderr: String },
 
-    /// `legion commit` (#854) declined before running git: bad arguments,
-    /// no git repo, or a message-convention violation. The reason is always
-    /// specific enough to fix without a second look at the docs -- a
-    /// refusal the caller cannot act on is just a failure.
+    /// `legion commit` (#854) declined before the commit ran: bad
+    /// arguments, no git repo, a message-convention violation, or git
+    /// itself refusing the signer probe (an unresolvable committer identity
+    /// is the ordinary way -- git dies there without reaching the signer,
+    /// which makes it a refusal rather than a signing failure). The reason
+    /// is always specific enough to fix without a second look at the docs --
+    /// a refusal the caller cannot act on is just a failure.
     #[error("refusing to commit: {reason}")]
     CommitRefused { reason: String },
 

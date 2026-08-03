@@ -19,8 +19,8 @@
 //!    `Co-Authored-By` trailer, and the no-emoji rule are checked before
 //!    the commit runs, so a violation costs a re-run instead of an amend.
 //! 3. **An audit row on every attempt**, refusals included, carrying the
-//!    resolved checkout, pre/post HEAD, card id, and the quality-gate state
-//!    of the commit being built on.
+//!    resolved checkout, pre/post HEAD, card id, whether the commit was
+//!    signed, and the quality-gate state of the commit being built on.
 //!
 //! The PreToolUse hook that rewrites plain `git commit` into this verb is
 //! deliberately NOT part of this change -- it is the second half of #854.
