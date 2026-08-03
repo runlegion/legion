@@ -305,7 +305,7 @@ pub enum LegionError {
     /// to go poke at an agent that was never locked. `detail` carries git's
     /// own output, which is the part that actually discriminates.
     #[error(
-        "signing unavailable ({program}): {detail} -- the configured signer could not sign; \
+        "signing unavailable ({program}): {detail}\nthe configured signer could not sign; \
          unlock your signer or fix the signing configuration (git's output above names the cause)"
     )]
     CommitSigningUnavailable { program: String, detail: String },
@@ -536,6 +536,13 @@ mod tests {
         // sends half the callers to the wrong place.
         assert!(msg.contains("unlock your signer"), "got: {msg}");
         assert!(msg.contains("fix the signing configuration"), "got: {msg}");
+        // The remedy starts its own line: `detail` is relayed git stderr,
+        // often multi-line, and a remedy glued to its last line reads as
+        // part of git's output rather than as ours.
+        assert!(
+            msg.contains("agent refused operation\nthe configured signer"),
+            "got: {msg}"
+        );
     }
 
     #[test]

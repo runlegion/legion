@@ -49,6 +49,10 @@ use crate::{db, error};
 /// is excluded on purpose: one subject is an instance, not a convention, and
 /// this list encodes what the repo does. Widening it is a decision someone
 /// should make deliberately rather than inherit from a single 2026 commit.
+/// One token outside the spec set completes the census: `release` appeared
+/// twice (4c44f5f and c9b357d, both 2026-06-18) as the older spelling of what
+/// is now `chore(release)`, and is excluded for the same reason as `ci` -- so
+/// the eight above plus `ci` and `release` are every type token in history.
 const COMMIT_TYPES: [&str; 8] = [
     "feat", "fix", "chore", "docs", "refactor", "test", "perf", "style",
 ];
