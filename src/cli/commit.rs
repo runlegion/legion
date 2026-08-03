@@ -37,11 +37,18 @@ use crate::{db, error};
 
 /// Commit types accepted in a subject line, derived from this repo's own
 /// history rather than from the Conventional Commits spec: these are the
-/// eight that appear across the last 600 subjects (`feat` and `fix` account
-/// for most of them; `perf` and `style` are rare but real). Types the repo
-/// has never used (`ci`, `build`, `revert`) are deliberately absent -- the
-/// rule encodes what the repo does, and widening it is a decision someone
-/// should make on purpose.
+/// eight that appear as type tokens across ALL of history -- 494 commits at
+/// the time of writing, so there is no window to have missed anything in
+/// (`feat` and `fix` account for most of them; `perf` and `style` are rare
+/// but real).
+///
+/// Three types are absent, for two different reasons. `build` and `revert`
+/// have never appeared as type tokens at all -- git's auto-generated
+/// `Revert "..."` subjects are not the conventional `revert` type and do not
+/// parse as one. `ci` HAS appeared, exactly once (bdd7dd8, 2026-04-28), and
+/// is excluded on purpose: one subject is an instance, not a convention, and
+/// this list encodes what the repo does. Widening it is a decision someone
+/// should make deliberately rather than inherit from a single 2026 commit.
 const COMMIT_TYPES: [&str; 8] = [
     "feat", "fix", "chore", "docs", "refactor", "test", "perf", "style",
 ];
@@ -99,6 +106,14 @@ pub(crate) fn handle_commit(
     let branch: String = current_branch(&checkout)?;
     let pre_sha: Option<String> = head_sha(&checkout)?;
 
+    // Read once, here, because this value is both consulted (it decides
+    // whether the preflight runs) and RECORDED. Recorded matters: whether a
+    // commit was signed is exactly what an audit trail gets asked about
+    // after the fact, and answering it later by re-reading the config would
+    // describe the config as it is then rather than as it was when the
+    // commit ran.
+    let signing: bool = signing_enabled(&checkout);
+
     // Opened before the commit (not after) so a DB-open failure fails fast
     // rather than masking the commit result behind a DB error once the
     // commit has already landed -- same ordering as `legion push`.
@@ -108,19 +123,26 @@ pub(crate) fn handle_commit(
     // the PRE-commit HEAD and read before the commit runs.
     let gates: serde_json::Value = gate_state(&database, pre_sha.as_deref());
 
-    let result: error::Result<String> = preflight_validate_and_commit(&checkout, &text);
+    let result: error::Result<Committed> = preflight_validate_and_commit(&checkout, &text, signing);
 
     // Every attempt leaves a row, refusals included. A refused commit is an
     // attempted mutation that the perimeter blocked, and that is exactly
     // the signal the audit trail exists to carry -- especially once the
     // deferred hook starts routing every plain `git commit` through here.
     // The error (if any) propagates AFTER the row is written.
+    //
+    // `outcome` tracks whether the COMMIT happened, nothing else. See
+    // [`Committed`]: a landed commit whose new HEAD would not read back is
+    // still a landed commit, and it records the read failure in
+    // `post_sha_error` rather than claiming the mutation never happened.
     let details = serde_json::json!({
         "checkout": checkout.display().to_string(),
         "pre_sha": pre_sha,
-        "post_sha": result.as_ref().ok(),
+        "post_sha": result.as_ref().ok().and_then(|c| c.post_sha.clone()),
+        "post_sha_error": result.as_ref().ok().and_then(|c| c.post_sha_error.clone()),
         "card_id": card,
         "gates": gates,
+        "signing": signing,
     })
     .to_string();
     audit(
@@ -137,21 +159,64 @@ pub(crate) fn handle_commit(
         },
     );
 
-    let post_sha = result?;
-    println!(
-        "committed {} on {branch} ({})",
-        short_sha(&post_sha),
-        checkout.display()
-    );
+    let committed: Committed = result?;
+    match committed.post_sha {
+        Some(sha) => println!(
+            "committed {} on {branch} ({})",
+            short_sha(&sha),
+            checkout.display()
+        ),
+        None => {
+            // Effectively unreachable -- git exited 0, so there is a HEAD --
+            // and deliberately not an error. The commit is on disk by the
+            // time we are here; exiting non-zero because we could not read
+            // back the sha would tell the caller their work did not land
+            // when it did, which is the worse of the two lies.
+            eprintln!(
+                "[legion] warning: {}",
+                committed
+                    .post_sha_error
+                    .as_deref()
+                    .unwrap_or("HEAD did not resolve after the commit")
+            );
+            println!(
+                "committed on {branch} ({}) -- the new HEAD could not be read back",
+                checkout.display()
+            );
+        }
+    }
     Ok(())
+}
+
+/// A commit that LANDED, and what could be learned about it afterwards.
+///
+/// Two fields rather than a `Result` because these are not alternatives in
+/// the sense the audit row cares about: both shapes mean the commit
+/// happened. Folding a failed post-commit `rev-parse` into the commit's own
+/// `Result` -- which is what this used to do -- recorded a landed commit as
+/// `outcome: failure`, the single worst thing an audit trail can say, since
+/// it denies a mutation that is already on disk. The read failure is worth
+/// recording; it is just not the same fact as "the commit failed".
+struct Committed {
+    /// The new HEAD, absent only if it could not be resolved after the fact.
+    post_sha: Option<String>,
+    /// Why `post_sha` is absent, carried into the audit row's details.
+    post_sha_error: Option<String>,
 }
 
 /// Preflight the signer, validate the message, then commit. Split out from
 /// [`handle_commit`] so every failure between "we know which checkout and
 /// branch" and "the commit landed" funnels through one `Result` the audit
 /// row can classify, instead of each refusal needing its own audit call.
-fn preflight_validate_and_commit(checkout: &Path, message: &str) -> error::Result<String> {
-    preflight_signer(checkout)?;
+///
+/// `signing` is passed in rather than read here so the value that gates the
+/// preflight and the value recorded on the audit row are the same read.
+fn preflight_validate_and_commit(
+    checkout: &Path,
+    message: &str,
+    signing: bool,
+) -> error::Result<Committed> {
+    preflight_signer(checkout, signing)?;
     validate_message(message)?;
     run_git_commit(checkout, message)
 }
@@ -311,10 +376,17 @@ fn gate_state(database: &db::Database, pre_sha: Option<&str>) -> serde_json::Val
 /// Fail once, by name, if commit signing is configured but the signer
 /// cannot sign right now.
 ///
-/// `commit.gpgsign` alone decides whether this runs; `gpg.format` only
-/// selects which program name appears in the error. The probe is `git
-/// commit-tree -S` against the tree we are about to commit, and the
-/// resulting oid is discarded.
+/// `commit.gpgsign` alone decides whether this runs -- the caller passes the
+/// answer in, since the audit row records it too; `gpg.format` only selects
+/// which program name appears in the error.
+///
+/// The probe is `git commit-tree -S` against HEAD's tree (the STAGED tree
+/// only on an unborn branch, where `HEAD^{tree}` does not resolve -- see
+/// [`probe_tree`]), and the resulting oid is discarded. Which tree it is
+/// does not matter: any valid tree exercises the same `sign_buffer` path,
+/// and the question being asked is whether the signer can sign at all, not
+/// what it would be signing. Using HEAD's tree simply avoids writing a new
+/// one when there is already a tree lying around to point at.
 ///
 /// Why `commit-tree` and not invoking the configured signer directly: the
 /// direct route means reimplementing git's key selection -- `user.signingkey`
@@ -334,8 +406,8 @@ fn gate_state(database: &db::Database, pre_sha: Option<&str>) -> serde_json::Val
 /// at all; you cannot ask a signer whether it can sign without asking it to
 /// sign. Invisible with a cached agent (the agent-driven case this verb is
 /// built for), a real per-commit tax otherwise.
-fn preflight_signer(checkout: &Path) -> error::Result<()> {
-    if !signing_enabled(checkout) {
+fn preflight_signer(checkout: &Path, signing: bool) -> error::Result<()> {
+    if !signing {
         return Ok(());
     }
     let program: String = signer_program(checkout);
@@ -345,11 +417,31 @@ fn preflight_signer(checkout: &Path) -> error::Result<()> {
 
 /// Run the probe. Split from [`preflight_signer`] so the config reads and
 /// the sign attempt stay separately readable.
+///
+/// The subprocess runs under `LC_ALL=C` with `LANGUAGE` cleared. Both this
+/// function's exit-code handling and [`signer_failure_detail`]'s prefix
+/// stripping read git's own English output, and git localizes that output:
+/// under `fr_FR` its diagnostics come back as `erreur:`, and every
+/// assumption made about the text quietly stops holding. Pinning the locale
+/// on the probe is what makes those assumptions true rather than lucky.
+///
+/// EXIT CODE, not text, decides which failure this is -- measured against
+/// git 2.54.0. git DIES with 128 when it never reaches the signer at all
+/// (unresolvable committer identity, a tree oid that will not parse) and
+/// exits 1 when the signer WAS invoked and failed. A 128 is therefore not a
+/// signing problem, and reporting it as one sends the operator to unlock an
+/// agent that was never the issue. The split is an implementation detail of
+/// git rather than a documented contract, so it is pinned by test
+/// (`commit_preflight_reports_a_git_refusal_as_a_refusal`), and any
+/// unrecognized code falls through to the signing arm -- degrading to the
+/// previous behaviour rather than to silence.
 fn probe_signer(checkout: &Path, tree: &str, program: &str) -> error::Result<()> {
     let output = Command::new("git")
         .arg("-C")
         .arg(checkout)
         .args(["commit-tree", "-S", "-m", PROBE_MESSAGE, tree])
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "")
         .stdin(Stdio::null())
         .output()
         .map_err(|e| {
@@ -358,9 +450,20 @@ fn probe_signer(checkout: &Path, tree: &str, program: &str) -> error::Result<()>
     if output.status.success() {
         return Ok(());
     }
+
+    let stderr: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&output.stderr);
+    if output.status.code() == Some(128) {
+        return Err(error::LegionError::CommitRefused {
+            reason: format!(
+                "git refused to build the signer preflight object, so signing was never \
+                 attempted -- git said: {}",
+                stderr.trim()
+            ),
+        });
+    }
     Err(error::LegionError::CommitSigningUnavailable {
         program: program.to_string(),
-        detail: signer_failure_detail(&String::from_utf8_lossy(&output.stderr)),
+        detail: signer_failure_detail(&stderr),
     })
 }
 
@@ -468,28 +571,51 @@ fn probe_tree(checkout: &Path) -> error::Result<String> {
     Ok(String::from_utf8_lossy(&written.stdout).trim().to_string())
 }
 
-/// Pull the useful line out of a failed signing attempt's stderr.
+/// Everything a failed signing attempt said, minus the content-free lines.
+///
+/// Relays EVERY informative line rather than just the first, because the
+/// first is routinely the least useful one: a failing signer explains itself
+/// across several lines and the remedy tends to be the last of them (gpg
+/// answers "gpg failed to sign the data" and then, underneath, the keyid it
+/// could not find or the agent it could not reach). Taking line one throws
+/// away the part the operator needed and keeps the part they could have
+/// guessed.
 ///
 /// git relays the signer's own stderr behind a bare `error: ` prefix, so a
 /// signer that fails silently (a stub like `/usr/bin/false`, or an agent
 /// that exits without a message) leaves nothing but the prefix -- measured,
-/// not assumed: `/usr/bin/false` produces exactly `"error: \n"`. Stripping
-/// the prefix and falling back to a literal keeps the refusal from reading
-/// "signing unavailable (...):  -- unlock your signer and re-run" with a
-/// hole where the reason should be.
+/// not assumed: `/usr/bin/false` produces exactly `"error: \n"`. Dropping
+/// the lines that are only a prefix, and falling back to a literal when
+/// none survive, keeps the refusal from reading "signing unavailable
+/// (...):  -- ..." with a hole where the reason should be.
+///
+/// Only the prefixed lines are trimmed at the front; the rest keep their
+/// indentation, because signers indent the commands in their remediation
+/// hints and that indentation is what makes them copy-pasteable. Matching
+/// the English prefixes literally is safe because [`probe_signer`] pins the
+/// subprocess locale.
 fn signer_failure_detail(stderr: &str) -> String {
-    for line in stderr.lines() {
-        let trimmed = line.trim();
-        let stripped = trimmed
-            .strip_prefix("error:")
-            .or_else(|| trimmed.strip_prefix("fatal:"))
-            .unwrap_or(trimmed)
-            .trim();
-        if !stripped.is_empty() {
-            return stripped.to_string();
-        }
+    let kept: Vec<&str> = stderr
+        .lines()
+        .map(|line| {
+            let line = line.trim_end();
+            match line
+                .strip_prefix("error:")
+                .or_else(|| line.strip_prefix("fatal:"))
+            {
+                // A prefixed line is git's own framing, never indented
+                // content, so its leading space is noise.
+                Some(rest) => rest.trim_start(),
+                None => line,
+            }
+        })
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    if kept.is_empty() {
+        return "the signer exited non-zero without a message".to_string();
     }
-    "the signer exited non-zero without a message".to_string()
+    kept.join("\n")
 }
 
 /// Enforce this repo's commit-message conventions, refusing by name.
@@ -650,7 +776,12 @@ fn is_coauthor_trailer(line: &str) -> bool {
     !rest.trim().is_empty()
 }
 
-/// Run `git commit -F <tempfile>` in `checkout` and return the new HEAD.
+/// Run `git commit -F <tempfile>` in `checkout` and report what landed.
+///
+/// The returned `Err` means one thing only: the commit process itself
+/// failed. Reading the new HEAD back is a separate concern with a separate
+/// home on [`Committed`], because once git has exited 0 the commit exists
+/// whether or not anything downstream can describe it.
 ///
 /// `--cleanup=whitespace` is pinned on the command line rather than left to
 /// git's default for `-F`. The default IS `whitespace`, but an ambient
@@ -662,7 +793,7 @@ fn is_coauthor_trailer(line: &str) -> bool {
 ///
 /// No `-a`: only the staged index is committed, exactly as `git commit`
 /// would. Nothing here stages anything.
-fn run_git_commit(checkout: &Path, message: &str) -> error::Result<String> {
+fn run_git_commit(checkout: &Path, message: &str) -> error::Result<Committed> {
     // UUIDv7 name rather than a fixed one so two concurrent agents (the
     // situation 019fc46c is about) cannot overwrite each other's message
     // file between write and read.
@@ -678,10 +809,25 @@ fn run_git_commit(checkout: &Path, message: &str) -> error::Result<String> {
 
     outcome?;
 
-    head_sha(checkout)?.ok_or_else(|| {
-        error::LegionError::WorkSource(
-            "git commit reported success but HEAD does not resolve".to_string(),
-        )
+    // Past this line the commit has LANDED. Everything below describes it;
+    // nothing below may retract it.
+    Ok(match head_sha(checkout) {
+        Ok(Some(sha)) => Committed {
+            post_sha: Some(sha),
+            post_sha_error: None,
+        },
+        Ok(None) => Committed {
+            post_sha: None,
+            post_sha_error: Some(
+                "git commit reported success but HEAD does not resolve".to_string(),
+            ),
+        },
+        Err(e) => Committed {
+            post_sha: None,
+            post_sha_error: Some(format!(
+                "git commit reported success but HEAD could not be read: {e}"
+            )),
+        },
     })
 }
 
@@ -855,6 +1001,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_message_reports_the_emoji_when_the_subject_is_also_wrong() {
+        // Two rules broken at once, and the order is load-bearing: the emoji
+        // scan is the only check that can fire on a line other than the
+        // subject, so if the subject check won here, a message whose real
+        // problem is a rocket in the body would send the caller to line one.
+        let msg = "wip: nope \n\nShipped \u{1F680}\n\nCo-Authored-By: C <x@y.invalid>\n";
+        let reason = refusal_reason(validate_message(msg).unwrap_err());
+        assert!(reason.contains("emoji"), "got: {reason}");
+        assert!(
+            !reason.contains("bad subject line"),
+            "the emoji must be reported first, got: {reason}"
+        );
+    }
+
+    #[test]
     fn find_emoji_ignores_ordinary_prose_and_punctuation() {
         // Every one of these appears in this repo's real commit bodies and
         // must not be mistaken for an emoji: em dash, curly quotes, arrows
@@ -931,9 +1092,32 @@ mod tests {
     }
 
     #[test]
-    fn signer_failure_detail_uses_the_first_informative_line() {
+    fn signer_failure_detail_keeps_every_informative_line() {
         let stderr = "error: \nerror: gpg failed to sign the data\nfatal: failed to write commit\n";
-        assert_eq!(signer_failure_detail(stderr), "gpg failed to sign the data");
+        let detail = signer_failure_detail(stderr);
+        // The first line is not the useful one, which is the whole reason
+        // this relays all of them instead of picking one.
+        assert!(
+            detail.contains("gpg failed to sign the data"),
+            "got: {detail}"
+        );
+        assert!(detail.contains("failed to write commit"), "got: {detail}");
+        // The content-free "error: " line is dropped, and git's own prefixes
+        // go with it -- the caller already knows this is an error.
+        assert!(!detail.contains("error:"), "got: {detail}");
+        assert!(!detail.contains("fatal:"), "got: {detail}");
+    }
+
+    #[test]
+    fn signer_failure_detail_preserves_indented_remediation() {
+        // A signer that tells the operator what to run indents the command,
+        // and that indentation is what makes it copy-pasteable. Only the
+        // prefixed lines get their leading space trimmed.
+        let stderr = "error: gpg failed to sign the data\nTry:\n  gpg --card-status\n";
+        assert_eq!(
+            signer_failure_detail(stderr),
+            "gpg failed to sign the data\nTry:\n  gpg --card-status"
+        );
     }
 
     /// Record a gate row so the three verdicts can be told apart.

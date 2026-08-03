@@ -363,6 +363,163 @@ fn commit_preflight_refuses_when_the_signer_cannot_sign() {
     );
 }
 
+/// The preflight's SUCCESS direction, which the failure tests cannot prove:
+/// with a real signer configured, the verb signs and the commit lands.
+/// Without this, every signing assertion in the suite is about refusing, and
+/// a preflight that refused unconditionally would pass all of them.
+///
+/// Hermetic: the ed25519 key is generated per-run with no passphrase, so
+/// there is no agent to unlock and nothing on the host is consulted. The key
+/// lives in its OWN tempdir, not the repo -- a key file inside the checkout
+/// would be an untracked file in the tree under test.
+///
+/// This is also the unborn-branch path end to end. The commit is the FIRST
+/// in the repo, so `HEAD^{tree}` does not resolve and the probe falls back
+/// to `git write-tree` -- the one fallback in `probe_tree` that the
+/// repo-with-a-seed-commit fixtures never reach.
+///
+/// The assertion is `gpgsig ` in the raw commit object rather than
+/// `--format=%G?`: %G? reports `N` (no signature) without a configured
+/// `gpg.ssh.allowedSignersFile`, because it answers whether the signature
+/// VERIFIES against known signers, which is a different question and would
+/// fail this test for a reason that has nothing to do with signing.
+#[cfg(unix)]
+#[test]
+fn commit_signs_when_a_real_signer_is_configured() {
+    let _guard = RealRepoConfigGuard::new();
+    let repo = tempfile::tempdir().unwrap();
+    let rp = repo.path();
+    let keydir = tempfile::tempdir().unwrap();
+    let key = keydir.path().join("id_ed25519");
+
+    let keygen = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .expect("ssh-keygen must be available to test ssh signing");
+    assert!(keygen.success(), "ssh-keygen failed to generate a test key");
+
+    run_git_fixture(rp, &["init", "-q", "-b", "main"]);
+    run_git_fixture(rp, &["config", "user.name", "Legion Test Fixture"]);
+    run_git_fixture(rp, &["config", "user.email", "fixture@example.invalid"]);
+    run_git_fixture(rp, &["config", "commit.gpgsign", "true"]);
+    run_git_fixture(rp, &["config", "gpg.format", "ssh"]);
+    run_git_fixture(
+        rp,
+        &[
+            "config",
+            "user.signingkey",
+            keydir.path().join("id_ed25519.pub").to_str().unwrap(),
+        ],
+    );
+
+    // Staged, uncommitted: the repo is on an unborn branch.
+    std::fs::write(rp.join("README.md"), "first\n").unwrap();
+    run_git_fixture(rp, &["add", "README.md"]);
+
+    let data_dir = tempfile::tempdir().unwrap();
+    run_ok(commit_cmd(data_dir.path(), rp).args([
+        "commit",
+        "--repo",
+        "test-agent",
+        "--message",
+        GOOD_MESSAGE,
+    ]));
+
+    let raw = run_git_fixture_output(rp, &["cat-file", "commit", "HEAD"]);
+    assert!(
+        raw.contains("gpgsig "),
+        "the commit object must carry a signature, got: {raw}"
+    );
+
+    let audit_out =
+        run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "commit", "--json"]));
+    assert!(
+        audit_out.contains("\"outcome\": \"success\""),
+        "got: {audit_out}"
+    );
+    // The direction that matters: `signing` must track the config rather
+    // than being a constant that happens to read right when signing is off.
+    assert!(
+        audit_out.contains("\\\"signing\\\":true"),
+        "the audit row must record that this commit was signed, got: {audit_out}"
+    );
+}
+
+/// git can die BEFORE it ever reaches the signer -- an unresolvable
+/// committer identity is the common way -- and that is not a signing
+/// failure. Reporting it as one tells the operator to go unlock an agent
+/// that was never the problem, while git's own stderr was sitting there
+/// naming the actual fix.
+///
+/// This pins the 1-vs-128 split the probe relies on, which is an
+/// implementation detail of git rather than a documented contract: if a
+/// future git stops dying with 128 here, this test is what notices.
+#[cfg(unix)]
+#[test]
+fn commit_preflight_reports_a_git_refusal_as_a_refusal() {
+    let _guard = RealRepoConfigGuard::new();
+    let repo = tempfile::tempdir().unwrap();
+    let rp = repo.path();
+    run_git_fixture(rp, &["init", "-q", "-b", "main"]);
+    // No identity, and auto-detection disabled so git cannot invent one from
+    // the host's gecos/hostname -- which is exactly what it does otherwise,
+    // making this test pass or fail on whose machine it runs.
+    run_git_fixture(rp, &["config", "user.useConfigOnly", "true"]);
+    run_git_fixture(rp, &["config", "commit.gpgsign", "true"]);
+    run_git_fixture(rp, &["config", "gpg.format", "ssh"]);
+    run_git_fixture(rp, &["config", "gpg.ssh.program", "/usr/bin/false"]);
+    run_git_fixture(
+        rp,
+        &[
+            "config",
+            "user.signingkey",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyForFixtureUseOnly000000000",
+        ],
+    );
+    std::fs::write(rp.join("README.md"), "first\n").unwrap();
+    run_git_fixture(rp, &["add", "README.md"]);
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut cmd = commit_cmd(data_dir.path(), rp);
+    // Identity from the ambient environment would defeat useConfigOnly.
+    for var in [
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "EMAIL",
+    ] {
+        cmd.env_remove(var);
+    }
+    let (_stdout, stderr) =
+        run_fail(cmd.args(["commit", "--repo", "test-agent", "--message", GOOD_MESSAGE]));
+
+    assert!(stderr.contains("refusing to commit"), "got: {stderr}");
+    // git's own remediation must survive into the refusal -- it is the part
+    // that names the fix.
+    assert!(
+        stderr.contains("user.email"),
+        "git's guidance must be relayed, got: {stderr}"
+    );
+    // The discriminators: git's guidance appears on OTHER failure paths too,
+    // so containing it proves nothing on its own. This must be the probe's
+    // refusal, not a signing verdict and not the real commit failing.
+    assert!(
+        !stderr.contains("signing unavailable"),
+        "a git die is not a signer failure, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("git commit failed"),
+        "the preflight must catch this before the real commit runs, got: {stderr}"
+    );
+    assert_eq!(
+        run_git_fixture_output(rp, &["rev-list", "--all", "--count"]),
+        "0",
+        "nothing may be committed"
+    );
+}
+
 /// A locked signer is caught by the preflight even when the message is
 /// ALSO invalid: preflight runs first on purpose, because a locked signer
 /// needs the operator to go unlock something while a bad subject is a
@@ -449,6 +606,14 @@ fn commit_writes_audit_row_with_shas_card_and_gates() {
     assert!(
         audit_out.contains("\\\"pr_write\\\":\\\"absent\\\""),
         "expected the pr-write gate verdict in the details, got: {audit_out}"
+    );
+    // This fixture commits with `commit.gpgsign=false`, so the row must say
+    // so. The true direction is pinned by
+    // `commit_signs_when_a_real_signer_is_configured`, without which a
+    // hardcoded `false` would satisfy this assertion.
+    assert!(
+        audit_out.contains("\\\"signing\\\":false"),
+        "expected the signing flag in the details, got: {audit_out}"
     );
 }
 
