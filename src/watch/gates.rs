@@ -131,14 +131,39 @@ pub fn poll_cycle(
         // the race against the owner's entry and wake the owner's persona in
         // the WRONG workdir. Not competing for the lease is what makes a
         // directed `@owner` signal wake exactly once, in the owner's workdir.
-        // Signals are deliberately NOT marked handled here -- same reasoning as
-        // the lease-held skip below: the owner's entry is the one that consumes
-        // them, and a local handled-mark would only discard our own view.
+        // Signals are deliberately NOT marked handled here, and this is NOT the
+        // same reasoning as the lease-held skip below. That skip defers to a
+        // TRANSIENT holder which, once it spawns, marks the signal handled under
+        // the SAME repo_name -- so something does eventually consume this
+        // entry's copy. Delegation is permanent config, and NOTHING consumes
+        // this entry's copy: `watch_handled` is keyed (signal_id, repo_name), so
+        // the owner's spawn marks it under the OWNER's repo_name and this repo's
+        // pending row drains only when the signal hits its TTL
+        // (TTL_SIGNAL_HOURS, 7 days -- src/db/board.rs) or someone runs
+        // `legion resolve`. Marking here would also not be a local decision:
+        // `watch_handled` is cluster-synced while delegation is a host-local
+        // watch.toml choice, so a mark driven by THIS host's config would
+        // suppress the signal for peer nodes whose config does not delegate this
+        // repo -- the #308/#314 lost-signal failure mode.
         if repo.is_delegated() {
-            eprintln!(
-                "[legion watch] skipping wake for delegated repo '{}' (owner: {})",
-                repo.name, recipient
-            );
+            // Log on state change only: this branch runs every poll cycle (30s
+            // by default) for as long as the pending copy survives, and
+            // daemon.log is append-only with no rotation. The `since` lookback
+            // does not bound that -- it is a now-minus-24h cutoff computed once
+            // at WatchLoop construction (src/watch/mod.rs) and never advanced,
+            // so any signal arriving after startup stays inside the window. The
+            // real bound is the daemon's uptime, capped by the 7-day TTL above.
+            // `should_log_delegated_skip` remembers the last set of pending
+            // signal ids logged for this repo and answers `false` while it is
+            // unchanged. Deliberately scoped to this skip; the session-lock and
+            // cooldown skips are #853's problem.
+            let pending_ids: Vec<String> = signals.iter().map(|(id, _, _)| id.clone()).collect();
+            if cooldown.should_log_delegated_skip(&repo.name, &pending_ids) {
+                eprintln!(
+                    "[legion watch] skipping wake for delegated repo '{}' (owner: {})",
+                    repo.name, recipient
+                );
+            }
             continue;
         }
 
@@ -688,14 +713,19 @@ mod tests {
         // the exact bug #849 is about, so it gets its own assertion.
         assert_no_wake_machinery_touched(&db, "platform");
 
-        // The signal stays pending: the owner's entry is the one that consumes
-        // it, so the delegated entry must not mark it handled on its own behalf.
+        // The signal stays pending, and nothing ever consumes this copy: the
+        // owner's spawn marks the signal handled under the OWNER's repo_name,
+        // never under `ledger`, so ledger's row drains only at the signal's
+        // 7-day TTL or an explicit `legion resolve`. That is accepted, not
+        // accidental -- `watch_handled` is cluster-synced, so marking on the
+        // strength of this host's watch.toml would lose the signal for peers
+        // that do not delegate ledger (#308/#314).
         let still_pending =
             find_pending_signals(&db, "ledger", &["platform".to_string()], None).expect("pending");
         assert_eq!(
             still_pending.len(),
             1,
-            "the signal must be left for the owner's entry to handle"
+            "a host-local delegation decision must not consume the signal"
         );
     }
 
@@ -840,6 +870,118 @@ mod tests {
              the delegation guard must not swallow it"
         );
         assert_eq!(attempts[0].repo_name, "platform");
+    }
+
+    #[test]
+    fn poll_cycle_wakes_only_the_owner_when_both_entries_are_configured() {
+        // Co-presence: the delegated entry and its owner are BOTH in watch.toml,
+        // which is the shape a real host has, and the shape the single-entry
+        // tests above cannot express. One directed @platform signal, two entries
+        // that both match it, one real lease gate.
+        //
+        // What this proves: exactly one entry reaches the wake machinery, and it
+        // is the owner's. The wake_attempt table carries both halves -- its
+        // length says how many entries got through, and its `repo_name` says
+        // which one.
+        //
+        // Which mutations it discriminates:
+        // - guard deleted    -> ledger runs the full path first, so there are
+        //                       TWO attempt rows (ledger's spawn fails on the
+        //                       bogus workdir, which releases its lease and lets
+        //                       platform re-acquire and enqueue its own).
+        // - predicate inverted -> ONE attempt row, keyed to `ledger` instead of
+        //                       `platform`.
+        //
+        // One caveat, stated because the alternative is a comment that claims
+        // more than it checks. This test does NOT discriminate a guard moved
+        // BELOW the lease acquire: `try_acquire_persona_lease` returns true for
+        // a same-host re-acquire (src/db/wake.rs -- it reads the holder back and
+        // compares it to `host`), so ledger taking the lease and skipping does
+        // not lock platform out, and the attempt count stays 1. That mutation is
+        // caught by `assert_no_wake_machinery_touched` in the single-entry tests,
+        // where no second entry can paper over the stolen lease.
+        //
+        // Nor does it replay the production #849 incident, which was one wake in
+        // the WRONG workdir. Reproducing that needs a SUCCESSFUL spawn, and the
+        // whole suite deliberately forbids one (see UNSPAWNABLE_WORKDIR) rather
+        // than bill a live session per test run.
+        let (db, _index, _dir) = test_storage();
+
+        let config = WatchConfig {
+            // Explicit: the default is 15s, and a stagger sleep between two
+            // entries would make this test pay for it.
+            stagger_secs: 0,
+            repos: vec![
+                delegated_repo("ledger", "platform"),
+                WatchRepoConfig {
+                    name: "platform".to_string(),
+                    workdir: UNSPAWNABLE_WORKDIR.to_string(),
+                    agent: Some("platform".to_string()),
+                    broadcast_tags: Vec::new(),
+                    extra: toml::Table::new(),
+                },
+            ],
+            ..WatchConfig::default()
+        };
+
+        db.insert_reflection("kelex", "@platform question:can you look at this", "team")
+            .expect("insert signal");
+
+        let gate = PersonaLeaseGate {
+            db: &db,
+            host: "this-host",
+            ttl: Duration::from_secs(3600),
+        };
+        let mut cooldown = CooldownTracker::new(0, None, None);
+        let mut tracker = AgentTracker::new();
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            Some(&gate),
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll");
+        assert_eq!(spawned, 0, "the bogus workdir must fail both spawns");
+
+        let attempts = db.recent_wake_attempts(50).expect("list attempts");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "a directed @platform signal must reach the wake machinery exactly once \
+             even though two configured entries match it"
+        );
+        assert_eq!(
+            attempts[0].repo_name, "platform",
+            "the entry that wakes must be the owner's, not the delegated one"
+        );
+
+        // The regression guard for a future "just mark it handled" patch. The
+        // pending lookup catches a mark under `repo.name` (ledger's own copy
+        // would vanish); the watch_handled count catches a mark under the
+        // RECIPIENT, which the pending lookup cannot see because it joins on
+        // repo_name = 'ledger'. Neither entry legitimately writes the table in
+        // this cycle -- the owner marks handled only on a successful spawn, and
+        // this spawn fails -- so the table must be empty outright.
+        let ledger_pending =
+            find_pending_signals(&db, "ledger", &["platform".to_string()], None).expect("pending");
+        assert_eq!(
+            ledger_pending.len(),
+            1,
+            "ledger's pending copy must survive the skip -- nothing consumes it, \
+             and a host-local delegation decision must not write a cluster-synced mark"
+        );
+        let handled_rows: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM watch_handled", [], |row| row.get(0))
+            .expect("count watch_handled");
+        assert_eq!(
+            handled_rows, 0,
+            "the delegated skip must not mark the signal handled under ANY repo_name"
+        );
     }
 
     #[test]
