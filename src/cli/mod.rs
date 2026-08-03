@@ -2,6 +2,7 @@
 //! Domain handlers live in the sibling modules; `main.rs` owns dispatch.
 
 pub(crate) mod autonomy;
+pub(crate) mod commit;
 pub(crate) mod datadir;
 pub(crate) mod document;
 pub(crate) mod index_cmd;
@@ -871,6 +872,44 @@ pub(crate) enum Commands {
         branch: Option<String>,
     },
 
+    /// Commit the staged index -- the sanctioned in-band commit path (#854).
+    ///
+    /// Closes the last unaudited hop in the mutation path: `legion push`
+    /// (#791/#834) routes pushes and #836 fences `gh`, but the commit --
+    /// where authorship, trailers, and signing happen -- was raw `git`.
+    ///
+    /// Preflights the configured signer before touching anything, by
+    /// signing a throwaway commit object (`git commit --dry-run` never
+    /// reaches the signer). A locked or absent signer fails once, by name,
+    /// naming the program to unlock. Signing is never disabled and never
+    /// retried in a loop.
+    ///
+    /// Validates the message and refuses violations by name: the subject
+    /// must be `<type>(<scope>): <summary>` with a scope, the message must
+    /// end with a `Co-Authored-By:` trailer, and no emoji anywhere.
+    ///
+    /// Commits only the staged index (no `-a`, nothing is staged for you)
+    /// and audit-logs every attempt -- refusals included -- with the
+    /// resolved checkout, pre/post HEAD, card id, and the simplify /
+    /// pr-write gate state of the commit being built on.
+    Commit {
+        /// Repository name (identifies the calling agent for the audit log)
+        #[arg(long)]
+        repo: String,
+
+        /// Commit message. Mutually exclusive with --message-file.
+        #[arg(long)]
+        message: Option<String>,
+
+        /// File holding the commit message. Mutually exclusive with --message.
+        #[arg(long)]
+        message_file: Option<String>,
+
+        /// Kanban card this commit belongs to, recorded on the audit row.
+        #[arg(long)]
+        card: Option<String>,
+    },
+
     /// View the audit log of work source actions
     Audit {
         /// Filter by agent name
@@ -880,7 +919,7 @@ pub(crate) enum Commands {
         /// Filter by action type. Known verbs:
         /// create-issue, close-issue, reopen-issue, edit-issue,
         /// create-pr, close-pr, review, merge, comment,
-        /// delete-card, update-card, push.
+        /// delete-card, update-card, push, commit.
         /// Filter is an exact string match; additional verbs
         /// introduced by future subcommands work automatically.
         /// `push` was written by `legion push` from #791 onward but was

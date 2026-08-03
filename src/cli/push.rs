@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::cli::util::{audit, git_head_commit_and_branch, open_db};
+use crate::cli::util::{audit, git_head_commit_and_branch, open_db, relay_and_capture_stderr};
 use crate::{db, error};
 
 /// Branches this command refuses to push under any circumstances. Merges to
@@ -249,25 +249,6 @@ fn run_push(checkout: &Path, branch: &str) -> error::Result<()> {
     }
 
     Ok(())
-}
-
-/// Read `pipe` line by line, relaying each line to our own stderr as it
-/// arrives and accumulating it into the returned string.
-fn relay_and_capture_stderr(pipe: impl std::io::Read) -> String {
-    use std::io::BufRead;
-    let reader = std::io::BufReader::new(pipe);
-    let mut captured = String::new();
-    for line in reader.lines() {
-        match line {
-            Ok(l) => {
-                eprintln!("{l}");
-                captured.push_str(&l);
-                captured.push('\n');
-            }
-            Err(_) => break,
-        }
-    }
-    captured
 }
 
 #[cfg(test)]

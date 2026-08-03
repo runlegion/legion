@@ -299,6 +299,12 @@ fn run() -> error::Result<()> {
         Commands::Issue { action } => cli::issue::handle(action)?,
         Commands::Pr { action } => cli::pr::handle(action)?,
         Commands::Push { repo, branch } => cli::push::handle_push(repo, branch)?,
+        Commands::Commit {
+            repo,
+            message,
+            message_file,
+            card,
+        } => cli::commit::handle_commit(repo, message, message_file, card)?,
         Commands::Comment { repo, number, body } => cli::issue::handle_comment(repo, number, body)?,
         Commands::Audit {
             repo,

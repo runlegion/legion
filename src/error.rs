@@ -284,6 +284,22 @@ pub enum LegionError {
     #[error("git push failed: {stderr}")]
     PushFailed { stderr: String },
 
+    /// `legion commit` (#854) declined before running git: bad arguments,
+    /// no git repo, or a message-convention violation. The reason is always
+    /// specific enough to fix without a second look at the docs -- a
+    /// refusal the caller cannot act on is just a failure.
+    #[error("refusing to commit: {reason}")]
+    CommitRefused { reason: String },
+
+    /// The configured commit signer could not sign (#854). Raised by the
+    /// preflight probe BEFORE the commit runs, so a locked signer costs one
+    /// named error instead of a retry loop against a hardware key.
+    #[error("signing unavailable ({program}): {detail} -- unlock your signer and re-run")]
+    CommitSigningUnavailable { program: String, detail: String },
+
+    #[error("git commit failed: {stderr}")]
+    CommitFailed { stderr: String },
+
     /// Signals that the process should exit with a specific non-zero code.
     ///
     /// Used by CLI handlers that have already printed a user-facing message
@@ -480,6 +496,37 @@ mod tests {
             stderr: "! [rejected]".to_string(),
         };
         assert!(err.to_string().contains("! [rejected]"));
+    }
+
+    #[test]
+    fn commit_refused_display() {
+        let err = LegionError::CommitRefused {
+            reason: "commit message is empty".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "refusing to commit: commit message is empty"
+        );
+    }
+
+    #[test]
+    fn commit_signing_unavailable_display() {
+        let err = LegionError::CommitSigningUnavailable {
+            program: "/usr/bin/op-ssh-sign".to_string(),
+            detail: "agent refused operation".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.starts_with("signing unavailable (/usr/bin/op-ssh-sign):"));
+        assert!(msg.contains("agent refused operation"));
+        assert!(msg.ends_with("unlock your signer and re-run"));
+    }
+
+    #[test]
+    fn commit_failed_display() {
+        let err = LegionError::CommitFailed {
+            stderr: "nothing to commit".to_string(),
+        };
+        assert!(err.to_string().contains("nothing to commit"));
     }
 
     #[test]
