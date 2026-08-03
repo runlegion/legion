@@ -74,6 +74,10 @@ const EMOJI_RANGES: [(u32, u32); 5] = [
 /// on a dangling object reads as intentional rather than as corruption.
 const PROBE_MESSAGE: &str = "legion signer preflight (#854)";
 
+/// Trailer key every commit message must end with, including the colon.
+/// Matched case-insensitively -- see [`is_coauthor_trailer`].
+const COAUTHOR_KEY: &str = "co-authored-by:";
+
 /// Commit staged changes in the CWD's checkout, audited.
 ///
 /// Order is load-bearing: the signer preflight runs before message
@@ -469,15 +473,14 @@ fn validate_message(message: &str) -> error::Result<()> {
 
     let lines: Vec<&str> = message.lines().collect();
     if lines.iter().all(|l| l.trim().is_empty()) {
+        // Covers both a zero-line message and one that is nothing but
+        // whitespace, so the subject lookup below has no empty-vec case
+        // left to handle.
         return Err(error::LegionError::CommitRefused {
             reason: "commit message is empty".to_string(),
         });
     }
-    let Some(subject) = lines.first() else {
-        return Err(error::LegionError::CommitRefused {
-            reason: "commit message is empty".to_string(),
-        });
-    };
+    let subject: &str = lines.first().copied().unwrap_or("");
     if subject.trim().is_empty() {
         return Err(error::LegionError::CommitRefused {
             reason: "commit message starts with a blank line -- the first line is the subject"
@@ -555,7 +558,15 @@ fn validate_subject(subject: &str) -> error::Result<()> {
         return Err(refuse(&format!("unknown type '{commit_type}'")));
     }
     let Some(scope) = scope_with_paren.strip_suffix(')') else {
-        return Err(refuse("unclosed '(' in the scope"));
+        // Tell the two failures apart rather than blaming the paren for
+        // both: `feat(#854: x` really is unclosed, but `feat(#854) oops: x`
+        // closed it and then kept going, and reporting that as "unclosed"
+        // sends the caller looking for a bracket that is right there.
+        return Err(refuse(if scope_with_paren.contains(')') {
+            "unexpected text after '(<scope>)'"
+        } else {
+            "unclosed '(' in the scope"
+        }));
     };
     if scope.is_empty() {
         return Err(refuse("empty scope"));
@@ -598,9 +609,6 @@ fn is_coauthor_trailer(line: &str) -> bool {
     };
     !rest.trim().is_empty()
 }
-
-/// Trailer key, including the colon, matched case-insensitively.
-const COAUTHOR_KEY: &str = "co-authored-by:";
 
 /// Run `git commit -F <tempfile>` in `checkout` and return the new HEAD.
 ///
@@ -743,6 +751,20 @@ mod tests {
         let msg = "feat(#854): \n\nCo-Authored-By: Claude <x@y.invalid>\n";
         let reason = refusal_reason(validate_message(msg).unwrap_err());
         assert!(reason.contains("empty summary"), "got: {reason}");
+    }
+
+    #[test]
+    fn validate_subject_tells_an_unclosed_paren_from_trailing_text() {
+        // Both fail, but for opposite reasons, and a caller sent looking for
+        // a missing ')' that is right there loses the round trip.
+        let unclosed = refusal_reason(validate_subject("feat(#854: summary").unwrap_err());
+        assert!(unclosed.contains("unclosed '('"), "got: {unclosed}");
+
+        let trailing = refusal_reason(validate_subject("feat(#854) oops: summary").unwrap_err());
+        assert!(
+            trailing.contains("unexpected text after"),
+            "got: {trailing}"
+        );
     }
 
     #[test]
