@@ -284,6 +284,35 @@ pub enum LegionError {
     #[error("git push failed: {stderr}")]
     PushFailed { stderr: String },
 
+    /// `legion commit` (#854) declined before the commit ran: bad
+    /// arguments, no git repo, a message-convention violation, or git
+    /// itself refusing the signer probe (an unresolvable committer identity
+    /// is the ordinary way -- git dies there without reaching the signer,
+    /// which makes it a refusal rather than a signing failure). The reason
+    /// is always specific enough to fix without a second look at the docs --
+    /// a refusal the caller cannot act on is just a failure.
+    #[error("refusing to commit: {reason}")]
+    CommitRefused { reason: String },
+
+    /// The configured commit signer could not sign (#854). Raised by the
+    /// preflight probe BEFORE the commit runs, so a locked signer costs one
+    /// named error instead of a retry loop against a hardware key.
+    ///
+    /// The remedy names two possibilities on purpose. A signer that exits
+    /// non-zero has not told us WHY -- a locked agent and a misconfigured
+    /// key look identical from here -- and a message that asserts "unlock
+    /// your signer" sends everyone whose real problem is the configuration
+    /// to go poke at an agent that was never locked. `detail` carries git's
+    /// own output, which is the part that actually discriminates.
+    #[error(
+        "signing unavailable ({program}): {detail}\nthe configured signer could not sign; \
+         unlock your signer or fix the signing configuration (git's output above names the cause)"
+    )]
+    CommitSigningUnavailable { program: String, detail: String },
+
+    #[error("git commit failed: {stderr}")]
+    CommitFailed { stderr: String },
+
     /// Signals that the process should exit with a specific non-zero code.
     ///
     /// Used by CLI handlers that have already printed a user-facing message
@@ -480,6 +509,48 @@ mod tests {
             stderr: "! [rejected]".to_string(),
         };
         assert!(err.to_string().contains("! [rejected]"));
+    }
+
+    #[test]
+    fn commit_refused_display() {
+        let err = LegionError::CommitRefused {
+            reason: "commit message is empty".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "refusing to commit: commit message is empty"
+        );
+    }
+
+    #[test]
+    fn commit_signing_unavailable_display() {
+        let err = LegionError::CommitSigningUnavailable {
+            program: "/usr/bin/op-ssh-sign".to_string(),
+            detail: "agent refused operation".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.starts_with("signing unavailable (/usr/bin/op-ssh-sign):"));
+        assert!(msg.contains("agent refused operation"));
+        // Both remedies, not just the lock: the probe cannot tell a locked
+        // agent from a misconfigured signer, so naming only one of them
+        // sends half the callers to the wrong place.
+        assert!(msg.contains("unlock your signer"), "got: {msg}");
+        assert!(msg.contains("fix the signing configuration"), "got: {msg}");
+        // The remedy starts its own line: `detail` is relayed git stderr,
+        // often multi-line, and a remedy glued to its last line reads as
+        // part of git's output rather than as ours.
+        assert!(
+            msg.contains("agent refused operation\nthe configured signer"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn commit_failed_display() {
+        let err = LegionError::CommitFailed {
+            stderr: "nothing to commit".to_string(),
+        };
+        assert!(err.to_string().contains("nothing to commit"));
     }
 
     #[test]

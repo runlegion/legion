@@ -354,6 +354,32 @@ pub(crate) fn git_changed_files(base: Option<&str>) -> Result<ChangedFiles, erro
     })
 }
 
+/// Read `pipe` line by line, relaying each line to our own stderr as it
+/// arrives and accumulating it into the returned string.
+///
+/// Shared by `legion push` and `legion commit`: both shell out to a git
+/// command that can sit behind a long-running hook (the nested-claude
+/// pre-push review, the pre-commit simplify review), and both need that
+/// output visible AS IT HAPPENS as well as captured for the failure
+/// message. Buffering until exit turns a two-minute hook into what looks
+/// like a hang.
+pub(crate) fn relay_and_capture_stderr(pipe: impl std::io::Read) -> String {
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(pipe);
+    let mut captured = String::new();
+    for line in reader.lines() {
+        match line {
+            Ok(l) => {
+                eprintln!("{l}");
+                captured.push_str(&l);
+                captured.push('\n');
+            }
+            Err(_) => break,
+        }
+    }
+    captured
+}
+
 pub(crate) fn format_age(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
