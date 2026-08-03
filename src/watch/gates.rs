@@ -131,38 +131,44 @@ pub fn poll_cycle(
         // the race against the owner's entry and wake the owner's persona in
         // the WRONG workdir. Not competing for the lease is what makes a
         // directed `@owner` signal wake exactly once, in the owner's workdir.
-        // Signals are deliberately NOT marked handled here, and this is NOT the
-        // same reasoning as the lease-held skip below. That skip defers to a
-        // TRANSIENT holder which, once it spawns, marks the signal handled under
-        // the SAME repo_name -- so something does eventually consume this
-        // entry's copy. Delegation is permanent config, and NOTHING consumes
-        // this entry's copy: `watch_handled` is keyed (signal_id, repo_name), so
-        // the owner's spawn marks it under the OWNER's repo_name and this repo's
-        // pending row drains only when the signal hits its TTL
-        // (TTL_SIGNAL_HOURS, 7 days -- src/db/board.rs) or someone runs
-        // `legion resolve`. Marking here would also not be a local decision:
-        // `watch_handled` is cluster-synced while delegation is a host-local
-        // watch.toml choice, so a mark driven by THIS host's config would
-        // suppress the signal for peer nodes whose config does not delegate this
-        // repo -- the #308/#314 lost-signal failure mode.
+        //
+        // The batch IS marked handled under THIS repo's own name, and that is
+        // local bookkeeping rather than a cluster decision. `watch_handled` is
+        // a HOST-LOCAL table: it carries no `updated_at`/`deleted_at`
+        // (src/db/board.rs) and is not one of the four tables on the sync wire
+        // (reflections, cards, schedules, persona_wake_leases --
+        // src/sync_actor.rs), so a mark written here can never travel to a peer
+        // whose watch.toml does not delegate this repo. It is keyed
+        // (signal_id, repo_name), and the `find_pending_signals` above joins on
+        // that exact pair (via `get_unhandled_signals_for_repo`), so the mark
+        // retires ONLY this entry's pending copy: the owner's copy lives under
+        // the OWNER's repo_name, untouched, and the owner's wake is unaffected.
+        // Retiring it is the point -- nothing else ever drains a delegated
+        // entry's copy, so an unmarked row would sit pending until the 7-day
+        // signal TTL, re-announcing this skip on every poll. The mark is also
+        // anti-replay: if the operator later drops `agent` and un-delegates the
+        // repo, week-old signals must not suddenly wake it. Same keying
+        // doctrine as the post-spawn mark below -- keyed by `repo.name`
+        // (stable) so future `agent=` edits do not replay.
+        //
+        // The mark is not permanent: the retention sweep in src/watch/mod.rs
+        // calls `prune_watch_handled` (src/db/board.rs) to drop rows past
+        // `retention_days`. If that is ever tuned below the signal TTL, a
+        // pruned mark resurrects this pending copy for exactly one cycle --
+        // one log line, then re-marked here. Self-healing, so the prune needs
+        // no delegation-aware special case.
         if repo.is_delegated() {
-            // Log on state change only: this branch runs every poll cycle (30s
-            // by default) for as long as the pending copy survives, and
-            // daemon.log is append-only with no rotation. The `since` lookback
-            // does not bound that -- it is a now-minus-24h cutoff computed once
-            // at WatchLoop construction (src/watch/mod.rs) and never advanced,
-            // so any signal arriving after startup stays inside the window. The
-            // real bound is the daemon's uptime, capped by the 7-day TTL above.
-            // `should_log_delegated_skip` remembers the last set of pending
-            // signal ids logged for this repo and answers `false` while it is
-            // unchanged. Deliberately scoped to this skip; the session-lock and
-            // cooldown skips are #853's problem.
-            let pending_ids: Vec<String> = signals.iter().map(|(id, _, _)| id.clone()).collect();
-            if cooldown.should_log_delegated_skip(&repo.name, &pending_ids) {
-                eprintln!(
-                    "[legion watch] skipping wake for delegated repo '{}' (owner: {})",
-                    repo.name, recipient
-                );
+            eprintln!(
+                "[legion watch] skipping wake for delegated repo '{}' (owner: {})",
+                repo.name, recipient
+            );
+            for (id, _, _) in &signals {
+                if let Err(e) = db.mark_signal_handled_for_repo(id, &repo.name) {
+                    eprintln!(
+                        "[legion watch] failed to mark delegated-skip signal {} as handled for {}: {}",
+                        id, repo.name, e
+                    );
+                }
             }
             continue;
         }
@@ -671,6 +677,33 @@ mod tests {
         );
     }
 
+    /// Assert the delegated skip retired its OWN pending copy and only its own.
+    ///
+    /// Both halves are load-bearing, and neither is sufficient alone. The first
+    /// is the point of the mark: nothing else drains a delegated entry's copy,
+    /// so an unmarked row re-announces the skip every poll until the signal's
+    /// 7-day TTL. The second is what proves the mark is SCOPED -- the owner's
+    /// copy is keyed under the owner's own `repo_name`, and a guard that marked
+    /// under `recipient()` instead of `repo.name` would retire it and starve
+    /// the real wake. `find_pending_signals` joins `watch_handled` on
+    /// (signal_id, repo_name), so only the paired query can see the difference.
+    fn assert_delegated_copy_retired(db: &Database, delegated: &str, owner: &str) {
+        let names: Vec<String> = vec![owner.to_string()];
+
+        let retired = find_pending_signals(db, delegated, &names, None).expect("delegated pending");
+        assert!(
+            retired.is_empty(),
+            "the delegated skip must retire {delegated}'s pending copy -- nothing else drains it"
+        );
+
+        let owner_pending = find_pending_signals(db, owner, &names, None).expect("owner pending");
+        assert_eq!(
+            owner_pending.len(),
+            1,
+            "{owner}'s copy is keyed under its own repo_name and must survive the skip"
+        );
+    }
+
     #[test]
     fn poll_cycle_skips_wake_for_delegated_entry_with_directed_signal() {
         // `ledger` is maintained by `platform`, so a directed @platform signal
@@ -713,20 +746,11 @@ mod tests {
         // the exact bug #849 is about, so it gets its own assertion.
         assert_no_wake_machinery_touched(&db, "platform");
 
-        // The signal stays pending, and nothing ever consumes this copy: the
-        // owner's spawn marks the signal handled under the OWNER's repo_name,
-        // never under `ledger`, so ledger's row drains only at the signal's
-        // 7-day TTL or an explicit `legion resolve`. That is accepted, not
-        // accidental -- `watch_handled` is cluster-synced, so marking on the
-        // strength of this host's watch.toml would lose the signal for peers
-        // that do not delegate ledger (#308/#314).
-        let still_pending =
-            find_pending_signals(&db, "ledger", &["platform".to_string()], None).expect("pending");
-        assert_eq!(
-            still_pending.len(),
-            1,
-            "a host-local delegation decision must not consume the signal"
-        );
+        // The skip retires ledger's own pending copy. `watch_handled` is
+        // host-local and keyed (signal_id, repo_name), so nothing else would
+        // ever drain this row -- leaving it pending means re-announcing the
+        // skip every poll until the 7-day TTL.
+        assert_delegated_copy_retired(&db, "ledger", "platform");
     }
 
     #[test]
@@ -770,6 +794,10 @@ mod tests {
             "a broadcast must not wake a delegated entry either"
         );
         assert_no_wake_machinery_touched(&db, "platform");
+        // A broadcast copy is retired the same way a directed one is: the mark
+        // is per (signal_id, repo_name), which is exactly the mechanism that
+        // already lets one `@all` wake every non-delegated repo once.
+        assert_delegated_copy_retired(&db, "ledger", "platform");
     }
 
     #[test]
@@ -815,6 +843,7 @@ mod tests {
             "a file-change-driven wake must not spawn a delegated entry"
         );
         assert_no_wake_machinery_touched(&db, "platform");
+        assert_delegated_copy_retired(&db, "ledger", "platform");
     }
 
     #[test]
@@ -959,28 +988,46 @@ mod tests {
             "the entry that wakes must be the owner's, not the delegated one"
         );
 
-        // The regression guard for a future "just mark it handled" patch. The
-        // pending lookup catches a mark under `repo.name` (ledger's own copy
-        // would vanish); the watch_handled count catches a mark under the
-        // RECIPIENT, which the pending lookup cannot see because it joins on
-        // repo_name = 'ledger'. Neither entry legitimately writes the table in
-        // this cycle -- the owner marks handled only on a successful spawn, and
-        // this spawn fails -- so the table must be empty outright.
-        let ledger_pending =
-            find_pending_signals(&db, "ledger", &["platform".to_string()], None).expect("pending");
-        assert_eq!(
-            ledger_pending.len(),
-            1,
-            "ledger's pending copy must survive the skip -- nothing consumes it, \
-             and a host-local delegation decision must not write a cluster-synced mark"
-        );
-        let handled_rows: i64 = db
+        // Scoped marking, asserted directly on the table rather than through
+        // the pending lookups. The delegated skip retires ledger's copy, so a
+        // row must exist under 'ledger'; the row that must NOT exist is one
+        // under 'platform'. That is the mark-under-recipient regression, and it
+        // is invisible to the pending lookups because each joins watch_handled
+        // on its own repo_name -- ledger's query cannot see a platform-keyed
+        // row, and a platform-keyed row would silently starve the owner's wake.
+        //
+        // No other path can have written a platform row in this cycle: the
+        // owner's post-spawn marking loop lives on the `Ok(child)` arm of the
+        // spawn match, and this spawn fails at UNSPAWNABLE_WORKDIR. The Err arm
+        // releases leases and abandons the wake_attempt, marking nothing. So
+        // counting by repo_name is exact here, not merely indicative.
+        assert_delegated_copy_retired(&db, "ledger", "platform");
+
+        let ledger_marks: i64 = db
             .conn
-            .query_row("SELECT COUNT(*) FROM watch_handled", [], |row| row.get(0))
-            .expect("count watch_handled");
+            .query_row(
+                "SELECT COUNT(*) FROM watch_handled WHERE repo_name = 'ledger'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count ledger marks");
         assert_eq!(
-            handled_rows, 0,
-            "the delegated skip must not mark the signal handled under ANY repo_name"
+            ledger_marks, 1,
+            "the delegated skip must mark the batch under its OWN repo_name"
+        );
+
+        let platform_marks: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_handled WHERE repo_name = 'platform'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count platform marks");
+        assert_eq!(
+            platform_marks, 0,
+            "a mark written under the RECIPIENT would retire the owner's copy \
+             and starve the wake that is supposed to happen"
         );
     }
 

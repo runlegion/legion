@@ -270,22 +270,12 @@ impl SessionLockTracker {
 
 // -- Cooldown ----------------------------------------------------------------
 
-/// Per-repo memory that persists across poll ticks (the poll loop owns one
-/// instance and passes `&mut` into every `poll_cycle`). Two things live here
-/// because both are "what did this repo already do recently":
-/// - the wake cooldown, which prevents wake storms;
-/// - the last delegated-skip log line emitted per repo, so a skip that repeats
-///   every cycle for days does not repeat in the log (#849).
+/// Tracks per-repo cooldown to prevent wake storms.
 pub struct CooldownTracker {
     last_wake: HashMap<String, Instant>,
     cooldown: Duration,
     work_hours_start: Option<u8>,
     work_hours_end: Option<u8>,
-    /// Sorted pending-signal ids behind the most recent delegated-skip log line
-    /// for each repo. Exact ids rather than a hash: the set is bounded by the
-    /// repo's pending signals, and storing them outright removes any question
-    /// of a collision silently swallowing a log line.
-    last_delegated_skip_log: HashMap<String, Vec<String>>,
 }
 
 impl CooldownTracker {
@@ -299,7 +289,6 @@ impl CooldownTracker {
             cooldown: Duration::from_secs(cooldown_secs),
             work_hours_start,
             work_hours_end,
-            last_delegated_skip_log: HashMap::new(),
         }
     }
 
@@ -333,29 +322,6 @@ impl CooldownTracker {
     pub fn record_wake(&mut self, repo: &str) {
         self.last_wake.insert(repo.to_string(), Instant::now());
     }
-
-    /// Should the delegated-skip line be logged for `repo` this cycle?
-    ///
-    /// True on a state change -- the first skip for a repo, or any cycle whose
-    /// pending set differs from the one behind the last logged line -- and
-    /// false while the same signals keep re-appearing. A delegated entry's
-    /// pending copy is consumed by nobody (see the skip in `poll_cycle`), so
-    /// without this the line would repeat once per poll interval for as long as
-    /// the daemon runs, capped only by the signal's TTL.
-    ///
-    /// The insert sits on the true path only because there is nothing to do on
-    /// the false one -- that path is reached exactly when the incoming set
-    /// already equals the stored one. It is a shortcut, not an invariant.
-    pub fn should_log_delegated_skip(&mut self, repo: &str, signal_ids: &[String]) -> bool {
-        let mut sorted: Vec<String> = signal_ids.to_vec();
-        sorted.sort();
-        if self.last_delegated_skip_log.get(repo) == Some(&sorted) {
-            return false;
-        }
-        self.last_delegated_skip_log
-            .insert(repo.to_string(), sorted);
-        true
-    }
 }
 
 #[cfg(test)]
@@ -370,50 +336,6 @@ mod tests {
         tracker.record_wake("rafters");
         assert!(tracker.is_cooling_down("rafters"));
         assert!(!tracker.is_cooling_down("legion"));
-    }
-
-    #[test]
-    fn delegated_skip_log_fires_only_on_state_change() {
-        // The dedup contract behind the once-per-poll skip line (#849): log the
-        // first time, stay silent while the same pending set keeps coming back,
-        // speak again when the set changes, and track each repo separately.
-        let mut tracker = CooldownTracker::new(0, None, None);
-        let first: Vec<String> = vec!["sig-a".to_string()];
-
-        assert!(
-            tracker.should_log_delegated_skip("ledger", &first),
-            "the first skip for a repo must be logged"
-        );
-        assert!(
-            !tracker.should_log_delegated_skip("ledger", &first),
-            "an unchanged pending set must stay silent -- this is the whole point"
-        );
-
-        // Order must not count as a change: find_pending_signals row order is
-        // not a contract, and a reordered identical set is not new information.
-        let reordered: Vec<String> = vec!["sig-b".to_string(), "sig-a".to_string()];
-        let same_reordered: Vec<String> = vec!["sig-a".to_string(), "sig-b".to_string()];
-        assert!(
-            tracker.should_log_delegated_skip("ledger", &reordered),
-            "a new signal joining the pending set is a state change"
-        );
-        assert!(
-            !tracker.should_log_delegated_skip("ledger", &same_reordered),
-            "the same ids in a different order must not re-log"
-        );
-
-        // A signal draining out (TTL expiry or `legion resolve`) is also a
-        // change, so the log reflects the shrink.
-        assert!(
-            tracker.should_log_delegated_skip("ledger", &first),
-            "a shrinking pending set is a state change too"
-        );
-
-        // Per-repo memory: another delegated entry's first skip is its own.
-        assert!(
-            tracker.should_log_delegated_skip("kelex", &first),
-            "dedup state must be keyed per repo, not global"
-        );
     }
 
     /// Run a short-lived child to completion and return its (now-dead) PID.
