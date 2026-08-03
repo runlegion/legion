@@ -51,6 +51,26 @@ impl WatchRepoConfig {
             .unwrap_or(&self.name)
     }
 
+    /// Whether this entry is DELEGATED -- maintained through another agent's
+    /// session rather than waking one of its own.
+    ///
+    /// Ruling (#849): a delegated entry never spawns. Its `agent` field names
+    /// the persona that MAINTAINS the repo, and that persona wakes in the
+    /// owner's own workdir. The delegated entry still earns its place in
+    /// watch.toml -- it supplies `legion watch` list output, index coverage,
+    /// workdir-ownership checks, and `sym --repo` resolution -- but never a
+    /// wake. The wake path skips it before lease acquisition, so it does not
+    /// even compete for the persona wake-lease; that is what guarantees a
+    /// directed `@owner` signal wakes exactly once, in the owner's workdir.
+    ///
+    /// Defined against `recipient()` rather than the raw `agent` field so an
+    /// empty or whitespace-only `agent` (which `recipient()` treats as absent)
+    /// cannot read as delegated here while the lease layer treats it as
+    /// self-owned.
+    pub fn is_delegated(&self) -> bool {
+        self.recipient() != self.name
+    }
+
     /// The full addressable name set for this repo: `recipient()` plus every
     /// `broadcast_tags` entry. This is exactly the `names` contract of
     /// `find_pending_signals` -- the wake path (poll_cycle) and the read path
@@ -809,6 +829,72 @@ workdir = "/nonexistent/path/that/does/not/exist"
             extra: toml::Table::new(),
         };
         assert_eq!(repo_without_agent.recipient(), "legion");
+    }
+
+    #[test]
+    fn is_delegated_is_true_only_when_agent_names_another_persona() {
+        // #849: `agent` set to a DIFFERENT persona means the repo is maintained
+        // through that owner's session -- the entry itself never wakes.
+        let delegated = WatchRepoConfig {
+            name: "ledger".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: Some("platform".to_string()),
+            broadcast_tags: Vec::new(),
+            extra: toml::Table::new(),
+        };
+        assert!(
+            delegated.is_delegated(),
+            "agent naming another persona must read as delegated"
+        );
+
+        // `agent` absent -- the repo speaks for itself, so it wakes normally.
+        let no_agent = WatchRepoConfig {
+            name: "legion".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: None,
+            broadcast_tags: Vec::new(),
+            extra: toml::Table::new(),
+        };
+        assert!(
+            !no_agent.is_delegated(),
+            "absent agent must not read as delegated"
+        );
+
+        // `agent` echoing the repo's own name is the self-owned primary entry,
+        // not a delegation (e.g. platform's own repo carries agent = platform).
+        let self_named = WatchRepoConfig {
+            name: "platform".to_string(),
+            workdir: "/tmp".to_string(),
+            agent: Some("platform".to_string()),
+            broadcast_tags: Vec::new(),
+            extra: toml::Table::new(),
+        };
+        assert!(
+            !self_named.is_delegated(),
+            "agent equal to name is the self-owned primary entry"
+        );
+    }
+
+    #[test]
+    fn is_delegated_treats_empty_agent_as_absent() {
+        // Mirrors recipient()'s normalization: a hand-edited agent = "" or an
+        // all-whitespace value falls back to `name`, so it must NOT read as
+        // delegated. Keying is_delegated on recipient() is what buys this --
+        // a raw `agent` comparison would call these delegated while the lease
+        // layer still treated the entry as self-owned.
+        for blank in ["", "   "] {
+            let repo = WatchRepoConfig {
+                name: "fallback".to_string(),
+                workdir: "/tmp".to_string(),
+                agent: Some(blank.to_string()),
+                broadcast_tags: Vec::new(),
+                extra: toml::Table::new(),
+            };
+            assert!(
+                !repo.is_delegated(),
+                "blank agent {blank:?} must fall back to name, not read as delegated"
+            );
+        }
     }
 
     #[test]
