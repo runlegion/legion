@@ -122,6 +122,57 @@ pub fn poll_cycle(
         // their unblock check to the next poll -- the signals stay pending.
         check_auto_unblock(db, &signals);
 
+        // #849: a delegated entry never spawns. `agent` names the persona that
+        // MAINTAINS this repo, and that persona wakes in its OWN workdir -- so
+        // this entry is not a wake target at all, whatever the wake source
+        // (directed signal, broadcast, or a file change that landed a signal).
+        // The skip lands before the lease and wake_attempt work below on
+        // purpose: a delegated entry that acquired the persona lease would win
+        // the race against the owner's entry and wake the owner's persona in
+        // the WRONG workdir. Not competing for the lease is what makes a
+        // directed `@owner` signal wake exactly once, in the owner's workdir.
+        //
+        // The batch IS marked handled under THIS repo's own name, and that is
+        // local bookkeeping rather than a cluster decision. `watch_handled` is
+        // a HOST-LOCAL table: it carries no `updated_at`/`deleted_at`
+        // (src/db/board.rs) and is not one of the four tables on the sync wire
+        // (reflections, cards, schedules, persona_wake_leases --
+        // src/sync_actor.rs), so a mark written here can never travel to a peer
+        // whose watch.toml does not delegate this repo. It is keyed
+        // (signal_id, repo_name), and the `find_pending_signals` above joins on
+        // that exact pair (via `get_unhandled_signals_for_repo`), so the mark
+        // retires ONLY this entry's pending copy: the owner's copy lives under
+        // the OWNER's repo_name, untouched, and the owner's wake is unaffected.
+        // Retiring it is the point -- nothing else ever drains a delegated
+        // entry's copy, so an unmarked row would sit pending until the 7-day
+        // signal TTL, re-announcing this skip on every poll. The mark is also
+        // anti-replay: if the operator later drops `agent` and un-delegates the
+        // repo, week-old signals must not suddenly wake it. Same keying
+        // doctrine as the post-spawn mark below -- keyed by `repo.name`
+        // (stable) so future `agent=` edits do not replay.
+        //
+        // The mark is not permanent: the retention sweep in src/watch/mod.rs
+        // calls `prune_watch_handled` (src/db/board.rs) to drop rows past
+        // `retention_days`. If that is ever tuned below the signal TTL, a
+        // pruned mark resurrects this pending copy for exactly one cycle --
+        // one log line, then re-marked here. Self-healing, so the prune needs
+        // no delegation-aware special case.
+        if repo.is_delegated() {
+            eprintln!(
+                "[legion watch] skipping wake for delegated repo '{}' (owner: {})",
+                repo.name, recipient
+            );
+            for (id, _, _) in &signals {
+                if let Err(e) = db.mark_signal_handled_for_repo(id, &repo.name) {
+                    eprintln!(
+                        "[legion watch] failed to mark delegated-skip signal {} as handled for {}: {}",
+                        id, repo.name, e
+                    );
+                }
+            }
+            continue;
+        }
+
         if cooldown.is_cooling_down(&repo.name) {
             continue;
         }
@@ -572,6 +623,412 @@ mod tests {
         let listed = db.list_persona_leases(Some("legion")).expect("list");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].acquired_by_host, "peer-host");
+    }
+
+    // -- Delegated entries never wake (#849) -----------------------------------
+
+    /// A workdir that cannot exist, so `spawn_agent` fails at the `chdir`
+    /// instead of launching a real `claude` session.
+    ///
+    /// Every delegated-entry test below uses it as a safety net. Without it, a
+    /// regression that removes the guard does not just fail the test -- it
+    /// launches a live billed wake session per test run, in `/tmp`, with the
+    /// prompt of whatever signal the test seeded. Verified during development:
+    /// disabling the guard with a `/tmp` workdir spawned real `claude --print`
+    /// children that had to be killed by hand. The assertions below therefore
+    /// do NOT lean on `spawned == 0` (a bogus workdir gives that for free);
+    /// they lean on the wake_attempt row, which is enqueued immediately before
+    /// `spawn_agent` with nothing in between that could skip.
+    const UNSPAWNABLE_WORKDIR: &str = "/nonexistent/legion-849/spawn-must-fail";
+
+    /// A watch.toml entry whose `agent` names another persona.
+    fn delegated_repo(name: &str, owner: &str) -> WatchRepoConfig {
+        WatchRepoConfig {
+            name: name.to_string(),
+            workdir: UNSPAWNABLE_WORKDIR.to_string(),
+            agent: Some(owner.to_string()),
+            broadcast_tags: Vec::new(),
+            extra: toml::Table::new(),
+        }
+    }
+
+    /// Assert the delegated entry was skipped before it could touch any of the
+    /// wake machinery: no persona lease taken from `owner`, and no wake_attempt
+    /// row enqueued. The attempt table is the tight one -- `enqueue_wake_attempt`
+    /// is the last statement before `spawn_agent`, so an empty table means the
+    /// loop never reached the spawn call at all.
+    ///
+    /// Every caller must run `poll_cycle` WITH a `PersonaLeaseGate`. Without one
+    /// the lease half of this assertion is vacuous -- no lease can be taken, so
+    /// it would still pass against a guard that had been moved below the acquire,
+    /// which is precisely the regression #849 is about.
+    fn assert_no_wake_machinery_touched(db: &Database, owner: &str) {
+        let leases = db.list_persona_leases(Some(owner)).expect("list leases");
+        assert!(
+            leases.is_empty(),
+            "delegated entry must not acquire the persona lease it would steal from {owner}"
+        );
+
+        let attempts = db.recent_wake_attempts(50).expect("list attempts");
+        assert!(
+            attempts.is_empty(),
+            "delegated entry must be skipped before the wake_attempt enqueue that \
+             immediately precedes spawn_agent"
+        );
+    }
+
+    /// Assert the delegated skip retired its OWN pending copy and only its own.
+    ///
+    /// Both halves are load-bearing, and neither is sufficient alone. The first
+    /// is the point of the mark: nothing else drains a delegated entry's copy,
+    /// so an unmarked row re-announces the skip every poll until the signal's
+    /// 7-day TTL. The second is what proves the mark is SCOPED -- the owner's
+    /// copy is keyed under the owner's own `repo_name`, and a guard that marked
+    /// under `recipient()` instead of `repo.name` would retire it and starve
+    /// the real wake. `find_pending_signals` joins `watch_handled` on
+    /// (signal_id, repo_name), so only the paired query can see the difference.
+    fn assert_delegated_copy_retired(db: &Database, delegated: &str, owner: &str) {
+        let names: Vec<String> = vec![owner.to_string()];
+
+        let retired = find_pending_signals(db, delegated, &names, None).expect("delegated pending");
+        assert!(
+            retired.is_empty(),
+            "the delegated skip must retire {delegated}'s pending copy -- nothing else drains it"
+        );
+
+        let owner_pending = find_pending_signals(db, owner, &names, None).expect("owner pending");
+        assert_eq!(
+            owner_pending.len(),
+            1,
+            "{owner}'s copy is keyed under its own repo_name and must survive the skip"
+        );
+    }
+
+    #[test]
+    fn poll_cycle_skips_wake_for_delegated_entry_with_directed_signal() {
+        // `ledger` is maintained by `platform`, so a directed @platform signal
+        // must wake platform in PLATFORM's workdir -- never ledger's entry.
+        let (db, _index, _dir) = test_storage();
+
+        let config = WatchConfig {
+            repos: vec![delegated_repo("ledger", "platform")],
+            ..WatchConfig::default()
+        };
+
+        db.insert_reflection("kelex", "@platform question:can you look at this", "team")
+            .expect("insert signal");
+
+        let gate = PersonaLeaseGate {
+            db: &db,
+            host: "this-host",
+            ttl: Duration::from_secs(3600),
+        };
+        let mut cooldown = CooldownTracker::new(0, None, None);
+        let mut tracker = AgentTracker::new();
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            Some(&gate),
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll");
+
+        assert_eq!(spawned, 0, "a delegated entry must never spawn a session");
+
+        // The load-bearing assertions: the skip happens BEFORE lease acquisition
+        // and before the wake_attempt enqueue. A skip that ran AFTER the lease
+        // acquire would still report `spawned == 0` while holding the lease the
+        // owner's entry needs -- blocking the real wake for a full TTL. That is
+        // the exact bug #849 is about, so it gets its own assertion.
+        assert_no_wake_machinery_touched(&db, "platform");
+
+        // The skip retires ledger's own pending copy. `watch_handled` is
+        // host-local and keyed (signal_id, repo_name), so nothing else would
+        // ever drain this row -- leaving it pending means re-announcing the
+        // skip every poll until the 7-day TTL.
+        assert_delegated_copy_retired(&db, "ledger", "platform");
+    }
+
+    #[test]
+    fn poll_cycle_skips_wake_for_delegated_entry_on_broadcast() {
+        // Broadcasts reach spawn through the same loop as directed signals, so
+        // the guard must cover them too -- an @all fan-out must not wake a
+        // delegated entry in the wrong workdir.
+        let (db, _index, _dir) = test_storage();
+
+        let config = WatchConfig {
+            repos: vec![delegated_repo("ledger", "platform")],
+            ..WatchConfig::default()
+        };
+
+        db.insert_reflection("kelex", "@all request -- wake everyone", "team")
+            .expect("insert broadcast");
+
+        // The lease gate is passed on purpose: without it the lease half of
+        // assert_no_wake_machinery_touched could not fail.
+        let gate = PersonaLeaseGate {
+            db: &db,
+            host: "this-host",
+            ttl: Duration::from_secs(3600),
+        };
+        let mut cooldown = CooldownTracker::new(0, None, None);
+        let mut tracker = AgentTracker::new();
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            Some(&gate),
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll");
+
+        assert_eq!(
+            spawned, 0,
+            "a broadcast must not wake a delegated entry either"
+        );
+        assert_no_wake_machinery_touched(&db, "platform");
+        // A broadcast copy is retired the same way a directed one is: the mark
+        // is per (signal_id, repo_name), which is exactly the mechanism that
+        // already lets one `@all` wake every non-delegated repo once.
+        assert_delegated_copy_retired(&db, "ledger", "platform");
+    }
+
+    #[test]
+    fn poll_cycle_skips_wake_for_delegated_entry_on_file_change_wake() {
+        // A file-change wake is not a separate spawn path: `spawn_agent` has a
+        // single call site in this loop, and a file change reaches it by landing
+        // a signal that `find_pending_signals` picks up on the next poll. So the
+        // file-change case is exercised the same way -- a wake-worthy signal
+        // addressed to the owner, arriving at a delegated entry.
+        let (db, _index, _dir) = test_storage();
+
+        let config = WatchConfig {
+            repos: vec![delegated_repo("ledger", "platform")],
+            ..WatchConfig::default()
+        };
+
+        db.insert_reflection("watch", "@platform request -- ledger files changed", "team")
+            .expect("insert file-change signal");
+
+        // The lease gate is passed on purpose: without it the lease half of
+        // assert_no_wake_machinery_touched could not fail.
+        let gate = PersonaLeaseGate {
+            db: &db,
+            host: "this-host",
+            ttl: Duration::from_secs(3600),
+        };
+        let mut cooldown = CooldownTracker::new(0, None, None);
+        let mut tracker = AgentTracker::new();
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            Some(&gate),
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll");
+
+        assert_eq!(
+            spawned, 0,
+            "a file-change-driven wake must not spawn a delegated entry"
+        );
+        assert_no_wake_machinery_touched(&db, "platform");
+        assert_delegated_copy_retired(&db, "ledger", "platform");
+    }
+
+    #[test]
+    fn poll_cycle_does_not_skip_a_self_owned_entry() {
+        // The negative control for the guard: an entry whose `agent` equals its
+        // own name is NOT delegated, so it must run the full wake path.
+        //
+        // Same UNSPAWNABLE_WORKDIR trick as the delegated tests, so this control
+        // does not launch a live session either: `spawn_agent` fails at the
+        // chdir and poll_cycle takes its Err arm. `spawned` is therefore 0 for
+        // BOTH this entry and a delegated one -- the distinguishing evidence is
+        // the wake_attempt row, enqueued only once the delegation guard has let
+        // the entry through. This is the mirror of
+        // `assert_no_wake_machinery_touched`: there the table must be empty,
+        // here it must not be.
+        let (db, _index, _dir) = test_storage();
+
+        let config = WatchConfig {
+            stagger_secs: 0,
+            repos: vec![WatchRepoConfig {
+                name: "platform".to_string(),
+                workdir: UNSPAWNABLE_WORKDIR.to_string(),
+                agent: Some("platform".to_string()),
+                broadcast_tags: Vec::new(),
+                extra: toml::Table::new(),
+            }],
+            ..WatchConfig::default()
+        };
+
+        db.insert_reflection("kelex", "@platform question:can you look at this", "team")
+            .expect("insert signal");
+
+        let mut cooldown = CooldownTracker::new(0, None, None);
+        let mut tracker = AgentTracker::new();
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            None,
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll");
+        assert_eq!(spawned, 0, "the bogus workdir must fail the spawn");
+
+        let attempts = db.recent_wake_attempts(50).expect("list attempts");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "a self-owned entry must reach the wake_attempt enqueue -- \
+             the delegation guard must not swallow it"
+        );
+        assert_eq!(attempts[0].repo_name, "platform");
+    }
+
+    #[test]
+    fn poll_cycle_wakes_only_the_owner_when_both_entries_are_configured() {
+        // Co-presence: the delegated entry and its owner are BOTH in watch.toml,
+        // which is the shape a real host has, and the shape the single-entry
+        // tests above cannot express. One directed @platform signal, two entries
+        // that both match it, one real lease gate.
+        //
+        // What this proves: exactly one entry reaches the wake machinery, and it
+        // is the owner's. The wake_attempt table carries both halves -- its
+        // length says how many entries got through, and its `repo_name` says
+        // which one.
+        //
+        // Which mutations it discriminates:
+        // - guard deleted    -> ledger runs the full path first, so there are
+        //                       TWO attempt rows (ledger's spawn fails on the
+        //                       bogus workdir, which releases its lease and lets
+        //                       platform re-acquire and enqueue its own).
+        // - predicate inverted -> ONE attempt row, keyed to `ledger` instead of
+        //                       `platform`.
+        //
+        // One caveat, stated because the alternative is a comment that claims
+        // more than it checks. This test does NOT discriminate a guard moved
+        // BELOW the lease acquire: `try_acquire_persona_lease` returns true for
+        // a same-host re-acquire (src/db/wake.rs -- it reads the holder back and
+        // compares it to `host`), so ledger taking the lease and skipping does
+        // not lock platform out, and the attempt count stays 1. That mutation is
+        // caught by `assert_no_wake_machinery_touched` in the single-entry tests,
+        // where no second entry can paper over the stolen lease.
+        //
+        // Nor does it replay the production #849 incident, which was one wake in
+        // the WRONG workdir. Reproducing that needs a SUCCESSFUL spawn, and the
+        // whole suite deliberately forbids one (see UNSPAWNABLE_WORKDIR) rather
+        // than bill a live session per test run.
+        let (db, _index, _dir) = test_storage();
+
+        let config = WatchConfig {
+            // Explicit: the default is 15s, and a stagger sleep between two
+            // entries would make this test pay for it.
+            stagger_secs: 0,
+            repos: vec![
+                delegated_repo("ledger", "platform"),
+                WatchRepoConfig {
+                    name: "platform".to_string(),
+                    workdir: UNSPAWNABLE_WORKDIR.to_string(),
+                    agent: Some("platform".to_string()),
+                    broadcast_tags: Vec::new(),
+                    extra: toml::Table::new(),
+                },
+            ],
+            ..WatchConfig::default()
+        };
+
+        db.insert_reflection("kelex", "@platform question:can you look at this", "team")
+            .expect("insert signal");
+
+        let gate = PersonaLeaseGate {
+            db: &db,
+            host: "this-host",
+            ttl: Duration::from_secs(3600),
+        };
+        let mut cooldown = CooldownTracker::new(0, None, None);
+        let mut tracker = AgentTracker::new();
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            None,
+            Some(&gate),
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll");
+        assert_eq!(spawned, 0, "the bogus workdir must fail both spawns");
+
+        let attempts = db.recent_wake_attempts(50).expect("list attempts");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "a directed @platform signal must reach the wake machinery exactly once \
+             even though two configured entries match it"
+        );
+        assert_eq!(
+            attempts[0].repo_name, "platform",
+            "the entry that wakes must be the owner's, not the delegated one"
+        );
+
+        // Scoped marking, asserted directly on the table rather than through
+        // the pending lookups. The delegated skip retires ledger's copy, so a
+        // row must exist under 'ledger'; the row that must NOT exist is one
+        // under 'platform'. That is the mark-under-recipient regression, and it
+        // is invisible to the pending lookups because each joins watch_handled
+        // on its own repo_name -- ledger's query cannot see a platform-keyed
+        // row, and a platform-keyed row would silently starve the owner's wake.
+        //
+        // No other path can have written a platform row in this cycle: the
+        // owner's post-spawn marking loop lives on the `Ok(child)` arm of the
+        // spawn match, and this spawn fails at UNSPAWNABLE_WORKDIR. The Err arm
+        // releases leases and abandons the wake_attempt, marking nothing. So
+        // counting by repo_name is exact here, not merely indicative.
+        assert_delegated_copy_retired(&db, "ledger", "platform");
+
+        let ledger_marks: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_handled WHERE repo_name = 'ledger'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count ledger marks");
+        assert_eq!(
+            ledger_marks, 1,
+            "the delegated skip must mark the batch under its OWN repo_name"
+        );
+
+        let platform_marks: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_handled WHERE repo_name = 'platform'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count platform marks");
+        assert_eq!(
+            platform_marks, 0,
+            "a mark written under the RECIPIENT would retire the owner's copy \
+             and starve the wake that is supposed to happen"
+        );
     }
 
     #[test]
