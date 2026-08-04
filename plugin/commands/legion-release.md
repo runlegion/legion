@@ -35,43 +35,110 @@ version, real prose, every bullet cited, correct release-type rationale. If it i
 thin or wrong, send the agent back with specifics. Do NOT hand-write the entry
 yourself -- that is the agent's job; you are the editor.
 
-## 4. Ship it
+## 4. Ship it -- through the queue, like every other change
 
-Run `scripts/release.sh NEW` (pass the explicit version, plus `--activate` and/or
-`--dry-run` if the operator gave them). The script reads `release.toml` for the
-version source, changelog path, propagation targets, and tag format (`Cargo.toml`
-/ `plugin/CHANGELOG.md` / `v{version}` for legion itself), runs preflight (fmt,
-clippy, test, SCIP regen), bumps the version file, refreshes `Cargo.lock`, syncs
-the manifests, commits `chore(release): NEW`, tags, and pushes -- which fires the
-release CI that builds and publishes the platform binaries. The script validates
+The release commit is not special and no longer behaves as if it were. Until
+#844 this step was one `scripts/release.sh NEW` invocation that committed,
+tagged and pushed straight to `main`, bypassing the pull-request rule, the merge
+queue and seven required status checks on the one commit that reaches every
+agent in the cluster (the marketplace sets `autoUpdate: true`). It now runs as a
+chain, and **only the tag is ever pushed to `main`**.
+
+**4a. Stage.** Run `scripts/release.sh NEW` (explicit version, plus `--activate`
+and/or `--dry-run` if the operator gave them). It reads `release.toml` for the
+version source, changelog path, propagation targets, work-source repo name and
+tag format, runs preflight (fmt, clippy, test, SCIP regen), bumps the version
+file, refreshes `Cargo.lock`, syncs the manifests, commits `chore(release): NEW`
+**onto `release/NEW`**, and pushes that branch with `legion push`. It validates
 that the CHANGELOG header the agent wrote matches the bumped version; a mismatch
-aborts the release, which is the safety net.
+aborts before anything is committed. Nothing is tagged yet, and the script says
+so.
 
 If `--dry-run` was passed, stop here and report what would have happened.
 
-## 5. Docs review on shingle
+**4b. Earn the gates.** On `release/NEW`, run `/legion:legion-simplify` and then
+`/legion:legion-pr-write`. This is not ceremony to work around a tool -- it is
+the point of the change. Both gates are keyed to the release commit's hash and
+`legion pr create` refuses without a clean row for each, which is exactly what
+every feature branch faces. Do not reach for `--skip-gates`.
 
-Resolve the shingle repo path from watch.toml -- `legion watch list` maps `shingle`
-to its working directory; the runlegion.dev docs live under
-`<shingle>/sites/runlegion.dev/src/pages/docs/` (do not hardcode an absolute path,
-it differs per machine). Spawn `writer-legion` (Task, subagent_type `writer-legion`)
-with the new changelog entry. Brief it: review the release against the docs pages
-under that dir (concepts, architecture, cli-reference, getting-started, plugin-guide
-at time of writing -- read the directory rather than trusting this list to stay
-complete). If the
-release changes user-facing behavior -- a new/changed command, verb, flag, config
-knob, or concept -- update the affected pages on a `docs/legion-NEW` branch in the
-shingle repo, in the writer-legion voice. If nothing user-facing changed (internal
-refactor, test-only, CI), it should say so and write nothing -- not every release
-needs docs.
+**4c. Open and enqueue.** `legion pr create --repo legion --title "chore(release):
+NEW" --head release/NEW --body-file <the body you validated>`, then `legion pr
+merge --repo legion --number <N>`. On a queue-enabled base this enqueues and
+returns immediately; the merge is asynchronous.
 
-If writer-legion produced doc changes, open the shingle PR for them through the
-normal gate flow (issue -> branch -> simplify gate -> pr-write -> `legion pr create
---repo shingle`), exactly as a runlegion.dev docs PR is opened. Report the PR URL.
+**4d. Tag the commit that actually landed.** Run `scripts/release.sh NEW
+--finish=<N>` (re-pass `--activate` if the operator asked for it). It polls until
+the merge lands, then re-reads `origin/main`, verifies that tree really carries
+`NEW`, tags **that** sha, and pushes only the tag -- which fires the release CI.
+The verification is load-bearing: the queue may squash or rebase, so the merged
+sha is not the branch tip, and tagging the branch tip would point the release at
+an object that is not on `main`.
+
+Three failures this step reports rather than papers over, all of which leave
+nothing tagged:
+
+- **Ejected from the queue.** It happens (it happened in the 0.25.0 batch).
+  Merge `origin/main` into the branch -- never rebase, `legion push` has no force
+  path -- re-run the gates, push, re-enqueue, then re-run `--finish`.
+- **Timeout.** A failure to *observe* the merge, not evidence the release commit
+  failed. Check the PR, then re-run `--finish` once it has landed.
+- **Tagging failed after a successful merge.** Reported as INCOMPLETE BUT
+  RECOVERABLE, naming the merged sha. The version bump is already on `main`;
+  re-running `--finish` completes it and is idempotent from that point.
+
+## 5. Docs review on shingle -- in a worktree the script gives you
+
+**Do not resolve shingle's checkout path and do not send an agent into it.** That
+repo has its own agent who may be working in that tree right now, and you cannot
+see them. Cutting v0.25.0 swept another agent's uncommitted `cli-reference.mdx`
+edits into the docs commit through the shared working tree -- and note that a
+`git add <file>` *by name*, not `-A`, still took their whole file.
+
+Run `scripts/release.sh --docs-worktree`. It resolves shingle from `watch.toml`
+itself, creates an isolated worktree off a **remote** ref on the stable docs
+branch (`docs/legion-current`), and prints that worktree's path -- the only thing
+on stdout. Hand `writer-legion` **that path and only that path**. If it fails, it
+fails named (a stale worktree or branch from an earlier release is reported, not
+clobbered) and the docs step stops; there is no fallback to the shared checkout,
+because that fallback is the defect.
+
+The branch is stable on purpose (#820). Docs describe the CURRENT state, not
+per-version history, so each release EXTENDS the one open runlegion.dev docs PR
+rather than stacking a `docs/legion-<ver>` branch per release -- five of those
+stacked and conflict-cascaded across 0.20 through 0.24. When the branch already
+exists on the remote, the script starts from it and merges `origin/main` in.
+
+Spawn `writer-legion` (Task, subagent_type `writer-legion`) with the new
+changelog entry and the worktree path. Brief it: the runlegion.dev docs live
+under `<worktree>/sites/runlegion.dev/src/pages/docs/` -- read that directory
+rather than trusting any list of pages to stay complete. If the release changes
+user-facing behavior -- a new/changed command, verb, flag, config knob, or
+concept -- update the affected pages there, in the writer-legion voice, describing
+the current state rather than framing it as "new in X.Y". If nothing user-facing
+changed (internal refactor, test-only, CI), it should say so and write nothing --
+not every release needs docs.
+
+If writer-legion produced doc changes, take them through shingle's normal gate
+flow from inside the worktree (issue -> simplify gate -> pr-write -> `legion pr
+create --repo shingle`), or extend the open docs PR if one is already on that
+branch. `legion push` resolves the checkout holding the branch itself, so it
+works from the worktree unchanged. Report the PR URL.
+
+When the docs step is done, run `scripts/release.sh --docs-worktree-done=<path>`.
+It removes the worktree when nothing would be lost -- unchanged, or already
+pushed -- and RETAINS it, naming the path, when it carries work that is not on
+the remote, so a failed or partial docs run is recoverable rather than discarded.
+
+A docs step that fails does not fail the release: the tag is pushed and the
+binaries are building by then. Report it as an incomplete follow-up naming the
+worktree path so it can be resumed.
 
 ## 6. Report
 
-Summarize: the version shipped, the tag, the release CI status, whether docs were
-updated (and the PR if so), and -- if `--activate` was used -- the local daemon's
-new version from `/health`. Note any follow-up (e.g. "verify the GitHub Release
-published" if the CI build had not finished).
+Summarize: the version shipped, the release PR number and the sha the queue
+actually produced, the tag and what it points at, the release CI status, whether
+docs were updated (and the PR if so), and -- if `--activate` was used -- the local
+daemon's new version from `/health`. Note any follow-up (e.g. "verify the GitHub
+Release published" if the CI build had not finished, or a retained docs worktree
+path if the docs step did not finish).
