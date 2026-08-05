@@ -29,26 +29,273 @@ no() { # no <label> <cmd...>   (expect non-zero)
   if "$@"; then FAIL=$((FAIL + 1)); printf 'FAIL: %s -- expected failure\n' "$label" >&2; else PASS=$((PASS + 1)); fi
 }
 
-# -- git fixture preamble ----------------------------------------------------
-# Shared by every block below that builds a real repo. Defined up here because
-# the first of those blocks is the merge-observer section, well before the docs
-# worktree fixtures.
+# -- THE FIXTURE PERIMETER (#861) --------------------------------------------
+# Everything below this banner exists because this suite has twice driven git
+# against the REAL repository it was running from, and the second time force-fed
+# a one-line Cargo.toml and a `chore(release): 0.25.0` commit onto origin/main.
 #
-# `require_dir` IS THE GUARD on fixture commands, and it is worth being exact
-# about that, because the natural reading is that addressing repos with `git -C
-# <dir>` instead of `cd` closed the incident class by itself. It did not:
-# `git -C ""` does NOT fail -- inside a repo it runs in the CURRENT repo and
-# exits 0, exactly the silent cwd fallback `cd ""` gives you. So a fixture
-# command built on a helper that returned nothing is just as capable of
-# operating on the test runner's own checkout either way. That is not
-# hypothetical: during a mutation run that deliberately broke
-# docs_worktree_setup, the fixture committed the test runner's own staged work
-# onto a fixture branch. What prevents it is refusing to run the dependent
-# assertions at all when the path is empty or missing -- so do not add an
-# unguarded `git -C "$SOMETHING"` believing the primitive protects you.
+# THE DELIVERY CHANNEL, stated plainly, because it is not obvious from this
+# file: scripts/release.sh runs scripts/preflight.sh, and preflight.sh does
+# `cd "$(git rev-parse --show-toplevel)"` and then `bash scripts/test-release.sh`.
+# So during a real release this suite executes with its CWD SET TO THE REAL
+# CHECKOUT, inside a repo whose `origin` is the real GitHub remote. Every
+# fallback-to-cwd in here is therefore a fallback to production.
+#
+# `require_dir` was the previous guard and it is DEMONSTRABLY NOT ENOUGH:
+#   * `git -C ""` does not fail. Verified: inside a repo it runs in the CURRENT
+#     repo and exits 0, exactly the silent no-op `cd ""` gives you. The
+#     primitive protects nothing.
+#   * `require_dir` accepts "." -- `[ -n "." ] && [ -d "." ]` is true. A path
+#     helper that degrades to a RELATIVE path sails straight through it, and
+#     then `git -C .` and `rm -rf "$(dirname .)"` both address the runner.
+#   * `dirname ""` is ".", so a single empty variable turns the EXIT cleanup
+#     into `rm -rf .` at the root of the real checkout.
+#
+# So the guard cannot be a check on the value. It is a check on the RESOLVED
+# TARGET: every fixture git call goes through `fixture_git`, which refuses any
+# directory that is not absolute, not under this suite's own temp root, or that
+# resolves to the same git repository the suite is running from -- and refuses
+# it by killing the suite, not by returning non-zero (most calls here sit inside
+# `$( )` or `( )`, where a `return`/`exit` is swallowed by the subshell and the
+# run marches on into the next block).
+SUITE_PID=$$
+
+# phys <path>: the physical, symlink-free form of an EXISTING directory. Path
+# STRINGS are not comparable identities here: /Users/seansilvius/projects/... and
+# /Volumes/store/projects/... are the same checkout through a symlink, and
+# mktemp hands out /var/folders/... for /private/var/folders/....
+phys() {
+  local p="$1"
+  [ -n "$p" ] || return 1
+  (cd "$p" 2>/dev/null && pwd -P) || return 1
+}
+
+# path_under <path> <root>: <path> is <root> or lives beneath it.
+path_under() {
+  local p="$1" root="$2"
+  [ -n "$p" ] && [ -n "$root" ] || return 1
+  case "$p" in "$root" | "$root"/*) return 0 ;; esac
+  return 1
+}
+
+# repo_key <dir>: a canonical identity for the git REPOSITORY <dir> belongs to.
+# The common git dir, so a linked worktree keys to the repo it is linked into --
+# a fixture pointed at a worktree of the runner's checkout must be caught too.
+repo_key() {
+  local d="$1" g
+  [ -n "$d" ] || return 1
+  g="$(cd "$d" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [ -n "$g" ] || return 1
+  case "$g" in /*) ;; *) g="${d}/${g}" ;; esac
+  phys "$g"
+}
+
+# The forbidden repository, captured TWICE: the repo containing this script, and
+# the repo at the cwd the suite started in. Under preflight they are the same;
+# run standalone from elsewhere they need not be, and both are equally fatal.
+# These two calls are the only git invocations in this file that are exempt from
+# fixture_git by definition -- they are how it learns what to refuse.
+SUITE_SELF_REPO="$(repo_key "$DIR" || printf '')"
+SUITE_CWD_REPO="$(repo_key "." || printf '')"
+SUITE_SELF_TOP="$( (cd "$DIR" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || printf '' )"
+[ -z "$SUITE_SELF_TOP" ] || SUITE_SELF_TOP="$(phys "$SUITE_SELF_TOP" || printf '%s' "$SUITE_SELF_TOP")"
+
+# ONE temp root for the whole suite, so "is this path mine?" is a containment
+# test rather than a list of four unrelated mktemp results.
+SUITE_TMP="$(phys "$(mktemp -d)")" || {
+  printf '[test-release] could not create the suite temp root\n' >&2
+  exit 90
+}
+SYSTEM_TMP="$(phys "${TMPDIR:-/tmp}" || printf '/tmp')"
+SUITE_ABORT_NOTE="${SUITE_TMP}/ABORT"
+
+# suite_abort <reason>: kill the RUN, from wherever it is called. `exit` alone
+# is not enough (subshells), and `return 1` is not enough (`set +e` on line 13),
+# so the signal goes to the top-level shell by pid and the local shell dies too.
+suite_abort() {
+  printf '\n[test-release] PERIMETER ABORT -- %s\n' "$1" >&2
+  printf '[test-release] the fixture harness refuses to run git outside its own temp root.\n' >&2
+  printf '%s\n' "$1" >"$SUITE_ABORT_NOTE" 2>/dev/null || true
+  kill -TERM "$SUITE_PID" 2>/dev/null || true
+  exit 97
+}
+suite_terminated() {
+  printf '\n[test-release] SUITE ABORTED BY THE PERIMETER GUARD: %s\n' \
+    "$(cat "$SUITE_ABORT_NOTE" 2>/dev/null || printf 'reason unavailable')" >&2
+  exit 97
+}
+trap suite_terminated TERM
+
+# Every temp directory this file creates goes on one list with one EXIT trap, so
+# a RED run cleans up as thoroughly as a green one -- and an ABORTED run cleans
+# up too. docs_worktree_setup makes its OWN `mktemp -d` parent, outside
+# $SUITE_TMP, and only a successful teardown ever removed it, so each failing run
+# leaked a worktree parent into the system temp dir, which is where the release
+# is cut. Registering the parent as soon as the path is known covers the failure
+# paths too.
+CLEANUP_PATHS=("$SUITE_TMP")
+cleanup_temps() {
+  [ "${#CLEANUP_PATHS[@]}" -eq 0 ] || rm -rf "${CLEANUP_PATHS[@]}"
+}
+trap cleanup_temps EXIT
+
+# register_temp <path...>: add a directory to the EXIT cleanup list. This list
+# is an `rm -rf` argument vector, so it is guarded at least as hard as the git
+# targets: `dirname ""` is ".", and a "." on this list is `rm -rf` at the root of
+# the runner's checkout when the suite exits.
+register_temp() {
+  local p rp
+  for p in "$@"; do
+    [ -n "$p" ] || continue
+    case "$p" in
+      /*) ;;
+      *) suite_abort "register_temp given the RELATIVE path [${p}] -- the EXIT 'rm -rf' would resolve it against the runner's checkout" ;;
+    esac
+    # Canonicalise before comparing. `mktemp -d` hands back /var/folders/... for
+    # what is physically /private/var/folders/..., so a string test against a
+    # physically-resolved root rejects a perfectly legitimate temp parent.
+    rp="$(phys "$p" || printf '%s' "$p")"
+    if ! path_under "$rp" "$SUITE_TMP" && ! path_under "$rp" "$SYSTEM_TMP"; then
+      suite_abort "register_temp given [${p}] (-> ${rp}), which is under neither ${SUITE_TMP} nor ${SYSTEM_TMP}"
+    fi
+    if [ -n "$SUITE_SELF_TOP" ] && { path_under "$rp" "$SUITE_SELF_TOP" || path_under "$SUITE_SELF_TOP" "$rp"; }; then
+      suite_abort "register_temp given [${p}] (-> ${rp}), which contains or lives inside the runner's checkout ${SUITE_SELF_TOP}"
+    fi
+    CLEANUP_PATHS+=("$rp")
+  done
+}
+
+# fixture_dir_allowed <physical-path>: under the suite temp root, or under a
+# directory already registered for cleanup. The second arm is what admits the
+# worktree parents docs_worktree_setup mints with its own `mktemp -d` -- those
+# are outside $SUITE_TMP by construction, and release.sh is not in scope here.
+fixture_dir_allowed() {
+  local p="$1" reg
+  path_under "$p" "$SUITE_TMP" && return 0
+  for reg in "${CLEANUP_PATHS[@]}"; do
+    path_under "$p" "$reg" && return 0
+  done
+  return 1
+}
+
+# fixture_git_verb <args...>: the git subcommand, skipping global options and
+# their values, so the remote assertion fires on the calls that can reach one.
+fixture_git_verb() {
+  local a skip=0
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then
+      skip=0
+      continue
+    fi
+    case "$a" in
+      -c | -C | --git-dir | --work-tree | --namespace) skip=1 ;;
+      -*) ;;
+      *)
+        printf '%s' "$a"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+# fixture_assert_url <url-or-arg> <what>: a fixture's remote must be a temp bare
+# repo. Anything addressable off this machine is refused outright -- that is the
+# difference between a bad test run and a push to GitHub.
+fixture_assert_url() {
+  local url="$1" what="$2" rp
+  [ -n "$url" ] || return 0
+  case "$url" in
+    /*)
+      rp="$(phys "$url" || printf '%s' "$url")"
+      fixture_dir_allowed "$rp" \
+        || suite_abort "fixture remote [${url}] resolves OUTSIDE the suite temp root ${SUITE_TMP} -- ${what}"
+      ;;
+    *://* | *@*:*)
+      suite_abort "fixture remote [${url}] is NON-LOCAL -- ${what}"
+      ;;
+    *) : ;; # a remote name, refspec or branch, not a URL
+  esac
+}
+
+# fixture_assert_remote <dir> <what>: <dir>'s origin, if it has one. The read is
+# a DIRECT git call -- it is part of the guard, so routing it through
+# fixture_git would recurse.
+fixture_assert_remote() {
+  local d="$1" what="$2" url
+  url="$(git -C "$d" remote get-url origin 2>/dev/null)" || url=""
+  fixture_assert_url "$url" "${what} (origin of ${d})"
+}
+
+# fixture_git <dir> <git-args...>: THE ONLY WAY this file addresses a git repo.
+fixture_git() {
+  local d="$1"
+  shift
+  local p key last a
+  [ -n "$d" ] || suite_abort "fixture git with an EMPTY target directory: 'git $*' -- 'git -C \"\"' silently runs in the CURRENT repo and exits 0"
+  case "$d" in
+    /*) ;;
+    *) suite_abort "fixture git with the RELATIVE target directory [${d}]: 'git $*' -- it would resolve against the runner's cwd" ;;
+  esac
+  p="$(phys "$d")" || suite_abort "fixture git target does not exist [${d}]: 'git $*'"
+  fixture_dir_allowed "$p" \
+    || suite_abort "fixture git target [${p}] is outside the suite temp root ${SUITE_TMP}: 'git $*'"
+  key="$(repo_key "$p" || printf '')"
+  if [ -n "$key" ]; then
+    [ "$key" != "$SUITE_SELF_REPO" ] \
+      || suite_abort "fixture git target [${p}] IS the repository this suite is running from (${key}): 'git $*'"
+    [ "$key" != "$SUITE_CWD_REPO" ] \
+      || suite_abort "fixture git target [${p}] is the repository at the suite's startup cwd (${key}): 'git $*'"
+  fi
+  case "$(fixture_git_verb "$@")" in
+    push | fetch | pull | clone | ls-remote)
+      fixture_assert_remote "$d" "git $*"
+      ;;
+    remote)
+      fixture_assert_remote "$d" "git $*"
+      last=""
+      for a in "$@"; do last="$a"; done
+      fixture_assert_url "$last" "git $*"
+      ;;
+  esac
+  git -C "$d" "$@"
+}
+
+# fixture_git_init <dir> <git-args...>: <dir> is APPENDED, because `git init` and
+# friends take the target as an argument rather than via -C, and -C requires the
+# directory to already exist.
+fixture_git_init() {
+  local d="$1"
+  shift
+  [ -n "$d" ] || suite_abort "fixture git init with an EMPTY target directory: 'git $*'"
+  case "$d" in
+    /*) ;;
+    *) suite_abort "fixture git init with the RELATIVE target directory [${d}]: 'git $*'" ;;
+  esac
+  path_under "$d" "$SUITE_TMP" \
+    || suite_abort "fixture git init target [${d}] is outside the suite temp root ${SUITE_TMP}"
+  git "$@" "$d"
+}
+
+# gitp <dir> <git-args...>: a fixture git call with hooks pinned off, so a stray
+# repo-level or inherited hook cannot turn a fixture push into a mystery failure.
+gitp() {
+  local d="$1"
+  shift
+  fixture_git "$d" -c core.hooksPath=/dev/null "$@"
+}
+
+# require_dir stays, one layer in from the perimeter: it turns "the helper under
+# test returned nothing usable" into a NAMED test failure with its dependent
+# assertions skipped, rather than a pile of confusing downstream failures. It is
+# not a safety boundary -- it passes on "." -- and nothing below may rely on it
+# as one.
 require_dir() { # require_dir <label> <path>
   local label="$1" d="$2"
-  if [ -n "$d" ] && [ -d "$d" ]; then PASS=$((PASS + 1)); return 0; fi
+  if [ -n "$d" ] && [ -d "$d" ]; then
+    PASS=$((PASS + 1))
+    return 0
+  fi
   FAIL=$((FAIL + 1))
   printf 'FAIL: %s -- no usable directory [%s]; dependent assertions skipped\n' "$label" "$d" >&2
   return 1
@@ -64,9 +311,6 @@ require_dir() { # require_dir <label> <path>
 # global config leaves git with no committer.
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
-# gitp: a push with hooks pinned off, so a stray repo-level hook cannot turn a
-# fixture push into a mystery failure.
-gitp() { git -c core.hooksPath=/dev/null "$@"; }
 
 # compute_new_version
 eq "patch"         0.18.3 "$(compute_new_version 0.18.2 patch)"
@@ -124,28 +368,12 @@ eq "tag: custom format"   "ledger@0.2.0"   "$(render_tag '{version}' ledger@0.2.
 # #741's proof that the bump step generalizes beyond Cargo.toml (a package.json
 # source, e.g. a JS repo's `[version] file = "package.json"`, bumps the same way
 # a flat json target does in scripts/sync-version.sh).
-# Every temp directory this file creates goes on one list with one EXIT trap, so
-# a RED run cleans up as thoroughly as a green one. docs_worktree_setup makes its
-# OWN `mktemp -d` parent, outside $DOCS_TMP, and only a successful teardown ever
-# removed it -- so each failing run leaked a worktree parent into the system temp
-# dir, which is where the release is cut. Registering the parent as soon as the
-# path is known covers the failure paths too.
-CLEANUP_PATHS=()
-cleanup_temps() {
-  [ "${#CLEANUP_PATHS[@]}" -eq 0 ] || rm -rf "${CLEANUP_PATHS[@]}"
-}
-trap cleanup_temps EXIT
-# register_temp <path...>: add a directory to the EXIT cleanup list.
-register_temp() {
-  local p
-  for p in "$@"; do
-    [ -n "$p" ] || continue
-    CLEANUP_PATHS+=("$p")
-  done
-}
-
-BUMP_DIR=$(mktemp -d)
-register_temp "$BUMP_DIR"
+#
+# Every fixture directory below is a CHILD of $SUITE_TMP rather than its own
+# `mktemp -d`, so "is this path the suite's own?" -- which is what the perimeter
+# guard asks on every git call -- is a single containment test.
+BUMP_DIR="${SUITE_TMP}/bump"
+mkdir -p "$BUMP_DIR"
 
 cat >"${BUMP_DIR}/Cargo.toml" <<'EOF'
 [package]
@@ -219,8 +447,8 @@ eq "merge: landed wins over unknown queue" "merged" "$(classify_release_merge 1 
 # --finish= argument) supply is ever parsed as shell. Sequenced observers keep
 # their state in a counter FILE because each observer runs in a command
 # substitution, i.e. a subshell: a shell variable would not survive the poll.
-WAIT_DIR=$(mktemp -d)
-register_temp "$WAIT_DIR"
+WAIT_DIR="${SUITE_TMP}/wait"
+mkdir -p "$WAIT_DIR"
 # step <file>: print the call count so far, then increment it.
 step() { local f="$1" n; n="$(cat "$f")"; printf '%s\n' "$((n + 1))" >"$f"; printf '%s\n' "$n"; }
 
@@ -310,28 +538,57 @@ eq "wait: injected observer resolves a sourced function" "merged" \
 # remote cannot be reached, which a stubbed observer cannot show.
 #
 # release_landed operates on the CURRENT directory (finish_release cd's to the
-# repo root first), so these run through `in_dir`, which refuses an empty path.
-# `cd ""` returns 0 in bash, so `cd "$X" || return` is NOT a guard on its own.
+# repo root first), so these run through `in_dir`. `cd ""` returns 0 in bash, so
+# `cd "$X" || return` is NOT a guard on its own.
+#
+# in_dir is THE SECOND DOOR into the runner's repo, and it has to be barred as
+# hard as the first: it hands the cwd to a release.sh function whose own git
+# calls cannot be routed through fixture_git, so whatever `cd` lands on is what
+# that function operates on. It therefore applies the same perimeter as
+# fixture_git -- absolute, inside the suite temp root, and not the runner's
+# repository -- before it moves anywhere. Refusing a relative path matters as
+# much as refusing an empty one: "." is the value `require_dir` waves through.
 in_dir() { # in_dir <dir> <cmd...>
   local d="$1"; shift
+  local p key
   [ -n "$d" ] || return 90
-  cd "$d" || return 91
+  case "$d" in
+    /*) ;;
+    *) suite_abort "in_dir given the RELATIVE directory [${d}] -- it would hand the runner's cwd to '$1'" ;;
+  esac
+  p="$(phys "$d")" || return 91
+  fixture_dir_allowed "$p" \
+    || suite_abort "in_dir target [${p}] is outside the suite temp root ${SUITE_TMP} -- refusing to run '$1' there"
+  key="$(repo_key "$p" || printf '')"
+  if [ -n "$key" ]; then
+    [ "$key" != "$SUITE_SELF_REPO" ] \
+      || suite_abort "in_dir target [${p}] IS the repository this suite is running from -- refusing to run '$1' there"
+    [ "$key" != "$SUITE_CWD_REPO" ] \
+      || suite_abort "in_dir target [${p}] is the repository at the suite's startup cwd -- refusing to run '$1' there"
+  fi
+  cd "$p" || return 91
   "$@"
 }
 
-OBS_TMP=$(mktemp -d)
-register_temp "$OBS_TMP"
+# THE FIXTURE WHOSE SHAPE IS THE INCIDENT. A one-line Cargo.toml carrying
+# `version = "0.25.0"`, a commit subject of `chore(release): 0.25.0`, and a
+# `push -u origin main` -- which is, byte for byte, what was force-fed onto the
+# real origin/main. Nothing here is exotic; the escape is entirely in WHERE the
+# three lines land, which is why every one of them now goes through the
+# perimeter rather than through a bare `git -C`.
+OBS_TMP="${SUITE_TMP}/obs"
+mkdir -p "$OBS_TMP"
 OBS_CO="${OBS_TMP}/repo"
-git init --bare --quiet "${OBS_TMP}/origin.git"
-git -c init.defaultBranch=main init --quiet "$OBS_CO"
-git -C "$OBS_CO" config user.email t@t
-git -C "$OBS_CO" config user.name t
-git -C "$OBS_CO" checkout --quiet -B main
+fixture_git_init "${OBS_TMP}/origin.git" init --bare --quiet
+fixture_git_init "$OBS_CO" -c init.defaultBranch=main init --quiet
+fixture_git "$OBS_CO" config user.email t@t
+fixture_git "$OBS_CO" config user.name t
+fixture_git "$OBS_CO" checkout --quiet -B main
 printf 'version = "0.25.0"\n' >"${OBS_CO}/Cargo.toml"
-git -C "$OBS_CO" add Cargo.toml
-git -C "$OBS_CO" commit --quiet --no-verify -m "chore(release): 0.25.0"
-git -C "$OBS_CO" remote add origin "${OBS_TMP}/origin.git"
-gitp -C "$OBS_CO" push --quiet -u origin main
+fixture_git "$OBS_CO" add Cargo.toml
+fixture_git "$OBS_CO" commit --quiet --no-verify -m "chore(release): 0.25.0"
+fixture_git "$OBS_CO" remote add origin "${OBS_TMP}/origin.git"
+gitp "$OBS_CO" push --quiet -u origin main
 
 if require_dir "observers: fixture repo" "$OBS_CO"; then
   # A reachable remote that does not carry the version is a definite NO.
@@ -344,9 +601,9 @@ if require_dir "observers: fixture repo" "$OBS_CO"; then
   # being updated. A gate phrased as "did the ref read cleanly" answers a
   # confident 0 here, and the poll loop turns a sustained 0 into an EJECTED
   # verdict. Only the fetch's exit status can tell the difference.
-  git -C "$OBS_CO" remote set-url origin "${OBS_TMP}/does-not-exist.git"
+  fixture_git "$OBS_CO" remote set-url origin "${OBS_TMP}/does-not-exist.git"
   ok "landed: the remote-tracking ref is still readable during the outage" \
-    test -n "$(git -C "$OBS_CO" rev-parse --verify --quiet origin/main 2>/dev/null)"
+    test -n "$(fixture_git "$OBS_CO" rev-parse --verify --quiet origin/main 2>/dev/null)"
   eq "landed: unreachable remote is unknown, not 0" "unknown" \
     "$( (in_dir "$OBS_CO" release_landed main Cargo.toml package.version 0.25.0) 2>/dev/null )"
   # Same failure, same requirement, for the queue observer: the rc must belong to
@@ -354,12 +611,14 @@ if require_dir "observers: fixture repo" "$OBS_CO"; then
   eq "queue: unreachable remote is unknown, not 0" "unknown" \
     "$( (in_dir "$OBS_CO" release_queue_ref_present 42) 2>/dev/null )"
 
-  git -C "$OBS_CO" remote set-url origin "${OBS_TMP}/origin.git"
+  fixture_git "$OBS_CO" remote set-url origin "${OBS_TMP}/origin.git"
   eq "queue: reachable remote without the ref is 0" "0" \
     "$( (in_dir "$OBS_CO" release_queue_ref_present 42) 2>/dev/null )"
   # A real merge-queue ref: refs/heads/gh-readonly-queue/<base>/pr-<N>-<sha>.
-  OBS_SHA="$(git -C "$OBS_CO" rev-parse HEAD)"
-  git -C "${OBS_TMP}/origin.git" update-ref \
+  OBS_SHA="$(fixture_git "$OBS_CO" rev-parse HEAD)"
+  # A BARE repo: fixture_git keys on the common git dir, which a bare repo has,
+  # so this is guarded exactly like the checkouts are.
+  fixture_git "${OBS_TMP}/origin.git" update-ref \
     "refs/heads/gh-readonly-queue/main/pr-42-${OBS_SHA}" "$OBS_SHA"
   eq "queue: the PR's queue ref is present" "1" \
     "$( (in_dir "$OBS_CO" release_queue_ref_present 42) 2>/dev/null )"
@@ -491,50 +750,59 @@ no "disposable: missing base sha even when untouched" worktree_is_disposable bbb
 # remote. No network, no gh, no shingle. Both call `fail` (which exits), so every
 # arm runs in a subshell.
 #
-# Every fixture command below addresses its repo with `git -C <dir>` and writes
-# through absolute paths, and `require_dir` (see the fixture preamble at the top
-# of this file -- it, not `git -C`, is what makes that safe) gates every block on
-# the helper under test having returned a real directory.
-DOCS_TMP=$(mktemp -d)
-register_temp "$DOCS_TMP"
+# Every fixture command below goes through `fixture_git`, which resolves the
+# target repo and refuses anything that is not this suite's own temp tree (see
+# THE FIXTURE PERIMETER at the top of this file). `docs_worktree_setup` and
+# `docs_worktree_teardown` are the functions UNDER TEST, so their internal git
+# calls cannot be routed -- what bounds them is `in_dir`/`require_dir` on the
+# way in, the fact that the only checkout they are ever handed is $DOCS_CO, and
+# the perimeter on every assertion made about their output afterwards.
+DOCS_TMP="${SUITE_TMP}/docs"
+mkdir -p "$DOCS_TMP"
 DOCS_CO="${DOCS_TMP}/checkout"
 DOCS_BRANCH="docs/fixture-current"
-git init --bare --quiet "${DOCS_TMP}/origin.git"
-git -c init.defaultBranch=main init --quiet "$DOCS_CO"
-git -C "$DOCS_CO" config user.email t@t
-git -C "$DOCS_CO" config user.name t
-git -C "$DOCS_CO" checkout --quiet -B main
+fixture_git_init "${DOCS_TMP}/origin.git" init --bare --quiet
+fixture_git_init "$DOCS_CO" -c init.defaultBranch=main init --quiet
+fixture_git "$DOCS_CO" config user.email t@t
+fixture_git "$DOCS_CO" config user.name t
+fixture_git "$DOCS_CO" checkout --quiet -B main
 printf 'docs\n' >"${DOCS_CO}/index.md"
-git -C "$DOCS_CO" add index.md
-git -C "$DOCS_CO" commit --quiet --no-verify -m "init"
-git -C "$DOCS_CO" remote add origin "${DOCS_TMP}/origin.git"
-gitp -C "$DOCS_CO" push --quiet -u origin main
+fixture_git "$DOCS_CO" add index.md
+fixture_git "$DOCS_CO" commit --quiet --no-verify -m "init"
+fixture_git "$DOCS_CO" remote add origin "${DOCS_TMP}/origin.git"
+gitp "$DOCS_CO" push --quiet -u origin main
 # Prove the pin took, rather than assuming it: every assertion below about
 # config-independence rests on this.
 eq "fixture: ambient global config is neutralised" "" \
-  "$(git -C "$DOCS_CO" config --global --get merge.ff 2>/dev/null || true)"
+  "$(fixture_git "$DOCS_CO" config --global --get merge.ff 2>/dev/null || true)"
 eq "fixture: repo identity is set for worktree commits" "t@t" \
-  "$(git -C "$DOCS_CO" config user.email 2>/dev/null)"
+  "$(fixture_git "$DOCS_CO" config user.email 2>/dev/null)"
+# The remote guard, asserted rather than assumed: the fixture's origin resolves
+# inside the suite temp root. A fixture whose origin is a real forge is the
+# entire incident, so this must be a checked property of the fixture, not a
+# property of the line that happened to create it.
+ok "fixture: origin is a temp bare repo inside the suite root" \
+  path_under "$(phys "$(fixture_git "$DOCS_CO" remote get-url origin)")" "$SUITE_TMP"
 
 # Fresh arm: no such branch on the remote, so the worktree starts from
 # origin/main -- NOT from whatever the shared checkout has checked out. Prove
 # that by parking the shared checkout on an unrelated branch first.
-git -C "$DOCS_CO" checkout --quiet -b someone-elses-work
+fixture_git "$DOCS_CO" checkout --quiet -b someone-elses-work
 printf 'wip\n' >"${DOCS_CO}/wip.md"
-git -C "$DOCS_CO" add wip.md
-git -C "$DOCS_CO" commit --quiet --no-verify -m "wip"
+fixture_git "$DOCS_CO" add wip.md
+fixture_git "$DOCS_CO" commit --quiet --no-verify -m "wip"
 WT1="$( (docs_worktree_setup "$DOCS_CO" "$DOCS_BRANCH" main fixture-docs) 2>/dev/null )"
 # Registered for cleanup the moment the path is known: docs_worktree_setup makes
 # its own mktemp parent OUTSIDE $DOCS_TMP, and a red run never reaches teardown.
 [ -z "$WT1" ] || register_temp "$(dirname "$WT1")"
 if require_dir "docs wt: created" "$WT1"; then
-  eq "docs wt: on the stable branch" "$DOCS_BRANCH" "$(git -C "$WT1" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  eq "docs wt: on the stable branch" "$DOCS_BRANCH" "$(fixture_git "$WT1" rev-parse --abbrev-ref HEAD 2>/dev/null)"
   # The load-bearing one: it must NOT have inherited the other agent's branch.
   eq "docs wt: starts from origin/main, not the shared checkout's branch" \
-    "$(git -C "$DOCS_CO" rev-parse origin/main)" "$(git -C "$WT1" rev-parse HEAD 2>/dev/null)"
+    "$(fixture_git "$DOCS_CO" rev-parse origin/main)" "$(fixture_git "$WT1" rev-parse HEAD 2>/dev/null)"
   ok "docs wt: the other agent's file is absent" test ! -f "${WT1}/wip.md"
   ok "docs wt: base sha recorded outside the worktree" test -f "$(dirname "$WT1")/base-sha"
-  eq "docs wt: worktree left clean" "" "$(git -C "$WT1" status --porcelain 2>/dev/null)"
+  eq "docs wt: worktree left clean" "" "$(fixture_git "$WT1" status --porcelain 2>/dev/null)"
   # The OWNERSHIP marker, and it must name this worktree by path -- teardown
   # refuses to destroy anything it cannot match against this file.
   ok "docs wt: ownership marker written" test -f "$(dirname "$WT1")/worktree-path"
@@ -555,7 +823,7 @@ ok "docs wt: collision never yields the shared checkout" test "$COLLIDE_OUT" != 
 (docs_worktree_teardown "$WT1") >/dev/null 2>&1
 ok "docs teardown: unchanged worktree removed" test ! -d "$WT1"
 no "docs teardown: unchanged branch removed too" \
-  git -C "$DOCS_CO" show-ref --verify --quiet "refs/heads/${DOCS_BRANCH}"
+  fixture_git "$DOCS_CO" show-ref --verify --quiet "refs/heads/${DOCS_BRANCH}"
 
 # Teardown, carrying unpushed commits: RETAINED, so a failed docs run is
 # recoverable rather than discarded.
@@ -563,15 +831,15 @@ WT2="$( (docs_worktree_setup "$DOCS_CO" "$DOCS_BRANCH" main fixture-docs) 2>/dev
 [ -z "$WT2" ] || register_temp "$(dirname "$WT2")"
 if require_dir "docs teardown: second worktree created" "$WT2"; then
   printf 'draft\n' >"${WT2}/draft.md"
-  git -C "$WT2" add draft.md
-  git -C "$WT2" commit --quiet --no-verify -m "docs: draft"
+  fixture_git "$WT2" add draft.md
+  fixture_git "$WT2" commit --quiet --no-verify -m "docs: draft"
   (docs_worktree_teardown "$WT2") >/dev/null 2>&1
   ok "docs teardown: unpushed work retained" test -d "$WT2"
   ok "docs teardown: retained worktree keeps its commit" test -f "${WT2}/draft.md"
 
   # Same worktree once the work is PUSHED: now disposable. Without this arm a
   # successful docs run would pin the worktree forever and collide next release.
-  gitp -C "$WT2" push --quiet -u origin "$DOCS_BRANCH"
+  gitp "$WT2" push --quiet -u origin "$DOCS_BRANCH"
   (docs_worktree_teardown "$WT2") >/dev/null 2>&1
   ok "docs teardown: pushed work is disposable" test ! -d "$WT2"
 fi
@@ -579,10 +847,10 @@ fi
 # Extend arm (#820): the stable branch now exists on the remote, so the next
 # release starts from IT and merges origin/main in -- one docs PR that each
 # release extends, not a new version-pinned branch stacked on the last.
-git -C "$DOCS_CO" checkout --quiet main
+fixture_git "$DOCS_CO" checkout --quiet main
 printf 'more\n' >>"${DOCS_CO}/index.md"
-git -C "$DOCS_CO" commit --quiet --no-verify -am "main moves on"
-gitp -C "$DOCS_CO" push --quiet origin main
+fixture_git "$DOCS_CO" commit --quiet --no-verify -am "main moves on"
+gitp "$DOCS_CO" push --quiet origin main
 
 # The extend arm runs under a HOSTILE-BUT-ORDINARY config, pinned on the repo so
 # the assertion does not depend on the operator's machine. `merge.ff = only` is a
@@ -592,26 +860,26 @@ gitp -C "$DOCS_CO" push --quiet origin main
 # operator to go and resolve it in the shared checkout, which is the fallback
 # #845 exists to close. `user.useConfigOnly` is pinned alongside it because it
 # breaks the same step a different way.
-git -C "$DOCS_CO" config merge.ff only
-git -C "$DOCS_CO" config user.useConfigOnly true
+fixture_git "$DOCS_CO" config merge.ff only
+fixture_git "$DOCS_CO" config user.useConfigOnly true
 WT3="$( (docs_worktree_setup "$DOCS_CO" "$DOCS_BRANCH" main fixture-docs) 2>/dev/null )"
 [ -z "$WT3" ] || register_temp "$(dirname "$WT3")"
 if require_dir "docs extend: worktree created under merge.ff=only" "$WT3"; then
   ok "docs extend: the earlier release's docs commit is still there" test -f "${WT3}/draft.md"
   ok "docs extend: origin/main was merged in" \
-    git -C "$WT3" merge-base --is-ancestor origin/main HEAD
+    fixture_git "$WT3" merge-base --is-ancestor origin/main HEAD
   # --no-ff, so the merge-in is a real merge commit (two parents) regardless of
   # whether it could have fast-forwarded.
   eq "docs extend: merge-in is a merge commit" "2" \
-    "$(git -C "$WT3" rev-list --parents -n 1 HEAD 2>/dev/null | awk '{print NF-1}')"
+    "$(fixture_git "$WT3" rev-list --parents -n 1 HEAD 2>/dev/null | awk '{print NF-1}')"
   # The merge is setup's own work, so it must not count as agent work at teardown.
   eq "docs extend: base sha recorded after the merge-in" \
-    "$(git -C "$WT3" rev-parse HEAD 2>/dev/null)" "$(cat "$(dirname "$WT3")/base-sha" 2>/dev/null)"
+    "$(fixture_git "$WT3" rev-parse HEAD 2>/dev/null)" "$(cat "$(dirname "$WT3")/base-sha" 2>/dev/null)"
   (docs_worktree_teardown "$WT3") >/dev/null 2>&1
   ok "docs extend: unchanged extend-arm worktree removed" test ! -d "$WT3"
 fi
-git -C "$DOCS_CO" config --unset merge.ff
-git -C "$DOCS_CO" config --unset user.useConfigOnly
+fixture_git "$DOCS_CO" config --unset merge.ff
+fixture_git "$DOCS_CO" config --unset user.useConfigOnly
 
 # A retained worktree whose DIRECTORY was deleted by hand stays registered as
 # "prunable". That registration is invisible to worktree_holding_branch, so every
@@ -629,9 +897,9 @@ if require_dir "docs prune: worktree created" "$WT4"; then
   ok "docs prune: message does not name the vanished path" \
     test "${PRUNE_ERR##*"$WT4"*}" = "$PRUNE_ERR"
   ok "docs prune: registration was actually pruned" \
-    test -z "$(git -C "$DOCS_CO" worktree list --porcelain | worktree_holding_branch "$DOCS_BRANCH" || true)"
+    test -z "$(fixture_git "$DOCS_CO" worktree list --porcelain | worktree_holding_branch "$DOCS_BRANCH" || true)"
   # And the named recovery genuinely unblocks it: delete the branch, run again.
-  git -C "$DOCS_CO" branch -D "$DOCS_BRANCH" >/dev/null 2>&1
+  fixture_git "$DOCS_CO" branch -D "$DOCS_BRANCH" >/dev/null 2>&1
   WT5="$( (docs_worktree_setup "$DOCS_CO" "$DOCS_BRANCH" main fixture-docs) 2>/dev/null )"
   [ -z "$WT5" ] || register_temp "$(dirname "$WT5")"
   ok "docs prune: docs step is unblocked after the named recovery" test -n "$WT5"
@@ -653,19 +921,19 @@ fi
 SHARED="${DOCS_TMP}/shared"
 mkdir -p "$SHARED"
 printf 'do not delete me\n' >"${SHARED}/sibling.txt"
-git -C "$DOCS_CO" worktree add --quiet -b hand-made "${SHARED}/hand-made" main >/dev/null 2>&1
+fixture_git "$DOCS_CO" worktree add --quiet -b hand-made "${SHARED}/hand-made" main >/dev/null 2>&1
 # Pushed, so it satisfies the DISPOSABLE arm on content. It must survive anyway:
 # "looks disposable" is not an ownership claim, and every clean fully-pushed
 # worktree in the docs repo looks exactly like this one.
-gitp -C "${SHARED}/hand-made" push --quiet -u origin hand-made
+gitp "${SHARED}/hand-made" push --quiet -u origin hand-made
 FOREIGN_RC=0
 (docs_worktree_teardown "${SHARED}/hand-made") >/dev/null 2>&1 || FOREIGN_RC=$?
 eq "docs teardown: foreign worktree teardown refuses" "1" "$FOREIGN_RC"
 ok "docs teardown: foreign worktree RETAINED" test -d "${SHARED}/hand-made"
 ok "docs teardown: foreign worktree's branch survives" \
-  git -C "$DOCS_CO" show-ref --verify --quiet "refs/heads/hand-made"
+  fixture_git "$DOCS_CO" show-ref --verify --quiet "refs/heads/hand-made"
 ok "docs teardown: foreign worktree keeps its registration" \
-  test -n "$(git -C "$DOCS_CO" worktree list --porcelain | worktree_holding_branch hand-made || true)"
+  test -n "$(fixture_git "$DOCS_CO" worktree list --porcelain | worktree_holding_branch hand-made || true)"
 ok "docs teardown: an unowned parent directory survives" test -d "$SHARED"
 ok "docs teardown: its siblings survive" test -f "${SHARED}/sibling.txt"
 
@@ -674,9 +942,9 @@ ok "docs teardown: its siblings survive" test -f "${SHARED}/sibling.txt"
 # enough to authorise the removal.
 MISMARK="${DOCS_TMP}/mismarked"
 mkdir -p "$MISMARK"
-git -C "$DOCS_CO" worktree add --quiet -b mis-marked "${MISMARK}/wt" main >/dev/null 2>&1
-gitp -C "${MISMARK}/wt" push --quiet -u origin mis-marked
-printf '%s\n' "$(git -C "${MISMARK}/wt" rev-parse HEAD)" >"${MISMARK}/base-sha"
+fixture_git "$DOCS_CO" worktree add --quiet -b mis-marked "${MISMARK}/wt" main >/dev/null 2>&1
+gitp "${MISMARK}/wt" push --quiet -u origin mis-marked
+printf '%s\n' "$(fixture_git "${MISMARK}/wt" rev-parse HEAD)" >"${MISMARK}/base-sha"
 printf '%s\n' "${MISMARK}/some-other-worktree" >"${MISMARK}/worktree-path"
 MISMARK_RC=0
 (docs_worktree_teardown "${MISMARK}/wt") >/dev/null 2>&1 || MISMARK_RC=$?
@@ -694,32 +962,32 @@ ok "docs teardown: mismarked worktree retained" test -d "${MISMARK}/wt"
 # Deliberately no `legion`: the reader is injected by name, so the fixture reads
 # the version with git+sed. CI never runs this file (only scripts/preflight.sh
 # does), and a standalone preflight run is not guaranteed a legion binary.
-BND_TMP=$(mktemp -d)
-register_temp "$BND_TMP"
+BND_TMP="${SUITE_TMP}/bnd"
+mkdir -p "$BND_TMP"
 BND="${BND_TMP}/repo"
-git -c init.defaultBranch=main init --quiet "$BND"
-git -C "$BND" config user.email t@t
-git -C "$BND" config user.name t
+fixture_git_init "$BND" -c init.defaultBranch=main init --quiet
+fixture_git "$BND" config user.email t@t
+fixture_git "$BND" config user.name t
 bnd_commit() { # bnd_commit <file> <content> <subject>
   printf '%s\n' "$2" >"${BND}/$1"
-  git -C "$BND" add "$1"
-  git -C "$BND" commit --quiet --no-verify -m "$3"
+  fixture_git "$BND" add "$1"
+  fixture_git "$BND" commit --quiet --no-verify -m "$3"
 }
 # The reader under test's production twin is ref_version; here it is git show
 # plus a sed, so the fixture stays hermetic.
-bnd_version() { git -C "$BND" show "${1}:Cargo.toml" 2>/dev/null | sed -n 's/^version = "\(.*\)"$/\1/p'; }
+bnd_version() { fixture_git "$BND" show "${1}:Cargo.toml" 2>/dev/null | sed -n 's/^version = "\(.*\)"$/\1/p'; }
 
 bnd_commit Cargo.toml 'version = "0.24.0"' "chore(release): 0.24.0"
 bnd_commit src.txt 'work' "feat: something"
 bnd_commit Cargo.toml 'version = "0.25.0"' "chore(release): 0.25.0"
-BND_RELEASE="$(git -C "$BND" rev-parse HEAD)"
+BND_RELEASE="$(fixture_git "$BND" rev-parse HEAD)"
 # What lands between `legion pr merge` and `--finish`: ordinary merges that do
 # not touch the version file at all.
 bnd_commit a.txt 'a' "feat(#1): a"
 bnd_commit b.txt 'b' "fix(#2): b"
-BND_TIP="$(git -C "$BND" rev-parse HEAD)"
+BND_TIP="$(fixture_git "$BND" rev-parse HEAD)"
 
-BND_LIST="$(git -C "$BND" rev-list HEAD -- Cargo.toml)"
+BND_LIST="$(fixture_git "$BND" rev-list HEAD -- Cargo.toml)"
 eq "release commit: resolved from a real history" "$BND_RELEASE" \
   "$(printf '%s\n' "$BND_LIST" | release_boundary_commit bnd_version 0.25.0 200)"
 # The point of the finding, stated as an assertion: the tip is NOT the answer,
@@ -733,7 +1001,7 @@ ok "release commit: the tip still passes the version gate (why tip-resolution lo
 eq "release commit: walks only commits that touch the version file" "2" \
   "$(printf '%s\n' "$BND_LIST" | wc -l | tr -d ' ')"
 eq "release commit: while the branch itself is longer" "5" \
-  "$(git -C "$BND" rev-list HEAD | wc -l | tr -d ' ')"
+  "$(fixture_git "$BND" rev-list HEAD | wc -l | tr -d ' ')"
 
 # IDEMPOTENCE, which is what release.sh:767 and legion-release.md:88 promise when
 # they say re-running --finish is safe. Re-resolving must return the SAME sha
@@ -741,27 +1009,27 @@ eq "release commit: while the branch itself is longer" "5" \
 # the existing tag and re-push it, instead of deriving a new sha and dying on
 # "tag already exists and points at <other>".
 bnd_commit c.txt 'c' "fix(#3): c"
-BND_AGAIN="$(git -C "$BND" rev-list HEAD -- Cargo.toml | release_boundary_commit bnd_version 0.25.0 200)"
+BND_AGAIN="$(fixture_git "$BND" rev-list HEAD -- Cargo.toml | release_boundary_commit bnd_version 0.25.0 200)"
 eq "release commit: stable across re-runs as the branch moves" "$BND_RELEASE" "$BND_AGAIN"
 # And the next release's boundary is its own commit, not the previous one.
 bnd_commit Cargo.toml 'version = "0.26.0"' "chore(release): 0.26.0"
-BND_NEXT="$(git -C "$BND" rev-parse HEAD)"
+BND_NEXT="$(fixture_git "$BND" rev-parse HEAD)"
 eq "release commit: the next release resolves to its own commit" "$BND_NEXT" \
-  "$(git -C "$BND" rev-list HEAD -- Cargo.toml | release_boundary_commit bnd_version 0.26.0 200)"
+  "$(fixture_git "$BND" rev-list HEAD -- Cargo.toml | release_boundary_commit bnd_version 0.26.0 200)"
 # Once a NEWER release has landed, the older one no longer resolves at all
 # (rc 1) rather than resolving to something plausible-looking. In production the
 # branch-tip landed gate refuses first, for the same reason: --finish on a
 # superseded release must stop, not tag.
 eq "release commit: a superseded release refuses to resolve" "1" \
-  "$(git -C "$BND" rev-list HEAD -- Cargo.toml | release_boundary_commit bnd_version 0.25.0 200 >/dev/null; printf '%s' $?)"
+  "$(fixture_git "$BND" rev-list HEAD -- Cargo.toml | release_boundary_commit bnd_version 0.25.0 200 >/dev/null; printf '%s' $?)"
 # A commit that touches the version file WITHOUT changing the version (a
 # dependency edit) must not be mistaken for the release commit.
 bnd_commit Cargo.toml 'version = "0.26.0"
 serde = "1.0.1"' "chore: dep bump"
 ok "release commit: the dep-bump commit really landed" \
-  test "$(git -C "$BND" rev-parse HEAD)" != "$BND_NEXT"
+  test "$(fixture_git "$BND" rev-parse HEAD)" != "$BND_NEXT"
 eq "release commit: a non-version edit to the file is not the release" "$BND_NEXT" \
-  "$(git -C "$BND" rev-list HEAD -- Cargo.toml | release_boundary_commit bnd_version 0.26.0 200)"
+  "$(fixture_git "$BND" rev-list HEAD -- Cargo.toml | release_boundary_commit bnd_version 0.26.0 200)"
 
 printf '\n[test-release] %d passed, %d failed\n' "$PASS" "$FAIL" >&2
 [ "$FAIL" -eq 0 ]

@@ -598,8 +598,17 @@ main() {
   # pushed, and `--docs-worktree-done=<path> --dry-run` really removed the
   # worktree. Refusing the combination is both cheaper and less ambiguous than
   # implementing a no-op for steps whose entire content is the mutation.
+  # The message names the FLAG the operator typed, not the internal mode name:
+  # "docs-setup mode" appears in neither the usage text nor legion-release.md.
   if [ "$DRY_RUN" = "1" ] && [ "$MODE" != "stage" ]; then
-    fail "--dry-run is not supported in ${MODE} mode -- it polls, tags, pushes or removes worktrees, and there is no meaningful no-op for those. Re-run without --dry-run."
+    local DRY_RUN_CONFLICT
+    case "$MODE" in
+      finish)        DRY_RUN_CONFLICT="--finish= (it polls the merge queue, tags the release commit and pushes the tag)" ;;
+      docs-setup)    DRY_RUN_CONFLICT="--docs-worktree (it creates a branch and a worktree, and its whole output is that worktree's path)" ;;
+      docs-teardown) DRY_RUN_CONFLICT="--docs-worktree-done= (it removes a worktree and deletes a branch)" ;;
+      *)             DRY_RUN_CONFLICT="${MODE}" ;;
+    esac
+    fail "--dry-run cannot be combined with ${DRY_RUN_CONFLICT}. There is no meaningful no-op for a step whose entire content is the mutation, and this combination used to be accepted and then ignored. Re-run without --dry-run. (--dry-run applies to the staging run: 'release.sh <X.Y.Z> --dry-run'.)"
   fi
 
   # -- cross-repo docs worktree modes (#845) ---------------------------------

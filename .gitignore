@@ -14,6 +14,12 @@ plugin/.legion-binary-path
 # transient artifact, not source.
 /index.scip
 
+# The embedding model's download cache, written at the repo root the first time
+# a model is fetched. Reproducible from the network on demand, several hundred
+# megabytes, and not source. (Re-added: this line was lost in the 2026-08-03
+# incident that rewrote main.)
+.fastembed_cache/
+
 # Agent worktrees created by the Task tool's worktree isolation mode.
 # These contain .git references back to the parent and must never be
 # committed -- a stray gitlink mode 160000 entry will break checkout@v5
