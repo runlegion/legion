@@ -30,6 +30,16 @@ CC v2.1.x has `permissions.deny` in settings.json, and it is everything the hook
   blocked at the harness, before any hook runs, including inside pipes (each subcommand of a
   compound command is checked).
 
+**Scope caveat (#860, added 2026-08-04).** "Cannot be overridden" means the *agent* cannot
+override it; it does not mean total coverage. `permissions.deny` matches the command the agent
+submits, not the processes that command spawns. Reproduced in-session: a direct
+`grep -c '^' plugin/hooks/lib/prelude.sh` was denied, and the identical `grep` inside a shell
+script run as `bash /tmp/repro.sh` executed and returned its answer. Pipes and compound
+commands are checked; a script is not. This does not weaken the decision -- grep-blocking is a
+cost-and-routing control, and a script escape costs tokens, not correctness. It does mean the
+ruleset is not the layer to reach for when a rule must hold unconditionally. See
+`plugin/hooks/README.md` for the boundary and the per-guard audit.
+
 `permissionDecision: "deny"` is also now the documented clean PreToolUse block (the old
 implicit exit-2 model).
 

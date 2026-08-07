@@ -35,6 +35,41 @@
 #   LEGION_SKIP_<HOOK>=1 -- disable one hook entirely, silently
 #   LEGION_BYPASS_<X>=1  -- telemetried escape from a block tier
 #   LEGION_NO_<FEATURE>=1 -- disable a feature (sync, daemon), not a hook
+#
+# ---------------------------------------------------------------------------
+# THE BOUNDARY (#860). Read this before you write a hook that denies anything.
+#
+# Claude-layer hooks fire on the AGENT'S TOOL CALL ONLY. They never see child
+# processes. A script, a Makefile, a test suite, a `bash -c` wrapper, or any
+# tool that shells out executes unimpeded. The harness's own permissions.deny
+# has the same reach: it is matched against the command the agent submits, not
+# against what that command goes on to spawn.
+#
+# Verified 2026-08-04, twice. A shell script containing `gh --version` ran with
+# no interception although a direct `gh` call is denied by no-gh.sh; and a test
+# fixture's `git push -u origin main` reached GitHub and rewrote main with no
+# Claude-layer interception at all (incident writeup: reflection 019fce1a).
+#
+# This is REQUIRED by design, not a bug awaiting a patch -- see no-git-push.sh's
+# header. The alternative, a PATH shim over `git`, would recurse, because legion
+# is itself a git consumer. Interception has to happen at the agent's tool call,
+# and the agent's tool call is exactly one process deep.
+#
+# CONSEQUENCE: hooks SHAPE AGENT BEHAVIOUR. They are not an enforcement
+# boundary. Anything that must be TOTAL lives at the git layer (.githooks/*),
+# in the binary (e.g. REFUSED_BRANCHES in src/cli/push.rs), or in remote branch
+# protection. A hook may front such a rule with a better error message; it can
+# never be the rule.
+#
+# COROLLARY: bypass.jsonl cannot record what the hooks never saw, so a
+# script-shaped escape writes no row. Absence of bypass rows is not absence of
+# bypass.
+#
+# Every guard in this directory carries an ADVISORY / MUST-BE-TOTAL verdict, and
+# each MUST-BE-TOTAL row names the layer that actually enforces it (or says that
+# nothing does). New hook that denies something: add its row.
+#   -> plugin/hooks/README.md
+# ---------------------------------------------------------------------------
 
 # Double-source guard.
 if [ -n "${LEGION_PRELUDE_SOURCED:-}" ]; then

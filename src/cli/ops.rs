@@ -60,7 +60,11 @@ pub(crate) enum TelemetryAction {
 
     /// Summarize bypass volume by `(tool, repo, pattern)`. Top under-served
     /// query shapes surface first. Feeds the dashboard surface in #440 and
-    /// the uncertainty engine in #354.
+    /// the uncertainty engine in #354. CAVEAT (#860): a bypass row is written
+    /// only when a hook FIRES, and Claude-layer hooks never see child
+    /// processes -- the same command inside a script is not blocked, not
+    /// counted, and indistinguishable here from a command never issued. A low
+    /// count is not evidence of low bypass. See plugin/hooks/README.md.
     Summary {
         /// Drop rows older than this duration before summarizing.
         #[arg(long)]
@@ -83,7 +87,10 @@ pub(crate) enum TelemetryAction {
     /// SECONDARY signal only. This reads `etc-usage.jsonl` instead of
     /// `bypass.jsonl` and reports usage volume + zero-result rate per
     /// shape (find-content/tree/extract/find-file) -- whether the
-    /// sanctioned surface actually answers.
+    /// sanctioned surface actually answers. Same blind spot as `summary`
+    /// (#860): a search run from inside a script is never seen by the hooks
+    /// that would record it, so it inflates neither metric and its absence
+    /// reads as adoption. See plugin/hooks/README.md.
     EtcSummary {
         /// Drop rows older than this duration before summarizing.
         #[arg(long)]
