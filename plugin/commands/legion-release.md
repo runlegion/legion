@@ -67,15 +67,34 @@ NEW" --head release/NEW --body-file <the body you validated>`, then `legion pr
 merge --repo legion --number <N>`. On a queue-enabled base this enqueues and
 returns immediately; the merge is asynchronous.
 
-**4d. Tag the commit that actually landed.** Run `scripts/release.sh NEW
---finish=<N>` (re-pass `--activate` if the operator asked for it). It polls until
-the merge lands, then re-reads `origin/main`, verifies that tree really carries
-`NEW`, tags **that** sha, and pushes only the tag -- which fires the release CI.
-The verification is load-bearing: the queue may squash or rebase, so the merged
-sha is not the branch tip, and tagging the branch tip would point the release at
-an object that is not on `main`.
+**4d. Tag the release commit.** Run `scripts/release.sh NEW --finish=<N>`
+(re-pass `--activate` if the operator asked for it). It polls until the merge
+lands, then does two separate things that are easy to run together and must not
+be:
 
-Three failures this step reports rather than papers over, all of which leave
+1. **Re-reads `origin/main` as the landed gate.** This proves the release
+   actually reached the branch *and* that no later release superseded it. It is
+   the right question to ask of the tip -- and it is not the sha to tag.
+2. **Resolves the release commit, and tags that.** Between `legion pr merge` and
+   `--finish`, unrelated PRs land on `main`. None of them touch the version file,
+   so the "does this tree carry `NEW`" check still passes several commits past
+   the release, and tagging the tip would ship a tree nobody released. The script
+   therefore walks the commits that *touch the version file*, newest first, and
+   takes the last one still reading `NEW` -- the commit before it reads the
+   previous version, which is what makes it the boundary. The queue may squash or
+   rebase, so this is derived from history, never assumed from the branch tip.
+
+It prints both shas (`release commit for NEW is <sha> (origin/main tip is
+<other>)`); two different shas is the normal case, not a warning. Then it pushes
+**only the tag**, which fires the release CI.
+
+Resolving the boundary from history rather than from the tip is also what makes
+re-running `--finish` idempotent: a second run derives the *same* sha however far
+`main` has moved on, matches the tag that already exists on it, and re-pushes it.
+Tip-resolution derived a different sha every time and died on "tag already exists
+and points at <other>".
+
+Four failures this step reports rather than papers over, all of which leave
 nothing tagged:
 
 - **Ejected from the queue.** It happens (it happened in the 0.25.0 batch).
@@ -83,6 +102,12 @@ nothing tagged:
   path -- re-run the gates, push, re-enqueue, then re-run `--finish`.
 - **Timeout.** A failure to *observe* the merge, not evidence the release commit
   failed. Check the PR, then re-run `--finish` once it has landed.
+- **The version could not be read.** Distinct from "the branch carries the wrong
+  version", and reported as such: the file may be absent on the ref, or `legion
+  sym etc extract` may have failed. Also a failure to observe -- it never counts
+  as evidence that the release did not land, because a poll loop that treats an
+  unreadable version as a definite "no" reports an *ejection* for a release that
+  merged fine.
 - **Tagging failed after a successful merge.** Reported as INCOMPLETE BUT
   RECOVERABLE, naming the merged sha. The version bump is already on `main`;
   re-running `--finish` completes it and is idempotent from that point.
