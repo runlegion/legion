@@ -309,15 +309,34 @@ tag_target_matches() {
 # stands on <ref>, read WITHOUT checking anything out (git show into a scratch
 # file, then the same `legion sym etc extract` the rest of the script uses).
 # The scratch file keeps the source file's basename so extract can sniff the
-# format from the extension. Prints empty when the ref or the file is absent.
+# format from the extension.
+#
+#   rc 0 + the version on stdout -- the read succeeded.
+#   rc 2 + nothing on stdout     -- THE QUESTION COULD NOT BE ASKED: the scratch
+#                                   dir failed, the ref or the file is absent, or
+#                                   extract failed or came back empty.
+#
+# The distinction is load-bearing and it was the second door into the false
+# ejection. Fix 2 correctly keyed `unknown` on the FETCH's exit status, but a
+# fetch that SUCCEEDS followed by a read that fails used to be indistinguishable
+# from "the remote definitely does not carry this version": every failure path
+# here was swallowed (`|| true`) into an empty string, and `release_landed` then
+# printed a confident 0. Sustained past the point where the queue ref has been
+# seen, a 0 is an EJECTED verdict -- reported for a release that landed, sending
+# the operator to re-run gates on a merged PR. An empty read is not evidence of
+# absence, so it must not be able to produce one.
 ref_version() {
-  local ref="$1" file_rel="$2" field="$3" tmpdir scratch got=""
-  tmpdir="$(mktemp -d)" || { printf '\n'; return 0; }
+  local ref="$1" file_rel="$2" field="$3" tmpdir scratch got rc=0
+  tmpdir="$(mktemp -d)" || return 2
   scratch="${tmpdir}/${file_rel##*/}"
   if git show "${ref}:${file_rel}" >"$scratch" 2>/dev/null; then
-    got="$(legion sym etc extract "$scratch" --field "$field" 2>/dev/null || true)"
+    got="$(legion sym etc extract "$scratch" --field "$field" 2>/dev/null)" || rc=2
+  else
+    rc=2
   fi
   rm -rf "$tmpdir"
+  [ "$rc" -eq 0 ] || return "$rc"
+  [ -n "$got" ] || return 2
   printf '%s\n' "$got"
 }
 
@@ -389,12 +408,20 @@ release_boundary_commit() {
 # then reports an ejection for a release nobody could see. The fetch is the only
 # step that actually touches the remote, so its rc is the only honest signal.
 release_landed() {
-  local branch="$1" file_rel="$2" field="$3" want="$4"
+  local branch="$1" file_rel="$2" field="$3" want="$4" got
   if ! git fetch origin "$branch" --quiet >/dev/null 2>&1; then
     printf 'unknown\n'
     return 0
   fi
-  if [ "$(ref_version "origin/${branch}" "$file_rel" "$field")" = "$want" ]; then
+  # A successful fetch is necessary but NOT sufficient. If the version could not
+  # be read off the ref that was just fetched, the honest answer is still
+  # `unknown` -- printing 0 here is what turns an unreadable file into an
+  # ejection verdict for a release that landed.
+  if ! got="$(ref_version "origin/${branch}" "$file_rel" "$field")"; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if [ "$got" = "$want" ]; then
     printf '1\n'
   else
     printf '0\n'
@@ -848,7 +875,7 @@ finish_release() {
   local SOURCE_FIELD="$5" NEW="$6" TAG="$7" TAG_MESSAGE="$8" PR_NUMBER="$9"
   local MAX_POLLS="${10}" INTERVAL="${11}" ACTIVATE="${12}"
   local OUTCOME RC=0 TIP_SHA TIP_VERSION MERGED_SHA MERGED_VERSION EXISTING_TAG_SHA
-  local BOUNDARY_LIST BOUNDARY_RC=0
+  local BOUNDARY_LIST BOUNDARY_RC=0 TIP_VERSION_RC=0 MERGED_VERSION_RC=0
   # How far back the release-commit walk may go, counted in commits that TOUCH
   # the version file -- so this is "releases", not "commits", and 200 of them is
   # already far past any sane re-run.
@@ -896,7 +923,16 @@ finish_release() {
   # This asks of the branch TIP, and it is the right question to ask of the tip:
   # it proves the release is on the branch AND that no LATER release superseded
   # it. It is not, however, the sha to tag -- see below.
-  TIP_VERSION="$(merged_version_at "origin/${RELEASE_BRANCH}")"
+  # `|| TIP_VERSION=""` is required, not defensive: ref_version now returns rc 2
+  # when the read fails, and a bare assignment carries that rc under `set -e`,
+  # which would kill the run with no message at all. Empty flows into
+  # tag_target_matches, which fails closed -- and the rc is kept so the operator
+  # is told WHICH failure this is, since "the branch carries the wrong version"
+  # and "the version could not be read" need different responses.
+  TIP_VERSION="$(merged_version_at "origin/${RELEASE_BRANCH}")" || TIP_VERSION_RC=$?
+  if [ "$TIP_VERSION_RC" -ne 0 ]; then
+    fail "could not READ ${SOURCE_FILE_REL} at ${SOURCE_FIELD} on origin/${RELEASE_BRANCH} (${TIP_SHA}) -- the file may be absent on that ref, or 'legion sym etc extract' may have failed. This is not evidence the release did not land; it is a failure to observe. Nothing was tagged."
+  fi
   tag_target_matches "$NEW" "$TIP_VERSION" \
     || fail "tag-target mismatch: origin/${RELEASE_BRANCH} is ${TIP_SHA}, whose ${SOURCE_FILE_REL} says '${TIP_VERSION:-<none>}', not ${NEW}. Refusing to tag a commit that is not the release. Nothing was tagged."
 
@@ -930,7 +966,10 @@ finish_release() {
   # is exactly why it is cheap to keep: it makes the tag step self-verifying no
   # matter how the sha was resolved, and the resolution above reaches it through
   # a dynamically-scoped closure that a later refactor could quietly repoint.
-  MERGED_VERSION="$(merged_version_at "$MERGED_SHA")"
+  MERGED_VERSION="$(merged_version_at "$MERGED_SHA")" || MERGED_VERSION_RC=$?
+  if [ "$MERGED_VERSION_RC" -ne 0 ]; then
+    fail "could not READ ${SOURCE_FILE_REL} at ${SOURCE_FIELD} on the resolved release commit ${MERGED_SHA} -- a failure to observe, not a mismatch. Nothing was tagged."
+  fi
   tag_target_matches "$NEW" "$MERGED_VERSION" \
     || fail "tag-target mismatch: resolved the ${NEW} release commit as ${MERGED_SHA}, but its ${SOURCE_FILE_REL} says '${MERGED_VERSION:-<none>}'. Nothing was tagged."
   info "release commit for ${NEW} is ${MERGED_SHA} (origin/${RELEASE_BRANCH} tip is ${TIP_SHA})"
