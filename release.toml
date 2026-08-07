@@ -43,6 +43,40 @@ tag_message = "legion {version}"
 # Optional co-authorship trailer appended to the release commit message.
 # Defaults to legion's own release agent when omitted.
 co_authored_by = "Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+# The name this repo answers to in watch.toml -- what `legion push` and
+# `legion pr *` resolve their work source from. Defaults to the checkout's
+# directory name when omitted, which is the convention every registered repo
+# already follows. Since #844 the release commit goes through a PR and the
+# merge queue like any other change, so the release needs this name.
+repo = "legion"
+# Bounded wait for the merge queue (#844): `legion pr merge` enqueues and
+# returns, so `release.sh --finish` polls until the merge lands. Budget is
+# expressed in polls x seconds -- 90 x 20s = 30 minutes -- and expiry is a
+# named "failed to observe the merge" error, not a failed release. Defaults
+# to these values when omitted.
+merge_wait_polls = 90
+merge_wait_interval = 20
+
+# Cross-repo docs target (#845). The release's docs step commits to a repo that
+# is not this one, and the operator rule is that commits to a repo you do not
+# own go in a WORKTREE -- that repo's agent may be in-process in its checkout
+# and you cannot see them. `scripts/release.sh --docs-worktree` reads this
+# section, creates the worktree off a remote ref, and prints only the worktree
+# path; the shared checkout is never handed to an agent. Omit the section
+# entirely in a repo whose release has no cross-repo docs step.
+[docs]
+# watch.toml name of the repo holding the docs. Its checkout is resolved via
+# `legion watch list`, never hardcoded -- the path differs per machine.
+repo = "shingle"
+# The docs branch. This MUST be a STABLE name, not a version-pinned one (#820):
+# a per-release docs/legion-<ver> branch stacks a new PR every release and the
+# stack conflict-cascades (five deep on 0.20->0.24). Docs describe the CURRENT
+# state, so each release extends the same branch. Defaults to
+# "docs/<git.repo>-current" when omitted.
+branch = "docs/legion-current"
+# Branch in the docs repo the worktree starts from (and merges in when the
+# stable branch already exists remotely). Defaults to "main".
+base = "main"
 
 [preflight]
 # Commands run, in order, repo-root relative, before a release is cut. Each
