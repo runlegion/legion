@@ -793,13 +793,20 @@ ok "assert_url: no remote configured at all"                  fixture_assert_url
 #
 # Comment lines are stripped first (several of them quote `cd ""` while
 # explaining why it is fatal), and the pattern requires real whitespace after
-# `cd`, so the regex literals in these two lines do not match themselves.
+# `cd`, so the regex literals below do not match themselves.
+# ONE filtered stream, two readings -- the same discipline fixture_git_argv
+# applies to argv. Two separately-written filters are two definitions of "what
+# counts as a cd", and they drift.
+SUITE_CD_LINES="$(grep -vE '^[[:space:]]*#' "$0" | grep -E '(^|[^[:alnum:]_])cd[[:space:]]')"
 SUITE_CD_TARGETS="$(
-  grep -vE '^[[:space:]]*#' "$0" \
-    | grep -E '(^|[^[:alnum:]_])cd[[:space:]]' \
+  printf '%s\n' "$SUITE_CD_LINES" \
     | sed -E 's/.*[^[:alnum:]_]cd[[:space:]]+//; s/[[:space:]].*//' \
     | LC_ALL=C sort -u
 )"
+# `grep -c` over that same stream rather than `wc -l`: printf of an EMPTY
+# variable still emits one newline, so `wc -l` would report 1 where the truth
+# is 0 -- and a lint that reads 1 on "nothing matched" fails open.
+SUITE_CD_COUNT="$(printf '%s\n' "$SUITE_CD_LINES" | grep -cE '(^|[^[:alnum:]_])cd[[:space:]]')"
 # The expected value is the literal TEXT of the four targets as they appear in
 # the source, so the single quotes are the point -- expanding them would compare
 # this file against its own runtime values instead of against what it says.
@@ -809,6 +816,11 @@ eq "self-lint: every 'cd' in this file is a perimeter-resolved target" \
 "$DIR"
 "$d"
 "$p"' "$SUITE_CD_TARGETS"
+# The SET alone is not enough, because `sort -u` dedupes: a new `cd "$p"` in an
+# unguarded context adds no new member and would pass the assertion above --
+# and `$p` is exactly the name a future author reuses. The count closes it, so
+# the two together are total.
+eq "self-lint: and there are exactly five of them" "5" "$SUITE_CD_COUNT"
 
 # THE ATTACKS. The sacrificial runner: a real git repo carrying a COPY of this
 # script and of release.sh, so a child launched from it computes that repo as its
