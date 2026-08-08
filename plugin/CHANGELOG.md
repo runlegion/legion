@@ -1,5 +1,120 @@
 # Legion Changelog
 
+## 0.26.0
+
+The release that its own release pipeline nearly prevented. Six PRs since 0.25.0, and
+the through-line is not a feature: it is that legion's tooling could reach the
+repository it was supposed to be protecting. `scripts/preflight.sh` ran the shell
+fixture suites with cwd set to the live checkout, and `release.sh` runs preflight as
+step 4 -- so during a release, test fixtures executed inside the repo being released,
+against a real remote, and every cwd fallback in every fixture became a write to
+production. That channel corrupted `main` three times while this release was being
+prepared: fixture commits pushed to origin, a release-shaped commit that reduced
+`Cargo.toml` to a single line, and `core.bare=true` set on the live checkout twice.
+Two rounds of hardening aimed at the suites could not close it, because the defect was
+in the caller. The invisibility had a specific cause worth knowing: a linked worktree's
+`--git-common-dir` resolves to the parent repo's `.git`, and git ignores `core.bare` for
+linked worktrees -- so an agent working in a worktree breaks the main checkout while its
+own view keeps answering normally. Minor release: one net-new verb (`legion commit`),
+one behavior change to `watch.toml` semantics that silences delegated entries, no schema
+migration and no wire-format change.
+
+### Breaking
+
+- **`agent =` in `watch.toml` now means THIS REPO NEVER WAKES** (PR #850, #849): the
+  field previously reached signal matching only -- `recipient()` and `wake_addresses()`
+  routed who a signal addressed, and the persona wake-lease deduped on recipient -- while
+  the spawn ignored it entirely and booted `claude` in the *delegated* repo's workdir,
+  where identity then resolved from CWD. A repo explicitly delegated to a named owner
+  launched as its own agent anyway. A June audit found four such sessions live at once;
+  a delegated seat posted to the bullpen in its own voice the day this was filed. The
+  wake path now skips a delegated entry before lease acquisition, so it does not compete
+  for the persona lease at all, which is what makes a directed `@owner` signal wake
+  exactly once in the owner's workdir. Delegated entries keep every non-wake role --
+  `watch list`, index coverage, workdir-ownership checks, `sym --repo` resolution. They
+  also retire their own pending copy of a signal at skip time, marked under their own
+  `repo_name`: `watch_handled` is host-local and keyed `(signal_id, repo_name)`, so the
+  owner's copy is untouched and the mark additionally prevents replay if the repo is
+  later un-delegated. **On upgrade, every entry carrying `agent =` goes quiet.** In this
+  fleet that is five: `ledger`, `astro-data`, `astro-meta`, `astro-consent`, and
+  formerly `http-sql` -- which was promoted to self-owned before this shipped, because
+  its `whoami` had been deliberately seeded and it was operating as a real seat. If a
+  delegated repo of yours is a real seat, remove its `agent =` line before upgrading.
+
+### New
+
+- **`legion commit` -- the last unaudited mutation closes** (PR #855, #854): pushes were
+  routed through `legion push` in 0.25.0 and `gh` was fenced, but the commit itself --
+  where authorship, trailers and signing happen -- was raw `git`, writing no audit row.
+  The new verb wraps `git commit` with a signer preflight, message-convention validation,
+  and an audit row carrying agent, branch, pre/post SHA, card id, gate state and signing
+  state. The preflight matters more than it sounds: with 1Password as the SSH agent,
+  `op-ssh-sign` fails when the *desktop app* is locked even though `ssh-add -l` lists the
+  key, and the failure surfaced as two unrelated-looking errors after five retries. It
+  now fails once, by name, before touching the index. The probe is `git commit-tree -S`
+  -- git's own `sign_buffer` path, so it cannot pick a different key than the real commit
+  will -- and it discriminates a signer that was invoked and failed from a git refusal
+  that never reached the signer, because "unlock your signer" is the wrong remedy for a
+  missing `user.email`. Message rules are derived from this repo's actual history rather
+  than a style guide: eight types across all 494 commits, scope required, `Co-Authored-By`
+  trailer as the last non-empty line, no emoji. The verb does NOT stage; that is
+  deliberate and tested. The PreToolUse hook routing plain `git commit` through it is
+  deferred (#856), so this is opt-in for now.
+
+### Fixed
+
+- **A release now pushes only the tag; the release commit earns main through the queue**
+  (PR #870/#871, #844): the old flow ran `git push --atomic origin main <tag>`, which
+  GitHub accepted while printing `Bypassed rule violations for refs/heads/main` -- easy
+  to scroll past. `release.sh` is now two invocations with the normal gates between them:
+  the bump commits onto `release/<new>` and leaves via `legion push`, the orchestrator
+  runs the gates and opens and enqueues the PR, and `release.sh <new> --finish=<pr>`
+  polls the queue and tags. The tag resolves the *release commit* by walking
+  `git rev-list <ref> -- <version file>`, not `origin/main`'s tip: unrelated PRs land
+  between merge and finish (six landed in 38 seconds on 2026-08-02), later commits do
+  not touch the version file, so a tip-based check passes on a tree nobody released --
+  and `release.yml` builds from the tag while the marketplace sets `autoUpdate: true`.
+  A prior incident had already ruled tags sit on the release commit and not on later
+  HEAD; this makes the script obey it. Queue observation is three-valued: `unknown` keys
+  on the *fetch exit status* rather than readability, because the remote-tracking ref
+  stays perfectly readable through an outage, and an ejection requires two consecutive
+  observations since the queue ref also vanishes at the moment of success.
+
+- **Cross-repo docs work runs in a script-created worktree** (PR #870, #845): step 5 of
+  `/legion-release` resolved shingle's path from `watch.toml` and sent an agent into the
+  shared checkout. Cutting 0.25.0 swept another agent's uncommitted `cli-reference.mdx`
+  into the docs commit -- and notably a `git add <file>` by name, not `-A`, still took
+  their whole file. The script now creates the worktree from a remote ref and hands over
+  only that path; teardown proves ownership before removing anything, and a worktree
+  carrying unpushed work is retained and reported rather than clobbered.
+
+- **Fixture suites can no longer reach the repository they run in** (PR #875, #867):
+  the suites now execute from a copied `scripts/` tree in a `git init`ed throwaway --
+  not a clone, and deliberately not a worktree, since `pf_repo_key` keys on
+  `--git-common-dir` and refuses a linked worktree of the release repo as the *same*
+  repository. Three fail-closed brackets bracket every run, and the release-checkout
+  bracket fires on every exit path: it previously ran only on completion, so a suite
+  that corrupted the checkout and then failed reported only its own failure, and the
+  next run re-baselined from the corruption and came back green -- the first escape
+  ratifying itself. The perimeter inside the suites was hardened alongside it (PR #871,
+  #861): `fixture_git` is the only way a fixture addresses a repo, refusing empty and
+  relative targets, targets outside the temp root, and any target whose *resolved repo
+  identity* matches the runner's. `git -C ""` is not a guard -- it silently falls back
+  to the current repo and exits 0, exactly like `cd ""`.
+
+### Docs
+
+- **The hook/child-process boundary, written where hook authors read it** (PR #865,
+  #860): Claude-layer hooks fire on the agent's tool call only and never see child
+  processes -- a script, Makefile or test suite executes unimpeded, and the harness's own
+  `permissions.deny` has the same reach. This is required by design (a PATH shim over
+  `git` would recurse, since legion is itself a git consumer), so it is a boundary to
+  know rather than a bug to fix. Every denying hook now carries an ADVISORY or
+  MUST-BE-TOTAL verdict naming the layer that actually enforces it, or stating plainly
+  that nothing does. The corollary is in `--help` where the numbers are read:
+  `bypass.jsonl` cannot record what the hooks never saw, so a low bypass count is not
+  evidence of low bypass.
+
 ## 0.25.0
 
 The enforcement-coverage release. Seven PRs since 0.24.0, all from one investigation
