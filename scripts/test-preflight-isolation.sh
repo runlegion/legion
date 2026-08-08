@@ -41,10 +41,25 @@ no() { # no <label> <cmd...>   (expect non-zero)
   if "$@"; then FAIL=$((FAIL + 1)); printf 'FAIL: %s -- expected failure\n' "$label" >&2; else PASS=$((PASS + 1)); fi
 }
 has() { # has <label> <haystack> <needle>
-  if [ -z "${2##*"$3"*}" ]; then PASS=$((PASS + 1)); else
+  # `case`, NOT the `[ -z "${2##*"$3"*}" ]` idiom this started as. That idiom
+  # passes on an EMPTY haystack -- there is nothing to strip, so nothing is left,
+  # so the -z succeeds -- which made every assertion written with it go green the
+  # moment a mutation silenced the output it was reading. Found while
+  # mutation-checking pf_sandbox_rm: deleting that guard emptied $ISO_OUT and the
+  # message assertion passed anyway. An assertion that cannot go red is exactly
+  # the defect this file exists to catch, so the helper gets the same treatment.
+  if [ -z "$3" ]; then
     FAIL=$((FAIL + 1))
-    printf 'FAIL: %s -- output did not contain [%s]. Output:\n%s\n' "$1" "$3" "$2" >&2
+    printf 'FAIL: %s -- empty needle, this assertion asserts nothing\n' "$1" >&2
+    return 0
   fi
+  case "$2" in
+    *"$3"*) PASS=$((PASS + 1)) ;;
+    *)
+      FAIL=$((FAIL + 1))
+      printf 'FAIL: %s -- output did not contain [%s]. Output:\n%s\n' "$1" "$3" "$2" >&2
+      ;;
+  esac
 }
 
 # One temp root for every victim, removed through preflight's OWN guarded
@@ -170,6 +185,14 @@ FP_BARE="$(pf_fingerprint "$V_BARE")"
 iso_run "$V_BARE"
 no  "core.bare: preflight FAILS"                     test "$ISO_RC" -eq 0
 has "core.bare: and it names the suite"              "$ISO_OUT" "scripts/test-core-bare.sh"
+# WHICH ARM fired, not just that something did. core.bare=true leaves the
+# sandbox UNREADABLE -- `git status` answers "must be run in a work tree" -- so
+# this is caught by the after-run fingerprint FAILING, not by the before/after
+# comparison that catches an ordinary write. Asserting only the suite name let
+# that arm be deleted with no test going red: the same input then fell through
+# to the comparison arm and the run still failed, for the wrong reason.
+has "core.bare: and it names the arm that fired -- an UNREADABLE sandbox" \
+  "$ISO_OUT" "THE SANDBOX REPOSITORY IS UNREADABLE AFTER THE RUN"
 eq  "core.bare: the release checkout's core.bare is untouched" "$BARE_BEFORE" "$(bare_of "$V_BARE")"
 eq  "core.bare: and the checkout is byte-identical"  "$FP_BARE" "$(pf_fingerprint "$V_BARE")"
 ok  "core.bare: the release checkout still has a work tree" \
@@ -233,6 +256,47 @@ has "absolute: and it reports the release checkout changed" \
 ok  "absolute: the write really landed (so the gate, not luck, caught it)" \
   pf_git -C "$V_ABS" show-ref --verify --quiet refs/heads/absolute-escape
 
+# -- 5b. AND IT IS STILL REPORTED WHEN THE SUITE ALSO FAILS ------------------
+# The bracket above used to sit AFTER the suite loop, so every `fail` inside the
+# loop jumped over it. A suite that corrupted the release checkout and THEN
+# exited non-zero produced only "FAILED at: <suite>" -- the corruption was never
+# named. That is the self-concealing half: the operator fixes the suite, re-runs,
+# and run 2 captures its baseline from the already-corrupted checkout and goes
+# green. Nothing here asserted the two facts together, which is why it shipped.
+V_ABSF="$(iso_victim absolute-escape-failing)"
+cat >"${V_ABSF}/scripts/test-absolute-escape-fail.sh" <<EOF
+#!/usr/bin/env bash
+# THE ATTACK: corrupt the release checkout by absolute path, THEN exit non-zero.
+# The branch name is fresh on every run, so a SECOND run corrupts again instead
+# of erroring out on the ref the first run already left behind -- otherwise the
+# re-run would go red for a bookkeeping reason and assert nothing.
+set -euo pipefail
+n=\$(git -C "${V_ABSF}" for-each-ref --format='%(refname)' 'refs/heads/escape-*' | wc -l | tr -d ' ')
+git -C "${V_ABSF}" branch "escape-\$((n + 1))"
+exit 1
+EOF
+ok "absolute+fail: victim built" iso_commit "$V_ABSF"
+iso_run "$V_ABSF"
+no  "absolute+fail: preflight FAILS"                 test "$ISO_RC" -eq 0
+has "absolute+fail: the suite's own failure is reported" \
+  "$ISO_OUT" "scripts/test-absolute-escape-fail.sh"
+has "absolute+fail: AND the release corruption is reported by the SAME run" \
+  "$ISO_OUT" "THE RELEASE CHECKOUT"
+has "absolute+fail: named as a change, not as a suite failure" "$ISO_OUT" "CHANGED"
+eq  "absolute+fail: the write really landed" "1" \
+  "$(pf_git -C "$V_ABSF" for-each-ref --format='%(refname)' 'refs/heads/escape-*' | wc -l | tr -d ' ')"
+
+# THE RE-RUN. A fingerprint bracket has no memory across runs -- run 2's
+# baseline is whatever run 1 left behind -- so what has to hold is that
+# detection is not a ONE-SHOT that a concurrent suite failure launders. A second
+# run that corrupts again must report it again.
+iso_run "$V_ABSF"
+no  "absolute+fail re-run: preflight FAILS again"    test "$ISO_RC" -eq 0
+has "absolute+fail re-run: and reports the corruption again, not just the suite" \
+  "$ISO_OUT" "THE RELEASE CHECKOUT"
+eq  "absolute+fail re-run: both runs left their ref behind" "2" \
+  "$(pf_git -C "$V_ABSF" for-each-ref --format='%(refname)' 'refs/heads/escape-*' | wc -l | tr -d ' ')"
+
 # -- 6. THE PRE-RUN GATE, DIRECTLY -------------------------------------------
 # Everything above observes the gate through a whole phase. These pin the gate's
 # own decisions, including the one arm the phase cannot reach: what happens when
@@ -284,6 +348,175 @@ rmdir "$INSIDE"
 iso_guard "${ISO_TMP}/no-such-sandbox" "$V_OK"
 eq  "gate: an unresolvable sandbox is refused" "1" "$ISO_RC"
 has "gate: and refusal is the fail-CLOSED answer" "$ISO_OUT" "does not resolve"
+
+# -- 7. SUITE DISCOVERY FAILS CLOSED -----------------------------------------
+# "the glob matched nothing" and "every suite was renamed" are the same
+# observation, and both have to stop a release rather than sail through it as a
+# phase with no work to do. Nothing exercised discovery at all, so the `-gt 0`
+# carrying that decision was free to become `-ge 0` with no test going red.
+V_NONE="$(iso_victim no-suites)"
+ok  "discovery: a victim carrying no suites was built" iso_commit "$V_NONE"
+iso_run "$V_NONE"
+no  "discovery: a repo root with no scripts/test-*.sh is refused" test "$ISO_RC" -eq 0
+has "discovery: and the refusal says what it could not find" \
+  "$ISO_OUT" "no scripts/test-*.sh found"
+
+# -- 8. THE FINGERPRINT FAILS CLOSED -----------------------------------------
+# A fingerprint that degrades to empty compares equal to the next empty one, and
+# every before/after gate in this file then passes on nothing. The header says
+# so at length; nothing checked it.
+fp() { pf_fingerprint "$@" >/dev/null 2>&1; }   # only the exit code is under test
+no  "fingerprint: no argument at all is refused"      fp
+no  "fingerprint: a path that does not exist is refused" fp "${ISO_TMP}/not-a-repository"
+mkdir -p "${ISO_TMP}/not-a-repository"
+no  "fingerprint: a directory that is not a repository is refused" \
+  fp "${ISO_TMP}/not-a-repository"
+# The DISCRIMINATING case. core.bare=true leaves for-each-ref, rev-parse, the
+# reflog and config all answering normally and breaks only `git status` -- so a
+# fingerprint that tolerated a failing command would still return a full-looking
+# value here, and only here. It is also the exact shape of the incident, twice.
+V_BROKE="$(iso_victim unreadable-repo)"
+ok  "fingerprint: a healthy checkout was built"       iso_commit "$V_BROKE"
+ok  "fingerprint: and a healthy checkout fingerprints" fp "$V_BROKE"
+pf_git -C "$V_BROKE" config core.bare true
+no  "fingerprint: a checkout broken by core.bare=true is refused, not fingerprinted" \
+  fp "$V_BROKE"
+pf_git -C "$V_BROKE" config --unset core.bare
+
+# -- 9. pf_path_under, DIRECTLY ----------------------------------------------
+# The separator in `"$root"/*` IS the guard. Without it, `"$root"*` admits every
+# sibling that merely shares a prefix -- /a/bc reads as "under" /a/b -- and this
+# is the predicate that keeps the sandbox out of the release checkout, keeps the
+# release checkout out of the cleanup vector, and bounds `rm -rf` to the temp
+# root. It was reachable only through those callers, none of which passes a
+# prefix-sharing sibling, so the separator was untested.
+ok "path_under: a child is under its root"            pf_path_under /a/b/c /a/b
+ok "path_under: a root is under itself"               pf_path_under /a/b /a/b
+ok "path_under: a deep descendant is under it"        pf_path_under /a/b/c/d/e /a/b
+no "path_under: a SIBLING sharing the prefix is NOT under it" pf_path_under /a/bc /a/b
+no "path_under: nor one that merely starts the same"  pf_path_under /a/b-2 /a/b
+no "path_under: an unrelated path is not"             pf_path_under /x/y /a/b
+no "path_under: an empty path is refused"             pf_path_under "" /a/b
+no "path_under: an empty root is refused"             pf_path_under /a/b ""
+
+# -- 10. pf_sandbox_rm, DIRECTLY ---------------------------------------------
+# An `rm -rf` argument vector with no test of any kind. Every arm is exercised
+# against a target that must SURVIVE, because "it returned 1" and "it deleted
+# nothing" are different claims and only the second one is the safety property.
+#
+# The temp-root arms run against a FAKE temp root inside this file's own tree
+# rather than the real $TMPDIR. The mutant that proves an assertion here is
+# "delete the guard", and the blast radius of that mutant has to be a directory
+# this file owns -- pointed at the real $TMPDIR it would remove the system temp
+# directory, which is where the release itself is cut.
+iso_rm() { # iso_rm <cwd> <tmpdir> <arg>
+  ISO_RC=0
+  ISO_OUT="$( (cd "$1" && export TMPDIR="$2" && pf_sandbox_rm "$3") 2>&1 )" || ISO_RC=$?
+}
+FAKE_TMP="${ISO_TMP}/fake-tmp"
+mkdir -p "$FAKE_TMP"
+
+# A RELATIVE path: `dirname ""` is ".", so this arm is what stands between a
+# degraded path helper and `rm -rf` at the root of whatever the cwd happens to be.
+mkdir -p "${ISO_TMP}/rm-relative"
+iso_rm "$ISO_TMP" "$ISO_TMP" "rm-relative"
+eq  "sandbox_rm: a RELATIVE path is refused"          "1" "$ISO_RC"
+has "sandbox_rm: and says which arm refused it"       "$ISO_OUT" "refusing to clean up the RELATIVE path"
+ok  "sandbox_rm: and the target SURVIVES"             test -d "${ISO_TMP}/rm-relative"
+
+# The temp root ITSELF: strictly-under, not under-or-equal.
+iso_rm "$ISO_TMP" "$FAKE_TMP" "$FAKE_TMP"
+eq  "sandbox_rm: the temp root itself is refused"     "1" "$ISO_RC"
+has "sandbox_rm: and says why"                        "$ISO_OUT" "not strictly under"
+ok  "sandbox_rm: and the temp root SURVIVES"          test -d "$FAKE_TMP"
+
+# Anything outside the temp root, which is every real repository on the machine.
+mkdir -p "${ISO_TMP}/rm-outside"
+iso_rm "$ISO_TMP" "$FAKE_TMP" "${ISO_TMP}/rm-outside"
+eq  "sandbox_rm: a path outside the temp root is refused" "1" "$ISO_RC"
+has "sandbox_rm: and says why"                        "$ISO_OUT" "not strictly under"
+ok  "sandbox_rm: and the outside target SURVIVES"     test -d "${ISO_TMP}/rm-outside"
+
+iso_rm "$ISO_TMP" "$FAKE_TMP" "/"
+eq  "sandbox_rm: / is refused"                        "1" "$ISO_RC"
+has "sandbox_rm: and says why"                        "$ISO_OUT" "not strictly under"
+ok  "sandbox_rm: and / survives"                      test -d /
+
+# The positive control, so the refusals above are a guard rather than a function
+# that never removes anything at all.
+mkdir -p "${FAKE_TMP}/removable"
+iso_rm "$ISO_TMP" "$FAKE_TMP" "${FAKE_TMP}/removable"
+eq  "sandbox_rm: a path strictly under the temp root IS removed" "0" "$ISO_RC"
+no  "sandbox_rm: and it is really gone"               test -d "${FAKE_TMP}/removable"
+
+# -- 11. THE REQUIRED-SUITE LIST ---------------------------------------------
+# PREFLIGHT_REQUIRED_SUITES exists so a renamed or deleted suite stops the
+# release instead of quietly shrinking what is gated. This file is the committed
+# proof of #867, and it was not on the list: renaming it away left the discovery
+# glob still matching the other two, so discovery passed, the release proceeded,
+# and the only thing checking any of the guarantees above had stopped running.
+iso_required() {
+  local s
+  for s in "${PREFLIGHT_REQUIRED_SUITES[@]}"; do
+    [ "$s" = "$1" ] && return 0
+  done
+  return 1
+}
+ok "required: test-release.sh is a required suite"       iso_required test-release.sh
+ok "required: test-sync-version.sh is a required suite"  iso_required test-sync-version.sh
+ok "required: and THIS proof is a required suite too"    iso_required test-preflight-isolation.sh
+
+# -- 12. THE AMBIENT GIT ENVIRONMENT -----------------------------------------
+# The sandbox pins core.hooksPath with `git config --local`, and preflight used
+# to claim that meant "nothing a suite does can pick up a hook". Measured, not
+# reasoned about: an env-injected config pair OUTRANKS a --local pin, and
+# GIT_CONFIG_GLOBAL=/dev/null does not touch it -- so an ambient
+# GIT_CONFIG_COUNT/KEY_n/VALUE_n defeats the pin outright and a planted hook
+# fires inside the sandbox. GIT_TEMPLATE_DIR is worse, because it reaches the
+# `git init` and plants into .git/hooks BEFORE the pin exists to be outranked.
+EVIL_HOOKS="${ISO_TMP}/evil-hooks"
+mkdir -p "$EVIL_HOOKS"
+mkdir -p "${ISO_TMP}/evil-template/hooks"
+printf '#!/bin/sh\nexit 0\n' >"${ISO_TMP}/evil-template/hooks/pre-commit"
+chmod +x "${ISO_TMP}/evil-template/hooks/pre-commit"
+
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$EVIL_HOOKS"
+export GIT_TEMPLATE_DIR="${ISO_TMP}/evil-template"
+ok "env: a sandbox still builds under a hostile ambient git environment" \
+  pf_make_sandbox "$V_OK"
+SB_ENV="$PREFLIGHT_SANDBOX"
+ok "env: and it has a path" test -n "$SB_ENV"
+# The control. Without it the assertion below is vacuous -- it would pass just
+# as well against an attack that never worked in the first place.
+eq "env: (control) an UNSCRUBBED read really is beaten by the injection" \
+  "$EVIL_HOOKS" "$(git -C "$SB_ENV" config --get core.hooksPath)"
+eq "env: a scrubbed read sees the sandbox's pin, not the injection" \
+  "/dev/null" "$(pf_git -C "$SB_ENV" config --get core.hooksPath)"
+# A fresh `git init` ships pre-commit.sample and no pre-commit, so this file
+# existing means the ambient template reached the init.
+no "env: and GIT_TEMPLATE_DIR planted no hook in the sandbox" \
+  test -e "${SB_ENV}/.git/hooks/pre-commit"
+
+# The numbered pairs are unset BY NAME, not merely disarmed by clearing the
+# count. Measured, because the distinction is not obvious in either direction:
+# with the count cleared and the pairs left in place the pin DOES hold, so
+# clearing the count looks sufficient. It is not -- pf_env_run's subshell is
+# where the SUITE runs, and a suite that exports GIT_CONFIG_COUNT itself re-arms
+# whatever KEY_n/VALUE_n are still lying in the environment and the injection
+# applies again. With the pairs genuinely gone, that same suite makes git fail
+# loudly ("missing config key GIT_CONFIG_KEY_0") instead of silently reading an
+# attacker's value. Asserted here rather than through a phase because the phase
+# cannot reach it: nothing else re-arms the count.
+# Single quotes are the point: the expansion has to happen in the shell pf_env_run
+# starts, AFTER the scrub, not in this one where the variable is still set.
+# shellcheck disable=SC2016
+eq "env: GIT_CONFIG_KEY_0 does not survive into the scrubbed environment" \
+  "" "$(pf_env_run sh -c 'printf %s "${GIT_CONFIG_KEY_0:-}"')"
+# shellcheck disable=SC2016
+eq "env: nor GIT_CONFIG_VALUE_0, so re-arming the count finds nothing to apply" \
+  "" "$(pf_env_run sh -c 'printf %s "${GIT_CONFIG_VALUE_0:-}"')"
+
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_TEMPLATE_DIR
 
 printf '\n[test-preflight-isolation] %d passed, %d failed\n' "$PASS" "$FAIL" >&2
 [ "$FAIL" -eq 0 ]

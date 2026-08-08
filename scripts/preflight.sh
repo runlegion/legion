@@ -58,13 +58,22 @@
 #   * around the phase   -- the release checkout must be byte-identical: refs,
 #     HEAD, reflog, status, core.bare, the worktree registry and the local
 #     config. This is the one that catches an escape by absolute path, which no
-#     amount of cwd discipline can prevent.
+#     amount of cwd discipline can prevent. It is compared on EVERY exit from
+#     the phase, not only the clean one -- a suite can corrupt the checkout and
+#     then fail, and if the comparison were skipped on the failure path the
+#     corruption would become the baseline the next run measures against.
 set -euo pipefail
 
 # The suites that MUST exist. Previously the runner was `if [ -f ... ]`, so
 # renaming or deleting a suite silently stopped gating on it; a missing required
 # suite is now a failure.
-PREFLIGHT_REQUIRED_SUITES=(test-release.sh test-sync-version.sh)
+#
+# test-preflight-isolation.sh is on this list for the same reason the other two
+# are, and the reason is sharper for it: it is the committed proof of #867, and
+# the discovery glob below would still match the other two if it were renamed
+# away. Discovery would pass, the release would proceed, and the only thing that
+# checks THIS FILE's guarantees would have stopped running silently.
+PREFLIGHT_REQUIRED_SUITES=(test-release.sh test-sync-version.sh test-preflight-isolation.sh)
 
 # Sandbox roots created by this process, for the EXIT cleanup.
 PREFLIGHT_SANDBOX_ROOTS=()
@@ -89,12 +98,39 @@ fail() { printf '\n[preflight] FAILED at: %s\n' "$1" >&2; exit 1; }
 # an empty key compares equal to nothing, which silently turns the identity gate
 # into a no-op. Pin first, then capture.
 #
+# THE PINS ARE NOT ENOUGH ON THEIR OWN, measured 2026-08-07 rather than reasoned
+# about: env-injected config OUTRANKS a repository's own `--local` values, and
+# GIT_CONFIG_GLOBAL=/dev/null does not touch it. With GIT_CONFIG_COUNT=1
+# GIT_CONFIG_KEY_0=core.hooksPath ambient, the sandbox's core.hooksPath pin reads
+# back as the attacker's directory and a planted hook FIRES inside the sandbox.
+# GIT_TEMPLATE_DIR is worse still, because it reaches the `git init` in
+# pf_make_sandbox and plants files into .git/hooks BEFORE any pin exists.
+# So the numbered pairs are unset individually. Clearing GIT_CONFIG_COUNT alone
+# does hold the pin for git's next read -- measured -- but the subshell below is
+# where the SUITE runs, and a suite that exports GIT_CONFIG_COUNT itself re-arms
+# whatever KEY_n/VALUE_n are still lying in the environment. With the pairs
+# actually gone that suite gets "missing config key GIT_CONFIG_KEY_0" and dies
+# loudly instead of quietly reading an attacker's value. The rest of the list is
+# the same class -- values that redirect where git finds its config, its
+# templates, its helper programs, or the commands it will shell out to.
+#
 # The subshell scoping is the point, not an accident, hence the disable.
 # shellcheck disable=SC2030,SC2031
 pf_env_run() {
   (
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_NAMESPACE \
-      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      GIT_CONFIG GIT_CONFIG_COUNT GIT_TEMPLATE_DIR GIT_EXEC_PATH \
+      GIT_CEILING_DIRECTORIES GIT_SSH_COMMAND GIT_ASKPASS GIT_PROXY_COMMAND \
+      GIT_EDITOR GIT_SEQUENCE_EDITOR GIT_ALLOW_PROTOCOL GIT_ATTR_NOSYSTEM
+    # The numbered config pairs, by name. Unquoted on purpose: this is bash's
+    # prefix expansion over VARIABLE NAMES, which cannot contain whitespace, and
+    # it expands to nothing when none are set.
+    # shellcheck disable=SC2086
+    local pf_k
+    for pf_k in ${!GIT_CONFIG_KEY_@} ${!GIT_CONFIG_VALUE_@}; do
+      unset "$pf_k"
+    done
     export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
       GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
     "$@"
@@ -233,8 +269,14 @@ pf_make_sandbox() {
   pf_git -c init.defaultBranch=main init --quiet "$sandbox" >/dev/null || return 1
   pf_git -C "$sandbox" config user.email preflight@localhost || return 1
   pf_git -C "$sandbox" config user.name preflight || return 1
-  # A repo-level hooks pin, so nothing a suite does can pick up a hook: the
-  # global config is already /dev/null, and a fresh init has no hooks of its own.
+  # A repo-level hooks pin. What it covers: this repository's own hooks, and any
+  # hook a suite installs into .git/hooks afterwards. What it does NOT cover, and
+  # the comment here used to claim it did -- an ambient GIT_CONFIG_COUNT/KEY_n
+  # pair, which outranks `--local` and would make this line read back as the
+  # attacker's directory; and GIT_TEMPLATE_DIR, which planted its files during
+  # the `git init` above, before this line existed to be outranked. Neither is
+  # closed here. Both are closed by the scrub in pf_env_run, which is why every
+  # git call in this file goes through it.
   pf_git -C "$sandbox" config core.hooksPath /dev/null || return 1
   pf_git -C "$sandbox" add -A || return 1
   pf_git -C "$sandbox" -c commit.gpgsign=false commit --quiet --no-verify \
@@ -287,7 +329,7 @@ pf_assert_sandbox_isolated() {
 # from the release checkout.
 pf_run_shell_suites() {
   local repo_root="$1"
-  local sandbox t before after release_before release_after rc
+  local sandbox t before after release_before release_after rc phase_rc
   local -a suites=()
 
   # The sandbox must be removed on the failure path too, and `fail` exits.
@@ -312,47 +354,83 @@ pf_run_shell_suites() {
   [ -n "$sandbox" ] \
     || fail "shell-script tests -- the disposable sandbox has no path"
 
-  for t in "${suites[@]}"; do
-    pf_assert_sandbox_isolated "$sandbox" "$repo_root" "scripts/${t}"
+  # THE LOOP RUNS IN A SUBSHELL so that the release-checkout comparison below is
+  # reached by EVERY exit from this phase rather than only by the clean one.
+  #
+  # `fail` exits, and there are FIVE refusals inside this loop -- the pre-run
+  # gate, the before-fingerprint, the suite's own exit code, and the two
+  # after-run arms -- every one of which used to jump straight over the
+  # comparison. A suite that corrupted the release checkout AND then failed
+  # reported only its own failure; the corruption was never mentioned. The
+  # operator would then fix the suite and re-run, and run 2 would capture
+  # `release_before` from the ALREADY-CORRUPTED checkout and pass. Silent, and
+  # self-concealing, and the corruption becomes the next run's baseline.
+  #
+  # A subshell rather than a wrapper around each `fail`: a wrapper is a thing
+  # somebody has to remember to call at every new exit, which is the same shape
+  # as the defect being fixed. This makes the bracket structural. The suite's own
+  # diagnosis is already on stderr from inside the subshell, so a run that both
+  # corrupted the checkout and failed reports BOTH facts.
+  phase_rc=0
+  (
+    for t in "${suites[@]}"; do
+      pf_assert_sandbox_isolated "$sandbox" "$repo_root" "scripts/${t}"
 
-    before="$(pf_fingerprint "$sandbox")" \
-      || fail "scripts/${t} -- cannot fingerprint the sandbox before the run"
+      before="$(pf_fingerprint "$sandbox")" \
+        || fail "scripts/${t} -- cannot fingerprint the sandbox before the run"
 
-    # This exact format is PARSED by test-preflight-isolation.sh's
-    # iso_sandbox_path, which asserts the sandbox is removed afterwards on both
-    # the success and the failure path. Reformat both ends together.
-    printf '\n[preflight] --- scripts/%s (sandbox: %s) ---\n' "$t" "$sandbox" >&2
-    # The cwd the suite inherits is the sandbox, never the release checkout --
-    # which is the whole of #867. $sandbox has just been resolved and gated, so
-    # the `cd` is a perimeter-checked target rather than a bare one.
-    rc=0
-    (cd "$sandbox" && pf_env_run bash "${sandbox}/scripts/${t}") || rc=$?
-    [ "$rc" -eq 0 ] || fail "scripts/${t} (exit ${rc})"
+      # This exact format is PARSED by test-preflight-isolation.sh's
+      # iso_sandbox_path, which asserts the sandbox is removed afterwards on both
+      # the success and the failure path. Reformat both ends together.
+      printf '\n[preflight] --- scripts/%s (sandbox: %s) ---\n' "$t" "$sandbox" >&2
+      # The cwd the suite inherits is the sandbox, never the release checkout --
+      # which is the whole of #867. $sandbox has just been resolved and gated, so
+      # the `cd` is a perimeter-checked target rather than a bare one.
+      rc=0
+      (cd "$sandbox" && pf_env_run bash "${sandbox}/scripts/${t}") || rc=$?
+      [ "$rc" -eq 0 ] || fail "scripts/${t} (exit ${rc})"
 
-    # An unreadable sandbox AFTER the run is not an inconvenience, it is the
-    # finding: `core.bare=true` is exactly what makes `git status` answer "this
-    # operation must be run in a work tree", and that write landed on the
-    # operator's live checkout twice.
-    after="$(pf_fingerprint "$sandbox")" \
-      || fail "scripts/${t} -- THE SANDBOX REPOSITORY IS UNREADABLE AFTER THE RUN.
+      # An unreadable sandbox AFTER the run is not an inconvenience, it is the
+      # finding: `core.bare=true` is exactly what makes `git status` answer "this
+      # operation must be run in a work tree", and that write landed on the
+      # operator's live checkout twice.
+      after="$(pf_fingerprint "$sandbox")" \
+        || fail "scripts/${t} -- THE SANDBOX REPOSITORY IS UNREADABLE AFTER THE RUN.
        The suite broke the repository it ran in (core.bare=true is the known
        shape); under the pre-#867 runner that repository was ${repo_root}."
-    if [ "$before" != "$after" ]; then
-      fail "scripts/${t} -- THE SUITE MODIFIED THE REPOSITORY IT RAN IN. It was
+      if [ "$before" != "$after" ]; then
+        fail "scripts/${t} -- THE SUITE MODIFIED THE REPOSITORY IT RAN IN. It was
        sandboxed, so the damage is a temp directory -- but the same write with
        the pre-#867 runner would have landed in ${repo_root}. Fix the suite's
        fallback-to-cwd rather than this gate."
-    fi
-  done
+      fi
+    done
+  ) || phase_rc=$?
 
-  release_after="$(pf_fingerprint "$repo_root")" \
-    || fail "shell-script tests -- cannot fingerprint the release checkout after the run"
+  # THE BRACKET. Reached on the success path and on every failure path above.
+  # An unreadable release checkout is reported on its own terms rather than
+  # collapsed into "it changed": core.bare=true set on the checkout by absolute
+  # path is exactly what makes it unreadable, and naming that is the finding.
+  if ! release_after="$(pf_fingerprint "$repo_root")"; then
+    fail "shell-script tests -- THE RELEASE CHECKOUT ${repo_root} IS UNREADABLE
+       after the shell suites ran. A suite reached it and broke it (core.bare
+       =true is the known shape). Do not release; repair the checkout and
+       inspect refs and the local config before doing anything else."
+  fi
   if [ "$release_before" != "$release_after" ]; then
     fail "shell-script tests -- THE RELEASE CHECKOUT ${repo_root} CHANGED while the
        shell suites ran. A suite reached it by a route the sandbox does not
        bound (an absolute path, or an inherited git environment). Do not
-       release; inspect refs, core.bare and the local config."
+       release; inspect refs, core.bare and the local config.
+       THIS IS REPORTED EVEN WHEN A SUITE ALSO FAILED ABOVE, and fixing that
+       suite does NOT clear it: the next run would capture its baseline from the
+       checkout as this run left it, and would pass."
   fi
+
+  # The suite failure itself, passed through unchanged. `exit`, not `fail` --
+  # the failing suite already named itself from inside the subshell and a second
+  # "FAILED at:" line would only obscure which gate actually fired.
+  [ "$phase_rc" -eq 0 ] || exit "$phase_rc"
 
   pf_sandbox_cleanup
 }
