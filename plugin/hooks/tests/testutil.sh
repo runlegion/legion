@@ -160,12 +160,28 @@ finish_tests() {
 #   FAKE_SYM_REMOTE          symbols answered with one hit in
 #                            FAKE_SYM_REMOTE_REPO (huttspawn); others -> []
 #   FAKE_SYM_REFS_JSON       `sym refs --json` body (default [])
-#   FAKE_RECALL              `recall` body (default empty)
+#   FAKE_RECALL              `recall` body, default for any `recall` call
+#                            that does not carry --domain checkpoint or
+#                            --domain snooze (default empty)
+#   FAKE_CHECKPOINT          `recall --domain checkpoint` body; falls back
+#                            to FAKE_RECALL when unset, mirroring
+#                            legion_boot_fetch_checkpoint's own fallback
+#   FAKE_SNOOZE              `recall --domain snooze` body (default empty;
+#                            no fallback -- this IS the fallback tier)
 #   FAKE_KANBAN_ACCEPTED     `kanban list` -> one accepted card titled this
 #   FAKE_KANBAN_DELEGATED_DEAD  `kanban delegated-needs-attention` -> one
 #                            not-live delegated card titled this (#778)
 #   FAKE_GOAL                `goal` body
 #   FAKE_WHOAMI_BODY         `whoami` body below the standard banner header
+#   FAKE_WHATAMI_BODY        `whatami` body below the standard banner header
+#   FAKE_PENDING_REPLIES     `pending-replies` body (default empty)
+#   FAKE_NOW_BANNER          `now --banner` body (default empty)
+#   FAKE_INDEX_BANNER        `index <repo> --status --banner` body (default
+#                            empty; distinct from FAKE_INDEX_JSON, which
+#                            answers the unrelated `index --status --json`
+#                            shape _legion-indexed.sh calls)
+#   FAKE_AUTONOMY_BANNER     `autonomy status --banner` body (default empty)
+#   FAKE_BULLPEN_COUNT       `bullpen --count` body (default empty)
 #   FAKE_PREDICTION_ID       `uncertainty emit` row id (pred-fixed-1)
 #   FAKE_WITNESS_LOG=<file>  `uncertainty witness` appends its argv here
 #   FAKE_SPAWN_LOG=<file>    `serve` appends "spawned at <epoch>" here;
@@ -217,6 +233,11 @@ case "${1:-}" in
   index)
     if [ "${2:-}" = "--status" ] && [ "${3:-}" = "--json" ]; then
       printf '%s\n' "${FAKE_INDEX_JSON:-[]}"
+    elif [ "${3:-}" = "--status" ] && [ "${4:-}" = "--banner" ]; then
+      # Real call: index "$REPO" --status --banner -- repo is $2, so the
+      # discriminating flags land at $3/$4, not $2/$3 like the --json shape
+      # above.
+      [ -n "${FAKE_INDEX_BANNER:-}" ] && printf '%s\n' "$FAKE_INDEX_BANNER"
     fi
     ;;
   sym)
@@ -242,7 +263,33 @@ case "${1:-}" in
     fi
     ;;
   recall)
-    printf '%s\n' "${FAKE_RECALL:-}"
+    # Discriminate by scanning argv for --domain rather than pinning a
+    # position: real calls are `recall --repo R --domain X ...` (domain at
+    # $4) or `recall --repo R --context Q ...` (no domain at all), and a
+    # position-pinned check silently answers the wrong FAKE_* var when a
+    # flag shifts.
+    domain=""
+    take_next="0"
+    for arg in "$@"; do
+      if [ "$take_next" = "1" ]; then
+        domain="$arg"
+        break
+      fi
+      if [ "$arg" = "--domain" ]; then
+        take_next="1"
+      fi
+    done
+    case "$domain" in
+      checkpoint)
+        printf '%s\n' "${FAKE_CHECKPOINT:-${FAKE_RECALL:-}}"
+        ;;
+      snooze)
+        printf '%s\n' "${FAKE_SNOOZE:-}"
+        ;;
+      *)
+        printf '%s\n' "${FAKE_RECALL:-}"
+        ;;
+    esac
     ;;
   kanban)
     if [ "${2:-}" = "list" ] && [ -n "${FAKE_KANBAN_ACCEPTED:-}" ]; then
@@ -259,6 +306,31 @@ case "${1:-}" in
     echo "[Legion] Identity for test:"
     if [ -n "${FAKE_WHOAMI_BODY:-}" ]; then
       printf '%s\n' "$FAKE_WHOAMI_BODY"
+    fi
+    ;;
+  whatami)
+    echo "=== HOW YOU OPERATE -- READ THIS ==="
+    echo "[Legion] Operating contract for test:"
+    if [ -n "${FAKE_WHATAMI_BODY:-}" ]; then
+      printf '%s\n' "$FAKE_WHATAMI_BODY"
+    fi
+    ;;
+  pending-replies)
+    [ -n "${FAKE_PENDING_REPLIES:-}" ] && printf '%s\n' "$FAKE_PENDING_REPLIES"
+    ;;
+  now)
+    if [ "${2:-}" = "--banner" ]; then
+      [ -n "${FAKE_NOW_BANNER:-}" ] && printf '%s\n' "$FAKE_NOW_BANNER"
+    fi
+    ;;
+  autonomy)
+    if [ "${2:-}" = "status" ]; then
+      [ -n "${FAKE_AUTONOMY_BANNER:-}" ] && printf '%s\n' "$FAKE_AUTONOMY_BANNER"
+    fi
+    ;;
+  bullpen)
+    if [ "${2:-}" = "--count" ]; then
+      [ -n "${FAKE_BULLPEN_COUNT:-}" ] && printf '%s\n' "$FAKE_BULLPEN_COUNT"
     fi
     ;;
   uncertainty)
@@ -299,7 +371,8 @@ make_plugin_root() {
   # shellcheck disable=SC2064
   trap "rm -rf '$WORK'" EXIT
   mkdir -p "$WORK/plugin/bin" "$WORK/plugin/hooks/lib" "$WORK/cache" "$WORK/state/legion"
-  cp "$HOOKS_SRC_DIR/lib/prelude.sh" "$HOOKS_SRC_DIR/lib/emit.sh" "$WORK/plugin/hooks/lib/"
+  cp "$HOOKS_SRC_DIR/lib/prelude.sh" "$HOOKS_SRC_DIR/lib/emit.sh" \
+     "$HOOKS_SRC_DIR/lib/boot-sections.sh" "$WORK/plugin/hooks/lib/"
   cp "$HOOKS_SRC_DIR/_legion-covered.sh" \
      "$HOOKS_SRC_DIR/_legion-indexed.sh" \
      "$HOOKS_SRC_DIR/_legion-prequery.sh" \

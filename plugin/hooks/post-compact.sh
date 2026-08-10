@@ -1,11 +1,24 @@
 #!/bin/bash
 # Legion post-compact hook: aggressive re-orientation after context compaction
 # The compaction summary is STALE. This hook provides ground truth.
+#
+# The core banner (identity, operating contract, pending replies,
+# checkpoint, index status, kanban, goal, autonomy budget) is assembled by
+# lib/boot-sections.sh (#879) via emit_boot_core -- the SAME driver
+# session-start.sh calls. Before #879 this hook emitted only a standalone
+# checkpoint block, so compaction silently dropped identity, the operating
+# contract, pending replies, the work source, and the autonomy budget with
+# no error. What stays local to this hook is genuinely compact-specific:
+# the re-orientation preamble, git ground-truth, and branch-context recall
+# (all three are meaningless at cold boot), plus the unread-bullpen count
+# and the ACTION REQUIRED footer.
 
 # shellcheck source=lib/prelude.sh
 source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
 # shellcheck source=lib/emit.sh
 source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/boot-sections.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/boot-sections.sh" 2>/dev/null || exit 0
 
 LOG="$LEGION_HOOK_LOG"
 
@@ -46,17 +59,9 @@ if [ -n "$GIT_BRANCH" ]; then
   OUTPUT="$OUTPUT"$'\n\n'"Branch: $GIT_BRANCH"
 fi
 
-# Recall: checkpoint reflection from PreCompact hook + branch context
-OUTPUT="$OUTPUT"$'\n\n'"--- LEGION CHECKPOINT (stored before compaction) ---"
-
-CHECKPOINT=$("$LEGION" recall --repo "$REPO" --domain checkpoint --limit 1 2>>"$LOG")
-if [ -n "$CHECKPOINT" ]; then
-  OUTPUT="$OUTPUT"$'\n'"$CHECKPOINT"
-else
-  OUTPUT="$OUTPUT"$'\n'"(no checkpoint found)"
-fi
-
-# Branch-specific recall if on a feature branch
+# Branch-specific recall if on a feature branch. Compact-specific (derived
+# from the git branch read above) and stays local to this hook -- it has
+# no cold-boot equivalent.
 if [ -n "$GIT_BRANCH" ] && [ "$GIT_BRANCH" != "main" ] && [ "$GIT_BRANCH" != "master" ]; then
   BRANCH_RECALL=$("$LEGION" recall --repo "$REPO" --context "$GIT_BRANCH" 2>>"$LOG")
   legion_check $? "recall (branch)"
@@ -65,10 +70,15 @@ if [ -n "$GIT_BRANCH" ] && [ "$GIT_BRANCH" != "main" ] && [ "$GIT_BRANCH" != "ma
   fi
 fi
 
-# Surface: cross-repo highlights, board posts, pending tasks
-SURFACE=$("$LEGION" surface --repo "$REPO" 2>>"$LOG")
-if [ -n "$SURFACE" ]; then
-  OUTPUT="$OUTPUT"$'\n\n'"$SURFACE"
+# Core banner: identity, operating contract, pending replies, checkpoint,
+# index status, kanban, goal, autonomy budget (#879). This is the same
+# emit_boot_core call session-start.sh makes -- the checkpoint reflection
+# that used to get its own "LEGION CHECKPOINT (stored before compaction)"
+# wrapper here now rides inside this block like every other session, and
+# the ACTION REQUIRED footer below still calls out checking it explicitly.
+CORE=$(emit_boot_core)
+if [ -n "$CORE" ]; then
+  OUTPUT="$OUTPUT"$'\n\n'"$CORE"
 fi
 
 # Unread bullpen

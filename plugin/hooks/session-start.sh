@@ -1,10 +1,12 @@
 #!/bin/bash
 # Legion SessionStart hook: focused bootstrap.
 #
-# Injects exactly three things:
-#   1. Identity  -- who am I (domain: identity)
-#   2. Last checkpoint -- where was I (domain: checkpoint)
-#   3. Work source -- what's on my plate (kanban list)
+# Session-only side effects live here: marker cleanup, index warm, daemon
+# supervisor, watch lock, GitHub sync (see below). The banner itself --
+# identity, operating contract, pending replies, checkpoint, index status,
+# kanban, goal, autonomy budget -- is assembled by lib/boot-sections.sh
+# (#879), the SAME driver post-compact.sh calls, so the two SessionStart
+# matchers cannot drift out of sync the way they did before #879.
 #
 # Everything else (bulk recall, surface, bullpen) is pulled on demand
 # during the session via recall/consult/bullpen commands.
@@ -16,6 +18,8 @@
 source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
 # shellcheck source=lib/emit.sh
 source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/boot-sections.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/boot-sections.sh" 2>/dev/null || exit 0
 
 LOG="$LEGION_HOOK_LOG"
 
@@ -56,93 +60,11 @@ if [ "${LEGION_NO_SYNC:-}" != "1" ]; then
   fi
 fi
 
-OUTPUT=""
-
-# Append-with-separator helper. Identity must always lead; everything else
-# appends in priority order (pending > snooze > kanban). Per #338: agents need
-# to know WHO they are before WHAT they are doing -- pending-replies prepended
-# in front of identity drowned the banner under 100KB of REQUIRES A REPLY
-# framing on rafters' rich-identity startup, and the agent defaulted to
-# generic Claude prose instead of reading its identity chain.
-append_block() {
-  local block="$1"
-  if [ -z "$block" ]; then
-    return
-  fi
-  if [ -n "$OUTPUT" ]; then
-    OUTPUT="${OUTPUT}"$'\n\n'"${block}"
-  else
-    OUTPUT="$block"
-  fi
-}
-
-# 0. Now -- weekday + local time + sunphase. One line, lands first so an
-# agent reads "today is Sunday afternoon" before identity primes voice.
-# claude-code's own systemPrompt ships `currentDate` but no weekday and
-# no hour, so agents pattern-match on conversation density and start
-# saying "tonight" or "wind down" when the operator has the rest of the
-# workday ahead. See #410.
-NOW=$("$LEGION" now --banner 2>>"$LOG")
-append_block "$NOW"
-
-# 1. Identity -- who am I. Banner-wrapped by the binary.
-IDENTITY=$("$LEGION" whoami --repo "$REPO" --limit 5 2>>"$LOG")
-append_block "$IDENTITY"
-
-# 1b. Operating contract -- how I operate (domain: workflow). Lands right after
-# identity so the agent reads WHO YOU ARE, then HOW YOU OPERATE. Banner-wrapped
-# by the binary; silent when the repo has no workflow roots yet.
-WHATAMI=$("$LEGION" whatami --repo "$REPO" --limit 5 2>>"$LOG")
-append_block "$WHATAMI"
-
-# 2. Pending request-shaped signals -- directed asks waiting on a reply.
-# Strong "REQUIRES A REPLY" framing prevents the system-reminder wrapper
-# from causing the agent to no-op (the platform smugglr-fence RFC review
-# regression, #318). Lands second so identity informs the response voice.
-PENDING=$("$LEGION" pending-replies --repo "$REPO" 2>>"$LOG")
-append_block "$PENDING"
-
-# 3. Last checkpoint -- where was I. The /checkpoint command and the
-# precompact safety-net both write domain=checkpoint; freshest wins.
-CHECKPOINT=$("$LEGION" recall --repo "$REPO" --domain checkpoint --limit 1 --preview 500 2>>"$LOG")
-# Transitional fallback: before the snooze->checkpoint rename (#568), the
-# deliberate session summary lived in domain=snooze. Surface a legacy snooze
-# reflection only when no checkpoint exists yet, so the first session after
-# upgrade does not lose its anchor. Remove once domain=snooze has aged out.
-if [ -z "$CHECKPOINT" ]; then
-  CHECKPOINT=$("$LEGION" recall --repo "$REPO" --domain snooze --limit 1 --preview 500 2>>"$LOG")
-fi
-append_block "$CHECKPOINT"
-
-# 4. Index status -- one line if every detected language has a fresh
-# index, multi-line block if anything is stale or missing. Silent when
-# the repo is not in watch.toml or no language is detected. Lets the
-# agent see whether `legion sym` will succeed before they call it.
-INDEX_BANNER=$("$LEGION" index "$REPO" --status --banner 2>>"$LOG")
-append_block "$INDEX_BANNER"
-
-# 5. Work source -- what's on my plate
-KANBAN=$("$LEGION" kanban list --repo "$REPO" 2>>"$LOG")
-if [ -n "$KANBAN" ]; then
-  append_block "[Legion] Current work:
-${KANBAN}"
-fi
-
-# 6. Board-derived goal (#525) -- the active Accepted card's acceptance
-# criteria, framed as the completion condition the agent carries this session.
-# Native /goal cannot be set programmatically, so legion re-derives it from the
-# board here. Empty when nothing is in progress (the goal is cleared by board
-# state alone). Lands right after the work list: "here is your work, and here
-# is the one you committed to finishing."
-GOAL=$("$LEGION" goal --repo "$REPO" 2>>"$LOG")
-append_block "$GOAL"
-
-# 7. Autonomy budget (#524) -- remind the agent it has sanctioned units to
-# spend on self-directed work, so it acts on the board instead of waiting to
-# be told. Lands after the goal: first "finish this," then "and you are
-# cleared to pick up more yourself."
-BUDGET=$("$LEGION" autonomy status --repo "$REPO" --banner 2>>"$LOG")
-append_block "$BUDGET"
+# Banner assembly: identity, operating contract, pending replies,
+# checkpoint, index status, kanban, goal, autonomy budget -- in that order
+# (LEGION_BOOT_SECTIONS in lib/boot-sections.sh). See that file for why the
+# order is fixed and why no per-hook section list lives here anymore.
+OUTPUT=$(emit_boot_core)
 
 if [ -n "$OUTPUT" ]; then
   emit_context "SessionStart" "$OUTPUT"
