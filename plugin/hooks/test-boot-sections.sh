@@ -67,21 +67,33 @@ echo "==> neither hook re-inlines a core banner call outside boot-sections.sh"
 # lib/boot-sections.sh. A future maintainer re-inlining one of these
 # directly into a hook (instead of registering a boot_section_<name> once)
 # is exactly the per-path divergence #879 fixed.
-# shellcheck disable=SC2016  # single-quoted on purpose: literal grep needles, not expansion
+# REGEX, not literal substrings. The first version of this list used literal
+# needles like '"$LEGION" whoami', which miss every other spelling of the same
+# call -- "${LEGION}" whoami, $LEGION whoami, '"'"'${LEGION}'"'"' whoami -- and this
+# repo's own house style is the brace form (see "${CLAUDE_PLUGIN_ROOT:-}"
+# above). A guard that only catches the spelling its author happened to think
+# of is the same defect the Tier-1 positional-parameter lock had; both are
+# fixed the same way and for the same reason.
+# shellcheck disable=SC2016  # single-quoted on purpose: regex, not expansion
 FORBIDDEN_PATTERNS=(
-  '"$LEGION" whoami'
-  '"$LEGION" whatami'
-  '"$LEGION" pending-replies'
-  '"$LEGION" kanban'
-  '"$LEGION" goal'
-  '"$LEGION" autonomy status'
-  '"$LEGION" index'
-  '"$LEGION" now --banner'
-  '--domain checkpoint'
+  '[$]\{?LEGION\}?"? +whoami'
+  '[$]\{?LEGION\}?"? +whatami'
+  '[$]\{?LEGION\}?"? +pending-replies'
+  '[$]\{?LEGION\}?"? +kanban'
+  '[$]\{?LEGION\}?"? +goal'
+  '[$]\{?LEGION\}?"? +autonomy +status'
+  '[$]\{?LEGION\}?"? +index'
+  '[$]\{?LEGION\}?"? +now +--banner'
+  '--domain +checkpoint'
 )
 for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
-  assert_not_contains "session-start.sh does not re-inline: ${pattern}" "$(cat "$SESSION_START_SRC")" "$pattern"
-  assert_not_contains "post-compact.sh does not re-inline: ${pattern}" "$(cat "$POST_COMPACT_SRC")" "$pattern"
+  for src in "$SESSION_START_SRC" "$POST_COMPACT_SRC"; do
+    # `--` is load-bearing: the `--domain checkpoint` pattern starts with a
+    # dash and grep parses it as a flag without it, yielding empty output
+    # and a green-looking assertion for a guard that never ran.
+    hit=$(grep -cE -- "$pattern" "$src" || true)
+    assert_eq "$(basename "$src") does not re-inline: ${pattern}" "0" "$hit"
+  done
 done
 
 echo "==> every boot_section_<name>() defined is registered in LEGION_BOOT_SECTIONS, and vice versa"
@@ -144,6 +156,29 @@ SENTINELS=(
   "SENTINEL_AUTONOMY_ABC"
 )
 
+# SENTINELS above is in LEGION_BOOT_SECTIONS order on purpose: this block
+# asserts the rendered SEQUENCE, not just presence. Presence assertions alone
+# stay green if someone swaps `pending` and `identity` in the array -- which is
+# precisely the #338 regression the comment beside that array memorializes
+# (pending-replies ahead of identity buried the banner and the agent fell back
+# to generic Claude prose). Criterion 1 of #879 is an ORDER claim, so presence
+# was the wrong kind of evidence for it.
+assert_sentinel_order() {
+  local label="$1" haystack="$2"
+  local prev=-1 idx rest sentinel bad=""
+  for sentinel in "${SENTINELS[@]}"; do
+    case "$haystack" in
+      *"$sentinel"*) rest="${haystack#*"$sentinel"}"; idx=$(( ${#haystack} - ${#rest} )) ;;
+      *) bad="${bad} ${sentinel}(absent)"; continue ;;
+    esac
+    if [ "$idx" -le "$prev" ]; then
+      bad="${bad} ${sentinel}(out-of-order)"
+    fi
+    prev="$idx"
+  done
+  assert_eq "$label emits sections in LEGION_BOOT_SECTIONS order" "" "$bad"
+}
+
 EVENT_JSON="{\"cwd\":\"${SCRATCH_CWD}\",\"session_id\":\"boot-sections-test\"}"
 
 SESSION_START_OUT=$(printf '%s' "$EVENT_JSON" | bash "$CLAUDE_PLUGIN_ROOT/hooks/session-start.sh")
@@ -171,5 +206,9 @@ POST_COMPACT_SNOOZE_OUT=$(printf '%s' "$EVENT_JSON" | bash "$CLAUDE_PLUGIN_ROOT/
 POST_COMPACT_SNOOZE_CTX=$(printf '%s' "$POST_COMPACT_SNOOZE_OUT" | jq -r '.hookSpecificOutput.additionalContext // empty')
 assert_contains "post-compact.sh falls back to domain=snooze" "$POST_COMPACT_SNOOZE_CTX" "SENTINEL_SNOOZE_ABC"
 unset FAKE_SNOOZE
+
+echo "==> sections render in LEGION_BOOT_SECTIONS order on BOTH hooks (#338)"
+assert_sentinel_order "session-start.sh" "$SESSION_START_OUT"
+assert_sentinel_order "post-compact.sh" "$POST_COMPACT_OUT"
 
 finish_tests

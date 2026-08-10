@@ -123,7 +123,20 @@ boot_section_pending() {
 
 # Last checkpoint -- where was I.
 boot_section_checkpoint() {
-  legion_boot_fetch_checkpoint
+  local out
+  out=$(legion_boot_fetch_checkpoint)
+  if [ -z "$out" ]; then
+    # main's post-compact.sh printed a literal "(no checkpoint found)" here.
+    # append_block skips empty sections, so consolidating without this left
+    # post-compact's ACTION REQUIRED footer instructing the agent to "check
+    # the checkpoint reflection" with nothing above it and no signal that the
+    # absence was real rather than a fetch failure -- the ambiguous-silence
+    # failure mode. Emitted on both paths, since a per-caller placeholder is
+    # the branching this file forbids.
+    printf '%s' "[Legion] No checkpoint found (none stored, or the last session ended without one)."
+    return 0
+  fi
+  printf '%s' "$out"
 }
 
 # Index status -- one line if every detected language has a fresh index,
