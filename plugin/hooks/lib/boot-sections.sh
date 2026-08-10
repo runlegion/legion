@@ -71,11 +71,17 @@ append_block() {
 # domain=snooze. Surface a legacy snooze reflection only when no checkpoint
 # exists yet, so the first session after upgrade does not lose its anchor.
 # Remove once domain=snooze has aged out.
+# --preview 2000, not 500. Cold boot capped at 500 and post-compact passed
+# no --preview at all (full text). Consolidating on 500 would silently
+# truncate the checkpoint on the ONE path that exists to restore it -- a
+# just-compacted agent has nothing else. 2000 matches the whoami banner cap
+# (#342) and is applied to BOTH callers, since a per-caller preview length
+# is exactly the branching this file forbids.
 legion_boot_fetch_checkpoint() {
   local out
-  out=$("$LEGION" recall --repo "$REPO" --domain checkpoint --limit 1 --preview 500 2>>"$LOG")
+  out=$("$LEGION" recall --repo "$REPO" --domain checkpoint --limit 1 --preview 2000 2>>"$LOG")
   if [ -z "$out" ]; then
-    out=$("$LEGION" recall --repo "$REPO" --domain snooze --limit 1 --preview 500 2>>"$LOG")
+    out=$("$LEGION" recall --repo "$REPO" --domain snooze --limit 1 --preview 2000 2>>"$LOG")
   fi
   printf '%s' "$out"
 }

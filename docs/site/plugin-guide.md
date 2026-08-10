@@ -43,12 +43,18 @@ Provides full situational awareness at session start:
 
 1. Derives the repo name from `basename $CWD`
 2. Cleans up markers from previous sessions (`/tmp/legion-reflected-*`, `/tmp/legion-work-*`, `/tmp/legion-recall-nudge-*`, `/tmp/legion-channel-*`)
-3. Runs `legion recall --repo <repo> --context <branch>` if on a feature branch, falls back to `legion recall --repo <repo> --latest`
-4. Runs `legion surface --repo <repo>` for cross-repo highlights
-5. Runs `legion status --repo <repo>` for work state
-6. Runs `legion work --repo <repo> --peek` for the next kanban card
-7. Appends a static legion reminder (team culture + tool reference)
-8. Outputs all context as `hookSpecificOutput.additionalContext`
+3. Runs session-only side effects: index warm, daemon supervisor probe, watch lock, GitHub -> kanban sync
+4. Calls `emit_boot_core` from `hooks/lib/boot-sections.sh` -- the shared banner assembly (#879)
+5. Outputs the assembled banner as `hookSpecificOutput.additionalContext`
+
+The banner sections, in order, come from that one shared list and are
+identical on both SessionStart matchers: `now --banner`, `whoami`
+(identity), `whatami` (operating contract), `pending-replies`, the
+`domain=checkpoint` anchor, index status, `kanban list`, the active card's
+goal, and `autonomy status`. Identity precedes work by construction (#338).
+
+Bulk recall, `legion surface` and the bullpen are deliberately NOT in the
+banner -- they are pulled on demand during the session.
 
 ### SessionStart / compact
 
@@ -59,11 +65,18 @@ Fires after context compaction. The compaction summary may be stale -- this hook
 1. Outputs `[Legion] POST-COMPACTION RE-ORIENTATION` header
 2. Shows `git log --oneline -10` and `git status --short` from the working directory
 3. Shows the current branch name
-4. Recalls the checkpoint reflection (from PreCompact) via `legion recall --context "compact checkpoint" --limit 1`
-5. Recalls branch-specific context if on a feature branch
-6. Runs `legion surface` for cross-repo highlights
-7. Checks unread bullpen count
-8. Appends action items: trust git over the compaction summary, read the checkpoint, then resume
+4. Recalls branch-specific context if on a feature branch
+5. Calls the SAME `emit_boot_core` session-start.sh calls, so identity, the
+   operating contract, pending replies, the checkpoint, index status, kanban,
+   goal and autonomy budget survive compaction (#879). Before #879 this hook
+   emitted only a bare checkpoint and a compacted agent silently lost the rest.
+6. Checks unread bullpen count
+7. Appends action items: trust git over the compaction summary, read the
+   checkpoint, then resume
+
+`legion surface` is no longer called here (#879); it remains available on
+demand via `/legion:surface`. Cross-repo high-value reflections and chain
+extensions are therefore not surfaced automatically after a compaction.
 
 ### PreCompact
 

@@ -164,8 +164,12 @@ finish_tests() {
 #                            that does not carry --domain checkpoint or
 #                            --domain snooze (default empty)
 #   FAKE_CHECKPOINT          `recall --domain checkpoint` body; falls back
-#                            to FAKE_RECALL when unset, mirroring
-#                            legion_boot_fetch_checkpoint's own fallback
+#                            to FAKE_RECALL when unset. NOTE this is a
+#                            harness convenience, NOT a model of the real
+#                            fallback -- production falls back
+#                            checkpoint-domain -> SNOOZE-domain
+#                            (legion_boot_fetch_checkpoint). Use FAKE_SNOOZE
+#                            to exercise that path; this default does not
 #   FAKE_SNOOZE              `recall --domain snooze` body (default empty;
 #                            no fallback -- this IS the fallback tier)
 #   FAKE_KANBAN_ACCEPTED     `kanban list` -> one accepted card titled this

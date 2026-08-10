@@ -93,14 +93,18 @@ REGISTERED_SECTIONS=$(printf '%s\n' "$ARRAY_LINE" \
 assert_eq "defined boot_section_* set equals LEGION_BOOT_SECTIONS array" \
   "$DEFINED_SECTIONS" "$REGISTERED_SECTIONS"
 
-echo "==> emit_boot_core takes no arguments (no \$1 / \$@ / \$# in its body)"
+echo "==> emit_boot_core takes no arguments (no positional parameter in its body)"
 EMIT_BODY=$(sed -n '/^emit_boot_core() {/,/^}/p' "$BOOT_SECTIONS_SRC")
-# shellcheck disable=SC2016  # single-quoted on purpose: literal grep needles, not expansion
-assert_not_contains "no \$1 in emit_boot_core" "$EMIT_BODY" '$1'
-# shellcheck disable=SC2016
-assert_not_contains "no \$@ in emit_boot_core" "$EMIT_BODY" '$@'
-# shellcheck disable=SC2016
-assert_not_contains "no \$# in emit_boot_core" "$EMIT_BODY" '$#'
+# Matches BOTH bare and brace forms: $1 $@ $# $* and ${1} ${1:-} ${@} ${#}.
+# A literal three-needle check for '$1'/'$@'/'$#' misses every brace form --
+# "${1:-}" does not contain the substring "$1" -- so `if [ -n "${1:-}" ]`
+# smuggled in here passed the old lock silently. Measured: injecting exactly
+# that turned the suite 45/0 GREEN before this change, and red after.
+# Array expansions like "${arr[@]}" are not matched: the char after `${` is
+# a letter, not one of [0-9@#*].
+POSITIONAL_USE=$(printf '%s\n' "$EMIT_BODY" | grep -oE '[$]\{?[0-9@#*]' | sort -u | tr '\n' ' ')
+assert_eq "no positional parameter (bare or brace form) in emit_boot_core" \
+  "" "$POSITIONAL_USE"
 
 # =========================== Tier 2: behavioral ============================
 
