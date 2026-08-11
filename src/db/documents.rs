@@ -3,6 +3,7 @@
 
 use rusqlite::Connection;
 
+use super::Database;
 use crate::error::Result;
 
 /// `documents` table (#456).
@@ -45,5 +46,21 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_documents_archived
                 ON documents(archived_at, type) WHERE archived_at IS NOT NULL AND deleted_at IS NULL;",
         )?;
+    Ok(())
+}
+
+/// Column migrations for `documents`.
+///
+/// The `revision` column (#882 step 1) gives a document a human-legible
+/// lineage counter: bumped once per `Database::revise_document` call.
+/// `DEFAULT 1` backfills every pre-existing row as revision 1 in the
+/// same `ALTER TABLE` -- no separate backfill pass is needed, matching the
+/// "existing documents are already at their first revision" reading.
+pub(super) fn migrate(conn: &Connection) -> Result<()> {
+    if !Database::has_column(conn, "documents", "revision")? {
+        conn.execute_batch(
+            "ALTER TABLE documents ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;",
+        )?;
+    }
     Ok(())
 }

@@ -9,6 +9,7 @@
 mod audit;
 mod autonomy;
 mod board;
+mod card_criteria;
 pub mod css_symbols;
 mod documents;
 pub(crate) mod findings;
@@ -128,6 +129,7 @@ impl Database {
         reflections::create_tables(conn)?;
         board::create_tables(conn)?;
         kanban::create_tables(conn)?;
+        card_criteria::create_tables(conn)?;
         schedules::create_tables(conn)?;
         health::create_tables(conn)?;
         audit::create_tables(conn)?;
@@ -153,6 +155,7 @@ impl Database {
         schedules::migrate(conn)?;
         wake::migrate(conn)?;
         quality_gates::migrate(conn)?;
+        documents::migrate(conn)?;
         Ok(())
     }
 
@@ -302,6 +305,53 @@ mod tests {
             .insert_reflection("legion", "post-migration row", "team")
             .unwrap();
         assert!(db.get_reflection_by_id(&r.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn init_schema_migrates_a_pre_revision_documents_table() {
+        // A `documents` table created before the `revision` column existed
+        // (#882 step 1) must come up through the migration with existing
+        // rows backfilled to revision 1, and the write/read paths that
+        // depend on the column working afterward.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE documents (
+                    id TEXT PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    surface TEXT,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    priority TEXT,
+                    owner TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    archived_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO documents (id, type, owner, payload, created_at, updated_at) \
+                 VALUES ('old-doc', 'requirement', 'legion', '{}', \
+                 '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+
+        // Pre-existing row backfilled to revision 1 by the column DEFAULT.
+        assert_eq!(db.document_revision("old-doc").unwrap(), 1);
+
+        // revise_document (which depends on the column existing) works on
+        // the migrated database.
+        let revised = db.revise_document("old-doc", "{}").unwrap();
+        assert_eq!(revised.id, "old-doc");
+        assert_eq!(db.document_revision("old-doc").unwrap(), 2);
     }
 
     #[test]

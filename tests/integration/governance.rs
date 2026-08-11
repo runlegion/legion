@@ -232,6 +232,237 @@ fn verify_gate_fail_keeps_done_blocked() {
     run_fail(legion_cmd(data).args(["done", "--repo", "kelex", "--text", "done", "--id", &card]));
 }
 
+// #882 step 3: the spec-bound verdict format, end-to-end at the CLI
+// boundary. A card bound to a document whose payload carries id-carrying
+// `verification.criteria` (#882 step 1) must be verified with the new
+// {spec_doc_id, spec_revision, criterion_id, verdict, artifacts} shape. A
+// verdict citing a criterion id that does not exist in the named spec at
+// that revision is rejected; a verdict citing a valid id passes.
+#[test]
+fn verify_spec_bound_card_rejects_unknown_criterion_id_then_accepts_valid_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    // Land a spec document with one id-carrying criterion.
+    let doc_payload = r#"{"meta":{},"verification":{"criteria":[{"text":"ships the thing"}]}}"#;
+    let doc_id = run_with_stdin(
+        legion_cmd(data).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "kelex",
+        ]),
+        doc_payload.as_bytes(),
+    );
+    assert!(
+        doc_id.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&doc_id.stderr)
+    );
+    let doc_id = String::from_utf8(doc_id.stdout).unwrap().trim().to_string();
+
+    // Read back the server-assigned criterion id.
+    let view = run_ok(legion_cmd(data).args(["document", "view", &doc_id, "--json"]));
+    let view_json: serde_json::Value = serde_json::from_str(view.trim()).unwrap();
+    let criterion_id = view_json["payload"]
+        .as_str()
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|v| {
+            v["verification"]["criteria"][0]["id"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .expect("assigned criterion id");
+
+    // Create a card and bind it to the document.
+    let card = run_ok(legion_cmd(data).args([
+        "kanban",
+        "create",
+        "--from",
+        "kelex",
+        "--to",
+        "kelex",
+        "--text",
+        "ship the thing",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(data).args(["kanban", "assign", "--id", &card, "--to", "kelex"]));
+    run_ok(legion_cmd(data).args(["kanban", "accept", "--id", &card]));
+    run_ok(legion_cmd(data).args(["kanban", "bind", "--id", &card, "--document", &doc_id]));
+
+    // A verdict citing a criterion id that does not exist in the named
+    // spec at that revision must FAIL.
+    let bad_verdicts = data.join("bad.json");
+    std::fs::write(
+        &bad_verdicts,
+        serde_json::json!([{
+            "spec_doc_id": doc_id,
+            "spec_revision": 1,
+            "criterion_id": "does-not-exist",
+            "verdict": "pass",
+            "artifacts": [{"kind": "test", "ref": "tests::x", "outcome": "passed"}]
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let (_stdout, stderr) = run_fail(legion_cmd(data).args([
+        "verify",
+        "--repo",
+        "kelex",
+        "--card",
+        &card,
+        "--verdicts-file",
+        bad_verdicts.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("does not exist"),
+        "expected an unknown-criterion-id rejection, got: {stderr}"
+    );
+
+    // A verdict citing the valid criterion id, correct document, and
+    // correct revision must PASS.
+    let good_verdicts = data.join("good.json");
+    std::fs::write(
+        &good_verdicts,
+        serde_json::json!([{
+            "spec_doc_id": doc_id,
+            "spec_revision": 1,
+            "criterion_id": criterion_id,
+            "verdict": "pass",
+            "artifacts": [{"kind": "test", "ref": "tests::x", "outcome": "passed"}]
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    run_ok(legion_cmd(data).args([
+        "verify",
+        "--repo",
+        "kelex",
+        "--card",
+        &card,
+        "--verdicts-file",
+        good_verdicts.to_str().unwrap(),
+    ]));
+
+    // Done now succeeds -- the clean spec-bound verdict gates the same as
+    // the legacy free-text format.
+    run_ok(legion_cmd(data).args(["done", "--repo", "kelex", "--text", "done", "--id", &card]));
+}
+
+// HIGH-3 (#882 review): the staleness guard `decide_spec` builds into the
+// verdict itself (spec_doc_id/spec_revision citation checking) is bypassed
+// purely by ORDERING if `handle_done` never re-checks the recorded gate
+// against the document's CURRENT revision: verify first (against revision
+// 1, recorded Clean), then revise the document (bumps to revision 2), then
+// done -- the Clean gate is still sitting there, formed against a spec
+// state that no longer exists. Done must refuse and name both revisions.
+#[test]
+fn verify_gate_stale_after_spec_revision_blocks_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+
+    // Land a spec document with one id-carrying criterion.
+    let doc_payload = r#"{"meta":{},"verification":{"criteria":[{"text":"ships the thing"}]}}"#;
+    let doc_id = run_with_stdin(
+        legion_cmd(data).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "kelex",
+        ]),
+        doc_payload.as_bytes(),
+    );
+    assert!(
+        doc_id.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&doc_id.stderr)
+    );
+    let doc_id = String::from_utf8(doc_id.stdout).unwrap().trim().to_string();
+
+    let view = run_ok(legion_cmd(data).args(["document", "view", &doc_id, "--json"]));
+    let view_json: serde_json::Value = serde_json::from_str(view.trim()).unwrap();
+    let criterion_id = view_json["payload"]
+        .as_str()
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|v| {
+            v["verification"]["criteria"][0]["id"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .expect("assigned criterion id");
+
+    let card = run_ok(legion_cmd(data).args([
+        "kanban",
+        "create",
+        "--from",
+        "kelex",
+        "--to",
+        "kelex",
+        "--text",
+        "ship the thing",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(data).args(["kanban", "assign", "--id", &card, "--to", "kelex"]));
+    run_ok(legion_cmd(data).args(["kanban", "accept", "--id", &card]));
+    run_ok(legion_cmd(data).args(["kanban", "bind", "--id", &card, "--document", &doc_id]));
+
+    // Record a Clean verdict against revision 1.
+    let verdicts = data.join("good.json");
+    std::fs::write(
+        &verdicts,
+        serde_json::json!([{
+            "spec_doc_id": doc_id,
+            "spec_revision": 1,
+            "criterion_id": criterion_id,
+            "verdict": "pass",
+            "artifacts": [{"kind": "test", "ref": "tests::x", "outcome": "passed"}]
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    run_ok(legion_cmd(data).args([
+        "verify",
+        "--repo",
+        "kelex",
+        "--card",
+        &card,
+        "--verdicts-file",
+        verdicts.to_str().unwrap(),
+    ]));
+
+    // Revise the document -- echoing the same criterion id back keeps the
+    // criterion itself valid, isolating the test to the ordering bypass
+    // (revision drift alone), not a stale/unknown-criterion citation.
+    let revised_payload = serde_json::json!({
+        "meta": {},
+        "verification": {
+            "criteria": [{"id": criterion_id, "text": "ships the thing, reworded"}]
+        }
+    });
+    run_with_stdin(
+        legion_cmd(data).args(["document", "revise", &doc_id]),
+        revised_payload.to_string().as_bytes(),
+    );
+
+    // The gate is still recorded Clean, but it was formed against revision
+    // 1 and the document is now at revision 2. Done must refuse.
+    let (_stdout, stderr) = run_fail(
+        legion_cmd(data).args(["done", "--repo", "kelex", "--text", "done", "--id", &card]),
+    );
+    assert!(
+        stderr.contains("spec revision 1") && stderr.contains("at revision 2"),
+        "error must name both the gate's recorded revision and the document's current \
+         revision, discriminated from the UUID card/doc ids that also appear in stderr \
+         (both contain digits '1' and '2'), got: {stderr}"
+    );
+}
+
 // #524 autonomy budget, end-to-end at the CLI: operator work bypasses, a spend
 // accumulates, and exhaustion stops self-directed work cleanly (non-zero exit,
 // no error). A fresh DB has no rate sample, so the ceiling is the conservative
