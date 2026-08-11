@@ -1,5 +1,111 @@
 # Legion Changelog
 
+## 0.27.0
+
+Guards that refused a command now translate it, and the conversion exposed that the
+audit trail we have been claiming since 0.25.0 had a hole at the single most common
+idiom. `git add -A && git commit -m "..." && git push` reached no guard at all -- no
+deny, no rewrite, no audit row -- because every hook's subcommand detection required
+the guarded verb to come FIRST and exited when it did not. So did `git push; git
+status`, where `push;` tokenizes as one word and failed a strict equality check.
+Neither was a mis-rewrite; both were total bypasses of the guarantee the hooks exist
+to provide. Minor release: one net-new hook, one new set of `legion document` and
+`legion kanban` surfaces, a schema migration on `documents`, and a behavior change
+every agent meets on its first commit after upgrade.
+
+### Breaking
+
+- **The documented `git commit` idiom now refuses.** `git commit -m "$(cat <<'EOF'
+  ... EOF)"` -- the form Claude Code's own system prompt gives agents -- is denied by
+  the new `no-git-commit.sh` hook, because the command substitution is live and a
+  PreToolUse translator cannot evaluate it on the shell's behalf. This is not
+  conservatism: before the fix landed, that idiom had its heredoc SYNTAX captured as
+  literal message bytes with `cat` never running, and `git commit -m "fix(#123):
+  $(date +%F) rollout"` passed `validate_subject` outright, so unevaluated shell text
+  would have reached permanent history with no error. The refusal names three
+  remedies -- escape it, single-quote it (POSIX makes single quotes inert, and those
+  still rewrite), or write it to a file and use `--message-file`. Every agent hits
+  this on its first commit after upgrading; the routing is deliberate, but it is a
+  wall if you are not expecting it.
+- **`git commit` shapes that worked with no hook coverage now deny by name**: `-a` /
+  `-am` (the common combined add-and-commit), `--amend`, `-n` / `--no-verify`,
+  `--allow-empty-message`, `-e` / `--interactive` / `--patch`, `-C` / `-c` reuse
+  forms, and bare `git commit`. Each names its remedy. `legion commit` commits only
+  the staged index, which is why `-a` cannot be translated rather than merely being
+  disallowed.
+- **Verify verdicts move from prose evidence to resolvable references.** The format
+  is now `{spec_doc_id, spec_revision, criterion_id, verdict, artifacts[{kind, ref,
+  outcome}]}`. Every skill that writes a verdict is affected. Done now because
+  `verify` had run once in seven days, so the migration corpus was approximately
+  zero; after specs are load-bearing it would not have been.
+
+### New
+
+- **Guards rewrite instead of refusing** (PR #886, #856, #854): `git commit -m/-F` to
+  `legion commit`, `gh pr/issue view|list|checks` to their legion equivalents, `git
+  grep` to `legion sym etc find-content`, and the built-in `Explore` subagent to
+  `legion:legion-explore`. `git grep` is the one that mattered -- the operator's
+  `permissions.deny` matches a segment's first token, which for `git grep` is `git`,
+  so it had been reaching the disk untouched. Upstream closed the equivalent deny-list
+  gap as "not planned", so rewriting is the fix denying could not be. The rule
+  throughout, from `emit_rewrite`'s own comment: rewrite only when the translation is
+  lossless, deny when a flag cannot be expressed, never rewrite silently.
+- **Spec binding** (PR #883, #882): spec documents carry `criteria[]` with UUIDv7 ids
+  assigned at creation and preserved across revisions, documents carry a `revision`,
+  and work declares which criterion ids it services via `legion kanban
+  service-criteria`. A verdict records the revision it was made against, so a spec
+  edit invalidates verdicts against the old text the way a new commit invalidates a
+  HEAD-keyed gate -- same mechanism, second key. `legion document revise` is new and
+  applies the same `doc_type=schema` structural gate `create` does.
+- **A trust-boundary decision doc** (`docs/decisions/2026-08-10-quality-gate-trust-boundary.md`)
+  grading six artifact classes on whether an agent can forge them, each cited to a
+  file:line. It is deliberately unflattering: test results are graded FORGEABLE with
+  no mitigation today, spec references schema-conformant rather than truth-conformant,
+  gate rows partially forgeable. It carries a premise table with runnable probes and a
+  cadence, because the 2026-06-02 decision doc asserted a platform behavior as
+  permanent, was wrong for two months, and our own telemetry held the disproof.
+
+### Fixed
+
+- **Compaction no longer drops identity** (PR #881, #879): `hooks.json` dispatches
+  SessionStart to two scripts by matcher, and their section lists had diverged. Cold
+  boot emitted identity, the operating contract, pending replies, index status, kanban
+  and the autonomy budget; post-compact emitted git state and a bare checkpoint. A
+  session that compacted mid-work silently lost who it was and the rules it operates
+  under -- with no error, because nothing was broken; the two hooks had simply never
+  been forced to agree. Both now render one shared list, and a test fails if a section
+  reaches one path and not the other. `legion surface` is no longer called at compact:
+  cross-repo high-value reflections and chain extensions are not surfaced
+  automatically after compaction, and `/legion:surface` renders them on demand.
+- **`git push; git status` ran completely unaudited**, and `git add -A && git commit
+  && git push` reached no guard at all. Both fixed by making the compound check
+  independent of verb position.
+- **`emit_rewrite` dropped every `tool_input` field but `command`.** `updatedInput`
+  replaces `tool_input` rather than merging, so a rewritten background command came
+  back FOREGROUND and a raised timeout reverted to default -- the rewrite correct, its
+  context silently wrong.
+- **`git push && echo done` rewrote to `legion push --branch echo`**, reading the next
+  command's name as a branch argument.
+- **`grep -E 'foo|bar' .` searched for `foo`.** Naive suffix stripping truncated the
+  pattern at the first literal metacharacter regardless of quoting. The consistency
+  check meant to catch it did not fire, because the sanctioned extractor carried the
+  identical bug and the two agreed on the same wrong value -- a safety net built from
+  two copies of one defect. Tracked at #885.
+- **`legion done` accepted a verify gate formed against a superseded spec revision**,
+  so the staleness guard was defeated by ordering: verify, then revise, then done.
+- **`resolve_spec_criteria` silently dropped malformed criteria entries**, shrinking
+  the enforced set so verify passed on partial coverage.
+
+### Known gaps, named rather than implied
+
+- A `git commit` issued from inside a SCRIPT reaches none of the new guarantees except
+  signing -- PreToolUse hooks never see a command a script runs. `.githooks/pre-commit`
+  is the layer that would catch it and enforces none of it. Filed as #884.
+- The verdict format accepts `kind: "test"` and `kind: "command"` references, but the
+  capture that would make them resolvable is not built, so a test reference is checked
+  for shape and not existence. That is why the trust-boundary doc grades test results
+  FORGEABLE. Tracked as step 2 of #882.
+
 ## 0.26.0
 
 The release that its own release pipeline nearly prevented. Six PRs since 0.25.0, and
