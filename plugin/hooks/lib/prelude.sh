@@ -138,6 +138,30 @@ legion_hash_str() {
     || printf '%s\n' "$1" | md5sum 2>/dev/null | cut -d' ' -f1
 }
 
+# legion_hook_compound COMMAND -- true (0) when COMMAND is composed with
+# something else: a pipe, `&`/`&&`, `;`, a redirect, `$(...)`, a backtick,
+# or an embedded newline. Shared by every hook that can emit a REWRITE
+# (no-gh.sh, no-git-push.sh) so the check cannot drift between them.
+#
+# updatedInput.command replaces the tool's ENTIRE command string, and the
+# tokenizer each of those hooks uses to find its subcommand has no notion
+# of shell composition. Measured against no-git-push.sh before this
+# existed: `git push && echo done` rewrote to `legion push --branch echo`
+# and `git push | tee /tmp/log` rewrote to `... --branch tee` -- the
+# classify loop read the NEXT command's name as a branch argument (#883).
+# A composed command must always refuse the rewrite path, never attempt
+# to translate part of it.
+legion_hook_compound() {
+  # shellcheck disable=SC2016 # case glob patterns, not expansions -- the
+  # literal chars are what we're matching, single/ANSI-C quoting is correct.
+  case "$1" in
+    *'|'* | *'&'* | *';'* | *'>'* | *'<'* | *'$('* | *'`'* | *$'\n'*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # Coverage gate (#353). Sourced here so every hook shares one probe; the
 # declare -F guard tolerates hooks that sourced it themselves.
 if ! declare -F legion_covered >/dev/null 2>&1; then

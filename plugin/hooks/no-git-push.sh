@@ -18,9 +18,17 @@
 #   1. REWRITE -- the push is expressible as `legion push`. Replace the
 #      command via updatedInput and announce the translation.
 #   2. DENY    -- the command carries semantics `legion push` cannot
-#      express (force, refspec, delete, tags, mirror, prune). Refuse and
-#      name the flag. Rewriting would silently drop it and run something
-#      the agent did not ask for.
+#      express (force, refspec, delete, tags, mirror, prune), OR is
+#      composed with something else via a pipe, `&`/`&&`, `;`, a
+#      redirect, `$(...)`, a backtick, or an embedded newline
+#      (legion_hook_compound, lib/prelude.sh -- shared with no-gh.sh so
+#      the two hooks cannot drift). Refuse and name the reason. Rewriting
+#      would silently drop it and run something the agent did not ask
+#      for -- measured before this guard existed: `git push && echo done`
+#      rewrote to `legion push --branch echo`, and `git push | tee
+#      /tmp/log` rewrote to `... --branch tee`. The classify loop below
+#      has no notion of shell composition, so it read the NEXT command's
+#      name as a branch argument (#883).
 #   3. PASS    -- not a git push, repo not legion-covered, or any
 #      dependency missing. Fail open; a PreToolUse hook that fails closed
 #      can wedge every session.
@@ -77,6 +85,13 @@ read -r -a TOKENS <<<"$COMMAND"
 FIRST_BIN="${TOKENS[0]##*/}"
 [ "$FIRST_BIN" = "git" ] || exit 0
 
+# Composed-command guard, checked on the raw string so it doesn't depend
+# on how the tokenizer below splits things (see #883 in the file header).
+COMPOUND=""
+if legion_hook_compound "$COMMAND"; then
+  COMPOUND="1"
+fi
+
 # Walk past git's own global options to find the subcommand. Options that
 # take a value (-C, -c, --git-dir, --work-tree, --namespace) consume the
 # next token too.
@@ -100,7 +115,32 @@ while [ "$IDX" -lt "${#TOKENS[@]}" ]; do
   esac
 done
 
-[ "$SUBCOMMAND" = "push" ] || exit 0
+# `push` glued to a metacharacter with no space (`git push;`, `git
+# push&&echo`) tokenizes as one word -- `read -a` splits on whitespace
+# only, and `;`/`&` are not whitespace. Strict `= push` missed this
+# entirely and let the whole command pass through unexamined (#883); a
+# composed `git push` is exactly the shape this hook most needs to see,
+# so the match tolerates a metacharacter glued directly onto `push`.
+case "$SUBCOMMAND" in
+  push) ;;
+  push[\;\&\|\<\>\$\`]*) ;;
+  *) exit 0 ;;
+esac
+
+# A composed command is denied before it ever reaches the classify loop
+# below, which has no notion of shell composition and would otherwise
+# read the NEXT command's name as a branch argument (measured: `git push
+# && echo done` -> `legion push --branch echo`; see file header, #883).
+if [ -n "$COMPOUND" ]; then
+  emit_deny "Refusing \`git push\` -- it's composed with something else (a pipe, redirect, \`&&\`, \`;\`, or \`\$(...)\`), and legion's rewrite would replace the WHOLE command string.
+
+Translating it would silently drop everything else in it -- or worse, misread part of it: this hook used to read the NEXT command's name as if it were a branch argument. Run the push and the rest of your pipeline as separate steps:
+
+    legion push --repo ${REPO}
+
+Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
+  exit 0
+fi
 
 # --- Classify the push -------------------------------------------------------
 #
