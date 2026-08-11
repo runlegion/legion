@@ -157,6 +157,57 @@ pub struct AcResult {
     pub evidence: String,
 }
 
+/// One criterion with a stable identity (#882 step 1), as carried in a
+/// document's `verification.criteria` array (`[{id, text}]`). `id` is a
+/// UUIDv7 assigned once at first write and preserved across revisions by
+/// `Database::revise_document` -- it is what a spec-bound verdict
+/// (`SpecAcResult`) cites, instead of matching against free prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecCriterion {
+    pub id: String,
+    pub text: String,
+}
+
+/// The kind of resolvable artifact backing a spec-bound verdict (#882 step
+/// 3): a test that ran, a diff hunk/path, or a command invocation. Stored
+/// lowercase in JSON, mirroring `AcVerdict`/`GateResult`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactKind {
+    Test,
+    Diff,
+    Command,
+}
+
+/// One piece of resolvable evidence for a spec-bound verdict: something a
+/// reader (or a future validator) can go look up, not prose. `reference`
+/// serializes as `ref` on the wire -- `ref` is a Rust keyword, so the field
+/// is named `reference` and renamed at the serde boundary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerdictArtifact {
+    pub kind: ArtifactKind,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub outcome: String,
+}
+
+/// One verdict against a spec-bound criterion (#882 step 3). Replaces free
+/// -text evidence (`AcResult`) with a resolvable reference -- which spec
+/// document, which revision, which criterion id -- plus structured
+/// artifacts. Used only for cards bound to a document whose payload carries
+/// `verification.criteria` (id-carrying); a card on the legacy path
+/// (`tasks.acceptance`, or a document with only `verification.acceptance`
+/// strings) keeps submitting `AcResult`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpecAcResult {
+    pub spec_doc_id: String,
+    pub spec_revision: i64,
+    pub criterion_id: String,
+    pub verdict: AcVerdict,
+    #[serde(default)]
+    pub artifacts: Vec<VerdictArtifact>,
+}
+
 /// The aggregate routing decision for a card's ->Done transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyDecision {
@@ -181,6 +232,15 @@ pub enum VerifyDecision {
     /// re-plan. Distinct from `Block` so the message names the missing
     /// ratification rather than a plain unmet criterion.
     ReplanRequired { reason: String },
+    /// A `SpecAcResult` cited a spec reference that does not resolve (#882
+    /// step 3): the wrong spec document, a stale revision, or a criterion id
+    /// absent from the document's current criteria set. Hard block -- a
+    /// verdict that does not name real spec state proves nothing, so it
+    /// never reaches the Pass/Fail/Uncertain accounting below it. `details`
+    /// carries one human-readable line per bad citation naming exactly
+    /// which condition failed (wrong document / stale revision / unknown
+    /// id), so the caller never has to guess which check tripped.
+    InvalidCriterionReference { details: Vec<String> },
 }
 
 impl VerifyDecision {
@@ -303,6 +363,139 @@ pub fn decide(acceptance: &[String], results: &[AcResult]) -> VerifyDecision {
         .iter()
         .filter(|r| effective(r) == AcVerdict::Uncertain)
         .map(|r| r.criterion.clone())
+        .collect();
+    if !uncertain.is_empty() {
+        return VerifyDecision::NeedsInput { uncertain };
+    }
+
+    VerifyDecision::Proceed
+}
+
+/// Classify why a single `SpecAcResult` fails to resolve against the named
+/// spec, or `None` when it resolves cleanly. Checked in order (document,
+/// then revision, then criterion id) so the returned message always names
+/// the first real problem rather than a downstream symptom of it -- a
+/// verdict citing the wrong document will always name that, never a
+/// confusing "unknown criterion" for an id that would have been valid on
+/// the intended document.
+fn classify_invalid_reference(
+    result: &SpecAcResult,
+    valid_ids: &std::collections::HashSet<&str>,
+    expected_doc_id: &str,
+    expected_revision: i64,
+) -> Option<String> {
+    if result.spec_doc_id != expected_doc_id {
+        return Some(format!(
+            "criterion '{}': cites spec document '{}', expected '{expected_doc_id}'",
+            result.criterion_id, result.spec_doc_id
+        ));
+    }
+    if result.spec_revision != expected_revision {
+        return Some(format!(
+            "criterion '{}': cites spec revision {}, expected {expected_revision} \
+             (stale reference -- the spec was revised since this verdict was formed)",
+            result.criterion_id, result.spec_revision
+        ));
+    }
+    if !valid_ids.contains(result.criterion_id.as_str()) {
+        return Some(format!(
+            "criterion id '{}' does not exist in spec '{expected_doc_id}' at revision \
+             {expected_revision}",
+            result.criterion_id
+        ));
+    }
+    None
+}
+
+/// Decide a card's fate from its spec-bound criteria and the agent's
+/// spec-verdicts (#882 step 3). Sibling of `decide()` for the id-carrying
+/// verdict format: `criteria` is the document's current criterion set
+/// (id + text), `results` is one `SpecAcResult` per submitted verdict, and
+/// `expected_doc_id`/`expected_revision` are the spec the card is actually
+/// bound to right now -- every result is checked against them before
+/// anything else runs.
+///
+/// Coverage is computed by **id set**, not by count: two verdicts citing the
+/// same criterion id satisfy that one id twice and leave every other
+/// criterion uncovered, so `results.len() >= criteria.len()` alone would
+/// reproduce the #520 count-only hole this format exists to close.
+pub fn decide_spec(
+    criteria: &[SpecCriterion],
+    results: &[SpecAcResult],
+    expected_doc_id: &str,
+    expected_revision: i64,
+) -> VerifyDecision {
+    if criteria.is_empty() {
+        return VerifyDecision::NoCheckableAc;
+    }
+
+    let valid_ids: std::collections::HashSet<&str> =
+        criteria.iter().map(|c| c.id.as_str()).collect();
+    let text_for = |id: &str| -> String {
+        criteria
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.text.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+
+    // Every citation must resolve to the exact spec state named -- checked
+    // before coverage, so a bogus citation is always reported as exactly
+    // that, never mistaken for a missing verdict.
+    let invalid: Vec<String> = results
+        .iter()
+        .filter_map(|r| {
+            classify_invalid_reference(r, &valid_ids, expected_doc_id, expected_revision)
+        })
+        .collect();
+    if !invalid.is_empty() {
+        return VerifyDecision::InvalidCriterionReference { details: invalid };
+    }
+
+    // Past this point every result names a real (document, revision,
+    // criterion) triple. Coverage by id set: a criterion cited zero times
+    // is unaddressed regardless of how many results exist in total.
+    let cited: std::collections::HashSet<&str> =
+        results.iter().map(|r| r.criterion_id.as_str()).collect();
+    let unaddressed = valid_ids.difference(&cited).count();
+    if unaddressed > 0 {
+        return VerifyDecision::Incomplete { unaddressed };
+    }
+
+    // A Pass with no artifact carrying both a real (non-vacuous) reference
+    // and an outcome is not a provable pass -- demote to Uncertain. Parity
+    // with decide()'s vacuous-evidence rule for the legacy prose format
+    // (#549, HIGH-1 review fix): a reference must clear `is_vacuous_evidence`
+    // against the criterion text, not merely be non-empty. Two non-empty
+    // strings that restate the criterion or carry no assertion marker
+    // (no "::", no file:line, no "assert"/"returns"/etc token) are exactly
+    // the shape decide()'s legacy path already rejects, so the same
+    // predicate applies here rather than a second, looser standard.
+    let effective = |r: &SpecAcResult| -> AcVerdict {
+        let criterion_text = text_for(&r.criterion_id);
+        let has_evidence = r.artifacts.iter().any(|a| {
+            !a.outcome.trim().is_empty() && !is_vacuous_evidence(&criterion_text, &a.reference)
+        });
+        if r.verdict == AcVerdict::Pass && !has_evidence {
+            AcVerdict::Uncertain
+        } else {
+            r.verdict
+        }
+    };
+
+    let failed: Vec<String> = results
+        .iter()
+        .filter(|r| effective(r) == AcVerdict::Fail)
+        .map(|r| text_for(&r.criterion_id))
+        .collect();
+    if !failed.is_empty() {
+        return VerifyDecision::Block { failed };
+    }
+
+    let uncertain: Vec<String> = results
+        .iter()
+        .filter(|r| effective(r) == AcVerdict::Uncertain)
+        .map(|r| text_for(&r.criterion_id))
         .collect();
     if !uncertain.is_empty() {
         return VerifyDecision::NeedsInput { uncertain };
@@ -708,5 +901,290 @@ mod tests {
         // handle_verify (write site) and handle_done (read site).
         let key = verify_gate_key("card-abc-123");
         assert_eq!(key, "legion-verify:card-abc-123");
+    }
+
+    // --- decide_spec tests (#882 step 3: spec-bound verdict format) ---
+
+    fn crit(id: &str, text: &str) -> SpecCriterion {
+        SpecCriterion {
+            id: id.to_owned(),
+            text: text.to_owned(),
+        }
+    }
+
+    fn artifact(reference: &str, outcome: &str) -> VerdictArtifact {
+        VerdictArtifact {
+            kind: ArtifactKind::Test,
+            reference: reference.to_owned(),
+            outcome: outcome.to_owned(),
+        }
+    }
+
+    fn spec_res(
+        doc_id: &str,
+        revision: i64,
+        criterion_id: &str,
+        verdict: AcVerdict,
+        artifacts: Vec<VerdictArtifact>,
+    ) -> SpecAcResult {
+        SpecAcResult {
+            spec_doc_id: doc_id.to_owned(),
+            spec_revision: revision,
+            criterion_id: criterion_id.to_owned(),
+            verdict,
+            artifacts,
+        }
+    }
+
+    /// The headline proof (#882 step 3): a verdict citing a criterion id
+    /// that does not exist in the named spec at that revision must FAIL.
+    #[test]
+    fn decide_spec_unknown_criterion_id_is_rejected() {
+        let criteria = vec![crit("crit-1", "does the thing")];
+        let results = vec![spec_res(
+            "doc-1",
+            1,
+            "crit-BOGUS",
+            AcVerdict::Pass,
+            vec![artifact("tests::x", "passed")],
+        )];
+        let decision = decide_spec(&criteria, &results, "doc-1", 1);
+        match decision {
+            VerifyDecision::InvalidCriterionReference { details } => {
+                assert_eq!(details.len(), 1);
+                assert!(
+                    details[0].contains("crit-BOGUS") && details[0].contains("does not exist"),
+                    "expected an unknown-id message, got: {}",
+                    details[0]
+                );
+            }
+            other => panic!("expected InvalidCriterionReference, got {other:?}"),
+        }
+    }
+
+    /// The headline proof's positive half: a verdict citing a valid
+    /// criterion id, the correct spec document, and the correct revision
+    /// must PASS.
+    #[test]
+    fn decide_spec_valid_criterion_id_passes() {
+        let criteria = vec![crit("crit-1", "does the thing")];
+        let results = vec![spec_res(
+            "doc-1",
+            1,
+            "crit-1",
+            AcVerdict::Pass,
+            vec![artifact("tests::x", "passed")],
+        )];
+        assert_eq!(
+            decide_spec(&criteria, &results, "doc-1", 1),
+            VerifyDecision::Proceed
+        );
+    }
+
+    /// A wrong spec document id is reported distinctly from an unknown
+    /// criterion id -- same failure family, different, checkable message.
+    #[test]
+    fn decide_spec_wrong_document_is_rejected_distinctly() {
+        let criteria = vec![crit("crit-1", "does the thing")];
+        let results = vec![spec_res(
+            "doc-OTHER",
+            1,
+            "crit-1",
+            AcVerdict::Pass,
+            vec![artifact("tests::x", "passed")],
+        )];
+        match decide_spec(&criteria, &results, "doc-1", 1) {
+            VerifyDecision::InvalidCriterionReference { details } => {
+                assert!(
+                    details[0].contains("doc-OTHER") && details[0].contains("cites spec document"),
+                    "expected a wrong-document message, got: {}",
+                    details[0]
+                );
+            }
+            other => panic!("expected InvalidCriterionReference, got {other:?}"),
+        }
+    }
+
+    /// A stale revision (valid id, correct document, wrong revision) is
+    /// reported distinctly from both a wrong document and an unknown id.
+    #[test]
+    fn decide_spec_stale_revision_is_rejected_distinctly() {
+        let criteria = vec![crit("crit-1", "does the thing")];
+        let results = vec![spec_res(
+            "doc-1",
+            1, // the spec has since moved to revision 2
+            "crit-1",
+            AcVerdict::Pass,
+            vec![artifact("tests::x", "passed")],
+        )];
+        match decide_spec(&criteria, &results, "doc-1", 2) {
+            VerifyDecision::InvalidCriterionReference { details } => {
+                assert!(
+                    details[0].contains("stale reference"),
+                    "expected a stale-revision message, got: {}",
+                    details[0]
+                );
+            }
+            other => panic!("expected InvalidCriterionReference, got {other:?}"),
+        }
+    }
+
+    /// Coverage is by id set, not count (#520's count-only hole,
+    /// reproduced against the new format): two verdicts citing the SAME
+    /// criterion id must not silently satisfy a second, uncited criterion.
+    #[test]
+    fn decide_spec_duplicate_citation_does_not_cover_a_different_criterion() {
+        let criteria = vec![
+            crit("crit-1", "first thing"),
+            crit("crit-2", "second thing"),
+        ];
+        let results = vec![
+            spec_res(
+                "doc-1",
+                1,
+                "crit-1",
+                AcVerdict::Pass,
+                vec![artifact("tests::a", "passed")],
+            ),
+            spec_res(
+                "doc-1",
+                1,
+                "crit-1", // cites crit-1 again, never addresses crit-2
+                AcVerdict::Pass,
+                vec![artifact("tests::b", "passed")],
+            ),
+        ];
+        assert_eq!(
+            decide_spec(&criteria, &results, "doc-1", 1),
+            VerifyDecision::Incomplete { unaddressed: 1 }
+        );
+    }
+
+    #[test]
+    fn decide_spec_empty_criteria_is_blocked() {
+        assert_eq!(
+            decide_spec(&[], &[], "doc-1", 1),
+            VerifyDecision::NoCheckableAc
+        );
+    }
+
+    #[test]
+    fn decide_spec_fail_blocks() {
+        let criteria = vec![crit("crit-1", "does the thing")];
+        let results = vec![spec_res(
+            "doc-1",
+            1,
+            "crit-1",
+            AcVerdict::Fail,
+            vec![artifact("tests::x", "failed: no handler")],
+        )];
+        assert_eq!(
+            decide_spec(&criteria, &results, "doc-1", 1),
+            VerifyDecision::Block {
+                failed: vec!["does the thing".to_owned()]
+            }
+        );
+    }
+
+    /// A Pass with no artifact carrying both a reference and an outcome is
+    /// demoted to Uncertain, mirroring decide()'s vacuous-evidence rule.
+    #[test]
+    fn decide_spec_pass_with_no_artifacts_is_uncertain() {
+        let criteria = vec![crit("crit-1", "does the thing")];
+        let results = vec![spec_res("doc-1", 1, "crit-1", AcVerdict::Pass, vec![])];
+        assert_eq!(
+            decide_spec(&criteria, &results, "doc-1", 1),
+            VerifyDecision::NeedsInput {
+                uncertain: vec!["does the thing".to_owned()]
+            }
+        );
+    }
+
+    /// An artifact with an empty ref or outcome does not count as evidence.
+    #[test]
+    fn decide_spec_pass_with_blank_artifact_fields_is_uncertain() {
+        let criteria = vec![crit("crit-1", "does the thing")];
+        let results = vec![spec_res(
+            "doc-1",
+            1,
+            "crit-1",
+            AcVerdict::Pass,
+            vec![artifact("", "")],
+        )];
+        assert_eq!(
+            decide_spec(&criteria, &results, "doc-1", 1),
+            VerifyDecision::NeedsInput {
+                uncertain: vec!["does the thing".to_owned()]
+            }
+        );
+    }
+
+    /// HIGH-1 (#882 review): decide_spec's evidence bar must have parity
+    /// with decide()'s -- a reference that is merely non-empty prose, with
+    /// no assertion marker (no "::", no file:line, no "assert"/"returns"/
+    /// etc token), is not real evidence even though it clears the old
+    /// "both fields non-empty" bar. Mirrors `vacuous_evidence_echo_is_uncertain`
+    /// for the legacy format.
+    #[test]
+    fn decide_spec_pass_with_unshaped_reference_is_uncertain() {
+        let criteria = vec![crit("crit-1", "handles the empty case")];
+        let results = vec![spec_res(
+            "doc-1",
+            1,
+            "crit-1",
+            AcVerdict::Pass,
+            vec![artifact("added match arm for empty case", "looks good")],
+        )];
+        assert_eq!(
+            decide_spec(&criteria, &results, "doc-1", 1),
+            VerifyDecision::NeedsInput {
+                uncertain: vec!["handles the empty case".to_owned()]
+            }
+        );
+    }
+
+    /// A reference that merely restates the criterion text is not proof
+    /// either -- mirrors `vacuous_evidence_restatement_is_uncertain`.
+    #[test]
+    fn decide_spec_pass_with_restated_reference_is_uncertain() {
+        let criteria = vec![crit("crit-1", "returns error on empty input")];
+        let results = vec![spec_res(
+            "doc-1",
+            1,
+            "crit-1",
+            AcVerdict::Pass,
+            vec![artifact("returns error on empty input", "confirmed")],
+        )];
+        assert_eq!(
+            decide_spec(&criteria, &results, "doc-1", 1),
+            VerifyDecision::NeedsInput {
+                uncertain: vec!["returns error on empty input".to_owned()]
+            }
+        );
+    }
+
+    #[test]
+    fn decide_spec_all_pass_with_evidence_proceeds() {
+        let criteria = vec![crit("crit-1", "first"), crit("crit-2", "second")];
+        let results = vec![
+            spec_res(
+                "doc-1",
+                3,
+                "crit-1",
+                AcVerdict::Pass,
+                vec![artifact("tests::a", "passed")],
+            ),
+            spec_res(
+                "doc-1",
+                3,
+                "crit-2",
+                AcVerdict::Pass,
+                vec![artifact("src/x.rs:10", "returns Ok")],
+            ),
+        ];
+        assert_eq!(
+            decide_spec(&criteria, &results, "doc-1", 3),
+            VerifyDecision::Proceed
+        );
     }
 }

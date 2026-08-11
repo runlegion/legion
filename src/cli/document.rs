@@ -68,6 +68,22 @@ pub(crate) enum DocumentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Revise a document's payload in place, bumping its `revision` counter
+    /// (#882 step 1). Payload is read from --from or stdin, same as
+    /// `create`. A criterion in `verification.criteria` keeps its `id`
+    /// when the incoming payload echoes it back (the expected flow:
+    /// `document view --json` to read current ids, edit criterion text,
+    /// resubmit each item with its `id` intact); a criterion submitted with
+    /// no `id` is treated as new and gets a fresh UUIDv7. Errors when the
+    /// document does not exist, or when the payload names a duplicate
+    /// criterion id.
+    Revise {
+        /// Document id to revise.
+        id: String,
+        /// Read the new payload from this file. When omitted, reads stdin.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
     /// Mark a document archived.
     Archive { id: String },
     /// Set a document's lifecycle status (e.g. publish: draft -> published).
@@ -232,6 +248,58 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
                     )?;
                 }
             }
+        }
+        DocumentAction::Revise { id, from } => {
+            let payload = read_json_arg(from)?;
+            serde_json::from_str::<serde_json::Value>(&payload).map_err(|e| {
+                error::LegionError::WorkSource(format!("payload is not valid JSON: {e}"))
+            })?;
+            // Schema documents get the same structural gate Create enforces
+            // (#526, MED-4 review fix): without this, a revise could turn a
+            // valid landed schema into something Create would have refused,
+            // after which `document validate` would silently check
+            // instances against a non-schema.
+            let existing = database.get_document(&id)?.ok_or_else(|| {
+                error::LegionError::WorkSource(format!("document '{id}' not found"))
+            })?;
+            let schema_summary = if existing.doc_type == "schema" {
+                Some(documents::validate_schema_payload(&payload)?)
+            } else {
+                None
+            };
+            let doc = database.revise_document(&id, &payload)?;
+            // Write a fresh recall pointer (domain=schema) for the revised
+            // payload (#526, MED-4 review fix): Create dual-writes this
+            // pointer and Revise previously did not, so `recall --domain
+            // schema` could keep surfacing a title/description that no
+            // longer matched the landed schema. Reflections are append-only
+            // -- this does NOT retire or delete the prior pointer, it adds
+            // a newer one alongside it; `legion recall`'s recency ranking is
+            // what makes the current pointer the one an agent actually sees
+            // first. A stale prior pointer is not purged by this call.
+            if let Some(summary) = schema_summary {
+                let text = documents::schema_pointer_text(&doc.id, &summary);
+                let meta = db::ReflectionMeta {
+                    domain: Some("schema".to_string()),
+                    tags: Some("schema,document-pointer".to_string()),
+                    parent_id: None,
+                };
+                database
+                    .insert_reflection_with_meta(&doc.owner, &text, "self", &meta)
+                    .map_err(|e| {
+                        error::LegionError::WorkSource(format!(
+                            "document {} revised, but refreshing the schema pointer \
+                             reflection failed: {e}. Re-create the pointer with: legion \
+                             reflect --repo {} --text '{}'",
+                            doc.id, doc.owner, text
+                        ))
+                    })?;
+            }
+            println!(
+                "{} revision -> {}",
+                doc.id,
+                database.document_revision(&doc.id)?
+            );
         }
         DocumentAction::Archive { id } => {
             let doc = database.archive_document(&id)?;

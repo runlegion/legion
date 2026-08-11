@@ -391,6 +391,23 @@ pub(crate) enum KanbanAction {
         document: String,
     },
 
+    /// Declare which spec criteria this card is servicing (#882 step 1).
+    /// Replaces the card's previous declaration (a re-run with a shorter
+    /// list drops the criteria left out). The card must already be bound
+    /// to a document (`legion kanban bind`), and every id must exist in
+    /// that document's current `verification.criteria` set -- a card
+    /// cannot declare a criterion belonging to a different document, or
+    /// one that does not exist.
+    ServiceCriteria {
+        /// Card ID.
+        #[arg(long)]
+        id: String,
+
+        /// Comma-separated criterion ids to declare as serviced.
+        #[arg(long)]
+        criteria: String,
+    },
+
     /// Reconcile kanban cards with their linked GitHub issue state.
     ///
     /// Detects two drift directions:
@@ -659,6 +676,42 @@ fn propagate_card_reopen_to_worksource(
     }
 }
 
+/// Whether a recorded Clean verify gate is stale against the document's
+/// CURRENT spec revision (#882 review, HIGH-3), and why.
+///
+/// `ac_source` is the label `resolve_acceptance_criteria` returned
+/// (`"spec:<doc_id>"` for a spec-bound card, `"card"` otherwise). Returns
+/// `None` -- not stale, or nothing to compare -- when: the card is not
+/// spec-bound; the gate's `details` did not parse or carry a `results`
+/// array; or none of the recorded results carry a `spec_revision` (the
+/// legacy free-text `AcResult` format was used, which cites no revision).
+/// Otherwise compares the (first) cited `spec_revision` against
+/// `Database::document_revision` for the bound document and returns a
+/// human-readable reason naming both numbers when the cited revision is
+/// behind the document's current one.
+fn stale_spec_gate_reason(
+    database: &db::Database,
+    ac_source: &str,
+    gate: &db::quality_gates::QualityGateRow,
+) -> Option<String> {
+    let doc_id = ac_source.strip_prefix("spec:")?;
+    let details: serde_json::Value = serde_json::from_str(gate.details.as_deref()?).ok()?;
+    let recorded_revision = details
+        .get("results")?
+        .as_array()?
+        .iter()
+        .find_map(|r| r.get("spec_revision").and_then(|v| v.as_i64()))?;
+    let current_revision = database.document_revision(doc_id).ok()?;
+    if recorded_revision < current_revision {
+        Some(format!(
+            "gate recorded against spec revision {recorded_revision}, document '{doc_id}' \
+             is now at revision {current_revision}"
+        ))
+    } else {
+        None
+    }
+}
+
 pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> error::Result<()> {
     let (database, index) = open_db_and_index()?;
 
@@ -679,7 +732,25 @@ pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> err
             if !acceptance.is_empty() {
                 let skill = verify::verify_gate_key(card_id);
                 match database.get_latest_quality_gate_by_skill(&skill)? {
-                    Some(gate) if gate.result == GateResult::Clean => {}
+                    Some(gate) if gate.result == GateResult::Clean => {
+                        // HIGH-3 (#882 review): a Clean gate can be stale.
+                        // decide_spec's own staleness check compares a
+                        // verdict's cited spec_revision against the document's
+                        // revision AT VERIFY TIME -- it cannot see a revision
+                        // that happens AFTER verify ran. Ordering (verify,
+                        // then revise) would otherwise bypass the guard
+                        // entirely: the gate is still recorded Clean, it
+                        // simply no longer matches the spec it was formed
+                        // against. Re-check against the CURRENT revision here.
+                        if let Some(reason) = stale_spec_gate_reason(&database, &ac_source, &gate) {
+                            eprintln!(
+                                "[legion] error: verify gate for card {card_id} is stale: \
+                                 {reason}. Re-run verify against the current spec revision \
+                                 before Done."
+                            );
+                            return Err(error::LegionError::ExitWith(1));
+                        }
+                    }
                     Some(_) => {
                         eprintln!(
                             "[legion] error: verify gate is not clean for card {card_id} \
@@ -1020,6 +1091,20 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
         KanbanAction::Bind { id, document } => {
             kanban::bind_document(&database, &id, &document)?;
             println!("{id}");
+        }
+        KanbanAction::ServiceCriteria { id, criteria } => {
+            let ids: Vec<String> = criteria
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            database.set_card_criteria(&id, &ids)?;
+            let recorded = database.card_criteria(&id)?;
+            println!("{id} servicing {} criterion/criteria:", recorded.len());
+            for c in &recorded {
+                println!("  - {c}");
+            }
         }
         KanbanAction::Assign { id, to } => {
             database.assign_card(&id, &to)?;

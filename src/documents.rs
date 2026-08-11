@@ -75,6 +75,14 @@ impl Database {
     ///
     /// `id` is taken from `meta.id` when supplied, else generated as
     /// UUIDv7. Conflict on id is a hard error.
+    ///
+    /// When the payload carries a `verification.criteria` array (#882
+    /// step 1), any entry missing an `id` gets a fresh UUIDv7 assigned
+    /// before the row is written -- the returned (and stored) payload
+    /// carries the filled-in ids, so the caller can read them straight
+    /// back off the id this call returns without a follow-up fetch. A
+    /// payload with no such array (or none of whose entries need an id)
+    /// is stored byte-identical to what was passed in.
     pub fn insert_document(&self, meta: &DocumentMeta<'_>, payload: &str) -> Result<Document> {
         let now = Utc::now().to_rfc3339();
         let id = match meta.id {
@@ -82,6 +90,7 @@ impl Database {
             _ => Uuid::now_v7().to_string(),
         };
         let status = meta.status.unwrap_or("draft");
+        let payload = normalize_payload_criteria(payload)?;
 
         self.conn.execute(
             "INSERT INTO documents (id, type, surface, status, priority, owner, payload, created_at, updated_at) \
@@ -93,7 +102,7 @@ impl Database {
                 status,
                 meta.priority,
                 meta.owner,
-                payload,
+                &payload,
                 &now,
             ],
         ).map_err(|e| match e {
@@ -112,11 +121,102 @@ impl Database {
             status: status.to_string(),
             priority: meta.priority.map(str::to_string),
             owner: meta.owner.to_string(),
-            payload: payload.to_string(),
+            payload,
             archived_at: None,
             created_at: now.clone(),
             updated_at: now,
         })
+    }
+
+    /// Revise a document's payload in place, bumping the `revision` counter
+    /// (#882 step 1). Errors when the document does not exist.
+    ///
+    /// Criterion ids in `verification.criteria` are preserved across the
+    /// revision exactly when the incoming payload echoes them back: the
+    /// expected flow is `document view` (read current ids), edit criterion
+    /// text, resubmit each item with its `id` intact. An item submitted
+    /// with no `id` (a genuinely new criterion) gets a fresh UUIDv7, same
+    /// as `insert_document`. A duplicate `id` across two criteria in the
+    /// same payload is a hard error (see `normalize_criteria`).
+    ///
+    /// Deliberately NOT built here (#882 step 1 design, scoped down):
+    /// tracking which criterion ids a revision retires, or blocking a
+    /// revision that would retire a criterion a live card is still
+    /// servicing. The payload this call writes simply replaces what was
+    /// there; a verdict citing an id that existed at a prior revision but
+    /// not the current one is rejected by `verify::decide_spec` as an
+    /// unknown criterion id, same as an id that never existed.
+    ///
+    /// Two guards on the whole-payload replace (#882 review, MED-5):
+    /// refuses an already-archived document (archiving is meant to be
+    /// terminal for editing, mirroring `archive_document`'s own filter),
+    /// and -- when a live (non-cancelled) card is bound to this document --
+    /// refuses a payload that drops the top-level `meta` object. The
+    /// governed transition sync (`sync_bound_document`, `db::kanban`)
+    /// hard-errors on a payload with no `meta` object to write `status`
+    /// into, so a revise that dropped it would permanently wedge the bound
+    /// card in a status it cannot leave through the governed path. This is
+    /// the same invariant `archive_document` already enforces just above
+    /// (orphaning a card from its spec is unacceptable) applied to
+    /// structural corruption instead of archival.
+    pub fn revise_document(&self, id: &str, payload: &str) -> Result<Document> {
+        let existing = self
+            .get_document(id)?
+            .ok_or_else(|| LegionError::WorkSource(format!("document '{id}' not found")))?;
+        if existing.archived_at.is_some() {
+            return Err(LegionError::WorkSource(format!(
+                "document '{id}' is archived and cannot be revised"
+            )));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let normalized_payload = normalize_payload_criteria(payload)?;
+
+        if let Some(card_id) = self.live_card_bound_to_document(id)? {
+            let has_meta = serde_json::from_str::<serde_json::Value>(&normalized_payload)
+                .ok()
+                .is_some_and(|v| v.get("meta").is_some_and(|m| m.is_object()));
+            if !has_meta {
+                return Err(LegionError::WorkSource(format!(
+                    "document '{id}' is bound to live card '{card_id}': the revised payload \
+                     must keep a top-level 'meta' object, or the card's governed status \
+                     transitions would be permanently wedged"
+                )));
+            }
+        }
+
+        let rows = self.conn.execute(
+            "UPDATE documents SET payload = ?1, revision = revision + 1, updated_at = ?2 \
+             WHERE id = ?3 AND deleted_at IS NULL AND archived_at IS NULL",
+            params![&normalized_payload, &now, id],
+        )?;
+        if rows == 0 {
+            return Err(LegionError::WorkSource(format!(
+                "document '{id}' not found"
+            )));
+        }
+        self.get_document(id)?.ok_or_else(|| {
+            LegionError::WorkSource(format!("document '{id}' vanished after revise"))
+        })
+    }
+
+    /// Read a document's current `revision` counter (#882 step 1). A
+    /// spec-bound verdict (`verify::SpecAcResult`) names the revision it
+    /// was formed against; `cli::verify::handle_verify` reads this to
+    /// confirm the citation is not stale before trusting a criterion id.
+    pub fn document_revision(&self, id: &str) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT revision FROM documents WHERE id = ?1 AND deleted_at IS NULL",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    LegionError::WorkSource(format!("document '{id}' not found"))
+                }
+                other => LegionError::Database(other),
+            })
     }
 
     /// Read a document by id. Returns None if the row is soft-deleted
@@ -545,6 +645,77 @@ fn check_value(
         for (i, child) in arr.iter().enumerate() {
             check_value(items, child, &format!("{path}[{i}]"), errors);
         }
+    }
+}
+
+/// Assign a UUIDv7 `id` to any `verification.criteria` entry that lacks one
+/// (#882 step 1), in place. Returns `true` when at least one id was
+/// assigned -- the caller uses this to decide whether the payload needs to
+/// be re-serialized, so a payload with no `verification.criteria` array (or
+/// one whose entries already all carry ids) is left byte-identical.
+///
+/// Hard-errors on a duplicate id across two criteria in the same array: a
+/// shared id collapses `verify::decide_spec`'s required-id set to one
+/// entry, silently letting a single verdict "cover" two criteria.
+fn normalize_criteria(payload_value: &mut serde_json::Value) -> Result<bool> {
+    let Some(criteria) = payload_value
+        .get_mut("verification")
+        .and_then(|v| v.get_mut("criteria"))
+        .and_then(|c| c.as_array_mut())
+    else {
+        return Ok(false);
+    };
+
+    let mut mutated = false;
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in criteria.iter_mut() {
+        let Some(obj) = item.as_object_mut() else {
+            // Malformed entry (not a JSON object): leave untouched.
+            // `resolve_spec_criteria` filters non-conforming entries out
+            // when reading criteria back, so this is not a silent data
+            // hazard -- it just does not gain a stable id.
+            continue;
+        };
+        let existing_id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let id = match existing_id {
+            Some(id) => id,
+            None => {
+                let generated = Uuid::now_v7().to_string();
+                obj.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(generated.clone()),
+                );
+                mutated = true;
+                generated
+            }
+        };
+        if !seen_ids.insert(id.clone()) {
+            return Err(LegionError::WorkSource(format!(
+                "duplicate criterion id '{id}' in verification.criteria -- \
+                 each criterion needs a unique id"
+            )));
+        }
+    }
+    Ok(mutated)
+}
+
+/// Parse `payload` as JSON and run [`normalize_criteria`] over it, returning
+/// the (possibly rewritten) payload string. A payload that is not valid
+/// JSON is returned unchanged -- this function is a best-effort normalizer,
+/// not a second JSON validator (the CLI layer already validates payload
+/// shape before calling `insert_document`/`revise_document`).
+fn normalize_payload_criteria(payload: &str) -> Result<String> {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return Ok(payload.to_string());
+    };
+    if normalize_criteria(&mut value)? {
+        Ok(value.to_string())
+    } else {
+        Ok(payload.to_string())
     }
 }
 
@@ -986,5 +1157,240 @@ mod tests {
         let errors = validate_instance(&schema, &bad);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("$.phase"));
+    }
+
+    // -- criteria identity + revision (#882 step 1) -------------------------
+
+    /// A fresh document starts at revision 1 -- the migration's DEFAULT and
+    /// this insert path agree without a separate backfill.
+    #[test]
+    fn new_document_starts_at_revision_one() {
+        let db = test_db();
+        let doc = db
+            .insert_document(&sample_meta("requirement", "mail"), "{}")
+            .expect("insert");
+        assert_eq!(db.document_revision(&doc.id).expect("revision"), 1);
+    }
+
+    #[test]
+    fn document_revision_of_unknown_id_errors() {
+        let db = test_db();
+        assert!(db.document_revision("nope").is_err());
+    }
+
+    /// A criterion with no `id` gets one assigned at insert; the returned
+    /// (and stored) payload carries it.
+    #[test]
+    fn insert_document_assigns_ids_to_criteria_missing_one() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "verification": {
+                "criteria": [
+                    {"text": "does the thing"},
+                    {"text": "does the other thing"}
+                ]
+            }
+        })
+        .to_string();
+        let doc = db
+            .insert_document(&sample_meta("requirement", "mail"), &payload)
+            .expect("insert");
+        let value: serde_json::Value = serde_json::from_str(&doc.payload).unwrap();
+        let criteria = value["verification"]["criteria"].as_array().unwrap();
+        assert_eq!(criteria.len(), 2);
+        for c in criteria {
+            let id = c["id"].as_str().expect("id assigned");
+            assert!(
+                uuid::Uuid::parse_str(id).is_ok_and(|u| u.get_version_num() == 7),
+                "expected a UUIDv7, got {id}"
+            );
+        }
+        // Ids must be distinct.
+        assert_ne!(criteria[0]["id"], criteria[1]["id"]);
+    }
+
+    /// A caller-supplied id is kept verbatim, not overwritten.
+    #[test]
+    fn insert_document_preserves_caller_supplied_criterion_id() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "verification": {"criteria": [{"id": "crit-fixed", "text": "does the thing"}]}
+        })
+        .to_string();
+        let doc = db
+            .insert_document(&sample_meta("requirement", "mail"), &payload)
+            .expect("insert");
+        let value: serde_json::Value = serde_json::from_str(&doc.payload).unwrap();
+        assert_eq!(value["verification"]["criteria"][0]["id"], "crit-fixed");
+    }
+
+    /// A payload with no `verification.criteria` array is stored
+    /// byte-identical -- normalization must not touch unrelated payloads.
+    #[test]
+    fn insert_document_without_criteria_is_untouched() {
+        let db = test_db();
+        let payload = r#"{"meta":{"id":"FR-X"},"title":"Thread detail"}"#;
+        let doc = db
+            .insert_document(&sample_meta("requirement", "mail"), payload)
+            .expect("insert");
+        assert_eq!(doc.payload, payload);
+    }
+
+    /// Two criteria sharing the same explicit id is a hard error at insert.
+    #[test]
+    fn insert_document_rejects_duplicate_criterion_ids() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "verification": {
+                "criteria": [
+                    {"id": "dup", "text": "first"},
+                    {"id": "dup", "text": "second"}
+                ]
+            }
+        })
+        .to_string();
+        let err = db
+            .insert_document(&sample_meta("requirement", "mail"), &payload)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate criterion id"),
+            "got: {err}"
+        );
+    }
+
+    /// revise_document bumps the revision and, when the caller echoes an
+    /// existing criterion's id back, preserves it -- while a new criterion
+    /// with no id gets a fresh one.
+    #[test]
+    fn revise_document_bumps_revision_and_preserves_echoed_ids() {
+        let db = test_db();
+        let initial = serde_json::json!({
+            "verification": {"criteria": [{"text": "first criterion"}]}
+        })
+        .to_string();
+        let doc = db
+            .insert_document(&sample_meta("requirement", "mail"), &initial)
+            .expect("insert");
+        let first_id = serde_json::from_str::<serde_json::Value>(&doc.payload).unwrap()
+            ["verification"]["criteria"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(db.document_revision(&doc.id).unwrap(), 1);
+
+        // Revise: keep the first criterion (echoing its id, edited text) and
+        // add a second, brand-new criterion with no id.
+        let revised_payload = serde_json::json!({
+            "verification": {
+                "criteria": [
+                    {"id": first_id, "text": "first criterion, reworded"},
+                    {"text": "second criterion"}
+                ]
+            }
+        })
+        .to_string();
+        let revised = db
+            .revise_document(&doc.id, &revised_payload)
+            .expect("revise");
+        assert_eq!(db.document_revision(&doc.id).unwrap(), 2);
+
+        let value: serde_json::Value = serde_json::from_str(&revised.payload).unwrap();
+        let criteria = value["verification"]["criteria"].as_array().unwrap();
+        assert_eq!(criteria.len(), 2);
+        assert_eq!(criteria[0]["id"], first_id, "echoed id must be preserved");
+        assert_eq!(criteria[0]["text"], "first criterion, reworded");
+        let second_id = criteria[1]["id"].as_str().expect("second id assigned");
+        assert_ne!(second_id, first_id, "the new criterion gets its own id");
+    }
+
+    #[test]
+    fn revise_document_nonexistent_returns_error() {
+        let db = test_db();
+        let err = db.revise_document("nope", "{}").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    // -- revise guard: bound-live-card protection + archived filter (#882 review, MED-5) --
+
+    /// A document bound to a live card must keep its `meta` object across a
+    /// revise -- the governed transition sync (`sync_bound_document`,
+    /// src/db/kanban.rs) hard-errors on a payload with no `meta` object, so
+    /// dropping it would wedge the card in a status it cannot leave through
+    /// the governed path. Mirrors `archive_document_blocked_by_live_bound_card`.
+    #[test]
+    fn revise_document_blocked_when_bound_card_would_be_wedged() {
+        let db = test_db();
+        let mut m = sample_meta("requirement", "mail");
+        m.id = Some("FR-WEDGE");
+        db.insert_document(&m, r#"{"meta":{}}"#).unwrap();
+
+        let card_id = insert_bound_card(&db, "FR-WEDGE");
+
+        // The revise payload drops 'meta' entirely.
+        let err = db.revise_document("FR-WEDGE", "{}").unwrap_err();
+        assert!(
+            err.to_string().contains("meta"),
+            "error must name the missing 'meta' object: {err}"
+        );
+        assert!(
+            err.to_string().contains(&card_id) || err.to_string().contains("live"),
+            "error must explain the live-card wedge risk: {err}"
+        );
+
+        // Refused: the original payload (with meta) must still be in place.
+        let fetched = db.get_document("FR-WEDGE").unwrap().unwrap();
+        assert!(fetched.payload.contains("meta"));
+    }
+
+    /// The same document, same drop-meta payload, succeeds once the bound
+    /// card is cancelled (no longer live) -- mirrors
+    /// `archive_document_allowed_when_bound_card_is_cancelled`.
+    #[test]
+    fn revise_document_allowed_when_bound_card_is_cancelled() {
+        let db = test_db();
+        let mut m = sample_meta("requirement", "mail");
+        m.id = Some("FR-WEDGE-CANCEL");
+        db.insert_document(&m, r#"{"meta":{}}"#).unwrap();
+
+        let card_id = insert_bound_card(&db, "FR-WEDGE-CANCEL");
+        db.force_move_card(&card_id, "cancelled", None)
+            .expect("cancel card");
+
+        let revised = db.revise_document("FR-WEDGE-CANCEL", "{}").expect("revise");
+        assert_eq!(revised.payload, "{}");
+    }
+
+    /// A document bound to a live card may still be revised as long as the
+    /// new payload keeps a `meta` object -- the guard only refuses payloads
+    /// that would actually wedge the card, not every revise of a bound doc.
+    #[test]
+    fn revise_document_allowed_when_bound_card_and_meta_preserved() {
+        let db = test_db();
+        let mut m = sample_meta("requirement", "mail");
+        m.id = Some("FR-WEDGE-OK");
+        db.insert_document(&m, r#"{"meta":{}}"#).unwrap();
+        insert_bound_card(&db, "FR-WEDGE-OK");
+
+        let revised = db
+            .revise_document("FR-WEDGE-OK", r#"{"meta":{"status":"draft"}}"#)
+            .expect("revise with meta preserved must succeed");
+        assert!(revised.payload.contains("meta"));
+    }
+
+    /// An archived document cannot be revised (the revise UPDATE now also
+    /// filters `archived_at IS NULL`, not just `deleted_at IS NULL`).
+    #[test]
+    fn revise_document_refuses_archived_document() {
+        let db = test_db();
+        let mut m = sample_meta("requirement", "mail");
+        m.id = Some("FR-ARCHIVED");
+        db.insert_document(&m, "{}").unwrap();
+        db.archive_document("FR-ARCHIVED").expect("archive");
+
+        let err = db.revise_document("FR-ARCHIVED", "{}").unwrap_err();
+        assert!(
+            err.to_string().contains("archived"),
+            "error must say the document is archived: {err}"
+        );
     }
 }

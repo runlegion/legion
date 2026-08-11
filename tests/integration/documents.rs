@@ -184,6 +184,73 @@ fn schema_document_malformed_rejected_at_create() {
     assert_eq!(docs.as_array().map(Vec::len), Some(0));
 }
 
+// MED-4 (#882 review): DocumentAction::Revise skipped the doc_type=schema
+// structural gate that Create enforces, so a landed valid JSON Schema could
+// be revised into something Create would have refused -- after which
+// `document validate` checks instances against a non-schema. Revise must
+// apply the same gate.
+#[test]
+fn schema_document_revise_rejects_malformed_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let doc_id = create_schema_ok(dir.path(), &schema_payload_persona());
+
+    // Valid JSON, invalid JSON Schema: no $schema, no properties -- exactly
+    // the shape `schema_document_malformed_rejected_at_create` proves Create
+    // refuses.
+    let out = run_with_stdin(
+        legion_cmd(dir.path()).args(["document", "revise", &doc_id]),
+        br#"{"title": "Broken", "type": "object"}"#,
+    );
+    assert!(
+        !out.status.success(),
+        "revising a schema document into a malformed shape must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("$schema"),
+        "rejection must name the missing field, got: {stderr}"
+    );
+
+    // The original valid payload must still be in place -- a rejected
+    // revise must not have landed.
+    let view = run_ok(legion_cmd(dir.path()).args(["document", "view", &doc_id, "--json"]));
+    let view_json: serde_json::Value = serde_json::from_str(view.trim()).unwrap();
+    assert!(
+        view_json["payload"]
+            .as_str()
+            .is_some_and(|p| p.contains("Persona")),
+        "the original schema payload must be unchanged, got: {view_json}"
+    );
+}
+
+// MED-4 (#882 review): revise dual-writes a fresh schema pointer reflection
+// just as create does, so `recall --domain schema` reflects the revised
+// title/description instead of serving a stale pointer.
+#[test]
+fn schema_document_revise_refreshes_recall_pointer() {
+    let dir = tempfile::tempdir().unwrap();
+    let doc_id = create_schema_ok(dir.path(), &schema_payload_persona());
+
+    let mut revised: serde_json::Value = serde_json::from_str(&schema_payload_persona()).unwrap();
+    revised["title"] = serde_json::Value::String("Persona Revised".to_string());
+    let out = run_with_stdin(
+        legion_cmd(dir.path()).args(["document", "revise", &doc_id]),
+        revised.to_string().as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "revise failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout =
+        run_ok(legion_cmd(dir.path()).args(["recall", "--repo", "legion", "--domain", "schema"]));
+    assert!(
+        stdout.contains("[SCHEMA] Persona Revised"),
+        "recall must surface the refreshed pointer, got: {stdout}"
+    );
+}
+
 #[test]
 fn document_validate_accepts_real_persona_instance() {
     let dir = tempfile::tempdir().unwrap();
