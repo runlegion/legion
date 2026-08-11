@@ -56,6 +56,29 @@
 # quotes, multiple -m flags, trailing pathspecs -- is a DENY, never a
 # guessed rewrite.
 #
+# That lexer has to solve TWO separate re-quoting hazards, not one. The
+# OUTBOUND half is: don't let the rewritten command's shell re-interpret
+# `$`/backtick a second time (solved by writing to a tempfile and using
+# --message-file, see below). The INBOUND half, easy to miss because
+# nothing about it looks wrong until you reason about WHEN evaluation was
+# supposed to happen: any `$(...)`, backtick, or bare `$VAR` inside the
+# ORIGINAL command was supposed to be evaluated by the shell running that
+# ORIGINAL command, before this hook ever saw the string. This hook only
+# ever sees source text -- it cannot evaluate a live substitution on the
+# agent's behalf -- so capturing one as-is either commits unevaluated
+# syntax verbatim (a heredoc that never ran, permanently in history) or
+# silently drops whatever the expansion would have produced. Same failure
+# mode applies to an UNQUOTED value containing `;`, `&`, or `|`: those are
+# command separators/pipes to the ORIGINAL shell, not message bytes, so
+# `git commit -m done&&true` glues "done&&true" into the whole message and
+# `true` silently never runs. Every one of these is a DENY, not a rewrite:
+# there is no lossless way to carry a live evaluation through a
+# translation that replaces the shell that was going to do the evaluating.
+# Escaped forms (`\$`, `` \` ``) are already resolved to a literal
+# character before the check runs, so they are unaffected; single-quoted
+# values never reach the check at all, because POSIX makes single quotes
+# fully inert -- `$(...)` inside them was always literal, nothing to miss.
+#
 # The extracted message is written to a fresh tempfile and passed via
 # `legion commit --message-file`, not re-quoted into `--message "..."` on
 # the rewritten command line: re-quoting risks re-interpreting embedded `$`,
@@ -108,7 +131,6 @@ read -r -a TOKENS <<<"$COMMAND"
 [ "${#TOKENS[@]}" -ge 2 ] || exit 0
 
 FIRST_BIN="${TOKENS[0]##*/}"
-[ "$FIRST_BIN" = "git" ] || exit 0
 
 # Walk past git's own global options to find the subcommand, capturing `-C`
 # specially: it is the one global option this hook has to act on, since it
@@ -116,44 +138,103 @@ FIRST_BIN="${TOKENS[0]##*/}"
 # whose value itself contains spaces is a known, accepted gap shared with
 # no-git-push.sh's identical walk -- the resulting `cd` fails loudly rather
 # than silently targeting the wrong tree, which is the safe failure mode.
+# Only meaningful when the FIRST token is git -- for anything else
+# (including a leading unrelated command, see #886 below) this never runs
+# and SUBCOMMAND stays empty.
 GIT_C_PATH=""
 SUBCOMMAND=""
-IDX=1
-while [ "$IDX" -lt "${#TOKENS[@]}" ]; do
-  TOK="${TOKENS[$IDX]}"
-  case "$TOK" in
-    -C)
-      GIT_C_PATH="${TOKENS[$((IDX + 1))]:-}"
-      IDX=$((IDX + 2))
-      continue
-      ;;
-    -c | --git-dir | --work-tree | --namespace)
-      IDX=$((IDX + 2))
-      continue
-      ;;
-    -*)
-      IDX=$((IDX + 1))
-      continue
-      ;;
-    *)
-      SUBCOMMAND="$TOK"
-      break
-      ;;
-  esac
-done
+if [ "$FIRST_BIN" = "git" ]; then
+  IDX=1
+  while [ "$IDX" -lt "${#TOKENS[@]}" ]; do
+    TOK="${TOKENS[$IDX]}"
+    case "$TOK" in
+      -C)
+        GIT_C_PATH="${TOKENS[$((IDX + 1))]:-}"
+        IDX=$((IDX + 2))
+        continue
+        ;;
+      -c | --git-dir | --work-tree | --namespace)
+        IDX=$((IDX + 2))
+        continue
+        ;;
+      -*)
+        IDX=$((IDX + 1))
+        continue
+        ;;
+      *)
+        SUBCOMMAND="$TOK"
+        break
+        ;;
+    esac
+  done
+fi
 
-[ "$SUBCOMMAND" = "commit" ] || exit 0
-
-# --- Resolve the target repo and check coverage ------------------------------
+# --- Resolve the target repo -------------------------------------------------
 #
 # LEGION_REPO wins over everything, in every hook (lib/prelude.sh:20-24).
 # Absent that, a `-C <path>` retargets the repo identity the same way it
 # retargets the checkout; with no `-C`, this is exactly the session repo
-# legion_hook_parse already resolved. Coverage has to be checked against
-# THIS resolved repo -- an agent running `git -C ~/other-repo commit` should
-# not be gated by whether the session's OWN repo happens to be covered.
+# legion_hook_parse already resolved. Resolved here, before the #886
+# compound fallback below, so both branches (a clean `git commit` and a
+# composed command where `commit` sits deeper in a chain) check coverage
+# against the same repo identity.
 if [ -n "$GIT_C_PATH" ] && [ -z "${LEGION_REPO:-}" ]; then
   REPO="$(basename "$GIT_C_PATH")"
+fi
+
+# --- #886: compound-chain fallback, ONLY when commit is not the FIRST -------
+# --- subcommand found --------------------------------------------------------
+#
+# The walk above only ever looks at the FIRST git invocation's immediate
+# subcommand. `commit` glued to a metacharacter (`git commit;`) or not
+# the first command in the chain at all (`git add -A && git commit -m
+# x`, `npm test && git commit -m x`) both leave SUBCOMMAND holding
+# something other than exactly `commit`, and the old strict equality
+# check exited 0 on all of them -- a raw `git commit` ran with no audit
+# row, no deny, no rewrite, nothing.
+#
+# Deliberately NOT applied when SUBCOMMAND == "commit" cleanly, unlike
+# no-git-push.sh's equivalent guard. A commit MESSAGE is free text that
+# can legitimately contain `&&`, `;`, `$(...)` etc. as ordinary prose or
+# as an inert single-quoted literal (POSIX makes single quotes fully
+# inert -- `'$(date) is not evaluated'` is exactly that, and denying it
+# outright was tried here and measured as a false-positive: it broke a
+# genuinely safe rewrite). `legion_hook_compound` scans the RAW string,
+# not tokens, so it cannot tell "composed with another real command"
+# apart from "these characters happen to sit inside a quoted message,"
+# and would silently deny messages this hook is fully equipped to handle
+# correctly.
+#
+# That correctness is not lost by skipping the check here: when `commit`
+# genuinely IS the first subcommand, this hook's own message-value lexer
+# (below) already denies real trailing composition on its own terms --
+# a `&&`/`;` AFTER a properly closed quote fails the "nothing may follow
+# the value" rule (EXTRACT_ERROR: unexpected content after the quoted
+# value), and a live, UNQUOTED or double-quoted `$`/backtick/`;`/`&`/`|`
+# inside the value denies as a live-substitution/live-metacharacter
+# hazard the translator cannot evaluate on the agent's behalf. Only the
+# "commit is not the first subcommand" shape below still needs a
+# dedicated guard, because for THAT shape the message-extraction
+# machinery never runs at all -- there is no lexer downstream to catch
+# it, which is exactly why the whole-command scan is safe there: it is
+# reached only when this command was never going to touch a real commit
+# message in the first place.
+if [ "$SUBCOMMAND" != "commit" ]; then
+  if legion_hook_compound "$COMMAND" \
+    && legion_hook_token_present "$COMMAND" git \
+    && legion_hook_token_present "$COMMAND" commit; then
+    legion_hook_covered || exit 0
+    emit_deny "Refusing \`git commit\` -- it's composed with something else (a pipe, redirect, \`&&\`, \`;\`, or \`\$(...)\`), and legion's rewrite would replace the WHOLE command string.
+
+Translating it would silently drop everything else in it, or misread part of one command as belonging to another. Run the commit and the rest of your pipeline as separate steps:
+
+    legion commit --repo ${REPO} --message '<type>(<scope>): <summary>
+
+Co-Authored-By: <name> <email>'
+
+Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
+  fi
+  exit 0
 fi
 
 legion_hook_covered || exit 0
@@ -322,10 +403,13 @@ else
     BI=0
     VAL=""
     CLOSED=0
+    LIVE_SUBST=0
     while [ "$BI" -lt "$BLEN" ]; do
       C="${BODY:$BI:1}"
       if [ "$Q" = '"' ] && [ "$C" = "\\" ] && [ $((BI + 1)) -lt "$BLEN" ]; then
         NC="${BODY:$((BI + 1)):1}"
+        # shellcheck disable=SC1003 # '\' here is the one-char literal
+        # backslash pattern, not an attempt to escape the closing quote.
         case "$NC" in
           '"' | '\' | '$' | '`')
             VAL="${VAL}${NC}"
@@ -333,6 +417,23 @@ else
             continue
             ;;
         esac
+      fi
+      # An UNESCAPED $ or ` inside a double-quoted value is live: the
+      # ORIGINAL shell would have evaluated $(...), a backtick command
+      # substitution, or a bare $VAR/${VAR} expansion right here. This
+      # hook cannot evaluate that on the agent's behalf -- it can only
+      # capture source text -- so capturing it silently would either
+      # commit the raw unevaluated syntax verbatim (a heredoc that never
+      # ran, literally in history) or drop a variable expansion the
+      # message depended on. Escaped forms (\$, \`, handled above) are
+      # already literal by the time they reach here and never trigger
+      # this. Single-quoted values (`$Q` = "'") never reach this branch
+      # at all -- POSIX makes single quotes fully inert, so `$(...)`
+      # inside them was always meant literally, no live substitution to
+      # miss.
+      if [ "$Q" = '"' ] && { [ "$C" = '$' ] || [ "$C" = '`' ]; }; then
+        LIVE_SUBST=1
+        break
       fi
       if [ "$C" = "$Q" ]; then
         CLOSED=1
@@ -342,7 +443,9 @@ else
       VAL="${VAL}${C}"
       BI=$((BI + 1))
     done
-    if [ "$CLOSED" -ne 1 ]; then
+    if [ "$LIVE_SUBST" -eq 1 ]; then
+      EXTRACT_ERROR="the message contains an unescaped \$ or \` -- the ORIGINAL command's shell would have evaluated that (command substitution or a variable expansion), and this translator cannot evaluate it on your behalf. Escape it (\\\$, \\\`) if you meant it literally, quote the message with single quotes instead (POSIX single quotes never evaluate anything), or write the already-evaluated text to a file and use --file"
+    elif [ "$CLOSED" -ne 1 ]; then
       EXTRACT_ERROR="unterminated quote"
     else
       TRAILING="${BODY:$BI}"
@@ -360,7 +463,22 @@ else
     if [ -n "$REST" ]; then
       EXTRACT_ERROR="unexpected content after the value: ${REST}"
     else
-      EXTRACTED_VALUE="$WORD"
+      # An unquoted value is not just a word -- it is argv text the shell
+      # itself would have parsed. $, `, ;, &, and | are all live there
+      # too (command substitution, command separators, background jobs,
+      # pipes): `git commit -m done&&true` never runs `true`, it glues
+      # "done&&true" into ONE argv word that becomes the whole message,
+      # silently absorbing a command this hook cannot know was supposed
+      # to run. Same posture as the quoted branch above: deny rather than
+      # guess.
+      case "$WORD" in
+        *'$'* | *'`'* | *';'* | *'&'* | *'|'*)
+          EXTRACT_ERROR="an unquoted value containing \$, \`, ;, &, or | would have been evaluated -- or would have ended the command and started another -- when the ORIGINAL command ran. This translator cannot replicate that safely. Quote the message (single or double quotes) and re-run"
+          ;;
+        *)
+          EXTRACTED_VALUE="$WORD"
+          ;;
+      esac
     fi
   fi
 fi

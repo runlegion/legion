@@ -159,6 +159,18 @@ assert_compound_deny "cmd-subst"  '"gh pr view 42 $(id)"'
 # shellcheck disable=SC2016 # same: literal backtick, not command substitution.
 assert_compound_deny "backtick"   '"gh pr list `id`"'
 
+echo "==> #886: a leading unrelated command no longer hides gh from the compound guard"
+# Before #886, this hook only ever looked at TOKENS[0]: `echo hi && gh pr
+# merge 123` had FIRST_BIN="echo", so the whole command passed through
+# with no deny, no rewrite -- a real `gh` call ran unaudited. The guard
+# must fire regardless of what precedes `gh` in the chain.
+assert_compound_deny "leading unrelated command" '"echo hi && gh pr merge 123"'
+assert_compound_deny "leading unrelated, rewrite-eligible verb" '"echo hi && gh pr view 42"'
+assert_compound_deny "leading unrelated, absolute path gh" '"echo hi && /usr/bin/gh pr merge 123"'
+
+echo "==> #886: compound commands that never mention gh still pass through untouched"
+assert_empty "compound but no gh anywhere" "$(run_hook '"echo hi && ls /tmp"')"
+
 
 # --- #828: exact redirect instead of a fixed menu, still holds -------------
 

@@ -41,6 +41,28 @@ fi
 # Skip enforcement in repos legion does not cover (#353).
 legion_hook_covered || exit 0
 
+# --- #886: compound commands deny BEFORE position-dependent detection -------
+#
+# `gh` does not have to be the FIRST word for this hook's guarantee to
+# matter: `echo hi && gh pr merge 123` reaches the real `gh` binary just
+# as surely as a bare `gh pr merge 123` does. The basename check below
+# only ever looks at the first token, so it silently passed a leading
+# unrelated command straight through -- checked here, independent of
+# where in the command `gh` sits, before that position-dependent check
+# ever runs. `updatedInput` replaces the WHOLE command string, so a
+# composed command showing `gh` anywhere always denies; there is no
+# segment of a chain this hook will classify or rewrite in isolation.
+if legion_hook_compound "$COMMAND" && legion_hook_token_present "$COMMAND" gh; then
+  emit_deny "Refusing -- this command is composed with something else (a pipe, redirect, \`&&\`, \`;\`, or \`\$(...)\`) and mentions \`gh\`, and legion's rewrite would replace the WHOLE command string.
+
+Translating it would either drop everything else in it or misread part of one command as an argument to another. Run the \`gh\` step (or its legion equivalent) and the rest of your pipeline as separate steps:
+
+    legion --help
+
+Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
+  exit 0
+fi
+
 # Check if the command invokes gh -- including by absolute path. Naive
 # prefix matching on `gh ` leaves /opt/homebrew/bin/gh, /usr/bin/gh,
 # ~/bin/gh as silent escape hatches. Take the basename of the first
@@ -112,27 +134,19 @@ NUM_ARG="--number ${NUMBER:-<n>}"
 # only arms converted to emit_rewrite. Every other verb keeps the
 # unmodified deny below -- see the file header for why.
 #
-# Two guards gate every candidate before it is allowed to become a
-# rewrite:
+# One guard gates every candidate before it is allowed to become a
+# rewrite: NUMBER absent -- gh resolves an omitted PR/issue number from
+# the current branch; legion has no equivalent and requires --number
+# explicit. Rather than emit a command with a "<n>" placeholder (bash
+# would read `--number <n>` as a redirect from a file named `n`), this
+# simply skips the rewrite attempt and falls through to the existing
+# deny below, which already renders the placeholder as text, never as
+# something executed.
 #
-#   COMPOUND -- a shell metacharacter anywhere in the raw command
-#   (legion_hook_compound, lib/prelude.sh -- shared with no-git-push.sh
-#   so the two hooks cannot drift). Caught up front so an agent's
-#   `gh pr view 42 | jq .title` or `cd other && gh pr view 42` denies
-#   with a reason instead of silently losing the pipe or the `cd`.
-#
-#   NUMBER absent -- gh resolves an omitted PR/issue number from the
-#   current branch; legion has no equivalent and requires --number
-#   explicit. Rather than emit a command with a "<n>" placeholder (bash
-#   would read `--number <n>` as a redirect from a file named `n`), this
-#   simply skips the rewrite attempt and falls through to the existing
-#   deny below, which already renders the placeholder as text, never as
-#   something executed.
-
-COMPOUND=""
-if legion_hook_compound "$COMMAND"; then
-  COMPOUND="1"
-fi
+# A compound command never reaches this section at all -- the #886 guard
+# near the top of the file denies before FIRST_BIN is even resolved, so
+# by the time GROUP/VERB/NUMBER are known, the command is guaranteed
+# uncomposed.
 
 # first_flag_token WANT... -- echo the first GH_TOKENS entry (after the
 # binary) matching one of the given flag spellings, exact token or
@@ -176,56 +190,54 @@ case "$GROUP $VERB" in
   "pr view" | "issue view" | "pr checks") NUM_SUFFIX=" --number ${NUMBER}" ;;
 esac
 
-if [ -z "$COMPOUND" ]; then
-  case "$GROUP $VERB" in
-    "pr view")
-      if [ -n "$NUMBER" ]; then
-        BLOCKING=$(first_flag_token -c --comments -q --jq --json -t --template -w --web -R --repo) || true
-        if [ -n "$BLOCKING" ]; then
-          REWRITE_BLOCK_REASON="$BLOCKING"
-        else
-          REWRITE_CMD="legion pr view --repo ${REPO} --number ${NUMBER}"
-        fi
-      fi
-      ;;
-    "issue view")
-      if [ -n "$NUMBER" ]; then
-        BLOCKING=$(first_flag_token -c --comments -q --jq --json -t --template -w --web -R --repo) || true
-        if [ -n "$BLOCKING" ]; then
-          REWRITE_BLOCK_REASON="$BLOCKING"
-        else
-          REWRITE_CMD="legion issue view --repo ${REPO} --number ${NUMBER}"
-        fi
-      fi
-      ;;
-    "pr checks")
-      if [ -n "$NUMBER" ]; then
-        BLOCKING=$(first_flag_token -q --jq --json -t --template -w --web -R --repo --watch --fail-fast -i --interval --required) || true
-        if [ -n "$BLOCKING" ]; then
-          REWRITE_BLOCK_REASON="$BLOCKING"
-        else
-          REWRITE_CMD="legion pr checks --repo ${REPO} --number ${NUMBER}"
-        fi
-      fi
-      ;;
-    "pr list")
-      BLOCKING=$(any_flag_token) || true
+case "$GROUP $VERB" in
+  "pr view")
+    if [ -n "$NUMBER" ]; then
+      BLOCKING=$(first_flag_token -c --comments -q --jq --json -t --template -w --web -R --repo) || true
       if [ -n "$BLOCKING" ]; then
         REWRITE_BLOCK_REASON="$BLOCKING"
       else
-        REWRITE_CMD="legion pr list --repo ${REPO}"
+        REWRITE_CMD="legion pr view --repo ${REPO} --number ${NUMBER}"
       fi
-      ;;
-    "issue list")
-      BLOCKING=$(any_flag_token) || true
+    fi
+    ;;
+  "issue view")
+    if [ -n "$NUMBER" ]; then
+      BLOCKING=$(first_flag_token -c --comments -q --jq --json -t --template -w --web -R --repo) || true
       if [ -n "$BLOCKING" ]; then
         REWRITE_BLOCK_REASON="$BLOCKING"
       else
-        REWRITE_CMD="legion issue list --repo ${REPO}"
+        REWRITE_CMD="legion issue view --repo ${REPO} --number ${NUMBER}"
       fi
-      ;;
-  esac
-fi
+    fi
+    ;;
+  "pr checks")
+    if [ -n "$NUMBER" ]; then
+      BLOCKING=$(first_flag_token -q --jq --json -t --template -w --web -R --repo --watch --fail-fast -i --interval --required) || true
+      if [ -n "$BLOCKING" ]; then
+        REWRITE_BLOCK_REASON="$BLOCKING"
+      else
+        REWRITE_CMD="legion pr checks --repo ${REPO} --number ${NUMBER}"
+      fi
+    fi
+    ;;
+  "pr list")
+    BLOCKING=$(any_flag_token) || true
+    if [ -n "$BLOCKING" ]; then
+      REWRITE_BLOCK_REASON="$BLOCKING"
+    else
+      REWRITE_CMD="legion pr list --repo ${REPO}"
+    fi
+    ;;
+  "issue list")
+    BLOCKING=$(any_flag_token) || true
+    if [ -n "$BLOCKING" ]; then
+      REWRITE_BLOCK_REASON="$BLOCKING"
+    else
+      REWRITE_CMD="legion issue list --repo ${REPO}"
+    fi
+    ;;
+esac
 
 if [ -n "$REWRITE_CMD" ]; then
   emit_rewrite "$REWRITE_CMD" "Translated your \`gh ${GROUP} ${VERB}\` to \`${REWRITE_CMD}\`.
@@ -245,21 +257,6 @@ Without that flag:
 
 Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
   exit 0
-fi
-
-if [ -n "$COMPOUND" ]; then
-  case "$GROUP $VERB" in
-    "pr view" | "issue view" | "pr checks" | "pr list" | "issue list")
-      emit_deny "Use legion, not gh -- but this command is composed with something else (a pipe, a redirect, \`&&\`, \`;\`, or \`\$(...)\`), and legion's rewrite replaces the WHOLE command string.
-
-Translating it would silently drop everything after the \`gh\` call -- a pipe destination, a redirect target, a chained command. Run the legion equivalent and the rest of your pipeline as separate steps:
-
-    legion ${GROUP} ${VERB} --repo ${REPO}${NUM_SUFFIX}
-
-Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
-      exit 0
-      ;;
-  esac
 fi
 
 # `pr diff` never becomes a rewrite: `pr_view.rs::render_pr` prints a PR's

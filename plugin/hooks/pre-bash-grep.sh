@@ -3,26 +3,42 @@
 # search binary (grep|rg|ag|ack|find|fd), or a search spelled as a git
 # subcommand (#829), apply this ladder:
 #
-#   0. REWRITE -- the command is a content search (grep/rg/`git grep`) that
-#                 `legion sym etc find-content` can answer LOSSLESSLY:
-#                 single (non-compound) invocation, no flag find-content
-#                 cannot express, no subdirectory path scoping. Replace the
-#                 command via updatedInput (#876) instead of denying --
-#                 `git grep` was the live bypass (permissions.deny matches
-#                 the first token, which for `git grep` is `git`) and the
-#                 old ladder below only advises on symbol-shaped patterns,
-#                 silently passing free-text/regex searches straight
-#                 through. This tier runs after the bypass tier (state 3
-#                 below) so an explicit operator escape still always wins,
-#                 and only for grep/rg/`git grep` -- `ag`/`ack` are left
-#                 alone (their default gitignore/hidden-file handling isn't
-#                 confidently known here) and `find`/`fd` search FILE
-#                 NAMES, not content, so they stay on the ladder below.
-#                 Anything not confidently classified (unrecognized flag,
-#                 subdirectory path argument, the two independent pattern
-#                 extractors disagreeing) falls through to the ladder
-#                 unchanged rather than guess -- see
-#                 `_legion_bashgrep_classify`'s doc comment.
+#   0. REWRITE -- the command is a content search (rg/`git grep`, and plain
+#                 `grep` when its wider gitignore/hidden-file scope is not
+#                 in play) that `legion sym etc find-content` can answer
+#                 LOSSLESSLY: single (non-compound) invocation, no flag
+#                 find-content cannot express, no subdirectory path
+#                 scoping. Replace the command via updatedInput (#876)
+#                 instead of denying -- `git grep` was the live bypass
+#                 (permissions.deny matches the first token, which for
+#                 `git grep` is `git`) and the old ladder below only
+#                 advises on symbol-shaped patterns, silently passing
+#                 free-text/regex searches straight through. Runs after the
+#                 bypass tier (state 3 below, an explicit operator escape
+#                 always wins) and ONLY when the pattern does not already
+#                 resolve to a local symbol (LOCAL_HITS, reused from the
+#                 BLOCK tier's own predicate below) -- `sym def` is a
+#                 strictly better, non-path-scoped answer than a
+#                 find-content scan for those, so they fall through to
+#                 BLOCK unchanged (#886 review). Only grep/rg/`git grep` --
+#                 `ag`/`ack` are left alone (their default gitignore/
+#                 hidden-file handling isn't confidently known here) and
+#                 `find`/`fd` search FILE NAMES, not content, so they stay
+#                 on the ladder below. Plain `grep` has no gitignore/
+#                 hidden-file awareness at all -- wider than find-content's
+#                 default scope -- so it DENIES naming the gap rather than
+#                 rewriting with a prose disclosure: a narrowed-scope
+#                 rewrite returns a plausible, non-empty, INCOMPLETE result
+#                 with no structural signal, the same failure shape as a
+#                 silently truncated pattern (#886 review). `rg`'s own
+#                 defaults already match find-content's, no caveat needed;
+#                 `git grep` gets true parity via an auto-appended
+#                 `--hidden`, so both still rewrite. Anything not
+#                 confidently classified (unrecognized flag, subdirectory
+#                 path argument, the two independent pattern extractors
+#                 disagreeing) falls through to the ladder unchanged rather
+#                 than guess -- see `_legion_bashgrep_classify`'s doc
+#                 comment.
 #   1. INJECT  -- repo not indexed or no high-confidence sym hit.
 #                 Emit additionalContext with whatever sym found.
 #   2. BLOCK   -- repo indexed AND `legion sym def` returned >=1 result.
@@ -464,59 +480,79 @@ For symbols, \`legion sym def ${PATTERN}\` / \`sym refs\` / \`sym list\` answer 
   exit 0
 fi
 
-# --- REWRITE tier (#876) ----------------------------------------------------
+# --- REWRITE tier (#876, revised per #886 review) ---------------------------
 #
 # grep/rg/`git grep` are content-search shapes `legion sym etc find-content`
-# can answer exactly (#707). Runs after the bypass tier above (an explicit
-# operator escape always wins) and before the INJECT/BLOCK ladder below (so
-# it covers BOTH the free-text patterns that ladder silently passes through
-# at line ~148, AND the symbol-shaped patterns it would otherwise BLOCK --
-# converting the deny into a working answer is the point of #876). Only a
-# single, non-compound invocation is attempted -- a wrong rewrite inside a
-# pipeline is worse than no rewrite.
-case "$BINARY" in
-  grep | rg | "git grep")
-    if ! _legion_bashgrep_is_compound "$COMMAND"; then
-      _legion_bashgrep_classify "$COMMAND" "$BINARY" "$REPO"
-      # The hook's own sanctioned extractor and this classifier's
-      # independent re-derivation must agree on the pattern. A mismatch
-      # means the two parses diverged somewhere -- do not guess which one
-      # is right, fall through to the existing ladder unchanged.
-      if [ -n "$RW_CMD" ] && [ "$RW_PATTERN" != "$PATTERN" ]; then
-        RW_CMD=""
-      fi
-      if [ -n "$RW_CMD" ]; then
-        SCOPE_NOTE=""
-        case "$BINARY" in
-          grep)
-            SCOPE_NOTE="
+# can answer (#707). Runs after the bypass tier above (an explicit operator
+# escape always wins) and before the INJECT/BLOCK ladder below, but ONLY
+# when the pattern does NOT already resolve to a local symbol -- reusing
+# LOCAL_HITS (computed above, same predicate the BLOCK tier below uses,
+# never a second implementation of it). When LOCAL_HITS is non-empty, `sym
+# def` is a strictly better, byte-cheap, non-path-scoped answer than a
+# find-content scan; falling through lets the existing BLOCK tier give it
+# (#886 review: a rewrite there was not wrong, just worse than what the
+# ladder already had). REWRITE is for the case the old ladder handled
+# worst: free-text/regex patterns it silently passed straight through with
+# no local-symbol answer to redirect to.
+if [ -n "$LOCAL_HITS" ] && [ "$LOCAL_HITS" != "[]" ]; then
+  : # A local symbol answer exists -- let the BLOCK tier below give it.
+else
+  case "$BINARY" in
+    grep | rg | "git grep")
+      if ! _legion_bashgrep_is_compound "$COMMAND"; then
+        _legion_bashgrep_classify "$COMMAND" "$BINARY" "$REPO"
+        # The hook's own sanctioned extractor and this classifier's
+        # independent re-derivation must agree on the pattern. A mismatch
+        # means the two parses diverged somewhere -- do not guess which one
+        # is right, fall through to the existing ladder unchanged.
+        if [ -n "$RW_CMD" ] && [ "$RW_PATTERN" != "$PATTERN" ]; then
+          RW_CMD=""
+        fi
+        # Plain `grep` has no gitignore/hidden-file awareness at all, so
+        # its own scope is wider than find-content's default -- a rewrite
+        # there would return a plausible, non-empty, INCOMPLETE result set
+        # with no structural signal anything was left out (#886 review:
+        # the same failure shape as the truncated-pattern bug this file's
+        # history already treats as worse than a bypass, just quieter). A
+        # prose disclosure is not a structural signal. DENY instead, naming
+        # the gap. `rg` needs no such caveat -- its own defaults already
+        # match find-content's. `git grep` gets true parity via the
+        # `--hidden` classify() already appends, so it still rewrites.
+        if [ -n "$RW_CMD" ] && [ "$BINARY" = "grep" ]; then
+          REASON="Refusing to auto-rewrite this \`grep\` search to \`legion sym etc find-content\` -- \`grep -r\` has no gitignore/hidden-file awareness at all, so it can see files find-content's default scope excludes (gitignored content, dotfiles like .github/, .env).
 
-Note: unlike a raw \`grep -r\`, this does not see gitignored files or dotfiles (.github/, .env, etc.) by default -- legion will not silently widen a content search into gitignored territory. If you specifically need those, ask your operator."
-            ;;
-          "git grep")
+A rewrite at find-content's default scope would come back with a plausible, non-empty result set and no signal that anything was left out -- the same failure shape as a silently truncated pattern, just quieter. That is worse than refusing.
+
+If find-content's scope still answers your question: \`${RW_CMD} --hidden\` (adds back tracked dotfiles; still gitignore-respecting). If you specifically need gitignored files too, ask your operator -- legion will not silently widen a content search into gitignored territory via --no-ignore, which its own help text warns can surface secrets."
+          emit_deny "$REASON"
+          exit 0
+        fi
+        if [ -n "$RW_CMD" ]; then
+          SCOPE_NOTE=""
+          if [ "$BINARY" = "git grep" ]; then
             SCOPE_NOTE="
 
 \`--hidden\` was added so tracked dotfiles (.github/, .claude/, etc.) that \`git grep\` sees are not silently dropped -- find-content excludes hidden paths by default. Gitignored files stay out of scope either way, same as \`git grep\`."
-            ;;
-        esac
-        CTX="Translated your \`${BINARY}\` search to \`${RW_CMD}\`.
+          fi
+          CTX="Translated your \`${BINARY}\` search to \`${RW_CMD}\`.
 
 This is the sanctioned content-search path (#707) -- the same one the shell-grep block already points you to, run for you instead of denied.${SCOPE_NOTE}"
-        emit_rewrite "$RW_CMD" "$CTX" "routed through legion sym etc find-content (#876)"
-        exit 0
-      fi
-      if [ -n "$RW_DENY" ]; then
-        REASON="Refusing to auto-translate this \`${BINARY}\` search to \`legion sym etc find-content\` -- ${RW_DENY}.
+          emit_rewrite "$RW_CMD" "$CTX" "routed through legion sym etc find-content (#876)"
+          exit 0
+        fi
+        if [ -n "$RW_DENY" ]; then
+          REASON="Refusing to auto-translate this \`${BINARY}\` search to \`legion sym etc find-content\` -- ${RW_DENY}.
 
 Rewriting anyway would silently drop that and hand you results that do not answer what you asked, which is worse than refusing. If the plain search answers your question: \`legion sym etc find-content '${PATTERN}' --repo ${REPO}\`. Otherwise this shape is not on the sanctioned surface yet -- ask your operator, or use \`LEGION_BYPASS_GREP=1\` / \`# legion-bypass: <reason>\` for a one-off (refused for symbol-shaped patterns that resolve locally in this repo's SCIP index)."
-        emit_deny "$REASON"
-        exit 0
+          emit_deny "$REASON"
+          exit 0
+        fi
+        # Unclassifiable (unrecognized flag, subdirectory path, pattern
+        # mismatch) -- fall through to the existing ladder rather than guess.
       fi
-      # Unclassifiable (unrecognized flag, subdirectory path, pattern
-      # mismatch) -- fall through to the existing ladder rather than guess.
-    fi
-    ;;
-esac
+      ;;
+  esac
+fi
 
 # No hits: state 1 INJECT path is empty -- nothing to inject. Pass through
 # silently rather than emit a content-free additionalContext block (which

@@ -163,4 +163,18 @@ assert_not_contains "no --branch tee" "$pipe_out" '--branch tee'
 echo "==> #883: the compound guard is scoped to push -- unrelated compound git commands still pass through"
 assert_passthrough "compound but not a push" '"git status && echo hi"'
 
+echo "==> #886: a leading unrelated command no longer hides push from the compound guard"
+# Before #886, the subcommand walk only ever looked at the FIRST git
+# invocation: `git status && git push` found SUBCOMMAND="status", matched
+# neither the deny nor the rewrite path, and exited 0 -- a real
+# `git push` ran with no audit row, no deny, nothing. The guard must
+# fire regardless of what precedes `git push` in the chain, and
+# regardless of whether the FIRST word is even `git` at all.
+assert_compound_deny "leading unrelated git command"  '"git status && git push"'
+assert_compound_deny "leading non-git command"        '"npm test && git push"'
+assert_compound_deny "leading non-git, absolute path" '"npm test && /usr/bin/git push"'
+
+echo "==> #886: still scoped to push -- a leading command chained to an unrelated git verb passes through"
+assert_passthrough "leading command, no push anywhere" '"npm test && git status"'
+
 finish_tests

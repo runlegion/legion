@@ -139,6 +139,49 @@ assert_denied "unrecognized short flag with attached value" '"git commit -Cmain"
 assert_denied "-m with no value"      '"git commit -m"'
 assert_denied "positional pathspec"   '"git commit -m fix extra.txt"'
 
+echo "==> denies live shell metacharacters this hook cannot evaluate on the ORIGINAL command's behalf"
+# Command substitution and glued shell operators inside the message value
+# were supposed to be evaluated when the ORIGINAL command ran. Capturing
+# them as inert literal text silently defeats that -- the substitution
+# never runs, and the raw syntax (or a truncated command) lands in history
+# instead. Deny is the only honest outcome: there is no lossless rewrite.
+# shellcheck disable=SC2016  # single-quoted ON PURPOSE: these are the
+# literal shell-substitution bytes under test. If they expanded here the
+# fixture would deliver already-evaluated text and the assertion would
+# prove nothing -- the exact vacuous-fixture trap that let the truncated
+# grep pattern pass its own test.
+# shellcheck disable=SC2016 # single-quoted printf format strings, on
+# purpose: these must reach jq as literal source text, never expand in
+# this test's own shell.
+HEREDOC_CMD=$(printf 'git commit -m "$(cat <<'"'"'EOF'"'"'\nfix(x): real subject\n\nCo-Authored-By: Someone <a@b.c>\nEOF\n)"' | jq -Rs .)
+assert_denied "heredoc-in-command-substitution (repro 1)" "$HEREDOC_CMD"
+# shellcheck disable=SC2016 # same: literal text, not expansion.
+DATE_SUBST_CMD=$(printf 'git commit -m "fix(#123): $(date +%%F) rollout"' | jq -Rs .)
+assert_denied "command substitution mid-message (repro 2)" "$DATE_SUBST_CMD"
+assert_denied "glued && absorbs a second command (repro 3a)" '"git commit -m done&&true"'
+assert_denied "glued ; absorbs a second command (repro 3b)" '"git commit -m done;true"'
+# shellcheck disable=SC2016 # same: literal text, not expansion.
+BACKTICK_CMD=$(printf 'git commit -m done`id`' | jq -Rs .)
+assert_denied "glued backtick command substitution (repro 3c)" "$BACKTICK_CMD"
+assert_denied "bare pipe"  '"git commit -m done|cat"'
+# shellcheck disable=SC2016 # same: literal text, not expansion.
+DOLLAR_VAR_CMD=$(printf 'git commit -m "release $HOME build"' | jq -Rs .)
+assert_denied "bare \$VAR expansion inside double quotes (same class as \$(...))" "$DOLLAR_VAR_CMD"
+
+echo "==> but does NOT over-deny: single quotes are inert, escaped \$/\` are literal"
+# shellcheck disable=SC2016 # same: literal text, not expansion.
+SINGLE_QUOTED_SUBST_CMD=$(printf "git commit -m '\$(date) is not evaluated in single quotes'" | jq -Rs .)
+assert_rewritten "single-quoted \$(...) stays inert -- safe to rewrite" "$SINGLE_QUOTED_SUBST_CMD"
+SQ_CONTENT=$(extract_message_file "$SINGLE_QUOTED_SUBST_CMD")
+# shellcheck disable=SC2016 # matching against literal text, not expansion.
+assert_contains "single-quoted literal text preserved verbatim" "$SQ_CONTENT" '$(date) is not evaluated'
+# shellcheck disable=SC2016 # same: literal text, not expansion.
+ESCAPED_DOLLAR_CMD=$(printf 'git commit -m "price is \\$5"' | jq -Rs .)
+assert_rewritten "backslash-escaped \\\$ inside double quotes is literal, not live" "$ESCAPED_DOLLAR_CMD"
+ESC_CONTENT=$(extract_message_file "$ESCAPED_DOLLAR_CMD")
+# shellcheck disable=SC2016 # matching against literal text, not expansion.
+assert_contains "escaped dollar preserved as a literal character" "$ESC_CONTENT" 'price is $5'
+
 echo "==> a denied commit does NOT carry a rewrite"
 assert_not_contains "amend is never silently translated" \
   "$(run_hook '"git commit --amend"')" '"updatedInput"'
@@ -170,5 +213,30 @@ assert_not_contains "-C target uncovered (no deny)" "$uncovered_c_out" '"permiss
 
 echo "==> honours the skip switch"
 LEGION_SKIP_GIT_COMMIT=1 assert_passthrough "LEGION_SKIP_GIT_COMMIT=1" '"git commit -m fix"'
+
+echo "==> #886: a leading unrelated command no longer hides commit from the compound guard"
+# Before #886, the subcommand walk only ever looked at the FIRST git
+# invocation: `git add -A && git commit -m x` found SUBCOMMAND="add",
+# matched neither the deny nor the rewrite path, and exited 0 -- a real
+# `git commit` ran with no audit row, no message validation, no signer
+# preflight, nothing. The guard must fire regardless of what precedes
+# `git commit` in the chain, and regardless of whether the first word is
+# even `git` at all -- `git add -A && git commit -m "..." && git push`
+# is the standard shape an agent lands work with.
+assert_denied "leading unrelated git command"  '"git add -A && git commit -m fix"'
+assert_denied "leading non-git command"        '"npm test && git commit -m fix"'
+assert_denied "full land-work chain"           '"git add -A && git commit -m fix && git push"'
+LAND_WORK_OUT=$(run_hook '"git add -A && git commit -m fix && git push"')
+assert_not_contains "land-work chain not silently rewritten" "$LAND_WORK_OUT" '"updatedInput"'
+
+echo "==> #886: still scoped to commit -- a leading command chained to an unrelated git verb passes through"
+assert_passthrough "leading command, no commit anywhere" '"npm test && git status"'
+
+echo "==> #886: a genuinely safe message is NOT over-denied by the compound guard"
+# The compound fallback above only fires when `commit` is not the FIRST
+# subcommand -- confirmed here: a normal commit whose single-quoted
+# message happens to contain metacharacters (already covered above) and
+# a normal commit with no composition at all must still rewrite cleanly.
+assert_rewritten "plain commit still rewrites, unaffected by the #886 guard" '"git commit -m fix"'
 
 finish_tests
