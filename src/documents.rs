@@ -90,7 +90,7 @@ impl Database {
             _ => Uuid::now_v7().to_string(),
         };
         let status = meta.status.unwrap_or("draft");
-        let payload = normalize_payload_criteria(payload)?;
+        let payload = normalize_payload_criteria(&id, payload)?;
 
         self.conn.execute(
             "INSERT INTO documents (id, type, surface, status, priority, owner, payload, created_at, updated_at) \
@@ -170,7 +170,7 @@ impl Database {
         }
 
         let now = Utc::now().to_rfc3339();
-        let normalized_payload = normalize_payload_criteria(payload)?;
+        let normalized_payload = normalize_payload_criteria(id, payload)?;
 
         if let Some(card_id) = self.live_card_bound_to_document(id)? {
             let has_meta = serde_json::from_str::<serde_json::Value>(&normalized_payload)
@@ -657,7 +657,18 @@ fn check_value(
 /// Hard-errors on a duplicate id across two criteria in the same array: a
 /// shared id collapses `verify::decide_spec`'s required-id set to one
 /// entry, silently letting a single verdict "cover" two criteria.
-fn normalize_criteria(payload_value: &mut serde_json::Value) -> Result<bool> {
+///
+/// Also hard-errors (#882 simplify finding 2) on a `criteria` entry that is
+/// not a JSON object: `resolve_spec_criteria` (src/cli/verify.rs, HIGH-2)
+/// already refuses that same shape when reading criteria back for verify,
+/// so leaving it untouched here would let a document be *written* with a
+/// criterion that can *never* pass verify -- accepted at write time, then
+/// hard-rejected downstream on someone else's card. Refusing here instead
+/// puts the failure at the write the author controls. Because
+/// `revise_document` always replaces the whole payload, this never
+/// permanently strands an existing document: resubmitting a payload with
+/// the offending entry fixed or dropped still succeeds.
+fn normalize_criteria(doc_id: &str, payload_value: &mut serde_json::Value) -> Result<bool> {
     let Some(criteria) = payload_value
         .get_mut("verification")
         .and_then(|v| v.get_mut("criteria"))
@@ -668,13 +679,12 @@ fn normalize_criteria(payload_value: &mut serde_json::Value) -> Result<bool> {
 
     let mut mutated = false;
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for item in criteria.iter_mut() {
+    for (idx, item) in criteria.iter_mut().enumerate() {
         let Some(obj) = item.as_object_mut() else {
-            // Malformed entry (not a JSON object): leave untouched.
-            // `resolve_spec_criteria` filters non-conforming entries out
-            // when reading criteria back, so this is not a silent data
-            // hazard -- it just does not gain a stable id.
-            continue;
+            return Err(LegionError::WorkSource(format!(
+                "document '{doc_id}' verification.criteria[{idx}] is not a JSON object -- \
+                 a malformed spec entry is refused, not silently written"
+            )));
         };
         let existing_id = obj
             .get("id")
@@ -708,11 +718,11 @@ fn normalize_criteria(payload_value: &mut serde_json::Value) -> Result<bool> {
 /// JSON is returned unchanged -- this function is a best-effort normalizer,
 /// not a second JSON validator (the CLI layer already validates payload
 /// shape before calling `insert_document`/`revise_document`).
-fn normalize_payload_criteria(payload: &str) -> Result<String> {
+fn normalize_payload_criteria(doc_id: &str, payload: &str) -> Result<String> {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else {
         return Ok(payload.to_string());
     };
-    if normalize_criteria(&mut value)? {
+    if normalize_criteria(doc_id, &mut value)? {
         Ok(value.to_string())
     } else {
         Ok(payload.to_string())
@@ -1392,5 +1402,71 @@ mod tests {
             err.to_string().contains("archived"),
             "error must say the document is archived: {err}"
         );
+    }
+
+    // -- normalize_criteria: non-object entries (#882 simplify finding 2) --
+
+    /// A `criteria` entry that is not a JSON object (e.g. a bare string)
+    /// must be refused at insert, not written through untouched --
+    /// `resolve_spec_criteria` (src/cli/verify.rs, HIGH-2) already refuses
+    /// that same shape when reading criteria back for verify, so accepting
+    /// it here would create a document that can never pass verify.
+    #[test]
+    fn insert_document_rejects_non_object_criterion_entry() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "verification": {
+                "criteria": [
+                    {"text": "does the thing"},
+                    "not an object"
+                ]
+            }
+        })
+        .to_string();
+        let err = db
+            .insert_document(&sample_meta("requirement", "mail"), &payload)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("criteria[1]"),
+            "error must name the offending index: {err}"
+        );
+    }
+
+    /// A document with a malformed criteria entry already in storage
+    /// (representing data written before this guard existed) is not
+    /// permanently stuck: `revise_document` replaces the whole payload, so
+    /// resubmitting a corrected criteria array -- with the bad entry
+    /// dropped -- still succeeds. A write-time refusal must not make an
+    /// existing document unrevisable.
+    #[test]
+    fn revise_document_recovers_a_document_with_a_preexisting_malformed_entry() {
+        let db = test_db();
+        let mut m = sample_meta("requirement", "mail");
+        m.id = Some("FR-LEGACY-BAD");
+        db.insert_document(&m, r#"{"meta":{}}"#).unwrap();
+
+        // Simulate data already in storage before this guard existed:
+        // write a non-object criteria entry directly, bypassing
+        // normalize_criteria.
+        db.conn
+            .execute(
+                "UPDATE documents SET payload = ?1 WHERE id = ?2",
+                params![
+                    r#"{"meta":{},"verification":{"criteria":["not an object"]}}"#,
+                    "FR-LEGACY-BAD",
+                ],
+            )
+            .unwrap();
+
+        let fixed = serde_json::json!({
+            "meta": {},
+            "verification": {"criteria": [{"text": "fixed criterion"}]}
+        })
+        .to_string();
+        let revised = db.revise_document("FR-LEGACY-BAD", &fixed).expect(
+            "revise with a corrected payload must succeed even though the stored \
+                     document previously carried a malformed entry",
+        );
+        assert!(revised.payload.contains("fixed criterion"));
     }
 }

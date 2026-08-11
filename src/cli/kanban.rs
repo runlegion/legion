@@ -680,36 +680,64 @@ fn propagate_card_reopen_to_worksource(
 /// CURRENT spec revision (#882 review, HIGH-3), and why.
 ///
 /// `ac_source` is the label `resolve_acceptance_criteria` returned
-/// (`"spec:<doc_id>"` for a spec-bound card, `"card"` otherwise). Returns
-/// `None` -- not stale, or nothing to compare -- when: the card is not
-/// spec-bound; the gate's `details` did not parse or carry a `results`
-/// array; or none of the recorded results carry a `spec_revision` (the
-/// legacy free-text `AcResult` format was used, which cites no revision).
-/// Otherwise compares the (first) cited `spec_revision` against
-/// `Database::document_revision` for the bound document and returns a
-/// human-readable reason naming both numbers when the cited revision is
-/// behind the document's current one.
+/// (`"spec:<doc_id>"` for a spec-bound card, `"card"` otherwise).
+///
+/// Returns `Ok(None)` -- not stale, or nothing to compare -- in two
+/// genuinely different situations that both mean "allow": the card is not
+/// spec-bound, or the gate's recorded results carry no `spec_revision` at
+/// all (the legacy free-text `AcResult` format, which cites no revision by
+/// design). That is a real determination -- the gate predates the
+/// revision-citing format -- not an unknown, so it stays a silent no-op.
+///
+/// Returns `Err` -- which the caller must surface and block on, not
+/// silently allow -- when `Database::document_revision` cannot resolve the
+/// bound document: a DB error, or a document that no longer exists. That
+/// check cannot determine the answer at all (#882 simplify finding 1), and
+/// a gate that cannot answer must refuse rather than pass through as "not
+/// stale".
+///
+/// Otherwise compares the (first) cited `spec_revision` against the
+/// document's current revision and returns `Ok(Some(reason))` naming both
+/// numbers when the cited revision is behind, `Ok(None)` when it is current.
 fn stale_spec_gate_reason(
     database: &db::Database,
     ac_source: &str,
     gate: &db::quality_gates::QualityGateRow,
-) -> Option<String> {
-    let doc_id = ac_source.strip_prefix("spec:")?;
-    let details: serde_json::Value = serde_json::from_str(gate.details.as_deref()?).ok()?;
-    let recorded_revision = details
-        .get("results")?
-        .as_array()?
-        .iter()
-        .find_map(|r| r.get("spec_revision").and_then(|v| v.as_i64()))?;
-    let current_revision = database.document_revision(doc_id).ok()?;
-    if recorded_revision < current_revision {
+) -> error::Result<Option<String>> {
+    let Some(doc_id) = ac_source.strip_prefix("spec:") else {
+        return Ok(None);
+    };
+    let Some(details_str) = gate.details.as_deref() else {
+        return Ok(None);
+    };
+    let Ok(details) = serde_json::from_str::<serde_json::Value>(details_str) else {
+        return Ok(None);
+    };
+    let Some(recorded_revision) =
+        details
+            .get("results")
+            .and_then(|r| r.as_array())
+            .and_then(|results| {
+                results
+                    .iter()
+                    .find_map(|r| r.get("spec_revision").and_then(|v| v.as_i64()))
+            })
+    else {
+        return Ok(None);
+    };
+    let current_revision = database.document_revision(doc_id).map_err(|e| {
+        error::LegionError::WorkSource(format!(
+            "cannot confirm the verify gate for document '{doc_id}' is current: {e}"
+        ))
+    })?;
+    Ok(if recorded_revision < current_revision {
         Some(format!(
             "gate recorded against spec revision {recorded_revision}, document '{doc_id}' \
              is now at revision {current_revision}"
         ))
     } else {
         None
-    }
+    })
 }
 
 pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> error::Result<()> {
@@ -742,13 +770,23 @@ pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> err
                         // entirely: the gate is still recorded Clean, it
                         // simply no longer matches the spec it was formed
                         // against. Re-check against the CURRENT revision here.
-                        if let Some(reason) = stale_spec_gate_reason(&database, &ac_source, &gate) {
-                            eprintln!(
-                                "[legion] error: verify gate for card {card_id} is stale: \
-                                 {reason}. Re-run verify against the current spec revision \
-                                 before Done."
-                            );
-                            return Err(error::LegionError::ExitWith(1));
+                        match stale_spec_gate_reason(&database, &ac_source, &gate) {
+                            Ok(Some(reason)) => {
+                                eprintln!(
+                                    "[legion] error: verify gate for card {card_id} is stale: \
+                                     {reason}. Re-run verify against the current spec revision \
+                                     before Done."
+                                );
+                                return Err(error::LegionError::ExitWith(1));
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                eprintln!(
+                                    "[legion] error: verify gate for card {card_id} could not \
+                                     be confirmed current: {e}. Re-run verify before Done."
+                                );
+                                return Err(error::LegionError::ExitWith(1));
+                            }
                         }
                     }
                     Some(_) => {
@@ -1231,4 +1269,95 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::quality_gates::QualityGateInput;
+    use crate::db::testutil::test_db;
+    use crate::verify::GateProvenance;
+
+    /// Records a Clean legion-verify gate citing `spec_revision` against
+    /// `doc_id`, mirroring the shape `finish_verify` (src/cli/verify.rs)
+    /// writes for a spec-bound `SpecAcResult` verdict.
+    fn spec_gate_row(
+        db: &db::Database,
+        doc_id: &str,
+        spec_revision: i64,
+    ) -> db::quality_gates::QualityGateRow {
+        let details = serde_json::json!({
+            "skill": "legion-verify",
+            "results": [{
+                "spec_doc_id": doc_id,
+                "spec_revision": spec_revision,
+                "criterion_id": "c1",
+                "verdict": "pass",
+                "artifacts": []
+            }]
+        })
+        .to_string();
+        db.record_quality_gate(&QualityGateInput {
+            branch: "feat/x",
+            commit_hash: "deadbeef",
+            skill: "legion-verify:card-1",
+            result: GateResult::Clean,
+            findings_count: 0,
+            details: Some(&details),
+            provenance: GateProvenance::Asserted,
+            base: None,
+        })
+        .unwrap()
+    }
+
+    // #882 simplify finding 1: a gate that cites a document that no longer
+    // resolves (deleted, or a DB error on lookup) must refuse -- the check
+    // genuinely cannot determine whether the gate is stale, and "cannot
+    // determine" must not silently read as "not stale".
+    #[test]
+    fn stale_spec_gate_reason_refuses_when_document_cannot_be_resolved() {
+        let db = test_db();
+        // No document with this id was ever created -- the same DB state a
+        // hard-deleted binding or a corrupted reference produces.
+        let gate = spec_gate_row(&db, "missing-doc", 1);
+
+        let err = stale_spec_gate_reason(&db, "spec:missing-doc", &gate)
+            .expect_err("an unresolvable document must refuse, not silently allow");
+        assert!(
+            err.to_string().contains("missing-doc"),
+            "error must name the document id: {err}"
+        );
+    }
+
+    // The legacy free-text `AcResult` format cites no `spec_revision` at
+    // all -- that is a real determination (the gate predates the
+    // revision-citing format), not an unknown, so it must stay a silent
+    // no-op distinct from the DB-error/missing-document case above.
+    #[test]
+    fn stale_spec_gate_reason_still_tolerates_legacy_shape_with_no_spec_revision() {
+        let db = test_db();
+        let details = serde_json::json!({
+            "skill": "legion-verify",
+            "results": [{"criterion": "x", "verdict": "pass", "evidence": "tests::x"}]
+        })
+        .to_string();
+        let gate = db
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "deadbeef",
+                skill: "legion-verify:card-1",
+                result: GateResult::Clean,
+                findings_count: 0,
+                details: Some(&details),
+                provenance: GateProvenance::Asserted,
+                base: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            stale_spec_gate_reason(&db, "spec:whatever-doc", &gate).unwrap(),
+            None,
+            "legacy-shape gates with no spec_revision must stay a silent no-op"
+        );
+    }
 }
