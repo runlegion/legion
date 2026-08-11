@@ -1383,7 +1383,10 @@ SESSIONSTART / COMPACT:
          `legion recall --domain checkpoint --limit 1` (same read path as
          SessionStart; no separate [COMPACT CHECKPOINT] domain).
        - Recalls branch-specific context if on feature branch
-       - Runs legion surface
+       - Calls emit_boot_core (hooks/lib/boot-sections.sh) -- the SAME
+         shared banner assembly session-start uses, so identity, operating
+         contract, pending replies, index, kanban, goal and budget survive
+         compaction (#879). legion surface is no longer called here.
        - Checks unread bullpen count
        - Action items: trust git over compaction summary, read checkpoint, resume
 
