@@ -1,7 +1,28 @@
 #!/bin/bash
-# Legion PreToolUse hook (#438): when a Bash command starts with a search
-# binary (grep|rg|ag|ack|find|fd), apply the three-state ladder:
+# Legion PreToolUse hook (#438, #876): when a Bash command starts with a
+# search binary (grep|rg|ag|ack|find|fd), or a search spelled as a git
+# subcommand (#829), apply this ladder:
 #
+#   0. REWRITE -- the command is a content search (grep/rg/`git grep`) that
+#                 `legion sym etc find-content` can answer LOSSLESSLY:
+#                 single (non-compound) invocation, no flag find-content
+#                 cannot express, no subdirectory path scoping. Replace the
+#                 command via updatedInput (#876) instead of denying --
+#                 `git grep` was the live bypass (permissions.deny matches
+#                 the first token, which for `git grep` is `git`) and the
+#                 old ladder below only advises on symbol-shaped patterns,
+#                 silently passing free-text/regex searches straight
+#                 through. This tier runs after the bypass tier (state 3
+#                 below) so an explicit operator escape still always wins,
+#                 and only for grep/rg/`git grep` -- `ag`/`ack` are left
+#                 alone (their default gitignore/hidden-file handling isn't
+#                 confidently known here) and `find`/`fd` search FILE
+#                 NAMES, not content, so they stay on the ladder below.
+#                 Anything not confidently classified (unrecognized flag,
+#                 subdirectory path argument, the two independent pattern
+#                 extractors disagreeing) falls through to the ladder
+#                 unchanged rather than guess -- see
+#                 `_legion_bashgrep_classify`'s doc comment.
 #   1. INJECT  -- repo not indexed or no high-confidence sym hit.
 #                 Emit additionalContext with whatever sym found.
 #   2. BLOCK   -- repo indexed AND `legion sym def` returned >=1 result.
@@ -12,8 +33,12 @@
 #                 hard escape (#560): mandatory shell-grep blocking is the
 #                 operator's permissions.deny, not this hook.
 #
-# Sibling of pre-grep.sh which covers the Grep and Glob tools. This hook is now SOFT FALLBACK GUIDANCE: the
-# mandatory shell-grep block is the operator's settings.json
+# Sibling of pre-grep.sh which covers the Grep and Glob tools -- those
+# guard a TOOL, and `updatedInput` rewrites a tool's arguments, not its
+# type, so a Grep/Glob call cannot become a Bash call and pre-grep.sh must
+# keep denying rather than rewriting. This hook covers Bash, so a rewrite
+# is possible. Beyond the REWRITE tier, this hook is SOFT FALLBACK
+# GUIDANCE: the mandatory shell-grep block is the operator's settings.json
 # permissions.deny (Bash(grep:*)/Bash(rg:*)/...), which is evaluated
 # before this hook runs and inherits to subagents. See
 # docs/decisions/2026-06-02-grep-blocking-is-operator-permissions.md.
@@ -55,6 +80,303 @@ fi
 # lib/emit.sh transitively.
 # shellcheck source=_legion-prequery.sh
 source "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-prequery.sh"
+
+# _legion_bashgrep_safe_head CMD -- echo the portion of CMD up to (not
+# including) the first shell chain/pipe/redirect operator (|, ;, >, <, &)
+# OUTSIDE single/double quotes, or the whole CMD when no such operator
+# exists. Quote-aware so a quoted pattern containing one of those
+# characters (`grep -E 'foo|bar' .` -- regex alternation, not a pipe) is
+# not truncated.
+#
+# THIS IS LOAD-BEARING (found via a real reproduction, #876 follow-up): the
+# naive `${cmd%%|*}` idiom used elsewhere in this codebase's pattern
+# extraction truncates on ANY literal `|`, quoted or not -- for
+# `grep -E 'foo|bar' .` it silently produces "grep -E 'foo", and a pattern
+# extracted from that truncated head is "foo", not "foo|bar". That is not a
+# failure that reads as a failure: the rewritten command runs, returns a
+# plausible non-empty result set, and the agent reads it as the answer to
+# the question it asked. `_legion_bashgrep_classify` must never derive its
+# own pattern this way.
+_legion_bashgrep_safe_head() {
+  local cmd="$1"
+  local i=0 len=${#cmd}
+  local in_single=0 in_double=0 c
+  while [ "$i" -lt "$len" ]; do
+    c="${cmd:$i:1}"
+    if [ "$in_single" -eq 1 ]; then
+      [ "$c" = "'" ] && in_single=0
+    elif [ "$in_double" -eq 1 ]; then
+      [ "$c" = '"' ] && in_double=0
+    else
+      case "$c" in
+        "'") in_single=1 ;;
+        '"') in_double=1 ;;
+        '|' | ';' | '>' | '<' | '&')
+          printf '%s' "${cmd:0:$i}"
+          return 0
+          ;;
+      esac
+    fi
+    i=$((i + 1))
+  done
+  printf '%s' "$cmd"
+}
+
+# _legion_bashgrep_is_compound CMD -- true (0) when CMD contains a shell
+# chain/pipe/redirect operator OUTSIDE single/double quotes. A wrong
+# rewrite inside a pipeline is worse than no rewrite, so callers skip the
+# REWRITE tier entirely when this returns true.
+_legion_bashgrep_is_compound() {
+  local cmd="$1"
+  local head
+  head="$(_legion_bashgrep_safe_head "$cmd")"
+  [ "${#head}" -lt "${#cmd}" ]
+}
+
+# _legion_bashgrep_classify CMD BINARY REPO -- attempt a lossless rewrite of
+# a grep-shaped Bash command (grep/rg/`git grep`) to
+# `legion sym etc find-content`. Sets, on return:
+#
+#   RW_CMD  -- non-empty: the rewritten command (success).
+#   RW_DENY -- non-empty: a specific flag find-content cannot express, with
+#              the reason. The caller denies rather than silently dropping
+#              the flag and running something not asked for.
+#
+# BOTH EMPTY means "could not confidently classify" -- the caller falls
+# through to the existing ladder rather than guess. This covers: an
+# unrecognized flag, a subdirectory path argument (find-content has no
+# path-scoping flag, only --repo/--ext -- narrowing would search more than
+# asked, so this is treated the same as an unrecognized flag rather than a
+# named deny, so the ladder's better BLOCK-tier answer for a genuinely
+# local symbol -- `sym def`, which is not path-scoped at all -- still
+# fires), and a mismatch between this function's own pattern extraction and
+# the hook's sanctioned `legion_prequery_extract_pattern` /
+# `legion_prequery_git_pattern` (the caller checks this; two independent
+# extractors disagreeing is a signal to not guess which one is right).
+_legion_bashgrep_classify() {
+  local cmd="$1" binary="$2" repo="$3"
+  RW_CMD=""
+  RW_DENY=""
+  RW_PATTERN=""
+
+  local head
+  head="$(_legion_bashgrep_safe_head "$cmd")"
+
+  local toks=()
+  IFS=' ' read -ra toks <<<"$head"
+
+  local start=1
+  if [ "$binary" = "git grep" ]; then
+    local gi=1
+    while [ "$gi" -lt "${#toks[@]}" ]; do
+      case "${toks[$gi]}" in
+        -C | -c | --git-dir | --work-tree | --namespace) gi=$((gi + 2)) ;;
+        -*) gi=$((gi + 1)) ;;
+        *) break ;;
+      esac
+    done
+    start=$((gi + 1))
+  fi
+
+  local pattern="" pattern_found=0
+  local path_args=()
+  local fixed_strings=0 ignore_case=0 ext=""
+  local seen_dashdash=0
+  local i="$start" t val
+  while [ "$i" -lt "${#toks[@]}" ]; do
+    t="${toks[$i]}"
+    if [ "$seen_dashdash" -eq 1 ]; then
+      # `git grep` convention: `--` separates the search args from the
+      # PATHSPEC that follows (pattern already found). Plain grep/rg
+      # convention: `--` just ends flag parsing -- the first positional
+      # after it is still the pattern if none was seen yet.
+      if [ "$binary" = "git grep" ] || [ "$pattern_found" -eq 1 ]; then
+        path_args+=("${t//[\"\']/}")
+      else
+        pattern="${t//[\"\']/}"
+        pattern_found=1
+      fi
+      i=$((i + 1))
+      continue
+    fi
+    case "$t" in
+      --)
+        seen_dashdash=1
+        ;;
+      -e | --regexp)
+        i=$((i + 1))
+        if [ "$i" -lt "${#toks[@]}" ]; then
+          pattern="${toks[$i]//[\"\']/}"
+          pattern_found=1
+        fi
+        ;;
+      --regexp=*)
+        pattern="${t#--regexp=}"
+        pattern="${pattern//[\"\']/}"
+        pattern_found=1
+        ;;
+      -r | -R | --recursive | -n | --line-number | -H | --with-filename | \
+        -E | --extended-regexp | --color | --color=* | --colour | --colour=*)
+        : # find-content already behaves this way -- no-op
+        ;;
+      -F | --fixed-strings | -Q | --literal)
+        fixed_strings=1
+        ;;
+      -i | --ignore-case)
+        ignore_case=1
+        ;;
+      --include=*)
+        val="${t#--include=}"
+        val="${val//[\"\']/}"
+        case "$val" in
+          '*.'*)
+            local extval="${val#\*.}"
+            case "$extval" in
+              '' | *[!a-zA-Z0-9_]*)
+                # Empty, or anything beyond a bare extension (another dot,
+                # a directory separator, more glob syntax) -- not a single
+                # simple extension. --ext takes exactly one extension.
+                RW_DENY="\`$t\` -- find-content only supports a single-extension filter (--ext: one extension, no directory globs)"
+                return 0
+                ;;
+              *)
+                ext="$extval"
+                ;;
+            esac
+            ;;
+          *)
+            RW_DENY="\`$t\` -- find-content only supports a single-extension filter (--ext: one extension, no directory globs)"
+            return 0
+            ;;
+        esac
+        ;;
+      --exclude*)
+        RW_DENY="\`$t\` -- find-content has no exclude filter"
+        return 0
+        ;;
+      -A* | --after-context* | -B* | --before-context* | -C* | --context*)
+        RW_DENY="\`$t\` (context lines) -- find-content returns matched lines only, no surrounding-context option"
+        return 0
+        ;;
+      -l | --files-with-matches)
+        RW_DENY="\`$t\` -- find-content returns per-line hits, not a files-only list"
+        return 0
+        ;;
+      -c | --count)
+        RW_DENY="\`$t\` -- find-content has no count mode"
+        return 0
+        ;;
+      -o | --only-matching)
+        RW_DENY="\`$t\` -- find-content prints the whole matching line, not just the matched substring"
+        return 0
+        ;;
+      -v | --invert-match)
+        RW_DENY="\`$t\` -- find-content has no invert-match mode"
+        return 0
+        ;;
+      -w | --word-regexp | -x | --line-regexp)
+        RW_DENY="\`$t\` -- find-content has no boundary-anchoring flag; silently rewriting the pattern would change what you asked for"
+        return 0
+        ;;
+      -P | --perl-regexp)
+        RW_DENY="\`$t\` -- find-content's regex engine (Rust regex) does not support PCRE lookaround/backreferences"
+        return 0
+        ;;
+      -[a-zA-Z][a-zA-Z0-9]*)
+        # Combined short-flag cluster (`-cE`, `-rn`, `-Fi`, `-A3`, ...).
+        # Decompose and classify each letter; a digit is a numeric value
+        # attached to a preceding A/B/C and carries no meaning of its own.
+        local cluster="${t#-}" cj ch cluster_lossy="" cluster_unknown=0
+        for ((cj = 0; cj < ${#cluster}; cj++)); do
+          ch="${cluster:$cj:1}"
+          case "$ch" in
+            [0-9]) ;;
+            r | R | n | H | E) ;;
+            F | Q) fixed_strings=1 ;;
+            i) ignore_case=1 ;;
+            A | B | C) cluster_lossy="-$ch (context lines) -- find-content returns matched lines only, no surrounding-context option" ;;
+            l) cluster_lossy="-l -- find-content returns per-line hits, not a files-only list" ;;
+            c) cluster_lossy="-c -- find-content has no count mode" ;;
+            o) cluster_lossy="-o -- find-content prints the whole matching line, not just the matched substring" ;;
+            v) cluster_lossy="-v -- find-content has no invert-match mode" ;;
+            w | x) cluster_lossy="-$ch -- find-content has no boundary-anchoring flag; silently rewriting the pattern would change what you asked for" ;;
+            P) cluster_lossy="-P -- find-content's regex engine (Rust regex) does not support PCRE lookaround/backreferences" ;;
+            *) cluster_unknown=1 ;;
+          esac
+        done
+        if [ "$cluster_unknown" -eq 1 ]; then
+          return 0
+        fi
+        if [ -n "$cluster_lossy" ]; then
+          RW_DENY="\`$t\` (${cluster_lossy})"
+          return 0
+        fi
+        ;;
+      -*)
+        # Unrecognized flag -- do not guess.
+        return 0
+        ;;
+      *)
+        if [ "$pattern_found" -eq 0 ]; then
+          pattern="${t//[\"\']/}"
+          pattern_found=1
+        else
+          path_args+=("${t//[\"\']/}")
+        fi
+        ;;
+    esac
+    i=$((i + 1))
+  done
+
+  [ -n "$pattern" ] || return 0
+
+  # -i combined with -F/--fixed-strings has no expressible equivalent --
+  # find-content's --fixed-strings has no case-insensitive companion flag.
+  if [ "$fixed_strings" -eq 1 ] && [ "$ignore_case" -eq 1 ]; then
+    RW_DENY="-i (combined with -F/--fixed-strings) -- find-content's --fixed-strings has no case-insensitive companion"
+    return 0
+  fi
+
+  # A subdirectory path argument cannot be expressed -- find-content has
+  # no path-scoping flag, only --repo (whole repo) and --ext (extension).
+  # Not a named deny (see the function doc comment): fall through
+  # unclassified so the BLOCK tier's `sym def` answer, which is not
+  # path-scoped at all, still fires for a genuinely local symbol.
+  local p
+  for p in "${path_args[@]}"; do
+    case "$p" in
+      . | ./) ;;
+      *) return 0 ;;
+    esac
+  done
+
+  RW_PATTERN="$pattern"
+
+  if [ "$ignore_case" -eq 1 ]; then
+    pattern="(?i)${pattern}"
+  fi
+
+  local cmd_arr=(legion sym etc find-content "$pattern" --repo "$repo")
+  if [ "$binary" = "git grep" ]; then
+    # find-content excludes hidden paths by default; `git grep` sees
+    # tracked dotfiles (.github/, .claude/, ...). Added for parity, never
+    # --no-ignore -- that flag's own help text warns it can surface
+    # gitignored secrets (.env), which `git grep` would never see either.
+    cmd_arr+=(--hidden)
+  fi
+  if [ -n "$ext" ]; then
+    cmd_arr+=(--ext "$ext")
+  fi
+  if [ "$fixed_strings" -eq 1 ]; then
+    cmd_arr+=(--fixed-strings)
+  fi
+
+  local part rendered=""
+  for part in "${cmd_arr[@]}"; do
+    rendered="${rendered}$(printf '%q' "$part") "
+  done
+  RW_CMD="${rendered% }"
+}
 
 # Universal gate: skip uncovered repos.
 legion_hook_covered || exit 0
@@ -141,6 +463,60 @@ For symbols, \`legion sym def ${PATTERN}\` / \`sym refs\` / \`sym list\` answer 
     "$HAD_SYM" "false"
   exit 0
 fi
+
+# --- REWRITE tier (#876) ----------------------------------------------------
+#
+# grep/rg/`git grep` are content-search shapes `legion sym etc find-content`
+# can answer exactly (#707). Runs after the bypass tier above (an explicit
+# operator escape always wins) and before the INJECT/BLOCK ladder below (so
+# it covers BOTH the free-text patterns that ladder silently passes through
+# at line ~148, AND the symbol-shaped patterns it would otherwise BLOCK --
+# converting the deny into a working answer is the point of #876). Only a
+# single, non-compound invocation is attempted -- a wrong rewrite inside a
+# pipeline is worse than no rewrite.
+case "$BINARY" in
+  grep | rg | "git grep")
+    if ! _legion_bashgrep_is_compound "$COMMAND"; then
+      _legion_bashgrep_classify "$COMMAND" "$BINARY" "$REPO"
+      # The hook's own sanctioned extractor and this classifier's
+      # independent re-derivation must agree on the pattern. A mismatch
+      # means the two parses diverged somewhere -- do not guess which one
+      # is right, fall through to the existing ladder unchanged.
+      if [ -n "$RW_CMD" ] && [ "$RW_PATTERN" != "$PATTERN" ]; then
+        RW_CMD=""
+      fi
+      if [ -n "$RW_CMD" ]; then
+        SCOPE_NOTE=""
+        case "$BINARY" in
+          grep)
+            SCOPE_NOTE="
+
+Note: unlike a raw \`grep -r\`, this does not see gitignored files or dotfiles (.github/, .env, etc.) by default -- legion will not silently widen a content search into gitignored territory. If you specifically need those, ask your operator."
+            ;;
+          "git grep")
+            SCOPE_NOTE="
+
+\`--hidden\` was added so tracked dotfiles (.github/, .claude/, etc.) that \`git grep\` sees are not silently dropped -- find-content excludes hidden paths by default. Gitignored files stay out of scope either way, same as \`git grep\`."
+            ;;
+        esac
+        CTX="Translated your \`${BINARY}\` search to \`${RW_CMD}\`.
+
+This is the sanctioned content-search path (#707) -- the same one the shell-grep block already points you to, run for you instead of denied.${SCOPE_NOTE}"
+        emit_rewrite "$RW_CMD" "$CTX" "routed through legion sym etc find-content (#876)"
+        exit 0
+      fi
+      if [ -n "$RW_DENY" ]; then
+        REASON="Refusing to auto-translate this \`${BINARY}\` search to \`legion sym etc find-content\` -- ${RW_DENY}.
+
+Rewriting anyway would silently drop that and hand you results that do not answer what you asked, which is worse than refusing. If the plain search answers your question: \`legion sym etc find-content '${PATTERN}' --repo ${REPO}\`. Otherwise this shape is not on the sanctioned surface yet -- ask your operator, or use \`LEGION_BYPASS_GREP=1\` / \`# legion-bypass: <reason>\` for a one-off (refused for symbol-shaped patterns that resolve locally in this repo's SCIP index)."
+        emit_deny "$REASON"
+        exit 0
+      fi
+      # Unclassifiable (unrecognized flag, subdirectory path, pattern
+      # mismatch) -- fall through to the existing ladder rather than guess.
+    fi
+    ;;
+esac
 
 # No hits: state 1 INJECT path is empty -- nothing to inject. Pass through
 # silently rather than emit a content-free additionalContext block (which

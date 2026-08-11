@@ -218,4 +218,185 @@ echo "==> git shapes are classified as such"
 legion_prequery_is_git_shape "git grep" && echo "  PASS: git grep is a git shape" || echo "  FAIL: git grep is a git shape"
 legion_prequery_is_git_shape "grep" && echo "  FAIL: plain grep misclassified" || echo "  PASS: plain grep is not a git shape"
 
+
+# --- #876: REWRITE tier -- grep-shaped searches -> find-content -------------
+#
+# grep/rg/`git grep` are content-search shapes `legion sym etc find-content`
+# can answer exactly. Convert deny-and-explain (or, below the symbol-hit
+# threshold, silent pass-through) into a rewrite when it is lossless.
+
+echo "==> #876 REWRITE: bare git grep (no path scoping) rewrites, adds --hidden for dotfile parity"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"git grep Symbol"},"session_id":"rw-gitgrep-t"}' | bash "$HOOK")
+assert_contains "updatedInput present" "$out" '"updatedInput"'
+assert_contains "rewritten command names find-content" "$out" 'sym etc find-content'
+assert_contains "rewritten command carries the pattern" "$out" 'Symbol'
+assert_contains "rewritten command scopes to repo" "$out" '--repo legion'
+assert_contains "git grep rewrite adds --hidden for tracked-dotfile parity" "$out" '--hidden'
+assert_contains "CTX announces the translation" "$out" 'Translated your'
+assert_not_contains "git grep rewrite never adds --no-ignore (secrets hazard)" "$out" 'no-ignore'
+
+echo "==> #876 REWRITE: git grep -- . (trivial path) still rewrites"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"git grep -n Symbol -- ."},"session_id":"rw-gitgrep-dot-t"}' | bash "$HOOK")
+assert_contains "trivial . path still rewrites" "$out" '"updatedInput"'
+
+echo "==> #876 REWRITE: git grep with a real subdirectory pathspec falls through unchanged (BLOCK tier still fires for the local symbol)"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"git grep -n Symbol -- src"},"session_id":"rw-gitgrep-path-t"}' | bash "$HOOK")
+assert_not_contains "path-scoped git grep is not rewritten" "$out" '"updatedInput"'
+assert_contains "falls through to the existing BLOCK guidance instead" "$out" 'legion sym def'
+
+echo "==> #876 REWRITE: bare grep -rn PAT . rewrites, discloses gitignore/hidden scope caveat"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -rn fn_main ."},"session_id":"rw-grep-t"}' | bash "$HOOK")
+assert_contains "grep rewrite present" "$out" '"updatedInput"'
+assert_contains "grep rewrite names find-content" "$out" 'sym etc find-content'
+assert_contains "grep rewrite discloses gitignore/hidden scope caveat" "$out" 'gitignored files or dotfiles'
+assert_not_contains "grep rewrite does not silently add --hidden" "$out" '--hidden'
+assert_not_contains "grep rewrite never adds --no-ignore (secrets hazard)" "$out" 'no-ignore'
+
+echo "==> #876 REWRITE: rg PAT rewrites with no scope caveat (rg's own defaults already match find-content's)"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"rg fn_main"},"session_id":"rw-rg-t"}' | bash "$HOOK")
+assert_contains "rg rewrite present" "$out" '"updatedInput"'
+assert_not_contains "rg rewrite has no gitignore caveat" "$out" 'gitignored files or dotfiles'
+
+echo "==> #876 REWRITE: -F/--fixed-strings translates directly"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -F fn_main ."},"session_id":"rw-fixed-t"}' | bash "$HOOK")
+assert_contains "fixed-strings carried through" "$out" '--fixed-strings'
+
+echo "==> #876 REWRITE: -i translates to an inline (?i) regex prefix"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -i fn_main ."},"session_id":"rw-icase-t"}' | bash "$HOOK")
+# printf %q shell-escapes the parens/`?` in `(?i)` for safe re-execution
+# (they are shell metacharacters), so the raw JSON carries the escaped
+# form -- assert on the substring that survives escaping either way.
+assert_contains "case-insensitive prefix applied" "$out" '?i'
+
+echo "==> #876 REWRITE: --include=*.rs (single simple extension) translates to --ext rs"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -rn fn_main --include=*.rs ."},"session_id":"rw-include-t"}' | bash "$HOOK")
+assert_contains "--include=*.rs becomes --ext rs" "$out" '--ext rs'
+
+echo "==> #876 REWRITE: leading-dash pattern via -e survives quoting intact (known hazard: a hyphen-leading pattern must not silently misparse)"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -rn -e --domain-thing ."},"session_id":"rw-dash-pattern-t"}' | bash "$HOOK")
+assert_contains "leading-dash pattern (via -e) rewrites" "$out" '"updatedInput"'
+assert_contains "pattern is carried into the rewritten command" "$out" 'domain-thing'
+
+echo "==> #876 consistency check: a shape where the sanctioned extractor and this classifier would disagree does not guess"
+# The sanctioned extractor (legion_prequery_extract_pattern) has no special
+# handling for a bare `--` end-of-options marker -- it treats `--` and
+# whatever leading-dash token follows it as more flags to skip, so for
+# `grep -rn -- --spacing-0.5 .` it would derive "." as the pattern. This
+# classifier's own `--` handling derives "--spacing-0.5". The mismatch must
+# short-circuit the rewrite rather than trust either guess.
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -rn -- --spacing-0.5 ."},"session_id":"rw-mismatch-t"}' | bash "$HOOK")
+assert_not_contains "extractor disagreement -- no rewrite" "$out" '"updatedInput"'
+assert_not_contains "extractor disagreement -- no deny either (unclassified, not lossy)" "$out" '"permissionDecision": "deny"'
+
+echo "==> #876 REGRESSION (reported by team-lead): a quoted alternation must never rewrite to a SILENTLY TRUNCATED pattern"
+# Root cause: the sanctioned extractor (legion_prequery_extract_pattern in
+# _legion-prequery.sh, out of this card's scope) truncates its head on the
+# first literal `|`/`;`/`>`/`<` REGARDLESS of quoting -- for
+# `grep -E 'foo|bar' .` it derives "foo", not "foo|bar". This classifier's
+# OWN extraction is quote-aware (_legion_bashgrep_safe_head) and correctly
+# derives the full "foo|bar", which now DISAGREES with the sanctioned
+# extractor's "foo" -- the consistency check (RW_PATTERN != $PATTERN) must
+# catch that disagreement and refuse to guess, rather than rewrite with
+# either value. The correct, safe outcome here is NO rewrite at all (falls
+# through to the pre-#876 ladder), not a rewrite carrying a truncated
+# pattern that reads as a plausible, wrong answer.
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -E '"'"'foo|bar'"'"' ."},"session_id":"rw-quoted-pipe-t"}' | bash "$HOOK")
+assert_not_contains "quoted alternation is NOT rewritten (sanctioned extractor still truncates it, so we cannot trust either value)" "$out" '"updatedInput"'
+assert_not_contains "the truncated pattern never appears as if it were the full answer" "$out" 'find-content foo --repo'
+
+echo "==> #876 REGRESSION: the same truncate-inside-quotes hazard for ; and > and < (all also truncation chars in the sanctioned extractor -- same safe fall-through)"
+for pat in 'foo;bar' 'foo>bar' 'foo<bar'; do
+  out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep -E '$pat' .\"},\"session_id\":\"rw-trunc-$pat-t\"}" | bash "$HOOK")
+  assert_not_contains "quoted '$pat' is not rewritten with a truncated value" "$out" '"updatedInput"'
+done
+
+echo "==> #876: a quoted single & is NOT a sanctioned-extractor truncation char, so both extractors agree and the FULL pattern (with &) survives a real rewrite"
+# Needles avoid the backslash printf %q/jq double-escape into the raw JSON
+# (a fragile exact-match) -- checking the text on both sides of & is
+# sufficient proof the pattern was not cut at the &.
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -E '"'"'fn_main&other'"'"' ."},"session_id":"rw-amp-t"}' | bash "$HOOK")
+assert_contains "rewrite happens" "$out" '"updatedInput"'
+assert_contains "text before & survives" "$out" 'fn_main'
+assert_contains "text after & survives (not truncated there)" "$out" 'other'
+
+echo "==> #876: a quoted pattern using OTHER regex metacharacters (not truncation chars) survives a real rewrite fully intact -- proves the fix is not just suppressing everything"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -E '"'"'fn_main[0-9]+'"'"' ."},"session_id":"rw-brackets-t"}' | bash "$HOOK")
+assert_contains "rewrite happens" "$out" '"updatedInput"'
+assert_contains "text before the bracket class survives" "$out" 'fn_main'
+assert_contains "the character class content survives (not truncated)" "$out" '0-9'
+
+echo "==> #876 compound guard: a real (unquoted) pipe is never rewritten"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep fn_main . | wc -l"},"session_id":"rw-real-pipe-t"}' | bash "$HOOK")
+assert_not_contains "real pipeline is not rewritten" "$out" '"updatedInput"'
+
+echo "==> #876 DENY: context flags (-A/-B/-C) have no find-content equivalent"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -A3 fn_main ."},"session_id":"deny-context-t"}' | bash "$HOOK")
+assert_contains "context flag denied" "$out" '"permissionDecision": "deny"'
+assert_contains "denial names the flag" "$out" 'context lines'
+
+echo "==> #876 DENY: -l (files-with-matches)"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -l fn_main ."},"session_id":"deny-l-t"}' | bash "$HOOK")
+assert_contains "-l denied" "$out" '"permissionDecision": "deny"'
+assert_contains "denial explains files-only vs per-line" "$out" 'files-only list'
+
+echo "==> #876 DENY (known hazard): combined -cE cluster + a leading-dash pattern denies on -c, never silently returns an empty green result"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -cE \"--domain checkpoint\""},"session_id":"deny-hazard-t"}' | bash "$HOOK")
+assert_contains "combined -cE cluster denies on -c" "$out" '"permissionDecision": "deny"'
+assert_contains "denial names count mode" "$out" 'count mode'
+
+echo "==> #876 DENY: -o (only-matching)"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -o fn_main ."},"session_id":"deny-o-t"}' | bash "$HOOK")
+assert_contains "-o denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #876 DENY: -v (invert-match)"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -v fn_main ."},"session_id":"deny-v-t"}' | bash "$HOOK")
+assert_contains "-v denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #876 DENY: -w (word-regexp)"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -w fn_main ."},"session_id":"deny-w-t"}' | bash "$HOOK")
+assert_contains "-w denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #876 DENY: -x (line-regexp)"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -x fn_main ."},"session_id":"deny-x-t"}' | bash "$HOOK")
+assert_contains "-x denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #876 DENY: -P (perl-regexp)"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -P fn_main ."},"session_id":"deny-p-t"}' | bash "$HOOK")
+assert_contains "-P denied" "$out" '"permissionDecision": "deny"'
+assert_contains "denial explains PCRE gap" "$out" 'PCRE'
+
+echo "==> #876 DENY: --include with a non-simple-extension glob"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -rn fn_main --include=*.spec.ts ."},"session_id":"deny-include-t"}' | bash "$HOOK")
+assert_contains "complex --include denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #876 DENY: --exclude has no find-content equivalent"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -rn fn_main --exclude=vendor.rs ."},"session_id":"deny-exclude-t"}' | bash "$HOOK")
+assert_contains "--exclude denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #876 DENY: -i combined with -F -- no case-insensitive fixed-string equivalent"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -iF fn_main ."},"session_id":"deny-if-t"}' | bash "$HOOK")
+assert_contains "-i + -F combo denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #876: bypass tier still wins over the rewrite tier"
+rm -f "$LEGION_TEST_MARKER"
+# "freetextphrase" is not in any FAKE_SYM_* fixture, so this is the
+# non-symbol soft-bypass-allowed path, not the refused-on-local-hit path --
+# it must never even reach the rewrite classifier.
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep freetextphrase . # legion-bypass: manual check"},"session_id":"rw-bypass-wins-t"}' | bash "$HOOK")
+assert_not_contains "bypass wins -- no rewrite" "$out" '"updatedInput"'
+assert_empty "bypass allowed silently, same as before #876" "$out"
+assert_file_contains "bypass still recorded" "$LEGION_TEST_MARKER" "record-bypass"
+
+echo "==> #876: git log -S / --grep still pass through unchanged, never rewritten"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"git log -S find_plugin"},"session_id":"rw-gitlog-s-t"}' | bash "$HOOK")
+assert_empty "git log -S is not a content-search rewrite candidate" "$out"
+
+echo "==> #876: ag/ack are left on the existing ladder, not rewritten"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"ag fn_main ."},"session_id":"rw-ag-t"}' | bash "$HOOK")
+assert_not_contains "ag is not rewritten" "$out" '"updatedInput"'
+
+echo "==> #876: not-legion-covered repo -- no rewrite, same universal gate as everything else"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"git grep Symbol"},"session_id":"rw-uncovered-t"}' | LEGION_REPO=uncovered-elsewhere bash "$HOOK")
+assert_empty "uncovered repo -- no rewrite, no deny, nothing" "$out"
+
 finish_tests
