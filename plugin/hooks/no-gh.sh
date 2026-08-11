@@ -1,6 +1,30 @@
 #!/bin/bash
-# Block direct gh usage -- agents should use legion issue/pr/comment instead.
-# All work source actions go through legion for audit logging and workflow tracking.
+# Legion PreToolUse hook: translate or block direct gh usage.
+#
+# Three outcomes:
+#
+#   1. REWRITE -- the call is expressible losslessly as its legion
+#      equivalent: `pr view`, `pr checks`, `pr list`, `issue view`,
+#      `issue list`, each bare or carrying only --number. Replace the
+#      command via updatedInput and announce the translation (#862).
+#   2. DENY    -- everything else. Writes (merge, close, edit, review,
+#      comment) carry free-text arguments this tokenizer cannot safely
+#      round-trip -- `read -r -a` does no quote removal, so `--body "a b"`
+#      splits into `"a` and `b"` on the space. Flags with no legion
+#      equivalent (--json, --jq, --template, --web, -R/--repo) block a
+#      would-be rewrite and name the flag rather than silently dropping
+#      it. `gh pr diff` stays denied even though `pr view` exists: legion
+#      pr view renders metadata and body, never diff content, so mapping
+#      one to the other would silently swap what the agent asked for.
+#      `gh api` has no legion counterpart at all. Any invocation composed
+#      with a pipe, redirect, `&&`, `;`, or `$(...)` also denies --
+#      updatedInput.command replaces the WHOLE string, so rewriting it
+#      would silently drop everything after the gh call.
+#   3. PASS    -- not a gh invocation, repo not legion-covered, or a
+#      dependency missing. Fail open.
+#
+# All work source actions go through legion for audit logging and
+# workflow tracking (`legion audit`).
 
 # shellcheck source=lib/prelude.sh
 source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
@@ -16,6 +40,28 @@ fi
 
 # Skip enforcement in repos legion does not cover (#353).
 legion_hook_covered || exit 0
+
+# --- #886: compound commands deny BEFORE position-dependent detection -------
+#
+# `gh` does not have to be the FIRST word for this hook's guarantee to
+# matter: `echo hi && gh pr merge 123` reaches the real `gh` binary just
+# as surely as a bare `gh pr merge 123` does. The basename check below
+# only ever looks at the first token, so it silently passed a leading
+# unrelated command straight through -- checked here, independent of
+# where in the command `gh` sits, before that position-dependent check
+# ever runs. `updatedInput` replaces the WHOLE command string, so a
+# composed command showing `gh` anywhere always denies; there is no
+# segment of a chain this hook will classify or rewrite in isolation.
+if legion_hook_compound "$COMMAND" && legion_hook_token_present "$COMMAND" gh; then
+  emit_deny "Refusing -- this command is composed with something else (a pipe, redirect, \`&&\`, \`;\`, or \`\$(...)\`) and mentions \`gh\`, and legion's rewrite would replace the WHOLE command string.
+
+Translating it would either drop everything else in it or misread part of one command as an argument to another. Run the \`gh\` step (or its legion equivalent) and the rest of your pipeline as separate steps:
+
+    legion --help
+
+Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
+  exit 0
+fi
 
 # Check if the command invokes gh -- including by absolute path. Naive
 # prefix matching on `gh ` leaves /opt/homebrew/bin/gh, /usr/bin/gh,
@@ -82,9 +128,152 @@ fi
 
 NUM_ARG="--number ${NUMBER:-<n>}"
 
+# --- #862: rewrite the lossless read subset, deny everything else -----------
+#
+# `pr view`, `pr checks`, `pr list`, `issue view`, `issue list` are the
+# only arms converted to emit_rewrite. Every other verb keeps the
+# unmodified deny below -- see the file header for why.
+#
+# One guard gates every candidate before it is allowed to become a
+# rewrite: NUMBER absent -- gh resolves an omitted PR/issue number from
+# the current branch; legion has no equivalent and requires --number
+# explicit. Rather than emit a command with a "<n>" placeholder (bash
+# would read `--number <n>` as a redirect from a file named `n`), this
+# simply skips the rewrite attempt and falls through to the existing
+# deny below, which already renders the placeholder as text, never as
+# something executed.
+#
+# A compound command never reaches this section at all -- the #886 guard
+# near the top of the file denies before FIRST_BIN is even resolved, so
+# by the time GROUP/VERB/NUMBER are known, the command is guaranteed
+# uncomposed.
+
+# first_flag_token WANT... -- echo the first GH_TOKENS entry (after the
+# binary) matching one of the given flag spellings, exact token or
+# --flag=value form. Nothing echoed / return 1 on no match.
+first_flag_token() {
+  local tok want gi
+  for ((gi = 1; gi < ${#GH_TOKENS[@]}; gi++)); do
+    tok="${GH_TOKENS[$gi]}"
+    for want in "$@"; do
+      if [ "$tok" = "$want" ] || [ "${tok%%=*}" = "$want" ]; then
+        printf '%s\n' "$tok"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# any_flag_token -- echo the first GH_TOKENS entry (after the binary) that
+# looks like a flag at all. Used for `pr list` / `issue list`, which take
+# zero flags on the legion side -- any flag present means a filter would
+# silently vanish, not merely a display option.
+any_flag_token() {
+  local tok gi
+  for ((gi = 1; gi < ${#GH_TOKENS[@]}; gi++)); do
+    tok="${GH_TOKENS[$gi]}"
+    case "$tok" in
+      -*)
+        printf '%s\n' "$tok"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+REWRITE_CMD=""
+REWRITE_BLOCK_REASON=""
+NUM_SUFFIX=""
+case "$GROUP $VERB" in
+  "pr view" | "issue view" | "pr checks") NUM_SUFFIX=" --number ${NUMBER}" ;;
+esac
+
+case "$GROUP $VERB" in
+  "pr view")
+    if [ -n "$NUMBER" ]; then
+      BLOCKING=$(first_flag_token -c --comments -q --jq --json -t --template -w --web -R --repo) || true
+      if [ -n "$BLOCKING" ]; then
+        REWRITE_BLOCK_REASON="$BLOCKING"
+      else
+        REWRITE_CMD="legion pr view --repo ${REPO} --number ${NUMBER}"
+      fi
+    fi
+    ;;
+  "issue view")
+    if [ -n "$NUMBER" ]; then
+      BLOCKING=$(first_flag_token -c --comments -q --jq --json -t --template -w --web -R --repo) || true
+      if [ -n "$BLOCKING" ]; then
+        REWRITE_BLOCK_REASON="$BLOCKING"
+      else
+        REWRITE_CMD="legion issue view --repo ${REPO} --number ${NUMBER}"
+      fi
+    fi
+    ;;
+  "pr checks")
+    if [ -n "$NUMBER" ]; then
+      BLOCKING=$(first_flag_token -q --jq --json -t --template -w --web -R --repo --watch --fail-fast -i --interval --required) || true
+      if [ -n "$BLOCKING" ]; then
+        REWRITE_BLOCK_REASON="$BLOCKING"
+      else
+        REWRITE_CMD="legion pr checks --repo ${REPO} --number ${NUMBER}"
+      fi
+    fi
+    ;;
+  "pr list")
+    BLOCKING=$(any_flag_token) || true
+    if [ -n "$BLOCKING" ]; then
+      REWRITE_BLOCK_REASON="$BLOCKING"
+    else
+      REWRITE_CMD="legion pr list --repo ${REPO}"
+    fi
+    ;;
+  "issue list")
+    BLOCKING=$(any_flag_token) || true
+    if [ -n "$BLOCKING" ]; then
+      REWRITE_BLOCK_REASON="$BLOCKING"
+    else
+      REWRITE_CMD="legion issue list --repo ${REPO}"
+    fi
+    ;;
+esac
+
+if [ -n "$REWRITE_CMD" ]; then
+  emit_rewrite "$REWRITE_CMD" "Translated your \`gh ${GROUP} ${VERB}\` to \`${REWRITE_CMD}\`.
+
+This is the audited work-source path: the command lands in \`legion audit\` the way a raw \`gh\` call never does. Reach for \`legion ${GROUP} ${VERB}\` directly next time rather than relying on this translation." \
+    "routed through legion for the audit trail (#862)"
+  exit 0
+fi
+
+if [ -n "$REWRITE_BLOCK_REASON" ]; then
+  emit_deny "Use legion, not gh -- but \`${REWRITE_BLOCK_REASON}\` cannot be translated.
+
+\`${REWRITE_BLOCK_REASON}\` has no equivalent on \`legion ${GROUP} ${VERB}\`. Rewriting anyway would silently drop it and hand you a narrower answer than the one you asked for.
+
+Without that flag:
+    legion ${GROUP} ${VERB} --repo ${REPO}${NUM_SUFFIX}
+
+Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
+  exit 0
+fi
+
+# `pr diff` never becomes a rewrite: `pr_view.rs::render_pr` prints a PR's
+# metadata and body only, never diff content, so mapping `gh pr diff` onto
+# `legion pr view` would silently swap the code changes the agent asked
+# for with something else. Denied on purpose, not merely unclassified.
+if [ "$GROUP $VERB" = "pr diff" ]; then
+  emit_deny "Use legion, not gh -- but there is no legion equivalent for the diff itself.
+
+\`legion pr view --repo ${REPO} ${NUM_ARG}\` shows a PR's metadata and body -- never the diff content, so rewriting \`gh pr diff\` to it would silently hand you something other than what you asked for. No legion command renders a PR's diff.
+
+Work-source actions go through legion so they land in the audit log (\`legion audit\`); \`legion pr --help\` lists the full surface."
+  exit 0
+fi
+
 case "$GROUP $VERB" in
   "pr view")     SUGGESTION="legion pr view --repo ${REPO} ${NUM_ARG}" ;;
-  "pr diff")     SUGGESTION="legion pr view --repo ${REPO} ${NUM_ARG}" ;;
   "pr checks")   SUGGESTION="legion pr checks --repo ${REPO} ${NUM_ARG}" ;;
   "pr list")     SUGGESTION="legion pr list --repo ${REPO}" ;;
   "pr create")   SUGGESTION="legion pr create --repo ${REPO} --title '...' --closes <issue>" ;;

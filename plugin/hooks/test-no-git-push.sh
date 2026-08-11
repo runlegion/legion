@@ -109,4 +109,72 @@ assert_not_contains "repo not legion-covered (no deny)" "$uncovered_out" '"permi
 echo "==> honours the skip switch"
 LEGION_SKIP_GIT_PUSH=1 assert_passthrough "LEGION_SKIP_GIT_PUSH=1" '"git push"'
 
+echo "==> a rewrite PRESERVES the caller's other tool_input fields"
+# Regression: emit_rewrite once emitted a bare {"command": ...}, and
+# updatedInput replaces tool_input wholesale rather than merging -- so every
+# other field the caller sent was silently dropped. A backgrounded push came
+# back FOREGROUND and a raised timeout reverted to the default, while the
+# rewrite itself looked correct. Measured before the fix: updatedInput was
+# {"command":"legion push --repo legion"} and nothing else.
+preserve_out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push","description":"push the branch","timeout":600000,"run_in_background":true},"cwd":"/tmp/legion-test","session_id":"test"}' | bash "$HOOK")
+assert_contains "rewrite keeps description" "$preserve_out" '"description": "push the branch"'
+assert_contains "rewrite keeps timeout" "$preserve_out" '"timeout": 600000'
+assert_contains "rewrite keeps run_in_background" "$preserve_out" '"run_in_background": true'
+assert_contains "rewrite still replaces command" "$preserve_out" '"command": "legion push'
+
+echo "==> #883: composed commands never rewrite -- updatedInput replaces the WHOLE string"
+assert_compound_deny() {
+  local desc="$1" cmd="$2" out
+  out=$(run_hook "$cmd")
+  assert_contains "$desc (denied)" "$out" '"permissionDecision": "deny"'
+  assert_not_contains "$desc (no updatedInput)" "$out" '"updatedInput"'
+}
+assert_compound_deny "pipe"           '"git push | tee /tmp/log"'
+assert_compound_deny "and-chain"      '"git push && echo done"'
+assert_compound_deny "or-chain"       '"git push || echo failed"'
+assert_compound_deny "semicolon"      '"git push; git status"'
+assert_compound_deny "redirect"       '"git push > out.txt"'
+assert_compound_deny "input-redirect" '"git push < in.txt"'
+# shellcheck disable=SC2016 # single-quoted on purpose: must reach the
+# hook as literal text, never expand in this test's own shell.
+assert_compound_deny "cmd-subst"      '"git push $(id)"'
+# shellcheck disable=SC2016 # same: literal backtick, not command substitution.
+assert_compound_deny "backtick"       '"git push `id`"'
+
+echo "==> #883: a metacharacter glued directly onto push (no space) still denies, never passes through silently"
+# read -a splits on whitespace only, so `push;`, `push&&`, `push$(id)` each
+# tokenize as ONE word. Strict `[ "$SUBCOMMAND" = "push" ]` missed all of
+# these entirely -- the command reached no branch of this hook, deny or
+# rewrite, and a raw `git push` ran with no audit row. This is the specific
+# regression: assert it denies, not that it merely avoids one bad rewrite.
+assert_compound_deny "semicolon glued, no space"    '"git push;git status"'
+assert_compound_deny "and-chain glued, no space"    '"git push&&echo done"'
+# shellcheck disable=SC2016 # literal text, see above.
+assert_compound_deny "cmd-subst glued, no space"    '"git push$(id)"'
+
+echo "==> #883: composed commands never misread the next command's name as a branch"
+# Measured before this guard existed: these two rewrote to
+# `legion push --branch echo` / `... --branch tee`.
+and_out=$(run_hook '"git push && echo done"')
+assert_not_contains "no --branch echo" "$and_out" '--branch echo'
+pipe_out=$(run_hook '"git push | tee /tmp/log"')
+assert_not_contains "no --branch tee" "$pipe_out" '--branch tee'
+
+echo "==> #883: the compound guard is scoped to push -- unrelated compound git commands still pass through"
+assert_passthrough "compound but not a push" '"git status && echo hi"'
+
+echo "==> #886: a leading unrelated command no longer hides push from the compound guard"
+# Before #886, the subcommand walk only ever looked at the FIRST git
+# invocation: `git status && git push` found SUBCOMMAND="status", matched
+# neither the deny nor the rewrite path, and exited 0 -- a real
+# `git push` ran with no audit row, no deny, nothing. The guard must
+# fire regardless of what precedes `git push` in the chain, and
+# regardless of whether the FIRST word is even `git` at all.
+assert_compound_deny "leading unrelated git command"  '"git status && git push"'
+assert_compound_deny "leading non-git command"        '"npm test && git push"'
+assert_compound_deny "leading non-git, absolute path" '"npm test && /usr/bin/git push"'
+
+echo "==> #886: still scoped to push -- a leading command chained to an unrelated git verb passes through"
+assert_passthrough "leading command, no push anywhere" '"npm test && git status"'
+
 finish_tests

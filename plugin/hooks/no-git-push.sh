@@ -18,9 +18,22 @@
 #   1. REWRITE -- the push is expressible as `legion push`. Replace the
 #      command via updatedInput and announce the translation.
 #   2. DENY    -- the command carries semantics `legion push` cannot
-#      express (force, refspec, delete, tags, mirror, prune). Refuse and
-#      name the flag. Rewriting would silently drop it and run something
-#      the agent did not ask for.
+#      express (force, refspec, delete, tags, mirror, prune), OR is
+#      composed with something else via a pipe, `&`/`&&`, `;`, a
+#      redirect, `$(...)`, a backtick, or an embedded newline
+#      (legion_hook_compound, lib/prelude.sh -- shared with no-gh.sh so
+#      the two hooks cannot drift). Refuse and name the reason. Rewriting
+#      would silently drop it and run something the agent did not ask
+#      for -- measured before this guard existed: `git push && echo done`
+#      rewrote to `legion push --branch echo`, and `git push | tee
+#      /tmp/log` rewrote to `... --branch tee`. The classify loop below
+#      has no notion of shell composition, so it read the NEXT command's
+#      name as a branch argument (#883). The compound check also has to
+#      run independent of WHERE `push` sits: `git status && git push`
+#      silently passed through entirely, because the subcommand walk
+#      only ever looks at the first git invocation and never re-consults
+#      the compound flag once that walk finds something other than
+#      `push` (#886; legion_hook_token_present, lib/prelude.sh).
 #   3. PASS    -- not a git push, repo not legion-covered, or any
 #      dependency missing. Fail open; a PreToolUse hook that fails closed
 #      can wedge every session.
@@ -75,32 +88,86 @@ read -r -a TOKENS <<<"$COMMAND"
 [ "${#TOKENS[@]}" -ge 2 ] || exit 0
 
 FIRST_BIN="${TOKENS[0]##*/}"
-[ "$FIRST_BIN" = "git" ] || exit 0
 
 # Walk past git's own global options to find the subcommand. Options that
 # take a value (-C, -c, --git-dir, --work-tree, --namespace) consume the
-# next token too.
+# next token too. Only meaningful when the FIRST token is git -- for
+# anything else (including a leading unrelated command, see below) this
+# never runs and SUBCOMMAND stays empty.
 SUBCOMMAND=""
-IDX=1
-while [ "$IDX" -lt "${#TOKENS[@]}" ]; do
-  TOK="${TOKENS[$IDX]}"
-  case "$TOK" in
-    -C | -c | --git-dir | --work-tree | --namespace)
-      IDX=$((IDX + 2))
-      continue
-      ;;
-    -*)
-      IDX=$((IDX + 1))
-      continue
-      ;;
-    *)
-      SUBCOMMAND="$TOK"
-      break
-      ;;
-  esac
-done
+if [ "$FIRST_BIN" = "git" ]; then
+  IDX=1
+  while [ "$IDX" -lt "${#TOKENS[@]}" ]; do
+    TOK="${TOKENS[$IDX]}"
+    case "$TOK" in
+      -C | -c | --git-dir | --work-tree | --namespace)
+        IDX=$((IDX + 2))
+        continue
+        ;;
+      -*)
+        IDX=$((IDX + 1))
+        continue
+        ;;
+      *)
+        SUBCOMMAND="$TOK"
+        break
+        ;;
+    esac
+  done
+fi
 
-[ "$SUBCOMMAND" = "push" ] || exit 0
+# --- #883/#886: composed commands always deny, never rewrite or pass -------
+#
+# Two shapes reach this point with a composed command, and both must
+# deny the same way:
+#
+#   SUBCOMMAND == "push" cleanly, but something follows it (#883): "git
+#   push && echo done" and "git push | tee log" tokenize push as a clean
+#   word -- the walk above finds it immediately -- yet the classify loop
+#   further down has no notion of shell composition and would read the
+#   NEXT command's name as a branch argument (measured: rewrote to
+#   `legion push --branch echo` / `--branch tee`).
+#
+#   SUBCOMMAND != "push" (#886): either `push` is glued to a
+#   metacharacter with no space (`git push;`, `git push&&echo` tokenize
+#   as ONE word -- `read -a` splits on whitespace only), or `git push`
+#   is not the first command at all (`git status && git push`, `npm
+#   test && git push`). The walk above only ever looks at the FIRST git
+#   invocation's immediate subcommand, so both of these left SUBCOMMAND
+#   holding something other than exactly `push` and the old strict
+#   equality check exited 0 on all of them -- a raw `git push` ran with
+#   no audit row, no deny, no rewrite, nothing.
+#
+# Never attempt to classify or rewrite one segment of a chain --
+# `updatedInput` replaces the whole command string, so a per-segment
+# rewrite would drop the rest, or worse, misread another command's
+# argument as this one's. A compound command that does not mention `git
+# push` at all (`git status && echo hi`) is not this hook's concern and
+# passes through untouched, same as any other non-push command always
+# has.
+deny_compound_push() {
+  emit_deny "Refusing \`git push\` -- it's composed with something else (a pipe, redirect, \`&&\`, \`;\`, or \`\$(...)\`), and legion's rewrite would replace the WHOLE command string.
+
+Translating it would silently drop everything else in it -- or worse, misread part of it: this hook used to read the NEXT command's name as if it were a branch argument. Run the push and the rest of your pipeline as separate steps:
+
+    legion push --repo ${REPO}
+
+Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
+}
+
+if [ "$SUBCOMMAND" = "push" ]; then
+  if legion_hook_compound "$COMMAND"; then
+    deny_compound_push
+    exit 0
+  fi
+else
+  if legion_hook_compound "$COMMAND" \
+    && legion_hook_token_present "$COMMAND" git \
+    && legion_hook_token_present "$COMMAND" push; then
+    deny_compound_push
+  fi
+  exit 0
+fi
 
 # --- Classify the push -------------------------------------------------------
 #

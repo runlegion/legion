@@ -138,6 +138,77 @@ legion_hash_str() {
     || printf '%s\n' "$1" | md5sum 2>/dev/null | cut -d' ' -f1
 }
 
+# legion_hook_compound COMMAND -- true (0) when COMMAND is composed with
+# something else: a pipe, `&`/`&&`, `;`, a redirect, `$(...)`, a backtick,
+# or an embedded newline. Shared by every hook that can emit a REWRITE
+# (no-gh.sh, no-git-push.sh) so the check cannot drift between them.
+#
+# updatedInput.command replaces the tool's ENTIRE command string, and the
+# tokenizer each of those hooks uses to find its subcommand has no notion
+# of shell composition. Measured against no-git-push.sh before this
+# existed: `git push && echo done` rewrote to `legion push --branch echo`
+# and `git push | tee /tmp/log` rewrote to `... --branch tee` -- the
+# classify loop read the NEXT command's name as a branch argument (#883).
+# A composed command must always refuse the rewrite path, never attempt
+# to translate part of it.
+legion_hook_compound() {
+  # shellcheck disable=SC2016 # case glob patterns, not expansions -- the
+  # literal chars are what we're matching, single/ANSI-C quoting is correct.
+  case "$1" in
+    *'|'* | *'&'* | *';'* | *'>'* | *'<'* | *'$('* | *'`'* | *$'\n'*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# legion_hook_token_present COMMAND WORD -- true (0) when WORD appears
+# anywhere in COMMAND as a whitespace-delimited token, after stripping
+# (a) any leading/trailing run of shell metacharacters glued onto that
+# token with no space (";git", "push;", "&&push" all still match "git"/
+# "push") and (b) the token's directory prefix, so an absolute-path
+# invocation matches the same way a bare command does.
+#
+# Used for compound commands, where the single-command "walk to the next
+# subcommand and classify it" approach these hooks use for a plain
+# invocation cannot safely apply: `updatedInput` replaces the WHOLE
+# command string, so a hook that can rewrite or deny must be able to
+# notice the guarded binary/verb ANYWHERE in a chain, not only as the
+# very first word. Before this existed, `git status && git push` and
+# `echo hi && gh pr merge 123` both silently passed through their guard
+# hooks -- each hook's detection walk looked only at the first token, so
+# a leading unrelated command (or the guarded verb glued to an operator)
+# made the whole command invisible to it (#886).
+#
+# Deliberately coarse: it does not verify the matched token's ROLE in
+# the command (e.g. that "commit" immediately follows a "git" token,
+# rather than sitting inside some unrelated quoted string). A
+# false-positive costs the agent one extra manual step; a false-negative
+# silently skips the audit trail these hooks exist to guarantee, which is
+# the worse failure -- the same reasoning documented on
+# legion_hook_compound above and on every DENY branch in no-git-push.sh.
+legion_hook_token_present() {
+  local command="$1" word="$2" tok stripped
+  local -a toks
+  read -r -a toks <<<"$command"
+  for tok in "${toks[@]}"; do
+    stripped="$tok"
+    # Strip a leading run of glued metacharacters (";git" -> "git").
+    while :; do
+      case "$stripped" in
+        [\;\&\|\<\>\$\`]*) stripped="${stripped:1}" ;;
+        *) break ;;
+      esac
+    done
+    # Strip a trailing run of glued metacharacters ("push;" -> "push").
+    stripped="${stripped%%[\;\&\|\<\>\$\`]*}"
+    if [ "${stripped##*/}" = "$word" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Coverage gate (#353). Sourced here so every hook shares one probe; the
 # declare -F guard tolerates hooks that sourced it themselves.
 if ! declare -F legion_covered >/dev/null 2>&1; then

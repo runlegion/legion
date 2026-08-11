@@ -78,12 +78,35 @@ emit_deny() {
 emit_rewrite() {
   local cmd="$1" ctx="$2"
   local reason="${3:-legion rewrote this to its audited equivalent}"
-  jq -n --arg cmd "$cmd" --arg ctx "$ctx" --arg reason "$reason" '{
+
+  # updatedInput is a WHOLE-OBJECT replacement for tool_input, not a
+  # field-level merge. An earlier version of this helper emitted a bare
+  # `{"command": $cmd}`, which silently dropped every other field the caller
+  # sent -- for Bash that is `description`, `timeout` and
+  # `run_in_background`, so a rewritten background command came back as a
+  # FOREGROUND one and a long-running command lost its raised timeout. The
+  # rewrite stayed correct and its context stayed wrong, which is the worst
+  # shape for a translation the agent is told to trust.
+  #
+  # We patch the original tool_input instead of rebuilding it. That is also
+  # correct if the platform ever merges rather than replaces -- resending a
+  # field its own value is a no-op either way -- so this does not depend on
+  # which semantics hold. INPUT is the raw payload captured by
+  # legion_hook_parse; the fallback covers a caller that emits without
+  # having parsed (tests, mainly), and keeps this helper total.
+  local updated
+  updated=$(printf '%s' "${INPUT:-}" \
+    | jq -c --arg cmd "$cmd" '(.tool_input // {}) | .command = $cmd' 2>/dev/null)
+  if [ -z "$updated" ]; then
+    updated=$(jq -nc --arg cmd "$cmd" '{ "command": $cmd }')
+  fi
+
+  jq -n --arg ctx "$ctx" --arg reason "$reason" --argjson updated "$updated" '{
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "allow",
       "permissionDecisionReason": $reason,
-      "updatedInput": { "command": $cmd },
+      "updatedInput": $updated,
       "additionalContext": $ctx
     }
   }'
