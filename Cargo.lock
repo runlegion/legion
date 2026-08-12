@@ -3734,9 +3734,9 @@ checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
 
 [[package]]
 name = "smugglr-core"
-version = "0.4.0"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e41ba9c13a82ea180f63547220ee44ebb4f763be7e2c7c0b98fbd364a68702da"
+checksum = "94b7aeca1e5c0cf8cd37aea885f4e3caba8482fbd4f1cc1096118c14a40e516a"
 dependencies = [
  "anyhow",
  "chacha20poly1305",

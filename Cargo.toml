@@ -40,10 +40,26 @@ sha2 = "0.10"
 scip = "0.7"
 protobuf = "3"
 
-# Multi-node sync via LAN broadcast. Published crate (not the git source):
-# 0.4.0 carries the masterless multicast Gossip API + protocol v2. The old
-# unpinned git dep was frozen at 0.2.1 (TCP-era) by the lockfile.
-smugglr-core = { version = "0.4.0", default-features = false, features = ["native"] }
+# Multi-node sync via LAN broadcast. Published crate (not the git source): the
+# old unpinned git dep was frozen at 0.2.1 (TCP-era) by the lockfile, which is
+# why this is a version pin and not a path or git source.
+#
+# 0.4.2, not 0.4.0, for two fixes in code this binary runs today:
+#   - #174: ReplayGuard evicts the least-recently-seen peer at the 256-peer cap
+#     instead of permanently rejecting the newcomer. `receive_loop` runs
+#     ReplayGuard on every packet, so on a LAN with churning instance ids the
+#     old behavior locks out live peers with no recovery.
+#   - #168/#173: `split_digest` reserves AEAD seal headroom so a *sealed* digest
+#     part stays under SAFE_PACKET_SIZE. Not on a path this binary executes yet
+#     -- it is in `multicast`, which we do not drive -- but it is a hard
+#     prerequisite for the migration onto that engine, since our cluster runs
+#     with a key and oversized sealed digests fail as flaky sync rather than as
+#     an error.
+#
+# Do NOT bump to 0.4.3: it changes `Gossip::recv_and_handle` to take a
+# caller-owned buffer (a breaking signature change shipped under a patch bump),
+# and it is tagged but unpublished. Target the 0.4.2 signature.
+smugglr-core = { version = "0.4.2", default-features = false, features = ["native"] }
 rand = "0.9"
 hex = "0.4"
 hostname = "0.4"
