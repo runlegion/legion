@@ -337,9 +337,20 @@ impl Database {
     }
 
     /// Soft-delete every live lease (per [`LIVE_LEASE_WHERE`]) held by `host`.
-    /// Called on daemon shutdown so a graceful exit does not leave ghost
-    /// leases that must age out via TTL.
-    #[allow(dead_code)] // wired by a future SIGTERM handler; kept in the API surface now
+    ///
+    /// Called from [`crate::watch::WatchLoop::bootstrap`] on daemon START, not
+    /// on shutdown as originally intended (#900). Startup is the moment the
+    /// invariant is knowable: a daemon that has just booted owns no live
+    /// sessions, so every lease still attributed to this host is a leftover. A
+    /// shutdown hook cannot cover the case that actually loses leases -- a power
+    /// loss or SIGKILL never runs one.
+    ///
+    /// Soft-delete rather than DELETE because `deleted_at` + `updated_at` carry
+    /// the LWW semantics smugglr syncs on, so the tombstone propagates and
+    /// supersedes any copy a peer already holds. That matters here: the
+    /// heartbeat bug this cleanup answers rewrote `expires_at` to a fresh value
+    /// every tick, which moved each row's content hash every tick, so revived
+    /// leases were republished as legitimate updates rather than sitting local.
     pub fn release_persona_leases_by_host(&self, host: &str) -> Result<u64> {
         let now = Utc::now().to_rfc3339();
         let sql = format!(
