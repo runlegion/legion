@@ -261,6 +261,99 @@ fn run_watch_status(db: &db::Database, recent: u32, stale_after_secs: u64) -> er
     Ok(())
 }
 
+/// True when this process is a watch-spawned agent rather than a human's
+/// session, judged by `$LEGION_WAKE_ATTEMPT_ID` -- the same marker
+/// `WatchAction::SessionEnd` documents ("for interactive (human-started)
+/// sessions, `$LEGION_WAKE_ATTEMPT_ID` is empty").
+///
+/// This is the guard that keeps [`preempt_watch_worker`] from making a
+/// watch-spawned child kill itself: that child fires the SessionStart hook too,
+/// and would otherwise find its own live `.lock` and stand itself down.
+fn is_watch_spawned_session() -> bool {
+    std::env::var("LEGION_WAKE_ATTEMPT_ID")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// What [`preempt_watch_worker`] should do, split from the doing so the rules
+/// are testable without spawning a process or signalling anything.
+#[derive(Debug, PartialEq, Eq)]
+enum Preempt {
+    /// Leave the worker alone.
+    Skip,
+    /// Stand down the worker holding this pid.
+    Terminate(u32),
+}
+
+/// Decide whether an interactive SessionStart should preempt a watch-spawned
+/// worker. Pure; see [`Preempt`].
+///
+/// Skips when this session is itself watch-spawned (otherwise a watch-spawned
+/// child, which fires the same hook, would find its own `.lock` and kill
+/// itself), when no live worker holds the repo, and when the holder is this
+/// process under either identity -- `self_pid` is the pid the hook passed
+/// (`$PPID`, the long-lived session process), `current_pid` is this short-lived
+/// CLI invocation, and confusing the two is how a self-kill would slip through.
+fn preempt_decision(
+    watch_spawned: bool,
+    worker_pid: Option<u32>,
+    self_pid: u32,
+    current_pid: u32,
+) -> Preempt {
+    if watch_spawned {
+        return Preempt::Skip;
+    }
+    match worker_pid {
+        Some(pid) if pid != self_pid && pid != current_pid => Preempt::Terminate(pid),
+        _ => Preempt::Skip,
+    }
+}
+
+/// #900: stand down a watch-spawned worker when a human opens a session on the
+/// repo it holds.
+///
+/// The `.session` lock only stops watch from spawning INTO a live human
+/// session; it does nothing when the machine got there first, which is how two
+/// legion instances came to share a repo (watch spawned ~22s before the
+/// interactive session attached). This closes the other direction: the human is
+/// authoritative, so the worker is signalled and its gate released.
+///
+/// SIGTERM rather than SIGKILL so the worker runs its own Stop hook and
+/// finalizes its wake-attempt row; the daemon's `reap_dead_pid_attempts` sweep
+/// catches it either way. Deliberately does no DB bookkeeping of its own --
+/// releasing the `.lock` plus the existing reaper is the whole contract.
+///
+/// No-ops in three cases: this session is itself watch-spawned, no live worker
+/// holds the repo, or the holder is this very process.
+fn preempt_watch_worker(locks: &watch::SessionLockTracker, repo: &str, self_pid: u32) {
+    let worker_pid = match preempt_decision(
+        is_watch_spawned_session(),
+        locks.watch_spawned_pid(repo),
+        self_pid,
+        std::process::id(),
+    ) {
+        Preempt::Skip => return,
+        Preempt::Terminate(pid) => pid,
+    };
+
+    eprintln!(
+        "[legion watch] session-start: interactive session on {} preempting watch-spawned worker (pid {}) -- two agents must not share a repo",
+        repo, worker_pid
+    );
+    if !watch::terminate_process(worker_pid) {
+        eprintln!(
+            "[legion watch] session-start: could not signal pid {} -- it may have already exited",
+            worker_pid
+        );
+    }
+    if let Err(e) = locks.release(repo) {
+        eprintln!(
+            "[legion watch] session-start: failed to release watch lock for {}: {}",
+            repo, e
+        );
+    }
+}
+
 pub(crate) fn handle(action: Option<WatchAction>) -> error::Result<()> {
     let base = data_dir()?;
     match action {
@@ -396,6 +489,7 @@ pub(crate) fn handle(action: Option<WatchAction>) -> error::Result<()> {
                     repo, e
                 );
             }
+            preempt_watch_worker(&locks, &repo, effective_pid);
         }
         Some(WatchAction::SessionEnd { attempt_id, repo }) => {
             let db = open_db()?;
@@ -410,6 +504,56 @@ pub(crate) fn handle(action: Option<WatchAction>) -> error::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod preempt_tests {
+    use super::*;
+
+    /// The case that produced two legion instances: a human opens a session on
+    /// a repo a watch-spawned worker already holds.
+    #[test]
+    fn interactive_preempts_live_watch_worker() {
+        assert_eq!(
+            preempt_decision(false, Some(1520), 2711, 9999),
+            Preempt::Terminate(1520)
+        );
+    }
+
+    /// A watch-spawned child fires the same SessionStart hook. If it were not
+    /// gated it would find its own `.lock` and stand itself down, turning the
+    /// fix into a worker that kills every wake it is sent on.
+    #[test]
+    fn watch_spawned_session_never_preempts() {
+        assert_eq!(
+            preempt_decision(true, Some(1520), 1520, 9999),
+            Preempt::Skip
+        );
+        assert_eq!(
+            preempt_decision(true, Some(1520), 2711, 9999),
+            Preempt::Skip,
+            "the env marker alone must decide -- never fall through to the pid checks"
+        );
+    }
+
+    #[test]
+    fn no_live_worker_is_a_no_op() {
+        assert_eq!(preempt_decision(false, None, 2711, 9999), Preempt::Skip);
+    }
+
+    /// Both pid identities must be refused: `$PPID` (the session process the
+    /// hook reports) and this CLI process.
+    #[test]
+    fn never_signals_itself_under_either_pid() {
+        assert_eq!(
+            preempt_decision(false, Some(2711), 2711, 9999),
+            Preempt::Skip
+        );
+        assert_eq!(
+            preempt_decision(false, Some(9999), 2711, 9999),
+            Preempt::Skip
+        );
+    }
 }
 
 #[cfg(test)]
