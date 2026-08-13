@@ -112,6 +112,30 @@ pub(crate) fn process_alive(pid: u32) -> bool {
     }
 }
 
+/// Send SIGTERM to `pid`. Returns true when the signal was delivered.
+///
+/// Shells out to `kill` for the same reason [`process_alive`] does -- one
+/// mechanism for process control across the binary, no libc dependency. TERM
+/// rather than KILL so the target runs its own Stop hook (which releases its
+/// locks and finalizes its wake-attempt row) instead of leaving the state this
+/// function exists to clean up.
+pub(crate) fn terminate_process(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let result = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        matches!(result, Ok(status) if status.success())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 // -- Session Lock ------------------------------------------------------------
 
 /// Per-repo session lock. Prevents `watch` from spawning a second agent session
@@ -153,6 +177,27 @@ impl SessionLockTracker {
         self.lock_dir.join(format!("{}.session", repo))
     }
 
+    /// The live PID of a *watch-spawned* child holding `repo`, or `None`.
+    ///
+    /// Held when BOTH the `.lock` mtime is within `ttl` AND the PID is alive --
+    /// the TTL guards against PID reuse by an un-released lock from a crashed
+    /// spawn. This is the `.lock` half of [`Self::active_pid`], split out
+    /// because #900 needs to distinguish a headless worker from an interactive
+    /// session: `active_pid` deliberately merges both sources, so it cannot
+    /// answer "is a MACHINE holding this repo right now".
+    pub fn watch_spawned_pid(&self, repo: &str) -> Option<u32> {
+        let path = self.lock_path(repo);
+        let meta = std::fs::metadata(&path).ok()?;
+        let mtime = meta.modified().ok()?;
+        let age = mtime.elapsed().unwrap_or(Duration::ZERO);
+        if age > self.ttl {
+            return None;
+        }
+        let contents = std::fs::read_to_string(&path).ok()?;
+        let pid = contents.trim().parse::<u32>().ok()?;
+        if process_alive(pid) { Some(pid) } else { None }
+    }
+
     /// Returns the holding PID when any live session (watch-spawned or interactive)
     /// holds the gate. Returns `None` when no live holder exists in either lock
     /// file; callers can safely spawn in all `None` cases.
@@ -172,18 +217,7 @@ impl SessionLockTracker {
     /// The existing `.lock` mtime-TTL semantics are unchanged.
     pub fn active_pid(&self, repo: &str) -> Option<u32> {
         // -- .lock path (watch-spawned; TTL-gated) ----------------------------
-        let lock_pid: Option<u32> = (|| {
-            let path = self.lock_path(repo);
-            let meta = std::fs::metadata(&path).ok()?;
-            let mtime = meta.modified().ok()?;
-            let age = mtime.elapsed().unwrap_or(Duration::ZERO);
-            if age > self.ttl {
-                return None;
-            }
-            let contents = std::fs::read_to_string(&path).ok()?;
-            let pid = contents.trim().parse::<u32>().ok()?;
-            if process_alive(pid) { Some(pid) } else { None }
-        })();
+        let lock_pid: Option<u32> = self.watch_spawned_pid(repo);
 
         // -- .session path (interactive; PID-liveness only) -------------------
         let session_pid: Option<u32> = (|| {
@@ -367,6 +401,55 @@ mod tests {
         assert!(
             locks.active_pid("legion").is_some(),
             "own PID + fresh mtime should read as active"
+        );
+    }
+
+    /// #900: `watch_spawned_pid` must report ONLY the machine-held `.lock`.
+    /// `active_pid` deliberately merges `.lock` and `.session`, so it cannot
+    /// answer "is a headless worker holding this repo" -- which is exactly the
+    /// question the interactive preemption gate asks.
+    #[cfg(unix)]
+    #[test]
+    fn watch_spawned_pid_ignores_interactive_session_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        locks
+            .record_interactive("legion", std::process::id())
+            .expect("record");
+
+        assert!(
+            locks.active_pid("legion").is_some(),
+            "the interactive lock still holds the general gate"
+        );
+        assert!(
+            locks.watch_spawned_pid("legion").is_none(),
+            "a human session must never look like a watch-spawned worker"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_spawned_pid_reports_live_lock_holder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        locks
+            .record_spawn("legion", std::process::id())
+            .expect("record");
+        assert_eq!(
+            locks.watch_spawned_pid("legion"),
+            Some(std::process::id()),
+            "a live watch-spawned lock must be reported so it can be preempted"
+        );
+    }
+
+    #[test]
+    fn watch_spawned_pid_none_for_dead_holder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locks = SessionLockTracker::new(dir.path(), 3600);
+        locks.record_spawn("legion", dead_pid()).expect("record");
+        assert!(
+            locks.watch_spawned_pid("legion").is_none(),
+            "a dead worker must not be signalled"
         );
     }
 

@@ -232,6 +232,22 @@ impl Database {
 
     /// Refresh every live lease held by `host`, extending `expires_at` to
     /// `now + ttl`. Returns the number of leases touched.
+    ///
+    /// "Live" is [`LIVE_LEASE_WHERE`], the same predicate every other
+    /// reader/writer uses -- NOT `deleted_at IS NULL` alone. The distinction is
+    /// the whole TTL contract (#900): this sweep is host-scoped rather than
+    /// session-scoped, so a lease whose owning session died is still attributed
+    /// to a host whose daemon is alive. Refreshing on `deleted_at` alone
+    /// therefore *resurrects* an already-expired row every tick, and the dead
+    /// session's lease never ages out -- exactly what the struct doc at the top
+    /// of this file promises it will. Observed before this fix: every lease in
+    /// the table, acquired across three months, sharing one identical
+    /// `expires_at`, and the `expires_at <= now` reclaim arm in
+    /// `try_acquire_persona_lease` unable to ever fire.
+    ///
+    /// This is the same divergence #679 fixed for the list-vs-release paths;
+    /// the heartbeat path was missed then. A live lease is never dropped by the
+    /// added predicate because heartbeats run far more often than the TTL.
     pub fn heartbeat_persona_leases(&self, host: &str, ttl: std::time::Duration) -> Result<u64> {
         let now = Utc::now();
         let now_str = now.to_rfc3339();
@@ -239,12 +255,14 @@ impl Database {
             + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::minutes(10)))
         .to_rfc3339();
 
-        let updated = self.conn.execute(
+        let sql = format!(
             "UPDATE persona_wake_leases \
              SET heartbeat_at = ?1, expires_at = ?2, updated_at = ?1 \
-             WHERE acquired_by_host = ?3 AND deleted_at IS NULL",
-            rusqlite::params![&now_str, &expires, host],
-        )?;
+             WHERE acquired_by_host = ?3 AND {LIVE_LEASE_WHERE}"
+        );
+        let updated = self
+            .conn
+            .execute(&sql, rusqlite::params![&now_str, &expires, host, &now_str])?;
         Ok(updated as u64)
     }
 
@@ -319,9 +337,26 @@ impl Database {
     }
 
     /// Soft-delete every live lease (per [`LIVE_LEASE_WHERE`]) held by `host`.
-    /// Called on daemon shutdown so a graceful exit does not leave ghost
-    /// leases that must age out via TTL.
-    #[allow(dead_code)] // wired by a future SIGTERM handler; kept in the API surface now
+    ///
+    /// Called from [`crate::watch::WatchLoop::bootstrap`] on daemon START, not
+    /// on shutdown as originally intended (#900). Startup is the moment the
+    /// invariant is knowable: a daemon that has just booted owns no live
+    /// sessions, so every lease still attributed to this host is a leftover. A
+    /// shutdown hook cannot cover the case that actually loses leases -- a power
+    /// loss or SIGKILL never runs one.
+    ///
+    /// Soft-delete rather than DELETE so the cleanup PROPAGATES: the tombstone
+    /// is itself a delta, and [`Database::apply_persona_wake_lease_delta`]
+    /// (src/db/sync.rs:387) resolves a tombstone by plain LWW on `updated_at`,
+    /// so a peer holding a revived copy takes the delete and cannot hand the
+    /// row back. Note the guarantee is OURS, not the transport's -- smugglr's
+    /// remote_wins is last-received-wins and does not read `updated_at`, so
+    /// deleting that LWW arm would silently make this host-local again.
+    ///
+    /// That propagation matters because the heartbeat bug this cleanup answers
+    /// rebound `expires_at` to a fresh value every tick, which moved each row's
+    /// content hash every tick, so revived leases were republished as
+    /// legitimate updates rather than sitting local.
     pub fn release_persona_leases_by_host(&self, host: &str) -> Result<u64> {
         let now = Utc::now().to_rfc3339();
         let sql = format!(
@@ -924,6 +959,55 @@ mod tests {
             after.heartbeat_at > before.heartbeat_at,
             "heartbeat must advance heartbeat_at"
         );
+    }
+
+    /// #900: the heartbeat must not RESURRECT a lease that has already expired.
+    ///
+    /// The sweep is host-scoped, so a lease whose owning session died is still
+    /// attributed to a host whose daemon is alive. Refreshing on `deleted_at`
+    /// alone pushed those rows forward every tick, which is why the production
+    /// table held three months of leases all sharing one `expires_at` and the
+    /// documented TTL crash-recovery contract never fired.
+    #[test]
+    fn persona_lease_heartbeat_does_not_resurrect_expired_lease() {
+        let db = test_db();
+        // A zero TTL is already expired the moment it is written.
+        db.try_acquire_persona_lease("legion", "sig-dead", "hostA", Duration::from_secs(0))
+            .unwrap();
+        assert!(
+            db.list_persona_leases(Some("legion")).unwrap().is_empty(),
+            "precondition: a zero-TTL lease must not read as live"
+        );
+
+        let n = db
+            .heartbeat_persona_leases("hostA", Duration::from_secs(3600))
+            .unwrap();
+        assert_eq!(n, 0, "heartbeat must not touch an already-expired lease");
+
+        assert!(
+            db.list_persona_leases(Some("legion")).unwrap().is_empty(),
+            "an expired lease must stay dead -- reviving it is what made leases immortal"
+        );
+    }
+
+    /// The expired row must also remain CLAIMABLE after a heartbeat sweep: the
+    /// point of letting it die is that the next waker can reclaim it.
+    #[test]
+    fn persona_lease_expired_stays_claimable_after_heartbeat() {
+        let db = test_db();
+        db.try_acquire_persona_lease("legion", "sig-1", "hostA", Duration::from_secs(0))
+            .unwrap();
+        db.heartbeat_persona_leases("hostA", Duration::from_secs(3600))
+            .unwrap();
+
+        let won = db
+            .try_acquire_persona_lease("legion", "sig-1", "hostB", Duration::from_secs(60))
+            .unwrap();
+        assert!(won, "hostB must be able to reclaim the expired lease");
+
+        let listed = db.list_persona_leases(Some("legion")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].acquired_by_host, "hostB");
     }
 
     #[test]

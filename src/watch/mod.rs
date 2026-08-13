@@ -19,10 +19,10 @@ pub use config::{
     list_repos_in_config, load_config, remove_repo_from_config, rename_in_config,
 };
 pub use gates::{PersonaLeaseGate, QuotaPanicGate, poll_cycle};
-pub(crate) use locks::process_alive;
 pub use locks::{
     CooldownTracker, PidLockGuard, SessionLockTracker, acquire_index_lock, acquire_pid_lock,
 };
+pub(crate) use locks::{process_alive, terminate_process};
 pub use signals::{
     build_wake_prompt, directed_verb_will_not_wake, find_pending_signals, signal_requires_reply,
 };
@@ -219,6 +219,19 @@ impl WatchLoop {
 
             let db = Database::open(&db_path)?;
             let host = resolve_host_id();
+
+            // #900: a daemon that has just started owns no live sessions, so any
+            // persona lease still attributed to this host is a leftover from a
+            // previous daemon lifetime -- and after a power loss there is no
+            // graceful shutdown to release them. Without this, those rows are
+            // refreshed forever by the heartbeat and the TTL never reclaims them.
+            // Runs before the poll loop so the first tick sees a clean table.
+            // Non-fatal: a failure here must not stop the daemon from starting.
+            match db.release_persona_leases_by_host(&host) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("{log_prefix} released {n} stale persona lease(s) for {host}"),
+                Err(e) => eprintln!("{log_prefix} stale lease release failed: {e}"),
+            }
 
             Ok((
                 WatchLoop::new(config, db, data_dir, host, spawn_mode, log_prefix),
