@@ -44,11 +44,17 @@ protobuf = "3"
 # old unpinned git dep was frozen at 0.2.1 (TCP-era) by the lockfile, which is
 # why this is a version pin and not a path or git source.
 #
-# 0.4.2, not 0.4.0, for two fixes in code this binary runs today:
+# 0.4.2, not 0.4.0, for two fixes -- one on our live path, one gating a future
+# migration. This lists what motivated the pin, not every behavior change in the
+# range: 0.4.0..0.4.2 also carries upstream #194 (`peer_ttl` uses saturating_mul
+# so an absurd `interval_secs` cannot overflow), which touches discovery and is
+# strictly an improvement, and #175 (`Peer.protocol_version` removed), which we
+# never referenced.
 #   - #174: ReplayGuard evicts the least-recently-seen peer at the 256-peer cap
 #     instead of permanently rejecting the newcomer. `receive_loop` runs
 #     ReplayGuard on every packet, so on a LAN with churning instance ids the
-#     old behavior locks out live peers with no recovery.
+#     old behavior locks out live peers with no recovery. This is the one that
+#     is live for us today.
 #   - #168/#173: `split_digest` reserves AEAD seal headroom so a *sealed* digest
 #     part stays under SAFE_PACKET_SIZE. Not on a path this binary executes yet
 #     -- it is in `multicast`, which we do not drive -- but it is a hard
