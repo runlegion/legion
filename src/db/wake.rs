@@ -345,12 +345,18 @@ impl Database {
     /// shutdown hook cannot cover the case that actually loses leases -- a power
     /// loss or SIGKILL never runs one.
     ///
-    /// Soft-delete rather than DELETE because `deleted_at` + `updated_at` carry
-    /// the LWW semantics smugglr syncs on, so the tombstone propagates and
-    /// supersedes any copy a peer already holds. That matters here: the
-    /// heartbeat bug this cleanup answers rewrote `expires_at` to a fresh value
-    /// every tick, which moved each row's content hash every tick, so revived
-    /// leases were republished as legitimate updates rather than sitting local.
+    /// Soft-delete rather than DELETE so the cleanup PROPAGATES: the tombstone
+    /// is itself a delta, and [`Database::apply_persona_wake_lease_delta`]
+    /// (src/db/sync.rs:387) resolves a tombstone by plain LWW on `updated_at`,
+    /// so a peer holding a revived copy takes the delete and cannot hand the
+    /// row back. Note the guarantee is OURS, not the transport's -- smugglr's
+    /// remote_wins is last-received-wins and does not read `updated_at`, so
+    /// deleting that LWW arm would silently make this host-local again.
+    ///
+    /// That propagation matters because the heartbeat bug this cleanup answers
+    /// rebound `expires_at` to a fresh value every tick, which moved each row's
+    /// content hash every tick, so revived leases were republished as
+    /// legitimate updates rather than sitting local.
     pub fn release_persona_leases_by_host(&self, host: &str) -> Result<u64> {
         let now = Utc::now().to_rfc3339();
         let sql = format!(
