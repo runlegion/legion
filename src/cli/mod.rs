@@ -862,14 +862,26 @@ pub(crate) enum Commands {
     /// origin <branch>`) on every push, which is a no-op after the first.
     /// Every attempt (success or failure) is audit-logged with the branch,
     /// resolved checkout path, and head SHA.
+    /// `--tag <name>` pushes a tag instead (#915). Mutually exclusive with
+    /// `--branch`. Before #915 there was no sanctioned tag path at all:
+    /// `legion push` was branch-only, the guard rewrote a positional tag into
+    /// a branch push, and the only thing that worked was `scripts/release.sh`
+    /// shelling out past the hook -- which is why release tags wrote no audit
+    /// row. Refuses a tag whose target commit is not reachable from any branch
+    /// on origin, because publishing a tag that points at an unpushed commit
+    /// resolves for the tagger and dangles for everyone else.
     Push {
         /// Repository name (identifies the calling agent for the audit log)
         #[arg(long)]
         repo: String,
 
         /// Branch to push. Defaults to the CWD's checked-out branch.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "tag")]
         branch: Option<String>,
+
+        /// Tag to push. Mutually exclusive with `--branch`.
+        #[arg(long)]
+        tag: Option<String>,
     },
 
     /// Commit the staged index -- the sanctioned in-band commit path (#854).

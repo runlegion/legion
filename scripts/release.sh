@@ -986,9 +986,15 @@ finish_release() {
        git tag -a ${TAG} -m '${TAG_MESSAGE}' ${MERGED_SHA} && git push origin refs/tags/${TAG}"
   fi
 
-  git push origin "refs/tags/${TAG}" \
+  # #915: the tag push goes through `legion push --tag`, not a bare `git push`.
+  # A child-process git push is invisible to the hooks, which is exactly why
+  # every release tag before this one reached origin with no audit row -- the
+  # one write in a release that ships to every agent was the one write nobody
+  # could see afterwards. Routing it here means the tag is captured on the same
+  # path as the branch pushes above.
+  legion push --repo "$WORK_REPO" --tag "$TAG" \
     || fail "release INCOMPLETE BUT RECOVERABLE: ${NEW} IS merged on origin/${RELEASE_BRANCH} as ${MERGED_SHA} and ${TAG} exists locally on it, but pushing the tag failed, so release.yml has NOT fired and no binaries are building. Re-run only the tag step:
-       git push origin refs/tags/${TAG}
+       legion push --repo ${WORK_REPO} --tag ${TAG}
        (or re-run 'scripts/release.sh ${NEW} --finish=${PR_NUMBER}', which is idempotent from here)"
 
   info "pushed ${TAG} -> ${MERGED_SHA} -- release.yml will build + publish the platform binaries"

@@ -177,4 +177,64 @@ assert_compound_deny "leading non-git, absolute path" '"npm test && /usr/bin/git
 echo "==> #886: still scoped to push -- a leading command chained to an unrelated git verb passes through"
 assert_passthrough "leading command, no push anywhere" '"npm test && git status"'
 
+echo "==> #915: a positional ref is resolved, not assumed to be a branch"
+# The pre-#915 hook took POSITIONALS[1] as a branch unconditionally, so
+# `git push origin v0.0.79` became `legion push --branch v0.0.79` and failed.
+# That is what blocked rafters on a release tag, and it is why the release
+# script shells out past this hook entirely. Resolution needs a real
+# repository, so build one rather than asserting against the fixture cwd.
+# The coverage gate (#353) derives the repo NAME from the cwd's basename and
+# matches it against the watch list, so the fixture directory has to be named
+# what the watch entry calls it -- not a random mktemp suffix.
+REFPARENT="$(mktemp -d)"
+REFREPO="${REFPARENT}/legion-test"
+mkdir -p "$REFREPO"
+git -C "$REFREPO" init --quiet
+git -C "$REFREPO" config user.email t@t
+git -C "$REFREPO" config user.name t
+git -C "$REFREPO" commit --quiet --allow-empty -m init
+git -C "$REFREPO" branch feat/real-branch
+git -C "$REFREPO" tag v9.9.9
+git -C "$REFREPO" branch ambiguous
+git -C "$REFREPO" tag ambiguous
+
+# The coverage gate (#353) keys on the watch list, so the temp repo has to be
+# in it or the hook exits before resolving anything.
+REAL_WATCH="$FAKE_WATCH"
+export FAKE_WATCH=$'legion-test\t'"${REFREPO}"
+
+run_hook_in() {
+  local cwd="$1" cmd="$2"
+  printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":${cmd}},\"cwd\":\"${cwd}\",\"session_id\":\"test\"}" | bash "$HOOK"
+}
+
+tag_out=$(run_hook_in "$REFREPO" '"git push origin v9.9.9"')
+assert_contains "tag routes to --tag"              "$tag_out" '--tag v9.9.9'
+assert_not_contains "tag never routes to --branch" "$tag_out" '--branch v9.9.9'
+
+branch_out=$(run_hook_in "$REFREPO" '"git push origin feat/real-branch"')
+assert_contains "branch still routes to --branch"  "$branch_out" '--branch feat/real-branch'
+assert_not_contains "branch never routes to --tag" "$branch_out" '--tag feat/real-branch'
+
+amb_out=$(run_hook_in "$REFREPO" '"git push origin ambiguous"')
+assert_contains "branch+tag collision denies" "$amb_out" '"permissionDecision": "deny"'
+
+missing_out=$(run_hook_in "$REFREPO" '"git push origin does-not-exist"')
+assert_contains "unresolvable ref denies" "$missing_out" '"permissionDecision": "deny"'
+
+# The bulk and compound refusals must survive the new resolution path.
+bulk_out=$(run_hook_in "$REFREPO" '"git push --tags"')
+assert_contains "--tags still denied after #915" "$bulk_out" '"permissionDecision": "deny"'
+compound_out=$(run_hook_in "$REFREPO" '"git push origin v9.9.9 && echo done"')
+assert_contains "compound tag push still denied" "$compound_out" '"permissionDecision": "deny"'
+
+export FAKE_WATCH="$REAL_WATCH"
+rm -rf "$REFPARENT"
+
+# A repo the hook cannot inspect must behave exactly as it did before #915 --
+# resolution is an improvement where available, never a new gate. A hook that
+# blocks a legitimate push because it could not look at the repository is
+# worse than the bug it was added to fix.
+assert_rewritten "uninspectable cwd falls back to branch" '"git push origin feat/x"'
+
 finish_tests
