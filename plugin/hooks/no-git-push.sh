@@ -276,6 +276,21 @@ Nothing by that name exists in this repository, so the push would either fail or
 fi
 
 if [ -n "$EXPLICIT_TAG" ]; then
+  # The plugin's files and the binary they drive can be different versions --
+  # bin/legion is a shim dispatching to the data dir, and that binary is
+  # installed by a SessionStart hook, so a session started before an upgrade
+  # runs new hooks against an old binary. Rewriting to a flag it does not have
+  # would hand the agent a clap error instead of a push. Say what is actually
+  # wrong instead.
+  if [ -z "${LEGION:-}" ] || ! "$LEGION" push --help 2>/dev/null | grep -q -- '--tag'; then
+    emit_deny "Refusing \`git push\` -- \`${EXPLICIT_TAG}\` is a tag, and this legion binary cannot push tags yet.
+
+\`legion push --tag\` (#915) is the sanctioned path, but the installed binary predates it, so translating your command would produce an unknown-argument error rather than a push.
+
+Start a new session to pick up the current binary, then re-run. If you need the tag out now and cannot wait, that is an operator action -- ask rather than routing around the guard."
+    exit 0
+  fi
+
   REWRITTEN="legion push --repo ${REPO_ARG} --tag ${EXPLICIT_TAG}"
   emit_rewrite "$REWRITTEN" "Translated your \`git push\` to \`${REWRITTEN}\`.
 
