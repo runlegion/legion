@@ -1,5 +1,71 @@
 # Legion Changelog
 
+## 0.28.1
+
+One fix. There was no sanctioned way to push a tag: `legion push` was branch-only, the
+guard assumed every positional ref was a branch and rewrote `git push origin v0.0.79`
+into `legion push --branch v0.0.79`, which failed -- and the only thing that worked was
+`scripts/release.sh` shelling out past the hooks, which is exactly why every release
+tag legion has ever cut reached origin with no audit row. rafters was blocked pushing
+v0.0.79 until the operator pushed by hand; smugglr's 0.5.0 was waiting on the same gap.
+It surfaced now because #856 closed the fall-through where compound forms escaped the
+guard unaudited -- that fall-through was the side door tag pushes had been using, and
+closing it exposed that the capability behind it was never built. Patch release rather
+than a minor: this closes a gap rather than adding a capability, and corrects a
+mistranslation rather than altering a working contract -- before it there was no
+working tag path to change, only a broken one to fix (#915, PR #916).
+
+### Fixed
+
+- **`legion push --tag <tag>` is the sanctioned tag push** (PR #916, #915). It pushes
+  the fully-qualified `refs/tags/` refspec, never the bare name -- `push origin <name>`
+  is ambiguous when a branch and a tag collide, and git's disambiguation is not
+  something to rely on when the whole point is knowing what reached origin. It refuses
+  the same crafted shapes `--branch` refuses (leading `-`/`+`, embedded `:`,
+  whitespace), because this command has no force path and a crafted value must not
+  recover one. It refuses a tag whose commit is not reachable from any branch on
+  origin (operator ruling): such a tag resolves for the tagger and dangles for
+  everyone else, so the refusal lands before the push and says to push the carrying
+  branch first. And it audits every attempt, success or failure, with the tag, the
+  checkout, and the target sha -- visible via `legion audit --action push`.
+- **The push guard resolves a positional ref instead of assuming branch** (PR #916,
+  #915). `v0.0.79` and `feat/thing` are both just words; the hook now asks the
+  repository. A ref that resolves to a tag rewrites to `--tag`, a branch still
+  rewrites to `--branch`, a name that is both is denied naming the ambiguity, and a
+  name that is neither is denied naming the unresolvable ref. One deliberate
+  asymmetry: when the repo cannot be inspected at all, the guard falls back to the old
+  branch assumption rather than denying -- resolution is an improvement where
+  available, never a new gate, and a hook that blocks a legitimate push because it
+  could not read the repository is worse than the bug it was added to fix. Bulk and
+  compound shapes (`--tags`, metacharacter forms) stay denied, asserted against the
+  new fixture rather than assumed.
+- **Release tags are captured in `legion audit` for the first time** (PR #916, #915).
+  `scripts/release.sh` now routes its tag push through `legion push --tag` instead of
+  a child-process `git push` the hooks never see. The one write in a release that
+  ships to every agent was the one write nobody could see afterwards; every git write
+  in the script is now enumerated with its capture status, and none remains uncaptured.
+
+### Before you upgrade: the bootstrap caveat
+
+`release.sh` runs against the INSTALLED binary, not the tree being released, so the
+release that first ships this runs under a binary without `--tag` -- and there is no
+way out by ordering, because shipping the capable binary needs a release and the
+release needs the capability. The script probes for the flag and falls back to a raw
+`git push` for exactly as long as the probe fails, printing a loud warning that the
+tag push will NOT appear in the audit log. That is expected exactly once; if you see
+it after this release, the installed binary is behind the plugin and that is worth
+fixing. The same probe guards the hook rewrite, because the plugin's files and the
+binary they drive are installed by different mechanisms and can be different versions
+-- rather than translating to a flag the binary cannot run, the hook denies naming the
+real problem (PR #916).
+
+### Known gaps, named rather than implied
+
+- **The unpushed-commit check trusts local remote-tracking refs** (PR #916). `git
+  branch -r --contains` reads what this checkout last fetched, so a stale checkout can
+  refuse a tag whose commit IS on origin. Refusing wrongly is the safe direction and
+  the message says what to do, but a fetch is not forced.
+
 ## 0.28.0
 
 Two fixes, both of the same shape: a guarantee that had been reporting success while
