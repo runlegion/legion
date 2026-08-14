@@ -129,12 +129,19 @@ pub fn validate_pr_body(acceptance: &[String], body: &str) -> PrWriteReport {
 
     let entries = split_entries(mapping);
 
-    // Coverage: one mapping entry per acceptance criterion. Matching is
-    // positional, so the unmatched tail is `acceptance[entries.len()..]` --
-    // name those criteria verbatim. Printing two bare numbers and leaving the
-    // author to permute the body until one moves is what made this gate
-    // expensive (#907): smugglr rewrote a body four times against "3 for 5"
-    // without ever learning WHICH two were unmapped.
+    // Coverage: one mapping entry per acceptance criterion. Printing two bare
+    // numbers and leaving the author to permute the body until one moves is
+    // what made this gate expensive (#907) -- smugglr rewrote a body four times
+    // against "3 for 5" without ever learning WHICH two were unmapped -- so the
+    // shortfall is named.
+    //
+    // But matching is POSITIONAL (entry i covers criterion i) and nothing in a
+    // body declares its own order, so the tail is an inference, not a fact. On
+    // an out-of-order body it points at criteria that were mapped fine, and a
+    // confidently wrong name is worse than no name: it sends the author to
+    // rewrite an entry that was already correct. So the guess is labelled as a
+    // guess whenever it could be wrong. With zero entries there is nothing to
+    // misalign and the list is exact.
     if entries.len() < acceptance.len() {
         let unmatched: Vec<String> = acceptance[entries.len()..]
             .iter()
@@ -145,9 +152,15 @@ pub fn validate_pr_body(acceptance: &[String], body: &str) -> PrWriteReport {
                 )
             })
             .collect();
+        let qualifier = if entries.is_empty() {
+            "Unmapped"
+        } else {
+            "Likely unmapped (matched POSITIONALLY -- entry 1 covers criterion 1, and so on; \
+             if your entries are in a different order these may be the wrong ones)"
+        };
         findings.push(format!(
             "Your body has {} mapping entr{}; the issue declares {} acceptance criteri{}. \
-             Unmapped:\n{}\n{ENTRY_FORMAT_HELP}",
+             {qualifier}:\n{}\n{ENTRY_FORMAT_HELP}",
             entries.len(),
             if entries.len() == 1 { "y" } else { "ies" },
             acceptance.len(),
@@ -598,6 +611,56 @@ mod tests {
             coverage.contains("### "),
             "must state the entry-format rule, got: {coverage}"
         );
+    }
+
+    /// #907: naming the unmapped criteria is a POSITIONAL inference, so it must
+    /// be labelled as one whenever it can be wrong. On an out-of-order body the
+    /// tail points at criteria that were mapped fine, and a confidently wrong
+    /// name sends the author to rewrite an entry that was already correct --
+    /// worse than printing no name at all.
+    #[test]
+    fn positional_guess_is_labelled_when_it_could_be_wrong() {
+        let ac = vec![
+            "First criterion".to_owned(),
+            "Second criterion".to_owned(),
+            "Third criterion".to_owned(),
+        ];
+        let body = "## Acceptance criteria mapping\n\n\
+                    ### 1. First criterion\n\
+                    The dispatch path now threads the flag through and the handler honors it.\n\
+                    Evidence: foo.rs::first\n\n\
+                    ## Not done\n\nRest deferred.\n";
+        let report = validate_pr_body(&ac, body);
+        let coverage = report
+            .findings
+            .iter()
+            .find(|f| f.contains("mapping entr"))
+            .expect("a coverage finding");
+        assert!(
+            coverage.contains("POSITIONALLY"),
+            "a guess that can be wrong must say so, got: {coverage}"
+        );
+    }
+
+    /// With zero entries nothing can be misaligned, so the list is exact and
+    /// must NOT be hedged -- hedging a certain answer trains readers to ignore
+    /// the hedge on the uncertain one.
+    #[test]
+    fn zero_entries_names_all_criteria_without_hedging() {
+        let ac = vec!["First criterion".to_owned(), "Second criterion".to_owned()];
+        // Mapping section present but with no `### ` entries at all.
+        let body = "## Acceptance criteria mapping\n\nSee below.\n\n## Not done\n\nNothing.\n";
+        let report = validate_pr_body(&ac, body);
+        let coverage = report
+            .findings
+            .iter()
+            .find(|f| f.contains("mapping entr"))
+            .expect("a coverage finding");
+        assert!(
+            !coverage.contains("POSITIONALLY"),
+            "an exact list must not be hedged, got: {coverage}"
+        );
+        assert!(coverage.contains("First criterion") && coverage.contains("Second criterion"));
     }
 
     /// #907: an issue with no machine-readable criteria is a REFUSAL, not a

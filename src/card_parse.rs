@@ -42,13 +42,20 @@ pub fn parse_issue_body(body: &str) -> ParsedIssue {
     let mut parsed = ParsedIssue::default();
 
     for (heading, content) in &sections {
+        // Normalize before matching (#907): trailing punctuation on a heading
+        // is a formatting choice, never a different section. `## Acceptance
+        // criteria:` previously matched nothing, fell through to the generic
+        // bucket, and yielded ZERO criteria -- which then silently relaxed the
+        // pr-write gate. Strictness bought nothing here: there is no competing
+        // heading a trailing colon could disambiguate against.
         let key = heading.to_lowercase();
+        let key = key.trim_end_matches([':', '.', ' ']);
         let content = content.trim();
         if content.is_empty() {
             continue;
         }
 
-        match key.as_str() {
+        match key {
             "problem" | "bug" | "issue" => {
                 parsed.problem = Some(first_paragraph(content));
             }
@@ -183,6 +190,45 @@ pub fn card_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #907: a trailing colon on the heading is a formatting choice, never a
+    /// different section. It previously matched nothing, fell through to the
+    /// generic bucket, and produced ZERO criteria -- which then silently
+    /// relaxed the pr-write gate instead of failing anywhere visible. Five
+    /// issues on smugglr's migrate spine were authored in the colon form.
+    #[test]
+    fn acceptance_heading_tolerates_trailing_punctuation() {
+        for heading in [
+            "## Acceptance criteria:",
+            "## Acceptance criteria.",
+            "## Acceptance criteria: ",
+            "## Done when:",
+            "## ACCEPTANCE CRITERIA:",
+        ] {
+            let body = format!("{heading}\n- Tests pass\n- Clippy clean\n");
+            let parsed = parse_issue_body(&body);
+            assert_eq!(
+                parsed.acceptance,
+                vec!["Tests pass".to_owned(), "Clippy clean".to_owned()],
+                "heading {heading:?} must yield criteria, got {:?}",
+                parsed.acceptance
+            );
+        }
+    }
+
+    /// Normalization must not swallow a genuinely different section -- only
+    /// trailing punctuation is ignored, not surrounding words.
+    #[test]
+    fn acceptance_normalization_does_not_capture_other_headings() {
+        let body = "## Acceptance criteria notes\n- Not a criterion\n";
+        let parsed = parse_issue_body(body);
+        assert!(
+            parsed.acceptance.is_empty(),
+            "a different heading must stay a generic section, got {:?}",
+            parsed.acceptance
+        );
+        assert_eq!(parsed.sections.len(), 1);
+    }
 
     #[test]
     fn truncate_chars_handles_max_less_than_ellipsis() {
