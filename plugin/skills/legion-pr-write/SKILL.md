@@ -59,6 +59,28 @@ simplify gate).
    What you deliberately left out of scope, and why. Write "nothing" only if that is true.
    ```
 
+   **The two format contracts are literal, and the validator cannot see past them (#907).**
+   These are not style preferences -- they are how the parser finds anything at all. Two
+   agents independently lost an evening to them on 2026-08-13, one rewriting bullets that
+   were never entries, the other reading the parser source to escape.
+
+   - **Body side.** Mapping entries are split on `### ` subheadings ONLY. Bullets, numbered
+     items, bold run-in headings, and block quotes are invisible to the splitter, and
+     everything before the first `### ` is discarded as preamble. One `### ` per criterion.
+     A body with five bullets and three `### ` headings counts as **three** entries.
+   - **Body side.** The mapping section heading must contain both "acceptance" and
+     "mapping". Plain `## Acceptance criteria` is routed to the parser's own criteria field
+     and is then not findable as your mapping section.
+   - **Issue side.** Criteria are read only from a `## ` heading matching exactly one of
+     `Acceptance criteria`, `Acceptance`, `Done when`, `Done` -- case-insensitive, but with
+     no trailing punctuation. `## Acceptance criteria:` does NOT match, and neither does
+     `### Done when`. Items may be `- ` or `- [ ] ` list lines; indentation is fine.
+
+   If the issue declares no criteria the parser can read, the gate now REFUSES rather than
+   quietly dropping to a one-entry bar. Fix the issue's heading -- do not rewrite your body,
+   and do not simplify the criteria to appease the parser. The criteria are usually fine;
+   the heading is usually the problem.
+
    One `### ` entry per acceptance criterion. Each entry needs real explanatory prose and a
    line of evidence. The mapping must be composed prose, not a checklist -- a fill-in form
    defeats the purpose.

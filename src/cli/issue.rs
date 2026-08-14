@@ -5,6 +5,26 @@ use clap::Subcommand;
 use crate::cli::util::{audit, open_db};
 use crate::{card_parse, db, error, worksource};
 
+/// Render the acceptance-criteria section of `legion issue view` in the form
+/// `card_parse::parse_issue_body` can read BACK (#907).
+///
+/// This is a round-trip contract, not a formatting preference. Agents author
+/// new issues by mirroring what this viewer prints, so when it emitted
+/// `Acceptance criteria:` -- bare line, trailing colon, no `## ` -- it taught a
+/// shape the parser scores as ZERO criteria, which then silently relaxed the
+/// pr-write gate to a one-entry bar. The viewer's output format and the
+/// parser's input format have to be the same format, and
+/// `rendered_acceptance_round_trips` is what keeps them that way.
+fn render_acceptance_block(items: &[String]) -> String {
+    let mut out = String::from("## Acceptance criteria\n");
+    for item in items {
+        out.push_str("- ");
+        out.push_str(item);
+        out.push('\n');
+    }
+    out
+}
+
 #[derive(Subcommand)]
 pub(crate) enum SubIssueAction {
     /// Create a child issue linked to a parent via GitHub's native
@@ -261,11 +281,7 @@ pub(crate) fn handle(action: IssueAction) -> error::Result<()> {
                 println!("Solution: {}\n", solution);
             }
             if !parsed.acceptance.is_empty() {
-                println!("Acceptance criteria:");
-                for item in &parsed.acceptance {
-                    println!("  - {}", item);
-                }
-                println!();
+                println!("{}", render_acceptance_block(&parsed.acceptance));
             }
             for (heading, content) in &parsed.sections {
                 println!("{}:\n{}\n", heading, content);
@@ -453,4 +469,52 @@ pub(crate) fn handle_comment(repo: String, number: u64, body: String) -> error::
 
     eprintln!("[legion] commented on #{} on {}", number, source_repo);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #907: the viewer's output must survive re-parsing. This is the
+    /// regression that let `legion issue view` teach agents an unparseable
+    /// shape -- the criteria came back as ZERO, which silently relaxed the
+    /// pr-write gate rather than failing anywhere visible.
+    #[test]
+    fn rendered_acceptance_round_trips() {
+        let items = vec![
+            "Heartbeat refreshes only live leases".to_owned(),
+            "Daemon bootstrap releases stale leases".to_owned(),
+            "`cargo test` and `cargo clippy --all-targets` are clean".to_owned(),
+        ];
+        let rendered = render_acceptance_block(&items);
+        let reparsed = card_parse::parse_issue_body(&rendered);
+        assert_eq!(
+            reparsed.acceptance, items,
+            "what the viewer prints must parse back to the same criteria; got {:?}",
+            reparsed.acceptance
+        );
+    }
+
+    /// The specific shape that caused #907 must NOT be what we emit.
+    #[test]
+    fn rendered_acceptance_is_not_the_bare_colon_form() {
+        let rendered = render_acceptance_block(&["Something".to_owned()]);
+        assert!(
+            rendered.starts_with("## Acceptance criteria\n"),
+            "heading must be a parseable `## ` section, got: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("Acceptance criteria:"),
+            "the trailing-colon form is the bug, not the output"
+        );
+    }
+
+    /// An empty criteria list must not emit a heading with nothing under it --
+    /// `parse_issue_body` skips empty sections, so it would round-trip, but the
+    /// caller guards on non-empty and this pins that the block is items-only.
+    #[test]
+    fn rendered_acceptance_contains_one_line_per_item() {
+        let rendered = render_acceptance_block(&["a".to_owned(), "b".to_owned()]);
+        assert_eq!(rendered.lines().count(), 3, "heading plus two items");
+    }
 }

@@ -39,13 +39,31 @@ pub struct PrWriteReport {
     pub mapping_entries: usize,
 }
 
+/// How mapping entries must be written, restated in failure output. The rule
+/// is invisible from the outside -- `split_entries` recognizes ONLY `### `
+/// lines -- and two agents independently burned an evening rewriting bullets
+/// that were never entries (#907).
+const ENTRY_FORMAT_HELP: &str = "Mapping entries are split on `### ` subheadings ONLY -- give each criterion its own `### ` heading. \
+     Bullets, numbered items, and bold run-in headings are not entries.";
+
+/// How an issue must declare criteria, restated when none parsed. Mirrors
+/// `card_parse::extract_sections` (a `## ` heading, exactly) and
+/// `parse_issue_body`'s exact-match arm, which a trailing colon defeats.
+const CRITERIA_FORMAT_HELP: &str = "Criteria are read from a `## ` heading matching exactly one of: \
+     `Acceptance criteria`, `Acceptance`, `Done when`, `Done` (case-insensitive, no trailing punctuation -- \
+     `## Acceptance criteria:` does NOT match). Items are `- ` or `- [ ] ` list lines.";
+
 /// Validate a drafted PR `body` against the issue's `acceptance` criteria.
 ///
 /// `acceptance` is the criterion list parsed from the issue (see
-/// `card_parse::parse_issue_body`). An empty list means the issue declared no
-/// machine-readable criteria; the validator still requires a mapping section
-/// with at least one substantive entry plus a not-done section, so the
-/// forcing function is never a no-op.
+/// `card_parse::parse_issue_body`). An EMPTY list is a hard refusal (#907),
+/// not a relaxed bar: it previously collapsed the requirement to
+/// `acceptance.len().max(1)`, so one entry cleared a gate against an issue
+/// with any number of criteria. That inverted the gate -- it was weakest
+/// exactly where the spec was least machine-readable, and a degraded pass
+/// printed the same "clean" as a strict one. smugglr#335 merged that way,
+/// approved at one entry against five real criteria, with nothing recording
+/// that the gate had run at a tenth strength.
 pub fn validate_pr_body(acceptance: &[String], body: &str) -> PrWriteReport {
     let mut findings: Vec<String> = Vec::new();
 
@@ -73,6 +91,24 @@ pub fn validate_pr_body(acceptance: &[String], body: &str) -> PrWriteReport {
         })
         .map(|(_, c)| c.as_str());
 
+    // An issue that declared no machine-readable criteria cannot be mapped
+    // against, so there is nothing to validate and no honest verdict to give.
+    // Refuse loudly instead of quietly lowering the bar (#907).
+    if acceptance.is_empty() {
+        findings.push(format!(
+            "The ISSUE declares no machine-readable acceptance criteria, so this gate cannot \
+             check coverage. Fix the issue, not this body. {CRITERIA_FORMAT_HELP}"
+        ));
+        if not_done.is_none() {
+            findings.push(NOT_DONE_MISSING.to_owned());
+        }
+        return PrWriteReport {
+            ok: false,
+            findings,
+            mapping_entries: mapping.map(split_entries).map_or(0, |e| e.len()),
+        };
+    }
+
     let Some(mapping) = mapping else {
         findings.push(
             "Missing the 'Acceptance criteria mapping' section. Map each criterion to the \
@@ -93,16 +129,43 @@ pub fn validate_pr_body(acceptance: &[String], body: &str) -> PrWriteReport {
 
     let entries = split_entries(mapping);
 
-    // Coverage: at least one mapping entry per acceptance criterion (or, when
-    // the issue declared none, at least one entry overall).
-    let required = acceptance.len().max(1);
-    if entries.len() < required {
+    // Coverage: one mapping entry per acceptance criterion. Printing two bare
+    // numbers and leaving the author to permute the body until one moves is
+    // what made this gate expensive (#907) -- smugglr rewrote a body four times
+    // against "3 for 5" without ever learning WHICH two were unmapped -- so the
+    // shortfall is named.
+    //
+    // But matching is POSITIONAL (entry i covers criterion i) and nothing in a
+    // body declares its own order, so the tail is an inference, not a fact. On
+    // an out-of-order body it points at criteria that were mapped fine, and a
+    // confidently wrong name is worse than no name: it sends the author to
+    // rewrite an entry that was already correct. So the guess is labelled as a
+    // guess whenever it could be wrong. With zero entries there is nothing to
+    // misalign and the list is exact.
+    if entries.len() < acceptance.len() {
+        let unmatched: Vec<String> = acceptance[entries.len()..]
+            .iter()
+            .map(|c| {
+                format!(
+                    "  - {}",
+                    crate::card_parse::truncate_chars_with(c, 100, "...")
+                )
+            })
+            .collect();
+        let qualifier = if entries.is_empty() {
+            "Unmapped"
+        } else {
+            "Likely unmapped (matched POSITIONALLY -- entry 1 covers criterion 1, and so on; \
+             if your entries are in a different order these may be the wrong ones)"
+        };
         findings.push(format!(
-            "Only {} mapping entr{} for {} acceptance criteri{} -- map every criterion.",
+            "Your body has {} mapping entr{}; the issue declares {} acceptance criteri{}. \
+             {qualifier}:\n{}\n{ENTRY_FORMAT_HELP}",
             entries.len(),
             if entries.len() == 1 { "y" } else { "ies" },
             acceptance.len(),
             if acceptance.len() == 1 { "on" } else { "a" },
+            unmatched.join("\n"),
         ));
     }
 
@@ -522,29 +585,121 @@ mod tests {
                     ## Not done\n\nSecond criterion deferred.\n";
         let report = validate_pr_body(&ac, body);
         assert!(!report.ok);
+        let coverage = report
+            .findings
+            .iter()
+            .find(|f| f.contains("mapping entr"))
+            .expect("a coverage finding");
+        // #907: the unmapped criterion must be named. Reporting only counts is
+        // what forced smugglr to permute a body four times to discover which
+        // criteria were missing.
         assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| f.contains("map every criterion"))
+            coverage.contains("Second criterion"),
+            "must name the unmapped criterion verbatim, got: {coverage}"
+        );
+        assert!(
+            !coverage.contains("First criterion"),
+            "must not name a criterion that WAS mapped, got: {coverage}"
+        );
+        // The two counts must be attributable to a side.
+        assert!(
+            coverage.contains("Your body has") && coverage.contains("the issue declares"),
+            "counts must say which is which, got: {coverage}"
+        );
+        // The invisible rule must be stated where the author reads the failure.
+        assert!(
+            coverage.contains("### "),
+            "must state the entry-format rule, got: {coverage}"
         );
     }
 
+    /// #907: naming the unmapped criteria is a POSITIONAL inference, so it must
+    /// be labelled as one whenever it can be wrong. On an out-of-order body the
+    /// tail points at criteria that were mapped fine, and a confidently wrong
+    /// name sends the author to rewrite an entry that was already correct --
+    /// worse than printing no name at all.
     #[test]
-    fn requires_one_entry_even_without_declared_acceptance() {
-        // Issue declared no AC; the forcing function must not become a no-op.
-        let ac: Vec<String> = vec![];
-        // Mapping section present (non-empty so it survives parsing) but with
-        // no `### ` entries -- coverage still requires at least one.
-        let empty =
-            "## Acceptance criteria mapping\n\nSee below.\n\n## Not done\n\nNothing skipped.\n";
-        let report = validate_pr_body(&ac, empty);
-        assert!(!report.ok);
+    fn positional_guess_is_labelled_when_it_could_be_wrong() {
+        let ac = vec![
+            "First criterion".to_owned(),
+            "Second criterion".to_owned(),
+            "Third criterion".to_owned(),
+        ];
+        let body = "## Acceptance criteria mapping\n\n\
+                    ### 1. First criterion\n\
+                    The dispatch path now threads the flag through and the handler honors it.\n\
+                    Evidence: foo.rs::first\n\n\
+                    ## Not done\n\nRest deferred.\n";
+        let report = validate_pr_body(&ac, body);
+        let coverage = report
+            .findings
+            .iter()
+            .find(|f| f.contains("mapping entr"))
+            .expect("a coverage finding");
         assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| f.contains("map every criterion"))
+            coverage.contains("POSITIONALLY"),
+            "a guess that can be wrong must say so, got: {coverage}"
+        );
+    }
+
+    /// With zero entries nothing can be misaligned, so the list is exact and
+    /// must NOT be hedged -- hedging a certain answer trains readers to ignore
+    /// the hedge on the uncertain one.
+    #[test]
+    fn zero_entries_names_all_criteria_without_hedging() {
+        let ac = vec!["First criterion".to_owned(), "Second criterion".to_owned()];
+        // Mapping section present but with no `### ` entries at all.
+        let body = "## Acceptance criteria mapping\n\nSee below.\n\n## Not done\n\nNothing.\n";
+        let report = validate_pr_body(&ac, body);
+        let coverage = report
+            .findings
+            .iter()
+            .find(|f| f.contains("mapping entr"))
+            .expect("a coverage finding");
+        assert!(
+            !coverage.contains("POSITIONALLY"),
+            "an exact list must not be hedged, got: {coverage}"
+        );
+        assert!(coverage.contains("First criterion") && coverage.contains("Second criterion"));
+    }
+
+    /// #907: an issue with no machine-readable criteria is a REFUSAL, not a
+    /// relaxed one-entry bar. Previously `required = acceptance.len().max(1)`
+    /// let a single entry clear the gate no matter how many criteria the issue
+    /// actually stated in prose -- smugglr#335 merged that way, approved at one
+    /// entry against five real criteria.
+    #[test]
+    fn refuses_when_issue_declares_no_machine_readable_criteria() {
+        let ac: Vec<String> = vec![];
+        // A body that would have PASSED under the old max(1) rule: one
+        // substantive entry with evidence, plus a not-done section.
+        let body = "## Acceptance criteria mapping\n\n\
+                    ### The flag is threaded through dispatch\n\
+                    The dispatch path now threads the flag through and the handler honors it, \
+                    which is what the criterion asked for.\n\
+                    Evidence: foo.rs::first\n\n\
+                    ## Not done\n\nNothing skipped.\n";
+        let report = validate_pr_body(&ac, body);
+        assert!(
+            !report.ok,
+            "one entry must not clear a gate whose issue declared no criteria"
+        );
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.contains("no machine-readable acceptance criteria"))
+            .expect("a finding naming the unparseable issue");
+        // The author must be sent to the issue, not left rewriting the body --
+        // smugglr read "0 for 0" as a body problem and lost the time to it.
+        assert!(
+            finding.contains("Fix the issue, not this body"),
+            "must point at the issue, got: {finding}"
+        );
+        // The exact-match trap must be named: a trailing colon silently voids
+        // the heading (`card_parse::parse_issue_body` matches exactly).
+        assert!(
+            finding.contains("Acceptance criteria:"),
+            "must name the trailing-colon trap, got: {finding}"
         );
     }
 
