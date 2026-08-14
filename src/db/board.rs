@@ -600,8 +600,9 @@ impl Database {
         // Parameters are bound positionally: pattern slots first (?1..?N),
         // then repo_name (watch_handled join + self-exclusion), now
         // (expires_at check), and optionally since_ts.
-        let mut patterns: Vec<String> = Vec::with_capacity((names.len() + 2) * 4);
-        for reserved in ["all", "everyone"] {
+        let mut patterns: Vec<String> =
+            Vec::with_capacity((names.len() + crate::signal::BROADCAST_ADDRESSES.len()) * 4);
+        for reserved in crate::signal::BROADCAST_ADDRESSES {
             patterns.extend(crate::signal::address_like_patterns(reserved));
         }
         for name in names {
