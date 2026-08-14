@@ -1,5 +1,115 @@
 # Legion Changelog
 
+## 0.28.0
+
+Two fixes, both of the same shape: a guarantee that had been reporting success while
+doing nothing. The persona lease was documented to let a crashed session's claim age
+out via TTL, and the daemon heartbeat -- which is host-scoped, not session-scoped --
+pushed every expired row forward each tick instead, so no lease in the production
+table had died since 2026-05-18 and two legion instances ran the same repo as the same
+persona on 2026-08-12 (#900, PR #901). `legion pr write-check` collapsed its
+requirement to a single mapping entry whenever an issue's criteria failed to parse, so
+the gate was weakest exactly where the spec was least machine-readable and a degraded
+pass printed the same "clean" as a strict one (#907, PR #908). Neither was visible in
+any statistic we keep: a FAILED write-check records no gate row, so neither of the two
+incidents behind #907 appears in the 27.7% catch rate that gate is credited with -- and
+that measurement gap is still open, not fixed here. Minor release rather than a
+patch: `pr write-check` now refuses where it previously passed at a lowered bar, and
+`legion issue view` prints its acceptance criteria in a different format.
+
+### Breaking
+
+- **`legion pr write-check` refuses an issue that declares no machine-readable
+  acceptance criteria** (PR #908, #907). `required = acceptance.len().max(1)` is gone.
+  Previously a malformed issue got a bar it could not fail -- smugglr#335 merged with
+  one mapping entry against five real criteria, and nothing recorded that the gate had
+  run at a tenth strength. The refusal names the accepted headings (`## Acceptance
+  criteria`, `Acceptance`, `Done when`, `Done`, case-insensitive) and the `- ` / `- [ ]
+  ` item format, and it sends the author to the ISSUE rather than leaving them
+  rewriting a body that was never the problem. This is the bullet to read before
+  upgrading: an issue whose criteria still do not parse goes from quietly under-gated
+  to hard-blocked at PR time. Scope is narrower than it sounds, because the parser got
+  looser in the same change (see below) -- what flips is issues with no `## ` heading,
+  a heading outside the accepted set, or no list items under it. smugglr measured five
+  issues on their migrate spine authored in the viewer's old shape (#269, #289, #290,
+  #296, #322); normalization rescues the colon-only ones, and the residue needing human
+  work is the two already hand-fixed plus #322, which needs splitting into three issues
+  before it can be gated at all.
+- **`legion issue view` renders acceptance criteria in a new format** (PR #908, #907).
+  Output was a bare `Acceptance criteria:` line with two-space-indented `  - ` items;
+  it is now a `## Acceptance criteria` heading with flush `- ` items. Anything scraping
+  that output sees a different shape. This was the root cause of everything above: the
+  viewer taught a format the parser scores as zero criteria, and agents author issues
+  by mirroring what the viewer prints, so the tool was manufacturing the exact input
+  its own gate could not read. `rendered_acceptance_round_trips` now pins the viewer's
+  output to parse back to the same criteria.
+
+### Fixed
+
+- **The persona lease heartbeat resurrected expired leases** (PR #901, #900).
+  `heartbeat_persona_leases` filtered on `deleted_at IS NULL` and omitted the
+  `expires_at > now` half of `LIVE_LEASE_WHERE`, so the daemon refreshed dead sessions'
+  leases on their behalf every tick. Every row in the production table, acquired
+  between 2026-05-18 and 2026-08-13, carried one identical `expires_at`: three months
+  of leases that could never age out, and a stale-reclaim arm in
+  `try_acquire_persona_lease` that could never fire. Same predicate divergence #679
+  fixed for the list-vs-release paths; the heartbeat was never brought in line.
+- **Nothing cleared a host's leases in production** (PR #901, #900).
+  `release_persona_leases_by_host` existed with exactly one reference in the repo, and
+  it was inside a `#[test]`. A power loss skips graceful shutdown, so leases survived
+  the reboot and the heartbeat defect then immortalized them. Daemon bootstrap now
+  releases this host's leases before the poll loop starts, deliberately non-fatal: a
+  daemon that just started owns no live sessions, and refusing to boot over stale-lease
+  cleanup is worse than the stale leases.
+- **An interactive session opening into a repo a watch worker already holds stands that
+  worker down** (PR #901, #900). #583's gate was one-directional -- it stopped watch
+  from spawning into a live human session, and nothing stopped the reverse, which is
+  what actually bit on 2026-08-12 when watch spawned about 22 seconds before the
+  interactive banner. Session start now signals the `.lock` holder, releases the lock,
+  and reports the action on stderr. Visible if you open a session while watch is
+  mid-wake. SIGTERM rather than SIGKILL, so the worker runs its own Stop hook and
+  finalizes its wake-attempt row; preemption is gated on `LEGION_WAKE_ATTEMPT_ID` being
+  empty and refuses both of its own pid identities, so a watch-spawned session can
+  never cancel itself.
+- **A trailing colon on an issue heading voided the whole section** (PR #908, #907).
+  `## Acceptance criteria:` matched no arm of `parse_issue_body`, fell through to the
+  generic bucket, and yielded zero criteria -- which then silently relaxed the gate
+  rather than failing anywhere visible. Trailing punctuation is now normalized away.
+  The strictness was buying nothing: there is no competing heading a trailing colon
+  could disambiguate against. Note the direction -- the parser got LOOSER here while
+  the gate got stricter, and that asymmetry is what keeps the refusal above from being
+  a fleet-wide block.
+- **`pr write-check` names what it wants** (PR #908, #907). A coverage failure lists
+  the unmatched criteria verbatim instead of a count, the two numbers are labelled
+  ("Your body has N mapping entries; the issue declares M acceptance criteria") so the
+  author can tell which side is theirs, and the invisible rule is stated at failure
+  time: `split_entries` recognizes `### ` subheadings ONLY -- bullets, numbered items
+  and bold run-in headings are not entries, and everything before the first `### ` is
+  discarded as preamble. No amount of rewriting bullets discovers a rule the error
+  never mentions: two agents independently burned an evening rewriting bullets that
+  were never entries, and both escaped only by reading the parser source. The named
+  list is hedged as a positional guess whenever it could be misaligned, and left exact
+  only when there are zero entries and nothing can misalign.
+  `plugin/skills/legion-pr-write/SKILL.md` now documents both contracts -- the body-side
+  `### ` rule and the issue-side heading-exactness rule -- and tells the author not to
+  simplify criteria to appease the parser.
+
+### Known gaps, named rather than implied
+
+- **Arity is still not coverage**, and it is the larger remaining hole in the same gate
+  this release tightened. A body with the right entry COUNT and the wrong CONTENT
+  passes silently -- matching is by index, and the gate never compares an entry to the
+  criterion it claims. That is the same shape as the `max(1)` bar removed above:
+  strongest-looking exactly where it is weakest. A greedy best-overlap match between
+  each `### ` heading and its criterion text would turn arity-checking into real
+  coverage, but it changes what the gate VERIFIES and needs its own issue.
+- **`split_entries` still accepts only `### `.** This release documents the rule and
+  states it at failure time; widening it to other heading forms is a separate decision.
+- **The `bootstrap` stale-lease call site is untested one-line wiring** (PR #901).
+  Covering it needs a config file, a pid lock and an open DB -- an integration harness
+  the branch does not have. The function it calls is covered; what is not is the
+  wiring, verifiable by inspection.
+
 ## 0.27.0
 
 Guards that refused a command now translate it, and the conversion exposed that the
