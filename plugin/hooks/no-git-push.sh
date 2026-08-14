@@ -222,12 +222,83 @@ If you reached for force because the branch diverged: an already-pushed branch c
   exit 0
 fi
 
-# POSITIONALS are [remote] [branch] in the common `git push origin foo`
-# shape. Take the branch only when both are present; a bare `git push` or
-# `git push origin` lets `legion push` default to the CWD's branch, which
-# is the behaviour we want anyway.
+# POSITIONALS are [remote] [ref] in the common `git push origin foo` shape.
+# A bare `git push` or `git push origin` lets `legion push` default to the
+# CWD's branch, which is the behaviour we want anyway.
+#
+# When a ref IS named it cannot be classified lexically (#915): `v0.0.79` and
+# `feat/thing` are both just words. This hook used to assume branch, so a tag
+# push was rewritten into `legion push --branch v0.0.79` and failed -- which
+# is what blocked rafters on a release tag. Ask the repository instead.
+EXPLICIT_TAG=""
 if [ "${#POSITIONALS[@]}" -ge 2 ]; then
-  EXPLICIT_BRANCH="${POSITIONALS[1]}"
+  REF="${POSITIONALS[1]}"
+
+  # Resolve in the payload's cwd, not the hook process's -- the ref belongs to
+  # the repository the command targets.
+  #
+  # When the repo cannot be inspected at all, fall through to the pre-#915
+  # behaviour (assume branch) rather than denying. Ref resolution is an
+  # improvement where it is available, never a new gate: a hook that blocks a
+  # legitimate push because it could not look at the repository has made
+  # things worse than the bug it was added to fix.
+  REF_IS_BRANCH=no
+  REF_IS_TAG=no
+  REF_RESOLVABLE=no
+  if git -C "$CWD" rev-parse --git-dir >/dev/null 2>&1; then
+    REF_RESOLVABLE=yes
+    git -C "$CWD" rev-parse --verify --quiet "refs/heads/${REF}" >/dev/null 2>&1 && REF_IS_BRANCH=yes
+    git -C "$CWD" rev-parse --verify --quiet "refs/tags/${REF}" >/dev/null 2>&1 && REF_IS_TAG=yes
+  fi
+
+  if [ "$REF_IS_BRANCH" = yes ] && [ "$REF_IS_TAG" = yes ]; then
+    emit_deny "Refusing \`git push\` -- \`${REF}\` is BOTH a branch and a tag in this repository.
+
+git would disambiguate this for you, and which one it picks is not something to rely on when the whole point of this path is knowing what reached origin. Say which you meant:
+
+    legion push --repo ${REPO_ARG} --branch ${REF}
+    legion push --repo ${REPO_ARG} --tag ${REF}"
+    exit 0
+  fi
+
+  if [ "$REF_RESOLVABLE" = yes ] && [ "$REF_IS_BRANCH" = no ] && [ "$REF_IS_TAG" = no ]; then
+    emit_deny "Refusing \`git push\` -- \`${REF}\` resolves to neither a branch nor a tag here.
+
+Nothing by that name exists in this repository, so the push would either fail or create a ref you did not intend. Check the name, or create the branch/tag first."
+    exit 0
+  fi
+
+  if [ "$REF_IS_TAG" = yes ]; then
+    EXPLICIT_TAG="$REF"
+  else
+    EXPLICIT_BRANCH="$REF"
+  fi
+fi
+
+if [ -n "$EXPLICIT_TAG" ]; then
+  # The plugin's files and the binary they drive can be different versions --
+  # bin/legion is a shim dispatching to the data dir, and that binary is
+  # installed by a SessionStart hook, so a session started before an upgrade
+  # runs new hooks against an old binary. Rewriting to a flag it does not have
+  # would hand the agent a clap error instead of a push. Say what is actually
+  # wrong instead.
+  if [ -z "${LEGION:-}" ] || ! "$LEGION" push --help 2>/dev/null | grep -q -- '--tag'; then
+    emit_deny "Refusing \`git push\` -- \`${EXPLICIT_TAG}\` is a tag, and this legion binary cannot push tags yet.
+
+\`legion push --tag\` (#915) is the sanctioned path, but the installed binary predates it, so translating your command would produce an unknown-argument error rather than a push.
+
+Start a new session to pick up the current binary, then re-run. If you need the tag out now and cannot wait, that is an operator action -- ask rather than routing around the guard."
+    exit 0
+  fi
+
+  REWRITTEN="legion push --repo ${REPO_ARG} --tag ${EXPLICIT_TAG}"
+  emit_rewrite "$REWRITTEN" "Translated your \`git push\` to \`${REWRITTEN}\`.
+
+\`${EXPLICIT_TAG}\` is a tag, not a branch, so this routes to the tag path (#915). Until that path existed there was no sanctioned way to push a tag at all: this hook assumed every positional ref was a branch, and the only thing that worked was a release script shelling out past the guard -- which is exactly why release tags wrote no audit row.
+
+\`legion push --tag\` pushes the fully-qualified \`refs/tags/\` refspec (never the ambiguous bare name), refuses a tag whose commit is not reachable from any branch on origin, and writes an audit row carrying the tag and the sha it points at." \
+    "routed through legion push --tag for the audit trail (#915)"
+  exit 0
 fi
 
 REWRITTEN="legion push --repo ${REPO_ARG}"

@@ -152,6 +152,8 @@ finish_tests() {
 #   FAKE_BUILD               when set, `--version` appends " (build $FAKE_BUILD)"
 #                            (the #698 build-id suffix); unset -> no suffix
 #   FAKE_WATCH               `watch list` body ("repo<TAB>/path" lines)
+#   FAKE_NO_PUSH_TAG=1       `push --help` omits --tag, simulating a binary
+#                            that predates #915 (default: --tag advertised)
 #   FAKE_STATS="repo:N"      `stats --repo repo` -> "repo: N reflections (...)"
 #                            (anything else -> "no reflections stored yet")
 #   FAKE_INDEX_JSON          `index --status --json` body (default [])
@@ -213,6 +215,20 @@ case "${1:-}" in
       echo "legion ${FAKE_VERSION:-9.9.9} (build ${FAKE_BUILD})"
     else
       echo "legion ${FAKE_VERSION:-9.9.9}"
+    fi
+    ;;
+  push)
+    # `push --help` is probed by no-git-push.sh (#915) to decide whether this
+    # binary can push tags -- the plugin's hooks and the binary they drive can
+    # be different versions, so the hook must not rewrite to a flag the binary
+    # lacks. Advertises --tag by default (the current CLI); set
+    # FAKE_NO_PUSH_TAG=1 to simulate a binary that predates it.
+    if [ "${2:-}" = "--help" ]; then
+      echo "Push a branch to origin -- the sanctioned in-band push path (#791)."
+      echo "      --branch <BRANCH>  Branch to push"
+      if [ "${FAKE_NO_PUSH_TAG:-}" != "1" ]; then
+        echo "      --tag <TAG>        Tag to push"
+      fi
     fi
     ;;
   watch)

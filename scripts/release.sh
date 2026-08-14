@@ -986,10 +986,35 @@ finish_release() {
        git tag -a ${TAG} -m '${TAG_MESSAGE}' ${MERGED_SHA} && git push origin refs/tags/${TAG}"
   fi
 
-  git push origin "refs/tags/${TAG}" \
-    || fail "release INCOMPLETE BUT RECOVERABLE: ${NEW} IS merged on origin/${RELEASE_BRANCH} as ${MERGED_SHA} and ${TAG} exists locally on it, but pushing the tag failed, so release.yml has NOT fired and no binaries are building. Re-run only the tag step:
+  # #915: the tag push goes through `legion push --tag`, not a bare `git push`.
+  # A child-process git push is invisible to the hooks, which is exactly why
+  # every release tag before this one reached origin with no audit row -- the
+  # one write in a release that ships to every agent was the one write nobody
+  # could see afterwards. Routing it here means the tag is captured on the same
+  # path as the branch pushes above.
+  #
+  # BOOTSTRAP: this script runs against whatever `legion` is on PATH, which is
+  # the INSTALLED binary -- not the tree being released. The release that first
+  # ships `push --tag` therefore runs under a binary that does not have it yet,
+  # and there is no way out of that by ordering: shipping the capable binary
+  # requires a release, and the release needs the capability. So probe, and
+  # fall back to the raw push for exactly as long as that is true. The fallback
+  # is LOUD because it produces the uncaptured tag push #915 exists to end --
+  # an unaudited write that announces itself is a known gap; a silent one is
+  # the defect.
+  if legion push --help 2>/dev/null | grep -q -- '--tag'; then
+    legion push --repo "$WORK_REPO" --tag "$TAG" \
+      || fail "release INCOMPLETE BUT RECOVERABLE: ${NEW} IS merged on origin/${RELEASE_BRANCH} as ${MERGED_SHA} and ${TAG} exists locally on it, but pushing the tag failed, so release.yml has NOT fired and no binaries are building. Re-run only the tag step:
+       legion push --repo ${WORK_REPO} --tag ${TAG}
+       (or re-run 'scripts/release.sh ${NEW} --finish=${PR_NUMBER}', which is idempotent from here)"
+  else
+    info "WARNING: the installed legion ($(legion --version 2>/dev/null || echo 'version unknown')) has no 'push --tag' -- falling back to a raw git push for the tag."
+    info "         This tag push will NOT appear in 'legion audit --action push'. Expected only for the release that first ships #915; if you see it afterwards, the installed binary is behind the plugin and that is worth fixing."
+    git push origin "refs/tags/${TAG}" \
+      || fail "release INCOMPLETE BUT RECOVERABLE: ${NEW} IS merged on origin/${RELEASE_BRANCH} as ${MERGED_SHA} and ${TAG} exists locally on it, but pushing the tag failed, so release.yml has NOT fired and no binaries are building. Re-run only the tag step:
        git push origin refs/tags/${TAG}
        (or re-run 'scripts/release.sh ${NEW} --finish=${PR_NUMBER}', which is idempotent from here)"
+  fi
 
   info "pushed ${TAG} -> ${MERGED_SHA} -- release.yml will build + publish the platform binaries"
 
