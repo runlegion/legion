@@ -1023,8 +1023,25 @@ pub(crate) enum Commands {
         repo: String,
 
         /// Kanban card ID whose acceptance criteria are being verified.
+        /// Mutually exclusive with --issue.
+        #[arg(long, required_unless_present = "issue", conflicts_with = "issue")]
+        card: Option<String>,
+
+        /// Work-source issue number to verify instead of a card (#913).
+        ///
+        /// Criteria come from the issue body, parsed by the same reader
+        /// `legion pr write-check --issue` uses, so the gate that opens a PR
+        /// and the gate that closes the work check the same text. For a repo
+        /// whose work is issue-shaped and never produces cards, this is the
+        /// only path to a verify verdict -- before it, `verify` was reachable
+        /// only through `card.document_id` and such a repo silently got
+        /// simplify, pr-write and review but never the final evidence gate.
+        ///
+        /// Records `legion-verify:issue-<repo>#<n>`. Transitions nothing:
+        /// there is no card to move, so the verdict is the gate row and the
+        /// exit code.
         #[arg(long)]
-        card: String,
+        issue: Option<u64>,
 
         /// Path to a JSON file with the per-criterion verdicts. Reads stdin
         /// when omitted. Shape: `[{"criterion": "...", "verdict":
