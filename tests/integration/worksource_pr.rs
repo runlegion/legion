@@ -3241,3 +3241,86 @@ fn quality_gate_check_rename_with_delta_requires_new_path_not_old_path() {
          got: {stdout}"
     );
 }
+
+// -- verify --issue: the card-free verify path (#913) ----------------------
+
+/// `--issue` reaches work-source resolution, which is as far as a test
+/// without network can go. Confirms the flag parses and routes to the issue
+/// path rather than being silently ignored.
+#[test]
+fn verify_issue_errors_without_worksource_config() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "verify",
+        "--repo",
+        "no-such-repo",
+        "--issue",
+        "42",
+    ]));
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected worksource error (proving --issue routed to the issue path), got: {stderr}"
+    );
+}
+
+/// `--deviation` is a card-only gate: it is adjudicated against the card's
+/// ratified `ReplanRecord`, and an issue has nowhere to record one. It must
+/// refuse rather than accept an assertion nothing checks -- and it must do so
+/// before touching the work source, so the refusal is deterministic.
+#[test]
+fn verify_issue_refuses_deviation() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "verify",
+        "--repo",
+        "no-such-repo",
+        "--issue",
+        "42",
+        "--deviation",
+        "the criteria were wrong",
+    ]));
+    assert!(
+        stderr.contains("--deviation needs a card"),
+        "expected the deviation refusal, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("no work source configured"),
+        "refusal must come before work-source resolution so it is deterministic, got: {stderr}"
+    );
+}
+
+/// Exactly one target is required. Neither given is a parse error, not a
+/// silent default onto some card.
+#[test]
+fn verify_requires_a_target() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) =
+        run_fail(legion_cmd(dir.path()).args(["verify", "--repo", "no-such-repo"]));
+    assert!(
+        stderr.contains("--card") || stderr.contains("--issue"),
+        "expected clap to name the required target flags, got: {stderr}"
+    );
+}
+
+/// Both targets together is a parse error rather than one silently winning.
+#[test]
+fn verify_rejects_card_and_issue_together() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "verify",
+        "--repo",
+        "no-such-repo",
+        "--card",
+        "019d0000-0000-7000-8000-000000000000",
+        "--issue",
+        "42",
+    ]));
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("conflict"),
+        "expected a clap conflict error, got: {stderr}"
+    );
+}

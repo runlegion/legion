@@ -137,6 +137,21 @@ pub fn verify_gate_key(card_id: &str) -> String {
     format!("legion-verify:{card_id}")
 }
 
+/// Build the quality-gate skill key for a verify verdict on a work-source
+/// issue (#913).
+///
+/// The card-free counterpart to [`verify_gate_key`], for repos whose work is
+/// issue-shaped and which therefore never had a card to key on. Namespaced
+/// `issue-<n>` so it cannot collide with a card id, which is a UUIDv7.
+///
+/// Scoped by `source_repo` because issue numbers are only unique within a
+/// work-source repo: two legion-watched repos both pointing at their own
+/// GitHub project would otherwise share a gate row for their respective
+/// issue #12.
+pub fn verify_gate_key_for_issue(source_repo: &str, issue: u64) -> String {
+    format!("legion-verify:issue-{source_repo}#{issue}")
+}
+
 /// One verdict for one acceptance criterion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -901,6 +916,29 @@ mod tests {
         // handle_verify (write site) and handle_done (read site).
         let key = verify_gate_key("card-abc-123");
         assert_eq!(key, "legion-verify:card-abc-123");
+    }
+
+    #[test]
+    fn verify_gate_key_for_issue_is_scoped_by_source_repo() {
+        // Issue numbers are only unique within a work-source repo, so two
+        // repos' issue #12 must not collide on one gate row.
+        assert_eq!(
+            verify_gate_key_for_issue("runlegion/legion", 12),
+            "legion-verify:issue-runlegion/legion#12"
+        );
+        assert_ne!(
+            verify_gate_key_for_issue("runlegion/legion", 12),
+            verify_gate_key_for_issue("rafters-studio/smugglr", 12),
+        );
+    }
+
+    #[test]
+    fn verify_gate_key_for_issue_cannot_collide_with_a_card_key() {
+        // Card ids are UUIDv7, so the `issue-` namespace keeps the two key
+        // spaces disjoint even if a card were ever named like a number.
+        let issue_key = verify_gate_key_for_issue("owner/repo", 42);
+        assert!(issue_key.starts_with("legion-verify:issue-"));
+        assert_ne!(issue_key, verify_gate_key("42"));
     }
 
     // --- decide_spec tests (#882 step 3: spec-bound verdict format) ---

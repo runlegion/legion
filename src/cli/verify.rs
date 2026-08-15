@@ -14,7 +14,9 @@ use crate::db::quality_gates::{
 use crate::finding_gate::{self, FindingSeverity, FindingStatus};
 use crate::gate_trust::emit_gate_trust;
 use crate::verify::{GateProvenance, GateResult};
-use crate::{db, documents, error, gate_registry, kanban, simplify_check, verify};
+use crate::{
+    card_parse, db, documents, error, gate_registry, kanban, simplify_check, verify, worksource,
+};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum QualityGateAction {
@@ -1211,7 +1213,96 @@ pub(crate) fn resolve_spec_criteria(
     Ok(Some(criteria))
 }
 
+/// Dispatch `legion verify` to the card path or the issue path (#913).
+///
+/// Clap guarantees exactly one of `--card` / `--issue` is present
+/// (`required_unless_present` + `conflicts_with`), so the final arm is
+/// unreachable in practice and refuses rather than defaulting to a path the
+/// caller did not ask for.
 pub(crate) fn handle_verify(
+    repo: String,
+    card: Option<String>,
+    issue: Option<u64>,
+    verdicts_file: Option<String>,
+    deviation: Option<String>,
+) -> error::Result<()> {
+    match (card, issue) {
+        (Some(card), None) => handle_verify_card(card, verdicts_file, deviation),
+        (None, Some(issue)) => handle_verify_issue(&repo, issue, verdicts_file, deviation),
+        _ => Err(error::LegionError::WorkSource(
+            "legion verify needs exactly one of --card or --issue".into(),
+        )),
+    }
+}
+
+/// Verify a work-source issue's acceptance criteria, with no card involved
+/// (#913).
+///
+/// Criteria come from the issue body via `card_parse::parse_issue_body`, the
+/// same reader `pr write-check --issue` uses. That sharing is the point: the
+/// gate that lets a PR open and the gate that closes the work now read one
+/// text, so they cannot disagree about what was promised.
+///
+/// What this path deliberately does NOT do, versus the card path:
+///
+/// - No spec-document precedence. Binding a document is a card operation
+///   (`kanban bind`), so an issue-shaped repo has nothing to bind; criteria
+///   resolve to the issue body or the call refuses.
+/// - No `SpecAcResult` verdicts. Those cite `criterion_id`s that only exist
+///   in a bound document's `verification.criteria`, so this path takes the
+///   free-text `AcResult` shape.
+/// - No status transition. There is no card to move to Done or NeedsInput;
+///   the verdict IS the recorded gate row plus the exit code.
+/// - No `--deviation`. That gate is adjudicated against a card's
+///   `ReplanRecord`, and with no card there is nothing to ratify against --
+///   so it refuses rather than silently accepting an assertion nothing checks.
+fn handle_verify_issue(
+    repo: &str,
+    issue: u64,
+    verdicts_file: Option<String>,
+    deviation: Option<String>,
+) -> error::Result<()> {
+    if deviation.is_some() {
+        return Err(error::LegionError::WorkSource(
+            "--deviation needs a card: the spec-revision gate is adjudicated against the \
+             card's ratified ReplanRecord, and an issue has nowhere to record one. Revise \
+             the issue's acceptance criteria instead, then verify against them."
+                .into(),
+        ));
+    }
+
+    let database = open_db()?;
+    let (plugin, source_repo, _workdir) = worksource::require_worksource(repo)?;
+
+    let ext = worksource::view_issue(&plugin, &source_repo, issue)?;
+    let parsed = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or(""));
+    let acceptance = parsed.acceptance;
+    let ac_source = format!("issue:{source_repo}#{issue}");
+
+    let raw = read_file_or_stdin(verdicts_file.as_deref(), "--verdicts-file")?;
+    let results: Vec<verify::AcResult> = serde_json::from_str(&raw).map_err(|e| {
+        error::LegionError::WorkSource(format!(
+            "failed to parse verdicts JSON (expected a list of \
+             {{criterion, verdict, evidence}}): {e}"
+        ))
+    })?;
+    let decision = verify::decide(&acceptance, &results);
+    let results_value = serde_json::to_value(&results)?;
+
+    finish_verify(
+        &database,
+        &VerifyTarget::Issue {
+            gate_key: verify::verify_gate_key_for_issue(&source_repo, issue),
+            label: format!("issue {source_repo}#{issue}"),
+        },
+        &ac_source,
+        acceptance.len(),
+        decision,
+        results_value,
+    )
+}
+
+fn handle_verify_card(
     card: String,
     verdicts_file: Option<String>,
     deviation: Option<String>,
@@ -1329,7 +1420,7 @@ pub(crate) fn handle_verify(
 
     finish_verify(
         &database,
-        &card,
+        &VerifyTarget::Card(card),
         &ac_source,
         criteria_count,
         decision,
@@ -1342,21 +1433,63 @@ pub(crate) fn handle_verify(
 /// spec-bound `SpecAcResult` path decide independently (`decide` vs
 /// `decide_spec`), but recording the resulting `VerifyDecision` as a
 /// card-keyed gate and reporting it to the caller is identical either way.
+/// What a verify verdict is bound to: a kanban card, or a work-source issue
+/// with no card (#913).
+///
+/// Exists so `finish_verify` stays one function. Recording the gate and
+/// reporting the outcome are identical for both; only the gate key, the
+/// operator-facing noun, and which id lands in the details JSON differ.
+enum VerifyTarget {
+    Card(String),
+    Issue { gate_key: String, label: String },
+}
+
+impl VerifyTarget {
+    /// Quality-gate skill key. Card verdicts stay `legion-verify:<card>` so
+    /// `legion done`'s existing lookup is untouched.
+    fn gate_key(&self) -> String {
+        match self {
+            Self::Card(card) => verify::verify_gate_key(card),
+            Self::Issue { gate_key, .. } => gate_key.clone(),
+        }
+    }
+
+    /// How the target is named in operator-facing output.
+    fn label(&self) -> String {
+        match self {
+            Self::Card(card) => format!("card {card}"),
+            Self::Issue { label, .. } => label.clone(),
+        }
+    }
+
+    /// The identifying field for the gate's details JSON. Kept as distinct
+    /// keys rather than one polymorphic `target` field so anything already
+    /// reading `details.card` keeps working.
+    fn details_field(&self) -> (&'static str, serde_json::Value) {
+        match self {
+            Self::Card(card) => ("card", serde_json::Value::String(card.clone())),
+            Self::Issue { label, .. } => ("issue", serde_json::Value::String(label.clone())),
+        }
+    }
+}
+
 fn finish_verify(
     database: &crate::db::Database,
-    card: &str,
+    target: &VerifyTarget,
     ac_source: &str,
     criteria_count: usize,
     decision: verify::VerifyDecision,
     results: serde_json::Value,
 ) -> error::Result<()> {
-    // Record the verdict as a card-keyed gate so `legion done` can gate
+    // Record the verdict as a target-keyed gate so `legion done` can gate
     // on it regardless of which commit it runs on (e.g. post-merge).
-    let skill = verify::verify_gate_key(card);
+    let skill = target.gate_key();
+    let card = target.label();
     let (commit_hash, branch) = git_head_commit_and_branch()?;
+    let (id_field, id_value) = target.details_field();
     let details = serde_json::json!({
         "skill": "legion-verify",
-        "card": card,
+        id_field: id_value,
         "ac_source": ac_source,
         "decision": format!("{decision:?}"),
         "results": results,
@@ -1391,26 +1524,26 @@ fn finish_verify(
     match decision {
         verify::VerifyDecision::Proceed => {
             println!(
-                "[legion] verify PASS for card {card} ({criteria_count} criteria, source: {ac_source}). ->Done is unblocked.",
+                "[legion] verify PASS for {card} ({criteria_count} criteria, source: {ac_source}). ->Done is unblocked.",
             );
         }
         verify::VerifyDecision::NoCheckableAc => {
             eprintln!(
-                "[legion] verify BLOCKED for card {card}: no acceptance criteria to check. \
-                 A card cannot reach Done without checkable criteria -- add them upstream."
+                "[legion] verify BLOCKED for {card}: no acceptance criteria to check. \
+                 Work cannot reach Done without checkable criteria -- add them upstream."
             );
             return Err(error::LegionError::ExitWith(1));
         }
         verify::VerifyDecision::Incomplete { unaddressed } => {
             eprintln!(
-                "[legion] verify BLOCKED for card {card}: {unaddressed} of {criteria_count} \
+                "[legion] verify BLOCKED for {card}: {unaddressed} of {criteria_count} \
                  criteria have no verdict. Emit one verdict per criterion.",
             );
             return Err(error::LegionError::ExitWith(1));
         }
         verify::VerifyDecision::Block { failed } => {
             eprintln!(
-                "[legion] verify FAIL for card {card} -- {} criterion(s) not satisfied:",
+                "[legion] verify FAIL for {card} -- {} criterion(s) not satisfied:",
                 failed.len()
             );
             for c in &failed {
@@ -1421,28 +1554,39 @@ fn finish_verify(
         }
         verify::VerifyDecision::NeedsInput { uncertain } => {
             eprintln!(
-                "[legion] verify UNCERTAIN for card {card} -- {} criterion(s) cannot be \
+                "[legion] verify UNCERTAIN for {card} -- {} criterion(s) cannot be \
                  mechanically confirmed:",
                 uncertain.len()
             );
             for c in &uncertain {
                 eprintln!("  - {c}");
             }
-            // Route to a human rather than rubber-stamp ->Done. The gate
-            // is already recorded non-clean, so ->Done stays blocked even
-            // if the card is not in a state this transition accepts.
-            match kanban::transition_card(
-                database,
-                card,
-                kanban::Action::NeedInput,
-                Some("verify: unprovable acceptance criteria, needs human adjudication"),
-            ) {
-                Ok(_) => {
-                    eprintln!("\nCard routed to NeedsInput. ->Done stays blocked until resolved.")
-                }
-                Err(e) => eprintln!(
-                    "\n->Done stays blocked. (Could not auto-move card to NeedsInput: \
-                     {e}; move it manually.)"
+            // Route to a human rather than rubber-stamp ->Done. The gate is
+            // already recorded non-clean, so ->Done stays blocked even if the
+            // card is not in a state this transition accepts.
+            //
+            // Issue targets have no card to move: the non-clean gate row and
+            // the exit code ARE the block, and the human adjudication happens
+            // on the issue. Saying so beats a transition error that reads
+            // like a failure.
+            match target {
+                VerifyTarget::Card(card_id) => match kanban::transition_card(
+                    database,
+                    card_id,
+                    kanban::Action::NeedInput,
+                    Some("verify: unprovable acceptance criteria, needs human adjudication"),
+                ) {
+                    Ok(_) => eprintln!(
+                        "\nCard routed to NeedsInput. ->Done stays blocked until resolved."
+                    ),
+                    Err(e) => eprintln!(
+                        "\n->Done stays blocked. (Could not auto-move card to NeedsInput: \
+                         {e}; move it manually.)"
+                    ),
+                },
+                VerifyTarget::Issue { .. } => eprintln!(
+                    "\nRecorded as a non-clean verify gate. Adjudicate on the issue, \
+                     then re-verify."
                 ),
             }
             return Err(error::LegionError::ExitWith(1));
@@ -1452,12 +1596,12 @@ fn finish_verify(
         // checks (and returns early on) before either decide function runs.
         // Covered here for exhaustiveness against future callers.
         verify::VerifyDecision::ReplanRequired { reason } => {
-            eprintln!("[legion] verify BLOCKED for card {card}: {reason}");
+            eprintln!("[legion] verify BLOCKED for {card}: {reason}");
             return Err(error::LegionError::ExitWith(1));
         }
         verify::VerifyDecision::InvalidCriterionReference { details: bad_refs } => {
             eprintln!(
-                "[legion] verify BLOCKED for card {card} -- {} verdict(s) cite a spec \
+                "[legion] verify BLOCKED for {card} -- {} verdict(s) cite a spec \
                  reference that does not resolve:",
                 bad_refs.len()
             );
