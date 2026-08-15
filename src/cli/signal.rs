@@ -142,6 +142,18 @@ pub(crate) fn handle_signal(
         }
     }
 
+    // #919: replying retires what it answers. Runs after the send so a
+    // failure here can never cost the signal itself.
+    match retire_answered_signals(&database, &repo, &to) {
+        Ok(n) if n > 0 => {
+            eprintln!(
+                "[legion] retired {n} answered ask(s) from {to} -- they will not re-surface at next session start"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[legion] could not retire answered asks from {to}: {e}"),
+    }
+
     // #586: tell the sender when a directed signal will not wake its
     // recipient -- a non-wake-worthy verb delivers to a live session but
     // never pages an asleep agent, so surface it at send time.
@@ -158,14 +170,12 @@ pub(crate) fn handle_signal(
     Ok(())
 }
 
-pub(crate) fn handle_pending_replies(repo: String) -> error::Result<()> {
-    let database = open_db()?;
-
-    // Build the full addressable name set for this repo via the same
-    // wake_addresses() the watch poll cycle uses, so the read path can never
-    // disagree with the wake path on which addresses reach this repo. Fall
-    // back to [repo] for un-watched callers (no watch.toml, or repo not in it).
-    let names: Vec<String> = watch::load_config(&data_dir()?.join("watch.toml"))
+/// Addressable name set for `repo`, via the same `wake_addresses()` the watch
+/// poll cycle uses, so the read paths can never disagree with the wake path on
+/// which addresses reach this repo. Falls back to `[repo]` for un-watched
+/// callers (no watch.toml, or repo not listed in it).
+fn wake_names_for(repo: &str) -> error::Result<Vec<String>> {
+    Ok(watch::load_config(&data_dir()?.join("watch.toml"))
         .ok()
         .and_then(|cfg| {
             cfg.repos
@@ -173,7 +183,95 @@ pub(crate) fn handle_pending_replies(repo: String) -> error::Result<()> {
                 .find(|r| r.name == repo)
                 .map(watch::WatchRepoConfig::wake_addresses)
         })
-        .unwrap_or_else(|| vec![repo.clone()]);
+        .unwrap_or_else(|| vec![repo.to_string()]))
+}
+
+/// Retire `author`'s pending asks from `recipient` after `author` replies to
+/// them (#919).
+///
+/// Replying to a signal did not previously clear it. Nothing on the CLI path
+/// ever wrote `watch_handled` -- only the watch spawn path did
+/// (src/watch/gates.rs) -- so an agent that answered every ask still woke to
+/// the identical queue next session, with nothing distinguishing "unanswered"
+/// from "answered but unresolved". The honest response to that is to answer
+/// again, which is how a converged thread becomes an infinite one.
+///
+/// Retires on REPLY rather than on render. Marking at render was the obvious
+/// alternative and is wrong here: `legion pending-replies` backs both the
+/// SessionStart banner and post-compact.sh (lib/boot-sections.sh drives both),
+/// so retiring what it printed would mean a compacted session silently loses
+/// obligations it has not answered yet -- compaction being exactly when the
+/// agent has forgotten them. Replying is the first point at which the ask is
+/// demonstrably handled rather than merely delivered.
+///
+/// Scoped to `recipient`: only asks sent BY the agent being replied to are
+/// retired. Everything retired was rendered in the same banner the reply
+/// answers, so this never retires an ask the author has not seen.
+///
+/// Host-local by construction. `watch_handled` is not on the sync wire (the
+/// four synced tables are pinned at src/sync_actor.rs:45-48), so this clears
+/// THIS host's inbox copy and never touches a peer's queue or the team's
+/// bullpen. That is deliberately NOT `resolve_post`, which writes `resolved_at`
+/// on a synced reflections row and hides the thread from everyone's default
+/// `legion bullpen` -- a per-inbox intent with a team-wide effect.
+fn retire_answered_signals(
+    database: &db::Database,
+    authors: &[String],
+    recipient: &str,
+) -> error::Result<usize> {
+    let mut retired = 0;
+    for author in authors {
+        let names = wake_names_for(author)?;
+        retired += retire_answered_for_author(database, author, &names, recipient)?;
+    }
+    Ok(retired)
+}
+
+/// Single-author half of [`retire_answered_signals`], with the addressable
+/// name set injected so it is testable without a watch.toml on disk.
+fn retire_answered_for_author(
+    database: &db::Database,
+    author: &str,
+    names: &[String],
+    recipient: &str,
+) -> error::Result<usize> {
+    // Broadcasts are not replies to anyone in particular; retiring every
+    // pending ask because the author addressed the room would drop unrelated
+    // threads from unrelated senders.
+    if crate::signal::is_broadcast_address(recipient) {
+        return Ok(0);
+    }
+    let bare = recipient.strip_prefix('@').unwrap_or(recipient);
+
+    let mut retired = 0;
+    let pending = watch::find_pending_signals(database, author, names, None)?;
+    for (id, text, sender) in pending {
+        // Only the set `pending-replies` actually renders. A pending signal
+        // that does not require a reply never reaches the banner, so it is
+        // not part of the reported pain and is left alone.
+        if !watch::signal_requires_reply(&text) {
+            continue;
+        }
+        if !sender.eq_ignore_ascii_case(bare) {
+            continue;
+        }
+        match database.mark_signal_handled_for_repo(&id, author) {
+            Ok(true) => retired += 1,
+            Ok(false) => {}
+            // Logged, not propagated: the reply itself already landed, and a
+            // mark that fails costs one duplicate render next session --
+            // strictly better than failing a command whose primary effect
+            // succeeded.
+            Err(e) => eprintln!("[legion] failed to retire answered signal {id}: {e}"),
+        }
+    }
+    Ok(retired)
+}
+
+pub(crate) fn handle_pending_replies(repo: String) -> error::Result<()> {
+    let database = open_db()?;
+
+    let names = wake_names_for(&repo)?;
 
     let signals = watch::find_pending_signals(&database, &repo, &names, None)?;
     let reply_required: Vec<(String, String, String)> = signals
@@ -311,6 +409,141 @@ mod tests {
         assert!(
             msg.contains("--to"),
             "error message must reference --to flag: {msg}"
+        );
+    }
+
+    // -- retire-on-reply (#919) --------------------------------------------
+
+    /// Pending reply-required asks visible to `author`, as
+    /// `pending-replies` would render them.
+    fn rendered(database: &db::Database, author: &str) -> Vec<String> {
+        watch::find_pending_signals(database, author, &[author.to_string()], None)
+            .expect("find pending")
+            .into_iter()
+            .filter(|(_, text, _)| watch::signal_requires_reply(text))
+            .map(|(id, _, _)| id)
+            .collect()
+    }
+
+    /// The exact failure this change closes: six asks from one agent, all
+    /// answered by one reply, previously re-rendered forever because nothing
+    /// on the reply path ever wrote `watch_handled`.
+    #[test]
+    fn replying_retires_every_ask_from_that_sender() {
+        let (database, _index, _dir) = crate::testutil::test_storage();
+        for _ in 0..6 {
+            database
+                .insert_reflection("smugglr", "@legion question:help -- blast radius", "team")
+                .expect("insert ask");
+        }
+        assert_eq!(rendered(&database, "legion").len(), 6, "all six pending");
+
+        let n = retire_answered_for_author(&database, "legion", &["legion".to_string()], "smugglr")
+            .expect("retire");
+
+        assert_eq!(n, 6, "one reply retires the whole thread from that sender");
+        assert!(
+            rendered(&database, "legion").is_empty(),
+            "answered asks must not re-surface at next session start"
+        );
+    }
+
+    /// Scoping guard: replying to one agent must not silently drop another
+    /// agent's unanswered ask.
+    #[test]
+    fn replying_does_not_retire_a_different_senders_ask() {
+        let (database, _index, _dir) = crate::testutil::test_storage();
+        database
+            .insert_reflection("smugglr", "@legion question:help -- mine", "team")
+            .expect("insert smugglr ask");
+        database
+            .insert_reflection("rafters", "@legion question:help -- theirs", "team")
+            .expect("insert rafters ask");
+
+        let n = retire_answered_for_author(&database, "legion", &["legion".to_string()], "smugglr")
+            .expect("retire");
+
+        assert_eq!(n, 1, "only the replied-to sender's ask is retired");
+        let left = rendered(&database, "legion");
+        assert_eq!(left.len(), 1, "rafters' ask must survive");
+    }
+
+    /// Addressing the room is not a reply to anyone, so it must retire
+    /// nothing -- otherwise one broadcast clears every unanswered thread.
+    #[test]
+    fn broadcast_reply_retires_nothing() {
+        let (database, _index, _dir) = crate::testutil::test_storage();
+        database
+            .insert_reflection("smugglr", "@legion question:help -- unanswered", "team")
+            .expect("insert ask");
+
+        for addr in ["all", "@all", "everyone", "@everyone"] {
+            let n = retire_answered_for_author(&database, "legion", &["legion".to_string()], addr)
+                .expect("retire");
+            assert_eq!(n, 0, "broadcast address {addr} must retire nothing");
+        }
+        assert_eq!(
+            rendered(&database, "legion").len(),
+            1,
+            "the unanswered ask must survive every broadcast form"
+        );
+    }
+
+    /// A leading `@` on the recipient is decoration the send path tolerates,
+    /// so the retire path must match it or replies to "@smugglr" silently
+    /// stop clearing the queue.
+    #[test]
+    fn recipient_at_prefix_and_case_are_tolerated() {
+        for addr in ["@smugglr", "SMUGGLR", "Smugglr"] {
+            let (database, _index, _dir) = crate::testutil::test_storage();
+            database
+                .insert_reflection("smugglr", "@legion question:help -- ask", "team")
+                .expect("insert ask");
+
+            let n = retire_answered_for_author(&database, "legion", &["legion".to_string()], addr)
+                .expect("retire");
+            assert_eq!(n, 1, "recipient form {addr} must match sender 'smugglr'");
+        }
+    }
+
+    /// Informational signals never reach the wake banner, so they are not the
+    /// reported pain and must be left alone -- the watch poll owns retiring
+    /// those (src/watch/gates.rs).
+    #[test]
+    fn informational_signals_are_left_for_the_watch_path() {
+        let (database, _index, _dir) = crate::testutil::test_storage();
+        database
+            .insert_reflection("smugglr", "@legion announce -- shipped 0.5.0", "team")
+            .expect("insert announce");
+
+        let n = retire_answered_for_author(&database, "legion", &["legion".to_string()], "smugglr")
+            .expect("retire");
+
+        assert_eq!(n, 0, "informational signals are not retired on reply");
+    }
+
+    /// Retiring is host-local. `watch_handled` is keyed (signal_id,
+    /// repo_name) and is not on the sync wire, so clearing legion's inbox
+    /// must not clear another repo's copy of the same broadcast.
+    #[test]
+    fn retiring_is_per_repo_and_does_not_touch_a_peers_queue() {
+        let (database, _index, _dir) = crate::testutil::test_storage();
+        database
+            .insert_reflection("smugglr", "@all question:help -- who owns this", "team")
+            .expect("insert broadcast ask");
+
+        let n = retire_answered_for_author(&database, "legion", &["legion".to_string()], "smugglr")
+            .expect("retire");
+        assert_eq!(n, 1, "legion's own copy is retired");
+
+        assert!(
+            rendered(&database, "legion").is_empty(),
+            "legion no longer sees it"
+        );
+        assert_eq!(
+            rendered(&database, "rafters").len(),
+            1,
+            "rafters' copy of the same broadcast must be untouched"
         );
     }
 }

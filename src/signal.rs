@@ -16,6 +16,28 @@ pub fn validate_note(note: &str) -> error::Result<()> {
     Ok(())
 }
 
+/// Reserved addresses that fan out to every agent rather than naming one.
+///
+/// Single source for the sentinel set. Two shapes are needed and both read
+/// from here: `db/board.rs` iterates the list to build wake patterns, while
+/// [`is_broadcast_address`] tests a single address.
+pub(crate) const BROADCAST_ADDRESSES: [&str; 2] = ["all", "everyone"];
+
+/// Strip one leading `@` so callers passing "@all" or "@legion" are handled
+/// identically to the bare forms.
+fn strip_at(to: &str) -> &str {
+    to.strip_prefix('@').unwrap_or(to)
+}
+
+/// Whether `to` addresses the room rather than a specific agent.
+///
+/// A signal addressed here is not a reply to any particular agent, which is
+/// why the retire-on-reply path (`cli/signal.rs`) must not treat it as one.
+pub(crate) fn is_broadcast_address(to: &str) -> bool {
+    let lower = strip_at(to).to_lowercase();
+    BROADCAST_ADDRESSES.contains(&lower.as_str())
+}
+
 /// Decide whether a signal address is a self-address collision.
 ///
 /// Returns `true` when `to` names any of the authoring repos (case-insensitive)
@@ -27,14 +49,11 @@ pub fn validate_note(note: &str) -> error::Result<()> {
 /// Shared by both the CLI (`cli/signal.rs`) and MCP (`mcp/tools.rs`) signal
 /// guards so the sentinel set and stripping logic cannot drift between surfaces.
 pub(crate) fn is_self_address(repos: &[String], to: &str) -> bool {
-    // Strip one leading '@' so callers passing "@all" or "@legion" are
-    // handled identically to the bare "all" / "legion" forms.
-    let bare = to.strip_prefix('@').unwrap_or(to);
-    let lower = bare.to_lowercase();
     // Broadcast sentinels are never self-addresses; they fan out to everyone.
-    if matches!(lower.as_str(), "all" | "everyone") {
+    if is_broadcast_address(to) {
         return false;
     }
+    let lower = strip_at(to).to_lowercase();
     repos.iter().any(|r| r.to_lowercase() == lower)
 }
 
