@@ -447,6 +447,18 @@ impl Database {
     /// A post is archivable when every repo in board_reads has last_read_at
     /// after the post's created_at. Uses a single UPDATE with subquery to
     /// avoid race conditions between SELECT and UPDATE.
+    ///
+    /// The `MIN(last_read_at)` subquery excludes `hook-drain` cursor rows
+    /// (#941, `deliver::hook_reader_key`, keyed `"{repo}::hook-drain"`).
+    /// Those rows are not a "known reader" for this gate's purpose -- they
+    /// exist purely so the hook-side delivery lane can track what it has
+    /// already surfaced, independent of the MCP notifier's and manual
+    /// `legion bullpen`'s cursors on the same table. Letting a hook-drain
+    /// row into this aggregate would change archival's existing semantics
+    /// as an unintended side effect of adding the row: an unset/empty
+    /// cursor (fresh cold start) would drag the MIN down to `''` and halt
+    /// archival entirely, and any hook-drain row present only ever makes
+    /// the MIN more conservative than the pre-#941 behavior.
     /// Returns the number of posts archived.
     pub fn archive_read_posts(&self) -> Result<u64> {
         let now = Utc::now().to_rfc3339();
@@ -454,7 +466,10 @@ impl Database {
         let count = self.conn.execute(
             "UPDATE reflections SET archived_at = ?1, updated_at = ?1 \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
-             AND created_at < (SELECT MIN(last_read_at) FROM board_reads)",
+             AND created_at < ( \
+                 SELECT MIN(last_read_at) FROM board_reads \
+                 WHERE reader_repo NOT LIKE '%::hook-drain' \
+             )",
             rusqlite::params![now],
         )?;
 

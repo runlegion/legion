@@ -8,11 +8,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use chrono::Utc;
 use serde_json::json;
 
 use crate::db::Database;
 use crate::error::Result;
 use crate::signal as sig;
+use crate::telemetry;
 
 use super::log::{mcp_trace, mcp_verbose};
 
@@ -364,6 +366,35 @@ pub fn classify_notifier_health(
     }
 }
 
+/// Build the dual-lane parity `DeliveryRecord` (#941) for a post the MCP
+/// lane just wrote a notification for. Pure and side-effect free so the
+/// record shape is unit-testable without touching the filesystem or
+/// mutating process-global env state (the telemetry log path resolves
+/// through `XDG_STATE_HOME`, shared across the whole test binary).
+fn mcp_delivery_record(recipient: &str, reflection_id: &str) -> telemetry::DeliveryRecord {
+    telemetry::DeliveryRecord {
+        ts: Utc::now().to_rfc3339(),
+        lane: "mcp_notification".to_string(),
+        repo: recipient.to_string(),
+        reflection_id: reflection_id.to_string(),
+    }
+}
+
+/// Record dual-lane parity telemetry (#941) for a post the MCP lane just
+/// wrote a notification for. Extracted from `run_notifier_loop`'s write_ok
+/// branch so the recording behavior is unit-testable without driving the
+/// full poll loop. Best-effort: a telemetry write failure is traced, never
+/// propagated -- it must not affect delivery.
+fn record_mcp_delivery_telemetry(recipient: &str, reflection_id: &str) {
+    let record = mcp_delivery_record(recipient, reflection_id);
+    if let Err(e) = telemetry::append_delivery(&record) {
+        mcp_trace(
+            "notifier.telemetry.failed",
+            &[("post_id", reflection_id), ("err", &e.to_string())],
+        );
+    }
+}
+
 pub(super) fn run_notifier_loop(
     data_dir: PathBuf,
     out: Arc<Mutex<std::io::BufWriter<std::io::Stdout>>>,
@@ -617,6 +648,16 @@ pub(super) fn run_notifier_loop(
                             ("err", &e.to_string()),
                         ],
                     );
+                }
+
+                // Dual-lane parity telemetry (#941): one DeliveryRecord per
+                // successfully-written notification, sharing `reflection_id`
+                // with the hook lane's rows so a reader can diff the two
+                // lanes. Scoped to a known recipient, matching the cursor
+                // advance above -- without a client_repo there is no `repo`
+                // value to attribute the delivery to.
+                if let Some(recipient) = client_repo {
+                    record_mcp_delivery_telemetry(recipient, &post.id);
                 }
             } else {
                 consecutive_write_failures = consecutive_write_failures.saturating_add(1);
@@ -1026,5 +1067,23 @@ mod tests {
             content.contains("repo&amp;name"),
             "repo attribute must be XML-escaped; got: {content}"
         );
+    }
+
+    #[test]
+    fn notifier_records_delivery_telemetry_on_successful_write() {
+        // record_mcp_delivery_telemetry itself is a thin best-effort
+        // wrapper around telemetry::append_delivery, which resolves its
+        // path through XDG_STATE_HOME -- a process-global env var shared
+        // across the whole test binary. Testing at the mcp_delivery_record
+        // seam (what would be written) rather than through the actual
+        // filesystem write avoids racing every other parallel test that
+        // touches XDG_STATE_HOME (e.g.
+        // telemetry::tests::bypass_log_path_uses_xdg_state_home); the JSONL
+        // round-trip itself is covered by
+        // telemetry::tests::append_delivery_writes_jsonl_row_with_lane_and_reflection_id.
+        let record = mcp_delivery_record("legion", "01a00bdc-4e72-74b3-8c70-9dc417af5818");
+        assert_eq!(record.lane, "mcp_notification");
+        assert_eq!(record.repo, "legion");
+        assert_eq!(record.reflection_id, "01a00bdc-4e72-74b3-8c70-9dc417af5818");
     }
 }

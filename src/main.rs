@@ -6,6 +6,7 @@ mod cluster;
 mod css;
 mod daemon;
 mod db;
+mod deliver;
 mod documents;
 mod embed;
 mod error;
@@ -295,6 +296,7 @@ fn run() -> error::Result<()> {
         Commands::Cluster { action } => cli::ops::handle_cluster(action)?,
         Commands::Kanban { action } => cli::kanban::handle(action)?,
         Commands::Task { action } => cli::misc::handle_task(action)?,
+        Commands::Deliver { action } => cli::deliver::handle(action)?,
         Commands::Schedule { action } => cli::schedule::handle(action)?,
         Commands::Issue { action } => cli::issue::handle(action)?,
         Commands::Pr { action } => cli::pr::handle(action)?,

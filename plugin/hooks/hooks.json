@@ -35,6 +35,11 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/delivery-drain.sh",
+            "timeout": 8
           }
         ]
       }
@@ -227,6 +232,11 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/identity-chain-load.sh",
             "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/delivery-drain.sh",
+            "timeout": 8
           }
         ]
       }
@@ -238,6 +248,11 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/mark-work.sh",
             "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/delivery-drain.sh",
+            "timeout": 8
           }
         ]
       },
