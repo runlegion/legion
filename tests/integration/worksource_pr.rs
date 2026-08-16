@@ -3384,6 +3384,7 @@ fn issue_close_force_with_reason_parses() {
 
 /// Close stub whose issue body DECLARES acceptance criteria, so the verify
 /// gate applies. Used by the refusal tests below.
+#[cfg(unix)]
 fn close_stub_plugin_with_criteria() -> String {
     // r#####: the JSON body contains `"##`, which closes a plain r##" literal.
     r#####"#!/bin/bash
@@ -3409,6 +3410,7 @@ esac
 /// An issue with criteria and NO verify verdict must not close. This is the
 /// hole the issue was filed on: verify was advisory for every repo working
 /// from issues rather than cards.
+#[cfg(unix)]
 #[test]
 fn issue_close_refused_when_verify_verdict_is_absent() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -3431,6 +3433,7 @@ fn issue_close_refused_when_verify_verdict_is_absent() {
 
 /// A recorded but NON-CLEAN verdict must not close either, and must be
 /// reported differently from an absent one -- they are different problems.
+#[cfg(unix)]
 #[test]
 fn issue_close_refused_when_verify_verdict_is_not_clean() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -3467,6 +3470,7 @@ fn issue_close_refused_when_verify_verdict_is_not_clean() {
 }
 
 /// A clean verdict lets the close through.
+#[cfg(unix)]
 #[test]
 fn issue_close_allowed_when_verify_verdict_is_clean() {
     let data_dir = tempfile::tempdir().unwrap();
@@ -3497,6 +3501,7 @@ fn issue_close_allowed_when_verify_verdict_is_clean() {
 }
 
 /// --force closes despite an absent verdict, and says so loudly.
+#[cfg(unix)]
 #[test]
 fn issue_close_force_overrides_an_absent_verdict() {
     let data_dir = tempfile::tempdir().unwrap();
