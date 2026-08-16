@@ -108,6 +108,133 @@ fn document_create_rejects_malformed_payload() {
     );
 }
 
+/// #945 review: a malformed `verification.criteria` entry must be SAID on
+/// `document view`, not silently indistinguishable from a document with no
+/// criteria -- the view stays best-effort (metadata and payload still
+/// print, exit stays 0), but stderr names the reason the status section is
+/// absent.
+#[test]
+fn document_view_says_criteria_status_unavailable_on_malformed_entry() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // An entry with an id but no text: insert-time normalization only
+    // assigns MISSING ids, so this survives creation and trips
+    // resolve_spec_criteria's malformed-entry refusal at view time.
+    let payload = r#"{"meta":{},"verification":{"criteria":[{"id":"has-id-no-text"}]}}"#;
+    run_with_stdin(
+        legion_cmd(dir.path()).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "legion",
+            "--id",
+            "FR-VIEW-MALFORMED-1",
+        ]),
+        payload.as_bytes(),
+    );
+
+    let out =
+        run_ok_output(legion_cmd(dir.path()).args(["document", "view", "FR-VIEW-MALFORMED-1"]));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("FR-VIEW-MALFORMED-1"),
+        "view must still print the document, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("--- criteria status ---"),
+        "malformed criteria must not render a status section, got: {stdout}"
+    );
+    assert!(
+        stderr.contains("criteria status unavailable"),
+        "malformed criteria must be said on stderr, got: {stderr}"
+    );
+}
+
+/// #933: `legion document view` (human-readable path) reports which of a
+/// requirement's id-carrying criteria have a clean verify verdict recorded
+/// against them -- "a requirement can be asked which of its criteria have
+/// been serviced by a clean verdict," making completion computable rather
+/// than asserted. Seeds a clean `legion-verify:*` gate row directly (the
+/// same `details.results[]` shape `finish_verify` writes) rather than
+/// running a full verify, since only the read side is under test here.
+#[test]
+fn document_view_reports_criteria_served_by_a_clean_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let payload = r#"{"meta":{},"verification":{"criteria":[{"text":"first thing"},{"text":"second thing"}]}}"#;
+    run_with_stdin(
+        legion_cmd(dir.path()).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "legion",
+            "--id",
+            "FR-VIEW-SERVED-1",
+        ]),
+        payload.as_bytes(),
+    );
+
+    let view =
+        run_ok(legion_cmd(dir.path()).args(["document", "view", "FR-VIEW-SERVED-1", "--json"]));
+    let view_json: serde_json::Value = serde_json::from_str(view.trim()).unwrap();
+    let criterion_id = view_json["payload"]
+        .as_str()
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|v| {
+            v["verification"]["criteria"][0]["id"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .expect("assigned criterion id");
+
+    let details = serde_json::json!({
+        "results": [
+            {"spec_doc_id": "FR-VIEW-SERVED-1", "spec_revision": 1, "criterion_id": criterion_id, "verdict": "pass"}
+        ]
+    })
+    .to_string();
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-verify:issue-owner/stub#1",
+        "--result",
+        "clean",
+        "--details-json",
+        &details,
+    ]));
+
+    let human = run_ok(legion_cmd(dir.path()).args(["document", "view", "FR-VIEW-SERVED-1"]));
+    assert!(
+        human.contains("--- criteria status ---"),
+        "expected the criteria status section, got: {human}"
+    );
+    assert!(
+        human.contains(&format!("[x] {criterion_id} first thing")),
+        "expected the served criterion marked, got: {human}"
+    );
+    // Search only the criteria-status section (after its marker) -- "second
+    // thing" also appears verbatim in the raw `--- payload ---` JSON dump
+    // above it, which is not what this assertion is about.
+    let status_section = human
+        .split("--- criteria status ---")
+        .nth(1)
+        .expect("criteria status section");
+    let unserved_line = status_section
+        .lines()
+        .find(|l| l.contains("second thing"))
+        .expect("second thing line");
+    assert!(
+        unserved_line.trim_start().starts_with("[ ]"),
+        "unserved criterion must not be marked, got: {unserved_line}"
+    );
+}
+
 // --- Documents: schema landing + validation (#526) ---
 
 fn schema_payload_persona() -> String {

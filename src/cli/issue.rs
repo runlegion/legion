@@ -3,7 +3,100 @@
 use clap::Subcommand;
 
 use crate::cli::util::{audit, open_db};
+use crate::db::card_criteria;
 use crate::{card_parse, db, error, worksource};
+
+/// Validate an issue body's `## Traces to` section before the issue is
+/// created on the work source (#933 create-time refusals).
+///
+/// Untraced is legal and the common case: only new work traces to a
+/// requirement, so an empty `trace` (no `## Traces to` section at all)
+/// returns `Ok(())` immediately -- defect work is anchored by its stated
+/// premise instead, not a requirement.
+///
+/// Refusals, matching the trace format contract exactly:
+/// - `None` alongside a requirement bullet -- an issue either traces to at
+///   least one requirement or explicitly declares it has none, not both.
+/// - `- None` with no reason: only new work has a spec, so the no-spec case
+///   must say why, not just assert it.
+/// - A requirement id that does not resolve to a document.
+/// - A requirement whose document status is `cancelled` -- a cancelled
+///   requirement is not a trace.
+/// - A `[criteria: ...]` bracket citing an id the requirement's current
+///   `verification.criteria` does not contain.
+fn validate_trace(database: &db::Database, trace: &[card_parse::TraceBullet]) -> error::Result<()> {
+    if trace.is_empty() {
+        return Ok(());
+    }
+
+    let has_requirement = trace
+        .iter()
+        .any(|t| matches!(t, card_parse::TraceBullet::Requirement { .. }));
+    let has_none = trace
+        .iter()
+        .any(|t| matches!(t, card_parse::TraceBullet::NoRequirement { .. }));
+    if has_requirement && has_none {
+        return Err(error::LegionError::WorkSource(
+            "## Traces to: '- None' cannot appear alongside a requirement bullet -- an issue \
+             either traces to at least one requirement, or explicitly declares it has none, \
+             not both."
+                .to_string(),
+        ));
+    }
+
+    for bullet in trace {
+        // Bracket defects the tolerant parser degrades instead of refusing
+        // (#945 review): unclosed/repeated brackets buried in prose, empty
+        // brackets scoping zero criteria. One definition, shared with the
+        // live re-check in cli::verify::resolve_traced_requirements.
+        if let Some(defect) = card_parse::trace_bullet_bracket_defect(bullet) {
+            return Err(error::LegionError::WorkSource(format!(
+                "## Traces to: {defect}"
+            )));
+        }
+        match bullet {
+            card_parse::TraceBullet::NoRequirement { reason } => {
+                if reason.as_deref().unwrap_or("").trim().is_empty() {
+                    return Err(error::LegionError::WorkSource(
+                        "## Traces to: '- None' requires a reason ('- None -- <reason>') -- \
+                         only new work has a spec; state why this issue has none."
+                            .to_string(),
+                    ));
+                }
+            }
+            card_parse::TraceBullet::Requirement {
+                document_id,
+                criteria,
+                ..
+            } => {
+                let doc = database.get_document(document_id)?.ok_or_else(|| {
+                    error::LegionError::WorkSource(format!(
+                        "## Traces to cites requirement '{document_id}', which does not exist"
+                    ))
+                })?;
+                if doc.status == "cancelled" {
+                    return Err(error::LegionError::WorkSource(format!(
+                        "## Traces to cites requirement '{document_id}', which is cancelled -- \
+                         a cancelled requirement is not a trace"
+                    )));
+                }
+                if let Some(ids) = criteria {
+                    let valid = card_criteria::valid_criterion_ids(&doc.payload);
+                    for id in ids {
+                        if !valid.contains(id) {
+                            return Err(error::LegionError::WorkSource(format!(
+                                "## Traces to cites criterion '{id}' [criteria: ...] for \
+                                 requirement '{document_id}', which does not contain it"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Gate `legion issue close` on a clean verify verdict (#930).
 ///
@@ -24,11 +117,19 @@ use crate::{card_parse, db, error, worksource};
 /// `handle_done`'s own check, so the two do not double-gate and neither leaves
 /// a hole.
 ///
-/// An issue declaring no acceptance criteria is not gated -- matching the card
-/// rule, where a chore with no criteria can reach Done. But the ungated close
-/// SAYS SO on stdout rather than passing silently: an unchecked close and a
-/// checked one must not look identical, which is the failure this whole gate
-/// exists to close.
+/// An issue declaring no acceptance criteria AND no trace is not gated --
+/// matching the card rule, where a chore with no criteria can reach Done.
+/// But the ungated close SAYS SO on stdout rather than passing silently: an
+/// unchecked close and a checked one must not look identical, which is the
+/// failure this whole gate exists to close.
+///
+/// #933: a traced issue's own `## Acceptance criteria` section is
+/// legitimately empty -- the requirement's criteria are what verify judges,
+/// not a restatement on the issue -- so a `## Traces to` section naming at
+/// least one requirement counts as "has criteria" here even when
+/// `acceptance` is empty. Without this, a traced issue with no restated
+/// criteria would close ungated: #930's hole, reopened through the door
+/// #933 opened.
 fn check_verify_before_close(
     database: &db::Database,
     plugin_name: &str,
@@ -68,9 +169,14 @@ fn check_verify_before_close(
             )));
         }
     };
-    let acceptance = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or("")).acceptance;
+    let parsed = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or(""));
+    let acceptance = parsed.acceptance;
+    let has_trace = parsed
+        .trace
+        .iter()
+        .any(|t| matches!(t, card_parse::TraceBullet::Requirement { .. }));
 
-    if acceptance.is_empty() {
+    if acceptance.is_empty() && !has_trace {
         println!(
             "[legion] note: #{number} declares no acceptance criteria, so no verify verdict was required."
         );
@@ -80,20 +186,27 @@ fn check_verify_before_close(
     let skill = verify::verify_gate_key_for_issue(source_repo, number);
     let latest = database.get_latest_quality_gate_by_skill(&skill)?;
 
+    // What the issue is judged against, for the refusal message: its own
+    // restated criteria, or (#933) the requirement its trace resolves to
+    // when it declared none of its own.
+    let criteria_desc = if acceptance.is_empty() {
+        "criteria from its traced requirement".to_string()
+    } else {
+        format!("{} acceptance criteria", acceptance.len())
+    };
+
     // Absent and failed are different problems with different remedies, so
     // they get different refusals rather than one "not clean" message.
     let refusal = match &latest {
         Some(gate) if gate.result == GateResult::Clean => None,
         Some(_) => Some(format!(
-            "verify verdict for #{number} is not clean ({} criteria declared). \
+            "verify verdict for #{number} is not clean ({criteria_desc}). \
              Resolve the failing or uncertain criteria and re-run \
              `legion verify --repo <r> --issue {number}`.",
-            acceptance.len()
         )),
         None => Some(format!(
-            "#{number} declares {} acceptance criteria but no verify verdict exists. \
+            "#{number} declares {criteria_desc} but no verify verdict exists. \
              Run `legion verify --repo <r> --issue {number}` before closing.",
-            acceptance.len()
         )),
     };
 
@@ -136,6 +249,47 @@ fn render_acceptance_block(items: &[String]) -> String {
         out.push_str("- ");
         out.push_str(item);
         out.push('\n');
+    }
+    out
+}
+
+/// Render the `## Traces to` section in the exact form
+/// `card_parse::parse_issue_body` reads BACK (#933), mirroring
+/// `render_acceptance_block`'s #907 round-trip contract for the same
+/// reason: `legion issue view` is what agents (including `legion-verify`,
+/// which reads the issue to find the trace) look at, and a shape that does
+/// not survive re-parsing teaches the wrong format silently.
+fn render_trace_block(trace: &[card_parse::TraceBullet]) -> String {
+    let mut out = String::from("## Traces to\n");
+    for bullet in trace {
+        match bullet {
+            card_parse::TraceBullet::Requirement {
+                document_id,
+                criteria,
+                prose,
+            } => {
+                out.push_str("- ");
+                out.push_str(document_id);
+                if let Some(ids) = criteria {
+                    out.push_str(" [criteria: ");
+                    out.push_str(&ids.join(", "));
+                    out.push(']');
+                }
+                if let Some(p) = prose {
+                    out.push_str(" -- ");
+                    out.push_str(p);
+                }
+                out.push('\n');
+            }
+            card_parse::TraceBullet::NoRequirement { reason } => {
+                out.push_str("- None");
+                if let Some(r) = reason {
+                    out.push_str(" -- ");
+                    out.push_str(r);
+                }
+                out.push('\n');
+            }
+        }
     }
     out
 }
@@ -317,6 +471,14 @@ pub(crate) fn handle_sub_issue(action: SubIssueAction) -> error::Result<()> {
             body,
         } => {
             let (plugin, github_repo, _workdir) = worksource::require_worksource(&repo)?;
+
+            // #945 review: child issues are issues -- the same create-time
+            // trace refusals as `legion issue create`, or a malformed trace
+            // rides in through the second creation entry point.
+            let database = open_db()?;
+            let parsed = card_parse::parse_issue_body(body.as_deref().unwrap_or(""));
+            validate_trace(&database, &parsed.trace)?;
+
             let created = worksource::create_sub_issue(
                 &plugin,
                 &github_repo,
@@ -359,6 +521,13 @@ pub(crate) fn handle(action: IssueAction) -> error::Result<()> {
         } => {
             let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
             let database = open_db()?;
+
+            // #933: validate the `## Traces to` section before the issue
+            // ever reaches the work source -- an unresolvable, cancelled, or
+            // over-cited trace is refused here, not discovered later at
+            // verify or pr-write time.
+            let parsed = card_parse::parse_issue_body(body.as_deref().unwrap_or(""));
+            validate_trace(&database, &parsed.trace)?;
 
             let created = worksource::create_issue(
                 &plugin_name,
@@ -410,6 +579,9 @@ pub(crate) fn handle(action: IssueAction) -> error::Result<()> {
             }
             if !parsed.acceptance.is_empty() {
                 println!("{}", render_acceptance_block(&parsed.acceptance));
+            }
+            if !parsed.trace.is_empty() {
+                println!("{}", render_trace_block(&parsed.trace));
             }
             for (heading, content) in &parsed.sections {
                 println!("{}:\n{}\n", heading, content);
@@ -630,6 +802,161 @@ pub(crate) fn handle_comment(repo: String, number: u64, body: String) -> error::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::testutil::test_db;
+    use crate::documents::DocumentMeta;
+
+    fn seed_requirement(db: &db::Database, id: &str, status: Option<&str>) -> Vec<String> {
+        let meta = DocumentMeta {
+            id: Some(id),
+            doc_type: "requirement",
+            surface: None,
+            status,
+            priority: None,
+            owner: "legion",
+        };
+        let payload = serde_json::json!({
+            "verification": {
+                "criteria": [
+                    {"text": "first"},
+                    {"text": "second"}
+                ]
+            }
+        })
+        .to_string();
+        let doc = db.insert_document(&meta, &payload).expect("insert doc");
+        let value: serde_json::Value = serde_json::from_str(&doc.payload).unwrap();
+        value["verification"]["criteria"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    // -- #933: `validate_trace` create-time refusals -------------------------
+
+    #[test]
+    fn validate_trace_permits_no_trace_section() {
+        let db = test_db();
+        validate_trace(&db, &[]).expect("untraced issue is legal");
+    }
+
+    #[test]
+    fn validate_trace_permits_valid_requirement_reference() {
+        let db = test_db();
+        let ids = seed_requirement(&db, "FR-TRACE-001", None);
+        let trace = vec![card_parse::TraceBullet::Requirement {
+            document_id: "FR-TRACE-001".to_owned(),
+            criteria: Some(vec![ids[0].clone()]),
+            prose: None,
+        }];
+        validate_trace(&db, &trace).expect("valid trace must be accepted");
+    }
+
+    #[test]
+    fn validate_trace_permits_valid_none_bullet() {
+        let db = test_db();
+        let trace = vec![card_parse::TraceBullet::NoRequirement {
+            reason: Some("defect fix, nothing upstream".to_owned()),
+        }];
+        validate_trace(&db, &trace).expect("a reasoned None bullet is legal");
+    }
+
+    #[test]
+    fn validate_trace_refuses_nonexistent_document() {
+        let db = test_db();
+        let trace = vec![card_parse::TraceBullet::Requirement {
+            document_id: "FR-NOPE-999".to_owned(),
+            criteria: None,
+            prose: None,
+        }];
+        let err = validate_trace(&db, &trace).unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_trace_refuses_cancelled_requirement() {
+        let db = test_db();
+        seed_requirement(&db, "FR-TRACE-CANCELLED", Some("cancelled"));
+        let trace = vec![card_parse::TraceBullet::Requirement {
+            document_id: "FR-TRACE-CANCELLED".to_owned(),
+            criteria: None,
+            prose: None,
+        }];
+        let err = validate_trace(&db, &trace).unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_trace_refuses_criteria_bracket_citing_unknown_id() {
+        let db = test_db();
+        seed_requirement(&db, "FR-TRACE-002", None);
+        let trace = vec![card_parse::TraceBullet::Requirement {
+            document_id: "FR-TRACE-002".to_owned(),
+            criteria: Some(vec!["bogus-id".to_owned()]),
+            prose: None,
+        }];
+        let err = validate_trace(&db, &trace).unwrap_err();
+        assert!(
+            err.to_string().contains("does not contain it"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_trace_refuses_none_alongside_requirement_bullet() {
+        let db = test_db();
+        seed_requirement(&db, "FR-TRACE-003", None);
+        let trace = vec![
+            card_parse::TraceBullet::Requirement {
+                document_id: "FR-TRACE-003".to_owned(),
+                criteria: None,
+                prose: None,
+            },
+            card_parse::TraceBullet::NoRequirement {
+                reason: Some("contradiction".to_owned()),
+            },
+        ];
+        let err = validate_trace(&db, &trace).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot appear alongside"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_trace_refuses_empty_criteria_bracket() {
+        // #945 review: `[criteria:]` parses to Some(vec![]) and every
+        // validation loop over it runs zero iterations -- without this
+        // refusal the citation is a permanent no-op.
+        let db = test_db();
+        seed_requirement(&db, "FR-TRACE-EMPTY", None);
+        let parsed = card_parse::parse_issue_body("## Traces to\n\n- FR-TRACE-EMPTY [criteria:]\n");
+        let err = validate_trace(&db, &parsed.trace).unwrap_err();
+        assert!(err.to_string().contains("cites no ids"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_trace_refuses_unclosed_criteria_bracket() {
+        let db = test_db();
+        seed_requirement(&db, "FR-TRACE-UNCLOSED", None);
+        let parsed = card_parse::parse_issue_body(
+            "## Traces to\n\n- FR-TRACE-UNCLOSED [criteria: a -- never closed\n",
+        );
+        let err = validate_trace(&db, &parsed.trace).unwrap_err();
+        assert!(
+            err.to_string().contains("unparsed '[criteria:'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_trace_refuses_none_bullet_missing_reason() {
+        let db = test_db();
+        let trace = vec![card_parse::TraceBullet::NoRequirement { reason: None }];
+        let err = validate_trace(&db, &trace).unwrap_err();
+        assert!(err.to_string().contains("requires a reason"), "got: {err}");
+    }
 
     /// #907: the viewer's output must survive re-parsing. This is the
     /// regression that let `legion issue view` teach agents an unparseable
@@ -672,5 +999,59 @@ mod tests {
     fn rendered_acceptance_contains_one_line_per_item() {
         let rendered = render_acceptance_block(&["a".to_owned(), "b".to_owned()]);
         assert_eq!(rendered.lines().count(), 3, "heading plus two items");
+    }
+
+    // -- #933: `render_trace_block` round-trip (mirrors #907's acceptance
+    // round-trip contract) -----------------------------------------------
+
+    /// `legion issue view` must print the trace in a shape that re-parses
+    /// to the exact same structure -- otherwise the viewer teaches a shape
+    /// the parser cannot read back, silently blinding `legion-verify` (which
+    /// reads the issue to find the trace) the same way #907 blinded the
+    /// pr-write gate.
+    #[test]
+    fn rendered_trace_round_trips_requirement_bullets() {
+        let trace = vec![
+            card_parse::TraceBullet::Requirement {
+                document_id: "FR-EMAIL-003".to_owned(),
+                criteria: Some(vec!["crit-1".to_owned(), "crit-2".to_owned()]),
+                prose: Some("adds the retry path".to_owned()),
+            },
+            card_parse::TraceBullet::Requirement {
+                document_id: "FR-EMAIL-004".to_owned(),
+                criteria: None,
+                prose: None,
+            },
+        ];
+        let rendered = render_trace_block(&trace);
+        let reparsed = card_parse::parse_issue_body(&rendered);
+        assert_eq!(
+            reparsed.trace, trace,
+            "rendered trace must parse back to the same structure, got {:?}",
+            reparsed.trace
+        );
+    }
+
+    #[test]
+    fn rendered_trace_round_trips_none_bullet() {
+        let trace = vec![card_parse::TraceBullet::NoRequirement {
+            reason: Some("defect fix, no requirement above it".to_owned()),
+        }];
+        let rendered = render_trace_block(&trace);
+        let reparsed = card_parse::parse_issue_body(&rendered);
+        assert_eq!(reparsed.trace, trace);
+    }
+
+    #[test]
+    fn rendered_trace_starts_with_parseable_heading() {
+        let rendered = render_trace_block(&[card_parse::TraceBullet::Requirement {
+            document_id: "FR-X".to_owned(),
+            criteria: None,
+            prose: None,
+        }]);
+        assert!(
+            rendered.starts_with("## Traces to\n"),
+            "heading must be a parseable `## ` section, got: {rendered:?}"
+        );
     }
 }

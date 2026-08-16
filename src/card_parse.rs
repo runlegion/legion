@@ -15,12 +15,47 @@ pub struct ParsedIssue {
     /// Acceptance criteria as individual items
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub acceptance: Vec<String>,
+    /// Bullets from `## Traces to` (#933): which requirement(s) this issue
+    /// derives from, and which of their criteria it services. Empty when
+    /// the section is absent -- an untraced issue is legal (only new work
+    /// has a spec; defect work anchors on its stated premise instead).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub trace: Vec<TraceBullet>,
     /// Other sections keyed by heading name
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<(String, String)>,
     /// Raw body fallback when no headings found
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+}
+
+/// One bullet under an issue's `## Traces to` section (#933 trace format
+/// contract -- this is the single definition both the parser and the issue
+/// template are written against). Either a reference to a requirement, or
+/// the explicit no-requirement spelling.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TraceBullet {
+    /// `- FR-XXXX-NNN -- <prose>` and/or `- FR-XXXX-NNN [criteria: <id>, <id>]`.
+    Requirement {
+        /// First token of the bullet: the requirement document's id.
+        document_id: String,
+        /// Cited criterion ids from an optional `[criteria: ...]` bracket.
+        /// `None` means the bracket was absent -- the whole requirement is
+        /// in scope for this issue, per the contract.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        criteria: Option<Vec<String>>,
+        /// Free text after ` -- `, for humans; not parsed further.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prose: Option<String>,
+    },
+    /// `- None -- <reason>`, the explicit no-requirement case. `reason` is
+    /// `None` when the bullet omitted it -- a structural gap the caller
+    /// refuses on (`cli::issue`'s create-time validation), not something
+    /// the parser fabricates or silently accepts.
+    NoRequirement {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 /// Parse a markdown issue body into structured fields.
@@ -64,6 +99,9 @@ pub fn parse_issue_body(body: &str) -> ParsedIssue {
             }
             "acceptance criteria" | "acceptance" | "done when" | "done" => {
                 parsed.acceptance = extract_checklist(content);
+            }
+            "traces to" => {
+                parsed.trace = parse_trace_bullets(content);
             }
             _ => {
                 parsed.sections.push((heading.clone(), content.to_string()));
@@ -131,6 +169,134 @@ fn extract_checklist(text: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Parse the bullets under a `## Traces to` section (#933 trace format
+/// contract). Tolerant of malformed lines -- a line that is not a `- `
+/// bullet is skipped rather than erroring. Validating the parsed structure
+/// (`None` beside an FR bullet, a missing `None` reason, an id that does not
+/// resolve or a bracket citing a criterion the requirement lacks) is a
+/// separate, document-store-touching step the caller performs at the point
+/// it is needed (`cli::issue`'s create-time validation, `cli::verify`'s
+/// trace resolution) -- this function only turns text into structure.
+fn parse_trace_bullets(content: &str) -> Vec<TraceBullet> {
+    content
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- "))
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(parse_trace_bullet)
+        .collect()
+}
+
+/// Parse one `## Traces to` bullet (its content after the leading `- ` has
+/// already been stripped by `parse_trace_bullets`).
+fn parse_trace_bullet(line: &str) -> TraceBullet {
+    let mut parts = line.splitn(2, char::is_whitespace);
+    let token = parts.next().unwrap_or("").trim();
+    let mut remainder = parts.next().unwrap_or("").trim().to_string();
+
+    if token == "None" {
+        return TraceBullet::NoRequirement {
+            reason: extract_trace_prose(&remainder),
+        };
+    }
+
+    let criteria = extract_criteria_bracket(&mut remainder);
+    let prose = extract_trace_prose(&remainder);
+
+    TraceBullet::Requirement {
+        document_id: token.to_string(),
+        criteria,
+        prose,
+    }
+}
+
+/// Pull a `[criteria: id, id]` bracket out of a trace bullet's remainder (in
+/// place), returning the parsed id list. Returns `None` (and leaves
+/// `remainder` untouched) when no bracket is present -- the contract's
+/// stated meaning of absence is "the whole requirement is in scope", not
+/// "zero criteria", so this must stay distinguishable from `Some(vec![])`.
+fn extract_criteria_bracket(remainder: &mut String) -> Option<Vec<String>> {
+    let start = remainder.find("[criteria:")?;
+    let end = start + remainder[start..].find(']')?;
+    let inner = remainder[start + "[criteria:".len()..end].to_string();
+    let ids: Vec<String> = inner
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let before = remainder[..start].trim();
+    let after = remainder[end + 1..].trim();
+    let mut combined = String::new();
+    combined.push_str(before);
+    if !before.is_empty() && !after.is_empty() {
+        combined.push(' ');
+    }
+    combined.push_str(after);
+    *remainder = combined;
+
+    Some(ids)
+}
+
+/// Extract the human prose from what is left of a trace bullet after its id
+/// token (and any `[criteria: ...]` bracket) has been removed. The contract
+/// form is ` -- <prose>`; the leading `--` is stripped when present, but any
+/// non-empty leftover text is still returned as prose (e.g. a bracket
+/// followed directly by trailing text) rather than silently dropped.
+fn extract_trace_prose(remainder: &str) -> Option<String> {
+    let trimmed = remainder.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = trimmed.strip_prefix("--").map_or(trimmed, str::trim);
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.to_string())
+    }
+}
+
+/// Structural `[criteria: ...]` defects the tolerant parser cannot refuse
+/// itself (#933, #945 review): the parse layer is infallible by design, so
+/// a malformed bracket degrades -- an unclosed bracket lands unparsed in
+/// `prose` and the bullet silently widens to whole-requirement scope; a
+/// second bracket is dropped into `prose` and its ids never cited; an empty
+/// bracket becomes `Some(vec![])`, a citation that scopes zero criteria and
+/// no validator loop ever inspects. Each of those must be refused by the
+/// gates, not passed through, so this check is defined once here -- beside
+/// the parser whose tolerance creates the cases -- and called by both
+/// `cli::issue::validate_trace` (create time) and
+/// `cli::verify::resolve_traced_requirements` (live re-check).
+///
+/// Returns a human-readable defect description, or `None` for a
+/// well-formed bullet. `NoRequirement` bullets have no bracket grammar and
+/// always pass.
+pub fn trace_bullet_bracket_defect(bullet: &TraceBullet) -> Option<String> {
+    let TraceBullet::Requirement {
+        document_id,
+        criteria,
+        prose,
+    } = bullet
+    else {
+        return None;
+    };
+
+    if prose.as_deref().is_some_and(|p| p.contains("[criteria:")) {
+        return Some(format!(
+            "requirement '{document_id}' bullet carries an unparsed '[criteria:' fragment \
+             (unclosed or repeated bracket) -- write exactly one '[criteria: id, id]' bracket"
+        ));
+    }
+    if criteria.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Some(format!(
+            "'[criteria: ...]' for requirement '{document_id}' cites no ids -- omit the \
+             bracket for whole-requirement scope, or name at least one id"
+        ));
+    }
+    None
 }
 
 /// Truncate a string to at most `max` characters, appending `suffix` when
@@ -332,5 +498,162 @@ mod tests {
     fn card_summary_fallback_to_context() {
         let summary = card_summary(None, None, Some("Raw description")).expect("summary");
         assert_eq!(summary, "Raw description");
+    }
+
+    // -- #933: `## Traces to` trace-format contract -------------------------
+
+    #[test]
+    fn trace_absent_when_no_traces_to_section() {
+        let body = "## Problem\n\nSomething.\n";
+        let parsed = parse_issue_body(body);
+        assert!(parsed.trace.is_empty());
+    }
+
+    #[test]
+    fn trace_parses_requirement_bullet_with_prose() {
+        let body = "## Traces to\n\n- FR-EMAIL-003 -- adds the retry path\n";
+        let parsed = parse_issue_body(body);
+        assert_eq!(
+            parsed.trace,
+            vec![TraceBullet::Requirement {
+                document_id: "FR-EMAIL-003".to_owned(),
+                criteria: None,
+                prose: Some("adds the retry path".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn trace_parses_requirement_bullet_with_criteria_bracket() {
+        let body = "## Traces to\n\n- FR-EMAIL-003 [criteria: crit-1, crit-2]\n";
+        let parsed = parse_issue_body(body);
+        assert_eq!(
+            parsed.trace,
+            vec![TraceBullet::Requirement {
+                document_id: "FR-EMAIL-003".to_owned(),
+                criteria: Some(vec!["crit-1".to_owned(), "crit-2".to_owned()]),
+                prose: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn trace_parses_bracket_and_prose_combined() {
+        let body = "## Traces to\n\n- FR-EMAIL-003 [criteria: crit-1] -- also fixes the timeout\n";
+        let parsed = parse_issue_body(body);
+        assert_eq!(
+            parsed.trace,
+            vec![TraceBullet::Requirement {
+                document_id: "FR-EMAIL-003".to_owned(),
+                criteria: Some(vec!["crit-1".to_owned()]),
+                prose: Some("also fixes the timeout".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn trace_absent_criteria_bracket_means_whole_requirement_in_scope() {
+        let body = "## Traces to\n\n- FR-EMAIL-003 -- no bracket here\n";
+        let parsed = parse_issue_body(body);
+        match &parsed.trace[0] {
+            TraceBullet::Requirement { criteria, .. } => {
+                assert!(
+                    criteria.is_none(),
+                    "absent bracket must be None, not Some(vec![])"
+                );
+            }
+            other => panic!("expected Requirement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trace_parses_multiple_requirement_bullets() {
+        // #933: "an issue may service two requirements".
+        let body = "## Traces to\n\n- FR-EMAIL-003 -- first\n- FR-EMAIL-004 -- second\n";
+        let parsed = parse_issue_body(body);
+        assert_eq!(parsed.trace.len(), 2);
+        assert_eq!(
+            parsed.trace[0],
+            TraceBullet::Requirement {
+                document_id: "FR-EMAIL-003".to_owned(),
+                criteria: None,
+                prose: Some("first".to_owned()),
+            }
+        );
+        assert_eq!(
+            parsed.trace[1],
+            TraceBullet::Requirement {
+                document_id: "FR-EMAIL-004".to_owned(),
+                criteria: None,
+                prose: Some("second".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn trace_parses_none_bullet_with_reason() {
+        let body = "## Traces to\n\n- None -- defect fix, no requirement above it\n";
+        let parsed = parse_issue_body(body);
+        assert_eq!(
+            parsed.trace,
+            vec![TraceBullet::NoRequirement {
+                reason: Some("defect fix, no requirement above it".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn trace_parses_none_bullet_missing_reason_as_none() {
+        // The parser is tolerant -- a missing reason is a structural gap the
+        // create-time validator refuses on, not something parsing invents.
+        let body = "## Traces to\n\n- None\n";
+        let parsed = parse_issue_body(body);
+        assert_eq!(
+            parsed.trace,
+            vec![TraceBullet::NoRequirement { reason: None }]
+        );
+    }
+
+    #[test]
+    fn bracket_defect_flags_unclosed_repeated_and_empty_brackets() {
+        // Unclosed: bracket text degrades into prose, scope silently widens.
+        let unclosed = &parse_issue_body("## Traces to\n\n- FR-X [criteria: a -- oops\n").trace[0];
+        assert!(
+            trace_bullet_bracket_defect(unclosed)
+                .is_some_and(|m| m.contains("unparsed '[criteria:'")),
+            "unclosed bracket must be flagged"
+        );
+
+        // Repeated: second bracket's ids silently dropped into prose.
+        let repeated =
+            &parse_issue_body("## Traces to\n\n- FR-X [criteria: a] [criteria: b]\n").trace[0];
+        assert!(
+            trace_bullet_bracket_defect(repeated).is_some(),
+            "repeated bracket must be flagged"
+        );
+
+        // Empty: a citation scoping zero criteria.
+        let empty = &parse_issue_body("## Traces to\n\n- FR-X [criteria:]\n").trace[0];
+        assert!(
+            trace_bullet_bracket_defect(empty).is_some_and(|m| m.contains("cites no ids")),
+            "empty bracket must be flagged"
+        );
+
+        // Well-formed and bracketless bullets pass; None bullets always pass.
+        let ok = &parse_issue_body("## Traces to\n\n- FR-X [criteria: a] -- prose\n").trace[0];
+        assert!(trace_bullet_bracket_defect(ok).is_none());
+        let bare = &parse_issue_body("## Traces to\n\n- FR-X -- prose\n").trace[0];
+        assert!(trace_bullet_bracket_defect(bare).is_none());
+        let none = &parse_issue_body("## Traces to\n\n- None -- reason\n").trace[0];
+        assert!(trace_bullet_bracket_defect(none).is_none());
+    }
+
+    #[test]
+    fn trace_heading_tolerates_trailing_punctuation() {
+        // Mirrors #907's acceptance-heading normalization test for the new
+        // heading -- the same `key.trim_end_matches` call handles both.
+        let body = "## Traces to:\n\n- FR-EMAIL-003 -- fixes it\n";
+        let parsed = parse_issue_body(body);
+        assert_eq!(parsed.trace.len(), 1);
     }
 }

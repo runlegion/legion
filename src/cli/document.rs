@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::Subcommand;
 
 use crate::cli::util::open_db;
+use crate::cli::verify::resolve_spec_criteria;
 use crate::{db, documents, error};
 
 #[derive(Subcommand)]
@@ -205,6 +206,29 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
                 println!("updated:  {}", doc.updated_at);
                 println!("--- payload ---");
                 println!("{}", doc.payload);
+
+                // #933: "a requirement can be asked which of its criteria
+                // have been serviced by a clean verdict" -- making
+                // completion computable rather than asserted. The view
+                // itself stays best-effort (everything above still prints),
+                // but a malformed payload is SAID, not skipped (#945
+                // review): silence would make "malformed criteria" and "no
+                // criteria" indistinguishable on the one surface built to
+                // make completion legible.
+                match resolve_spec_criteria(&doc) {
+                    Ok(Some(criteria)) => {
+                        let served = database.document_criteria_served(&doc.id)?;
+                        println!("--- criteria status ---");
+                        for c in &criteria {
+                            let mark = if served.contains(&c.id) { "x" } else { " " };
+                            println!("[{mark}] {} {}", c.id, c.text);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("[legion] criteria status unavailable: {e}");
+                    }
+                }
             }
         }
         DocumentAction::List {

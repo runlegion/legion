@@ -306,6 +306,65 @@ fn failing_checks_error(failed: &[&str], number: u64) -> error::LegionError {
     ))
 }
 
+/// Render the traced requirement's criteria alongside the pr-write mapping
+/// (#933), so a wrong trace or a conflicting criterion is legible at the
+/// moment the mapping is written -- not discovered later at verify or close
+/// time. This is smugglr #411's countermeasure: a hand-written mapping entry
+/// can satisfy the issue's own restated criterion while contradicting what
+/// the traced requirement actually specifies, and every gate that only reads
+/// the issue's `acceptance` list passes anyway.
+///
+/// For each requirement bullet, prints its serviced criteria (id + text),
+/// then flags any of the issue's OWN `acceptance` bullets whose text is not
+/// found verbatim among them -- the re-authoring signature: acceptance
+/// criteria the issue declares that the requirement does not contain.
+/// Untraced issues (no `## Traces to` section, or only `- None`) print
+/// nothing; there is no requirement to render against.
+///
+/// Fails closed like `cli::verify`'s trace resolution -- it IS that
+/// resolution: `cli::verify::resolve_traced_requirements` is the single
+/// shared reader for both gates, so pr-write and verify cannot drift in
+/// how they resolve the same trace. An unresolvable trace refuses the
+/// pr-write gate rather than silently rendering nothing -- drift made
+/// invisible is exactly what this rendering exists to prevent.
+fn render_traced_requirement_criteria(
+    database: &db::Database,
+    trace: &[card_parse::TraceBullet],
+    acceptance: &[String],
+) -> error::Result<()> {
+    let requirements = crate::cli::verify::resolve_traced_requirements(database, trace)?;
+    if requirements.is_empty() {
+        return Ok(());
+    }
+
+    for req in &requirements {
+        eprintln!(
+            "[legion] requirement '{}' criteria serviced by this issue:",
+            req.doc_id
+        );
+        for c in &req.criteria {
+            eprintln!("  - [{}] {}", c.id, c.text);
+        }
+    }
+    // Re-authoring check against the UNION of all traced requirements'
+    // criteria: with two requirements, an acceptance bullet derived from
+    // either is derived -- warning per-requirement would flag every bullet
+    // once for each requirement it does not belong to.
+    for a in acceptance {
+        let derived = requirements
+            .iter()
+            .flat_map(|r| r.criteria.iter())
+            .any(|c| c.text.trim().eq_ignore_ascii_case(a.trim()));
+        if !derived {
+            eprintln!(
+                "[legion] warning: issue acceptance criterion not found in the traced \
+                 requirement -- re-authored, not derived: {a}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Load `issue`'s acceptance criteria, validate `body` against them, and
 /// record the result as the `legion-pr-write` quality gate for
 /// `(branch, commit_hash)`. Shared by `PrAction::WriteCheck` and
@@ -333,6 +392,7 @@ fn validate_and_record_pr_write_gate(
 ) -> error::Result<pr_write::PrWriteReport> {
     let ext = worksource::view_issue(plugin_name, source_repo, issue)?;
     let parsed = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or(""));
+    render_traced_requirement_criteria(database, &parsed.trace, &parsed.acceptance)?;
     let report = pr_write::validate_pr_body(&parsed.acceptance, body);
 
     let gate_result = if report.ok {

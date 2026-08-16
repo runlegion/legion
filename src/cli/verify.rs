@@ -1235,6 +1235,91 @@ pub(crate) fn handle_verify(
     }
 }
 
+/// Resolve an issue's `## Traces to` requirement bullets against live
+/// document state (#933), one `TracedRequirement` per bullet. `- None`
+/// bullets and an absent section resolve to an empty vec -- untraced.
+/// Shared by `handle_verify_issue` and `cli::pr`'s traced-criteria
+/// rendering, so the pr-write gate and the verify gate cannot drift in how
+/// they read the same trace.
+///
+/// Fails closed on the conditions `cli::issue::validate_trace` enforces at
+/// create time, re-checked live rather than trusted (a body edit can bypass
+/// the create-time validator): a requirement that does not exist, one whose
+/// status is `cancelled`, one with no id-carrying `verification.criteria`,
+/// and a `[criteria: ...]` bracket citing an id the requirement no longer
+/// contains. An unevaluated check is not a passed check, so none of these
+/// degrade to rendering or verifying nothing.
+pub(crate) fn resolve_traced_requirements(
+    database: &db::Database,
+    trace: &[card_parse::TraceBullet],
+) -> error::Result<Vec<verify::TracedRequirement>> {
+    let mut requirements = Vec::new();
+    for bullet in trace {
+        // Same bracket-defect refusal `cli::issue::validate_trace` applies
+        // at create time (#945 review) -- re-checked here because a body
+        // edit bypasses the create-time validator, and a degraded bracket
+        // (empty, unclosed, repeated) silently mis-scopes what this issue
+        // is judged against.
+        if let Some(defect) = card_parse::trace_bullet_bracket_defect(bullet) {
+            return Err(error::LegionError::WorkSource(format!(
+                "## Traces to: {defect}"
+            )));
+        }
+        let card_parse::TraceBullet::Requirement {
+            document_id,
+            criteria,
+            ..
+        } = bullet
+        else {
+            continue;
+        };
+        let doc = database.get_document(document_id)?.ok_or_else(|| {
+            error::LegionError::WorkSource(format!(
+                "issue traces to requirement '{document_id}', which does not exist"
+            ))
+        })?;
+        if doc.status == "cancelled" {
+            return Err(error::LegionError::WorkSource(format!(
+                "issue traces to requirement '{document_id}', which is cancelled -- a \
+                 cancelled requirement is not a trace"
+            )));
+        }
+        let spec_criteria = resolve_spec_criteria(&doc)?.ok_or_else(|| {
+            error::LegionError::WorkSource(format!(
+                "requirement '{document_id}' has no id-carrying verification.criteria to \
+                 verify against"
+            ))
+        })?;
+        let scoped: Vec<verify::SpecCriterion> = match criteria {
+            Some(ids) => {
+                let mut out = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let found = spec_criteria.iter().find(|c| &c.id == id).ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "issue cites criterion '{id}' for requirement '{document_id}', \
+                             which no longer contains it"
+                        ))
+                    })?;
+                    out.push(found.clone());
+                }
+                out
+            }
+            None => spec_criteria,
+        };
+        // Propagated, not defaulted: a fabricated fallback revision would
+        // corrupt the staleness check `decide_spec_multi` performs with
+        // this value -- wrongly refusing fresh verdicts or accepting stale
+        // ones whenever the read fails.
+        let revision = database.document_revision(&doc.id)?;
+        requirements.push(verify::TracedRequirement {
+            doc_id: doc.id.clone(),
+            revision,
+            criteria: scoped,
+        });
+    }
+    Ok(requirements)
+}
+
 /// Verify a work-source issue's acceptance criteria, with no card involved
 /// (#913).
 ///
@@ -1243,14 +1328,31 @@ pub(crate) fn handle_verify(
 /// gate that lets a PR open and the gate that closes the work now read one
 /// text, so they cannot disagree about what was promised.
 ///
+/// #933: when the issue body carries a `## Traces to` section naming at
+/// least one requirement, criteria resolve from THAT requirement's
+/// `verification.criteria` for the serviced ids, not from the issue's own
+/// restated criteria -- the issue's acceptance criteria define the slice's
+/// scope, but the requirement's criteria are what the verdict is judged
+/// against, so spec fidelity survives the issue the same way it survives a
+/// card. The trace is re-resolved against LIVE document state here (not
+/// trusted from `cli::issue`'s create-time validation, since `legion issue
+/// edit` can change the body after creation): a requirement that no longer
+/// exists, has gone `cancelled`, or no longer contains a cited criterion id
+/// refuses the run, matching the create-time rule's exact conditions.
+/// Verdicts take the id-carrying `SpecAcResult` shape in this case, pinning
+/// the document id and revision each criterion belongs to
+/// (`verify::decide_spec_multi`, which generalizes the card path's
+/// `decide_spec` to more than one traced requirement).
+///
+/// An untraced issue (no `## Traces to` section, or only the explicit
+/// `- None` no-requirement bullet) keeps the pre-#933 behavior exactly:
+/// free-text `AcResult` verdicts against the issue's own `acceptance` list.
+///
 /// What this path deliberately does NOT do, versus the card path:
 ///
-/// - No spec-document precedence. Binding a document is a card operation
-///   (`kanban bind`), so an issue-shaped repo has nothing to bind; criteria
-///   resolve to the issue body or the call refuses.
-/// - No `SpecAcResult` verdicts. Those cite `criterion_id`s that only exist
-///   in a bound document's `verification.criteria`, so this path takes the
-///   free-text `AcResult` shape.
+/// - No card-bound-document precedence. Binding a document via `kanban
+///   bind` is a card operation; an issue-shaped repo resolves its spec
+///   through the trace instead (see above), or has none.
 /// - No status transition. There is no card to move to Done or NeedsInput;
 ///   the verdict IS the recorded gate row plus the exit code.
 /// - No `--deviation`. That gate is adjudicated against a card's
@@ -1276,27 +1378,60 @@ fn handle_verify_issue(
 
     let ext = worksource::view_issue(&plugin, &source_repo, issue)?;
     let parsed = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or(""));
-    let acceptance = parsed.acceptance;
-    let ac_source = format!("issue:{source_repo}#{issue}");
+
+    let target = VerifyTarget::Issue {
+        gate_key: verify::verify_gate_key_for_issue(&source_repo, issue),
+        label: format!("issue {source_repo}#{issue}"),
+    };
+
+    // #933: one resolution, two gates -- the same shared resolver
+    // `cli::pr`'s traced-criteria rendering uses, so pr-write and verify
+    // cannot drift in how they read a trace. Empty means untraced: no
+    // `## Traces to` section, or only the explicit `- None` spelling.
+    let requirements = resolve_traced_requirements(&database, &parsed.trace)?;
 
     let raw = read_file_or_stdin(verdicts_file.as_deref(), "--verdicts-file")?;
-    let results: Vec<verify::AcResult> = serde_json::from_str(&raw).map_err(|e| {
+
+    if requirements.is_empty() {
+        let acceptance = parsed.acceptance;
+        let ac_source = format!("issue:{source_repo}#{issue}");
+        let results: Vec<verify::AcResult> = serde_json::from_str(&raw).map_err(|e| {
+            error::LegionError::WorkSource(format!(
+                "failed to parse verdicts JSON (expected a list of \
+                 {{criterion, verdict, evidence}}): {e}"
+            ))
+        })?;
+        let decision = verify::decide(&acceptance, &results);
+        let results_value = serde_json::to_value(&results)?;
+
+        return finish_verify(
+            &database,
+            &target,
+            &ac_source,
+            acceptance.len(),
+            decision,
+            results_value,
+        );
+    }
+
+    let criteria_count: usize = requirements.iter().map(|r| r.criteria.len()).sum();
+    let doc_ids: Vec<&str> = requirements.iter().map(|r| r.doc_id.as_str()).collect();
+    let ac_source = format!("trace:{}", doc_ids.join(","));
+
+    let results: Vec<verify::SpecAcResult> = serde_json::from_str(&raw).map_err(|e| {
         error::LegionError::WorkSource(format!(
-            "failed to parse verdicts JSON (expected a list of \
-             {{criterion, verdict, evidence}}): {e}"
+            "failed to parse spec verdicts JSON (expected a list of \
+             {{spec_doc_id, spec_revision, criterion_id, verdict, artifacts}}): {e}"
         ))
     })?;
-    let decision = verify::decide(&acceptance, &results);
+    let decision = verify::decide_spec_multi(&requirements, &results);
     let results_value = serde_json::to_value(&results)?;
 
     finish_verify(
         &database,
-        &VerifyTarget::Issue {
-            gate_key: verify::verify_gate_key_for_issue(&source_repo, issue),
-            label: format!("issue {source_repo}#{issue}"),
-        },
+        &target,
         &ac_source,
-        acceptance.len(),
+        criteria_count,
         decision,
         results_value,
     )

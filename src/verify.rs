@@ -519,6 +519,160 @@ pub fn decide_spec(
     VerifyDecision::Proceed
 }
 
+/// One requirement an issue's trace (#933) cites, scoped to the specific
+/// document state a `verify --issue` run resolved: which document, which
+/// revision it is currently at, and the criterion subset the trace bullet
+/// named (or the whole requirement, when the bullet carried no
+/// `[criteria: ...]` bracket). Callers build one of these per traced
+/// requirement bullet before calling `decide_spec_multi`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TracedRequirement {
+    pub doc_id: String,
+    pub revision: i64,
+    pub criteria: Vec<SpecCriterion>,
+}
+
+/// Decide a work-source issue's fate against the requirement(s) its trace
+/// (#933) cites. Sibling of `decide_spec` for the case where a trace may
+/// name more than one requirement -- the contract permits "an issue may
+/// service two requirements" -- so, unlike `decide_spec`, there is no single
+/// `(expected_doc_id, expected_revision)` pair the whole verdict set is
+/// checked against: each criterion is scoped to the specific document (and
+/// revision) its OWN traced requirement named.
+///
+/// Coverage, evidence, and pass/fail/uncertain accounting are otherwise
+/// identical to `decide_spec` -- see that function's doc comment for the
+/// rationale (id-set coverage, the vacuous-evidence demotion to Uncertain).
+///
+/// Criteria are keyed by `(doc_id, criterion_id)` throughout -- never by
+/// criterion id alone. Criterion ids are only unique WITHIN one document
+/// (`insert_document` preserves caller-supplied ids verbatim and checks
+/// duplicates only against the document's own payload), so two traced
+/// requirements can legitimately share an id string like `crit-1`. A
+/// single-id key would let the first requirement's criterion claim the
+/// slot: a correct citation against the second document would be refused
+/// as mis-cited, and -- worse, silently -- the second document's same-id
+/// criterion would vanish from coverage, letting verify Proceed without it
+/// ever being judged.
+pub fn decide_spec_multi(
+    requirements: &[TracedRequirement],
+    results: &[SpecAcResult],
+) -> VerifyDecision {
+    let mut owner: std::collections::HashMap<(&str, &str), (i64, &str)> =
+        std::collections::HashMap::new();
+    for req in requirements {
+        for c in &req.criteria {
+            owner
+                .entry((req.doc_id.as_str(), c.id.as_str()))
+                .or_insert((req.revision, c.text.as_str()));
+        }
+    }
+    if owner.is_empty() {
+        return VerifyDecision::NoCheckableAc;
+    }
+
+    // Human-readable label for a result: the criterion text where the
+    // citation resolves, the raw id otherwise.
+    let text_for = |r: &SpecAcResult| -> String {
+        owner
+            .get(&(r.spec_doc_id.as_str(), r.criterion_id.as_str()))
+            .map(|(_, text)| (*text).to_string())
+            .unwrap_or_else(|| r.criterion_id.clone())
+    };
+
+    // Every citation must resolve to the exact (document, revision) its own
+    // traced requirement named -- checked before coverage, same ordering
+    // rationale as `decide_spec`: a bogus citation is always reported as
+    // exactly that, never mistaken for a missing verdict.
+    let invalid: Vec<String> = results
+        .iter()
+        .filter_map(|r| {
+            match owner.get(&(r.spec_doc_id.as_str(), r.criterion_id.as_str())) {
+                None => {
+                    // Distinguish "right criterion, wrong document" from
+                    // "no traced requirement contains this id at all".
+                    let id_elsewhere = owner
+                        .keys()
+                        .find(|(_, cid)| *cid == r.criterion_id.as_str());
+                    match id_elsewhere {
+                        Some((doc_id, _)) => Some(format!(
+                            "criterion '{}': cites spec document '{}', but this issue's \
+                             trace scopes that id to '{doc_id}'",
+                            r.criterion_id, r.spec_doc_id
+                        )),
+                        None => Some(format!(
+                            "criterion id '{}' does not exist in any requirement this \
+                             issue traces to",
+                            r.criterion_id
+                        )),
+                    }
+                }
+                Some((revision, _)) => {
+                    if r.spec_revision != *revision {
+                        Some(format!(
+                            "criterion '{}': cites spec revision {}, expected {revision} \
+                             (stale reference -- the spec was revised since this verdict \
+                             was formed)",
+                            r.criterion_id, r.spec_revision
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            }
+        })
+        .collect();
+    if !invalid.is_empty() {
+        return VerifyDecision::InvalidCriterionReference { details: invalid };
+    }
+
+    // Past this point every result names a real (document, revision,
+    // criterion) triple. Coverage by (document, criterion) pair across ALL
+    // traced requirements -- a same-id criterion in a second document is
+    // its own entry and must be cited separately.
+    let valid_keys: std::collections::HashSet<(&str, &str)> = owner.keys().copied().collect();
+    let cited: std::collections::HashSet<(&str, &str)> = results
+        .iter()
+        .map(|r| (r.spec_doc_id.as_str(), r.criterion_id.as_str()))
+        .collect();
+    let unaddressed = valid_keys.difference(&cited).count();
+    if unaddressed > 0 {
+        return VerifyDecision::Incomplete { unaddressed };
+    }
+
+    let effective = |r: &SpecAcResult| -> AcVerdict {
+        let criterion_text = text_for(r);
+        let has_evidence = r.artifacts.iter().any(|a| {
+            !a.outcome.trim().is_empty() && !is_vacuous_evidence(&criterion_text, &a.reference)
+        });
+        if r.verdict == AcVerdict::Pass && !has_evidence {
+            AcVerdict::Uncertain
+        } else {
+            r.verdict
+        }
+    };
+
+    let failed: Vec<String> = results
+        .iter()
+        .filter(|r| effective(r) == AcVerdict::Fail)
+        .map(&text_for)
+        .collect();
+    if !failed.is_empty() {
+        return VerifyDecision::Block { failed };
+    }
+
+    let uncertain: Vec<String> = results
+        .iter()
+        .filter(|r| effective(r) == AcVerdict::Uncertain)
+        .map(&text_for)
+        .collect();
+    if !uncertain.is_empty() {
+        return VerifyDecision::NeedsInput { uncertain };
+    }
+
+    VerifyDecision::Proceed
+}
+
 /// The spec-revision deviation gate (#554,
 /// docs/decisions/2026-05-31-spec-revision-protocol.md).
 ///
@@ -1223,6 +1377,262 @@ mod tests {
         assert_eq!(
             decide_spec(&criteria, &results, "doc-1", 3),
             VerifyDecision::Proceed
+        );
+    }
+
+    // --- decide_spec_multi tests (#933: multi-requirement issue traces) ---
+
+    fn traced(doc_id: &str, revision: i64, criteria: Vec<SpecCriterion>) -> TracedRequirement {
+        TracedRequirement {
+            doc_id: doc_id.to_owned(),
+            revision,
+            criteria,
+        }
+    }
+
+    #[test]
+    fn decide_spec_multi_empty_requirements_is_blocked() {
+        assert_eq!(decide_spec_multi(&[], &[]), VerifyDecision::NoCheckableAc);
+    }
+
+    /// #945 review HIGH, execution-verified: criterion ids are only unique
+    /// within one document, so two traced requirements sharing an id string
+    /// (human-chosen ids like "crit-1") must remain distinct entries. A
+    /// correct citation against the SECOND document's same-named criterion
+    /// must proceed, not be refused as mis-cited to the first.
+    #[test]
+    fn decide_spec_multi_same_criterion_id_in_two_requirements_both_judged() {
+        let requirements = vec![
+            traced("doc-1", 1, vec![crit("crit-1", "first doc's crit")]),
+            traced("doc-2", 3, vec![crit("crit-1", "second doc's crit")]),
+        ];
+        let results = vec![
+            spec_res(
+                "doc-1",
+                1,
+                "crit-1",
+                AcVerdict::Pass,
+                vec![artifact("tests::a", "passed")],
+            ),
+            spec_res(
+                "doc-2",
+                3,
+                "crit-1",
+                AcVerdict::Pass,
+                vec![artifact("tests::b", "passed")],
+            ),
+        ];
+        assert_eq!(
+            decide_spec_multi(&requirements, &results),
+            VerifyDecision::Proceed
+        );
+    }
+
+    /// The silent half of the same collision: citing only the first
+    /// document's criterion must leave the second document's same-id
+    /// criterion counted as unaddressed -- it must not vanish from coverage.
+    #[test]
+    fn decide_spec_multi_same_id_second_document_still_requires_its_own_citation() {
+        let requirements = vec![
+            traced("doc-1", 1, vec![crit("crit-1", "first doc's crit")]),
+            traced("doc-2", 3, vec![crit("crit-1", "second doc's crit")]),
+        ];
+        let results = vec![spec_res(
+            "doc-1",
+            1,
+            "crit-1",
+            AcVerdict::Pass,
+            vec![artifact("tests::a", "passed")],
+        )];
+        assert_eq!(
+            decide_spec_multi(&requirements, &results),
+            VerifyDecision::Incomplete { unaddressed: 1 }
+        );
+    }
+
+    /// Ordering pin (#945 review): a call carrying BOTH an invalid citation
+    /// and an unaddressed criterion must report the invalid citation --
+    /// bogus references are never mistaken for missing verdicts.
+    #[test]
+    fn decide_spec_multi_invalid_citation_reported_before_coverage_gap() {
+        let requirements = vec![traced(
+            "doc-1",
+            1,
+            vec![crit("crit-1", "first"), crit("crit-2", "second")],
+        )];
+        let results = vec![spec_res(
+            "doc-1",
+            9,
+            "crit-1",
+            AcVerdict::Pass,
+            vec![artifact("tests::a", "passed")],
+        )];
+        match decide_spec_multi(&requirements, &results) {
+            VerifyDecision::InvalidCriterionReference { details } => {
+                assert!(
+                    details[0].contains("revision"),
+                    "expected the stale-revision refusal, got: {details:?}"
+                );
+            }
+            other => panic!("expected InvalidCriterionReference, got {other:?}"),
+        }
+    }
+
+    /// The headline proof for the multi-requirement case: an issue tracing
+    /// to two different requirements, each with its own document id and
+    /// revision, must resolve verdicts against the SPECIFIC requirement each
+    /// criterion belongs to -- not one shared expected document.
+    #[test]
+    fn decide_spec_multi_two_requirements_all_pass_proceeds() {
+        let requirements = vec![
+            traced("doc-1", 1, vec![crit("crit-1", "first thing")]),
+            traced("doc-2", 5, vec![crit("crit-2", "second thing")]),
+        ];
+        let results = vec![
+            spec_res(
+                "doc-1",
+                1,
+                "crit-1",
+                AcVerdict::Pass,
+                vec![artifact("tests::a", "passed")],
+            ),
+            spec_res(
+                "doc-2",
+                5,
+                "crit-2",
+                AcVerdict::Pass,
+                vec![artifact("tests::b", "passed")],
+            ),
+        ];
+        assert_eq!(
+            decide_spec_multi(&requirements, &results),
+            VerifyDecision::Proceed
+        );
+    }
+
+    /// A verdict citing the RIGHT criterion id but the WRONG requirement's
+    /// document (e.g. crit-1 belongs to doc-1, cited against doc-2) must be
+    /// rejected -- each criterion is pinned to its own traced requirement.
+    #[test]
+    fn decide_spec_multi_rejects_criterion_cited_against_wrong_requirement() {
+        let requirements = vec![
+            traced("doc-1", 1, vec![crit("crit-1", "first thing")]),
+            traced("doc-2", 1, vec![crit("crit-2", "second thing")]),
+        ];
+        let results = vec![
+            spec_res(
+                "doc-2", // wrong document for crit-1, which belongs to doc-1
+                1,
+                "crit-1",
+                AcVerdict::Pass,
+                vec![artifact("tests::a", "passed")],
+            ),
+            spec_res(
+                "doc-2",
+                1,
+                "crit-2",
+                AcVerdict::Pass,
+                vec![artifact("tests::b", "passed")],
+            ),
+        ];
+        match decide_spec_multi(&requirements, &results) {
+            VerifyDecision::InvalidCriterionReference { details } => {
+                assert!(
+                    details[0].contains("crit-1")
+                        && details[0].contains("scopes that id to 'doc-1'"),
+                    "expected a wrong-document message naming doc-1, got: {}",
+                    details[0]
+                );
+            }
+            other => panic!("expected InvalidCriterionReference, got {other:?}"),
+        }
+    }
+
+    /// A stale revision on one of several traced requirements is rejected
+    /// distinctly, scoped to that requirement's own expected revision.
+    #[test]
+    fn decide_spec_multi_rejects_stale_revision_on_one_requirement() {
+        let requirements = vec![
+            traced("doc-1", 2, vec![crit("crit-1", "first thing")]),
+            traced("doc-2", 1, vec![crit("crit-2", "second thing")]),
+        ];
+        let results = vec![
+            spec_res(
+                "doc-1",
+                1, // stale -- doc-1 is now at revision 2
+                "crit-1",
+                AcVerdict::Pass,
+                vec![artifact("tests::a", "passed")],
+            ),
+            spec_res(
+                "doc-2",
+                1,
+                "crit-2",
+                AcVerdict::Pass,
+                vec![artifact("tests::b", "passed")],
+            ),
+        ];
+        match decide_spec_multi(&requirements, &results) {
+            VerifyDecision::InvalidCriterionReference { details } => {
+                assert!(
+                    details[0].contains("stale reference"),
+                    "expected a stale-revision message, got: {}",
+                    details[0]
+                );
+            }
+            other => panic!("expected InvalidCriterionReference, got {other:?}"),
+        }
+    }
+
+    /// Coverage spans every traced requirement: a criterion from the second
+    /// requirement left unaddressed must block, even though the first
+    /// requirement's criterion was fully covered.
+    #[test]
+    fn decide_spec_multi_coverage_spans_all_requirements() {
+        let requirements = vec![
+            traced("doc-1", 1, vec![crit("crit-1", "first thing")]),
+            traced("doc-2", 1, vec![crit("crit-2", "second thing")]),
+        ];
+        let results = vec![spec_res(
+            "doc-1",
+            1,
+            "crit-1",
+            AcVerdict::Pass,
+            vec![artifact("tests::a", "passed")],
+        )];
+        assert_eq!(
+            decide_spec_multi(&requirements, &results),
+            VerifyDecision::Incomplete { unaddressed: 1 }
+        );
+    }
+
+    #[test]
+    fn decide_spec_multi_fail_on_one_requirement_blocks() {
+        let requirements = vec![
+            traced("doc-1", 1, vec![crit("crit-1", "first thing")]),
+            traced("doc-2", 1, vec![crit("crit-2", "second thing")]),
+        ];
+        let results = vec![
+            spec_res(
+                "doc-1",
+                1,
+                "crit-1",
+                AcVerdict::Pass,
+                vec![artifact("tests::a", "passed")],
+            ),
+            spec_res(
+                "doc-2",
+                1,
+                "crit-2",
+                AcVerdict::Fail,
+                vec![artifact("tests::b", "failed: no handler")],
+            ),
+        ];
+        assert_eq!(
+            decide_spec_multi(&requirements, &results),
+            VerifyDecision::Block {
+                failed: vec!["second thing".to_owned()]
+            }
         );
     }
 }
