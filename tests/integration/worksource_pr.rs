@@ -1692,12 +1692,21 @@ fn pr_create_accepts_repeated_closes_flag() {
 /// propagation tests; the unknown-verb fallback fails loud like the
 /// PR-read stub.
 #[cfg(unix)]
+/// Close stub. Implements `view-issue` as well as `close` because the close
+/// path now reads the issue to evaluate the verify gate (#930) and fails
+/// closed when it cannot. The stub body declares NO acceptance criteria, so
+/// the gate treats it as ungated and these tests keep exercising what they
+/// were written for -- the close call and its audit row -- rather than the
+/// gate.
 fn close_stub_plugin(close_exit: i32) -> String {
     format!(
         r##"#!/bin/bash
 case "${{1:-}}" in
   close)
     exit {close_exit}
+    ;;
+  view-issue)
+    echo '{{"url":"https://example.invalid/owner/stub/issues/42","number":42,"title":"stub","body":"no criteria here","labels":[],"assignees":[],"state":"OPEN"}}'
     ;;
   *)
     echo "stub: unknown subcommand $1" >&2
@@ -3322,5 +3331,216 @@ fn verify_rejects_card_and_issue_together() {
     assert!(
         stderr.contains("cannot be used with") || stderr.contains("conflict"),
         "expected a clap conflict error, got: {stderr}"
+    );
+}
+
+// -- issue close is gated on verify (#930) --------------------------------
+
+/// `--force` requires a reason. An unexplained override is the thing the gate
+/// exists to stop, so clap must refuse it before anything reaches the work
+/// source.
+#[test]
+fn issue_close_force_requires_a_reason() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "issue",
+        "close",
+        "--repo",
+        "no-such-repo",
+        "--number",
+        "42",
+        "--force",
+    ]));
+    assert!(
+        stderr.contains("force-reason") || stderr.contains("force_reason"),
+        "expected clap to require --force-reason alongside --force, got: {stderr}"
+    );
+}
+
+/// `--force --force-reason` parses. It still fails at work-source resolution
+/// here, which is as far as a test without network reaches -- the point is
+/// that the flag pair is accepted rather than rejected at parse time.
+#[test]
+fn issue_close_force_with_reason_parses() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "issue",
+        "close",
+        "--repo",
+        "no-such-repo",
+        "--number",
+        "42",
+        "--force",
+        "--force-reason",
+        "spec was wrong, re-planned",
+    ]));
+    assert!(
+        stderr.contains("no work source configured"),
+        "expected worksource error (proving the flags parsed), got: {stderr}"
+    );
+}
+
+/// Close stub whose issue body DECLARES acceptance criteria, so the verify
+/// gate applies. Used by the refusal tests below.
+#[cfg(unix)]
+fn close_stub_plugin_with_criteria() -> String {
+    // r#####: the JSON body contains `"##`, which closes a plain r##" literal.
+    r#####"#!/bin/bash
+case "${1:-}" in
+  close)
+    exit 0
+    ;;
+  view-issue)
+    # %s, not a format string: printf expands escapes in the FORMAT only, so
+    # the \n inside the JSON body stay two-character escapes rather than
+    # becoming real control characters (which is invalid JSON).
+    printf '%s\n' '{"url":"https://example.invalid/owner/stub/issues/42","number":42,"title":"stub","body":"## Acceptance criteria\n- the thing works\n- the other thing works\n","labels":[],"assignees":[],"state":"OPEN"}'
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"#####
+        .to_string()
+}
+
+/// An issue with criteria and NO verify verdict must not close. This is the
+/// hole the issue was filed on: verify was advisory for every repo working
+/// from issues rather than cards.
+#[cfg(unix)]
+#[test]
+fn issue_close_refused_when_verify_verdict_is_absent() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &close_stub_plugin_with_criteria(),
+    );
+
+    let (_stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["issue", "close", "--repo", "stub", "--number", "42"]),
+    );
+    assert!(
+        stderr.contains("no verify verdict"),
+        "absent verdict must be named as absent, got: {stderr}"
+    );
+}
+
+/// A recorded but NON-CLEAN verdict must not close either, and must be
+/// reported differently from an absent one -- they are different problems.
+#[cfg(unix)]
+#[test]
+fn issue_close_refused_when_verify_verdict_is_not_clean() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &close_stub_plugin_with_criteria(),
+    );
+
+    run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-verify:issue-owner/stub#42",
+        "--result",
+        "issues",
+        "--findings-count",
+        "1",
+    ]));
+
+    let (_stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["issue", "close", "--repo", "stub", "--number", "42"]),
+    );
+    assert!(
+        stderr.contains("not clean"),
+        "failed verdict must be named as not-clean, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("no verify verdict"),
+        "a failed verdict must not be reported as an absent one: {stderr}"
+    );
+}
+
+/// A clean verdict lets the close through.
+#[cfg(unix)]
+#[test]
+fn issue_close_allowed_when_verify_verdict_is_clean() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &close_stub_plugin_with_criteria(),
+    );
+
+    run_ok(legion_cmd(data_dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-verify:issue-owner/stub#42",
+        "--result",
+        "clean",
+    ]));
+
+    let stdout = run_ok(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["issue", "close", "--repo", "stub", "--number", "42"]),
+    );
+    assert!(
+        stdout.contains("closed issue #42"),
+        "a clean verdict must let the close through, got: {stdout}"
+    );
+}
+
+/// --force closes despite an absent verdict, and says so loudly.
+#[cfg(unix)]
+#[test]
+fn issue_close_force_overrides_an_absent_verdict() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &close_stub_plugin_with_criteria(),
+    );
+
+    let stdout = run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "issue",
+        "close",
+        "--repo",
+        "stub",
+        "--number",
+        "42",
+        "--force",
+        "--force-reason",
+        "criteria were re-planned",
+    ]));
+    assert!(
+        stdout.contains("closed issue #42"),
+        "force must close, got: {stdout}"
+    );
+
+    // The override must be visible in the DEFAULT audit listing, not only
+    // under --json. A bypass recorded where nobody looks is not recorded.
+    let audit_out = run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "close-issue"]));
+    assert!(
+        audit_out.contains("override"),
+        "the override must show in the default audit listing, got: {audit_out}"
+    );
+
+    // And the reason itself must survive, which is what --json carries.
+    let audit_json =
+        run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "close-issue", "--json"]));
+    assert!(
+        audit_json.contains("re-planned"),
+        "the override reason must be recorded, got: {audit_json}"
     );
 }
