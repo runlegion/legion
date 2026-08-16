@@ -80,10 +80,21 @@ pub fn append_bypass(record: &BypassRecord) -> Result<()> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeliveryRecord {
     pub ts: String,
-    /// "hook" | "mcp_notification"
-    pub lane: String,
+    pub lane: DeliveryLane,
     pub repo: String,
     pub reflection_id: String,
+}
+
+/// Which lane delivered the reflection. An enum rather than a string so
+/// the discriminant is compile-checked at both call sites (the hook drain
+/// in `deliver.rs`, the MCP notifier in `mcp/notifier.rs`) -- a typo in
+/// either literal would silently split the parity data this record exists
+/// to measure. Serializes as `"hook"` / `"mcp_notification"`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryLane {
+    Hook,
+    McpNotification,
 }
 
 /// Resolve the canonical delivery log path (sibling of `bypass.jsonl`).
@@ -849,12 +860,16 @@ mod tests {
         let path = tmp.path().join("delivery.jsonl");
         let rec = DeliveryRecord {
             ts: Utc::now().to_rfc3339(),
-            lane: "hook".to_string(),
+            lane: DeliveryLane::Hook,
             repo: "legion".to_string(),
             reflection_id: "01a00bdc-4e72-74b3-8c70-9dc417af5818".to_string(),
         };
         append_jsonl(&path, &rec).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("\"lane\":\"hook\""),
+            "enum must serialize to the bare lane string; got: {raw}"
+        );
         let parsed: DeliveryRecord = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(parsed, rec);
     }

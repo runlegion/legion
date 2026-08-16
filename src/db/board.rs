@@ -18,6 +18,13 @@ use crate::error::{LegionError, Result};
 const ACTIVE_TEAM_POST_WHERE: &str =
     "audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL";
 
+/// Suffix that marks a `board_reads` cursor row as belonging to the
+/// hook-side delivery lane (#941). `deliver::hook_reader_key` builds keys
+/// with it, and `archive_read_posts` excludes rows carrying it from the
+/// "all known readers have read" aggregate -- one constant so the two
+/// sites cannot drift apart.
+pub const HOOK_DRAIN_CURSOR_SUFFIX: &str = "::hook-drain";
+
 /// TTL hours for design or architecture posts.
 const TTL_DESIGN_HOURS: i64 = 14 * 24;
 /// TTL hours for signal-shaped posts (text starts with `@`).
@@ -449,7 +456,8 @@ impl Database {
     /// avoid race conditions between SELECT and UPDATE.
     ///
     /// The `MIN(last_read_at)` subquery excludes `hook-drain` cursor rows
-    /// (#941, `deliver::hook_reader_key`, keyed `"{repo}::hook-drain"`).
+    /// (#941, `deliver::hook_reader_key`, keyed by
+    /// [`HOOK_DRAIN_CURSOR_SUFFIX`]).
     /// Those rows are not a "known reader" for this gate's purpose -- they
     /// exist purely so the hook-side delivery lane can track what it has
     /// already surfaced, independent of the MCP notifier's and manual
@@ -468,9 +476,9 @@ impl Database {
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
              AND created_at < ( \
                  SELECT MIN(last_read_at) FROM board_reads \
-                 WHERE reader_repo NOT LIKE '%::hook-drain' \
+                 WHERE reader_repo NOT LIKE '%' || ?2 \
              )",
-            rusqlite::params![now],
+            rusqlite::params![now, HOOK_DRAIN_CURSOR_SUFFIX],
         )?;
 
         Ok(count as u64)

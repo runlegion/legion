@@ -23,7 +23,7 @@
 
 use chrono::Utc;
 
-use crate::db::{Database, Reflection};
+use crate::db::{Database, HOOK_DRAIN_CURSOR_SUFFIX, Reflection};
 use crate::error::Result;
 use crate::mcp::notifier;
 use crate::telemetry;
@@ -35,9 +35,11 @@ const DRAIN_BATCH_LIMIT: usize = 50;
 
 /// Cursor key the hook-drain lane writes to `board_reads`, namespaced
 /// apart from the plain `repo` key the MCP notifier and manual `legion
-/// bullpen` already use.
+/// bullpen` already use. Built from `db::HOOK_DRAIN_CURSOR_SUFFIX`, the
+/// same constant `archive_read_posts` uses to exclude these rows from its
+/// aggregate -- the key scheme and the exclusion cannot drift apart.
 pub fn hook_reader_key(repo: &str) -> String {
-    format!("{repo}::hook-drain")
+    format!("{repo}{HOOK_DRAIN_CURSOR_SUFFIX}")
 }
 
 /// Fetch this repo's undelivered bullpen posts/signals via the hook-drain
@@ -101,7 +103,7 @@ pub fn drain_for_hook(db: &Database, repo: &str) -> Result<Vec<Reflection>> {
     for post in &delivered {
         let record = telemetry::DeliveryRecord {
             ts: Utc::now().to_rfc3339(),
-            lane: "hook".to_string(),
+            lane: telemetry::DeliveryLane::Hook,
             repo: repo.to_string(),
             reflection_id: post.id.clone(),
         };

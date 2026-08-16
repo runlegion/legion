@@ -374,7 +374,7 @@ pub fn classify_notifier_health(
 fn mcp_delivery_record(recipient: &str, reflection_id: &str) -> telemetry::DeliveryRecord {
     telemetry::DeliveryRecord {
         ts: Utc::now().to_rfc3339(),
-        lane: "mcp_notification".to_string(),
+        lane: telemetry::DeliveryLane::McpNotification,
         repo: recipient.to_string(),
         reflection_id: reflection_id.to_string(),
     }
@@ -1082,7 +1082,7 @@ mod tests {
         // round-trip itself is covered by
         // telemetry::tests::append_delivery_writes_jsonl_row_with_lane_and_reflection_id.
         let record = mcp_delivery_record("legion", "01a00bdc-4e72-74b3-8c70-9dc417af5818");
-        assert_eq!(record.lane, "mcp_notification");
+        assert_eq!(record.lane, telemetry::DeliveryLane::McpNotification);
         assert_eq!(record.repo, "legion");
         assert_eq!(record.reflection_id, "01a00bdc-4e72-74b3-8c70-9dc417af5818");
     }
