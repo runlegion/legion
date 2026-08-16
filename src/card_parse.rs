@@ -259,6 +259,46 @@ fn extract_trace_prose(remainder: &str) -> Option<String> {
     }
 }
 
+/// Structural `[criteria: ...]` defects the tolerant parser cannot refuse
+/// itself (#933, #945 review): the parse layer is infallible by design, so
+/// a malformed bracket degrades -- an unclosed bracket lands unparsed in
+/// `prose` and the bullet silently widens to whole-requirement scope; a
+/// second bracket is dropped into `prose` and its ids never cited; an empty
+/// bracket becomes `Some(vec![])`, a citation that scopes zero criteria and
+/// no validator loop ever inspects. Each of those must be refused by the
+/// gates, not passed through, so this check is defined once here -- beside
+/// the parser whose tolerance creates the cases -- and called by both
+/// `cli::issue::validate_trace` (create time) and
+/// `cli::verify::resolve_traced_requirements` (live re-check).
+///
+/// Returns a human-readable defect description, or `None` for a
+/// well-formed bullet. `NoRequirement` bullets have no bracket grammar and
+/// always pass.
+pub fn trace_bullet_bracket_defect(bullet: &TraceBullet) -> Option<String> {
+    let TraceBullet::Requirement {
+        document_id,
+        criteria,
+        prose,
+    } = bullet
+    else {
+        return None;
+    };
+
+    if prose.as_deref().is_some_and(|p| p.contains("[criteria:")) {
+        return Some(format!(
+            "requirement '{document_id}' bullet carries an unparsed '[criteria:' fragment \
+             (unclosed or repeated bracket) -- write exactly one '[criteria: id, id]' bracket"
+        ));
+    }
+    if criteria.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Some(format!(
+            "'[criteria: ...]' for requirement '{document_id}' cites no ids -- omit the \
+             bracket for whole-requirement scope, or name at least one id"
+        ));
+    }
+    None
+}
+
 /// Truncate a string to at most `max` characters, appending `suffix` when
 /// truncated. Safe for multi-byte UTF-8. When `max` is smaller than the
 /// suffix, returns the leading `max` characters with no suffix -- there
@@ -572,6 +612,40 @@ mod tests {
             parsed.trace,
             vec![TraceBullet::NoRequirement { reason: None }]
         );
+    }
+
+    #[test]
+    fn bracket_defect_flags_unclosed_repeated_and_empty_brackets() {
+        // Unclosed: bracket text degrades into prose, scope silently widens.
+        let unclosed = &parse_issue_body("## Traces to\n\n- FR-X [criteria: a -- oops\n").trace[0];
+        assert!(
+            trace_bullet_bracket_defect(unclosed)
+                .is_some_and(|m| m.contains("unparsed '[criteria:'")),
+            "unclosed bracket must be flagged"
+        );
+
+        // Repeated: second bracket's ids silently dropped into prose.
+        let repeated =
+            &parse_issue_body("## Traces to\n\n- FR-X [criteria: a] [criteria: b]\n").trace[0];
+        assert!(
+            trace_bullet_bracket_defect(repeated).is_some(),
+            "repeated bracket must be flagged"
+        );
+
+        // Empty: a citation scoping zero criteria.
+        let empty = &parse_issue_body("## Traces to\n\n- FR-X [criteria:]\n").trace[0];
+        assert!(
+            trace_bullet_bracket_defect(empty).is_some_and(|m| m.contains("cites no ids")),
+            "empty bracket must be flagged"
+        );
+
+        // Well-formed and bracketless bullets pass; None bullets always pass.
+        let ok = &parse_issue_body("## Traces to\n\n- FR-X [criteria: a] -- prose\n").trace[0];
+        assert!(trace_bullet_bracket_defect(ok).is_none());
+        let bare = &parse_issue_body("## Traces to\n\n- FR-X -- prose\n").trace[0];
+        assert!(trace_bullet_bracket_defect(bare).is_none());
+        let none = &parse_issue_body("## Traces to\n\n- None -- reason\n").trace[0];
+        assert!(trace_bullet_bracket_defect(none).is_none());
     }
 
     #[test]

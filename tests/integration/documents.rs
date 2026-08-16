@@ -108,6 +108,51 @@ fn document_create_rejects_malformed_payload() {
     );
 }
 
+/// #945 review: a malformed `verification.criteria` entry must be SAID on
+/// `document view`, not silently indistinguishable from a document with no
+/// criteria -- the view stays best-effort (metadata and payload still
+/// print, exit stays 0), but stderr names the reason the status section is
+/// absent.
+#[test]
+fn document_view_says_criteria_status_unavailable_on_malformed_entry() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // An entry with an id but no text: insert-time normalization only
+    // assigns MISSING ids, so this survives creation and trips
+    // resolve_spec_criteria's malformed-entry refusal at view time.
+    let payload = r#"{"meta":{},"verification":{"criteria":[{"id":"has-id-no-text"}]}}"#;
+    run_with_stdin(
+        legion_cmd(dir.path()).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "legion",
+            "--id",
+            "FR-VIEW-MALFORMED-1",
+        ]),
+        payload.as_bytes(),
+    );
+
+    let out =
+        run_ok_output(legion_cmd(dir.path()).args(["document", "view", "FR-VIEW-MALFORMED-1"]));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("FR-VIEW-MALFORMED-1"),
+        "view must still print the document, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("--- criteria status ---"),
+        "malformed criteria must not render a status section, got: {stdout}"
+    );
+    assert!(
+        stderr.contains("criteria status unavailable"),
+        "malformed criteria must be said on stderr, got: {stderr}"
+    );
+}
+
 /// #933: `legion document view` (human-readable path) reports which of a
 /// requirement's id-carrying criteria have a clean verify verdict recorded
 /// against them -- "a requirement can be asked which of its criteria have

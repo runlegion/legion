@@ -147,11 +147,17 @@ impl Database {
     /// gate's `details.results[]` array, each entry carrying `spec_doc_id` +
     /// `criterion_id` + `verdict`. A criterion counts as served when at
     /// least one such row cites it against `doc_id` with verdict `"pass"`.
-    /// A gate only ever records `clean` when every result resolved to a real
-    /// (document, revision, criterion) triple at the time it was formed
-    /// (`decide_spec`/`decide_spec_multi` refuse a stale or unknown
-    /// citation before that point), so a row counted here was accurate as
-    /// of its own revision even if the document has since moved on.
+    /// Trust boundary (#945 review, #780/#882): rows written through
+    /// `legion verify` passed `decide_spec`/`decide_spec_multi`'s
+    /// referential checks (document, revision, criterion all resolved at
+    /// verdict time), but rows written through the free-form
+    /// `quality-gate record` path are NOT validated -- verify-family
+    /// skills have no check validator by design, and both paths record
+    /// `GateProvenance::Asserted`, so this scan cannot tell them apart. A
+    /// served mark here is therefore as trustworthy as the gate rows
+    /// themselves: self-declared, the system-wide gap #882 tracks. This
+    /// surface is read-only display (`legion document view`); nothing
+    /// gates on it.
     pub fn document_criteria_served(
         &self,
         doc_id: &str,

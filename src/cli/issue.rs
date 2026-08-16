@@ -45,6 +45,15 @@ fn validate_trace(database: &db::Database, trace: &[card_parse::TraceBullet]) ->
     }
 
     for bullet in trace {
+        // Bracket defects the tolerant parser degrades instead of refusing
+        // (#945 review): unclosed/repeated brackets buried in prose, empty
+        // brackets scoping zero criteria. One definition, shared with the
+        // live re-check in cli::verify::resolve_traced_requirements.
+        if let Some(defect) = card_parse::trace_bullet_bracket_defect(bullet) {
+            return Err(error::LegionError::WorkSource(format!(
+                "## Traces to: {defect}"
+            )));
+        }
         match bullet {
             card_parse::TraceBullet::NoRequirement { reason } => {
                 if reason.as_deref().unwrap_or("").trim().is_empty() {
@@ -462,6 +471,14 @@ pub(crate) fn handle_sub_issue(action: SubIssueAction) -> error::Result<()> {
             body,
         } => {
             let (plugin, github_repo, _workdir) = worksource::require_worksource(&repo)?;
+
+            // #945 review: child issues are issues -- the same create-time
+            // trace refusals as `legion issue create`, or a malformed trace
+            // rides in through the second creation entry point.
+            let database = open_db()?;
+            let parsed = card_parse::parse_issue_body(body.as_deref().unwrap_or(""));
+            validate_trace(&database, &parsed.trace)?;
+
             let created = worksource::create_sub_issue(
                 &plugin,
                 &github_repo,
@@ -903,6 +920,32 @@ mod tests {
         let err = validate_trace(&db, &trace).unwrap_err();
         assert!(
             err.to_string().contains("cannot appear alongside"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_trace_refuses_empty_criteria_bracket() {
+        // #945 review: `[criteria:]` parses to Some(vec![]) and every
+        // validation loop over it runs zero iterations -- without this
+        // refusal the citation is a permanent no-op.
+        let db = test_db();
+        seed_requirement(&db, "FR-TRACE-EMPTY", None);
+        let parsed = card_parse::parse_issue_body("## Traces to\n\n- FR-TRACE-EMPTY [criteria:]\n");
+        let err = validate_trace(&db, &parsed.trace).unwrap_err();
+        assert!(err.to_string().contains("cites no ids"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_trace_refuses_unclosed_criteria_bracket() {
+        let db = test_db();
+        seed_requirement(&db, "FR-TRACE-UNCLOSED", None);
+        let parsed = card_parse::parse_issue_body(
+            "## Traces to\n\n- FR-TRACE-UNCLOSED [criteria: a -- never closed\n",
+        );
+        let err = validate_trace(&db, &parsed.trace).unwrap_err();
+        assert!(
+            err.to_string().contains("unparsed '[criteria:'"),
             "got: {err}"
         );
     }

@@ -1255,6 +1255,16 @@ pub(crate) fn resolve_traced_requirements(
 ) -> error::Result<Vec<verify::TracedRequirement>> {
     let mut requirements = Vec::new();
     for bullet in trace {
+        // Same bracket-defect refusal `cli::issue::validate_trace` applies
+        // at create time (#945 review) -- re-checked here because a body
+        // edit bypasses the create-time validator, and a degraded bracket
+        // (empty, unclosed, repeated) silently mis-scopes what this issue
+        // is judged against.
+        if let Some(defect) = card_parse::trace_bullet_bracket_defect(bullet) {
+            return Err(error::LegionError::WorkSource(format!(
+                "## Traces to: {defect}"
+            )));
+        }
         let card_parse::TraceBullet::Requirement {
             document_id,
             criteria,

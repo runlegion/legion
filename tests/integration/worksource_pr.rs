@@ -1431,6 +1431,44 @@ fn pr_write_check_renders_traced_requirement_criteria() {
     );
 }
 
+/// #945 review: the derived-check is deliberately lenient on case and
+/// surrounding whitespace (`trim` + `eq_ignore_ascii_case`). Pin the
+/// leniency: acceptance bullets differing from the requirement's criterion
+/// text only by case must NOT warn -- mutating the comparison to a strict
+/// byte-equality check fails here.
+#[test]
+#[cfg(unix)]
+fn pr_write_check_case_and_whitespace_variants_are_still_derived() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+
+    // Requirement criteria differ from the stub issue's acceptance bullets
+    // ("crit one" / "crit two") in case only.
+    create_requirement_doc(
+        data_dir.path(),
+        "FR-PRWRITE-CASE",
+        None,
+        &["CRIT One", "Crit TWO"],
+    );
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &traced_pr_write_stub_plugin("FR-PRWRITE-CASE"),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+
+    let out = run_ok_output(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("re-authored"),
+        "case-variant bullets are derived, not re-authored -- got: {stderr}"
+    );
+}
+
 /// smugglr #411's drift case: the issue's own acceptance criteria do not
 /// match the traced requirement's criteria text. The mismatch is surfaced as
 /// a re-authoring warning at the moment the mapping is written, not
