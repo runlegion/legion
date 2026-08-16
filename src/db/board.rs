@@ -577,6 +577,52 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically claim the next batch of active team posts for a
+    /// cursor-keyed reader: read the cursor (seeding it from the board
+    /// watermark on the first-ever call), fetch up to `limit` posts past
+    /// it, and advance the cursor past the fetched batch -- all in one
+    /// IMMEDIATE transaction. Two concurrent claimants on the same key
+    /// serialize at BEGIN: the loser either waits and then reads the
+    /// already-advanced cursor (claiming nothing) or errors with
+    /// SQLITE_BUSY and retries on its next call; either way a post is
+    /// claimed exactly once. Without the transaction the
+    /// read-fetch-advance sequence double-delivers under concurrency
+    /// (#941 review finding, reproduced with a two-thread barrier test).
+    ///
+    /// The cursor advances past the WHOLE fetched batch regardless of
+    /// what the caller later keeps -- suppressed rows must not be
+    /// re-scanned, and the claim is the delivery decision of record.
+    /// Cold start seeds from `get_board_cursor_watermark` (the current
+    /// board tail), persisted immediately, so history is never replayed.
+    pub fn claim_board_posts_for_reader(
+        &self,
+        reader_key: &str,
+        limit: usize,
+    ) -> Result<Vec<Reflection>> {
+        let txn = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+
+        let (since_at, since_id) = match self.get_board_read_cursor(reader_key)? {
+            Some(cursor) => cursor,
+            None => {
+                let seed = self.get_board_cursor_watermark()?.unwrap_or_default();
+                self.advance_board_read_cursor(reader_key, &seed.0, &seed.1)?;
+                seed
+            }
+        };
+
+        let batch = self.get_board_posts_since(&since_at, &since_id, limit)?;
+
+        if let Some(last) = batch.last() {
+            self.advance_board_read_cursor(reader_key, &last.created_at, &last.id)?;
+        }
+
+        txn.commit()?;
+        Ok(batch)
+    }
+
     /// Find unhandled signals directed at a specific repo.
     ///
     /// `names` is the full addressable name set for this repo: the repo's

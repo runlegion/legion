@@ -10,8 +10,11 @@
 #   Stop        -- top-level {decision:block, reason} IS the documented
 #                  refusal shape for Stop (it is not legacy there); soft
 #                  feedback goes through additionalContext (emit_context).
-#   SessionStart / UserPromptSubmit / SubagentStop / Stop-nudge --
-#                  hookSpecificOutput.additionalContext (emit_context).
+#   SessionStart / UserPromptSubmit / PostToolUse / SubagentStop /
+#   Stop-nudge -- hookSpecificOutput.additionalContext (emit_context).
+#                 PostToolUse support verified empirically on CC 2.1.233
+#                 (#941: a mid-run post injected via a PostToolUse hook
+#                 reached the model, stream-json captured).
 #
 # precompact.sh deliberately does NOT use this file: its PreCompact block
 # reason is shown to the USER and must survive a missing jq, so it stays

@@ -70,13 +70,23 @@ pub fn append_bypass(record: &BypassRecord) -> Result<()> {
     append_jsonl(&bypass_log_path(), record)
 }
 
-/// One row per delivered reflection (#941), written by both the hook-drain
+/// One row per emitted reflection (#941), written by both the hook-drain
 /// lane and the MCP notification lane during the dual-lane parity period.
 /// `reflection_id` is the join key: a reader diffs `lane =
 /// "mcp_notification"` rows against `lane = "hook"` rows for the same
 /// `reflection_id` to find posts one lane delivered that the other missed.
 /// No separate `delivery-parity` command is introduced here -- the JSONL
 /// rows themselves are the measurement surface.
+///
+/// What a row asserts, precisely: "the post's bytes left the last stage
+/// this process controls." For the MCP lane that is the notifier's
+/// `write_ok` branch (notification frame written and flushed to stdout);
+/// for the hook lane it is the CLI's post-print flush in `cli::deliver`.
+/// Neither lane can see the harness-side tail -- whether Claude Code
+/// actually rendered the frame or injected the additionalContext (the
+/// hook script's `emit_context` step). A parity reader should treat the
+/// two lanes as equal-confidence at the process boundary, and neither as
+/// proof the model saw the post.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeliveryRecord {
     pub ts: String,

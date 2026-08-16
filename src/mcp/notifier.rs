@@ -1070,16 +1070,16 @@ mod tests {
     }
 
     #[test]
-    fn notifier_records_delivery_telemetry_on_successful_write() {
-        // record_mcp_delivery_telemetry itself is a thin best-effort
-        // wrapper around telemetry::append_delivery, which resolves its
-        // path through XDG_STATE_HOME -- a process-global env var shared
-        // across the whole test binary. Testing at the mcp_delivery_record
-        // seam (what would be written) rather than through the actual
-        // filesystem write avoids racing every other parallel test that
-        // touches XDG_STATE_HOME (e.g.
-        // telemetry::tests::bypass_log_path_uses_xdg_state_home); the JSONL
-        // round-trip itself is covered by
+    fn mcp_delivery_record_tags_lane_and_recipient() {
+        // Scope: the pure record constructor only. The write_ok call-site
+        // wiring (record_mcp_delivery_telemetry inside run_notifier_loop)
+        // is asserted end-to-end by the integration test
+        // mcp_push_bridge_delivers_cross_process_post, which runs the
+        // subprocess under an isolated XDG_STATE_HOME and requires exactly
+        // one mcp_notification row per delivered frame. Testing the
+        // constructor here rather than the filesystem write avoids racing
+        // parallel tests on the process-global XDG_STATE_HOME; the JSONL
+        // round-trip is covered by
         // telemetry::tests::append_delivery_writes_jsonl_row_with_lane_and_reflection_id.
         let record = mcp_delivery_record("legion", "01a00bdc-4e72-74b3-8c70-9dc417af5818");
         assert_eq!(record.lane, telemetry::DeliveryLane::McpNotification);

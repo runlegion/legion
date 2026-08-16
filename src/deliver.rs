@@ -21,16 +21,16 @@
 //! would let an agent who only ever receives posts via hooks silently
 //! satisfy archival without anyone running `legion bullpen` by hand.
 
-use chrono::Utc;
-
 use crate::db::{Database, HOOK_DRAIN_CURSOR_SUFFIX, Reflection};
 use crate::error::Result;
 use crate::mcp::notifier;
-use crate::telemetry;
 
-/// Batch size cap for a single drain call. Mirrors `NOTIFIER_BATCH_LIMIT`
-/// (mcp/notifier.rs) -- anything beyond the cap is picked up on the next
-/// drain because the cursor advances to the last fetched row.
+/// Batch size cap for a single drain call. Half `NOTIFIER_BATCH_LIMIT`'s
+/// 100 (mcp/notifier.rs): drains fire per hook event, far more often than
+/// notifier poll ticks, so each call can afford a smaller bite. Overflow
+/// is safe for the same reason as the notifier's -- anything beyond the
+/// cap is picked up on the next drain because the cursor advances to the
+/// last fetched row.
 const DRAIN_BATCH_LIMIT: usize = 50;
 
 /// Cursor key the hook-drain lane writes to `board_reads`, namespaced
@@ -42,80 +42,33 @@ pub fn hook_reader_key(repo: &str) -> String {
     format!("{repo}{HOOK_DRAIN_CURSOR_SUFFIX}")
 }
 
-/// Fetch this repo's undelivered bullpen posts/signals via the hook-drain
-/// cursor and advance the cursor past the fetched batch in the same call.
+/// Claim this repo's undrained bullpen posts/signals via the hook-drain
+/// cursor. The claim -- cursor read, batch fetch, cursor advance, and
+/// cold-start watermark seed -- is one atomic operation
+/// (`Database::claim_board_posts_for_reader`, an IMMEDIATE transaction),
+/// so two concurrent sessions on the same repo cannot double-deliver a
+/// post; see that method's docs for the loser's two safe outcomes.
 ///
 /// Applies the same delivery decision the MCP lane applies --
 /// `notifier::should_notify(text, repo, Some(repo))` -- so the two lanes
 /// are judged against an identical filter, not two different notions of
 /// "should this post reach this agent."
 ///
-/// The cursor advances unconditionally to the last row's `(created_at,
-/// id)` in the fetched batch regardless of how many rows `should_notify`
-/// kept, mirroring the MCP notifier's "must happen unconditionally or a
-/// suppressed post is re-scanned forever" invariant.
-///
-/// Cold start (no `board_reads` row for `hook_reader_key(repo)` yet)
-/// seeds from `Database::get_board_cursor_watermark` -- the current tail
-/// of the board -- rather than replaying full history, mirroring the MCP
-/// notifier's unknown-client cursor seed. The seed is persisted
-/// immediately, before the first `get_board_posts_since` call: each
-/// `drain_for_hook` invocation is a fresh, stateless CLI process, so
-/// unlike the long-lived MCP notifier thread (which keeps its seed in a
-/// local variable across poll ticks) there is nothing to carry the seed
-/// forward in memory. Leaving the cold-start row unwritten would mean a
-/// call against a nonempty board -- whose fetched batch is legitimately
-/// empty, because the seeded watermark strictly excludes itself -- would
-/// recompute the same cold-start seed on every subsequent call, sliding
-/// forward with the watermark and never catching up.
-///
-/// Every reflection returned here appends one `telemetry::DeliveryRecord`
-/// tagged `lane = "hook"`. Best-effort: a telemetry write failure is
-/// logged, never propagated, and never blocks delivery.
+/// This function records NO telemetry: a claimed post is drained, not yet
+/// delivered. The `lane = "hook"` `DeliveryRecord` is written by the CLI
+/// handler (`cli::deliver`) only after the drained text has been printed
+/// and flushed -- the last stage this process controls, mirroring the MCP
+/// lane's write-confirmed (`write_ok`) recording point. What neither lane
+/// can verify is the harness-side tail (frame render, additionalContext
+/// injection); that residual asymmetry is documented on
+/// `telemetry::DeliveryRecord`.
 pub fn drain_for_hook(db: &Database, repo: &str) -> Result<Vec<Reflection>> {
-    let key = hook_reader_key(repo);
+    let batch = db.claim_board_posts_for_reader(&hook_reader_key(repo), DRAIN_BATCH_LIMIT)?;
 
-    let (since_at, since_id) = match db.get_board_read_cursor(&key)? {
-        Some(cursor) => cursor,
-        None => {
-            let seed = db
-                .get_board_cursor_watermark()?
-                .unwrap_or_else(|| (String::new(), String::new()));
-            db.advance_board_read_cursor(&key, &seed.0, &seed.1)?;
-            seed
-        }
-    };
-
-    let batch = db.get_board_posts_since(&since_at, &since_id, DRAIN_BATCH_LIMIT)?;
-
-    // Advance unconditionally past the whole fetched batch -- a suppressed
-    // row (self-post, signal to a different recipient) must not be
-    // re-scanned on the next call.
-    if let Some(last) = batch.last() {
-        db.advance_board_read_cursor(&key, &last.created_at, &last.id)?;
-    }
-
-    let delivered: Vec<Reflection> = batch
+    Ok(batch
         .into_iter()
         .filter(|post| notifier::should_notify(&post.text, &post.repo, Some(repo)))
-        .collect();
-
-    for post in &delivered {
-        let record = telemetry::DeliveryRecord {
-            ts: Utc::now().to_rfc3339(),
-            lane: telemetry::DeliveryLane::Hook,
-            repo: repo.to_string(),
-            reflection_id: post.id.clone(),
-        };
-        if let Err(e) = telemetry::append_delivery(&record) {
-            eprintln!(
-                "[legion deliver] telemetry write failed for post {}: {e}",
-                post.id
-            );
-        }
-    }
-
-    Ok(delivered)
+        .collect())
 }
 
 #[cfg(test)]
@@ -246,6 +199,48 @@ mod tests {
         let second = drain_for_hook(&db, "legion").unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].text, "fresh musing");
+    }
+
+    #[test]
+    fn drain_for_hook_claims_each_post_once_across_concurrent_sessions() {
+        // Regression for the #941 review race: two live sessions on the
+        // same repo share one hook-drain cursor row, and the pre-fix
+        // read-fetch-advance sequence let both deliver the same post. The
+        // IMMEDIATE transaction in claim_board_posts_for_reader serializes
+        // the claim: the loser either sees the advanced cursor (empty) or
+        // errors with SQLITE_BUSY (counted as zero here -- it retries on
+        // its next debounced call). Either way the total delivered across
+        // both racers must be exactly one.
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.db");
+
+        let seed_db = Database::open(&path).unwrap();
+        seed_db
+            .insert_reflection("seed", "sentinel", "team")
+            .unwrap();
+        assert!(drain_for_hook(&seed_db, "legion").unwrap().is_empty());
+        seed_db
+            .insert_reflection("rafters", "raced post", "team")
+            .unwrap();
+        drop(seed_db);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let db = Database::open(&path).unwrap();
+                    barrier.wait();
+                    drain_for_hook(&db, "legion").map(|p| p.len()).unwrap_or(0)
+                })
+            })
+            .collect();
+
+        let total: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        assert_eq!(total, 1, "a raced post must be claimed exactly once");
     }
 
     #[test]

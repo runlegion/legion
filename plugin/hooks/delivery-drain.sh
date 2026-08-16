@@ -53,8 +53,11 @@ DEBOUNCE_SECONDS="${LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS:-10}"
 
 SAFE_SESSION=$(printf '%s' "$SESSION_ID" | tr -c 'a-zA-Z0-9_-' '_')
 
+# A failed mkdir is logged, not fatal: the drain still runs, but with no
+# sentinel the debounce never engages and every tool call pays the full
+# shell-out -- the log line is the only symptom, so keep it.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/legion"
-mkdir -p "$CACHE_DIR" 2>/dev/null
+mkdir -p "$CACHE_DIR" 2>>"$LOG"
 SENTINEL="${CACHE_DIR}/delivery-drain-last-${SAFE_SESSION}"
 
 NOW=$(date +%s)
