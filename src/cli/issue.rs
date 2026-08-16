@@ -5,6 +5,121 @@ use clap::Subcommand;
 use crate::cli::util::{audit, open_db};
 use crate::{card_parse, db, error, worksource};
 
+/// Gate `legion issue close` on a clean verify verdict (#930).
+///
+/// Returns a short label for the audit row describing which path was taken.
+///
+/// Why this lives here rather than only on the card path: `verify` is the only
+/// card-keyed gate, and until now the ONLY place it was enforced was
+/// `handle_done`'s card-keyed lookup (`cli/kanban.rs`). `legion issue close`
+/// checked nothing, and the issue-keyed verdict added for card-free repos is
+/// exit-code-only -- the row is recorded and nothing ever reads it back. So for
+/// any repo working from issues rather than cards, which is now most of them,
+/// verify was advisory. smugglr ran an entire epic in which simplify, pr-write
+/// and review all fired, verify never did, and nothing reported the absence.
+///
+/// The card path does NOT pass through here: `legion done` closes its linked
+/// issue via `propagate_card_close_to_worksource`, which resolves the work
+/// source itself and calls `close_issue` directly. That path is gated by
+/// `handle_done`'s own check, so the two do not double-gate and neither leaves
+/// a hole.
+///
+/// An issue declaring no acceptance criteria is not gated -- matching the card
+/// rule, where a chore with no criteria can reach Done. But the ungated close
+/// SAYS SO on stdout rather than passing silently: an unchecked close and a
+/// checked one must not look identical, which is the failure this whole gate
+/// exists to close.
+fn check_verify_before_close(
+    database: &db::Database,
+    plugin_name: &str,
+    source_repo: &str,
+    number: u64,
+    force: bool,
+    force_reason: Option<&str>,
+) -> error::Result<&'static str> {
+    use crate::verify::{self, GateResult};
+
+    // Fail closed when the issue cannot be read: an unreadable work source
+    // means the gate could not be EVALUATED, which is not the same as passing
+    // it. This makes `view-issue` a hard requirement of the close path -- a
+    // plugin implementing only `close` now needs it too -- so the error says
+    // that plainly rather than surfacing as an opaque close failure.
+    //
+    // `--force` is honoured here rather than after, so the escape hatch the
+    // error advertises actually exists on this branch.
+    let ext = match worksource::view_issue(plugin_name, source_repo, number) {
+        Ok(ext) => ext,
+        Err(e) if force => {
+            eprintln!(
+                "[legion] OVERRIDE: could not read #{number} to evaluate the verify gate ({e}); \
+                 closing anyway."
+            );
+            eprintln!(
+                "[legion] reason recorded: {}",
+                force_reason.unwrap_or("(none)")
+            );
+            return Ok("overridden: issue unreadable");
+        }
+        Err(e) => {
+            return Err(error::LegionError::WorkSource(format!(
+                "cannot evaluate the verify gate for #{number}: reading the issue failed ({e}). \
+                 The close path needs the work source's view-issue verb. Use --force with a \
+                 reason to close without the check."
+            )));
+        }
+    };
+    let acceptance = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or("")).acceptance;
+
+    if acceptance.is_empty() {
+        println!(
+            "[legion] note: #{number} declares no acceptance criteria, so no verify verdict was required."
+        );
+        return Ok("ungated: no acceptance criteria");
+    }
+
+    let skill = verify::verify_gate_key_for_issue(source_repo, number);
+    let latest = database.get_latest_quality_gate_by_skill(&skill)?;
+
+    // Absent and failed are different problems with different remedies, so
+    // they get different refusals rather than one "not clean" message.
+    let refusal = match &latest {
+        Some(gate) if gate.result == GateResult::Clean => None,
+        Some(_) => Some(format!(
+            "verify verdict for #{number} is not clean ({} criteria declared). \
+             Resolve the failing or uncertain criteria and re-run \
+             `legion verify --repo <r> --issue {number}`.",
+            acceptance.len()
+        )),
+        None => Some(format!(
+            "#{number} declares {} acceptance criteria but no verify verdict exists. \
+             Run `legion verify --repo <r> --issue {number}` before closing.",
+            acceptance.len()
+        )),
+    };
+
+    match (refusal, force) {
+        (None, _) => Ok("clean"),
+        (Some(reason), false) => {
+            eprintln!("[legion] refusing to close: {reason}");
+            eprintln!(
+                "[legion] override with --force --force-reason \"...\" if this is deliberate; \
+                 the reason is recorded in the audit log."
+            );
+            Err(error::LegionError::ExitWith(1))
+        }
+        (Some(reason), true) => {
+            // Loud on the way through. A recorded override that nobody sees at
+            // the moment of use is only half a control.
+            eprintln!("[legion] OVERRIDE: closing #{number} despite the verify gate. {reason}");
+            eprintln!(
+                "[legion] reason recorded: {}",
+                force_reason.unwrap_or("(none)")
+            );
+            Ok("overridden")
+        }
+    }
+}
+
 /// Render the acceptance-criteria section of `legion issue view` in the form
 /// `card_parse::parse_issue_body` can read BACK (#907).
 ///
@@ -137,6 +252,19 @@ pub(crate) enum IssueAction {
         /// Optional closing comment posted before the close
         #[arg(long)]
         comment: Option<String>,
+
+        /// Close despite a failed or missing verify verdict (#930).
+        ///
+        /// The override is recorded in the audit log with the reason, so a
+        /// bypass is visible afterwards rather than indistinguishable from a
+        /// clean close. Requires a reason: an unexplained override is the
+        /// thing this gate exists to stop.
+        #[arg(long, requires = "force_reason")]
+        force: bool,
+
+        /// Why the verify verdict is being overridden. Required with --force.
+        #[arg(long)]
+        force_reason: Option<String>,
     },
     /// Reopen a previously closed issue via the configured work source
     ///
@@ -347,13 +475,31 @@ pub(crate) fn handle(action: IssueAction) -> error::Result<()> {
             repo,
             number,
             comment,
+            force,
+            force_reason,
         } => {
             let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
             let database = open_db()?;
 
+            let gate = check_verify_before_close(
+                &database,
+                &plugin_name,
+                &source_repo,
+                number,
+                force,
+                force_reason.as_deref(),
+            )?;
+
             worksource::close_issue(&plugin_name, &source_repo, number, comment.as_deref())?;
 
-            let details = serde_json::json!({ "comment": comment });
+            // The override reason rides the audit row, not just stderr: a
+            // bypass that is only visible in the terminal of whoever ran it
+            // is not recorded at all.
+            let details = serde_json::json!({
+                "comment": comment,
+                "verify": gate,
+                "force_reason": force_reason,
+            });
             let details_str = details.to_string();
             audit(
                 &database,
@@ -365,7 +511,17 @@ pub(crate) fn handle(action: IssueAction) -> error::Result<()> {
                     task_id: None,
                     source_type: &plugin_name,
                     details: Some(&details_str),
-                    outcome: "success",
+                    // A bypassed gate must be visible in the DEFAULT audit
+                    // listing, which prints the outcome and not the details
+                    // JSON. Recording the override only in details would put
+                    // it where nobody looks unless they already suspect it --
+                    // which is the failure this gate exists to close, one
+                    // level up.
+                    outcome: if gate.starts_with("overridden") {
+                        "override"
+                    } else {
+                        "success"
+                    },
                 },
             );
 
