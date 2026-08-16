@@ -33,7 +33,13 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
 /// (`verification.criteria[].id`). Returns an empty set for a payload with
 /// no such array, a corrupt payload, or a document still on the legacy
 /// id-less `verification.acceptance` shape.
-fn valid_criterion_ids(payload: &str) -> std::collections::HashSet<String> {
+///
+/// `pub(crate)` (#933): this check is document-shaped, not card-shaped --
+/// `cli::issue`'s create-time trace validation reuses it to refuse a
+/// `[criteria: ...]` bracket citing an id a traced requirement does not
+/// contain, the same rule `set_card_criteria` below already enforces for a
+/// card's declared criteria. One existence check, two callers.
+pub(crate) fn valid_criterion_ids(payload: &str) -> std::collections::HashSet<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
         return std::collections::HashSet::new();
     };
@@ -125,6 +131,59 @@ impl Database {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Which of `doc_id`'s criteria have a clean verify verdict recorded
+    /// against them (#933): "a requirement can be asked which of its
+    /// criteria have been serviced by a clean verdict", making completion
+    /// computable rather than asserted. Document-shaped, like
+    /// `valid_criterion_ids` above -- it survives the card the same way
+    /// (this reads `legion-verify:*` gate rows, which exist for both the
+    /// card path and the card-free issue-trace path).
+    ///
+    /// Scans every non-voided, clean `legion-verify:*` quality-gate row.
+    /// Both `verify::decide_spec` (card path) and `verify::decide_spec_multi`
+    /// (issue-trace path, #933) write their `SpecAcResult` verdicts into the
+    /// gate's `details.results[]` array, each entry carrying `spec_doc_id` +
+    /// `criterion_id` + `verdict`. A criterion counts as served when at
+    /// least one such row cites it against `doc_id` with verdict `"pass"`.
+    /// A gate only ever records `clean` when every result resolved to a real
+    /// (document, revision, criterion) triple at the time it was formed
+    /// (`decide_spec`/`decide_spec_multi` refuse a stale or unknown
+    /// citation before that point), so a row counted here was accurate as
+    /// of its own revision even if the document has since moved on.
+    pub fn document_criteria_served(
+        &self,
+        doc_id: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT details FROM quality_gates \
+             WHERE skill LIKE 'legion-verify:%' AND result = 'clean' AND voided_at IS NULL \
+               AND details IS NOT NULL",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut served: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(row) = rows.next()? {
+            let details: String = row.get(0)?;
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&details) else {
+                continue;
+            };
+            let Some(results) = value.get("results").and_then(|r| r.as_array()) else {
+                continue;
+            };
+            for entry in results {
+                let spec_doc_id = entry.get("spec_doc_id").and_then(|v| v.as_str());
+                let criterion_id = entry.get("criterion_id").and_then(|v| v.as_str());
+                let verdict = entry.get("verdict").and_then(|v| v.as_str());
+                if spec_doc_id == Some(doc_id)
+                    && verdict == Some("pass")
+                    && let Some(id) = criterion_id
+                {
+                    served.insert(id.to_string());
+                }
+            }
+        }
+        Ok(served)
     }
 }
 
@@ -276,5 +335,124 @@ mod tests {
         let card_id = seed_bound_card(&db, "doc-crit-4");
         let _ = &ids;
         assert!(db.card_criteria(&card_id).unwrap().is_empty());
+    }
+
+    // -- #933: `document_criteria_served` ------------------------------------
+
+    fn record_verify_gate(
+        db: &Database,
+        skill: &str,
+        result: crate::verify::GateResult,
+        details: &serde_json::Value,
+    ) {
+        let details_str = details.to_string();
+        db.record_quality_gate(&crate::db::quality_gates::QualityGateInput {
+            branch: "feat/x",
+            commit_hash: "deadbeef",
+            skill,
+            result,
+            findings_count: 0,
+            details: Some(&details_str),
+            provenance: crate::verify::GateProvenance::Asserted,
+            base: None,
+        })
+        .expect("record gate");
+    }
+
+    #[test]
+    fn document_criteria_served_empty_with_no_gates() {
+        let db = test_db();
+        assert!(
+            db.document_criteria_served("FR-SERVED-1")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn document_criteria_served_reports_ids_with_a_clean_pass_verdict() {
+        let db = test_db();
+        let details = serde_json::json!({
+            "skill": "legion-verify",
+            "issue": "owner/repo#7",
+            "results": [
+                {"spec_doc_id": "FR-SERVED-2", "spec_revision": 1, "criterion_id": "crit-a", "verdict": "pass"},
+                {"spec_doc_id": "FR-SERVED-2", "spec_revision": 1, "criterion_id": "crit-b", "verdict": "fail"},
+                {"spec_doc_id": "FR-OTHER", "spec_revision": 1, "criterion_id": "crit-c", "verdict": "pass"}
+            ]
+        });
+        record_verify_gate(
+            &db,
+            "legion-verify:issue-owner/repo#7",
+            crate::verify::GateResult::Clean,
+            &details,
+        );
+
+        let served = db.document_criteria_served("FR-SERVED-2").unwrap();
+        assert_eq!(served.len(), 1, "got: {served:?}");
+        assert!(served.contains("crit-a"));
+        assert!(
+            !served.contains("crit-b"),
+            "a fail verdict must not count as served"
+        );
+        assert!(
+            !served.contains("crit-c"),
+            "a pass cited against a DIFFERENT document must not count"
+        );
+    }
+
+    #[test]
+    fn document_criteria_served_ignores_non_clean_gates() {
+        let db = test_db();
+        let details = serde_json::json!({
+            "results": [
+                {"spec_doc_id": "FR-SERVED-3", "spec_revision": 1, "criterion_id": "crit-a", "verdict": "pass"}
+            ]
+        });
+        // Same shape, but the GATE result is "issues" -- decide_spec_multi
+        // never returns Proceed here, so this row must not count even
+        // though an individual result entry says "pass".
+        record_verify_gate(
+            &db,
+            "legion-verify:issue-owner/repo#9",
+            crate::verify::GateResult::Issues,
+            &details,
+        );
+
+        assert!(
+            db.document_criteria_served("FR-SERVED-3")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn document_criteria_served_ignores_voided_gates() {
+        let db = test_db();
+        let details = serde_json::json!({
+            "results": [
+                {"spec_doc_id": "FR-SERVED-4", "spec_revision": 1, "criterion_id": "crit-a", "verdict": "pass"}
+            ]
+        });
+        let row = db
+            .record_quality_gate(&crate::db::quality_gates::QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "deadbeef",
+                skill: "legion-verify:issue-owner/repo#11",
+                result: crate::verify::GateResult::Clean,
+                findings_count: 0,
+                details: Some(&details.to_string()),
+                provenance: crate::verify::GateProvenance::Asserted,
+                base: None,
+            })
+            .expect("record gate");
+        db.void_quality_gate(&row.id, "superseded", None)
+            .expect("void gate");
+
+        assert!(
+            db.document_criteria_served("FR-SERVED-4")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

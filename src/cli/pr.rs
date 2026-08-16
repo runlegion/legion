@@ -4,6 +4,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{audit, git_head_commit_and_branch, open_db, read_file_or_stdin};
+use crate::cli::verify::resolve_spec_criteria;
 use crate::db::quality_gates::QualityGateInput;
 use crate::verify::{GateProvenance, GateResult};
 use crate::{board, card_parse, db, error, kanban, pr_view, pr_write, search, worksource};
@@ -306,6 +307,95 @@ fn failing_checks_error(failed: &[&str], number: u64) -> error::LegionError {
     ))
 }
 
+/// Render the traced requirement's criteria alongside the pr-write mapping
+/// (#933), so a wrong trace or a conflicting criterion is legible at the
+/// moment the mapping is written -- not discovered later at verify or close
+/// time. This is smugglr #411's countermeasure: a hand-written mapping entry
+/// can satisfy the issue's own restated criterion while contradicting what
+/// the traced requirement actually specifies, and every gate that only reads
+/// the issue's `acceptance` list passes anyway.
+///
+/// For each requirement bullet, prints its serviced criteria (id + text),
+/// then flags any of the issue's OWN `acceptance` bullets whose text is not
+/// found verbatim among them -- the re-authoring signature: acceptance
+/// criteria the issue declares that the requirement does not contain.
+/// Untraced issues (no `## Traces to` section, or only `- None`) print
+/// nothing; there is no requirement to render against.
+///
+/// Fails closed like `cli::verify`'s trace resolution: a requirement that no
+/// longer exists, has gone `cancelled`, or no longer contains a cited
+/// criterion id refuses the pr-write gate rather than silently rendering
+/// nothing -- an unresolvable trace is exactly the kind of drift this
+/// rendering exists to make visible, so it must not be the one failure mode
+/// that stays silent.
+fn render_traced_requirement_criteria(
+    database: &db::Database,
+    trace: &[card_parse::TraceBullet],
+    acceptance: &[String],
+) -> error::Result<()> {
+    for bullet in trace {
+        let card_parse::TraceBullet::Requirement {
+            document_id,
+            criteria,
+            ..
+        } = bullet
+        else {
+            continue;
+        };
+
+        let doc = database.get_document(document_id)?.ok_or_else(|| {
+            error::LegionError::WorkSource(format!(
+                "issue traces to requirement '{document_id}', which does not exist"
+            ))
+        })?;
+        if doc.status == "cancelled" {
+            return Err(error::LegionError::WorkSource(format!(
+                "issue traces to requirement '{document_id}', which is cancelled -- a \
+                 cancelled requirement is not a trace"
+            )));
+        }
+        let spec_criteria = resolve_spec_criteria(&doc)?.ok_or_else(|| {
+            error::LegionError::WorkSource(format!(
+                "requirement '{document_id}' has no id-carrying verification.criteria to \
+                 render"
+            ))
+        })?;
+        let scoped: Vec<&crate::verify::SpecCriterion> = match criteria {
+            Some(ids) => {
+                let mut out = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let found = spec_criteria.iter().find(|c| &c.id == id).ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "issue cites criterion '{id}' for requirement '{document_id}', \
+                             which no longer contains it"
+                        ))
+                    })?;
+                    out.push(found);
+                }
+                out
+            }
+            None => spec_criteria.iter().collect(),
+        };
+
+        eprintln!("[legion] requirement '{document_id}' criteria serviced by this issue:");
+        for c in &scoped {
+            eprintln!("  - [{}] {}", c.id, c.text);
+        }
+        for a in acceptance {
+            let derived = scoped
+                .iter()
+                .any(|c| c.text.trim().eq_ignore_ascii_case(a.trim()));
+            if !derived {
+                eprintln!(
+                    "[legion] warning: issue acceptance criterion not found in the traced \
+                     requirement -- re-authored, not derived: {a}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Load `issue`'s acceptance criteria, validate `body` against them, and
 /// record the result as the `legion-pr-write` quality gate for
 /// `(branch, commit_hash)`. Shared by `PrAction::WriteCheck` and
@@ -333,6 +423,7 @@ fn validate_and_record_pr_write_gate(
 ) -> error::Result<pr_write::PrWriteReport> {
     let ext = worksource::view_issue(plugin_name, source_repo, issue)?;
     let parsed = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or(""));
+    render_traced_requirement_criteria(database, &parsed.trace, &parsed.acceptance)?;
     let report = pr_write::validate_pr_body(&parsed.acceptance, body);
 
     let gate_result = if report.ok {

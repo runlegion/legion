@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::Subcommand;
 
 use crate::cli::util::open_db;
+use crate::cli::verify::resolve_spec_criteria;
 use crate::{db, documents, error};
 
 #[derive(Subcommand)]
@@ -205,6 +206,20 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
                 println!("updated:  {}", doc.updated_at);
                 println!("--- payload ---");
                 println!("{}", doc.payload);
+
+                // #933: "a requirement can be asked which of its criteria
+                // have been serviced by a clean verdict" -- making
+                // completion computable rather than asserted. Best-effort:
+                // a malformed payload still prints everything above; it
+                // just skips this section rather than failing the view.
+                if let Ok(Some(criteria)) = resolve_spec_criteria(&doc) {
+                    let served = database.document_criteria_served(&doc.id)?;
+                    println!("--- criteria status ---");
+                    for c in &criteria {
+                        let mark = if served.contains(&c.id) { "x" } else { " " };
+                        println!("[{mark}] {} {}", c.id, c.text);
+                    }
+                }
             }
         }
         DocumentAction::List {

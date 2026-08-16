@@ -1324,6 +1324,182 @@ fn pr_write_check_silent_when_closing_keyword_present() {
     );
 }
 
+// -- #933: pr write-check renders the traced requirement's criteria --------
+
+/// `view-issue` stub whose body carries both a `## Traces to` bullet naming
+/// `doc_id` and the same two-criterion `## Acceptance criteria` section
+/// `view_issue_stub_plugin` uses, so `substantive_body()` still validates.
+#[cfg(unix)]
+fn traced_pr_write_stub_plugin(doc_id: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+set -e
+case "${{1:-}}" in
+  view-issue)
+    cat <<BODY
+{{"url":"https://example.com/issues/7","number":7,"title":"stub issue","body":"Why it matters.\n\n## Traces to\n- {doc_id} -- adds retry\n\n## Acceptance criteria\n- crit one\n- crit two\n","labels":[],"assignees":null,"state":"OPEN"}}
+BODY
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##
+    )
+}
+
+fn create_requirement_doc(
+    data_dir: &std::path::Path,
+    id: &str,
+    status: Option<&str>,
+    criteria_texts: &[&str],
+) {
+    let criteria: Vec<serde_json::Value> = criteria_texts
+        .iter()
+        .map(|t| serde_json::json!({"text": t}))
+        .collect();
+    let payload = serde_json::json!({
+        "meta": {},
+        "verification": {"criteria": criteria}
+    })
+    .to_string();
+    let mut args = vec![
+        "document".to_string(),
+        "create".to_string(),
+        "--doc-type".to_string(),
+        "requirement".to_string(),
+        "--owner".to_string(),
+        "legion".to_string(),
+        "--id".to_string(),
+        id.to_string(),
+    ];
+    if let Some(s) = status {
+        args.push("--status".to_string());
+        args.push(s.to_string());
+    }
+    let out = run_with_stdin(legion_cmd(data_dir).args(args), payload.as_bytes());
+    assert!(
+        out.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The traced requirement's criteria are rendered on stderr alongside the
+/// mapping, and no re-authoring warning fires when the issue's own
+/// acceptance criteria match the requirement's criteria text (#933).
+#[cfg(unix)]
+#[test]
+fn pr_write_check_renders_traced_requirement_criteria() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+
+    create_requirement_doc(
+        data_dir.path(),
+        "FR-PRWRITE-1",
+        None,
+        &["crit one", "crit two"],
+    );
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &traced_pr_write_stub_plugin("FR-PRWRITE-1"),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+
+    let out = run_ok_output(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("pr-write gate clean"),
+        "expected a clean gate, got stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("FR-PRWRITE-1")
+            && stderr.contains("crit one")
+            && stderr.contains("crit two"),
+        "expected the traced requirement's criteria rendered, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("re-authored"),
+        "criteria match the requirement -- no re-authoring warning expected, got: {stderr}"
+    );
+}
+
+/// smugglr #411's drift case: the issue's own acceptance criteria do not
+/// match the traced requirement's criteria text. The mismatch is surfaced as
+/// a re-authoring warning at the moment the mapping is written, not
+/// discovered later.
+#[cfg(unix)]
+#[test]
+fn pr_write_check_warns_on_reauthored_criteria_not_in_requirement() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+
+    create_requirement_doc(
+        data_dir.path(),
+        "FR-PRWRITE-2",
+        None,
+        &["an entirely different criterion", "yet another one"],
+    );
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &traced_pr_write_stub_plugin("FR-PRWRITE-2"),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+
+    let out = run_ok_output(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("re-authored, not derived: crit one"),
+        "expected a re-authoring warning naming 'crit one', got: {stderr}"
+    );
+    assert!(
+        stderr.contains("re-authored, not derived: crit two"),
+        "expected a re-authoring warning naming 'crit two', got: {stderr}"
+    );
+}
+
+/// A requirement that has gone `cancelled` since the issue traced to it is
+/// not a valid render target -- `pr write-check` refuses, matching
+/// `verify --issue`'s posture on the same condition.
+#[cfg(unix)]
+#[test]
+fn pr_write_check_refuses_when_traced_requirement_cancelled() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+
+    create_requirement_doc(
+        data_dir.path(),
+        "FR-PRWRITE-3",
+        Some("cancelled"),
+        &["crit one", "crit two"],
+    );
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &traced_pr_write_stub_plugin("FR-PRWRITE-3"),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+
+    let (_stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)),
+    );
+    assert!(stderr.contains("cancelled"), "got: {stderr}");
+}
+
 // ---------------------------------------------------------------------------
 // `legion pr edit` (#776): in-place title/body correction on a live PR, no
 // close+recreate. `--body-file` runs the same structural pr-write validation
@@ -3334,6 +3510,292 @@ fn verify_rejects_card_and_issue_together() {
     );
 }
 
+// -- #933: issues trace to their requirement --------------------------------
+
+/// A `view-issue` stub whose body carries a `## Traces to` bullet naming
+/// `doc_id`, with no `[criteria: ...]` bracket (whole requirement in scope).
+#[cfg(unix)]
+fn traced_issue_stub_plugin(doc_id: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+set -e
+case "${{1:-}}" in
+  view-issue)
+    cat <<BODY
+{{"url":"https://example.com/issues/9","number":9,"title":"traced issue","body":"Why it matters.\n\n## Traces to\n- {doc_id} -- adds the retry path\n","labels":[],"assignees":null,"state":"OPEN"}}
+BODY
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##
+    )
+}
+
+/// `verify --issue` with a `## Traces to` bullet naming a real requirement
+/// resolves criteria from that requirement (not the issue's own restated
+/// acceptance criteria), accepts an id-carrying `SpecAcResult` verdict
+/// pinning the document id and revision, and PASSes end to end (#933).
+#[cfg(unix)]
+#[test]
+fn verify_issue_traced_requirement_resolves_spec_criteria_and_proceeds() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+
+    let doc_payload =
+        r#"{"meta":{},"verification":{"criteria":[{"text":"ships the retry path"}]}}"#;
+    let doc_out = run_with_stdin(
+        legion_cmd(data_dir.path()).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "legion",
+            "--id",
+            "FR-TRACE-ISSUE-1",
+        ]),
+        doc_payload.as_bytes(),
+    );
+    assert!(
+        doc_out.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&doc_out.stderr)
+    );
+
+    let view = run_ok(legion_cmd(data_dir.path()).args([
+        "document",
+        "view",
+        "FR-TRACE-ISSUE-1",
+        "--json",
+    ]));
+    let view_json: serde_json::Value = serde_json::from_str(view.trim()).unwrap();
+    let criterion_id = view_json["payload"]
+        .as_str()
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|v| {
+            v["verification"]["criteria"][0]["id"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .expect("assigned criterion id");
+
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &traced_issue_stub_plugin("FR-TRACE-ISSUE-1"),
+    );
+
+    let verdicts = data_dir.path().join("verdicts.json");
+    std::fs::write(
+        &verdicts,
+        serde_json::json!([{
+            "spec_doc_id": "FR-TRACE-ISSUE-1",
+            "spec_revision": 1,
+            "criterion_id": criterion_id,
+            "verdict": "pass",
+            "artifacts": [{"kind": "test", "ref": "tests::retry_path", "outcome": "passed"}]
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let stdout = run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "verify",
+        "--repo",
+        "stub",
+        "--issue",
+        "9",
+        "--verdicts-file",
+        verdicts.to_str().unwrap(),
+    ]));
+    assert!(
+        stdout.contains("verify PASS"),
+        "expected the traced-requirement verdict to pass, got: {stdout}"
+    );
+}
+
+/// `verify --issue` traced to a criterion id the requirement does not (or no
+/// longer) contain refuses, naming the requirement -- the trace is
+/// re-resolved against LIVE document state, not trusted from create time.
+#[cfg(unix)]
+#[test]
+fn verify_issue_traced_requirement_refuses_nonexistent_document() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &traced_issue_stub_plugin("FR-DOES-NOT-EXIST"),
+    );
+
+    let verdicts = data_dir.path().join("verdicts.json");
+    std::fs::write(&verdicts, "[]").unwrap();
+
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "verify",
+        "--repo",
+        "stub",
+        "--issue",
+        "9",
+        "--verdicts-file",
+        verdicts.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("FR-DOES-NOT-EXIST") && stderr.contains("does not exist"),
+        "expected a missing-requirement refusal, got: {stderr}"
+    );
+}
+
+/// A requirement that has gone `cancelled` since the issue was created is
+/// not a valid trace target -- `verify --issue` refuses rather than judging
+/// against a requirement nobody stands behind anymore.
+#[cfg(unix)]
+#[test]
+fn verify_issue_traced_requirement_refuses_cancelled_requirement() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+
+    let doc_payload =
+        r#"{"meta":{},"verification":{"criteria":[{"text":"ships the retry path"}]}}"#;
+    let doc_out = run_with_stdin(
+        legion_cmd(data_dir.path()).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "legion",
+            "--id",
+            "FR-TRACE-CANCELLED",
+            "--status",
+            "cancelled",
+        ]),
+        doc_payload.as_bytes(),
+    );
+    assert!(
+        doc_out.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&doc_out.stderr)
+    );
+
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &traced_issue_stub_plugin("FR-TRACE-CANCELLED"),
+    );
+
+    let verdicts = data_dir.path().join("verdicts.json");
+    std::fs::write(&verdicts, "[]").unwrap();
+
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "verify",
+        "--repo",
+        "stub",
+        "--issue",
+        "9",
+        "--verdicts-file",
+        verdicts.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("cancelled"),
+        "expected a cancelled-requirement refusal, got: {stderr}"
+    );
+}
+
+/// `legion issue create` refuses a body whose `## Traces to` section names a
+/// requirement that does not exist -- before the work source is ever called
+/// (the stub plugin here implements no `create-issue` case at all, so a call
+/// reaching it would fail loudly and differently from the expected refusal).
+#[cfg(unix)]
+#[test]
+fn issue_create_refuses_trace_to_nonexistent_document() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &view_issue_stub_plugin(),
+    );
+
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "issue",
+        "create",
+        "--repo",
+        "stub",
+        "--title",
+        "does the thing",
+        "--body",
+        "## Traces to\n\n- FR-GHOST-001 -- fixes it\n",
+    ]));
+    assert!(
+        stderr.contains("FR-GHOST-001") && stderr.contains("does not exist"),
+        "expected a missing-requirement refusal, got: {stderr}"
+    );
+}
+
+/// `legion issue create` succeeds when the trace resolves to a real,
+/// non-cancelled requirement -- the create-time gate is a refusal, not a
+/// universal block.
+#[cfg(unix)]
+#[test]
+fn issue_create_succeeds_with_valid_trace() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+
+    let doc_payload = r#"{"meta":{},"verification":{"criteria":[{"text":"ships it"}]}}"#;
+    let doc_out = run_with_stdin(
+        legion_cmd(data_dir.path()).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "legion",
+            "--id",
+            "FR-TRACE-VALID-1",
+        ]),
+        doc_payload.as_bytes(),
+    );
+    assert!(
+        doc_out.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&doc_out.stderr)
+    );
+
+    let create_issue_stub = r#"#!/bin/bash
+set -e
+case "${1:-}" in
+  create-issue)
+    echo '{"url":"https://example.com/issues/50","number":50}'
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"#;
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), create_issue_stub);
+
+    let stdout = run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "issue",
+        "create",
+        "--repo",
+        "stub",
+        "--title",
+        "does the thing",
+        "--body",
+        "## Traces to\n\n- FR-TRACE-VALID-1 -- fixes it\n",
+    ]));
+    assert!(
+        stdout.contains("https://example.com/issues/50"),
+        "expected the created issue URL, got: {stdout}"
+    );
+}
+
 // -- issue close is gated on verify (#930) --------------------------------
 
 /// `--force` requires a reason. An unexplained override is the thing the gate
@@ -3497,6 +3959,47 @@ fn issue_close_allowed_when_verify_verdict_is_clean() {
     assert!(
         stdout.contains("closed issue #42"),
         "a clean verdict must let the close through, got: {stdout}"
+    );
+}
+
+/// #933: a traced issue with NO `## Acceptance criteria` section of its own
+/// (the requirement's criteria are what verify judges, so the issue
+/// legitimately restates none) must still be gated -- a `## Traces to`
+/// bullet counts as "has criteria" the same way a non-empty acceptance
+/// section does. Without this, a traced issue would close ungated: #930's
+/// hole, reopened through the door #933 opened.
+#[cfg(unix)]
+#[test]
+fn issue_close_refused_for_traced_issue_with_no_acceptance_section() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let stub = r##"#!/bin/bash
+set -e
+case "${1:-}" in
+  view-issue)
+    cat <<'BODY'
+{"url":"https://example.com/issues/42","number":42,"title":"traced issue","body":"Why it matters.\n\n## Traces to\n- FR-CLOSE-GATE-1 -- adds retry\n","labels":[],"assignees":null,"state":"OPEN"}
+BODY
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##;
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), stub);
+
+    let (_stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["issue", "close", "--repo", "stub", "--number", "42"]),
+    );
+    assert!(
+        stderr.contains("no verify verdict"),
+        "a traced issue with no verdict must still be gated, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("no acceptance criteria"),
+        "must not read as ungated -- the trace supplies the criteria, got: {stderr}"
     );
 }
 

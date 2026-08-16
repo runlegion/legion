@@ -9,7 +9,7 @@
 mod audit;
 mod autonomy;
 mod board;
-mod card_criteria;
+pub(crate) mod card_criteria;
 pub mod css_symbols;
 mod documents;
 pub(crate) mod findings;
