@@ -1,5 +1,190 @@
 # Legion Changelog
 
+## 0.29.0
+
+Five changes, one shape: in each, a thing that happened and a thing that did not looked
+identical from the outside. An answered ask sat in the reply queue rendering exactly like
+an unanswered one (#919, PR #920). Every distinct failure of `pr-check-log` -- expired
+log, missing scope, and the actual one -- surfaced as one identical string (#895,
+PR #935). And the big one, in three places at once: a skipped verify and a passed verify
+were indistinguishable. Verify was unreachable at all for issue-shaped work (#922,
+PR #923); the verdict it recorded there was exit-code-only, with nothing reading the row
+back (#930, PR #932); and the stage whose entire job is noticing absence had no agent of
+its own, only a skill the implementer ran on its own work (#936, PR #937). Minor release
+rather than a patch: `legion issue close` now refuses where it previously passed, which
+every agent meets on its first close after upgrading, and two net-new surfaces ship
+alongside it -- `legion verify --issue` and a `legion-verify` agent in the plugin.
+
+### Breaking
+
+- **`legion issue close` refuses without a clean verify verdict** (PR #932, #930).
+  Verify was the only card-keyed quality gate and the only place it was ENFORCED was
+  `handle_done`'s card-keyed lookup; `legion issue close` checked nothing. So for any
+  repo working from issues rather than cards -- which is now most of them -- verify was
+  advisory, and the issue-keyed verdict added below would have been recorded and never
+  read. Close now resolves the issue's acceptance criteria through
+  `card_parse::parse_issue_body` and requires a clean
+  `legion-verify:issue-<repo>#<n>` row. Absent and failed refuse differently, because
+  they are different problems: absent says verify has not run and names the command,
+  not-clean says resolve the failing or uncertain criteria first. An issue declaring no
+  acceptance criteria is ungated -- matching the card rule that lets a chore reach Done
+  -- but it SAYS SO on stdout, because an unchecked close that looks like a checked one
+  is the failure the whole gate exists to close. It fails closed when the issue cannot
+  be read: a work source that will not answer means the gate could not be EVALUATED,
+  which is not the same as passing it, so `view-issue` is now a hard requirement of the
+  close path and a plugin implementing only `close` needs it too. The override is
+  `--force --force-reason "..."`, with the reason required by clap rather than
+  optional, and it records to the audit OUTCOME rather than only the details JSON --
+  the default `legion audit` listing prints outcome and not details, so a bypass
+  recorded only in details would sit where nobody looks unless they already suspected
+  it, which is the same failure one level up.
+- **Before you upgrade: the gate reads the issue-keyed verdict only.** #930 asked for a
+  close path covering both the card-keyed and issue-keyed gate forms; this ships the
+  issue-keyed half. The card path is not double-gated and does not need to be --
+  `legion done` closes its linked issue through `propagate_card_close_to_worksource`,
+  which resolves the work source itself and never routes through `IssueAction::Close`,
+  and `handle_done`'s own card-keyed check is unchanged. The gap is the other
+  direction: work that HAS a card, verified card-keyed as `legion-verify:<card_id>`,
+  and then closed by typing `legion issue close` instead of `legion done`, finds no
+  issue-keyed row and is refused as "no verify verdict exists" -- for work that passed
+  verify. The only way through is `--force`, which then records an override against a
+  clean run. If you have cards, close them with `legion done`.
+
+### New
+
+- **`legion verify --issue <n>` verifies work with no card involved** (PR #923, #922).
+  `resolve_acceptance_criteria` reached a spec document only through
+  `card.document_id`, so a repo whose work is issue-shaped never reached verify at all:
+  simplify, pr-write and review all fired, the final evidence gate never did, and
+  nothing said so. Measured, not theorised -- smugglr ran an entire epic that way. The
+  issue path reads criteria from the issue body via `card_parse::parse_issue_body`, the
+  same reader `pr write-check --issue` uses, and that sharing is the point rather than
+  an implementation convenience: the gate that lets a PR open and the gate that closes
+  the work now read one text and cannot disagree about what was promised. The verdict
+  records as `legion-verify:issue-<source_repo>#<n>` -- scoped by repo because issue
+  numbers are only unique within a work source, and namespaced so it cannot collide
+  with a card id. Card verdicts keep the `legion-verify:<card>` key untouched, so
+  `legion done`'s lookup is unaffected.
+- **What the issue path deliberately does less of** (PR #923, #922). Each is stated at
+  the function rather than left implicit, because each is a silent-acceptance risk. No
+  spec-document precedence: binding is a card operation, so criteria resolve to the
+  issue body or the call refuses. No `SpecAcResult` verdicts: those cite `criterion_id`s
+  that only exist in a bound document, so this path takes the free-text `AcResult`
+  shape. No status transition: there is no card to move, so the recorded gate row and
+  the exit code ARE the verdict. And `--deviation` refuses outright rather than being
+  ignored -- that gate is adjudicated against a card's ratified `ReplanRecord`, and
+  accepting the flag with no card would accept an assertion nothing checks. `--card`
+  and `--issue` are mutually exclusive and exactly one is required, enforced at parse
+  time.
+- **A `legion-verify` agent, and an issue-writer that briefs it** (PR #937, #936).
+  Review has two agent definitions; verify had none -- a skill the implementer ran on
+  its own work plus card-bound Rust, which is the author grading their own homework.
+  `plugin/agents/legion-verify.md` is new and ships to every repo with the plugin. It
+  runs three audits: spec conformance judged through the issue's trace in the
+  REQUIREMENT's wording rather than the issue's restatement (fidelity and intent
+  findings route to the spec author, not the implementer); process completeness across
+  gate rows, finding dispositions -- a finding auto-resolved because a later commit
+  touched its file was not weighed -- and prediction witnessing under each author's
+  name; and per-criterion verdicts where a pass with no cited evidence is downgraded to
+  uncertain and a criterion unverifiable IN PRINCIPLE is a specification finding rather
+  than a verification result. Depth defaults to queries and existing evidence, with
+  re-execution gated behind named triggers that must appear in the report, because both
+  validation runs showed every discovery finding came from that cheap floor. Findings
+  carry their audience -- implementer, spec-author, operator -- and delivery is by
+  SendMessage when the agent is spawned in the background, since a printed final message
+  does not route to the orchestrator; that was measured twice.
+- **The issue-writer now demands what it will not author** (PR #937, #936). Amendments
+  to `.claude/agents/issue-writer.md` (legion's own repo, not the plugin): check for a
+  covering requirement BEFORE writing, and when one exists transcribe and narrow in the
+  requirement's wording rather than re-deriving it -- every rephrased sentence is a
+  place the build can drift from what was agreed, and a paraphrase is exactly where the
+  issue and the requirement verify will judge against diverge. Disagreement with a spec
+  returns `UNCLEAR` back up the chain rather than being encoded into the body. Untraced
+  defect work must carry a stated premise and the measurement confirming it. And
+  predictions ride the brief: the caller's own prediction is required, a brief without
+  one returns `UNCLEAR`, and the scribe never invents it -- a scribe-authored prediction
+  deposits fake calibration signal that is worse than none. The one prediction it does
+  emit is its own coverage-confidence, under its own name, which verify then witnesses
+  against the intent audit. Both agents were validated before shipping: a blind run on
+  legion #922 caught a skipped review gate it had not been told about, a never-executed
+  success path, and an unqueryable uncertainty surface reported as a gap rather than a
+  pass; a second run on smugglr #380 failed a criterion the PR self-reported as met and
+  found the same skipped-review pattern independently.
+
+### Fixed
+
+- **Replying to a signal retires it** (PR #920, #919). `legion pending-replies` backs
+  the SessionStart REQUIRES A REPLY banner, and nothing on the CLI path ever wrote
+  `watch_handled` -- only the watch spawn path did. So an agent that answered every ask
+  woke to the identical queue, with nothing in the banner distinguishing unanswered from
+  answered-but-unresolved. Measured: six directed asks from smugglr, all six answered,
+  all six re-served verbatim, cleared only by six explicit `legion resolve` calls. The
+  honest response to an ask you cannot tell you already answered is to answer it again,
+  which is how a converged thread becomes an infinite one. `legion signal --to X` now
+  retires X's reply-required asks from this repo's queue, and reports how many. Scoped
+  to the agent being replied to, because the naive rule is falsified by the transcript
+  that prompted this -- the first reply covered two of the six, the rest were answered
+  twenty minutes later. A broadcast address retires nothing. The retire runs after the
+  send, so a failure there can never cost the signal itself.
+- **Retiring is host-local, and deliberately not `legion resolve`** (PR #920, #919).
+  This writes `watch_handled`, keyed `(signal_id, repo_name)` and not on the sync wire,
+  so it clears this host's inbox copy and nothing else. `resolve_post` writes
+  `resolved_at` on a synced `reflections` row and hides the thread from every node's
+  default `legion bullpen` -- a team-wide effect for a per-inbox intent, and an easy
+  mistake to make because the verb reads like an inbox operation. Retiring on REPLY
+  rather than on render is the other deliberate choice: `pending-replies` also backs
+  post-compact.sh through `lib/boot-sections.sh`, so marking at render would make a
+  compacted session silently lose obligations it had not answered yet -- compaction
+  being exactly when the agent has forgotten them. The `all`/`everyone` sentinel set is
+  now a single `BROADCAST_ADDRESSES` const read by both the predicate and the wake-
+  pattern builder, rather than a third inline copy.
+- **`pr-check-log` stops swallowing its own diagnosis** (PR #935, #895). The verb ended
+  `gh api ... 2>/dev/null || echo generic-error` -- a diagnostic that discarded its
+  diagnosis, so missing scope, expired log, wrong job id and the actual cause all
+  surfaced as `{"error":"gh api actions logs failed"}`, unrecoverable even by re-running
+  the verb by hand. The real failure, visible the moment stderr was kept: gh refuses to
+  emit logs containing terminal escape sequences -- which is to say cargo's colored
+  output -- without `--allow-escape-sequences`. It likely broke with the 2.91 -> 2.97
+  upgrade and reported nothing usable about it. Now gh's stderr is captured and
+  forwarded in the error JSON, the fetch lands in a temp file so the exit status tested
+  is gh's own rather than a downstream pipe's, `--allow-escape-sequences` is passed, and
+  ANSI codes are stripped on the way out so consumers get plain text. Note the direction
+  on that last one: the raw log carries cargo's color codes, and anything written against
+  the pre-upgrade output should expect them gone. Verified
+  against a real red run: the verb returned the 479-line Windows job log that diagnosed
+  the compile failure on PR #932, which is how the close gate above found its own CI
+  break -- stub-backed tests missing their `cfg(unix)` gate, failing COMPILATION of the
+  integration binary on windows-latest rather than failing a test.
+
+### Known gaps, named rather than implied
+
+- **The close gate covers one of the two gate forms #930 asked for.** Stated in full
+  under Breaking above, because it is an upgrade hazard rather than only a residue:
+  card-verified work closed with `legion issue close` instead of `legion done` is
+  refused for a verdict it has.
+- **#895 stays open, and this is narrower than it sounds.** Its requirement 4 says to
+  stop discarding stderr in the plugin FIRST, because nothing above the plugin can
+  classify what the plugin threw away. That precondition is what ships here. The
+  classification itself is not built: expired retention (410), missing Actions scope
+  (403), a run still in flight, and a non-GitHub work source still do not get named
+  errors. Requirements 1, 2, 3 and 5 -- `--json` carrying logs and `head_sha`, CANCELLED
+  rendering as distinct from FAILED, an audit row for `pr checks`, and the full-log
+  escape hatch -- are untouched.
+- **#913 stays open.** The commit that shipped `verify --issue` is subject-tagged
+  `fix(#913)`, but it closes #922, which was split out of it. The parent -- a declared
+  `worksource` that nothing ingests from, and sync staleness being invisible so an
+  unsynced board reads as an empty one -- is not addressed. Verify is now reachable for
+  issue-shaped work; automatic work-source ingestion is still manual-only and silent.
+- **Prediction witnessing rides an interim convention.** The verify agent scores
+  predictions attached to the work, but issue-scoped prediction queries land with #902;
+  until then both agents name the issue in the prediction text and search the emission
+  text for the ref. Same for id-carrying verdicts on issue-traced work: the criterion id
+  goes inside the evidence string rather than in a field, and the agent is instructed
+  not to claim plumbing that does not exist.
+- **Issue-keyed verify verdicts inherit #904.** Verify's skill string is invisible in
+  `quality-gate stats`, and the issue path takes the same shape rather than fixing it --
+  deliberately, so the two forms get corrected together there rather than separately.
+
 ## 0.28.1
 
 One fix. There was no sanctioned way to push a tag: `legion push` was branch-only, the
