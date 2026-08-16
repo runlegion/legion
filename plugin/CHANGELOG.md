@@ -1,5 +1,118 @@
 # Legion Changelog
 
+## 0.30.0
+
+Two features, one shape: each takes something that reached the agent through exactly one
+carrier and gives it a second, independent path -- without retiring the first. Mid-session
+bullpen posts and signals reached an interactive session ONLY through the MCP subprocess's
+`notifications/claude/channel` push -- a single point of failure that depends on a model
+inference roundtrip existing at all, so a sleeping or slow-to-poll session got nothing
+(#941, PR #942). And the spec layer -- the requirement a piece of work derives from, and
+the criteria its verdict is judged against -- reached the pipeline only through a kanban
+card, which no agent uses: legion and smugglr both ran live work this week at zero cards
+(#933, PR #945). Now delivery has a code-side hook lane running ALONGSIDE the MCP push,
+and issues trace to their requirement with no card involved. Minor release rather than a
+patch: pre-1.0 minor digit is the architectural-shift bump, and both are new surfaces
+rather than changes within existing ones -- a second delivery lane, and the spec layer
+detached from the card. No schema migration -- the hook lane reuses the existing
+`board_reads` cursor table and delivery telemetry is an append-only `delivery.jsonl` -- and
+no existing input is rejected: an issue with no `## Traces to` section creates and closes
+exactly as it did on 0.29.0. The one close that is newly gated is a 0.30.0 issue that
+traces to a requirement but restates no acceptance criteria of its own -- it now needs a
+clean verify verdict where the same body would have closed ungated a release ago -- but no
+such issue can exist before this release, so it is a within-cycle tightening rather than an
+upgrade hazard.
+
+### New
+
+- **`legion deliver drain` and a hook lane that surfaces posts without the MCP push**
+  (PR #942, #941). `plugin/hooks/delivery-drain.sh` runs `legion deliver drain --repo
+  <REPO>` on UserPromptSubmit, PostToolUse and Stop, and injects any undelivered bullpen
+  posts and signals as `additionalContext` -- the code-side counterpart to the MCP
+  notification lane's push, giving an interactive session the same no-inference-roundtrip
+  delivery the watch daemon already gives sleeping and spawned agents through
+  `find_pending_signals`. The two lanes keep INDEPENDENT cursors on `board_reads`: the hook
+  lane's row is keyed `<repo>::hook-drain` (`deliver::hook_reader_key`,
+  `db::HOOK_DRAIN_CURSOR_SUFFIX`), distinct from the plain-repo key the MCP notifier and
+  manual `legion bullpen` already use -- three cursor rows on one table, no new schema.
+  The independence is the point rather than an oversight: dual-lane parity needs each lane
+  to observe every eligible post on its own, not race the other for one shared cursor, and
+  both lanes apply the same `should_notify` filter so they cannot disagree about what
+  should reach the agent. The user-visible consequence, stated plainly because it is not
+  "nothing changes": a post can now surface through BOTH lanes in the same session, and
+  that duplication is deliberate and holds until the MCP channel is retired. Each delivery
+  writes a `DeliveryRecord` to `delivery.jsonl` -- `lane` tagged `"hook"` or
+  `"mcp_notification"`, sharing `reflection_id` as the join key -- and those rows ARE the
+  parity measurement surface; no separate command is introduced, and the MCP channel is
+  NOT removed in this release. Adding the hook-drain cursor row forced scoping
+  `archive_read_posts`'s `MIN(last_read_at)` aggregate to exclude `::hook-drain` rows,
+  because unscoped a fresh cold-start seed of `''` would drag the MIN down and halt
+  archival entirely, and any hook-drain row present would only ever make it more
+  conservative than pre-#941 behavior. `claim_board_posts_for_reader` wraps the cursor
+  read, batch fetch, advance and cold-start seed in one IMMEDIATE transaction, so two
+  concurrent same-repo sessions serialize at BEGIN and a post is claimed exactly once
+  rather than double-delivered. PostToolUse fires on every tool call, so a per-session
+  sentinel keyed by last-drain TIME debounces the shell-out (default 10s,
+  `LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS`), and the hook always exits 0 so a degraded
+  legion never blocks a turn.
+- **Issues trace to their requirement, so spec fidelity and verify survive the card**
+  (PR #945, #933). A `## Traces to` section on the issue body declares the requirement the
+  work derives from and, optionally, the criterion ids it services: `- FR-XXXX-NNN
+  [criteria: id, id] -- prose`, with the explicit `- None -- reason` spelling for work
+  that has no requirement above it. `card_parse` reads it through the existing `## `
+  section splitter and #907 trailing-punctuation normalization -- no second markdown
+  parser. Untraced is legal and the common case (defect work is anchored by its stated
+  premise, not a requirement); the refusals fire only when the section is present. `legion
+  issue create` refuses BEFORE the issue reaches the work source -- a requirement that does
+  not exist, one whose document status is `cancelled` (a cancelled requirement is not a
+  trace), a `[criteria: ...]` bracket citing an id the requirement does not contain, `None`
+  alongside an FR bullet, and `None` with no reason -- rather than leaving the break to be
+  discovered later at verify or pr-write time. `legion verify --issue` resolves criteria
+  from the traced requirement's own `verification.criteria` for the serviced ids -- judging
+  the requirement's wording, not the issue's restatement -- via
+  `decide_spec_multi`/`TracedRequirement`, which generalizes `decide_spec` to more than one
+  traced requirement and keys criteria by `(document_id, criterion_id)` so two requirements
+  sharing an id like `crit-1` do not collide. Verdicts take the id-carrying `SpecAcResult`
+  shape, pinning document id and revision, and the trace is re-resolved against live
+  document state on every run rather than trusted from create time; untraced issues keep
+  the pre-#933 free-text verdict path. `pr write-check` renders the traced requirement's
+  criteria beside the mapping and flags issue-declared acceptance criteria absent from the
+  requirement as re-authored -- drift made legible at mapping-writing time, checked against
+  the UNION of all traced requirements' criteria -- and one shared resolver,
+  `cli::verify::resolve_traced_requirements`, feeds both the pr-write gate and the verify
+  gate so they cannot read the same trace two different ways. `legion issue close`'s verify
+  gate now treats a requirement trace as "has criteria" even when the issue's own
+  acceptance section is empty, so a traced issue cannot close ungated -- #930's hole,
+  reopened through the door #933 opened, closed again. And `legion document view` reports
+  which of a requirement's criteria carry a clean verdict (`document_criteria_served`,
+  scanning clean `legion-verify:*` gate rows), making completion computable rather than
+  asserted; `valid_criterion_ids` is now shared (was card-only) for the create-time bracket
+  check. One correctness fix rode the same work: `document_revision` is now propagated with
+  `?` rather than consumed with `unwrap_or(1)`, which would have fabricated revision 1 on a
+  database error inside `decide_spec_multi`'s staleness check -- wrongly refusing fresh
+  verdicts or accepting stale ones.
+
+### Known gaps, named rather than implied
+
+- **The MCP channel stays, and that is the whole design for now.** Both lanes run and
+  record until parity can be read off the `delivery.jsonl` rows; only then is retiring the
+  MCP subprocess a decision anyone can make on data rather than assertion (PR #942, #941).
+  Until then a post may surface twice in one session, and neither lane can see the
+  harness-side tail -- a `DeliveryRecord` asserts the post's bytes left the last stage the
+  process controls, not that Claude Code rendered the frame or injected the
+  `additionalContext`. A parity reader should treat the two lanes as equal-confidence at
+  the process boundary and neither as proof the model saw the post.
+- **The card surface is not removed here.** #933 attaches the spec layer to issues so that
+  removing the card (its own issue, #931) does not take the spec layer's only wiring with
+  it; `kanban bind` and `kanban service-criteria` still exist, and this ships the
+  issue-shaped path that has to exist first.
+- **0.29.0's id-in-evidence interim is closed for traced work only.** That release noted
+  issue-traced verdicts stuffed the criterion id inside the evidence string rather than a
+  field; a trace now routes verify through the id-carrying `SpecAcResult` shape with
+  document id and revision pinned (PR #945, #933). Untraced `verify --issue` keeps the
+  free-text `AcResult` path, so the interim persists exactly where there is no requirement
+  to cite.
+
 ## 0.29.0
 
 Five changes, one shape: in each, a thing that happened and a thing that did not looked
