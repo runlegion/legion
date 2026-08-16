@@ -1235,6 +1235,81 @@ pub(crate) fn handle_verify(
     }
 }
 
+/// Resolve an issue's `## Traces to` requirement bullets against live
+/// document state (#933), one `TracedRequirement` per bullet. `- None`
+/// bullets and an absent section resolve to an empty vec -- untraced.
+/// Shared by `handle_verify_issue` and `cli::pr`'s traced-criteria
+/// rendering, so the pr-write gate and the verify gate cannot drift in how
+/// they read the same trace.
+///
+/// Fails closed on the conditions `cli::issue::validate_trace` enforces at
+/// create time, re-checked live rather than trusted (a body edit can bypass
+/// the create-time validator): a requirement that does not exist, one whose
+/// status is `cancelled`, one with no id-carrying `verification.criteria`,
+/// and a `[criteria: ...]` bracket citing an id the requirement no longer
+/// contains. An unevaluated check is not a passed check, so none of these
+/// degrade to rendering or verifying nothing.
+pub(crate) fn resolve_traced_requirements(
+    database: &db::Database,
+    trace: &[card_parse::TraceBullet],
+) -> error::Result<Vec<verify::TracedRequirement>> {
+    let mut requirements = Vec::new();
+    for bullet in trace {
+        let card_parse::TraceBullet::Requirement {
+            document_id,
+            criteria,
+            ..
+        } = bullet
+        else {
+            continue;
+        };
+        let doc = database.get_document(document_id)?.ok_or_else(|| {
+            error::LegionError::WorkSource(format!(
+                "issue traces to requirement '{document_id}', which does not exist"
+            ))
+        })?;
+        if doc.status == "cancelled" {
+            return Err(error::LegionError::WorkSource(format!(
+                "issue traces to requirement '{document_id}', which is cancelled -- a \
+                 cancelled requirement is not a trace"
+            )));
+        }
+        let spec_criteria = resolve_spec_criteria(&doc)?.ok_or_else(|| {
+            error::LegionError::WorkSource(format!(
+                "requirement '{document_id}' has no id-carrying verification.criteria to \
+                 verify against"
+            ))
+        })?;
+        let scoped: Vec<verify::SpecCriterion> = match criteria {
+            Some(ids) => {
+                let mut out = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let found = spec_criteria.iter().find(|c| &c.id == id).ok_or_else(|| {
+                        error::LegionError::WorkSource(format!(
+                            "issue cites criterion '{id}' for requirement '{document_id}', \
+                             which no longer contains it"
+                        ))
+                    })?;
+                    out.push(found.clone());
+                }
+                out
+            }
+            None => spec_criteria,
+        };
+        // Propagated, not defaulted: a fabricated fallback revision would
+        // corrupt the staleness check `decide_spec_multi` performs with
+        // this value -- wrongly refusing fresh verdicts or accepting stale
+        // ones whenever the read fails.
+        let revision = database.document_revision(&doc.id)?;
+        requirements.push(verify::TracedRequirement {
+            doc_id: doc.id.clone(),
+            revision,
+            criteria: scoped,
+        });
+    }
+    Ok(requirements)
+}
+
 /// Verify a work-source issue's acceptance criteria, with no card involved
 /// (#913).
 ///
@@ -1299,25 +1374,15 @@ fn handle_verify_issue(
         label: format!("issue {source_repo}#{issue}"),
     };
 
-    // #933: bullets that name a requirement, ignoring the explicit `- None`
-    // no-requirement spelling -- an issue with only `None` bullets is
-    // untraced, same as an issue with no `## Traces to` section at all.
-    let requirement_bullets: Vec<(String, Option<Vec<String>>)> = parsed
-        .trace
-        .iter()
-        .filter_map(|t| match t {
-            card_parse::TraceBullet::Requirement {
-                document_id,
-                criteria,
-                ..
-            } => Some((document_id.clone(), criteria.clone())),
-            card_parse::TraceBullet::NoRequirement { .. } => None,
-        })
-        .collect();
+    // #933: one resolution, two gates -- the same shared resolver
+    // `cli::pr`'s traced-criteria rendering uses, so pr-write and verify
+    // cannot drift in how they read a trace. Empty means untraced: no
+    // `## Traces to` section, or only the explicit `- None` spelling.
+    let requirements = resolve_traced_requirements(&database, &parsed.trace)?;
 
     let raw = read_file_or_stdin(verdicts_file.as_deref(), "--verdicts-file")?;
 
-    if requirement_bullets.is_empty() {
+    if requirements.is_empty() {
         let acceptance = parsed.acceptance;
         let ac_source = format!("issue:{source_repo}#{issue}");
         let results: Vec<verify::AcResult> = serde_json::from_str(&raw).map_err(|e| {
@@ -1339,61 +1404,8 @@ fn handle_verify_issue(
         );
     }
 
-    // Traced: resolve each requirement bullet's criteria off its current
-    // document state. Refuses on the same conditions
-    // `cli::issue::validate_trace` enforces at create time -- re-checked
-    // live rather than trusted, since the trace can drift after creation
-    // (`legion issue edit`) without going through that validator again.
-    let mut requirements: Vec<verify::TracedRequirement> =
-        Vec::with_capacity(requirement_bullets.len());
-    let mut doc_ids: Vec<String> = Vec::with_capacity(requirement_bullets.len());
-    for (document_id, criteria) in &requirement_bullets {
-        let doc = database.get_document(document_id)?.ok_or_else(|| {
-            error::LegionError::WorkSource(format!(
-                "issue traces to requirement '{document_id}', which does not exist"
-            ))
-        })?;
-        if doc.status == "cancelled" {
-            return Err(error::LegionError::WorkSource(format!(
-                "issue traces to requirement '{document_id}', which is cancelled -- a \
-                 cancelled requirement is not a trace"
-            )));
-        }
-        // A requirement that cannot be read (malformed spec entries, or no
-        // id-carrying criteria at all) is refused, not silently skipped: an
-        // unevaluated check is not a passed check.
-        let spec_criteria = resolve_spec_criteria(&doc)?.ok_or_else(|| {
-            error::LegionError::WorkSource(format!(
-                "requirement '{document_id}' has no id-carrying verification.criteria to \
-                 verify against"
-            ))
-        })?;
-        let scoped: Vec<verify::SpecCriterion> = match criteria {
-            Some(ids) => {
-                let mut out = Vec::with_capacity(ids.len());
-                for id in ids {
-                    let found = spec_criteria.iter().find(|c| &c.id == id).ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "issue cites criterion '{id}' for requirement '{document_id}', \
-                             which no longer contains it"
-                        ))
-                    })?;
-                    out.push(found.clone());
-                }
-                out
-            }
-            None => spec_criteria,
-        };
-        let revision = database.document_revision(&doc.id).unwrap_or(1);
-        doc_ids.push(document_id.clone());
-        requirements.push(verify::TracedRequirement {
-            doc_id: doc.id.clone(),
-            revision,
-            criteria: scoped,
-        });
-    }
-
     let criteria_count: usize = requirements.iter().map(|r| r.criteria.len()).sum();
+    let doc_ids: Vec<&str> = requirements.iter().map(|r| r.doc_id.as_str()).collect();
     let ac_source = format!("trace:{}", doc_ids.join(","));
 
     let results: Vec<verify::SpecAcResult> = serde_json::from_str(&raw).map_err(|e| {

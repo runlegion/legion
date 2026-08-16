@@ -4,7 +4,6 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{audit, git_head_commit_and_branch, open_db, read_file_or_stdin};
-use crate::cli::verify::resolve_spec_criteria;
 use crate::db::quality_gates::QualityGateInput;
 use crate::verify::{GateProvenance, GateResult};
 use crate::{board, card_parse, db, error, kanban, pr_view, pr_write, search, worksource};
@@ -322,75 +321,45 @@ fn failing_checks_error(failed: &[&str], number: u64) -> error::LegionError {
 /// Untraced issues (no `## Traces to` section, or only `- None`) print
 /// nothing; there is no requirement to render against.
 ///
-/// Fails closed like `cli::verify`'s trace resolution: a requirement that no
-/// longer exists, has gone `cancelled`, or no longer contains a cited
-/// criterion id refuses the pr-write gate rather than silently rendering
-/// nothing -- an unresolvable trace is exactly the kind of drift this
-/// rendering exists to make visible, so it must not be the one failure mode
-/// that stays silent.
+/// Fails closed like `cli::verify`'s trace resolution -- it IS that
+/// resolution: `cli::verify::resolve_traced_requirements` is the single
+/// shared reader for both gates, so pr-write and verify cannot drift in
+/// how they resolve the same trace. An unresolvable trace refuses the
+/// pr-write gate rather than silently rendering nothing -- drift made
+/// invisible is exactly what this rendering exists to prevent.
 fn render_traced_requirement_criteria(
     database: &db::Database,
     trace: &[card_parse::TraceBullet],
     acceptance: &[String],
 ) -> error::Result<()> {
-    for bullet in trace {
-        let card_parse::TraceBullet::Requirement {
-            document_id,
-            criteria,
-            ..
-        } = bullet
-        else {
-            continue;
-        };
+    let requirements = crate::cli::verify::resolve_traced_requirements(database, trace)?;
+    if requirements.is_empty() {
+        return Ok(());
+    }
 
-        let doc = database.get_document(document_id)?.ok_or_else(|| {
-            error::LegionError::WorkSource(format!(
-                "issue traces to requirement '{document_id}', which does not exist"
-            ))
-        })?;
-        if doc.status == "cancelled" {
-            return Err(error::LegionError::WorkSource(format!(
-                "issue traces to requirement '{document_id}', which is cancelled -- a \
-                 cancelled requirement is not a trace"
-            )));
-        }
-        let spec_criteria = resolve_spec_criteria(&doc)?.ok_or_else(|| {
-            error::LegionError::WorkSource(format!(
-                "requirement '{document_id}' has no id-carrying verification.criteria to \
-                 render"
-            ))
-        })?;
-        let scoped: Vec<&crate::verify::SpecCriterion> = match criteria {
-            Some(ids) => {
-                let mut out = Vec::with_capacity(ids.len());
-                for id in ids {
-                    let found = spec_criteria.iter().find(|c| &c.id == id).ok_or_else(|| {
-                        error::LegionError::WorkSource(format!(
-                            "issue cites criterion '{id}' for requirement '{document_id}', \
-                             which no longer contains it"
-                        ))
-                    })?;
-                    out.push(found);
-                }
-                out
-            }
-            None => spec_criteria.iter().collect(),
-        };
-
-        eprintln!("[legion] requirement '{document_id}' criteria serviced by this issue:");
-        for c in &scoped {
+    for req in &requirements {
+        eprintln!(
+            "[legion] requirement '{}' criteria serviced by this issue:",
+            req.doc_id
+        );
+        for c in &req.criteria {
             eprintln!("  - [{}] {}", c.id, c.text);
         }
-        for a in acceptance {
-            let derived = scoped
-                .iter()
-                .any(|c| c.text.trim().eq_ignore_ascii_case(a.trim()));
-            if !derived {
-                eprintln!(
-                    "[legion] warning: issue acceptance criterion not found in the traced \
-                     requirement -- re-authored, not derived: {a}"
-                );
-            }
+    }
+    // Re-authoring check against the UNION of all traced requirements'
+    // criteria: with two requirements, an acceptance bullet derived from
+    // either is derived -- warning per-requirement would flag every bullet
+    // once for each requirement it does not belong to.
+    for a in acceptance {
+        let derived = requirements
+            .iter()
+            .flat_map(|r| r.criteria.iter())
+            .any(|c| c.text.trim().eq_ignore_ascii_case(a.trim()));
+        if !derived {
+            eprintln!(
+                "[legion] warning: issue acceptance criterion not found in the traced \
+                 requirement -- re-authored, not derived: {a}"
+            );
         }
     }
     Ok(())
