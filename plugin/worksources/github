@@ -808,8 +808,30 @@ case "${1:-}" in
     OWNER="${REPO%%/*}"
     REPO_NAME="${REPO##*/}"
     # Raw log text, not JSON. gh api follows the 302 to the signed blob URL.
-    gh api "repos/${OWNER}/${REPO_NAME}/actions/jobs/${JOB_ID}/logs" 2>/dev/null \
-      || { echo '{"error":"gh api actions logs failed"}' >&2; exit 1; }
+    #
+    # gh's stderr is CAPTURED and forwarded on failure, not discarded. The
+    # previous spelling was `2>/dev/null || echo generic-error`: a diagnostic
+    # verb that swallowed its own diagnosis, so every distinct failure --
+    # missing scope, expired log, wrong job id, rate limit -- surfaced as one
+    # unactionable string and the real cause was unrecoverable even by
+    # re-running the verb by hand.
+    # --allow-escape-sequences: cargo/CI logs carry ANSI color codes and gh
+    # refuses to print them without it -- that refusal was the entire cause
+    # of the long-standing generic failure. Fetch lands in a temp file (not a
+    # pipe, so the exit status tested is gh's own) and the codes are stripped
+    # on the way out so consumers get plain text.
+    GH_ERR_FILE=$(mktemp)
+    GH_LOG_FILE=$(mktemp)
+    if ! gh api --allow-escape-sequences \
+        "repos/${OWNER}/${REPO_NAME}/actions/jobs/${JOB_ID}/logs" \
+        >"$GH_LOG_FILE" 2>"$GH_ERR_FILE"; then
+      GH_ERR=$(tr -d '\000' < "$GH_ERR_FILE" | tail -c 500)
+      rm -f "$GH_ERR_FILE" "$GH_LOG_FILE"
+      jq -n --arg e "gh api actions logs failed: ${GH_ERR:-no stderr}" '{"error":$e}' >&2
+      exit 1
+    fi
+    sed $'s/\033\\[[0-9;]*[A-Za-z]//g' "$GH_LOG_FILE"
+    rm -f "$GH_ERR_FILE" "$GH_LOG_FILE"
     ;;
 
   *)
