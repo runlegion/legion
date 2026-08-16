@@ -70,6 +70,54 @@ pub fn append_bypass(record: &BypassRecord) -> Result<()> {
     append_jsonl(&bypass_log_path(), record)
 }
 
+/// One row per emitted reflection (#941), written by both the hook-drain
+/// lane and the MCP notification lane during the dual-lane parity period.
+/// `reflection_id` is the join key: a reader diffs `lane =
+/// "mcp_notification"` rows against `lane = "hook"` rows for the same
+/// `reflection_id` to find posts one lane delivered that the other missed.
+/// No separate `delivery-parity` command is introduced here -- the JSONL
+/// rows themselves are the measurement surface.
+///
+/// What a row asserts, precisely: "the post's bytes left the last stage
+/// this process controls." For the MCP lane that is the notifier's
+/// `write_ok` branch (notification frame written and flushed to stdout);
+/// for the hook lane it is the CLI's post-print flush in `cli::deliver`.
+/// Neither lane can see the harness-side tail -- whether Claude Code
+/// actually rendered the frame or injected the additionalContext (the
+/// hook script's `emit_context` step). A parity reader should treat the
+/// two lanes as equal-confidence at the process boundary, and neither as
+/// proof the model saw the post.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeliveryRecord {
+    pub ts: String,
+    pub lane: DeliveryLane,
+    pub repo: String,
+    pub reflection_id: String,
+}
+
+/// Which lane delivered the reflection. An enum rather than a string so
+/// the discriminant is compile-checked at both call sites (the hook drain
+/// in `deliver.rs`, the MCP notifier in `mcp/notifier.rs`) -- a typo in
+/// either literal would silently split the parity data this record exists
+/// to measure. Serializes as `"hook"` / `"mcp_notification"`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryLane {
+    Hook,
+    McpNotification,
+}
+
+/// Resolve the canonical delivery log path (sibling of `bypass.jsonl`).
+pub fn delivery_log_path() -> PathBuf {
+    bypass_log_dir().join("delivery.jsonl")
+}
+
+/// Append one delivery record. Best-effort at the call site: a telemetry
+/// write failure must never fail the delivery that produced it.
+pub fn append_delivery(record: &DeliveryRecord) -> Result<()> {
+    append_jsonl(&delivery_log_path(), record)
+}
+
 /// One row in `etc-usage.jsonl` (#707): a sanctioned `sym etc` / `sym tree`
 /// query. The counterpart of `BypassRecord` -- bypass volume says where the
 /// index fails agents; usage rows and their zero-result rate say whether the
@@ -814,6 +862,26 @@ mod tests {
         assert!(parse_duration("24").is_err());
         assert!(parse_duration("abc").is_err());
         assert!(parse_duration("24x").is_err());
+    }
+
+    #[test]
+    fn append_delivery_writes_jsonl_row_with_lane_and_reflection_id() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("delivery.jsonl");
+        let rec = DeliveryRecord {
+            ts: Utc::now().to_rfc3339(),
+            lane: DeliveryLane::Hook,
+            repo: "legion".to_string(),
+            reflection_id: "01a00bdc-4e72-74b3-8c70-9dc417af5818".to_string(),
+        };
+        append_jsonl(&path, &rec).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("\"lane\":\"hook\""),
+            "enum must serialize to the bare lane string; got: {raw}"
+        );
+        let parsed: DeliveryRecord = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(parsed, rec);
     }
 
     #[test]

@@ -194,6 +194,7 @@ finish_tests() {
 #                            `daemon-restart` appends "daemon-restart at <epoch>"
 #   LEGION_TEST_MARKER=<file> `telemetry ...` appends its argv (sans
 #                            leading "telemetry") here
+#   FAKE_DELIVER_DRAIN      `deliver drain` body (default empty, #941)
 make_stub_legion() {
   local path="$1"
   cat > "$path" <<'EOF'
@@ -373,6 +374,11 @@ case "${1:-}" in
   telemetry)
     shift
     echo "$@" >> "${LEGION_TEST_MARKER:-/dev/null}"
+    ;;
+  deliver)
+    if [ "${2:-}" = "drain" ]; then
+      [ -n "${FAKE_DELIVER_DRAIN:-}" ] && printf '%s\n' "$FAKE_DELIVER_DRAIN"
+    fi
     ;;
 esac
 exit 0

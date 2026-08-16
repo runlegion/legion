@@ -18,6 +18,13 @@ use crate::error::{LegionError, Result};
 const ACTIVE_TEAM_POST_WHERE: &str =
     "audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL";
 
+/// Suffix that marks a `board_reads` cursor row as belonging to the
+/// hook-side delivery lane (#941). `deliver::hook_reader_key` builds keys
+/// with it, and `archive_read_posts` excludes rows carrying it from the
+/// "all known readers have read" aggregate -- one constant so the two
+/// sites cannot drift apart.
+pub const HOOK_DRAIN_CURSOR_SUFFIX: &str = "::hook-drain";
+
 /// TTL hours for design or architecture posts.
 const TTL_DESIGN_HOURS: i64 = 14 * 24;
 /// TTL hours for signal-shaped posts (text starts with `@`).
@@ -447,6 +454,19 @@ impl Database {
     /// A post is archivable when every repo in board_reads has last_read_at
     /// after the post's created_at. Uses a single UPDATE with subquery to
     /// avoid race conditions between SELECT and UPDATE.
+    ///
+    /// The `MIN(last_read_at)` subquery excludes `hook-drain` cursor rows
+    /// (#941, `deliver::hook_reader_key`, keyed by
+    /// [`HOOK_DRAIN_CURSOR_SUFFIX`]).
+    /// Those rows are not a "known reader" for this gate's purpose -- they
+    /// exist purely so the hook-side delivery lane can track what it has
+    /// already surfaced, independent of the MCP notifier's and manual
+    /// `legion bullpen`'s cursors on the same table. Letting a hook-drain
+    /// row into this aggregate would change archival's existing semantics
+    /// as an unintended side effect of adding the row: an unset/empty
+    /// cursor (fresh cold start) would drag the MIN down to `''` and halt
+    /// archival entirely, and any hook-drain row present only ever makes
+    /// the MIN more conservative than the pre-#941 behavior.
     /// Returns the number of posts archived.
     pub fn archive_read_posts(&self) -> Result<u64> {
         let now = Utc::now().to_rfc3339();
@@ -454,8 +474,11 @@ impl Database {
         let count = self.conn.execute(
             "UPDATE reflections SET archived_at = ?1, updated_at = ?1 \
              WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL \
-             AND created_at < (SELECT MIN(last_read_at) FROM board_reads)",
-            rusqlite::params![now],
+             AND created_at < ( \
+                 SELECT MIN(last_read_at) FROM board_reads \
+                 WHERE reader_repo NOT LIKE '%' || ?2 \
+             )",
+            rusqlite::params![now, HOOK_DRAIN_CURSOR_SUFFIX],
         )?;
 
         Ok(count as u64)
@@ -552,6 +575,52 @@ impl Database {
             (reader_repo, last_read_at, last_read_id),
         )?;
         Ok(())
+    }
+
+    /// Atomically claim the next batch of active team posts for a
+    /// cursor-keyed reader: read the cursor (seeding it from the board
+    /// watermark on the first-ever call), fetch up to `limit` posts past
+    /// it, and advance the cursor past the fetched batch -- all in one
+    /// IMMEDIATE transaction. Two concurrent claimants on the same key
+    /// serialize at BEGIN: the loser either waits and then reads the
+    /// already-advanced cursor (claiming nothing) or errors with
+    /// SQLITE_BUSY and retries on its next call; either way a post is
+    /// claimed exactly once. Without the transaction the
+    /// read-fetch-advance sequence double-delivers under concurrency
+    /// (#941 review finding, reproduced with a two-thread barrier test).
+    ///
+    /// The cursor advances past the WHOLE fetched batch regardless of
+    /// what the caller later keeps -- suppressed rows must not be
+    /// re-scanned, and the claim is the delivery decision of record.
+    /// Cold start seeds from `get_board_cursor_watermark` (the current
+    /// board tail), persisted immediately, so history is never replayed.
+    pub fn claim_board_posts_for_reader(
+        &self,
+        reader_key: &str,
+        limit: usize,
+    ) -> Result<Vec<Reflection>> {
+        let txn = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+
+        let (since_at, since_id) = match self.get_board_read_cursor(reader_key)? {
+            Some(cursor) => cursor,
+            None => {
+                let seed = self.get_board_cursor_watermark()?.unwrap_or_default();
+                self.advance_board_read_cursor(reader_key, &seed.0, &seed.1)?;
+                seed
+            }
+        };
+
+        let batch = self.get_board_posts_since(&since_at, &since_id, limit)?;
+
+        if let Some(last) = batch.last() {
+            self.advance_board_read_cursor(reader_key, &last.created_at, &last.id)?;
+        }
+
+        txn.commit()?;
+        Ok(batch)
     }
 
     /// Find unhandled signals directed at a specific repo.

@@ -33,6 +33,7 @@ mod uncertainty;
 mod wake;
 
 pub use audit::AuditInput;
+pub use board::HOOK_DRAIN_CURSOR_SUFFIX;
 pub use kanban::CardTimestamp;
 pub use reflections::{Reflection, ReflectionMeta};
 pub use schedules::{Schedule, validate_hhmm};

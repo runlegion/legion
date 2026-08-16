@@ -4,6 +4,7 @@
 pub(crate) mod autonomy;
 pub(crate) mod commit;
 pub(crate) mod datadir;
+pub(crate) mod deliver;
 pub(crate) mod document;
 pub(crate) mod index_cmd;
 pub(crate) mod issue;
@@ -25,6 +26,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use self::autonomy::AutonomyAction;
+use self::deliver::DeliverAction;
 use self::document::DocumentAction;
 use self::index_cmd::SymAction;
 use self::issue::{IssueAction, SubIssueAction};
@@ -809,6 +811,13 @@ pub(crate) enum Commands {
     Task {
         #[command(subcommand)]
         action: TaskAction,
+    },
+
+    /// Hook-side delivery drain (#941): the code-side counterpart to the
+    /// MCP notification lane's push
+    Deliver {
+        #[command(subcommand)]
+        action: DeliverAction,
     },
 
     /// Manage scheduled bullpen posts

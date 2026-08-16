@@ -121,8 +121,17 @@ fn mcp_push_bridge_delivers_cross_process_post() {
     // column name" errors. A single synchronous CLI command drives the
     // full migration path to completion, so subsequent openers see a
     // ready schema.
+    // Isolate telemetry state (#941): the notifier now writes DeliveryRecord
+    // rows through XDG_STATE_HOME, and without an override this test would
+    // append lane="mcp_notification" rows to the developer's real
+    // delivery.jsonl on every run -- polluting the exact parity dataset the
+    // telemetry exists to produce. The same override also lets this test
+    // assert on the rows (see the end of the test).
+    let state_home = dir.path().join("state");
+
     let warmup = Command::new(env!("CARGO_BIN_EXE_legion"))
         .env("LEGION_DATA_DIR", dir.path())
+        .env("XDG_STATE_HOME", &state_home)
         .args(["post", "--repo", "warmup-repo", "--text", "schema warmup"])
         .output()
         .expect("spawn legion post (warmup)");
@@ -136,6 +145,7 @@ fn mcp_push_bridge_delivers_cross_process_post() {
     // finishes quickly instead of waiting on the 500ms default.
     let mut child = Command::new(env!("CARGO_BIN_EXE_legion"))
         .env("LEGION_DATA_DIR", dir.path())
+        .env("XDG_STATE_HOME", &state_home)
         .env("LEGION_MCP_POLL_MS", "50")
         .args(["mcp"])
         .stdin(Stdio::piped())
@@ -231,6 +241,7 @@ fn mcp_push_bridge_delivers_cross_process_post() {
     for (repo, text) in &posts {
         let post_out = Command::new(env!("CARGO_BIN_EXE_legion"))
             .env("LEGION_DATA_DIR", dir.path())
+            .env("XDG_STATE_HOME", &state_home)
             .args(["post", "--repo", repo, "--text", text])
             .output()
             .expect("spawn legion post");
@@ -378,6 +389,37 @@ fn mcp_push_bridge_delivers_cross_process_post() {
         assert!(
             !content.contains(wrong_signal_marker),
             "wrong-recipient signal suppression regression: frame carrying {wrong_signal_marker} was delivered; {content}"
+        );
+    }
+
+    // Telemetry assertion (#941): the notifier's write_ok branch must have
+    // appended one lane="mcp_notification" DeliveryRecord per delivered
+    // frame. Deleting the record_mcp_delivery_telemetry call site was
+    // previously invisible to every test -- this closes that gap. Exactly
+    // the two delivered posts (musing + named signal) may record; the two
+    // suppressed posts must not.
+    let delivery_log = state_home.join("legion").join("delivery.jsonl");
+    let raw = std::fs::read_to_string(&delivery_log).unwrap_or_else(|e| {
+        panic!(
+            "delivery.jsonl missing after confirmed deliveries ({e}); {}",
+            failure_context()
+        )
+    });
+    let mcp_rows: Vec<serde_json::Value> = raw
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .filter(|v: &serde_json::Value| v["lane"] == "mcp_notification")
+        .collect();
+    assert_eq!(
+        mcp_rows.len(),
+        2,
+        "expected exactly 2 mcp_notification delivery rows (musing + named signal); got {}:\n{raw}",
+        mcp_rows.len()
+    );
+    for row in &mcp_rows {
+        assert_eq!(
+            row["repo"], "recv-repo",
+            "delivery row attributed to wrong recipient: {row}"
         );
     }
 }

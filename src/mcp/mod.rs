@@ -9,7 +9,11 @@
 //! No Content-Length headers. Each message is a single JSON line.
 
 mod log;
-mod notifier;
+// pub(crate): src/deliver.rs (#941) reuses `notifier::should_notify` so the
+// hook-drain lane and the MCP notification lane are judged against the
+// identical delivery filter, rather than duplicating the recipient/self-post
+// logic.
+pub(crate) mod notifier;
 mod tools;
 
 pub use self::log::{mcp_log_dir, mcp_log_path, mcp_trace, most_recent_mcp_log};
