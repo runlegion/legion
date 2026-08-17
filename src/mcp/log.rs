@@ -1,6 +1,6 @@
 //! MCP process logging and trace infrastructure (#395): per-PID log
-//! files, stderr redirection, the `mcp_trace` event format, and the
-//! verbose-trace gate. Carved from mcp.rs (#612).
+//! files, stderr redirection, and the `mcp_trace` event format. Carved
+//! from mcp.rs (#612).
 
 use std::path::PathBuf;
 
@@ -76,9 +76,12 @@ pub(super) fn redirect_stderr_to_log() {
 pub(super) fn redirect_stderr_to_log() {}
 
 /// Emit a trace event to stderr (which #395 redirects to the per-PID log
-/// file). Lifecycle and error events use this unconditionally; verbose
-/// events (per-poll, per-post-decision) gate on `LEGION_MCP_TRACE=1` so
-/// production sessions do not pay the log-volume cost. Format is
+/// file). Every call writes a line: there is no verbosity gate, and
+/// `LEGION_MCP_TRACE` is read nowhere in the codebase. The high-volume
+/// tier it used to gate was per-poll and per-post-decision tracing inside
+/// the notification lane's poll loop, which was retired with that lane in
+/// #947; what survives is lifecycle and error events, cheap enough that
+/// a session should always pay for them. Format is
 /// `<rfc3339> [legion mcp pid=<pid>] <event> <key>=<value> ...`.
 pub fn mcp_trace(event: &str, kvs: &[(&str, &str)]) {
     let now = chrono::Utc::now().to_rfc3339();
