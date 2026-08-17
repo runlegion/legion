@@ -1358,6 +1358,23 @@ mod tests {
     /// The live-session guard needs no new code -- the `session_locks` gate
     /// runs above the wake check -- but an answer-wake must inherit it, so
     /// pin it rather than trust the ordering to survive a refactor.
+    ///
+    /// Unix-only, and for the same reason the session-lock tests in
+    /// `locks.rs` are (see the note above
+    /// `session_lock_record_spawn_overwrites_abandoned_lock`): the setup
+    /// records a lock holding OUR OWN pid and needs it to read back as
+    /// alive. `process_alive` shells out to `kill -0` on unix and returns a
+    /// flat `false` on every other platform, so on Windows `active_pid`
+    /// reports no holder, `poll_cycle` sails past the session-lock gate into
+    /// the wake check, and the authentic answer enqueues the very
+    /// wake_attempt row this test asserts is absent.
+    ///
+    /// The sibling `poll_cycle_skips_when_session_lock_is_active` sets up
+    /// the identical scenario ungated, but asserts only `spawned == 0` --
+    /// true on Windows whether or not the lock gate held, because the spawn
+    /// fails there anyway. It passes vacuously, which is why `gates.rs`
+    /// carried no cfg gate before this test asserted on the attempts table.
+    #[cfg(unix)]
     #[test]
     fn poll_cycle_authentic_answer_does_not_wake_live_session() {
         let (db, _index, data_dir) = test_storage();
