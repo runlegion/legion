@@ -183,29 +183,17 @@ impl Database {
             [to, from],
         )? as u64;
 
-        // Delete target rows first to avoid PRIMARY KEY collision,
-        // then rename. The old read-state for `to` is stale anyway.
-        tx.execute("DELETE FROM board_reads WHERE reader_repo = ?1", [to])?;
-        let board_reads = tx.execute(
-            "UPDATE board_reads SET reader_repo = ?1 WHERE reader_repo = ?2",
-            [to, from],
-        )? as u64;
-
-        // Same for watch_handled: delete target's rows first to
-        // avoid composite PK collision on (signal_id, repo_name).
-        tx.execute("DELETE FROM watch_handled WHERE repo_name = ?1", [to])?;
-        let watch_handled = tx.execute(
-            "UPDATE watch_handled SET repo_name = ?1 WHERE repo_name = ?2",
-            [to, from],
-        )? as u64;
-
-        // Same for watch_redelivery (#948): identical composite PK shape,
-        // identical collision-avoidance need.
-        tx.execute("DELETE FROM watch_redelivery WHERE repo_name = ?1", [to])?;
-        let watch_redelivery = tx.execute(
-            "UPDATE watch_redelivery SET repo_name = ?1 WHERE repo_name = ?2",
-            [to, from],
-        )? as u64;
+        // board_reads, watch_handled, and watch_redelivery (#948) all key on
+        // a repo-name column with no room for two rows under the same repo,
+        // so each needs the target's existing rows deleted first to avoid a
+        // PK collision before the source's rows are renamed in. Every other
+        // table above is a bare UPDATE with no such collision risk.
+        let board_reads =
+            Self::carry_repo_keyed_table(&tx, "board_reads", "reader_repo", to, from)?;
+        let watch_handled =
+            Self::carry_repo_keyed_table(&tx, "watch_handled", "repo_name", to, from)?;
+        let watch_redelivery =
+            Self::carry_repo_keyed_table(&tx, "watch_redelivery", "repo_name", to, from)?;
 
         let schedules = tx.execute(
             "UPDATE schedules SET repo = ?1, updated_at = ?3 WHERE repo = ?2",
@@ -223,6 +211,31 @@ impl Database {
             watch_redelivery,
             schedules,
         })
+    }
+
+    /// Delete-then-rename for a `rename_repo` target whose key includes a
+    /// repo-name column: deletes the destination repo's existing rows (a PK
+    /// collision would otherwise abort the rename), then renames the source
+    /// repo's rows in. `table` and `repo_column` are call-site literals
+    /// (`board_reads`/`reader_repo`, `watch_handled`/`repo_name`,
+    /// `watch_redelivery`/`repo_name`), never caller-supplied input, so the
+    /// `format!`-built SQL carries no injection risk.
+    fn carry_repo_keyed_table(
+        tx: &rusqlite::Transaction,
+        table: &str,
+        repo_column: &str,
+        to: &str,
+        from: &str,
+    ) -> Result<u64> {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE {repo_column} = ?1"),
+            [to],
+        )?;
+        let count = tx.execute(
+            &format!("UPDATE {table} SET {repo_column} = ?1 WHERE {repo_column} = ?2"),
+            [to, from],
+        )?;
+        Ok(count as u64)
     }
 }
 
