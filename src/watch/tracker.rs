@@ -165,11 +165,20 @@ impl AgentTracker {
     /// with a `session_budget_exceeded` outcome -- so a turn that blocks
     /// indefinitely cannot leak the process or hold its persona lease forever.
     /// A zero budget disables the backstop.
+    ///
+    /// `max_redelivery_attempts` bounds the #948 redelivery hook: whenever a
+    /// terminal failure lands (submit-not-confirmed, budget-exceeded, or a
+    /// normal reap with `success == false`) AND `record_wake_attempt_outcome`
+    /// itself returns `Ok(())`, the tracked child's signals are re-armed or
+    /// abandoned via `super::rearm_or_abandon`. A success (`exit_status ==
+    /// "ok"`) never reaches the hook -- that path is unchanged from before
+    /// #948.
     pub fn reap_finished(
         &mut self,
         db: Option<&Database>,
         session_locks: Option<&SessionLockTracker>,
         session_budget: Duration,
+        max_redelivery_attempts: u32,
     ) {
         self.children.retain_mut(|tracked| {
             // Determine whether this child should be reaped.
@@ -339,18 +348,31 @@ impl AgentTracker {
                     .as_ref()
                     .or(tracked.budget_exceeded_reason.as_ref())
                 {
-                    if let Some(ref attempt_id) = tracked.attempt_id
-                        && let Err(e) = db.record_wake_attempt_outcome(attempt_id, "error", reason)
-                    {
-                        // Name the reason here: on a write failure the row stays
-                        // in-flight, so the same-tick dead-pid reaper settles it
-                        // with a generic "dead-pid" reason instead. Logging the
-                        // specific reason keeps the wedge/submit cause recoverable
-                        // from stderr even when it never reaches the row.
-                        eprintln!(
-                            "[legion watch] failed to record terminal outcome {} ({}): {}",
-                            attempt_id, reason, e
-                        );
+                    if let Some(ref attempt_id) = tracked.attempt_id {
+                        match db.record_wake_attempt_outcome(attempt_id, "error", reason) {
+                            Ok(()) => {
+                                super::rearm_or_abandon(
+                                    db,
+                                    attempt_id,
+                                    &tracked.repo,
+                                    &tracked.signal_ids,
+                                    max_redelivery_attempts,
+                                    "[legion watch]",
+                                );
+                            }
+                            Err(e) => {
+                                // Name the reason here: on a write failure the row
+                                // stays in-flight, so the same-tick dead-pid reaper
+                                // settles it with a generic "dead-pid" reason
+                                // instead. Logging the specific reason keeps the
+                                // wedge/submit cause recoverable from stderr even
+                                // when it never reaches the row.
+                                eprintln!(
+                                    "[legion watch] failed to record terminal outcome {} ({}): {}",
+                                    attempt_id, reason, e
+                                );
+                            }
+                        }
                     }
                     return false; // remove from tracking list
                 }
@@ -402,14 +424,29 @@ impl AgentTracker {
                 // Idempotent at the DB layer; errors logged but
                 // not propagated (the lease release + outcome
                 // record above are the load-bearing writes).
-                if let Some(ref attempt_id) = tracked.attempt_id
-                    && let Err(e) =
-                        db.record_wake_attempt_outcome(attempt_id, exit_status, outcome)
-                {
-                    eprintln!(
-                        "[legion watch] failed to record wake attempt outcome {}: {}",
-                        attempt_id, e
-                    );
+                if let Some(ref attempt_id) = tracked.attempt_id {
+                    match db.record_wake_attempt_outcome(attempt_id, exit_status, outcome) {
+                        Ok(()) => {
+                            // #948: exit_status == "ok" is the pre-existing
+                            // done-path -- it must never reach the rearm hook.
+                            if exit_status != "ok" {
+                                super::rearm_or_abandon(
+                                    db,
+                                    attempt_id,
+                                    &tracked.repo,
+                                    &tracked.signal_ids,
+                                    max_redelivery_attempts,
+                                    "[legion watch]",
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[legion watch] failed to record wake attempt outcome {}: {}",
+                                attempt_id, e
+                            );
+                        }
+                    }
                 }
             }
             false // remove from tracking list
@@ -598,7 +635,7 @@ mod tests {
         assert_eq!(tracker.active_count(), 1, "precondition: child is tracked");
 
         // Run the reaper with session_locks provided.
-        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600));
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600), 3);
 
         // The child must have been reaped (removed from tracking).
         assert_eq!(
@@ -662,7 +699,7 @@ mod tests {
         assert_eq!(tracker.active_count(), 1, "precondition: child tracked");
 
         // Reaper: child is live and exit_observed_at is NOT set.
-        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600));
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600), 3);
 
         // Child must still be tracked -- the turn is genuinely in progress.
         assert_eq!(
@@ -761,7 +798,7 @@ mod tests {
         // against a 60s budget -- no sleep needed to cross the threshold.
         tracker.children[0].spawn_instant = Instant::now() - Duration::from_secs(120);
 
-        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(60));
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(60), 3);
 
         assert_eq!(
             tracker.active_count(),
@@ -828,7 +865,7 @@ mod tests {
         // Very old child, but budget disabled.
         tracker.children[0].spawn_instant = Instant::now() - Duration::from_secs(99_999);
 
-        tracker.reap_finished(Some(&db), Some(&locks), Duration::ZERO);
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::ZERO, 3);
 
         assert_eq!(
             tracker.active_count(),
@@ -990,7 +1027,7 @@ mod tests {
         tracker.children[0].submit_failed_reason =
             Some("submit_not_confirmed (retries=12)".to_string());
 
-        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600));
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600), 3);
 
         assert_eq!(tracker.active_count(), 0, "failed child must be reaped");
         let row = db
@@ -1008,6 +1045,312 @@ mod tests {
         assert!(
             locks.active_pid("legion").is_none(),
             "session lock must be released after a submit-failure reap"
+        );
+    }
+
+    // -- redelivery on failed wake settle (#948) ------------------------------
+
+    /// A submit-not-confirmed reap (call site 2, `submit_failed_reason`
+    /// branch) must re-arm the signals it carried: the `watch_handled` row
+    /// marked at spawn time is deleted so the next poll re-surfaces the
+    /// signal, exactly the smugglr incident this issue fixes.
+    #[cfg(unix)]
+    #[test]
+    fn reap_finished_rearms_signal_on_submit_failure() {
+        let (db, _index, data_dir) = test_storage();
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+
+        let mut child_proc = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep");
+        let child_pid = child_proc.id();
+        child_proc.kill().expect("kill child");
+
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let signal_id = db
+            .insert_reflection("kelex", "@legion question:submit-fail-rearm", "team")
+            .expect("insert signal")
+            .id;
+        db.enqueue_wake_attempt(
+            &attempt_id,
+            "legion",
+            "legion",
+            std::slice::from_ref(&signal_id),
+        )
+        .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        use crate::wake_attempts::WakeAttemptState::{Claimed, Spawning};
+        db.transition_wake_attempt(&attempt_id, Claimed, Spawning)
+            .expect("Claimed->Spawning");
+        db.mark_signal_handled_for_repo(&signal_id, "legion")
+            .expect("mark handled at spawn time");
+
+        locks
+            .record_spawn("legion", child_pid)
+            .expect("record spawn");
+
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_proc),
+            Vec::new(),
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            vec![signal_id.clone()],
+            Some(attempt_id.clone()),
+        );
+        tracker.children[0].submit_failed_reason =
+            Some("submit_not_confirmed (retries=12)".to_string());
+
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600), 3);
+
+        let signals = db
+            .get_unhandled_signals_for_repo("legion", &["legion".to_string()], None)
+            .expect("query unhandled");
+        assert_eq!(
+            signals.len(),
+            1,
+            "a submit-failure reap must re-arm the signal it carried"
+        );
+    }
+
+    /// A wedged-session force-reap (call site 2, `budget_exceeded_reason`
+    /// branch) must also re-arm its signals.
+    #[cfg(unix)]
+    #[test]
+    fn reap_finished_rearms_signal_on_budget_exceeded() {
+        let (db, _index, data_dir) = test_storage();
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+
+        let child_proc = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep");
+        let child_pid = child_proc.id();
+
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let signal_id = db
+            .insert_reflection("kelex", "@legion question:wedge-rearm", "team")
+            .expect("insert signal")
+            .id;
+        db.enqueue_wake_attempt(
+            &attempt_id,
+            "legion",
+            "legion",
+            std::slice::from_ref(&signal_id),
+        )
+        .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        use crate::wake_attempts::WakeAttemptState::{Claimed, Running, Spawning};
+        db.transition_wake_attempt(&attempt_id, Claimed, Spawning)
+            .expect("Claimed->Spawning");
+        db.transition_wake_attempt(&attempt_id, Spawning, Running)
+            .expect("Spawning->Running");
+        db.mark_signal_handled_for_repo(&signal_id, "legion")
+            .expect("mark handled at spawn time");
+
+        locks
+            .record_spawn("legion", child_pid)
+            .expect("record spawn");
+
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_proc),
+            Vec::new(),
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            vec![signal_id.clone()],
+            Some(attempt_id.clone()),
+        );
+        tracker.children[0].spawn_instant = Instant::now() - Duration::from_secs(120);
+
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(60), 3);
+
+        let signals = db
+            .get_unhandled_signals_for_repo("legion", &["legion".to_string()], None)
+            .expect("query unhandled");
+        assert_eq!(
+            signals.len(),
+            1,
+            "a wedge-budget force-reap must re-arm the signal it carried"
+        );
+    }
+
+    /// A normal reap where the child exited but `success == false` (call
+    /// site 3) must also re-arm its signals -- the third of the three hook
+    /// sites named in #948, distinct from both submit-failure and the
+    /// budget wedge because the process genuinely finished, just not
+    /// successfully.
+    #[cfg(unix)]
+    #[test]
+    fn reap_finished_rearms_signal_on_normal_reap_failure() {
+        let (db, _index, data_dir) = test_storage();
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+
+        // A killed child reports success == false via try_wait, with
+        // neither submit_failed_reason nor budget_exceeded_reason set --
+        // this is the ordinary "child crashed mid-turn" path, not one of
+        // the two special-cased give-up reasons.
+        let mut child_proc = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep");
+        let child_pid = child_proc.id();
+        child_proc.kill().expect("kill child");
+
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let signal_id = db
+            .insert_reflection("kelex", "@legion question:normal-fail-rearm", "team")
+            .expect("insert signal")
+            .id;
+        db.enqueue_wake_attempt(
+            &attempt_id,
+            "legion",
+            "legion",
+            std::slice::from_ref(&signal_id),
+        )
+        .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        use crate::wake_attempts::WakeAttemptState::{Claimed, Running, Spawning};
+        db.transition_wake_attempt(&attempt_id, Claimed, Spawning)
+            .expect("Claimed->Spawning");
+        db.transition_wake_attempt(&attempt_id, Spawning, Running)
+            .expect("Spawning->Running");
+        db.mark_signal_handled_for_repo(&signal_id, "legion")
+            .expect("mark handled at spawn time");
+
+        locks
+            .record_spawn("legion", child_pid)
+            .expect("record spawn");
+
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_proc),
+            Vec::new(),
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            vec![signal_id.clone()],
+            Some(attempt_id.clone()),
+        );
+
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600), 3);
+
+        assert_eq!(tracker.active_count(), 0, "crashed child must be reaped");
+        let row = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get attempt")
+            .expect("row exists");
+        assert_eq!(
+            row.state,
+            crate::wake_attempts::WakeAttemptState::Failed,
+            "a killed child must settle the wake_attempt to Failed"
+        );
+        let signals = db
+            .get_unhandled_signals_for_repo("legion", &["legion".to_string()], None)
+            .expect("query unhandled");
+        assert_eq!(
+            signals.len(),
+            1,
+            "a normal reap with success == false must re-arm the signal it carried"
+        );
+    }
+
+    /// A successful reap (`exit_status == "ok"`) must be completely
+    /// unchanged by #948: no `watch_redelivery` row is created and the
+    /// `watch_handled` row marked at spawn time survives untouched.
+    #[cfg(unix)]
+    #[test]
+    fn reap_finished_success_path_leaves_redelivery_untouched() {
+        let (db, _index, data_dir) = test_storage();
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+
+        let mut child_proc = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let status = child_proc.wait().expect("wait for true to exit");
+        assert!(status.success(), "precondition: 'true' must exit 0");
+        let child_pid = child_proc.id();
+
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let signal_id = db
+            .insert_reflection("kelex", "@legion question:success-path", "team")
+            .expect("insert signal")
+            .id;
+        db.enqueue_wake_attempt(
+            &attempt_id,
+            "legion",
+            "legion",
+            std::slice::from_ref(&signal_id),
+        )
+        .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        use crate::wake_attempts::WakeAttemptState::{Claimed, Running, Spawning};
+        db.transition_wake_attempt(&attempt_id, Claimed, Spawning)
+            .expect("Claimed->Spawning");
+        db.transition_wake_attempt(&attempt_id, Spawning, Running)
+            .expect("Spawning->Running");
+        db.mark_signal_handled_for_repo(&signal_id, "legion")
+            .expect("mark handled at spawn time");
+
+        locks
+            .record_spawn("legion", child_pid)
+            .expect("record spawn");
+
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_proc),
+            Vec::new(),
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            vec![signal_id.clone()],
+            Some(attempt_id.clone()),
+        );
+
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600), 3);
+
+        assert_eq!(tracker.active_count(), 0, "exited child must be reaped");
+        let row = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get attempt")
+            .expect("row exists");
+        assert_eq!(
+            row.state,
+            crate::wake_attempts::WakeAttemptState::Done,
+            "a clean exit must settle the wake_attempt to Done"
+        );
+
+        let handled: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_handled WHERE signal_id = ?1 AND repo_name = 'legion'",
+                [&signal_id],
+                |r| r.get(0),
+            )
+            .expect("count watch_handled");
+        assert_eq!(
+            handled, 1,
+            "a successful reap must never delete the watch_handled row"
+        );
+
+        let redelivery_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM watch_redelivery", [], |r| r.get(0))
+            .expect("count watch_redelivery");
+        assert_eq!(
+            redelivery_count, 0,
+            "a successful reap must never create a watch_redelivery row"
         );
     }
 }

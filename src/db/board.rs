@@ -1,7 +1,7 @@
 //! Bullpen domain: team posts, decay TTLs (#376), read cursors,
 //! resolution markers (#362), and watch signal handling. Owns the
-//! `board_reads` and `watch_handled` DDL plus the reflections
-//! lifecycle-column migrations.
+//! `board_reads`, `watch_handled`, and `watch_redelivery` (#948) DDL plus
+//! the reflections lifecycle-column migrations.
 
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension};
@@ -89,6 +89,23 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
                 signal_id TEXT NOT NULL,
                 repo_name TEXT NOT NULL,
                 handled_at TEXT NOT NULL,
+                PRIMARY KEY (signal_id, repo_name)
+            );",
+    )?;
+
+    // #948: per-(signal_id, repo_name) redelivery counter, created
+    // alongside watch_handled so both tables exist from the first
+    // `Database::open` on a fresh db. Host-local like watch_handled -- not
+    // one of the four tables pinned on the sync wire (src/sync_actor.rs's
+    // TABLE_* constants). Never dropped or reset by rearm_or_abandon_signals;
+    // only prune_watch_redelivery (time-cutoff sweep, mirroring
+    // prune_watch_handled) and Database::rename_repo ever remove rows.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS watch_redelivery (
+                signal_id TEXT NOT NULL,
+                repo_name TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_failed_at TEXT NOT NULL,
                 PRIMARY KEY (signal_id, repo_name)
             );",
     )?;
@@ -207,6 +224,25 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
                  WHERE audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL;",
     )?;
     Ok(())
+}
+
+/// Outcome of one signal's redelivery accounting after a wake attempt
+/// carrying it settled to a failure terminal state (#948). Named
+/// `Exhausted` rather than `Abandoned` so it is never confused with
+/// `wake_attempts::WakeAttemptState::Abandoned`, which is a distinct
+/// concept (a claimed attempt row that never got a pid to check).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedeliveryOutcome {
+    /// `watch_handled(signal_id, repo_name)` was deleted. The signal is
+    /// returned by the next `get_unhandled_signals_for_repo` call for this
+    /// repo, subject to that function's own `lookback`/`expires_at`
+    /// filters (this outcome does not override them).
+    Rearmed { attempts: u32 },
+    /// `attempts` exceeded `max_attempts`. `watch_handled` was left in
+    /// place -- the signal stays permanently handled for this repo. The
+    /// caller is responsible for the visible log line and bullpen post;
+    /// this function only accounts, it does not alarm.
+    Exhausted { attempts: u32 },
 }
 
 impl Database {
@@ -760,6 +796,70 @@ impl Database {
             rusqlite::params![signal_id, repo_name, &now],
         )?;
         Ok(rows > 0)
+    }
+
+    /// Re-arm or give up on redelivery for the signals a failed wake
+    /// attempt carried, scoped to exactly `repo_name` (#948).
+    /// `watch_handled`'s primary key is `(signal_id, repo_name)`, so the
+    /// DELETE this issues can never touch another repo's copy of the same
+    /// `@all`/`@tag` broadcast -- per-repo scoping falls out of the
+    /// existing schema, it is not new logic this function has to get
+    /// right.
+    ///
+    /// Runs as one transaction per call (mirrors `Database::rename_repo`,
+    /// `src/db/mod.rs`): every signal_id's counter increment and
+    /// conditional delete commits together, so a crash mid-loop cannot
+    /// leave the redelivery ledger ahead of what `watch_handled` reflects.
+    ///
+    /// For each id in `signal_ids`: upsert `watch_redelivery`, incrementing
+    /// `attempts` (insert at 1 if the pair is new). If the new count is
+    /// `<= max_attempts`, delete the matching `watch_handled` row
+    /// (`Rearmed`). Otherwise leave `watch_handled` untouched (`Exhausted`).
+    pub fn rearm_or_abandon_signals(
+        &self,
+        signal_ids: &[String],
+        repo_name: &str,
+        max_attempts: u32,
+    ) -> Result<Vec<(String, RedeliveryOutcome)>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let mut results: Vec<(String, RedeliveryOutcome)> = Vec::with_capacity(signal_ids.len());
+
+        for signal_id in signal_ids {
+            let attempts: u32 = tx.query_row(
+                "INSERT INTO watch_redelivery (signal_id, repo_name, attempts, last_failed_at) \
+                 VALUES (?1, ?2, 1, ?3) \
+                 ON CONFLICT(signal_id, repo_name) DO UPDATE SET \
+                     attempts = attempts + 1, last_failed_at = excluded.last_failed_at \
+                 RETURNING attempts",
+                rusqlite::params![signal_id, repo_name, &now],
+                |row| row.get(0),
+            )?;
+
+            let outcome = if attempts <= max_attempts {
+                tx.execute(
+                    "DELETE FROM watch_handled WHERE signal_id = ?1 AND repo_name = ?2",
+                    rusqlite::params![signal_id, repo_name],
+                )?;
+                RedeliveryOutcome::Rearmed { attempts }
+            } else {
+                RedeliveryOutcome::Exhausted { attempts }
+            };
+            results.push((signal_id.clone(), outcome));
+        }
+
+        tx.commit()?;
+        Ok(results)
+    }
+
+    /// Delete stale `watch_redelivery` records older than a given
+    /// timestamp (#948), mirroring `prune_watch_handled` above.
+    pub fn prune_watch_redelivery(&self, older_than: &str) -> Result<u64> {
+        let rows = self.conn.execute(
+            "DELETE FROM watch_redelivery WHERE last_failed_at < ?1",
+            [older_than],
+        )?;
+        Ok(rows as u64)
     }
 
     /// Get recent bullpen posts (within last N hours by default).
@@ -1624,5 +1724,162 @@ mod tests {
             .unwrap();
         assert_eq!(expires_at, None, "self audience never expires");
         assert_eq!(evergreen, 0);
+    }
+
+    // -- Redelivery on failed wake settle (#948) --------------------------
+
+    #[test]
+    fn rearm_or_abandon_signals_deletes_watch_handled_below_cap() {
+        let db = test_db();
+        let signal_id = db
+            .insert_reflection("platform", "@smugglr question:test", "team")
+            .unwrap()
+            .id;
+        db.mark_signal_handled_for_repo(&signal_id, "smugglr")
+            .unwrap();
+
+        let outcomes = db
+            .rearm_or_abandon_signals(std::slice::from_ref(&signal_id), "smugglr", 3)
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].0, signal_id);
+        assert_eq!(
+            outcomes[0].1,
+            RedeliveryOutcome::Rearmed { attempts: 1 },
+            "first failure, below cap, must re-arm"
+        );
+
+        // watch_handled row must be gone so the next poll re-surfaces it.
+        let signals = db
+            .get_unhandled_signals_for_repo("smugglr", &["smugglr".to_string()], None)
+            .unwrap();
+        assert_eq!(
+            signals.len(),
+            1,
+            "rearmed signal must be visible again to get_unhandled_signals_for_repo"
+        );
+    }
+
+    #[test]
+    fn rearm_or_abandon_signals_exhausts_after_cap_and_leaves_watch_handled() {
+        let db = test_db();
+        let signal_id = db
+            .insert_reflection("platform", "@smugglr question:crashy", "team")
+            .unwrap()
+            .id;
+
+        // Simulate three prior failed-and-rearmed cycles: each cycle marks
+        // handled again (as a fresh spawn attempt would) then fails.
+        for expected_attempts in 1..=3u32 {
+            db.mark_signal_handled_for_repo(&signal_id, "smugglr")
+                .unwrap();
+            let outcomes = db
+                .rearm_or_abandon_signals(std::slice::from_ref(&signal_id), "smugglr", 3)
+                .unwrap();
+            assert_eq!(
+                outcomes[0].1,
+                RedeliveryOutcome::Rearmed {
+                    attempts: expected_attempts
+                }
+            );
+        }
+
+        // Fourth failure exceeds the cap of 3.
+        db.mark_signal_handled_for_repo(&signal_id, "smugglr")
+            .unwrap();
+        let outcomes = db
+            .rearm_or_abandon_signals(std::slice::from_ref(&signal_id), "smugglr", 3)
+            .unwrap();
+        assert_eq!(
+            outcomes[0].1,
+            RedeliveryOutcome::Exhausted { attempts: 4 },
+            "fourth failure must exceed the cap of 3 and exhaust"
+        );
+
+        // watch_handled must be left in place -- signal stays permanently
+        // handled for this repo.
+        let handled: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_handled WHERE signal_id = ?1 AND repo_name = 'smugglr'",
+                [&signal_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            handled, 1,
+            "exhausted outcome must not delete the watch_handled row"
+        );
+    }
+
+    #[test]
+    fn rearm_or_abandon_signals_scopes_deletion_to_one_repo() {
+        // An @all broadcast's watch_handled row exists per-repo; a failed
+        // wake attempt for one repo must never touch another repo's copy.
+        let db = test_db();
+        let signal_id = db
+            .insert_reflection("platform", "@all announce:broadcast", "team")
+            .unwrap()
+            .id;
+        db.mark_signal_handled_for_repo(&signal_id, "smugglr")
+            .unwrap();
+        db.mark_signal_handled_for_repo(&signal_id, "kessel")
+            .unwrap();
+
+        db.rearm_or_abandon_signals(std::slice::from_ref(&signal_id), "smugglr", 3)
+            .unwrap();
+
+        let smugglr_handled: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_handled WHERE signal_id = ?1 AND repo_name = 'smugglr'",
+                [&signal_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(smugglr_handled, 0, "smugglr's copy must be rearmed");
+
+        let kessel_handled: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_handled WHERE signal_id = ?1 AND repo_name = 'kessel'",
+                [&signal_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            kessel_handled, 1,
+            "kessel's copy of the same @all signal must be untouched"
+        );
+    }
+
+    #[test]
+    fn prune_watch_redelivery_deletes_only_stale_rows() {
+        let db = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO watch_redelivery (signal_id, repo_name, attempts, last_failed_at) \
+                 VALUES ('stale-signal', 'smugglr', 1, '2020-01-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO watch_redelivery (signal_id, repo_name, attempts, last_failed_at) \
+                 VALUES ('fresh-signal', 'smugglr', 1, ?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+
+        let deleted = db
+            .prune_watch_redelivery("2026-01-01T00:00:00+00:00")
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let remaining: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM watch_redelivery", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1, "only the stale row must be pruned");
     }
 }
