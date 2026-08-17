@@ -40,7 +40,7 @@ pub use gates::check_auto_unblock;
 #[allow(unused_imports)]
 pub use locks::release_pid_lock;
 #[allow(unused_imports)]
-pub use signals::is_wake_worthy;
+pub use signals::{is_wake_worthy, resolves_pending_ask};
 #[allow(unused_imports)]
 pub use spawn::{SpawnedChild, spawn_agent};
 #[allow(unused_imports)]

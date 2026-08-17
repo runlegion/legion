@@ -66,6 +66,57 @@ pub fn is_wake_worthy(text: &str) -> bool {
     }
 }
 
+/// The ask id an `answer` signal claims to resolve -- the send-time-stamped
+/// marker (see `cli::signal::answered_ask_id`) that a genuine pending ask
+/// existed when this signal was sent (#949).
+///
+/// Pure text read, no DB access, mirroring [`is_wake_worthy`]'s shape so the
+/// fact travels with the synced `reflections` row regardless of which host's
+/// watch daemon later evaluates it. #919's retire-on-reply destroys the
+/// pending-ask evidence synchronously in the sending invocation, so the fact
+/// cannot be re-derived downstream -- it has to ride along.
+///
+/// Claimed, not verified: a hand-typed `--details "resolves:x"` yields
+/// `Some("x")` here. [`resolved_ask_is_authentic`] is the DB-backed check
+/// the wake decision actually spawns on. Both the display-only bucketing in
+/// [`build_wake_prompt`] and the spawn gate in `gates::signal_wakes_repo`
+/// read the marker through this one function so they can never disagree
+/// about what counts as one.
+pub fn resolved_ask_id(text: &str) -> Option<String> {
+    let sig = signal::parse_signal(text)?;
+    if !sig.verb.eq_ignore_ascii_case("answer") {
+        return None;
+    }
+    sig.details.get("resolves").cloned()
+}
+
+/// Whether `text` is an `answer` carrying a `resolves` marker: the
+/// bucketing predicate for [`build_wake_prompt`]'s answered-ask section.
+/// Display-only, and deliberately not the authenticity check -- see
+/// [`resolved_ask_id`].
+pub fn resolves_pending_ask(text: &str) -> bool {
+    resolved_ask_id(text).is_some()
+}
+
+/// DB-backed authenticity check for a `resolves` marker on an `answer`
+/// signal: the referenced ask must have been authored by `recipient_repo`
+/// (the repo about to be woken) and must itself have been wake-worthy.
+///
+/// Without this, a hand-typed `--details "resolves:whatever"` would forge a
+/// wake for any sleeper -- the bound this feature rests on is that
+/// answer-wakes can never exceed the questions the sleeper actually asked.
+/// Read-only: never writes `watch_handled`.
+pub fn resolved_ask_is_authentic(
+    db: &Database,
+    ask_id: &str,
+    recipient_repo: &str,
+) -> Result<bool> {
+    Ok(match db.get_reflection_by_id(ask_id)? {
+        Some(ask) => ask.repo.eq_ignore_ascii_case(recipient_repo) && is_wake_worthy(&ask.text),
+        None => false,
+    })
+}
+
 /// Signals that require the recipient to reply, even if the reply is a refusal.
 ///
 /// Same gate as [`is_wake_worthy`] -- the wake decision and the
@@ -82,19 +133,33 @@ pub fn signal_requires_reply(text: &str) -> bool {
 /// by deep backlogs (rafters' pending block was 100KB pre-cap).
 const PENDING_REPLY_CAP: usize = 10;
 const PENDING_INFORMATIONAL_CAP: usize = 5;
+/// Cap on the "your ask was answered" section (#949), sized like the
+/// informational cap: an unblocking read, not an obligation list.
+const PENDING_ANSWERED_CAP: usize = 5;
 
 /// Build the prompt context for a woken agent from pending signals.
 ///
-/// Signals are split into two buckets:
+/// Signals are split into three buckets:
 /// - **Requires reply**: directed questions and requests. The agent MUST reply,
 ///   even if the reply is "no", "can't help", or "handing to X". Ghosting is not
 ///   an option -- it breaks team trust.
+/// - **Answered asks** (#949): answers that resolve a question this agent sent
+///   before sleeping. The agent is being unblocked, not assigned work, so these
+///   are deliberately NOT routed through `signal_requires_reply`.
 /// - **Informational**: announcements, updates, approvals. Silence is
 ///   acknowledgment; only reply if there is new information, concern, or dissent.
+///
+/// The first two buckets are provably disjoint: [`signal_requires_reply`] is
+/// exactly [`is_wake_worthy`], which only matches `VerbShape::Wake`, and
+/// `answer` ships `Record`. So no signal lands in both and the split order
+/// does not matter.
 pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) -> String {
-    let (must_reply, informational): (Vec<_>, Vec<_>) = signals
+    let (must_reply, rest): (Vec<_>, Vec<_>) = signals
         .iter()
         .partition(|(_, text, _)| signal_requires_reply(text));
+    let (answered, informational): (Vec<_>, Vec<_>) = rest
+        .into_iter()
+        .partition(|(_, text, _)| resolves_pending_ask(text));
 
     let mut prompt = format!(
         "You were auto-woken by legion watch. The following signal(s) are directed at you ({}).\n",
@@ -133,6 +198,15 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
          done-and-reported or explicitly declined/blocked.",
         &must_reply,
         PENDING_REPLY_CAP,
+    );
+
+    append_section(
+        "YOUR ASK WAS ANSWERED -- each of these resolves a question or request \
+         you sent before sleeping. You are being unblocked, not assigned work: \
+         no reply is required. Read the answer and continue whatever it was \
+         blocking.",
+        &answered,
+        PENDING_ANSWERED_CAP,
     );
 
     append_section(
@@ -537,6 +611,191 @@ mod tests {
         }
     }
 
+    // -- Answers that resolve a pending ask (#949) -------------------------
+
+    #[test]
+    fn resolves_pending_ask_requires_answer_verb_and_resolves_key() {
+        assert!(
+            resolves_pending_ask("@veneer answer:resolved {resolves: 01a0-ask} -- here you go"),
+            "an answer carrying a resolves marker is an answered ask"
+        );
+        assert!(
+            !resolves_pending_ask("@veneer answer:resolved -- here you go"),
+            "an answer with no resolves marker is fire-and-forget"
+        );
+        assert!(
+            !resolves_pending_ask("@veneer announce {resolves: 01a0-ask}"),
+            "the verb must be exactly `answer`, not any Record-shaped verb"
+        );
+        assert!(
+            !resolves_pending_ask("not a signal at all {resolves: 01a0-ask}"),
+            "a non-signal never carries a resolution"
+        );
+        // The predicate and the spawn gate read the marker through one
+        // extractor, so pin the value it hands the gate.
+        assert_eq!(
+            resolved_ask_id("@veneer answer:resolved {resolves: 01a0-ask} -- here you go")
+                .as_deref(),
+            Some("01a0-ask")
+        );
+        assert_eq!(
+            resolved_ask_id("@veneer announce {resolves: 01a0-ask}"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolved_ask_is_authentic_true_for_matching_wake_worthy_ask() {
+        let (db, _index, _dir) = test_storage();
+        let ask = db
+            .insert_reflection("veneer", "@rafters question -- need the schema", "team")
+            .expect("insert ask");
+
+        assert!(
+            resolved_ask_is_authentic(&db, &ask.id, "veneer").expect("authenticity check"),
+            "an ask authored by the repo about to be woken, with a wake-worthy \
+             verb, is the one case that authenticates"
+        );
+    }
+
+    #[test]
+    fn resolved_ask_is_authentic_false_for_wrong_author() {
+        let (db, _index, _dir) = test_storage();
+        let ask = db
+            .insert_reflection("smugglr", "@rafters question -- need the schema", "team")
+            .expect("insert ask");
+
+        assert!(
+            !resolved_ask_is_authentic(&db, &ask.id, "veneer").expect("authenticity check"),
+            "pointing at a third repo's real ask must not wake veneer"
+        );
+    }
+
+    #[test]
+    fn resolved_ask_is_authentic_false_for_unknown_id() {
+        let (db, _index, _dir) = test_storage();
+
+        assert!(
+            !resolved_ask_is_authentic(&db, "01a0-not-a-real-id", "veneer")
+                .expect("authenticity check"),
+            "an id that resolves to nothing must not wake anyone"
+        );
+    }
+
+    #[test]
+    fn resolved_ask_is_authentic_false_for_non_wake_worthy_ask() {
+        // The sleeper's own announce is not an ask, so answering it is not
+        // unblocking anyone -- the wake bound is questions asked.
+        let (db, _index, _dir) = test_storage();
+        let announce = db
+            .insert_reflection("veneer", "@rafters announce -- shipped 0.3.0", "team")
+            .expect("insert announce");
+
+        assert!(
+            !resolved_ask_is_authentic(&db, &announce.id, "veneer").expect("authenticity check"),
+            "the referenced signal must itself have been wake-worthy"
+        );
+    }
+
+    /// An answer-triggered wake is the sleeper being UNBLOCKED, not assigned
+    /// work, so it must never be routed into REQUIRES A REPLY (or into
+    /// `legion pending-replies`, which filters on the same predicate).
+    #[test]
+    fn signal_requires_reply_false_for_authentic_answer() {
+        let answer = "@veneer answer:resolved {resolves: 01a0-ask} -- the schema is in db.rs";
+        assert!(
+            !signal_requires_reply(answer),
+            "an answer must stay out of the must-reply bucket"
+        );
+        assert!(
+            resolves_pending_ask(answer),
+            "the same text must still bucket as an answered ask"
+        );
+        assert_eq!(
+            signal_requires_reply(answer),
+            is_wake_worthy(answer),
+            "signal_requires_reply must still delegate only to is_wake_worthy"
+        );
+    }
+
+    #[test]
+    fn build_wake_prompt_separates_answered_asks_from_informational() {
+        let signals = vec![
+            (
+                "id-q".to_string(),
+                "@veneer question -- can you take the port?".to_string(),
+                "smugglr".to_string(),
+            ),
+            (
+                "id-ans".to_string(),
+                "@veneer answer:resolved {resolves: id-ask} -- yes, use tokens.css".to_string(),
+                "rafters".to_string(),
+            ),
+            (
+                "id-info".to_string(),
+                "@all announce:ready -- docs published".to_string(),
+                "rafters".to_string(),
+            ),
+        ];
+
+        let prompt = build_wake_prompt("veneer", &signals);
+
+        let reply_idx = prompt.find("REQUIRES A REPLY").expect("reply section");
+        let answered_idx = prompt
+            .find("YOUR ASK WAS ANSWERED")
+            .expect("answered section");
+        let info_idx = prompt.find("INFORMATIONAL").expect("info section");
+        assert!(
+            reply_idx < answered_idx && answered_idx < info_idx,
+            "sections must render reply-required, then answered asks, then informational: {prompt}"
+        );
+
+        let reply_section = &prompt[reply_idx..answered_idx];
+        let answered_section = &prompt[answered_idx..info_idx];
+        let info_section = &prompt[info_idx..];
+
+        assert!(reply_section.contains("id-q"), "question stays must-reply");
+        assert!(
+            answered_section.contains("id-ans"),
+            "the answered ask must land in its own section: {prompt}"
+        );
+        assert!(
+            !reply_section.contains("id-ans") && !info_section.contains("id-ans"),
+            "the answered ask must not leak into must-reply or informational"
+        );
+        assert!(
+            info_section.contains("id-info"),
+            "announcements stay informational"
+        );
+        assert!(
+            answered_section.contains("no reply is required"),
+            "the answered section must frame the wake as unblocking, not work"
+        );
+    }
+
+    #[test]
+    fn build_wake_prompt_caps_answered_bucket() {
+        let answers: Vec<(String, String, String)> = (0..8)
+            .map(|i| {
+                (
+                    format!("id-ans-{i}"),
+                    format!("@veneer answer:resolved {{resolves: id-ask-{i}}}"),
+                    "rafters".to_string(),
+                )
+            })
+            .collect();
+        let prompt = build_wake_prompt("veneer", &answers);
+        let rendered = prompt.matches("(id: id-ans-").count();
+        assert_eq!(
+            rendered, PENDING_ANSWERED_CAP,
+            "expected exactly {PENDING_ANSWERED_CAP} rendered ids, got {rendered}: {prompt}"
+        );
+        assert!(
+            prompt.contains("... and 3 more"),
+            "expected tail line for 3 overflow answers: {prompt}"
+        );
+    }
+
     #[test]
     fn is_wake_worthy_rejects_posts() {
         // Posts don't start with @recipient -- never wake.
@@ -644,6 +903,10 @@ mod tests {
         let prompt = build_wake_prompt("legion", &announce_only);
         assert!(!prompt.contains("REQUIRES A REPLY"));
         assert!(prompt.contains("INFORMATIONAL"));
+        assert!(
+            !prompt.contains("YOUR ASK WAS ANSWERED"),
+            "the answered-ask section must be omitted when no answer resolves an ask"
+        );
 
         let question_only = vec![(
             "id-q".to_string(),
@@ -652,6 +915,19 @@ mod tests {
         )];
         let prompt = build_wake_prompt("eavesdrop", &question_only);
         assert!(prompt.contains("REQUIRES A REPLY"));
+        assert!(!prompt.contains("INFORMATIONAL"));
+        assert!(!prompt.contains("YOUR ASK WAS ANSWERED"));
+
+        // The mirror case (#949): an answered ask alone renders its own
+        // section and neither of the other two.
+        let answered_only = vec![(
+            "id-ans".to_string(),
+            "@veneer answer:resolved {resolves: id-ask} -- shipped it".to_string(),
+            "rafters".to_string(),
+        )];
+        let prompt = build_wake_prompt("veneer", &answered_only);
+        assert!(prompt.contains("YOUR ASK WAS ANSWERED"));
+        assert!(!prompt.contains("REQUIRES A REPLY"));
         assert!(!prompt.contains("INFORMATIONAL"));
     }
 
