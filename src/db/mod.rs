@@ -33,7 +33,7 @@ mod uncertainty;
 mod wake;
 
 pub use audit::AuditInput;
-pub use board::HOOK_DRAIN_CURSOR_SUFFIX;
+pub use board::{HOOK_DRAIN_CURSOR_SUFFIX, RedeliveryOutcome};
 pub use kanban::CardTimestamp;
 pub use reflections::{Reflection, ReflectionMeta};
 pub use schedules::{Schedule, validate_hhmm};
@@ -183,21 +183,17 @@ impl Database {
             [to, from],
         )? as u64;
 
-        // Delete target rows first to avoid PRIMARY KEY collision,
-        // then rename. The old read-state for `to` is stale anyway.
-        tx.execute("DELETE FROM board_reads WHERE reader_repo = ?1", [to])?;
-        let board_reads = tx.execute(
-            "UPDATE board_reads SET reader_repo = ?1 WHERE reader_repo = ?2",
-            [to, from],
-        )? as u64;
-
-        // Same for watch_handled: delete target's rows first to
-        // avoid composite PK collision on (signal_id, repo_name).
-        tx.execute("DELETE FROM watch_handled WHERE repo_name = ?1", [to])?;
-        let watch_handled = tx.execute(
-            "UPDATE watch_handled SET repo_name = ?1 WHERE repo_name = ?2",
-            [to, from],
-        )? as u64;
+        // board_reads, watch_handled, and watch_redelivery (#948) all key on
+        // a repo-name column with no room for two rows under the same repo,
+        // so each needs the target's existing rows deleted first to avoid a
+        // PK collision before the source's rows are renamed in. Every other
+        // table above is a bare UPDATE with no such collision risk.
+        let board_reads =
+            Self::carry_repo_keyed_table(&tx, "board_reads", "reader_repo", to, from)?;
+        let watch_handled =
+            Self::carry_repo_keyed_table(&tx, "watch_handled", "repo_name", to, from)?;
+        let watch_redelivery =
+            Self::carry_repo_keyed_table(&tx, "watch_redelivery", "repo_name", to, from)?;
 
         let schedules = tx.execute(
             "UPDATE schedules SET repo = ?1, updated_at = ?3 WHERE repo = ?2",
@@ -212,8 +208,34 @@ impl Database {
             tasks_to,
             board_reads,
             watch_handled,
+            watch_redelivery,
             schedules,
         })
+    }
+
+    /// Delete-then-rename for a `rename_repo` target whose key includes a
+    /// repo-name column: deletes the destination repo's existing rows (a PK
+    /// collision would otherwise abort the rename), then renames the source
+    /// repo's rows in. `table` and `repo_column` are call-site literals
+    /// (`board_reads`/`reader_repo`, `watch_handled`/`repo_name`,
+    /// `watch_redelivery`/`repo_name`), never caller-supplied input, so the
+    /// `format!`-built SQL carries no injection risk.
+    fn carry_repo_keyed_table(
+        tx: &rusqlite::Transaction,
+        table: &str,
+        repo_column: &str,
+        to: &str,
+        from: &str,
+    ) -> Result<u64> {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE {repo_column} = ?1"),
+            [to],
+        )?;
+        let count = tx.execute(
+            &format!("UPDATE {table} SET {repo_column} = ?1 WHERE {repo_column} = ?2"),
+            [to, from],
+        )?;
+        Ok(count as u64)
     }
 }
 
@@ -225,6 +247,7 @@ pub struct RenameCounts {
     pub tasks_to: u64,
     pub board_reads: u64,
     pub watch_handled: u64,
+    pub watch_redelivery: u64,
     pub schedules: u64,
 }
 
@@ -235,6 +258,7 @@ impl RenameCounts {
             + self.tasks_to
             + self.board_reads
             + self.watch_handled
+            + self.watch_redelivery
             + self.schedules
     }
 }
@@ -468,5 +492,63 @@ mod tests {
             indexes.contains(&"idx_schedules_repo_live".to_string()),
             "idx_schedules_repo_live should exist"
         );
+    }
+
+    #[test]
+    fn rename_repo_carries_watch_redelivery_and_avoids_pk_collision() {
+        // #948: watch_redelivery must move with the repo exactly like
+        // watch_handled -- delete the target's rows first (composite PK
+        // collision avoidance), then rename the source's rows in.
+        let db = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO watch_redelivery (signal_id, repo_name, attempts, last_failed_at) \
+                 VALUES ('sig-a', 'old-name', 2, '2026-01-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+        // A pre-existing row under the target name (any signal_id) must be
+        // wiped before the rename -- mirroring watch_handled's own
+        // collision-avoidance, this is a wholesale delete of the target's
+        // existing rows, not a selective one keyed on signal_id.
+        db.conn
+            .execute(
+                "INSERT INTO watch_redelivery (signal_id, repo_name, attempts, last_failed_at) \
+                 VALUES ('sig-b', 'new-name', 1, '2026-01-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+
+        let counts = db.rename_repo("old-name", "new-name").unwrap();
+        assert_eq!(counts.watch_redelivery, 1, "one row renamed from old-name");
+        assert!(
+            counts.total() >= counts.watch_redelivery,
+            "watch_redelivery must count toward the total"
+        );
+
+        let rows: Vec<(String, i64)> = db
+            .conn
+            .prepare("SELECT signal_id, attempts FROM watch_redelivery WHERE repo_name = 'new-name' ORDER BY signal_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![("sig-a".to_string(), 2)],
+            "the target's pre-existing row must be wiped before the rename, \
+             leaving only the row carried over from the source name"
+        );
+
+        let old_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_redelivery WHERE repo_name = 'old-name'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_count, 0, "no rows should remain under the old name");
     }
 }

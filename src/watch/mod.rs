@@ -49,7 +49,7 @@ pub use tracker::TrackedChild;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::db::Database;
+use crate::db::{Database, RedeliveryOutcome, ReflectionMeta};
 use crate::error::Result;
 use crate::health::HealthSampler;
 
@@ -263,12 +263,18 @@ impl WatchLoop {
             Some(&self.db),
             Some(&self.session_locks),
             Duration::from_secs(self.config.session_budget_secs),
+            self.config.max_redelivery_attempts,
         );
         // #673 fix 4: reap `running` wake_attempts whose backing pid is dead.
         // These rows accumulate after crash/restart (pid-alive check only runs
         // on the AgentTracker's live children; a row whose pid was never
         // tracked by *this* daemon instance is invisible to the tracker).
-        reap_dead_pid_attempts(&self.db, &self.host, self.log_prefix);
+        reap_dead_pid_attempts(
+            &self.db,
+            &self.host,
+            self.log_prefix,
+            self.config.max_redelivery_attempts,
+        );
         // #778: auto-revert delegated cards whose attempt is no longer live.
         // Runs AFTER the two reapers above so an attempt that just went
         // terminal this tick is already reflected in wake_attempts.state --
@@ -376,6 +382,9 @@ impl WatchLoop {
         if let Err(e) = self.db.prune_watch_handled(&cutoff) {
             eprintln!("{} watch_handled prune error: {e}", self.log_prefix);
         }
+        if let Err(e) = self.db.prune_watch_redelivery(&cutoff) {
+            eprintln!("{} watch_redelivery prune error: {e}", self.log_prefix);
+        }
     }
 
     /// Run one auto-reconcile tick (#654): scan the whole board for
@@ -431,7 +440,18 @@ impl WatchLoop {
 ///
 /// An error from the DB scan is logged and swallowed; the reaper must
 /// never abort the health tick.
-fn reap_dead_pid_attempts(db: &Database, host: &str, log_prefix: &str) {
+///
+/// #948: once `record_wake_attempt_outcome` itself returns `Ok(())` (this
+/// call won the terminal-state write), the signals this attempt carried
+/// are re-armed or abandoned via [`rearm_or_abandon`] -- a losing call
+/// (another site already settled the row) never reaches this branch,
+/// which is what keeps the redelivery accounting exactly-once.
+fn reap_dead_pid_attempts(
+    db: &Database,
+    host: &str,
+    log_prefix: &str,
+    max_redelivery_attempts: u32,
+) {
     let orphans = match db.list_local_orphans(host) {
         Ok(v) => v,
         Err(e) => {
@@ -455,14 +475,86 @@ fn reap_dead_pid_attempts(db: &Database, host: &str, log_prefix: &str) {
             attempt.attempt_id, attempt.repo_name, pid
         );
 
-        if let Err(e) = db.record_wake_attempt_outcome(
+        match db.record_wake_attempt_outcome(
             &attempt.attempt_id,
             "error",
             "dead-pid: process not found at reaper scan",
         ) {
+            Ok(()) => {
+                rearm_or_abandon(
+                    db,
+                    &attempt.attempt_id,
+                    &attempt.repo_name,
+                    &attempt.signal_ids,
+                    max_redelivery_attempts,
+                    log_prefix,
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "{log_prefix} dead-pid reaper: failed to mark {} as failed: {e}",
+                    attempt.attempt_id
+                );
+            }
+        }
+    }
+}
+
+/// Re-arm or abandon the signals a wake attempt carried once its terminal
+/// failure state has committed (#948). Shared by the three
+/// `record_wake_attempt_outcome`-adjacent call sites (the dead-pid reaper
+/// above, and the two `reap_finished` failure branches in tracker.rs) so
+/// the loud-abandonment behavior cannot drift between them.
+///
+/// Callers must only invoke this after `record_wake_attempt_outcome`
+/// itself returned `Ok(())` -- calling it on a losing write would
+/// double-account a redelivery attempt for a terminal state this call
+/// never actually settled.
+///
+/// A DB error re-arming is logged and swallowed, matching every other
+/// reaper convention in this file. An `Exhausted` outcome is loud: an
+/// `eprintln!` naming every identifying field, plus a best-effort bullpen
+/// post to `repo_name` (log-and-swallow on post failure, mirroring
+/// `QuotaPanicGate::check_and_post`) -- there is no future retry point for
+/// this event since `watch_handled` is deliberately left in place.
+pub(crate) fn rearm_or_abandon(
+    db: &Database,
+    attempt_id: &str,
+    repo_name: &str,
+    signal_ids: &[String],
+    max_attempts: u32,
+    log_prefix: &str,
+) {
+    let outcomes = match db.rearm_or_abandon_signals(signal_ids, repo_name, max_attempts) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{log_prefix} rearm/abandon error for attempt {attempt_id}: {e}");
+            return;
+        }
+    };
+
+    for (signal_id, outcome) in outcomes {
+        let RedeliveryOutcome::Exhausted { attempts } = outcome else {
+            continue;
+        };
+        // The post body carries no log prefix -- it is a bullpen message
+        // for a human/agent reader, not a log line (mirrors
+        // `QuotaPanicGate::check_and_post`, whose post text is likewise
+        // prefix-free while its own eprintln! calls carry `self.host`).
+        let post_text = format!(
+            "redelivery ABANDONED: signal {signal_id} for {repo_name} exhausted {attempts} \
+             delivery attempts (cap {max_attempts}) -- wake_attempt {attempt_id} settled failed; \
+             signal stays permanently handled for this repo"
+        );
+        eprintln!("{log_prefix} {post_text}");
+        if let Err(e) = db.insert_reflection_with_meta(
+            repo_name,
+            &post_text,
+            "team",
+            &ReflectionMeta::default(),
+        ) {
             eprintln!(
-                "{log_prefix} dead-pid reaper: failed to mark {} as failed: {e}",
-                attempt.attempt_id
+                "{log_prefix} redelivery abandonment bullpen post failed for signal {signal_id}: {e}"
             );
         }
     }
@@ -1067,6 +1159,40 @@ mod tests {
         );
     }
 
+    /// `tick_poll` prunes stale `watch_redelivery` rows alongside
+    /// `watch_handled` (#948), on the same retention cutoff.
+    #[test]
+    fn watch_loop_tick_poll_prunes_watch_redelivery() {
+        let (db, _index, _dir) = test_storage();
+        db.conn
+            .execute(
+                "INSERT INTO watch_redelivery (signal_id, repo_name, attempts, last_failed_at) \
+                 VALUES ('stale-signal', 'test-repo', 1, '2020-01-01T00:00:00+00:00')",
+                [],
+            )
+            .expect("seed stale row");
+        db.conn
+            .execute(
+                "INSERT INTO watch_redelivery (signal_id, repo_name, attempts, last_failed_at) \
+                 VALUES ('fresh-signal', 'test-repo', 1, ?1)",
+                [chrono::Utc::now().to_rfc3339()],
+            )
+            .expect("seed fresh row");
+
+        let mut state = test_watch_loop(db, "[legion test]");
+        state.tick_poll();
+
+        let remaining: i64 = state
+            .db
+            .conn
+            .query_row("SELECT COUNT(*) FROM watch_redelivery", [], |r| r.get(0))
+            .expect("count remaining");
+        assert_eq!(
+            remaining, 1,
+            "tick_poll must prune the stale watch_redelivery row and keep the fresh one"
+        );
+    }
+
     // -- WatchLoop::bootstrap (#611) ------------------------------------------
 
     /// Bootstrap with no watch.toml fails the watch half loudly and spawns
@@ -1188,7 +1314,7 @@ mod tests {
         .expect("running live");
 
         // Run the reaper.
-        reap_dead_pid_attempts(&db, "test-host", "[test]");
+        reap_dead_pid_attempts(&db, "test-host", "[test]", 3);
 
         // Dead-pid row must be in a terminal (failed) state.
         let dead_row = db
@@ -1244,7 +1370,7 @@ mod tests {
         .expect("running");
 
         // Run the reaper -- must not crash and must leave the row alone.
-        reap_dead_pid_attempts(&db, "test-host", "[test]");
+        reap_dead_pid_attempts(&db, "test-host", "[test]", 3);
 
         let row = db
             .get_wake_attempt(&attempt_id)
@@ -1254,6 +1380,153 @@ mod tests {
             row.state.as_str(),
             "running",
             "no-pid running row must be left in running state"
+        );
+    }
+
+    // -- redelivery on failed wake settle (#948) ------------------------------
+
+    /// A dead-pid attempt that carries a signal already marked
+    /// `watch_handled` for its repo must re-arm that signal (delete the
+    /// `watch_handled` row) once `record_wake_attempt_outcome` commits the
+    /// terminal `failed` state -- the exact incident this issue fixes.
+    #[cfg(unix)]
+    #[test]
+    fn reap_dead_pid_attempts_rearms_signal_below_cap() {
+        let (db, _index, _dir) = test_storage();
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let dead_pid = child.id();
+        child.wait().expect("wait for child");
+
+        let signal_id = db
+            .insert_reflection("platform", "@smugglr question:reap-me", "team")
+            .expect("insert signal")
+            .id;
+        db.mark_signal_handled_for_repo(&signal_id, "smugglr")
+            .expect("mark handled at spawn time");
+
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(
+            &attempt_id,
+            "test-persona",
+            "smugglr",
+            std::slice::from_ref(&signal_id),
+        )
+        .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        db.transition_wake_attempt(
+            &attempt_id,
+            crate::wake_attempts::WakeAttemptState::Claimed,
+            crate::wake_attempts::WakeAttemptState::Spawning,
+        )
+        .expect("spawning");
+        db.set_wake_attempt_pid(&attempt_id, dead_pid)
+            .expect("set dead pid");
+        db.transition_wake_attempt(
+            &attempt_id,
+            crate::wake_attempts::WakeAttemptState::Spawning,
+            crate::wake_attempts::WakeAttemptState::Running,
+        )
+        .expect("running");
+
+        reap_dead_pid_attempts(&db, "test-host", "[test]", 3);
+
+        let row = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get row")
+            .expect("row exists");
+        assert_eq!(row.state.as_str(), "failed");
+
+        let signals = db
+            .get_unhandled_signals_for_repo("smugglr", &["smugglr".to_string()], None)
+            .expect("query unhandled");
+        assert_eq!(
+            signals.len(),
+            1,
+            "the signal must re-surface for smugglr after the dead-pid reap"
+        );
+    }
+
+    /// Once a (signal_id, repo_name) pair has already failed `max_attempts`
+    /// times, the next failure must NOT delete `watch_handled` and must
+    /// post a loud abandonment notice to the recipient repo's own bullpen.
+    #[cfg(unix)]
+    #[test]
+    fn reap_dead_pid_attempts_exhausts_and_posts_bullpen_alarm() {
+        let (db, _index, _dir) = test_storage();
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let dead_pid = child.id();
+        child.wait().expect("wait for child");
+
+        let signal_id = db
+            .insert_reflection("platform", "@smugglr question:crashy", "team")
+            .expect("insert signal")
+            .id;
+        // Pre-seed the counter at the cap so this failure is the one that
+        // tips it over.
+        db.conn
+            .execute(
+                "INSERT INTO watch_redelivery (signal_id, repo_name, attempts, last_failed_at) \
+                 VALUES (?1, 'smugglr', 3, ?2)",
+                rusqlite::params![&signal_id, chrono::Utc::now().to_rfc3339()],
+            )
+            .expect("seed redelivery counter at cap");
+        db.mark_signal_handled_for_repo(&signal_id, "smugglr")
+            .expect("mark handled at spawn time");
+
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(
+            &attempt_id,
+            "test-persona",
+            "smugglr",
+            std::slice::from_ref(&signal_id),
+        )
+        .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        db.transition_wake_attempt(
+            &attempt_id,
+            crate::wake_attempts::WakeAttemptState::Claimed,
+            crate::wake_attempts::WakeAttemptState::Spawning,
+        )
+        .expect("spawning");
+        db.set_wake_attempt_pid(&attempt_id, dead_pid)
+            .expect("set dead pid");
+        db.transition_wake_attempt(
+            &attempt_id,
+            crate::wake_attempts::WakeAttemptState::Spawning,
+            crate::wake_attempts::WakeAttemptState::Running,
+        )
+        .expect("running");
+
+        reap_dead_pid_attempts(&db, "test-host", "[test]", 3);
+
+        // watch_handled must be left in place -- signal stays permanently
+        // handled for smugglr.
+        let handled: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM watch_handled WHERE signal_id = ?1 AND repo_name = 'smugglr'",
+                [&signal_id],
+                |r| r.get(0),
+            )
+            .expect("count watch_handled");
+        assert_eq!(handled, 1, "exhausted signal must stay handled");
+
+        // A best-effort bullpen post must land on smugglr's own board.
+        let posts = db.get_board_posts().expect("get board posts");
+        assert!(
+            posts
+                .iter()
+                .any(|p| p.repo == "smugglr" && p.text.contains("redelivery ABANDONED")),
+            "exhausted redelivery must post a loud abandonment notice to smugglr's bullpen; got: {:?}",
+            posts.iter().map(|p| (&p.repo, &p.text)).collect::<Vec<_>>()
         );
     }
 

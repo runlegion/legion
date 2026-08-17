@@ -256,6 +256,17 @@ pub struct WatchConfig {
     #[serde(default = "default_session_budget_secs")]
     pub session_budget_secs: u64,
 
+    /// Maximum number of redelivery attempts for a single (signal_id,
+    /// repo_name) pair before watch gives up and leaves it permanently
+    /// handled (#948 delivery-loss fix). Counted in `watch_redelivery`,
+    /// never reset. Default 3: tolerates the observed failure mode (a
+    /// daemon-restart race killing a spawn mid-window) plus a couple of
+    /// unrelated transient blips, while still bounding a systematically
+    /// crashing repo to at most 4 wasted spawns (1 original + 3 retries)
+    /// per signal before the abandonment alarm fires.
+    #[serde(default = "default_max_redelivery_attempts")]
+    pub max_redelivery_attempts: u32,
+
     /// Whether this node serves the web dashboard.
     /// Only one node per network should have this set to true.
     #[serde(default)]
@@ -345,6 +356,10 @@ fn default_session_budget_secs() -> u64 {
     1800
 }
 
+fn default_max_redelivery_attempts() -> u32 {
+    3
+}
+
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
@@ -366,6 +381,7 @@ impl Default for WatchConfig {
             submit_retry_interval_secs: default_submit_retry_interval_secs(),
             submit_confirm_budget_secs: default_submit_confirm_budget_secs(),
             session_budget_secs: default_session_budget_secs(),
+            max_redelivery_attempts: default_max_redelivery_attempts(),
             serve: false,
             cluster: None,
             repos: Vec::new(),
@@ -622,6 +638,8 @@ workdir = "/tmp"
         assert_eq!(config.session_budget_secs, 1800);
         // #654 auto-reconcile defaults to hourly when the key is absent.
         assert_eq!(config.reconcile_interval_secs, 3600);
+        // #948 redelivery cap defaults to 3 when the key is absent.
+        assert_eq!(config.max_redelivery_attempts, 3);
     }
 
     #[test]
