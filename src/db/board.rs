@@ -1882,4 +1882,61 @@ mod tests {
             .unwrap();
         assert_eq!(remaining, 1, "only the stale row must be pruned");
     }
+
+    #[test]
+    fn rearm_or_abandon_signals_rearmed_signal_respects_lookback_filter() {
+        // #948: rearm_or_abandon_signals only deletes the watch_handled
+        // row -- get_unhandled_signals_for_repo's own lookback/expires_at
+        // filters still apply afterward. Exercise the realistic incident
+        // shape: WatchLoop's fixed `now - 24h` lookback bound, and two
+        // signals on either side of it.
+        let db = test_db();
+
+        // A signal that predates the lookback window (as if it arrived
+        // long before the daemon's current run) stays lost even after a
+        // successful rearm.
+        let stale_signal_id = "01000000-0000-7000-8000-00000000aaaa";
+        let far_future = "2099-01-01T00:00:00+00:00";
+        db.conn
+            .execute(
+                "INSERT INTO reflections (id, repo, text, created_at, audience, expires_at) \
+                 VALUES (?1, 'platform', '@smugglr question:predates-lookback', \
+                 '2020-01-01T00:00:00+00:00', 'team', ?2)",
+                rusqlite::params![stale_signal_id, far_future],
+            )
+            .unwrap();
+        db.mark_signal_handled_for_repo(stale_signal_id, "smugglr")
+            .unwrap();
+
+        // A signal created fresh (same session as the failed wake attempt)
+        // must re-surface after rearm under the real lookback bound.
+        let fresh_signal_id = db
+            .insert_reflection("platform", "@smugglr question:same-session", "team")
+            .unwrap()
+            .id;
+        db.mark_signal_handled_for_repo(&fresh_signal_id, "smugglr")
+            .unwrap();
+
+        let lookback = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+
+        db.rearm_or_abandon_signals(
+            &[stale_signal_id.to_string(), fresh_signal_id.clone()],
+            "smugglr",
+            3,
+        )
+        .unwrap();
+
+        let signals = db
+            .get_unhandled_signals_for_repo("smugglr", &["smugglr".to_string()], Some(&lookback))
+            .unwrap();
+        let ids: Vec<&str> = signals.iter().map(|r| r.id.as_str()).collect();
+        assert!(
+            ids.contains(&fresh_signal_id.as_str()),
+            "a freshly-failed same-session signal must re-surface after rearm under the real lookback bound"
+        );
+        assert!(
+            !ids.contains(&stale_signal_id),
+            "a signal older than the lookback window must stay lost even after a successful rearm"
+        );
+    }
 }

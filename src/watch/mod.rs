@@ -537,15 +537,22 @@ pub(crate) fn rearm_or_abandon(
         let RedeliveryOutcome::Exhausted { attempts } = outcome else {
             continue;
         };
-        let text = format!(
-            "{log_prefix} redelivery ABANDONED: signal {signal_id} for {repo_name} exhausted \
-             {attempts} delivery attempts (cap {max_attempts}) -- wake_attempt {attempt_id} \
-             settled failed; signal stays permanently handled for this repo"
+        // The post body carries no log prefix -- it is a bullpen message
+        // for a human/agent reader, not a log line (mirrors
+        // `QuotaPanicGate::check_and_post`, whose post text is likewise
+        // prefix-free while its own eprintln! calls carry `self.host`).
+        let post_text = format!(
+            "redelivery ABANDONED: signal {signal_id} for {repo_name} exhausted {attempts} \
+             delivery attempts (cap {max_attempts}) -- wake_attempt {attempt_id} settled failed; \
+             signal stays permanently handled for this repo"
         );
-        eprintln!("{text}");
-        if let Err(e) =
-            db.insert_reflection_with_meta(repo_name, &text, "team", &ReflectionMeta::default())
-        {
+        eprintln!("{log_prefix} {post_text}");
+        if let Err(e) = db.insert_reflection_with_meta(
+            repo_name,
+            &post_text,
+            "team",
+            &ReflectionMeta::default(),
+        ) {
             eprintln!(
                 "{log_prefix} redelivery abandonment bullpen post failed for signal {signal_id}: {e}"
             );

@@ -1353,4 +1353,135 @@ mod tests {
             "a successful reap must never create a watch_redelivery row"
         );
     }
+
+    /// #948's exactly-once claim, turned into a test rather than left as a
+    /// code comment: `record_wake_attempt_outcome`'s terminal-is-sticky
+    /// `WHERE state IN (...)` clause means only ONE caller can ever win the
+    /// terminal write for a given `attempt_id`. A second reap for the same
+    /// attempt (representing another call site racing the same terminal
+    /// state) must get `Err` from that write and therefore must NEVER reach
+    /// the rearm hook -- `watch_redelivery.attempts` must stay at 1, not
+    /// advance to 2.
+    #[cfg(unix)]
+    #[test]
+    fn reap_finished_accounts_redelivery_exactly_once_per_attempt() {
+        let (db, _index, data_dir) = test_storage();
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+
+        let signal_id = db
+            .insert_reflection("kelex", "@legion question:exactly-once", "team")
+            .expect("insert signal")
+            .id;
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(
+            &attempt_id,
+            "legion",
+            "legion",
+            std::slice::from_ref(&signal_id),
+        )
+        .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        use crate::wake_attempts::WakeAttemptState::{Claimed, Spawning};
+        db.transition_wake_attempt(&attempt_id, Claimed, Spawning)
+            .expect("Claimed->Spawning");
+        db.mark_signal_handled_for_repo(&signal_id, "legion")
+            .expect("mark handled at spawn time");
+
+        // First (winning) reap: settles the row Claimed/Spawning -> Failed.
+        let mut child_a = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep A");
+        let pid_a = child_a.id();
+        child_a.kill().expect("kill child A");
+        locks.record_spawn("legion", pid_a).expect("record spawn A");
+
+        let mut tracker = AgentTracker::new();
+        tracker.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_a),
+            Vec::new(),
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            vec![signal_id.clone()],
+            Some(attempt_id.clone()),
+        );
+        tracker.children[0].submit_failed_reason =
+            Some("submit_not_confirmed (retries=1)".to_string());
+        tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600), 3);
+
+        let row_after_first = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get attempt")
+            .expect("row exists");
+        assert_eq!(
+            row_after_first.state,
+            crate::wake_attempts::WakeAttemptState::Failed,
+            "precondition: the first reap must win the terminal write"
+        );
+        let attempts_after_first: i64 = db
+            .conn
+            .query_row(
+                "SELECT attempts FROM watch_redelivery WHERE signal_id = ?1 AND repo_name = 'legion'",
+                [&signal_id],
+                |r| r.get(0),
+            )
+            .expect("count after first reap");
+        assert_eq!(attempts_after_first, 1);
+
+        // Second reap for the SAME attempt_id: represents another call site
+        // racing the same terminal state. Its own
+        // record_wake_attempt_outcome call must return Err (the row is
+        // already `failed`, which is not in the sticky-terminal WHERE
+        // clause's allowed source-state set), so this reap must never call
+        // the rearm hook.
+        let mut child_b = std::process::Command::new("sleep")
+            .arg("9999")
+            .spawn()
+            .expect("spawn sleep B");
+        let pid_b = child_b.id();
+        child_b.kill().expect("kill child B");
+        locks.record_spawn("legion", pid_b).expect("record spawn B");
+
+        let mut tracker2 = AgentTracker::new();
+        tracker2.track(
+            "legion".to_string(),
+            SpawnedChild::Print(child_b),
+            Vec::new(),
+            "test-host".to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            vec![signal_id.clone()],
+            Some(attempt_id.clone()),
+        );
+        tracker2.children[0].submit_failed_reason =
+            Some("submit_not_confirmed (retries=1)".to_string());
+        tracker2.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600), 3);
+
+        // The row's outcome must be unchanged from the first (winning)
+        // write -- the second write never landed.
+        let row_after_second = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get attempt")
+            .expect("row exists");
+        assert_eq!(
+            row_after_second.outcome, row_after_first.outcome,
+            "a losing terminal-state write must not overwrite the winner's outcome"
+        );
+
+        let attempts_after_second: i64 = db
+            .conn
+            .query_row(
+                "SELECT attempts FROM watch_redelivery WHERE signal_id = ?1 AND repo_name = 'legion'",
+                [&signal_id],
+                |r| r.get(0),
+            )
+            .expect("count after second reap");
+        assert_eq!(
+            attempts_after_second, 1,
+            "a losing terminal-state write must not double-account a redelivery attempt"
+        );
+    }
 }
