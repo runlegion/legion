@@ -258,7 +258,7 @@ pub struct WatchConfig {
 
     /// Maximum number of redelivery attempts for a single (signal_id,
     /// repo_name) pair before watch gives up and leaves it permanently
-    /// handled (#946 delivery-loss fix). Counted in `watch_redelivery`,
+    /// handled (#948 delivery-loss fix). Counted in `watch_redelivery`,
     /// never reset. Default 3: tolerates the observed failure mode (a
     /// daemon-restart race killing a spawn mid-window) plus a couple of
     /// unrelated transient blips, while still bounding a systematically
