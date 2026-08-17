@@ -18,7 +18,7 @@
 #   maybe-close -- may resolve a pending ask when status matches a resolution.
 #
 # The wake set below exactly reproduces the #586 canon. Do not add verbs here
-# without updating watch::WAKE_WORTHY_VERBS in src/watch.rs, and vice versa.
+# without updating verbs::WAKE_WORTHY_VERBS in src/verbs.rs, and vice versa.
 # The shipped_default_toml_wake_set_matches_builtin_default test enforces
 # this invariant at CI time.
 

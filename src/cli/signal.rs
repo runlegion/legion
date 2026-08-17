@@ -104,6 +104,31 @@ pub(crate) fn handle_signal(
 
     let (database, index) = open_db_and_index()?;
 
+    // #949: an `answer` is Record-shaped and never wakes on its own, but an
+    // answer that RESOLVES a pending ask must page the asker -- the one
+    // party known to be blocked on the reply. The resolved ask id is
+    // computed HERE, at send time, because the #919 retire below destroys
+    // the pending-ask evidence synchronously in this same invocation; a
+    // watch daemon polling later (possibly on another host) would find
+    // nothing left to re-derive. Stamping it into `details` makes the fact
+    // travel with the synced reflections row.
+    let resolves_id: Option<String> = if verb.eq_ignore_ascii_case("answer") {
+        match answered_ask_id(&database, &repo, &to) {
+            Ok(id) => id,
+            // Logged, never propagated. The stamp is an optimization on top
+            // of a send that must succeed regardless -- same guarantee the
+            // #919 retire call gets by running after the send, enforced here
+            // on the earlier side of compose.
+            Err(e) => {
+                eprintln!("[legion] could not check for a pending ask from {to}: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let details: Option<String> = stamp_resolves(details.as_deref(), resolves_id.as_deref());
+
     // One compose/validate entry point shared with the MCP legion_signal
     // tool (#612): details wire parsing, the #587 required-fields gate,
     // and the note length cap all live in signal::compose.
@@ -157,7 +182,11 @@ pub(crate) fn handle_signal(
     // #586: tell the sender when a directed signal will not wake its
     // recipient -- a non-wake-worthy verb delivers to a live session but
     // never pages an asleep agent, so surface it at send time.
-    if watch::directed_verb_will_not_wake(&to, &verb) {
+    //
+    // Suppressed when this send stamped a `resolves` marker (#949): that
+    // answer DOES wake its recipient, and the manifest-based warning would
+    // state the exact opposite of what just happened.
+    if resolves_id.is_none() && watch::directed_verb_will_not_wake(&to, &verb) {
         let wake_verbs: Vec<&str> = verbs::active_manifest().wake_verb_names();
         eprintln!(
             "[legion] note: verb '{}' will not wake {} -- it delivers to a live \
@@ -227,6 +256,81 @@ fn retire_answered_signals(
     Ok(retired)
 }
 
+/// The pending wake-worthy ask ids from `recipient` that a reply from
+/// `author` would resolve -- the read-only half of
+/// [`retire_answered_for_author`], marking nothing handled.
+///
+/// Split out for #949: the send path needs the same match to STAMP the
+/// resolved ask onto an outgoing `answer` before the retire consumes it,
+/// and one shared matcher is what keeps the stamp and the retirement from
+/// ever disagreeing about which ask a reply answered.
+///
+/// Broadcasts are not replies to anyone in particular; matching every
+/// pending ask because the author addressed the room would sweep in
+/// unrelated threads from unrelated senders.
+fn matching_pending_ask_ids(
+    database: &db::Database,
+    author: &str,
+    names: &[String],
+    recipient: &str,
+) -> error::Result<Vec<String>> {
+    if crate::signal::is_broadcast_address(recipient) {
+        return Ok(Vec::new());
+    }
+    let bare = recipient.strip_prefix('@').unwrap_or(recipient);
+    let pending = watch::find_pending_signals(database, author, names, None)?;
+    Ok(pending
+        .into_iter()
+        // Only the set `pending-replies` actually renders. A pending signal
+        // that does not require a reply never reaches the banner, so it is
+        // not part of the reported pain and is left alone.
+        .filter(|(_, text, sender)| {
+            watch::signal_requires_reply(text) && sender.eq_ignore_ascii_case(bare)
+        })
+        .map(|(id, _, _)| id)
+        .collect())
+}
+
+/// The id of the first still-pending wake-worthy ask (across `authors`) that
+/// `to` sent, if any -- the ask a `--verb answer` send resolves (#949).
+///
+/// `None` means this looks like a fire-and-forget answer: nothing tracked as
+/// asked, so the caller must not stamp `resolves` and the send must not wake
+/// anyone. Best-effort by contract -- see the call site in [`handle_signal`]
+/// for why a DB error here is logged rather than propagated.
+fn answered_ask_id(
+    database: &db::Database,
+    authors: &[String],
+    to: &str,
+) -> error::Result<Option<String>> {
+    for author in authors {
+        let names = wake_names_for(author)?;
+        if let Some(id) = matching_pending_ask_ids(database, author, &names, to)?
+            .into_iter()
+            .next()
+        {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// Merge the system-computed `resolves:<ask-id>` marker into the user's
+/// `--details` wire string, keeping every pair the sender typed (#949).
+///
+/// The stamp is appended LAST on purpose: `format_signal` preserves this
+/// order and `parse_signal` reads the braced block into a HashMap, so a
+/// sender who hand-types their own `resolves` key is overridden by the
+/// computed one rather than able to shadow it.
+fn stamp_resolves(details: Option<&str>, ask_id: Option<&str>) -> Option<String> {
+    match (details, ask_id) {
+        (Some(d), Some(id)) => Some(format!("{d}, resolves: {id}")),
+        (Some(d), None) => Some(d.to_string()),
+        (None, Some(id)) => Some(format!("resolves: {id}")),
+        (None, None) => None,
+    }
+}
+
 /// Single-author half of [`retire_answered_signals`], with the addressable
 /// name set injected so it is testable without a watch.toml on disk.
 fn retire_answered_for_author(
@@ -235,26 +339,8 @@ fn retire_answered_for_author(
     names: &[String],
     recipient: &str,
 ) -> error::Result<usize> {
-    // Broadcasts are not replies to anyone in particular; retiring every
-    // pending ask because the author addressed the room would drop unrelated
-    // threads from unrelated senders.
-    if crate::signal::is_broadcast_address(recipient) {
-        return Ok(0);
-    }
-    let bare = recipient.strip_prefix('@').unwrap_or(recipient);
-
     let mut retired = 0;
-    let pending = watch::find_pending_signals(database, author, names, None)?;
-    for (id, text, sender) in pending {
-        // Only the set `pending-replies` actually renders. A pending signal
-        // that does not require a reply never reaches the banner, so it is
-        // not part of the reported pain and is left alone.
-        if !watch::signal_requires_reply(&text) {
-            continue;
-        }
-        if !sender.eq_ignore_ascii_case(bare) {
-            continue;
-        }
+    for id in matching_pending_ask_ids(database, author, names, recipient)? {
         match database.mark_signal_handled_for_repo(&id, author) {
             Ok(true) => retired += 1,
             Ok(false) => {}
@@ -520,6 +606,120 @@ mod tests {
             .expect("retire");
 
         assert_eq!(n, 0, "informational signals are not retired on reply");
+    }
+
+    // -- send-time resolves stamping (#949) ---------------------------------
+
+    /// The composition `handle_signal` performs for a `--verb answer` send,
+    /// with the addressable name set injected (the production path reaches
+    /// it through `wake_names_for`, which needs a watch.toml on disk).
+    fn compose_answer(
+        database: &db::Database,
+        author: &str,
+        to: &str,
+        details: Option<&str>,
+    ) -> String {
+        let ask_id: Option<String> =
+            matching_pending_ask_ids(database, author, &[author.to_string()], to)
+                .expect("match pending asks")
+                .into_iter()
+                .next();
+        let stamped: Option<String> = stamp_resolves(details, ask_id.as_deref());
+        signal::compose(
+            to,
+            "answer",
+            Some("resolved"),
+            Some("here you go"),
+            stamped.as_deref(),
+            verbs::active_manifest(),
+        )
+        .expect("compose")
+    }
+
+    /// Read the `resolves` value back off a composed signal, through the same
+    /// parser the wake gate uses -- asserting on the wire text alone would
+    /// not catch a duplicate-key ordering that parses the wrong way.
+    fn parsed_resolves(text: &str) -> Option<String> {
+        crate::signal::parse_signal(text).and_then(|sig| sig.details.get("resolves").cloned())
+    }
+
+    /// The send-time stamp is the whole mechanism: #919's retire (which runs
+    /// later in this same invocation) destroys the pending-ask evidence, so
+    /// a watch daemon polling afterwards can only learn the fact if it rides
+    /// on the signal.
+    #[test]
+    fn answer_with_pending_ask_stamps_resolves_detail() {
+        let (database, _index, _dir) = crate::testutil::test_storage();
+        let ask = database
+            .insert_reflection("veneer", "@rafters question:help -- need X", "team")
+            .expect("insert ask");
+
+        let text = compose_answer(&database, "rafters", "veneer", None);
+
+        assert_eq!(
+            parsed_resolves(&text).as_deref(),
+            Some(ask.id.as_str()),
+            "the outgoing answer must name the ask it resolves: {text}"
+        );
+        assert!(
+            watch::resolves_pending_ask(&text),
+            "the composed text must satisfy the watch-side predicate: {text}"
+        );
+    }
+
+    /// A fire-and-forget answer to an agent with no tracked ask must compose
+    /// exactly as it does today -- no marker, and therefore no wake.
+    #[test]
+    fn answer_with_no_pending_ask_composes_unchanged() {
+        let (database, _index, _dir) = crate::testutil::test_storage();
+
+        let text = compose_answer(&database, "rafters", "veneer", None);
+
+        let unchanged = signal::compose(
+            "veneer",
+            "answer",
+            Some("resolved"),
+            Some("here you go"),
+            None,
+            verbs::active_manifest(),
+        )
+        .expect("compose baseline");
+        assert_eq!(
+            text, unchanged,
+            "with nothing pending the composed signal must be byte-for-byte today's"
+        );
+        assert!(!watch::resolves_pending_ask(&text));
+    }
+
+    /// The stamp merges into the sender's own `--details`, and wins over a
+    /// hand-typed `resolves` key. Ordering is what enforces that (the stamp
+    /// is appended last, and the braced block parses into a HashMap), so it
+    /// is pinned here rather than left to a `format_signal` refactor.
+    #[test]
+    fn answer_stamps_resolves_alongside_user_supplied_details() {
+        let (database, _index, _dir) = crate::testutil::test_storage();
+        let ask = database
+            .insert_reflection("veneer", "@rafters question:help -- need X", "team")
+            .expect("insert ask");
+
+        let text = compose_answer(&database, "rafters", "veneer", Some("pr: 949"));
+        assert!(
+            text.contains("pr: 949"),
+            "the sender's own details must survive the stamp: {text}"
+        );
+        assert_eq!(parsed_resolves(&text).as_deref(), Some(ask.id.as_str()));
+
+        let forged = compose_answer(
+            &database,
+            "rafters",
+            "veneer",
+            Some("resolves: 01a0-forged-id"),
+        );
+        assert_eq!(
+            parsed_resolves(&forged).as_deref(),
+            Some(ask.id.as_str()),
+            "a hand-typed resolves key must not shadow the computed one: {forged}"
+        );
     }
 
     /// Retiring is host-local. `watch_handled` is keyed (signal_id,

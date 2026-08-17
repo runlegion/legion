@@ -9,7 +9,10 @@ use crate::signal;
 
 use super::config::WatchConfig;
 use super::locks::{CooldownTracker, SessionLockTracker};
-use super::signals::{build_wake_prompt, find_pending_signals, is_wake_worthy};
+use super::signals::{
+    build_wake_prompt, find_pending_signals, is_wake_worthy, resolved_ask_id,
+    resolved_ask_is_authentic,
+};
 use super::spawn::{SpawnMode, spawn_agent};
 use super::tracker::AgentTracker;
 use super::wake_cap_reached;
@@ -78,6 +81,40 @@ pub fn check_auto_unblock(db: &Database, signals: &[(String, String, String)]) -
         }
     }
     unblocked
+}
+
+/// Whether this signal wakes `repo_name`: the verb-driven gate (#404), plus
+/// the conditional answer-wake (#949).
+///
+/// An `answer` is `Record`-shaped and never wake-worthy on its own -- a
+/// fire-and-forget answer to an agent with no tracked ask stays silent. But
+/// the asker is the one party known to be BLOCKED on the reply, and today it
+/// is the only party the wake gate cannot page. So an `answer` wakes when it
+/// carries a send-time `resolves:<ask-id>` stamp naming a wake-worthy ask
+/// this repo itself authored. That bounds answer-wakes by the questions the
+/// sleeper asked.
+///
+/// Kept out of the manifest deliberately: `status.rs` buckets the "WHAT
+/// CHANGED" list by exact equality against `VerbShape::Record`, so moving
+/// `answer` off `Record` would silently drop every answer from that view.
+/// Precedent for a single-verb special case here is `check_auto_unblock`
+/// above (`announce` + a `completed:` marker).
+///
+/// `repo_name` is the watch entry's own name rather than `recipient()`: this
+/// runs after the delegated-entry skip, past which `is_delegated()` false
+/// makes the two equal by definition (`src/watch/config.rs`), and the ask
+/// row's `repo` column is the author repo's own name.
+fn signal_wakes_repo(db: &Database, repo_name: &str, text: &str) -> bool {
+    if is_wake_worthy(text) {
+        return true;
+    }
+    let Some(ask_id) = resolved_ask_id(text) else {
+        return false;
+    };
+    // Fail CLOSED: an uncertain authenticity check must never spawn. A
+    // missed wake costs latency; an unauthenticated one costs a session
+    // any sender could conjure with a hand-typed --details.
+    resolved_ask_is_authentic(db, &ask_id, repo_name).unwrap_or(false)
 }
 
 /// Cluster-wide persona wake lease gate. When present, watch will try to
@@ -187,13 +224,22 @@ pub fn poll_cycle(
             continue;
         }
 
-        // Verb-driven wake gate (#404). Only spawn when at least one signal
-        // carries a wake-worthy verb. Informational signals targeting this
-        // repo (announce/ack/info/answer/review-without-request) are marked
-        // handled here so they do not re-poll forever; they remain visible
-        // via `legion bullpen` and were already delivered to live sessions
-        // by the channel push.
-        if !signals.iter().any(|(_, text, _)| is_wake_worthy(text)) {
+        // Verb-driven wake gate (#404), plus the conditional answer-wake
+        // (#949) -- see `signal_wakes_repo`. Only spawn when at least one
+        // signal wakes this repo. Informational signals targeting this repo
+        // (announce/ack/info/review-without-request, and any answer that
+        // resolves nothing this repo asked) are marked handled here so they
+        // do not re-poll forever; they remain visible via `legion bullpen`
+        // and were already delivered to live sessions by the channel push.
+        //
+        // The gate stays at this exact point in the cycle so an
+        // answer-triggered wake inherits every guard a classic wake already
+        // has: the delegated skip, the cooldown, and the live-session lock
+        // all run above, and the concurrent-wake cap runs below.
+        if !signals
+            .iter()
+            .any(|(_, text, _)| signal_wakes_repo(db, &repo.name, text))
+        {
             for (id, _, _) in &signals {
                 if let Err(e) = db.mark_signal_handled_for_repo(id, &repo.name) {
                     eprintln!(
@@ -1148,6 +1194,220 @@ mod tests {
             still_pending.len(),
             1,
             "deferred wake-worthy signal must stay pending for re-poll"
+        );
+    }
+
+    // -- Conditional answer-wake (#949) ---------------------------------------
+
+    /// One non-delegated `veneer` entry on the unspawnable workdir. Every
+    /// answer-wake test below takes its wake/no-wake evidence from the
+    /// `wake_attempts` table rather than from `spawned`, for the reason
+    /// spelled out at `UNSPAWNABLE_WORKDIR`: a spawn that SUCCEEDS bills a
+    /// live session per test run. `enqueue_wake_attempt` is the last
+    /// statement before `spawn_agent` with no gate in between, so a row
+    /// there means the wake gate let the batch through, and an empty table
+    /// means it did not. `spawned == 0` is still asserted everywhere as the
+    /// safety net that the workdir stayed unspawnable.
+    fn veneer_config() -> WatchConfig {
+        WatchConfig {
+            stagger_secs: 0,
+            repos: vec![WatchRepoConfig {
+                name: "veneer".to_string(),
+                workdir: UNSPAWNABLE_WORKDIR.to_string(),
+                agent: None,
+                broadcast_tags: Vec::new(),
+                extra: toml::Table::new(),
+            }],
+            ..WatchConfig::default()
+        }
+    }
+
+    fn poll_veneer(db: &Database, locks: Option<&SessionLockTracker>) -> u32 {
+        let config = veneer_config();
+        let mut cooldown = CooldownTracker::new(0, None, None);
+        let mut tracker = AgentTracker::new();
+        poll_cycle(
+            db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            locks,
+            None,
+            None,
+            SpawnMode::Print,
+        )
+        .expect("poll")
+    }
+
+    /// The motivating case: veneer asked, slept, and rafters answered. The
+    /// answer verb is `Record` and never joins the wake set, so the stamped
+    /// `resolves` marker is the only thing that can page the asker.
+    #[test]
+    fn poll_cycle_wakes_repo_when_authentic_answer_resolves_pending_ask() {
+        let (db, _index, _dir) = test_storage();
+        let ask = db
+            .insert_reflection("veneer", "@rafters question -- need X", "team")
+            .expect("insert ask");
+        db.insert_reflection(
+            "rafters",
+            &format!(
+                "@veneer answer:resolved {{resolves: {}}} -- X is in tokens.css",
+                ask.id
+            ),
+            "team",
+        )
+        .expect("insert answer");
+
+        assert_eq!(
+            poll_veneer(&db, None),
+            0,
+            "the bogus workdir must fail the spawn -- a test that really spawns \
+             bills a live session per run"
+        );
+
+        let attempts = db.recent_wake_attempts(50).expect("list attempts");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "an authentic answer must reach the wake machinery -- the asker is \
+             the party blocked on it"
+        );
+        assert_eq!(attempts[0].repo_name, "veneer");
+    }
+
+    /// The regression this issue exists to prevent: a fire-and-forget answer
+    /// to an agent with no tracked ask stays silent, exactly as any other
+    /// Record-shaped signal does today.
+    #[test]
+    fn poll_cycle_answer_without_matching_ask_does_not_wake() {
+        let (db, _index, _dir) = test_storage();
+        db.insert_reflection(
+            "rafters",
+            "@veneer answer:resolved -- fyi, X is done",
+            "team",
+        )
+        .expect("insert answer");
+
+        // Pre-assertion, so an empty pending set after the poll cannot pass
+        // vacuously: the answer really does reach veneer's queue first.
+        let before =
+            find_pending_signals(&db, "veneer", &["veneer".to_string()], None).expect("pending");
+        assert_eq!(before.len(), 1, "the answer must be pending for veneer");
+
+        assert_eq!(poll_veneer(&db, None), 0, "nothing may spawn here");
+
+        let attempts = db.recent_wake_attempts(50).expect("list attempts");
+        assert!(
+            attempts.is_empty(),
+            "an answer with no resolves marker must not wake anyone"
+        );
+        let pending =
+            find_pending_signals(&db, "veneer", &["veneer".to_string()], None).expect("pending");
+        assert!(
+            pending.is_empty(),
+            "it must be retired as informational, not left to re-poll forever"
+        );
+    }
+
+    /// The authenticity check, pinned: a `resolves` id can be typed by hand,
+    /// so a real id belonging to someone else's ask must not forge a wake.
+    #[test]
+    fn poll_cycle_rejects_forged_resolves_id() {
+        let (db, _index, _dir) = test_storage();
+        // A real, wake-worthy ask -- but smugglr asked it, not veneer.
+        let others_ask = db
+            .insert_reflection("smugglr", "@rafters question -- need Y", "team")
+            .expect("insert third-party ask");
+        db.insert_reflection(
+            "rafters",
+            &format!("@veneer answer:resolved {{resolves: {}}}", others_ask.id),
+            "team",
+        )
+        .expect("insert forged answer");
+        db.insert_reflection(
+            "rafters",
+            "@veneer answer:resolved {resolves: 01a0-no-such-reflection}",
+            "team",
+        )
+        .expect("insert answer naming a nonexistent ask");
+
+        // Pre-assertion, same reason as the sibling test above: an empty
+        // attempts table proves the authenticity check REFUSED these two
+        // only if they actually reached veneer's queue. Without it, broken
+        // address matching would pass this test with
+        // `resolved_ask_is_authentic` never having run. (The smugglr ask is
+        // addressed @rafters, so it is not one of the two.)
+        let before =
+            find_pending_signals(&db, "veneer", &["veneer".to_string()], None).expect("pending");
+        assert_eq!(
+            before.len(),
+            2,
+            "both forged answers must be pending for veneer before the poll"
+        );
+
+        assert_eq!(poll_veneer(&db, None), 0, "nothing may spawn here");
+
+        let attempts = db.recent_wake_attempts(50).expect("list attempts");
+        assert!(
+            attempts.is_empty(),
+            "a hand-typed resolves id must not forge a wake, whether it names a \
+             third repo's ask or nothing at all"
+        );
+    }
+
+    /// The live-session guard needs no new code -- the `session_locks` gate
+    /// runs above the wake check -- but an answer-wake must inherit it, so
+    /// pin it rather than trust the ordering to survive a refactor.
+    ///
+    /// Unix-only, and for the same reason the session-lock tests in
+    /// `locks.rs` are (see the note above
+    /// `session_lock_record_spawn_overwrites_abandoned_lock`): the setup
+    /// records a lock holding OUR OWN pid and needs it to read back as
+    /// alive. `process_alive` shells out to `kill -0` on unix and returns a
+    /// flat `false` on every other platform, so on Windows `active_pid`
+    /// reports no holder, `poll_cycle` sails past the session-lock gate into
+    /// the wake check, and the authentic answer enqueues the very
+    /// wake_attempt row this test asserts is absent.
+    ///
+    /// The sibling `poll_cycle_skips_when_session_lock_is_active` sets up
+    /// the identical scenario ungated, but asserts only `spawned == 0` --
+    /// true on Windows whether or not the lock gate held, because the spawn
+    /// fails there anyway. It passes vacuously, which is why `gates.rs`
+    /// carried no cfg gate before this test asserted on the attempts table.
+    #[cfg(unix)]
+    #[test]
+    fn poll_cycle_authentic_answer_does_not_wake_live_session() {
+        let (db, _index, data_dir) = test_storage();
+        let ask = db
+            .insert_reflection("veneer", "@rafters question -- need X", "team")
+            .expect("insert ask");
+        db.insert_reflection(
+            "rafters",
+            &format!("@veneer answer:resolved {{resolves: {}}}", ask.id),
+            "team",
+        )
+        .expect("insert answer");
+
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+        locks
+            .record_spawn("veneer", std::process::id())
+            .expect("record lock");
+
+        let spawned = poll_veneer(&db, Some(&locks));
+
+        assert_eq!(spawned, 0, "a live session must not be woken");
+        let attempts = db.recent_wake_attempts(50).expect("list attempts");
+        assert!(
+            attempts.is_empty(),
+            "the session-lock gate runs before the wake check, so an authentic \
+             answer must not even reach the wake machinery"
+        );
+        let pending =
+            find_pending_signals(&db, "veneer", &["veneer".to_string()], None).expect("pending");
+        assert_eq!(
+            pending.len(),
+            1,
+            "the answer skipped for a live session stays pending for the next poll"
         );
     }
 
