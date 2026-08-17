@@ -535,8 +535,19 @@ pub(crate) fn handle_recall(
             None => recall::recall_bm25(&database, &index, &repo, &context, limit, mode, &range)?,
         }
     };
-    // Apply min-score filter on hybrid/latest paths (cosine-only applies it inline).
-    if !cosine_only && let Some(threshold) = min_score {
+    // Apply min-score filter on hybrid/latest paths (cosine-only applies it
+    // inline). Skipped on the --id path: recall_by_id hardcodes score 0.0
+    // (correctly -- it mirrors --domain/--latest, the other bypass-search
+    // paths, none of which produce a meaningful score), so applying a
+    // positive --min-score threshold there would silently filter out a
+    // valid id with no error, contradicting the spec's intent that --id
+    // exits non-zero only on ReflectionNotFound/ReflectionRepoMismatch.
+    // --min-score is accepted-but-ignored on the --id path, same as
+    // --limit/--since/--until/--on above.
+    if id.is_none()
+        && !cosine_only
+        && let Some(threshold) = min_score
+    {
         recall::filter_by_min_score(&mut result, threshold);
     }
     let output = recall::format_for_hook(&result, preview, tier);

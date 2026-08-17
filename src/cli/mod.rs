@@ -190,10 +190,13 @@ pub(crate) enum Commands {
         /// hit's id to pull its full body. Mutually exclusive with the
         /// other search-mode selectors (--latest, --cosine-only, --domain,
         /// --context) -- it is a fourth way to select WHAT to return.
-        /// --limit, --since, --until, and --on are accepted but not
-        /// threaded into this fetch (a fetch-by-id is already unambiguous);
-        /// --archives / --include-archives DO apply, since they resolve
-        /// the archive mode this id lookup is filtered by.
+        /// --limit, --since, --until, --on, and --min-score are accepted
+        /// but not threaded into this fetch (a fetch-by-id is already
+        /// unambiguous, and the fetched reflection has no meaningful score
+        /// to threshold against -- applying --min-score here would make a
+        /// valid id vanish silently instead of erroring); --archives /
+        /// --include-archives DO apply, since they resolve the archive
+        /// mode this id lookup is filtered by.
         #[arg(long, conflicts_with_all = ["latest", "cosine_only", "domain", "context"])]
         id: Option<String>,
 
