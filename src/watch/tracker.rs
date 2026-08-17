@@ -1389,12 +1389,31 @@ mod tests {
             .expect("mark handled at spawn time");
 
         // First (winning) reap: settles the row Claimed/Spawning -> Failed.
-        let mut child_a = std::process::Command::new("sleep")
-            .arg("9999")
+        //
+        // The child must already be fully reaped (not merely signaled)
+        // before it is tracked: `reap_finished`'s very first step is
+        // `try_wait()`, and a `kill()` immediately followed by `try_wait()`
+        // races SIGKILL delivery against the kernel actually terminating
+        // the process. On a loaded/throttled CI runner that race can be
+        // lost -- `try_wait()` observes `Ok(None)` (still alive), and
+        // `reap_finished` falls all the way through to `return true; //
+        // keep tracking` WITHOUT EVER reaching the `submit_failed_reason`
+        // branch below, leaving the row stuck at `Spawning` (the exact CI
+        // failure this replaced). Spawning a fast, self-exiting process and
+        // blocking on `wait()` before tracking removes the race entirely:
+        // by the time `SpawnedChild::Print(child_a).try_wait()` runs, the
+        // OS has already reaped it, and Rust's `Child` caches that exit
+        // status so the later `try_wait()` call inside `reap_finished`
+        // returns it deterministically (same pattern already proven stable
+        // in `reap_finished_success_path_leaves_redelivery_untouched`
+        // above). The exit code itself is irrelevant here: the
+        // `submit_failed_reason` branch below always records outcome
+        // "error" regardless of what `try_wait()`'s success bit was.
+        let mut child_a = std::process::Command::new("true")
             .spawn()
-            .expect("spawn sleep A");
+            .expect("spawn true A");
         let pid_a = child_a.id();
-        child_a.kill().expect("kill child A");
+        child_a.wait().expect("wait for child A to exit");
         locks.record_spawn("legion", pid_a).expect("record spawn A");
 
         let mut tracker = AgentTracker::new();
@@ -1437,12 +1456,13 @@ mod tests {
         // already `failed`, which is not in the sticky-terminal WHERE
         // clause's allowed source-state set), so this reap must never call
         // the rearm hook.
-        let mut child_b = std::process::Command::new("sleep")
-            .arg("9999")
+        // Same determinism fix as child_a above: wait synchronously rather
+        // than kill-and-immediately-track.
+        let mut child_b = std::process::Command::new("true")
             .spawn()
-            .expect("spawn sleep B");
+            .expect("spawn true B");
         let pid_b = child_b.id();
-        child_b.kill().expect("kill child B");
+        child_b.wait().expect("wait for child B to exit");
         locks.record_spawn("legion", pid_b).expect("record spawn B");
 
         let mut tracker2 = AgentTracker::new();
