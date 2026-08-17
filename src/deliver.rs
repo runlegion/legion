@@ -1,19 +1,20 @@
-//! Hook-side delivery drain (#941): the code-side counterpart to the MCP
-//! notification lane's push. Gives interactive sessions the same
-//! no-inference-roundtrip delivery path the watch daemon already has for
-//! sleeping/spawned agents, driven by hooks instead of the MCP
-//! subprocess's `notifications/claude/channel` push. Reuses the exact
-//! `board_reads` cursor primitives the MCP notifier already uses -- no
-//! new table.
+//! Hook-side delivery drain (#941): the live-session delivery lane. Gives
+//! interactive sessions the same no-inference-roundtrip delivery path the
+//! watch daemon already has for sleeping/spawned agents, driven by plugin
+//! hook events. It ran alongside the MCP subprocess's
+//! `notifications/claude/channel` push through a dual-lane parity window
+//! and became the sole live-session lane when that push was retired
+//! (#947). Reuses the `board_reads` cursor primitives that lane also used
+//! -- no new table.
 //!
 //! The hook lane's cursor row is keyed by a distinct `reader_repo` string
-//! (`hook_reader_key`) so it cannot collide with the MCP notifier's
-//! cursor (`mcp::notifier`, keyed by the plain repo name) or with manual
-//! `legion bullpen`'s cursor (`Database::mark_board_read`, same
-//! plain-repo key). Three lanes, three independent cursor rows on the
-//! same table -- exactly what a dual-lane parity comparison needs: MCP
-//! and hook must each independently observe every eligible post, not
-//! race each other for one shared cursor.
+//! (`hook_reader_key`) so it cannot collide with manual `legion bullpen`'s
+//! cursor (`Database::mark_board_read`, keyed by the plain repo name).
+//! Independent cursor rows on the same table are what the parity
+//! comparison needed -- each lane had to observe every eligible post on
+//! its own rather than race the others for one shared cursor -- and the
+//! separation still earns its keep: a hook drain must not move the unread
+//! count that manual `bullpen` drives.
 //!
 //! Reusing `mark_board_read`/`get_and_mark_unread_board_posts` directly
 //! was considered and rejected: those also drive `archive_read_posts`'s
@@ -25,17 +26,16 @@ use crate::db::{Database, HOOK_DRAIN_CURSOR_SUFFIX, Reflection};
 use crate::error::Result;
 use crate::mcp::notifier;
 
-/// Batch size cap for a single drain call. Half `NOTIFIER_BATCH_LIMIT`'s
-/// 100 (mcp/notifier.rs): drains fire per hook event, far more often than
-/// notifier poll ticks, so each call can afford a smaller bite. Overflow
-/// is safe for the same reason as the notifier's -- anything beyond the
-/// cap is picked up on the next drain because the cursor advances to the
-/// last fetched row.
+/// Batch size cap for a single drain call. Half the 100-row cap the
+/// retired MCP notifier used: drains fire per hook event, far more often
+/// than that lane's poll ticks, so each call can afford a smaller bite.
+/// Overflow is safe -- anything beyond the cap is picked up on the next
+/// drain because the cursor advances to the last fetched row.
 const DRAIN_BATCH_LIMIT: usize = 50;
 
 /// Cursor key the hook-drain lane writes to `board_reads`, namespaced
-/// apart from the plain `repo` key the MCP notifier and manual `legion
-/// bullpen` already use. Built from `db::HOOK_DRAIN_CURSOR_SUFFIX`, the
+/// apart from the plain `repo` key manual `legion bullpen` uses (and the
+/// retired MCP notifier used). Built from `db::HOOK_DRAIN_CURSOR_SUFFIX`, the
 /// same constant `archive_read_posts` uses to exclude these rows from its
 /// aggregate -- the key scheme and the exclusion cannot drift apart.
 pub fn hook_reader_key(repo: &str) -> String {
@@ -49,18 +49,17 @@ pub fn hook_reader_key(repo: &str) -> String {
 /// so two concurrent sessions on the same repo cannot double-deliver a
 /// post; see that method's docs for the loser's two safe outcomes.
 ///
-/// Applies the same delivery decision the MCP lane applies --
-/// `notifier::should_notify(text, repo, Some(repo))` -- so the two lanes
-/// are judged against an identical filter, not two different notions of
-/// "should this post reach this agent."
+/// Applies the delivery decision `notifier::should_notify(text, repo,
+/// Some(repo))` -- the filter the retired MCP push lane was also judged
+/// against, kept as the single notion of "should this post reach this
+/// agent" rather than re-derived for the hook lane.
 ///
 /// This function records NO telemetry: a claimed post is drained, not yet
 /// delivered. The `lane = "hook"` `DeliveryRecord` is written by the CLI
 /// handler (`cli::deliver`) only after the drained text has been printed
-/// and flushed -- the last stage this process controls, mirroring the MCP
-/// lane's write-confirmed (`write_ok`) recording point. What neither lane
-/// can verify is the harness-side tail (frame render, additionalContext
-/// injection); that residual asymmetry is documented on
+/// and flushed -- the last stage this process controls. What it cannot
+/// verify is the harness-side tail (the additionalContext injection);
+/// that residual asymmetry is documented on
 /// `telemetry::DeliveryRecord`.
 pub fn drain_for_hook(db: &Database, repo: &str) -> Result<Vec<Reflection>> {
     let batch = db.claim_board_posts_for_reader(&hook_reader_key(repo), DRAIN_BATCH_LIMIT)?;
@@ -109,10 +108,10 @@ mod tests {
         let db = test_db();
         db.insert_reflection("rafters", "old post", "team").unwrap();
 
-        // Seed the plain "legion" cursor the way both the MCP notifier
-        // (advance_board_read_cursor) and manual `legion bullpen`
-        // (mark_board_read) would -- both write to the same
-        // plain-repo-keyed row in board_reads.
+        // Seed the plain "legion" cursor the way manual `legion bullpen`
+        // (mark_board_read) would -- the retired MCP notifier wrote the
+        // same plain-repo-keyed row in board_reads, which is why the hook
+        // lane was namespaced away from it in the first place.
         db.mark_board_read("legion").unwrap();
         let plain_cursor_before = db.get_board_read_cursor("legion").unwrap();
         assert_eq!(db.get_unread_count("legion").unwrap(), 0);

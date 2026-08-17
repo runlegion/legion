@@ -1,10 +1,11 @@
 #!/bin/bash
-# Legion hook-side delivery drain (#941): the code-side counterpart to the
-# MCP notification lane's push. Runs `legion deliver drain --repo "$REPO"`
-# and injects any drained bullpen posts/signals as additionalContext -- the
-# same delivery an interactive session would otherwise only get through the
-# MCP subprocess's `notifications/claude/channel` push, which depends on a
-# model inference roundtrip existing at all.
+# Legion hook-side delivery drain (#941): the live-session delivery lane.
+# Runs `legion deliver drain --repo "$REPO"` and injects any drained
+# bullpen posts/signals as additionalContext. It ran alongside the MCP
+# subprocess's `notifications/claude/channel` push through a dual-lane
+# parity window and became the sole live-session lane when that push was
+# retired (#947); unlike the push, it needs no model inference roundtrip
+# to fire.
 #
 # Wired into UserPromptSubmit, PostToolUse (alongside mark-work.sh), and
 # Stop -- three points in a turn where surfacing a mid-session post is
