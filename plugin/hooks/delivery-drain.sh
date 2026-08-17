@@ -80,7 +80,7 @@ if [ -z "$DRAINED" ]; then
   exit 0
 fi
 
-CTX="[Legion] Delivered via hook drain (dual-lane parity with the MCP channel push):
+CTX="[Legion] Delivered via hook drain:
 
 ${DRAINED}"
 

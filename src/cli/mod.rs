@@ -707,20 +707,6 @@ pub(crate) enum Commands {
         action: SubIssueAction,
     },
 
-    /// Probe a fresh MCP subprocess for notifier health (#391). Spawns
-    /// `legion mcp` over stdio, sends `initialize` + `legion/notifier_health`
-    /// JSON-RPC requests, prints the health JSON. This spins up a NEW MCP
-    /// -- it does NOT probe the MCP attached to a running Claude Code
-    /// session (that one is owned by the parent CC process and is not
-    /// externally addressable). Use as a contract smoke test.
-    McpHealth {
-        /// Wait this many seconds for the notifier to tick at least once
-        /// before sampling its health. Default 3 (>= one full poll interval
-        /// at the default 1500ms tick rate).
-        #[arg(long, default_value_t = 3)]
-        wait: u64,
-    },
-
     /// Print the current local time, weekday, and sunphase (#410).
     ///
     /// Used by SessionStart to inject a one-line framing block so agents

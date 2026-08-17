@@ -373,7 +373,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let req = make_request("tools/list", None);
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
 
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), 4);
@@ -406,7 +406,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
 
         // Should succeed
         assert!(
@@ -444,7 +444,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert!(
             resp.get("error").is_none(),
             "unexpected error: {:?}",
@@ -476,7 +476,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert!(
             resp.get("error").is_none(),
             "unexpected error: {:?}",
@@ -512,7 +512,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert!(
             resp.get("error").is_none(),
             "validation failures are tool errors, not JSON-RPC errors"
@@ -553,7 +553,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert!(resp.get("error").is_none());
         assert!(resp["result"].get("isError").is_none());
 
@@ -583,7 +583,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert_eq!(resp["result"]["isError"], true);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
         assert!(
@@ -606,7 +606,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         // Per MCP spec: tool errors go in the success envelope with isError:true,
         // NOT as a JSON-RPC error response.
         assert!(
@@ -640,7 +640,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         // Per MCP spec: McpInvalidArgument is a tool error, not a protocol error.
         // Must be in the success envelope with isError:true.
         assert!(
@@ -680,7 +680,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert_eq!(
             resp["result"]["isError"], true,
             "self-address signal must be rejected"
@@ -713,7 +713,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         // The signal itself should succeed (not be rejected as self-address).
         // It may fail for other reasons (e.g., missing required fields on the
         // verb) but must NOT fail with a self-address error.
@@ -745,7 +745,7 @@ mod tests {
             })),
         );
 
-        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None, None).expect("response");
+        let resp = dispatch(&req, dir.path(), "0.6.0", &tx, None).expect("response");
         assert!(
             resp.get("error").is_none(),
             "McpInvalidArgument must not produce a JSON-RPC error envelope"

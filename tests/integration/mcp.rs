@@ -1,4 +1,5 @@
-//! Integration tests: MCP stdio server and the cross-process push bridge.
+//! Integration tests: the MCP stdio server's request/response surface, and
+//! the absence of the retired server-initiated channel push (#947).
 
 use crate::common::*;
 use std::process::Command;
@@ -78,57 +79,65 @@ fn legion_mcp_subcommand_is_stdio_only() {
     drop(blocker);
 }
 
-/// End-to-end test: spawn `legion mcp` as a subprocess, perform the MCP
-/// `initialize` handshake, then fire FOUR separate `legion post` CLI
-/// invocations covering every branch of the recipient filter:
+/// The MCP subprocess must never initiate a message (#947).
 ///
-/// - **MUSING_DELIVERED**: plain text from `sender-repo` -- general musing
-///   from a different repo, MUST deliver.
-/// - **OWN_POST_SUPPRESSED**: plain text from `recv-repo` (same as
-///   `clientInfo.name`) -- own-post suppression, MUST NOT deliver.
-/// - **NAMED_SIGNAL_DELIVERED**: `@recv-repo` signal from `sender-repo` --
-///   targeted signal to this client, MUST deliver with `is_signal="true"`.
-/// - **WRONG_SIGNAL_SUPPRESSED**: `@other-repo` signal from `sender-repo` --
-///   targeted signal to a different client, MUST NOT deliver.
+/// This is the inverse of the test it replaces
+/// (`mcp_push_bridge_delivers_cross_process_post`), which asserted that a
+/// cross-process `legion post` produced `notifications/claude/channel`
+/// frames on the subprocess's stdout. That lane is retired; the hook drain
+/// (#941) delivers to live sessions now.
 ///
-/// For every delivered frame, the test also parses the wire payload (the
-/// `<channel>` XML inside `params.content`) and asserts the `repo`,
-/// `is_signal`, and CDATA body are correct -- this locks the wire format so
-/// a future refactor of `build_channel_content` cannot silently change the
-/// shape of the message Claude Code parses on the other end.
+/// The post fired here is deliberately the case the retired notifier was
+/// most certain to deliver: a plain musing from a repo other than
+/// `clientInfo.name`, which passes every branch of `should_notify` and lands
+/// after the subprocess's boot watermark, so it took the live path rather
+/// than the narrower cold-boot replay filter. Against the pre-#947 binary
+/// this test fails: the notifier polled at a 500ms default, so the quiet
+/// window below spans several ticks.
 ///
-/// This test is the primary regression guard for issue #220. Prior to the
-/// fix, the MCP notifier thread subscribed to an in-process
-/// `tokio::sync::broadcast` channel, which cannot cross process boundaries.
-/// Any write made from a separate process -- a `legion post` CLI command,
-/// a second Claude Code session's MCP subprocess, the standalone HTTP
-/// daemon -- was silently invisible to the notifier. This test exercises
-/// exactly that path across every filter branch and must fail if any of
-/// them regresses (the prior PR #221 review highlighted that a test
-/// covering only the general-musing branch would let a `client_repo_cell`
-/// wiring break slip through).
+/// Two things make the verdict trustworthy rather than vacuous:
+///
+///   1. **A dead subprocess cannot pass.** After the quiet window the test
+///      round-trips `tools/list` and requires the four legion tools back. A
+///      subprocess that crashed, wedged, or exited would fail there instead
+///      of silently satisfying "no frames arrived."
+///   2. **No kill, no reap race.** The child is retired by closing stdin and
+///      blocking on `wait()`, never by `kill()` -- the #959/PR960 lesson
+///      that a signal sent is not a process reaped, and that test
+///      determinism is a property of the fixture rather than the assert.
+///      Every line the subprocess writes, in every phase, is inspected for a
+///      push frame; none is skipped past.
+///
+/// The one residual timing exposure is a false PASS (a reintroduced push
+/// slower than the window), never a false fail: with the emitter deleted
+/// there is no code path that could produce a frame late.
 #[test]
-fn mcp_push_bridge_delivers_cross_process_post() {
+fn mcp_subprocess_never_emits_channel_push_frame() {
     use std::io::{BufRead, BufReader, Write};
     use std::process::Stdio;
+    use std::sync::mpsc::{RecvTimeoutError, channel};
     use std::time::{Duration, Instant};
 
+    /// Long enough to span several ticks of the retired notifier's 500ms
+    /// default poll interval, so the pre-#947 binary fails this test.
+    const QUIET_WINDOW: Duration = Duration::from_millis(2500);
+    /// Generous ceiling for a single request/response round trip. Only
+    /// reached when the subprocess is wedged, which is a real failure.
+    const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
     let dir = tempfile::tempdir().expect("tempdir");
+
+    // Isolate telemetry state: an `mcp_notification` row appended to the
+    // developer's real delivery.jsonl would corrupt the very parity dataset
+    // that authorized this retirement. The override also lets the test
+    // assert the file stays clean.
+    let state_home = dir.path().join("state");
 
     // Warm the database once before spawning the MCP subprocess. Legion's
     // schema migrations are not concurrency-safe at first-open time: two
     // processes racing to ALTER TABLE on a fresh DB produce "duplicate
-    // column name" errors. A single synchronous CLI command drives the
-    // full migration path to completion, so subsequent openers see a
-    // ready schema.
-    // Isolate telemetry state (#941): the notifier now writes DeliveryRecord
-    // rows through XDG_STATE_HOME, and without an override this test would
-    // append lane="mcp_notification" rows to the developer's real
-    // delivery.jsonl on every run -- polluting the exact parity dataset the
-    // telemetry exists to produce. The same override also lets this test
-    // assert on the rows (see the end of the test).
-    let state_home = dir.path().join("state");
-
+    // column name" errors. A single synchronous CLI command drives the full
+    // migration path to completion, so subsequent openers see a ready schema.
     let warmup = Command::new(env!("CARGO_BIN_EXE_legion"))
         .env("LEGION_DATA_DIR", dir.path())
         .env("XDG_STATE_HOME", &state_home)
@@ -141,12 +150,9 @@ fn mcp_push_bridge_delivers_cross_process_post() {
         String::from_utf8_lossy(&warmup.stderr)
     );
 
-    // Spawn the MCP subprocess with a tight poll interval so the test
-    // finishes quickly instead of waiting on the 500ms default.
     let mut child = Command::new(env!("CARGO_BIN_EXE_legion"))
         .env("LEGION_DATA_DIR", dir.path())
         .env("XDG_STATE_HOME", &state_home)
-        .env("LEGION_MCP_POLL_MS", "50")
         .args(["mcp"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -157,13 +163,10 @@ fn mcp_push_bridge_delivers_cross_process_post() {
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
     let child_stderr = child.stderr.take().expect("stderr");
-    let mut reader = BufReader::new(stdout);
 
-    // Drain subprocess stderr in a background thread. If the notifier spams
-    // errors (DB failure, etc.) and fills the stderr pipe, the child can
-    // block on `eprintln!`, which interacts badly with the shared stdout
-    // mutex. Draining stderr prevents that and captures the lines so the
-    // failure message can include them.
+    // Drain subprocess stderr in a background thread. A full stderr pipe
+    // blocks the child inside eprintln!, which would look like "quiet"
+    // here for the wrong reason.
     let captured_stderr = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     {
         let captured = std::sync::Arc::clone(&captured_stderr);
@@ -182,89 +185,11 @@ fn mcp_push_bridge_delivers_cross_process_post() {
         });
     }
 
-    // 1. Send initialize. `clientInfo.name = "recv-repo"` is load-bearing:
-    //    without it, the notifier cannot suppress own-posts or route
-    //    named signals.
-    let init = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "recv-repo", "version": "0.0.1" }
-        }
-    });
-    writeln!(stdin, "{}", serde_json::to_string(&init).unwrap()).expect("write initialize");
-    stdin.flush().expect("flush");
-
-    // 2. Read the initialize response.
-    let mut init_line = String::new();
-    reader
-        .read_line(&mut init_line)
-        .expect("read initialize response");
-    let init_resp: serde_json::Value =
-        serde_json::from_str(init_line.trim()).expect("parse initialize response");
-    assert_eq!(init_resp["id"], 1, "initialize response id mismatch");
-    assert_eq!(
-        init_resp["result"]["serverInfo"]["name"], "legion-channel",
-        "wrong server name"
-    );
-
-    // 3. Fire four cross-process posts covering every filter branch. The
-    //    markers are unique per-case so the assertions can distinguish
-    //    which frames arrived without parsing text content.
-    let musing_marker = "MCP_PUSH_MUSING_DELIVERED_9f2a1b";
-    let own_post_marker = "MCP_PUSH_OWN_POST_SUPPRESSED_9f2a1b";
-    let named_signal_marker = "MCP_PUSH_NAMED_SIGNAL_DELIVERED_9f2a1b";
-    let wrong_signal_marker = "MCP_PUSH_WRONG_SIGNAL_SUPPRESSED_9f2a1b";
-
-    // Order matters: fire the "must not deliver" posts FIRST so that when
-    // the later "must deliver" posts arrive, we know the prior ones have
-    // already been polled and filtered. If MUSING_DELIVERED arrives and
-    // OWN_POST_SUPPRESSED is not in the observed set by then, we can
-    // conclude the notifier's filter actively suppressed it, not just
-    // that it had not been polled yet.
-    let posts = [
-        ("recv-repo", own_post_marker.to_string()),
-        (
-            "sender-repo",
-            format!("@other-repo review:approved -- {}", wrong_signal_marker),
-        ),
-        ("sender-repo", musing_marker.to_string()),
-        (
-            "sender-repo",
-            format!("@recv-repo review:approved -- {}", named_signal_marker),
-        ),
-    ];
-
-    for (repo, text) in &posts {
-        let post_out = Command::new(env!("CARGO_BIN_EXE_legion"))
-            .env("LEGION_DATA_DIR", dir.path())
-            .env("XDG_STATE_HOME", &state_home)
-            .args(["post", "--repo", repo, "--text", text])
-            .output()
-            .expect("spawn legion post");
-        assert!(
-            post_out.status.success(),
-            "legion post failed ({}): {}",
-            repo,
-            String::from_utf8_lossy(&post_out.stderr)
-        );
-    }
-
-    // 4. Drain subprocess stdout until BOTH deliverable markers have been
-    //    seen OR the deadline expires. Each line is captured regardless
-    //    of whether it matches.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut observed_lines: Vec<String> = Vec::new();
-    let mut observed_frames: Vec<serde_json::Value> = Vec::new();
-
-    // Read in a dedicated thread so we can enforce the deadline via
-    // channel recv_timeout instead of blocking forever on a dead pipe.
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    // One reader thread forwards every stdout line for the whole test, so
+    // no phase can read past a frame another phase would have caught.
+    let (tx, rx) = channel::<String>();
     std::thread::spawn(move || {
-        let mut reader = reader;
+        let mut reader = BufReader::new(stdout);
         loop {
             let mut line = String::new();
             match reader.read_line(&mut line) {
@@ -279,147 +204,189 @@ fn mcp_push_bridge_delivers_cross_process_post() {
         }
     });
 
-    let mut musing_frame: Option<serde_json::Value> = None;
-    let mut signal_frame: Option<serde_json::Value> = None;
+    // Every line the subprocess emits, recorded in order for diagnostics.
+    let mut observed: Vec<String> = Vec::new();
+    // Lines that parsed as a server-initiated channel push. Must stay empty.
+    let mut push_frames: Vec<String> = Vec::new();
 
-    while Instant::now() < deadline && (musing_frame.is_none() || signal_frame.is_none()) {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+    let note = |line: String, observed: &mut Vec<String>, pushes: &mut Vec<String>| {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim())
+            && v["method"] == "notifications/claude/channel"
+        {
+            pushes.push(line.clone());
+        }
+        observed.push(line);
+    };
+
+    // 1. Handshake. `clientInfo.name = "recv-repo"` is load-bearing: it is
+    //    the identity the retired notifier routed against, so naming it
+    //    keeps the post below inside the delivered branch.
+    let init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "recv-repo", "version": "0.0.1" }
+        }
+    });
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::to_string(&init).expect("serialize initialize")
+    )
+    .expect("write initialize");
+    stdin.flush().expect("flush initialize");
+
+    let init_line = rx
+        .recv_timeout(RESPONSE_TIMEOUT)
+        .expect("no initialize response from legion mcp");
+    note(init_line.clone(), &mut observed, &mut push_frames);
+    let init_resp: serde_json::Value =
+        serde_json::from_str(init_line.trim()).expect("parse initialize response");
+    assert_eq!(init_resp["id"], 1, "initialize response id mismatch");
+    // The capability advertisement is what made the host subscribe to
+    // pushes; assert its absence on the wire, not just in the unit test.
+    assert!(
+        init_resp["result"]["capabilities"]
+            .get("experimental")
+            .is_none(),
+        "initialize still advertises an experimental capability: {}",
+        init_resp["result"]["capabilities"]
+    );
+
+    // 2. Fire the cross-process post the retired lane would have pushed.
+    let marker = "MCP_PUSH_RETIRED_MUSING_9f2a1b";
+    let post_out = Command::new(env!("CARGO_BIN_EXE_legion"))
+        .env("LEGION_DATA_DIR", dir.path())
+        .env("XDG_STATE_HOME", &state_home)
+        .args(["post", "--repo", "sender-repo", "--text", marker])
+        .output()
+        .expect("spawn legion post");
+    assert!(
+        post_out.status.success(),
+        "legion post failed: {}",
+        String::from_utf8_lossy(&post_out.stderr)
+    );
+
+    // 3. Quiet window: the subprocess must say nothing at all on its own.
+    let window_end = Instant::now() + QUIET_WINDOW;
+    loop {
+        let remaining = window_end.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(line) => note(line, &mut observed, &mut push_frames),
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let unsolicited: Vec<String> = observed[1..].to_vec();
+
+    // 4. Liveness proof: a normal request must still get a normal response,
+    //    so an exited or wedged subprocess cannot pass as "retired."
+    let list_req = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::to_string(&list_req).expect("serialize tools/list")
+    )
+    .expect("write tools/list");
+    stdin.flush().expect("flush tools/list");
+
+    let list_deadline = Instant::now() + RESPONSE_TIMEOUT;
+    let mut list_resp: Option<serde_json::Value> = None;
+    while list_resp.is_none() {
+        let remaining = list_deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
         }
         match rx.recv_timeout(remaining) {
             Ok(line) => {
-                observed_lines.push(line.clone());
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-                    continue;
-                };
-                if v["method"] != "notifications/claude/channel" {
-                    continue;
-                }
-                observed_frames.push(v.clone());
-                let content = v["params"]["content"].as_str().unwrap_or("");
-                if content.contains(musing_marker) {
-                    musing_frame = Some(v);
-                } else if content.contains(named_signal_marker) {
-                    signal_frame = Some(v);
+                note(line.clone(), &mut observed, &mut push_frames);
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim())
+                    && v["id"] == 2
+                {
+                    list_resp = Some(v);
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(_) => break,
         }
     }
 
-    // Always kill the subprocess and collect captured stderr before
-    // asserting so a failure does not leave a zombie daemon behind and so
-    // the failure message is diagnosable.
-    let _ = child.kill();
-    let _ = child.wait();
+    // 5. Retire the child deterministically: EOF on stdin ends its read
+    //    loop, and wait() blocks until the kernel has actually reaped it.
+    //    No kill(), so there is no signal-delivery race to lose.
+    drop(stdin);
+    let status = child.wait().expect("wait for legion mcp");
     let stderr_snapshot = captured_stderr
         .lock()
         .map(|s| s.clone())
         .unwrap_or_default();
 
-    let failure_context = || {
+    let context = || {
         format!(
-            "observed {} frames:\n{}\ncaptured stderr:\n{}",
-            observed_frames.len(),
-            observed_lines.join(""),
+            "observed {} stdout lines:\n{}\ncaptured stderr:\n{}",
+            observed.len(),
+            observed.join(""),
             stderr_snapshot
         )
     };
 
-    // Positive assertion 1: general-musing branch delivered.
-    let musing = musing_frame.unwrap_or_else(|| {
+    assert!(
+        push_frames.is_empty(),
+        "MCP subprocess emitted {} notifications/claude/channel frame(s) after #947 retired the push:\n{}\n{}",
+        push_frames.len(),
+        push_frames.join(""),
+        context()
+    );
+    assert!(
+        unsolicited.is_empty(),
+        "MCP subprocess wrote unsolicited output during the quiet window:\n{}\n{}",
+        unsolicited.join(""),
+        context()
+    );
+
+    let list = list_resp.unwrap_or_else(|| {
         panic!(
-            "did not observe musing notification carrying {}; {}",
-            musing_marker,
-            failure_context()
+            "no tools/list response -- subprocess is not alive; {}",
+            context()
         )
     });
-    let musing_content = musing["params"]["content"].as_str().expect("content str");
-    assert!(
-        musing_content.contains(r#"repo="sender-repo""#),
-        "musing frame wire repo attribute wrong: {musing_content}"
-    );
-    assert!(
-        musing_content.contains(r#"is_signal="false""#),
-        "musing frame is_signal attribute wrong: {musing_content}"
-    );
-    assert!(
-        musing_content.contains(&format!("<![CDATA[{musing_marker}]]>")),
-        "musing frame CDATA body does not match marker: {musing_content}"
-    );
-
-    // Positive assertion 2: @recv-repo named-signal branch delivered.
-    let signal = signal_frame.unwrap_or_else(|| {
-        panic!(
-            "did not observe named-signal notification carrying {}; {}",
-            named_signal_marker,
-            failure_context()
-        )
-    });
-    let signal_content = signal["params"]["content"].as_str().expect("content str");
-    assert!(
-        signal_content.contains(r#"repo="sender-repo""#),
-        "signal frame wire repo attribute wrong: {signal_content}"
-    );
-    assert!(
-        signal_content.contains(r#"is_signal="true""#),
-        "signal frame is_signal attribute wrong: {signal_content}"
-    );
-    assert!(
-        signal_content.contains(named_signal_marker),
-        "signal frame CDATA body does not match marker: {signal_content}"
-    );
-
-    // Negative assertion 1: own-post (recv-repo → recv-repo) was suppressed.
-    // Both deliverable frames have arrived by this point, so any intervening
-    // polls that would have delivered OWN_POST_SUPPRESSED have already run.
-    for frame in &observed_frames {
-        let content = frame["params"]["content"].as_str().unwrap_or("");
-        assert!(
-            !content.contains(own_post_marker),
-            "own-post suppression regression: frame carrying {own_post_marker} was delivered; {content}"
-        );
-    }
-
-    // Negative assertion 2: wrong-recipient signal (@other-repo) was suppressed.
-    for frame in &observed_frames {
-        let content = frame["params"]["content"].as_str().unwrap_or("");
-        assert!(
-            !content.contains(wrong_signal_marker),
-            "wrong-recipient signal suppression regression: frame carrying {wrong_signal_marker} was delivered; {content}"
-        );
-    }
-
-    // Telemetry assertion (#941): the notifier's write_ok branch must have
-    // appended one lane="mcp_notification" DeliveryRecord per delivered
-    // frame. Deleting the record_mcp_delivery_telemetry call site was
-    // previously invisible to every test -- this closes that gap. Exactly
-    // the two delivered posts (musing + named signal) may record; the two
-    // suppressed posts must not.
-    let delivery_log = state_home.join("legion").join("delivery.jsonl");
-    let raw = std::fs::read_to_string(&delivery_log).unwrap_or_else(|e| {
-        panic!(
-            "delivery.jsonl missing after confirmed deliveries ({e}); {}",
-            failure_context()
-        )
-    });
-    let mcp_rows: Vec<serde_json::Value> = raw
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .filter(|v: &serde_json::Value| v["lane"] == "mcp_notification")
-        .collect();
+    let tools = list["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list response has no tools array: {list}"));
     assert_eq!(
-        mcp_rows.len(),
-        2,
-        "expected exactly 2 mcp_notification delivery rows (musing + named signal); got {}:\n{raw}",
-        mcp_rows.len()
+        tools.len(),
+        4,
+        "the four legion tools must survive the push retirement; got: {list}"
     );
-    for row in &mcp_rows {
-        assert_eq!(
-            row["repo"], "recv-repo",
-            "delivery row attributed to wrong recipient: {row}"
+
+    assert!(
+        status.success(),
+        "legion mcp exited nonzero on stdin EOF: {status:?}; {}",
+        context()
+    );
+
+    // Nothing was delivered, so nothing may be recorded as delivered. An
+    // absent file is the expected shape; a present one must carry no
+    // mcp_notification rows.
+    let delivery_log = state_home.join("legion").join("delivery.jsonl");
+    if let Ok(raw) = std::fs::read_to_string(&delivery_log) {
+        let mcp_rows: Vec<&str> = raw
+            .lines()
+            .filter(|l| {
+                serde_json::from_str::<serde_json::Value>(l)
+                    .map(|v| v["lane"] == "mcp_notification")
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            mcp_rows.is_empty(),
+            "retired lane still wrote delivery telemetry:\n{}",
+            mcp_rows.join("\n")
         );
     }
 }

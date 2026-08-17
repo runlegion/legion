@@ -93,13 +93,6 @@ pub fn mcp_trace(event: &str, kvs: &[(&str, &str)]) {
     eprintln!("{line}");
 }
 
-/// Whether verbose tracing is enabled (per-poll, per-post-decision).
-pub(super) fn mcp_verbose() -> bool {
-    std::env::var("LEGION_MCP_TRACE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
 /// Tail-friendly path lookup helper used by `legion mcp-logs --tail`.
 pub fn most_recent_mcp_log() -> Result<Option<PathBuf>> {
     let dir = mcp_log_dir()?;

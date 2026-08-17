@@ -84,66 +84,6 @@ pub(crate) enum TaskAction {
     },
 }
 
-pub(crate) fn handle_mcp_health(wait: u64) -> error::Result<()> {
-    // Spawn `legion mcp` as a subprocess. Send `initialize`, wait
-    // for the notifier to tick at least once, then send
-    // `legion/notifier_health`. Print the result JSON. Exit
-    // non-zero only on hard transport failure (binary missing,
-    // stdio closed); a `stale` or `unknown` health verdict is
-    // still a successful PROBE and prints to stdout for the
-    // operator to interpret.
-    let exe = std::env::current_exe()
-        .map_err(|e| error::LegionError::Server(format!("current_exe: {e}")))?;
-    let mut child = std::process::Command::new(exe)
-        .arg("mcp")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| error::LegionError::Server(format!("spawn legion mcp: {e}")))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| error::LegionError::Server("mcp stdin missing".into()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| error::LegionError::Server("mcp stdout missing".into()))?;
-    let mut reader = std::io::BufReader::new(stdout);
-
-    use std::io::{BufRead, Write};
-    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"legion-mcp-health","version":"0"}}}"#;
-    writeln!(stdin, "{init}").ok();
-    // Drain the init response so subsequent reads land on the
-    // health response.
-    let mut buf = String::new();
-    reader.read_line(&mut buf).ok();
-
-    // Give the notifier time to tick at least once.
-    std::thread::sleep(std::time::Duration::from_secs(wait));
-
-    let health_req = r#"{"jsonrpc":"2.0","id":2,"method":"legion/notifier_health"}"#;
-    writeln!(stdin, "{health_req}").ok();
-    buf.clear();
-    reader
-        .read_line(&mut buf)
-        .map_err(|e| error::LegionError::Server(format!("read mcp response: {e}")))?;
-
-    let _ = child.kill();
-    let _ = child.wait();
-
-    // Parse and pretty-print the result field; fall back to raw
-    // line on parse failure so the operator sees the actual bytes.
-    match serde_json::from_str::<serde_json::Value>(buf.trim()) {
-        Ok(v) => {
-            let result = v.get("result").cloned().unwrap_or(v);
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
-        Err(_) => print!("{buf}"),
-    }
-    Ok(())
-}
-
 pub(crate) fn handle_now(json: bool) -> error::Result<()> {
     // The default and `--banner` output are the same one-line
     // string; `banner` is accepted for explicitness in scripts

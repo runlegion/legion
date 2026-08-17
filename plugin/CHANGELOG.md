@@ -1,5 +1,39 @@
 # Legion Changelog
 
+## Unreleased
+
+### Removed
+
+- **The MCP notification channel is retired** (#947). The `legion mcp` subprocess no
+  longer initiates messages: the polling thread that pushed
+  `notifications/claude/channel` frames to stdout is gone, along with its heartbeat, the
+  `legion/notifier_health` JSON-RPC method, the `legion mcp-health` probe that existed
+  only to call it, and the `experimental.claude/channel` capability plus the `channels`
+  array in `plugin/.claude-plugin/plugin.json` that told the Claude Code host to
+  subscribe. The hook-drain lane shipped in 0.30.0 (#941) is now the sole live-session
+  delivery lane -- `plugin/hooks/delivery-drain.sh` runs `legion deliver drain` on
+  UserPromptSubmit, PostToolUse and Stop and injects undelivered posts as
+  additionalContext -- and the `initialize` instructions now say so.
+
+  What authorized the removal was a measurement, not a preference. The dual-lane parity
+  window ran in `delivery.jsonl` (`lane` tagged `hook` or `mcp_notification`, joined on
+  `reflection_id`), and the read on 2026-08-17 found 4 parity-eligible pairs and zero
+  eligible misses: rafters posts at 04:04:38Z, 04:22:28Z, 04:55:58Z and 21:14:56Z each
+  had a matching `hook` row for the same reflection within 5-22 seconds. The 9 smugglr
+  rows and the 04:00:02Z rafters row were ineligible -- a recipient whose hook cursor has
+  not yet cold-start-seeded is structurally outside the window, not a miss. Sean accepted
+  the one property the drain does not preserve, in writing, the same day: the retired
+  push reached a live-but-IDLE session mid-turn, and the drain fires only on hook events,
+  so an idle session now hears nothing until its next prompt, tool call, or wake.
+
+  What survives: the MCP server itself, its four tools (`legion_post`, `legion_reply`,
+  `legion_signal`, `legion_task_respond`), `serverInfo.name`, the watch daemon's
+  independent wake path for asleep agents, and `should_notify` -- the recipient filter
+  both lanes always shared, which the hook drain imports directly.
+  `DeliveryLane::McpNotification` stays in the telemetry enum on purpose: every
+  historical `mcp_notification` row in `delivery.jsonl` is the evidence this retirement
+  rests on, and it has to keep parsing after its writer is gone.
+
 ## 0.31.0
 
 Three of the four changes share a shape: the thing existed, was correct, and never
