@@ -2122,6 +2122,72 @@ fn issue_list_json_flag_emits_parseable_array() {
     assert_eq!(arr[0]["updated_at"], "2026-01-02T00:00:00Z");
 }
 
+/// `view-issue` stub whose body carries preamble text before its first
+/// `## ` heading, plus two `## ` sections -- for `legion issue view --json`
+/// (#961).
+#[cfg(unix)]
+fn view_issue_json_stub_plugin() -> String {
+    r##"#!/bin/bash
+set -e
+case "${1:-}" in
+  view-issue)
+    cat <<'BODY'
+{"url":"https://example.com/issues/61","number":61,"title":"stub view json issue","body":"Preamble text before any heading.\n\n## Problem\n\nSomething is broken.\n\n## Acceptance criteria\n\n- [ ] Fix it\n","labels":[],"assignees":null,"state":"OPEN"}
+BODY
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##
+    .to_string()
+}
+
+/// `legion issue view --json` emits a lossless heading-derived structure
+/// (#961). The specific mutant this test kills is a positional swap of
+/// `IssueViewSection`'s two same-typed String fields (`heading`/`content`)
+/// -- asserting by field name against distinct, cross-checkable values
+/// catches that; merely asserting the output parses as JSON does not.
+#[cfg(unix)]
+#[test]
+fn issue_view_json_flag_emits_lossless_structure() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &view_issue_json_stub_plugin(),
+    );
+
+    let stdout = run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "issue", "view", "--repo", "stub", "--number", "61", "--json",
+    ]));
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    assert_eq!(parsed["number"], 61);
+    assert_eq!(parsed["title"], "stub view json issue");
+    assert_eq!(parsed["state"], "OPEN");
+    assert_eq!(parsed["url"], "https://example.com/issues/61");
+    assert_eq!(
+        parsed["preamble"], "Preamble text before any heading.\n\n",
+        "expected the pre-heading content preserved verbatim, got: {stdout}"
+    );
+
+    let sections = parsed["sections"]
+        .as_array()
+        .expect("expected a sections array");
+    assert_eq!(
+        sections.len(),
+        2,
+        "expected two `## ` sections, got: {stdout}"
+    );
+    assert_eq!(sections[0]["heading"], "Problem");
+    assert_eq!(sections[0]["content"], "\n\nSomething is broken.\n\n");
+    assert_eq!(sections[1]["heading"], "Acceptance criteria");
+    assert_eq!(sections[1]["content"], "\n\n- [ ] Fix it\n");
+}
+
 /// A `gh` failure inside the plugin (expired auth, rate limit, unknown repo)
 /// must surface as a loud error, not a silent empty list -- this is the
 /// exact #711 failure mode #750 exists to prevent. The stub's `list-issues`

@@ -975,13 +975,61 @@ mod tests {
 
         let rendered = render_view_text(&issue);
 
-        assert!(
-            rendered.contains(body),
-            "default view output must contain the stored body verbatim, got: {rendered:?}"
+        // #961 review fix: assert_eq against the fully known expected
+        // string, not `contains` -- every field here is test-controlled,
+        // so there is no reason to accept a looser match that would miss a
+        // stray reformatting of the surrounding title/state/url lines.
+        let expected = format!(
+            "# Example issue #1\n\n{body}\n\nState: open\n\
+             URL: https://github.com/runlegion/legion/issues/1\n"
         );
-        assert!(rendered.contains("Example issue"));
-        assert!(rendered.contains("State: open"));
-        assert!(rendered.contains(&issue.url));
+        assert_eq!(
+            rendered, expected,
+            "default view output must be title/number, the stored body verbatim, \
+             then state/url -- no reformatting"
+        );
+    }
+
+    /// #961 review fix: pins the exact serde field-name mapping of
+    /// `IssueViewJson`/`IssueViewSection` on the same construction path the
+    /// View arm's `--json` branch uses (`split_body_lossless` -> map into
+    /// `IssueViewSection`). This is the unit-level companion to
+    /// `issue_view_json_flag_emits_lossless_structure` in
+    /// tests/integration/worksource_pr.rs, which drives the same shape
+    /// through the CLI and a stubbed plugin.
+    #[test]
+    fn issue_view_json_serializes_fields_by_name() {
+        let body = "## Problem\n\nBroken.\n";
+        let (preamble, sections) = card_parse::split_body_lossless(body);
+        let out = IssueViewJson {
+            number: 61,
+            title: "stub view json issue".to_owned(),
+            state: "OPEN".to_owned(),
+            url: "https://example.com/issues/61".to_owned(),
+            preamble,
+            sections: sections
+                .into_iter()
+                .map(|(heading, content)| IssueViewSection { heading, content })
+                .collect(),
+        };
+        let json = serde_json::to_string(&out).expect("serializes");
+
+        assert!(json.contains("\"number\":61"), "got: {json}");
+        assert!(
+            json.contains("\"title\":\"stub view json issue\""),
+            "got: {json}"
+        );
+        assert!(json.contains("\"state\":\"OPEN\""), "got: {json}");
+        assert!(
+            json.contains("\"url\":\"https://example.com/issues/61\""),
+            "got: {json}"
+        );
+        assert!(json.contains("\"preamble\":\"\""), "got: {json}");
+        assert!(json.contains("\"heading\":\"Problem\""), "got: {json}");
+        assert!(
+            json.contains("\"content\":\"\\n\\nBroken.\\n\""),
+            "got: {json}"
+        );
     }
 
     #[test]

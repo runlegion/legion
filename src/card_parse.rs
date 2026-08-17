@@ -760,6 +760,26 @@ mod tests {
         assert_eq!(reassemble(&preamble, &sections), body);
     }
 
+    /// #961 review fix: the doc comment on `split_body_lossless` claims a
+    /// final heading with no trailing newline reconstructs exactly, with
+    /// `content == ""` rather than a fabricated `"\n"`. Nothing proved
+    /// that -- the no-headings fixture above takes the early return and
+    /// never reaches the branch that handles this.
+    #[test]
+    fn split_body_lossless_round_trips_final_heading_without_trailing_newline() {
+        let body = "## Problem\n\nBroken.\n\n## Done";
+        let (preamble, sections) = split_body_lossless(body);
+        assert_eq!(preamble, "");
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[1].0, "Done");
+        assert_eq!(
+            sections[1].1, "",
+            "a final heading with no trailing newline must yield empty content, \
+             not an invented newline"
+        );
+        assert_eq!(reassemble(&preamble, &sections), body);
+    }
+
     #[test]
     fn split_body_lossless_preserves_checklist_and_fence_syntax() {
         // The whole point (#961): checkboxes, subheadings, and code fences
