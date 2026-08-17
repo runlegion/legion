@@ -981,13 +981,27 @@ mod tests {
         let (db, _index, data_dir) = test_storage();
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
 
-        // Spawn + immediately kill a child so try_wait reports exited.
-        let mut child_proc = std::process::Command::new("sleep")
+        // This test's own precondition assertion below requires the child
+        // to be genuinely ALIVE at that check (SessionLockTracker::active_pid
+        // calls process_alive on the recorded pid) -- unlike its siblings,
+        // it cannot pre-exit the child before tracking. Spawn a real
+        // long-lived process, keep it alive through the precondition check,
+        // then kill+reap it via the TRACKED SpawnedChild wrapper's own
+        // kill() (which calls Child::kill() followed by a blocking
+        // Child::wait() internally, see SpawnedChild::kill in spawn.rs) --
+        // NOT the raw child_proc's kill(). That blocking wait() guarantees
+        // the process is fully reaped before reap_finished's own
+        // try_wait() ever runs, so there is no window in which try_wait()
+        // could observe Ok(None) and fall through to "keep tracking"
+        // without reaching the submit_failed_reason branch below (the #948
+        // CI flake class: kill() alone only sends the signal, it does not
+        // wait for the kernel to actually terminate the process, and
+        // try_wait() called immediately afterward can race that).
+        let child_proc = std::process::Command::new("sleep")
             .arg("9999")
             .spawn()
             .expect("spawn sleep");
         let child_pid = child_proc.id();
-        child_proc.kill().expect("kill child");
 
         // wake_attempts row driven to Spawning (where the submit loop fails).
         let attempt_id = uuid::Uuid::now_v7().to_string();
@@ -1027,6 +1041,14 @@ mod tests {
         tracker.children[0].submit_failed_reason =
             Some("submit_not_confirmed (retries=12)".to_string());
 
+        // Kill and synchronously reap the tracked child NOW, before
+        // reap_finished runs, so its try_wait() sees a process the kernel
+        // has already terminated -- see the comment on the spawn above.
+        tracker.children[0]
+            .child
+            .kill()
+            .expect("kill tracked child before reap");
+
         tracker.reap_finished(Some(&db), Some(&locks), Duration::from_secs(3600), 3);
 
         assert_eq!(tracker.active_count(), 0, "failed child must be reaped");
@@ -1060,12 +1082,14 @@ mod tests {
         let (db, _index, data_dir) = test_storage();
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
 
-        let mut child_proc = std::process::Command::new("sleep")
-            .arg("9999")
+        // Deterministic exit -- see the identical comment in
+        // reap_records_submit_not_confirmed_outcome above. Exit code is
+        // irrelevant here too: submit_failed_reason always forces "error".
+        let mut child_proc = std::process::Command::new("true")
             .spawn()
-            .expect("spawn sleep");
+            .expect("spawn true");
         let child_pid = child_proc.id();
-        child_proc.kill().expect("kill child");
+        child_proc.wait().expect("wait for child to exit");
 
         let attempt_id = uuid::Uuid::now_v7().to_string();
         let signal_id = db
@@ -1119,6 +1143,15 @@ mod tests {
 
     /// A wedged-session force-reap (call site 2, `budget_exceeded_reason`
     /// branch) must also re-arm its signals.
+    ///
+    /// NOT converted to the spawn(true)+wait() determinism pattern used by
+    /// its siblings: this test's own semantics require the child to still
+    /// be ALIVE (never killed) when `try_wait()` runs, so `reap_finished`'s
+    /// Path B takes the wedge-budget branch and kills it internally. A
+    /// pre-exited child would take Path A instead and never exercise the
+    /// branch under test. It carries no kill()-vs-try_wait() race at all
+    /// (nothing signals the child before `reap_finished` sees it), so it
+    /// was never part of the #948 CI flake's defect class.
     #[cfg(unix)]
     #[test]
     fn reap_finished_rearms_signal_on_budget_exceeded() {
@@ -1193,16 +1226,24 @@ mod tests {
         let (db, _index, data_dir) = test_storage();
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
 
-        // A killed child reports success == false via try_wait, with
-        // neither submit_failed_reason nor budget_exceeded_reason set --
-        // this is the ordinary "child crashed mid-turn" path, not one of
-        // the two special-cased give-up reasons.
-        let mut child_proc = std::process::Command::new("sleep")
-            .arg("9999")
+        // This branch is entered only when try_wait() reports Ok(Some(false))
+        // -- a genuine failed exit -- so, unlike the submit_failed_reason
+        // siblings, `true` (exit 0) cannot stand in here: it would take
+        // Path A with success == true and never reach the branch under
+        // test. `false` gives a deterministic nonzero exit with no signal
+        // involved at all, so there is no kill()-vs-try_wait() race window
+        // to lose (the same #948 CI flake class its siblings had -- this
+        // one shares the SAME class via the process-still-alive-when-
+        // try_wait-runs failure mode, just via a killed sleep rather than a
+        // not-yet-reaped one; `false` removes it the same way `true` does
+        // for the other two, by making the exit deterministic before the
+        // child is ever tracked).
+        let mut child_proc = std::process::Command::new("false")
             .spawn()
-            .expect("spawn sleep");
+            .expect("spawn false");
         let child_pid = child_proc.id();
-        child_proc.kill().expect("kill child");
+        let status = child_proc.wait().expect("wait for child to exit");
+        assert!(!status.success(), "precondition: 'false' must exit nonzero");
 
         let attempt_id = uuid::Uuid::now_v7().to_string();
         let signal_id = db
