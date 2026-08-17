@@ -233,65 +233,49 @@ fn check_verify_before_close(
     }
 }
 
-/// Render the acceptance-criteria section of `legion issue view` in the form
-/// `card_parse::parse_issue_body` can read BACK (#907).
+/// Render the default (non-JSON) `legion issue view` output: title, the raw
+/// body verbatim, then state/URL (#961).
 ///
-/// This is a round-trip contract, not a formatting preference. Agents author
-/// new issues by mirroring what this viewer prints, so when it emitted
-/// `Acceptance criteria:` -- bare line, trailing colon, no `## ` -- it taught a
-/// shape the parser scores as ZERO criteria, which then silently relaxed the
-/// pr-write gate to a one-entry bar. The viewer's output format and the
-/// parser's input format have to be the same format, and
-/// `rendered_acceptance_round_trips` is what keeps them that way.
-fn render_acceptance_block(items: &[String]) -> String {
-    let mut out = String::from("## Acceptance criteria\n");
-    for item in items {
-        out.push_str("- ");
-        out.push_str(item);
-        out.push('\n');
-    }
-    out
+/// No parsing. #907 and #933 taught this file that reprinting a parsed
+/// projection creates a round-trip contract the parser and the display path
+/// then have to keep in sync forever -- and the generic-section fallback
+/// (`{heading}:\n{content}`, removed here) never joined that contract, which
+/// is how #947 got silently flattened after a `view` -> `edit --body` cycle.
+/// This function sidesteps the whole class of bug: nothing here derives a
+/// shape from `card_parse` that could diverge from the source, so the
+/// round-trip contract holds by construction, not by a dedicated test per
+/// section kind. `render_view_text_contains_stored_body_verbatim` supersedes
+/// #907's `rendered_acceptance_*` and #933's `rendered_trace_*` tests, which
+/// pinned round-tripping of the now-deleted `render_acceptance_block` /
+/// `render_trace_block`.
+fn render_view_text(issue: &worksource::ExternalIssue) -> String {
+    let body = issue.body.as_deref().unwrap_or("");
+    format!(
+        "# {} #{}\n\n{}\n\nState: {}\nURL: {}\n",
+        issue.title, issue.number, body, issue.state, issue.url
+    )
 }
 
-/// Render the `## Traces to` section in the exact form
-/// `card_parse::parse_issue_body` reads BACK (#933), mirroring
-/// `render_acceptance_block`'s #907 round-trip contract for the same
-/// reason: `legion issue view` is what agents (including `legion-verify`,
-/// which reads the issue to find the trace) look at, and a shape that does
-/// not survive re-parsing teaches the wrong format silently.
-fn render_trace_block(trace: &[card_parse::TraceBullet]) -> String {
-    let mut out = String::from("## Traces to\n");
-    for bullet in trace {
-        match bullet {
-            card_parse::TraceBullet::Requirement {
-                document_id,
-                criteria,
-                prose,
-            } => {
-                out.push_str("- ");
-                out.push_str(document_id);
-                if let Some(ids) = criteria {
-                    out.push_str(" [criteria: ");
-                    out.push_str(&ids.join(", "));
-                    out.push(']');
-                }
-                if let Some(p) = prose {
-                    out.push_str(" -- ");
-                    out.push_str(p);
-                }
-                out.push('\n');
-            }
-            card_parse::TraceBullet::NoRequirement { reason } => {
-                out.push_str("- None");
-                if let Some(r) = reason {
-                    out.push_str(" -- ");
-                    out.push_str(r);
-                }
-                out.push('\n');
-            }
-        }
-    }
-    out
+/// `legion issue view --json` output shape (#961): a lossless heading-derived
+/// structure for automation, so gates never have to re-parse the text output
+/// the way #907/#933's format-mirroring bug started. Field order matches the
+/// issue spec exactly.
+#[derive(serde::Serialize)]
+struct IssueViewJson {
+    number: u64,
+    title: String,
+    state: String,
+    url: String,
+    preamble: String,
+    sections: Vec<IssueViewSection>,
+}
+
+/// One `## Heading` section of `IssueViewJson`. `content` is byte-verbatim --
+/// see `card_parse::split_body_lossless`.
+#[derive(serde::Serialize)]
+struct IssueViewSection {
+    heading: String,
+    content: String,
 }
 
 #[derive(Subcommand)]
@@ -364,6 +348,11 @@ pub(crate) enum IssueAction {
         /// Issue number
         #[arg(long)]
         number: u64,
+
+        /// Emit lossless heading-derived JSON (number/title/state/url/
+        /// preamble/sections) instead of the default raw-body text (#961).
+        #[arg(long)]
+        json: bool,
     },
     /// List work-source issues: number, title, state, updated-at (#750).
     ///
@@ -562,36 +551,30 @@ pub(crate) fn handle(action: IssueAction) -> error::Result<()> {
                 created.number, source_repo
             );
         }
-        IssueAction::View { repo, number } => {
+        IssueAction::View { repo, number, json } => {
             let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
 
             let issue = worksource::view_issue(&plugin_name, &source_repo, number)?;
-            let parsed = card_parse::parse_issue_body(issue.body.as_deref().unwrap_or(""));
 
-            // Structured output
-            println!("# {} #{}\n", issue.title, issue.number);
-
-            if let Some(ref problem) = parsed.problem {
-                println!("Problem: {}\n", problem);
+            if json {
+                let body = issue.body.as_deref().unwrap_or("");
+                let (preamble, sections) = card_parse::split_body_lossless(body);
+                let out = IssueViewJson {
+                    number: issue.number,
+                    title: issue.title.clone(),
+                    state: issue.state.clone(),
+                    url: issue.url.clone(),
+                    preamble,
+                    sections: sections
+                        .into_iter()
+                        .map(|(heading, content)| IssueViewSection { heading, content })
+                        .collect(),
+                };
+                println!("{}", serde_json::to_string(&out)?);
+            } else {
+                // #961: raw body verbatim, no parsing in the display path.
+                print!("{}", render_view_text(&issue));
             }
-            if let Some(ref solution) = parsed.solution {
-                println!("Solution: {}\n", solution);
-            }
-            if !parsed.acceptance.is_empty() {
-                println!("{}", render_acceptance_block(&parsed.acceptance));
-            }
-            if !parsed.trace.is_empty() {
-                println!("{}", render_trace_block(&parsed.trace));
-            }
-            for (heading, content) in &parsed.sections {
-                println!("{}:\n{}\n", heading, content);
-            }
-            if let Some(ref body) = parsed.body {
-                println!("{}\n", body);
-            }
-
-            println!("State: {}", issue.state);
-            println!("URL: {}", issue.url);
         }
         IssueAction::List {
             repo,
@@ -958,100 +941,147 @@ mod tests {
         assert!(err.to_string().contains("requires a reason"), "got: {err}");
     }
 
-    /// #907: the viewer's output must survive re-parsing. This is the
-    /// regression that let `legion issue view` teach agents an unparseable
-    /// shape -- the criteria came back as ZERO, which silently relaxed the
-    /// pr-write gate rather than failing anywhere visible.
+    // -- #961: `render_acceptance_block` and `render_trace_block` are
+    // deleted, along with the six round-trip tests that pinned them
+    // (#907's `rendered_acceptance_*`, #933's `rendered_trace_*`). `legion
+    // sym refs` confirmed neither function had a caller outside the View
+    // arm and its own tests before this change, so removing the View arm's
+    // call removed the last caller. The round-trip contract those tests
+    // guarded -- what the viewer prints must survive re-parsing -- is now
+    // satisfied by construction: the default view path no longer parses or
+    // re-derives anything, it prints the stored body verbatim. The test
+    // below is the replacement: it pins that construction directly instead
+    // of round-tripping a projection.
+
+    /// #961: the default `legion issue view` output must contain the
+    /// stored body byte-for-byte -- headings, checkboxes, code fences, and
+    /// all -- because it is never reparsed or reconstructed.
     #[test]
-    fn rendered_acceptance_round_trips() {
-        let items = vec![
-            "Heartbeat refreshes only live leases".to_owned(),
-            "Daemon bootstrap releases stale leases".to_owned(),
-            "`cargo test` and `cargo clippy --all-targets` are clean".to_owned(),
-        ];
-        let rendered = render_acceptance_block(&items);
-        let reparsed = card_parse::parse_issue_body(&rendered);
+    fn render_view_text_contains_stored_body_verbatim() {
+        let body = "## Problem\n\nBroken.\n\n\
+                     ## Acceptance criteria\n\n- [ ] Fix it\n- [x] Already done\n\n\
+                     ## Done When\n\n- [ ] Ship it\n";
+        let issue = worksource::ExternalIssue {
+            url: "https://github.com/runlegion/legion/issues/1".to_owned(),
+            number: 1,
+            title: "Example issue".to_owned(),
+            body: Some(body.to_owned()),
+            labels: vec![],
+            assignees: None,
+            state: "open".to_owned(),
+            created_at: None,
+            updated_at: None,
+        };
+
+        let rendered = render_view_text(&issue);
+
+        // #961 review fix: assert_eq against the fully known expected
+        // string, not `contains` -- every field here is test-controlled,
+        // so there is no reason to accept a looser match that would miss a
+        // stray reformatting of the surrounding title/state/url lines.
+        let expected = format!(
+            "# Example issue #1\n\n{body}\n\nState: open\n\
+             URL: https://github.com/runlegion/legion/issues/1\n"
+        );
         assert_eq!(
-            reparsed.acceptance, items,
-            "what the viewer prints must parse back to the same criteria; got {:?}",
-            reparsed.acceptance
+            rendered, expected,
+            "default view output must be title/number, the stored body verbatim, \
+             then state/url -- no reformatting"
         );
     }
 
-    /// The specific shape that caused #907 must NOT be what we emit.
+    /// #961 review fix: pins the exact serde field-name mapping of
+    /// `IssueViewJson`/`IssueViewSection` on the same construction path the
+    /// View arm's `--json` branch uses (`split_body_lossless` -> map into
+    /// `IssueViewSection`). This is the unit-level companion to
+    /// `issue_view_json_flag_emits_lossless_structure` in
+    /// tests/integration/worksource_pr.rs, which drives the same shape
+    /// through the CLI and a stubbed plugin.
     #[test]
-    fn rendered_acceptance_is_not_the_bare_colon_form() {
-        let rendered = render_acceptance_block(&["Something".to_owned()]);
+    fn issue_view_json_serializes_fields_by_name() {
+        let body = "## Problem\n\nBroken.\n";
+        let (preamble, sections) = card_parse::split_body_lossless(body);
+        let out = IssueViewJson {
+            number: 61,
+            title: "stub view json issue".to_owned(),
+            state: "OPEN".to_owned(),
+            url: "https://example.com/issues/61".to_owned(),
+            preamble,
+            sections: sections
+                .into_iter()
+                .map(|(heading, content)| IssueViewSection { heading, content })
+                .collect(),
+        };
+        let json = serde_json::to_string(&out).expect("serializes");
+
+        assert!(json.contains("\"number\":61"), "got: {json}");
         assert!(
-            rendered.starts_with("## Acceptance criteria\n"),
-            "heading must be a parseable `## ` section, got: {rendered:?}"
+            json.contains("\"title\":\"stub view json issue\""),
+            "got: {json}"
         );
+        assert!(json.contains("\"state\":\"OPEN\""), "got: {json}");
         assert!(
-            !rendered.contains("Acceptance criteria:"),
-            "the trailing-colon form is the bug, not the output"
+            json.contains("\"url\":\"https://example.com/issues/61\""),
+            "got: {json}"
+        );
+        assert!(json.contains("\"preamble\":\"\""), "got: {json}");
+        assert!(json.contains("\"heading\":\"Problem\""), "got: {json}");
+        assert!(
+            json.contains("\"content\":\"\\n\\nBroken.\\n\""),
+            "got: {json}"
         );
     }
 
-    /// An empty criteria list must not emit a heading with nothing under it --
-    /// `parse_issue_body` skips empty sections, so it would round-trip, but the
-    /// caller guards on non-empty and this pins that the block is items-only.
+    /// #961 review fix: the `--json` branch's None-body path
+    /// (`issue.body.as_deref().unwrap_or("")`) had no coverage.
+    /// `split_body_lossless("")` must yield an empty preamble and zero
+    /// sections, not a panic or a fabricated section.
     #[test]
-    fn rendered_acceptance_contains_one_line_per_item() {
-        let rendered = render_acceptance_block(&["a".to_owned(), "b".to_owned()]);
-        assert_eq!(rendered.lines().count(), 3, "heading plus two items");
+    fn issue_view_json_serializes_none_body_as_empty_preamble_and_sections() {
+        // Mirrors the View arm's `issue.body.as_deref().unwrap_or("")` for a
+        // `None` body -- the same "" the arm would produce.
+        let (preamble, sections) = card_parse::split_body_lossless("");
+        let out = IssueViewJson {
+            number: 2,
+            title: "No body".to_owned(),
+            state: "closed".to_owned(),
+            url: "https://github.com/runlegion/legion/issues/2".to_owned(),
+            preamble,
+            sections: sections
+                .into_iter()
+                .map(|(heading, content)| IssueViewSection { heading, content })
+                .collect(),
+        };
+        let json = serde_json::to_string(&out).expect("serializes");
+
+        assert!(json.contains("\"preamble\":\"\""), "got: {json}");
+        assert!(json.contains("\"sections\":[]"), "got: {json}");
     }
 
-    // -- #933: `render_trace_block` round-trip (mirrors #907's acceptance
-    // round-trip contract) -----------------------------------------------
-
-    /// `legion issue view` must print the trace in a shape that re-parses
-    /// to the exact same structure -- otherwise the viewer teaches a shape
-    /// the parser cannot read back, silently blinding `legion-verify` (which
-    /// reads the issue to find the trace) the same way #907 blinded the
-    /// pr-write gate.
     #[test]
-    fn rendered_trace_round_trips_requirement_bullets() {
-        let trace = vec![
-            card_parse::TraceBullet::Requirement {
-                document_id: "FR-EMAIL-003".to_owned(),
-                criteria: Some(vec!["crit-1".to_owned(), "crit-2".to_owned()]),
-                prose: Some("adds the retry path".to_owned()),
-            },
-            card_parse::TraceBullet::Requirement {
-                document_id: "FR-EMAIL-004".to_owned(),
-                criteria: None,
-                prose: None,
-            },
-        ];
-        let rendered = render_trace_block(&trace);
-        let reparsed = card_parse::parse_issue_body(&rendered);
+    fn render_view_text_handles_missing_body() {
+        let issue = worksource::ExternalIssue {
+            url: "https://github.com/runlegion/legion/issues/2".to_owned(),
+            number: 2,
+            title: "No body".to_owned(),
+            body: None,
+            labels: vec![],
+            assignees: None,
+            state: "closed".to_owned(),
+            created_at: None,
+            updated_at: None,
+        };
+
+        let rendered = render_view_text(&issue);
+
+        // #961 review fix: assert_eq against the fully known expected
+        // string -- a None body renders as an empty slot ("\n\n\n\n"
+        // between the title line and State:), not omitted or panicking.
+        let expected = "# No body #2\n\n\n\nState: closed\n\
+                         URL: https://github.com/runlegion/legion/issues/2\n";
         assert_eq!(
-            reparsed.trace, trace,
-            "rendered trace must parse back to the same structure, got {:?}",
-            reparsed.trace
-        );
-    }
-
-    #[test]
-    fn rendered_trace_round_trips_none_bullet() {
-        let trace = vec![card_parse::TraceBullet::NoRequirement {
-            reason: Some("defect fix, no requirement above it".to_owned()),
-        }];
-        let rendered = render_trace_block(&trace);
-        let reparsed = card_parse::parse_issue_body(&rendered);
-        assert_eq!(reparsed.trace, trace);
-    }
-
-    #[test]
-    fn rendered_trace_starts_with_parseable_heading() {
-        let rendered = render_trace_block(&[card_parse::TraceBullet::Requirement {
-            document_id: "FR-X".to_owned(),
-            criteria: None,
-            prose: None,
-        }]);
-        assert!(
-            rendered.starts_with("## Traces to\n"),
-            "heading must be a parseable `## ` section, got: {rendered:?}"
+            rendered, expected,
+            "a missing body must render as an empty slot, not be omitted"
         );
     }
 }

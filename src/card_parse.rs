@@ -98,7 +98,12 @@ pub fn parse_issue_body(body: &str) -> ParsedIssue {
                 parsed.solution = Some(first_paragraph(content));
             }
             "acceptance criteria" | "acceptance" | "done when" | "done" => {
-                parsed.acceptance = extract_checklist(content);
+                // #961: extend, not assign. A body carrying both an
+                // `## Acceptance criteria` and a `## Done When` heading (the
+                // exact shape the view/edit round-trip bug produced, see
+                // #947) used to clobber -- whichever heading extract_sections
+                // visited second silently discarded the first's criteria.
+                parsed.acceptance.extend(extract_checklist(content));
             }
             "traces to" => {
                 parsed.trace = parse_trace_bullets(content);
@@ -137,6 +142,51 @@ fn extract_sections(text: &str) -> Vec<(String, String)> {
     }
 
     sections
+}
+
+/// Split a raw body into its preamble (content before the first `## `
+/// heading) and its heading-delimited sections, byte-for-byte (#961, for
+/// `legion issue view --json`).
+///
+/// This is a separate function from `extract_sections`, not a shared
+/// implementation: `extract_sections` trims each section's content for
+/// `parse_issue_body`'s structured extraction, which is fine for that
+/// consumer but is not byte-exact. `legion issue view --json`'s entire point
+/// is losslessness, so this function never trims -- `content` keeps its
+/// leading newline exactly when the heading line had one, rather than a
+/// separate flag, so `preamble` followed by `"## " + heading + content` for
+/// every section, in order, always reconstructs the original body exactly,
+/// including the edge case of a final heading with no trailing newline at
+/// all (content is `""` there, not `"\n"`, so no byte is invented).
+pub fn split_body_lossless(body: &str) -> (String, Vec<(String, String)>) {
+    let mut heading_starts: Vec<usize> = Vec::new();
+    if body.starts_with("## ") {
+        heading_starts.push(0);
+    }
+    let mut search_from = 0;
+    while let Some(rel) = body[search_from..].find("\n## ") {
+        let abs = search_from + rel + 1;
+        heading_starts.push(abs);
+        search_from = abs + 1;
+    }
+
+    if heading_starts.is_empty() {
+        return (body.to_string(), Vec::new());
+    }
+
+    let preamble = body[..heading_starts[0]].to_string();
+    let mut sections = Vec::with_capacity(heading_starts.len());
+    for (i, &start) in heading_starts.iter().enumerate() {
+        let end = heading_starts.get(i + 1).copied().unwrap_or(body.len());
+        let after_prefix = &body[start + 3..end];
+        let (heading, content) = match after_prefix.find('\n') {
+            Some(nl) => (&after_prefix[..nl], &after_prefix[nl..]),
+            None => (after_prefix, ""),
+        };
+        sections.push((heading.to_string(), content.to_string()));
+    }
+
+    (preamble, sections)
 }
 
 /// Get the first paragraph from a section (up to the first blank line).
@@ -646,6 +696,104 @@ mod tests {
         assert!(trace_bullet_bracket_defect(bare).is_none());
         let none = &parse_issue_body("## Traces to\n\n- None -- reason\n").trace[0];
         assert!(trace_bullet_bracket_defect(none).is_none());
+    }
+
+    // -- #961: acceptance/done-when merge, not clobber ----------------------
+
+    /// A body carrying both an `## Acceptance criteria` heading and a
+    /// `## Done When` heading must keep both sets of criteria. Previously
+    /// each acceptance-family heading ASSIGNED into `parsed.acceptance`, so
+    /// whichever heading `extract_sections` visited last silently discarded
+    /// the other's criteria -- exactly the shape #947's corrupted body
+    /// carried after a lossy `legion issue view` -> `issue edit --body`
+    /// round trip.
+    #[test]
+    fn acceptance_and_done_when_headings_merge_not_clobber() {
+        let body = "## Acceptance criteria\n\n- [ ] First\n\n## Done When\n\n- [ ] Second\n";
+        let parsed = parse_issue_body(body);
+        assert_eq!(
+            parsed.acceptance,
+            vec!["First".to_owned(), "Second".to_owned()],
+            "both headings' criteria must be present, got {:?}",
+            parsed.acceptance
+        );
+    }
+
+    // -- #961: `split_body_lossless` byte-exact round trip -------------------
+
+    fn reassemble(preamble: &str, sections: &[(String, String)]) -> String {
+        let mut out = preamble.to_string();
+        for (heading, content) in sections {
+            out.push_str("## ");
+            out.push_str(heading);
+            out.push_str(content);
+        }
+        out
+    }
+
+    #[test]
+    fn split_body_lossless_round_trips_with_preamble() {
+        let body = "Some intro text before any heading.\n\n\
+                     ## Problem\n\nBroken.\n\n\
+                     ## Acceptance criteria\n\n- [ ] Fix it\n";
+        let (preamble, sections) = split_body_lossless(body);
+        assert_eq!(preamble, "Some intro text before any heading.\n\n");
+        assert_eq!(sections.len(), 2);
+        assert_eq!(reassemble(&preamble, &sections), body);
+    }
+
+    #[test]
+    fn split_body_lossless_round_trips_without_preamble() {
+        let body = "## Problem\n\nBroken.\n\n## Acceptance criteria\n\n- [ ] Fix it\n";
+        let (preamble, sections) = split_body_lossless(body);
+        assert_eq!(preamble, "");
+        assert_eq!(sections.len(), 2);
+        assert_eq!(reassemble(&preamble, &sections), body);
+    }
+
+    #[test]
+    fn split_body_lossless_round_trips_with_no_headings() {
+        let body = "Just plain text, no headings at all.";
+        let (preamble, sections) = split_body_lossless(body);
+        assert_eq!(preamble, body);
+        assert!(sections.is_empty());
+        assert_eq!(reassemble(&preamble, &sections), body);
+    }
+
+    /// #961 review fix: the doc comment on `split_body_lossless` claims a
+    /// final heading with no trailing newline reconstructs exactly, with
+    /// `content == ""` rather than a fabricated `"\n"`. Nothing proved
+    /// that -- the no-headings fixture above takes the early return and
+    /// never reaches the branch that handles this.
+    #[test]
+    fn split_body_lossless_round_trips_final_heading_without_trailing_newline() {
+        let body = "## Problem\n\nBroken.\n\n## Done";
+        let (preamble, sections) = split_body_lossless(body);
+        assert_eq!(preamble, "");
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[1].0, "Done");
+        assert_eq!(
+            sections[1].1, "",
+            "a final heading with no trailing newline must yield empty content, \
+             not an invented newline"
+        );
+        assert_eq!(reassemble(&preamble, &sections), body);
+    }
+
+    #[test]
+    fn split_body_lossless_preserves_checklist_and_fence_syntax() {
+        // The whole point (#961): checkboxes, subheadings, and code fences
+        // inside a section survive untouched -- unlike `extract_checklist`,
+        // which rewrites `- [ ]`/`- [x]` to plain `- ` bullets.
+        let body = "## Acceptance criteria\n\n- [ ] Tests pass\n- [x] Clippy clean\n\n### Notes\n\n```rust\nfn f() {}\n```\n";
+        let (_preamble, sections) = split_body_lossless(body);
+        assert_eq!(sections.len(), 1);
+        let (heading, content) = &sections[0];
+        assert_eq!(heading, "Acceptance criteria");
+        assert!(content.contains("- [ ] Tests pass"));
+        assert!(content.contains("- [x] Clippy clean"));
+        assert!(content.contains("### Notes"));
+        assert!(content.contains("```rust"));
     }
 
     #[test]
