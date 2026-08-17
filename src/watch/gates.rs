@@ -1331,6 +1331,20 @@ mod tests {
         )
         .expect("insert answer naming a nonexistent ask");
 
+        // Pre-assertion, same reason as the sibling test above: an empty
+        // attempts table proves the authenticity check REFUSED these two
+        // only if they actually reached veneer's queue. Without it, broken
+        // address matching would pass this test with
+        // `resolved_ask_is_authentic` never having run. (The smugglr ask is
+        // addressed @rafters, so it is not one of the two.)
+        let before =
+            find_pending_signals(&db, "veneer", &["veneer".to_string()], None).expect("pending");
+        assert_eq!(
+            before.len(),
+            2,
+            "both forged answers must be pending for veneer before the poll"
+        );
+
         assert_eq!(poll_veneer(&db, None), 0, "nothing may spawn here");
 
         let attempts = db.recent_wake_attempts(50).expect("list attempts");
