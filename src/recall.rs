@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use chrono::Utc;
@@ -57,6 +58,90 @@ pub struct WhoamiEntry {
     pub in_chain: bool,
 }
 
+/// Retrieval tier for a reflection's text: how much of the stored body a
+/// caller receives. Card and Gist are progressively larger previews of the
+/// same text; Full is the stored `text` verbatim -- the existing, unchanged
+/// default for every caller that does not opt in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Default)]
+pub enum Tier {
+    /// id + first sentence: up to the first ". ", "! ", "? ", or newline,
+    /// whichever comes first. A reflection with none of those (shorter
+    /// than one sentence) has no card distinct from its full text.
+    Card,
+    /// id + lead paragraph: text up to the first blank line ("\n\n"). A
+    /// reflection with no blank line (shorter than one paragraph) has no
+    /// gist distinct from its full text.
+    Gist,
+    /// The stored `text`, verbatim.
+    #[default]
+    Full,
+}
+
+/// Render `text` at `tier`. Returns the rendered slice and whether it is
+/// strictly shorter than `text` -- i.e. whether a truncation marker
+/// applies. Both tier boundaries are located via `str::find` against
+/// single-byte ASCII patterns, whose match offsets are always valid UTF-8
+/// char boundaries, so this never splits a multi-byte character.
+/// `Card`/`Gist` on text with no matching boundary return the full text
+/// unmodified and report `false`: a short reflection's card or gist IS its
+/// full text, not a truncation of it -- callers must not print a marker
+/// pointing at a fuller body that does not exist.
+pub fn render_tier(text: &str, tier: Tier) -> (Cow<'_, str>, bool) {
+    match tier {
+        Tier::Full => (Cow::Borrowed(text), false),
+        Tier::Gist => match text.find("\n\n") {
+            Some(idx) => (Cow::Borrowed(&text[..idx]), true),
+            None => (Cow::Borrowed(text), false),
+        },
+        Tier::Card => {
+            // Track (match-start offset, slice-end offset) for whichever
+            // boundary is closest to the start of `text`. Sentence-ending
+            // punctuation keeps the punctuation mark (slice end = start +
+            // 1); a bare newline is dropped (slice end = start).
+            let mut best: Option<(usize, usize)> = None;
+            for pat in [". ", "! ", "? "] {
+                if let Some(start) = text.find(pat) {
+                    let end = start + 1;
+                    if best.is_none_or(|(best_start, _)| start < best_start) {
+                        best = Some((start, end));
+                    }
+                }
+            }
+            if let Some(start) = text.find('\n')
+                && best.is_none_or(|(best_start, _)| start < best_start)
+            {
+                best = Some((start, start));
+            }
+            match best {
+                Some((_, end)) => (Cow::Borrowed(&text[..end]), true),
+                None => (Cow::Borrowed(text), false),
+            }
+        }
+    }
+}
+
+/// Marker line appended after a Card/Gist render that was actually
+/// truncated, pointing at the exact single-reflection fault-in fetch for
+/// this hit's id and repo. Distinct from `format_capped_banner`'s
+/// AGGREGATE "(N more ... truncated)" line, which stays pointed at
+/// `--domain` -- see the module-level doc on `format_capped_banner` for why
+/// the two markers diverge. Callers append their own trailing newline;
+/// this returns the bare marker line.
+fn tier_truncation_marker(repo: &str, id: &str) -> String {
+    format!("  \u{21b3} truncated -- full text: `legion recall --repo {repo} --id {id}`")
+}
+
+/// Append `tier_truncation_marker` (and its trailing newline) to `output`
+/// when `truncated` is true. Shared by `format_for_hook` and
+/// `format_for_consult`, whose per-line formats differ (consult adds a
+/// `[repo]` prefix) but whose marker-append step is identical.
+fn append_tier_marker(output: &mut String, truncated: bool, repo: &str, id: &str) {
+    if truncated {
+        output.push_str(&tier_truncation_marker(repo, id));
+        output.push('\n');
+    }
+}
+
 /// Truncate `text` to at most `max_bytes`, backing off to the nearest lower
 /// UTF-8 character boundary so multi-byte characters are never split.
 fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
@@ -80,14 +165,28 @@ fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
 /// few hundred bytes over budget rendered in full, then every other root
 /// collapsed to a bare count). An entry that fits its fair share in full
 /// renders in full, and any unused share rolls forward to later entries.
-/// An entry that does not fit is head-truncated to its share with a recall
-/// pointer appended, provided at least `MIN_ENTRY_RENDER_BYTES` of actual
-/// text survives the truncation; otherwise it is dropped and folded into
-/// the aggregate truncation pointer instead of emitting an unreadable
-/// fragment. The first entry is exempt from the drop: it always renders,
-/// borrowing budget beyond its computed fair share if needed to clear the
-/// minimum-text floor, so the banner is never structurally present but
-/// informationally empty.
+/// An entry that does not fit its fair share tries `Tier::Gist`, then
+/// `Tier::Card` (whichever tier both differs from the full text and fits
+/// the entry's byte share), and falls back to the raw
+/// `truncate_at_char_boundary` byte-slice only when neither tier's natural
+/// boundary fits -- a single sentence can still be longer than a starved
+/// entry's fair share. The truncation notice is appended only when the
+/// chosen rendering actually differs from the full text, provided at least
+/// `MIN_ENTRY_RENDER_BYTES` of actual text survives the truncation;
+/// otherwise the entry is dropped and folded into the aggregate truncation
+/// pointer instead of emitting an unreadable fragment. The first entry is
+/// exempt from the drop: it always renders, borrowing budget beyond its
+/// computed fair share if needed to clear the minimum-text floor, so the
+/// banner is never structurally present but informationally empty.
+///
+/// Two distinct notice lines: the PER-ENTRY notice (attached to one
+/// truncated entry) points at that entry's own `--id` via
+/// `tier_truncation_marker`, since the reader already has the exact id in
+/// front of them. The AGGREGATE notice (`"(N more ... truncated)"`,
+/// covering entries dropped entirely rather than truncated) stays pointed
+/// at `--domain` -- it covers N different ids with no single one to name,
+/// and `~/.claude/CLAUDE.md`'s Boot section documents that exact
+/// `--domain` affordance. The two code paths must not collapse into one.
 ///
 /// Note on ordering: a later entry's fair share is recomputed from whatever
 /// budget remains, so a dropped entry can free up enough room for a
@@ -112,9 +211,6 @@ fn format_capped_banner(
     let header = format!("{open}\n{header_line}\n");
     let footer = format!("{close}\n");
     let available = cap.saturating_sub(header.len() + footer.len());
-    let truncated_notice = format!(
-        "  \u{21b3} truncated -- full text: `legion recall --repo {repo} --domain {recall_domain}`\n"
-    );
 
     let mut buf = header;
     let mut remaining_budget = available;
@@ -137,9 +233,13 @@ fn format_capped_banner(
             continue;
         }
 
+        // The per-entry notice, unlike the aggregate one below, names this
+        // entry's own id -- built once per entry so it can be sized into
+        // `overhead` before the text budget is computed.
+        let per_entry_notice = format!("{}\n", tier_truncation_marker(repo, &entry.id));
         let overhead = "- ".len()
             + format!("... (id: {})\n", entry.id).len()
-            + truncated_notice.len()
+            + per_entry_notice.len()
             + chain_line.len();
 
         // The floor applies to actual text bytes, not the raw per-entry
@@ -155,20 +255,42 @@ fn format_capped_banner(
         };
 
         let text_budget = budget_for_entry.saturating_sub(overhead);
-        let truncated_text = truncate_at_char_boundary(&entry.text, text_budget);
-        let text_was_cut = truncated_text.len() < entry.text.len();
-        let ellipsis = if text_was_cut { "..." } else { "" };
-        // Only claim truncation when text was actually cut -- the full body
-        // can exceed its share purely from id/chain overhead while the text
-        // itself still fits, and a "truncated" notice on unclipped text
-        // would be a false claim.
-        let notice = if text_was_cut {
-            truncated_notice.as_str()
+
+        // Gist, then Card, then the raw byte-slice as a last resort. Each
+        // tier is used only when it BOTH differs from the full text
+        // (render_tier reports `true` -- so it is a genuine truncation, not
+        // a same-length no-op on text with no paragraph/sentence boundary)
+        // AND fits the entry's byte share. Only the final raw-slice branch
+        // appends "..." -- Gist/Card already end at a natural boundary, so
+        // an ellipsis there would misrepresent a clean cut as a mid-word one.
+        let (rendered, was_truncated, ellipsis): (Cow<'_, str>, bool, &str) = {
+            let (gist, gist_truncated) = render_tier(&entry.text, Tier::Gist);
+            if gist_truncated && gist.len() <= text_budget {
+                (gist, true, "")
+            } else {
+                let (card, card_truncated) = render_tier(&entry.text, Tier::Card);
+                if card_truncated && card.len() <= text_budget {
+                    (card, true, "")
+                } else {
+                    let sliced = truncate_at_char_boundary(&entry.text, text_budget);
+                    let sliced_truncated = sliced.len() < entry.text.len();
+                    let ellipsis = if sliced_truncated { "..." } else { "" };
+                    (Cow::Borrowed(sliced), sliced_truncated, ellipsis)
+                }
+            }
+        };
+        // Only claim truncation when the rendering actually differs from
+        // the full text -- the full body can exceed its share purely from
+        // id/chain overhead while the text itself still fits (or has no
+        // tier boundary and is short enough to survive the raw slice
+        // untouched), and a "truncated" notice there would be a false claim.
+        let notice = if was_truncated {
+            per_entry_notice.as_str()
         } else {
             ""
         };
         let body = format!(
-            "- {truncated_text}{ellipsis} (id: {})\n{notice}{chain_line}",
+            "- {rendered}{ellipsis} (id: {})\n{notice}{chain_line}",
             entry.id
         );
         remaining_budget = remaining_budget.saturating_sub(budget_for_entry);
@@ -806,10 +928,16 @@ pub fn filter_by_min_score(result: &mut RecallResult, min_score: f32) {
 /// when there are no results. When `preview` is `Some(n)`, each reflection
 /// text is truncated to the first `n` characters (UTF-8 safe) via
 /// [`card_parse::truncate_chars`], keeping session-start and PreToolUse
-/// injections small. When preview is None, the reflection text is borrowed
-/// rather than cloned (the per-line `format!` still allocates the output
-/// chunk).
-pub fn format_for_hook(result: &RecallResult, preview: Option<usize>) -> String {
+/// injections small -- `tier` is NOT consulted in this case (byte-for-byte
+/// identical to the pre-tiering behavior; the CLI layer additionally makes
+/// `--tier` and `--preview` mutually exclusive, so a handler never receives
+/// both). When `preview` is `None`, `tier` selects the render via
+/// `render_tier`; a hit whose render actually truncated gets
+/// `tier_truncation_marker(&r.repo, &r.id)` appended on its own line --
+/// the per-HIT repo, not `result.repo`, since `find_similar_by_id` sets
+/// `result.repo = "(all)"` under `--cross-repo` and a marker built from
+/// that would emit an unusable `--repo (all)`.
+pub fn format_for_hook(result: &RecallResult, preview: Option<usize>, tier: Tier) -> String {
     if result.reflections.is_empty() {
         return String::new();
     }
@@ -817,16 +945,25 @@ pub fn format_for_hook(result: &RecallResult, preview: Option<usize>) -> String 
     let mut output = format!("[Legion] Relevant reflections for {}:\n", result.repo);
 
     for r in &result.reflections {
-        let text: std::borrow::Cow<'_, str> = match preview {
-            Some(n) if r.text.chars().count() > n => {
-                std::borrow::Cow::Owned(crate::card_parse::truncate_chars(&r.text, n))
-            }
-            _ => std::borrow::Cow::Borrowed(&r.text),
-        };
+        if let Some(n) = preview {
+            let text: Cow<'_, str> = if r.text.chars().count() > n {
+                Cow::Owned(crate::card_parse::truncate_chars(&r.text, n))
+            } else {
+                Cow::Borrowed(&r.text)
+            };
+            output.push_str(&format!(
+                "- {} (id: {}, score: {:.2})\n",
+                text, r.id, r.score
+            ));
+            continue;
+        }
+
+        let (rendered, truncated) = render_tier(&r.text, tier);
         output.push_str(&format!(
             "- {} (id: {}, score: {:.2})\n",
-            text, r.id, r.score
+            rendered, r.id, r.score
         ));
+        append_tier_marker(&mut output, truncated, &r.repo, &r.id);
     }
 
     output
@@ -836,8 +973,15 @@ pub fn format_for_hook(result: &RecallResult, preview: Option<usize>) -> String 
 ///
 /// Includes repository attribution per line so agents can see where
 /// each reflection originated. Returns an empty string when there
-/// are no results.
-pub fn format_for_consult(result: &RecallResult) -> String {
+/// are no results. `tier` selects the render via `render_tier`, same
+/// per-hit-repo marker rule as `format_for_hook` -- `format_for_consult`
+/// is cross-repo by construction (it already prints `[{r.repo}]` per
+/// line), so the marker must always use the hit's own repo. The default
+/// `Tier::Full` reproduces today's behavior byte-for-byte: reflection
+/// 019d7664 already ruled that cross-repo consult must not silently
+/// truncate, since full text matters for an agent reading someone else's
+/// knowledge.
+pub fn format_for_consult(result: &RecallResult, tier: Tier) -> String {
     if result.reflections.is_empty() {
         return String::new();
     }
@@ -845,13 +989,58 @@ pub fn format_for_consult(result: &RecallResult) -> String {
     let mut output = String::from("[Legion] Cross-repo reflections:\n");
 
     for r in &result.reflections {
+        let (rendered, truncated) = render_tier(&r.text, tier);
         output.push_str(&format!(
             "- [{}] {} (id: {}, score: {:.2})\n",
-            r.repo, r.text, r.id, r.score
+            r.repo, rendered, r.id, r.score
         ));
+        append_tier_marker(&mut output, truncated, &r.repo, &r.id);
     }
 
     output
+}
+
+/// Fetch exactly one reflection by id, bypassing search entirely -- the
+/// fault-in half of tiered retrieval. Mirrors `recall_by_domain` /
+/// `recall_latest`'s existing bypass-search shape (same file). Reuses
+/// `Database::get_reflection_by_id_in_mode`, already used by every other
+/// archive-mode-aware read path.
+///
+/// Returns `LegionError::ReflectionNotFound(id)` when `id` does not
+/// resolve under `mode` (missing entirely, or filtered out by archive
+/// mode). Returns `LegionError::ReflectionRepoMismatch { id, actual,
+/// expected }` when `id` resolves but belongs to a different repo than
+/// `repo` -- same variant and same shape `handle_forget`'s existing
+/// `--repo` safety check already uses.
+pub fn recall_by_id(
+    db: &Database,
+    repo: &str,
+    id: &str,
+    mode: ArchiveMode,
+) -> Result<RecallResult> {
+    let reflection = db
+        .get_reflection_by_id_in_mode(id, mode)?
+        .ok_or_else(|| crate::error::LegionError::ReflectionNotFound(id.to_string()))?;
+
+    if reflection.repo != repo {
+        return Err(crate::error::LegionError::ReflectionRepoMismatch {
+            id: id.to_string(),
+            actual: reflection.repo,
+            expected: repo.to_string(),
+        });
+    }
+
+    Ok(RecallResult {
+        reflections: vec![RecalledReflection {
+            id: reflection.id,
+            repo: reflection.repo,
+            text: reflection.text,
+            score: 0.0,
+            created_at: reflection.created_at,
+        }],
+        query: format!("(id:{id})"),
+        repo: repo.to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -1017,7 +1206,7 @@ mod tests {
                 created_at: "2026-03-05T00:00:00Z".into(),
             }],
         };
-        let output = format_for_hook(&result, None);
+        let output = format_for_hook(&result, None, Tier::Full);
         assert!(output.contains("mapping rules are fragile"));
         assert!(output.contains("kelex"));
         assert!(output.contains("0.87"));
@@ -1046,7 +1235,7 @@ mod tests {
                 },
             ],
         };
-        let output = format_for_hook(&result, None);
+        let output = format_for_hook(&result, None, Tier::Full);
         assert!(output.contains("mapping rules are fragile"));
         assert!(output.contains("discriminated unions hide complexity"));
         assert!(output.contains("[Legion]"));
@@ -1059,7 +1248,7 @@ mod tests {
             repo: "kelex".into(),
             reflections: vec![],
         };
-        let output = format_for_hook(&result, None);
+        let output = format_for_hook(&result, None, Tier::Full);
         assert!(output.is_empty() || output.contains("No relevant reflections"));
     }
 
@@ -1076,7 +1265,7 @@ mod tests {
                 created_at: "2026-04-10".into(),
             }],
         };
-        let output = format_for_hook(&result, Some(50));
+        let output = format_for_hook(&result, Some(50), Tier::Full);
         // Delegates to card_parse::truncate_chars which appends "..."
         assert!(output.contains("..."));
         assert!(output.len() < 200);
@@ -1096,7 +1285,7 @@ mod tests {
                 created_at: "2026-04-10".into(),
             }],
         };
-        let output = format_for_hook(&result, None);
+        let output = format_for_hook(&result, None, Tier::Full);
         assert!(output.contains(&long_text));
     }
 
@@ -1159,7 +1348,7 @@ mod tests {
                 },
             ],
         };
-        let output = format_for_consult(&result);
+        let output = format_for_consult(&result, Tier::Full);
         assert!(output.contains("[Legion] Cross-repo reflections:"));
         assert!(output.contains("[kelex]"));
         assert!(output.contains("[platform]"));
@@ -1178,7 +1367,7 @@ mod tests {
             repo: "(all)".into(),
             reflections: vec![],
         };
-        let output = format_for_consult(&result);
+        let output = format_for_consult(&result, Tier::Full);
         assert!(output.is_empty());
     }
 
@@ -1652,12 +1841,24 @@ mod tests {
 
     #[test]
     fn format_whoami_truncation_pointer_includes_repo() {
+        // Per-entry notices point at the entry's own `--id`, not
+        // `--domain` (the #950 sharpening) -- every truncated entry gets
+        // its own fault-in pointer naming its own id.
         let big = "x".repeat(800);
         let entries: Vec<WhoamiEntry> = (0..5)
             .map(|i| entry(&format!("id{i}"), &big, false))
             .collect();
         let out = format_whoami("kelex", &entries);
-        assert!(out.contains("legion recall --repo kelex --domain identity"));
+        for i in 0..5 {
+            assert!(
+                out.contains(&format!("legion recall --repo kelex --id id{i}")),
+                "entry id{i} should have its own --id pointer, got: {out}"
+            );
+        }
+        assert!(
+            !out.contains("--domain"),
+            "per-entry notice must not reference --domain"
+        );
     }
 
     #[test]
@@ -1688,7 +1889,11 @@ mod tests {
     }
 
     #[test]
-    fn format_whatami_per_entry_truncation_uses_workflow_domain() {
+    fn format_whatami_per_entry_truncation_uses_id_pointer() {
+        // Per-entry notices point at the entry's own `--id` regardless of
+        // banner (whoami vs. whatami) -- only the AGGREGATE "(N more ...
+        // truncated)" line stays pointed at `--domain workflow` (covered by
+        // `format_whatami_truncation_pointer_uses_workflow_domain`).
         let big = "x".repeat(800);
         let entries: Vec<WhoamiEntry> = (0..5)
             .map(|i| entry(&format!("w{i}"), &big, false))
@@ -1696,8 +1901,15 @@ mod tests {
         let out = format_whatami("kelex", &entries);
         for i in 0..5 {
             assert!(out.contains(&format!("w{i}")), "w{i} should be present");
+            assert!(
+                out.contains(&format!("legion recall --repo kelex --id w{i}")),
+                "entry w{i} should have its own --id pointer, got: {out}"
+            );
         }
-        assert!(out.contains("legion recall --repo kelex --domain workflow"));
+        assert!(
+            !out.contains("--domain"),
+            "per-entry notice must not reference --domain"
+        );
     }
 
     #[test]
@@ -1717,5 +1929,400 @@ mod tests {
             msg.contains("reindex"),
             "error should suggest reindex, got: {msg}"
         );
+    }
+
+    // --- #950: render_tier ---
+
+    #[test]
+    fn render_tier_full_returns_text_unmodified_never_truncates() {
+        let (rendered, truncated) = render_tier("any text at all.", Tier::Full);
+        assert_eq!(rendered, "any text at all.");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn render_tier_full_empty_string() {
+        let (rendered, truncated) = render_tier("", Tier::Full);
+        assert_eq!(rendered, "");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn render_tier_gist_returns_lead_paragraph() {
+        let text = "Lead paragraph summary.\n\nBody detail that follows after the blank line.";
+        let (rendered, truncated) = render_tier(text, Tier::Gist);
+        assert_eq!(rendered, "Lead paragraph summary.");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn render_tier_gist_short_text_equals_full() {
+        // No blank line -- gist IS the full text, not a truncation of it.
+        // A test must cover this explicitly: gist == full must not
+        // duplicate the text or claim truncation.
+        let text = "No blank line in this reflection at all.";
+        let (rendered, truncated) = render_tier(text, Tier::Gist);
+        assert_eq!(rendered, text);
+        assert!(
+            !truncated,
+            "gist must not claim truncation when it equals the full text"
+        );
+    }
+
+    #[test]
+    fn render_tier_card_returns_first_sentence_period() {
+        let text = "First sentence ends here. Second sentence follows.";
+        let (rendered, truncated) = render_tier(text, Tier::Card);
+        assert_eq!(rendered, "First sentence ends here.");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn render_tier_card_returns_first_sentence_exclamation() {
+        let text = "Watch out! Second sentence follows.";
+        let (rendered, truncated) = render_tier(text, Tier::Card);
+        assert_eq!(rendered, "Watch out!");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn render_tier_card_returns_first_sentence_question() {
+        let text = "Is this right? Second sentence follows.";
+        let (rendered, truncated) = render_tier(text, Tier::Card);
+        assert_eq!(rendered, "Is this right?");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn render_tier_card_stops_at_newline_when_earlier_than_punctuation() {
+        let text = "No punctuation on this line\nSecond line has a period. more.";
+        let (rendered, truncated) = render_tier(text, Tier::Card);
+        assert_eq!(rendered, "No punctuation on this line");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn render_tier_card_uses_whichever_boundary_is_smaller_offset() {
+        // Sentence punctuation appears before the newline -- the
+        // punctuation boundary wins because its byte offset is smaller.
+        let text = "Ends here. \nrest of the text on a new line.";
+        let (rendered, truncated) = render_tier(text, Tier::Card);
+        assert_eq!(rendered, "Ends here.");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn render_tier_card_short_text_equals_full() {
+        // No sentence-ending punctuation and no newline -- card IS the
+        // full text, same symmetry requirement as Gist.
+        let text = "no boundary of any kind in this text";
+        let (rendered, truncated) = render_tier(text, Tier::Card);
+        assert_eq!(rendered, text);
+        assert!(
+            !truncated,
+            "card must not claim truncation when it equals the full text"
+        );
+    }
+
+    #[test]
+    fn render_tier_card_empty_string() {
+        let (rendered, truncated) = render_tier("", Tier::Card);
+        assert_eq!(rendered, "");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn render_tier_card_multibyte_text_before_boundary_is_safe() {
+        // Multi-byte UTF-8 (accented char, snowman) before the ASCII
+        // sentence boundary -- str::find's match offset is always a valid
+        // char boundary in the haystack, so slicing there never panics.
+        let text = "caf\u{e9} \u{2603} done. more text after.";
+        let (rendered, truncated) = render_tier(text, Tier::Card);
+        assert!(truncated);
+        assert!(rendered.ends_with("done."));
+    }
+
+    // --- #950: format_for_hook / format_for_consult tier marker behavior ---
+
+    fn single_hit_result(repo: &str, id: &str, text: &str) -> RecallResult {
+        RecallResult {
+            query: "q".into(),
+            repo: repo.into(),
+            reflections: vec![RecalledReflection {
+                id: id.into(),
+                repo: repo.into(),
+                text: text.into(),
+                score: 0.9,
+                created_at: "2026-04-10T00:00:00Z".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn format_for_hook_full_tier_never_marks() {
+        let long_text = "First sentence ends here. ".to_string() + &"z".repeat(500);
+        let result = single_hit_result("legion", "abc", &long_text);
+        let output = format_for_hook(&result, None, Tier::Full);
+        assert!(output.contains(&long_text));
+        assert!(!output.contains("truncated"));
+    }
+
+    #[test]
+    fn format_for_hook_card_tier_marks_when_truncated() {
+        let text = "First sentence ends here. Second sentence follows with detail.";
+        let result = single_hit_result("legion", "abc", text);
+        let output = format_for_hook(&result, None, Tier::Card);
+        assert!(output.contains("First sentence ends here."));
+        assert!(!output.contains("Second sentence"));
+        assert!(output.contains("legion recall --repo legion --id abc"));
+    }
+
+    #[test]
+    fn format_for_hook_gist_tier_no_marker_when_short_text_equals_full() {
+        let text = "Short reflection with no paragraph break.";
+        let result = single_hit_result("legion", "abc", text);
+        let output = format_for_hook(&result, None, Tier::Gist);
+        assert!(output.contains(text));
+        assert!(!output.contains("truncated"));
+    }
+
+    #[test]
+    fn format_for_hook_card_tier_no_marker_when_short_text_equals_full() {
+        let text = "no sentence boundary here just words";
+        let result = single_hit_result("legion", "abc", text);
+        let output = format_for_hook(&result, None, Tier::Card);
+        assert!(output.contains(text));
+        assert!(!output.contains("truncated"));
+    }
+
+    #[test]
+    fn format_for_hook_preview_wins_over_tier() {
+        // preview wins, tier is not consulted, even when the combination
+        // is unreachable from the CLI (--tier conflicts_with --preview) --
+        // must still be well-defined for direct callers of the function.
+        let text = "a".repeat(500);
+        let result = single_hit_result("legion", "abc", &text);
+        let with_card = format_for_hook(&result, Some(50), Tier::Card);
+        let with_full = format_for_hook(&result, Some(50), Tier::Full);
+        assert_eq!(with_card, with_full, "preview must win regardless of tier");
+        assert!(!with_card.contains("--id abc"));
+    }
+
+    #[test]
+    fn format_for_hook_preview_none_full_tier_matches_pre_tiering_behavior() {
+        // format_for_hook(&result, None, Tier::Full) must be byte-for-byte
+        // identical to the pre-#950 format_for_hook(&result, None).
+        let text = "First sentence ends here. more detail follows after that.";
+        let result = single_hit_result("legion", "abc", text);
+        let output = format_for_hook(&result, None, Tier::Full);
+        assert_eq!(
+            output,
+            format!("[Legion] Relevant reflections for legion:\n- {text} (id: abc, score: 0.90)\n")
+        );
+    }
+
+    #[test]
+    fn format_for_hook_cross_repo_uses_hit_repo_not_result_repo() {
+        // Regression: find_similar_by_id sets result.repo = "(all)" under
+        // --cross-repo; the marker must use each hit's OWN repo, not
+        // result.repo, or it emits an unusable `--repo (all)`.
+        let text = "First sentence ends here. more detail follows after.";
+        let result = RecallResult {
+            query: "similar:x".into(),
+            repo: "(all)".into(),
+            reflections: vec![RecalledReflection {
+                id: "hit-1".into(),
+                repo: "kelex".into(),
+                text: text.into(),
+                score: 0.9,
+                created_at: "2026-04-10T00:00:00Z".into(),
+            }],
+        };
+        let output = format_for_hook(&result, None, Tier::Card);
+        assert!(output.contains("legion recall --repo kelex --id hit-1"));
+        assert!(!output.contains("--repo (all)"));
+    }
+
+    #[test]
+    fn format_for_consult_multi_repo_uses_each_hits_own_repo() {
+        let text_a = "Sentence from kelex ends here. more.";
+        let text_b = "Sentence from platform ends here. more.";
+        let result = RecallResult {
+            query: "q".into(),
+            repo: "(all)".into(),
+            reflections: vec![
+                RecalledReflection {
+                    id: "id-a".into(),
+                    repo: "kelex".into(),
+                    text: text_a.into(),
+                    score: 0.9,
+                    created_at: "2026-04-10T00:00:00Z".into(),
+                },
+                RecalledReflection {
+                    id: "id-b".into(),
+                    repo: "platform".into(),
+                    text: text_b.into(),
+                    score: 0.8,
+                    created_at: "2026-04-10T00:00:00Z".into(),
+                },
+            ],
+        };
+        let output = format_for_consult(&result, Tier::Card);
+        assert!(output.contains("legion recall --repo kelex --id id-a"));
+        assert!(output.contains("legion recall --repo platform --id id-b"));
+        assert!(!output.contains("--repo (all)"));
+    }
+
+    #[test]
+    fn format_for_consult_full_tier_matches_pre_tiering_behavior() {
+        let result = single_hit_result("kelex", "id-1", "schema introspection");
+        let output = format_for_consult(&result, Tier::Full);
+        assert_eq!(
+            output,
+            "[Legion] Cross-repo reflections:\n- [kelex] schema introspection (id: id-1, score: 0.90)\n"
+        );
+    }
+
+    // --- #950: recall_by_id ---
+
+    #[test]
+    fn recall_by_id_hit_returns_full_reflection() {
+        let (db, index, _dir) = test_storage();
+        let id = reflect_from_text(&db, &index, "kelex", "the fetched reflection text")
+            .expect("reflect");
+
+        let result = recall_by_id(&db, "kelex", &id, ArchiveMode::Hot).expect("recall_by_id hit");
+        assert_eq!(result.reflections.len(), 1);
+        assert_eq!(result.reflections[0].id, id);
+        assert_eq!(result.reflections[0].text, "the fetched reflection text");
+        assert_eq!(result.repo, "kelex");
+    }
+
+    #[test]
+    fn recall_by_id_miss_returns_not_found() {
+        let (db, _index, _dir) = test_storage();
+        let err = recall_by_id(&db, "kelex", "nonexistent-id", ArchiveMode::Hot).unwrap_err();
+        assert!(
+            matches!(err, crate::error::LegionError::ReflectionNotFound(ref i) if i == "nonexistent-id"),
+            "expected ReflectionNotFound, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn recall_by_id_archived_filtered_out_in_hot_mode() {
+        let (db, index, _dir) = test_storage();
+        let id =
+            reflect_from_text(&db, &index, "kelex", "archived reflection text").expect("reflect");
+        db.archive_reflection(&id).expect("archive");
+
+        let hot_err = recall_by_id(&db, "kelex", &id, ArchiveMode::Hot).unwrap_err();
+        assert!(
+            matches!(hot_err, crate::error::LegionError::ReflectionNotFound(_)),
+            "archived reflection must be hidden from hot mode, got: {hot_err:?}"
+        );
+
+        let cold = recall_by_id(&db, "kelex", &id, ArchiveMode::Cold).expect("cold hit");
+        assert_eq!(cold.reflections[0].id, id);
+    }
+
+    #[test]
+    fn recall_by_id_repo_mismatch_returns_error() {
+        let (db, index, _dir) = test_storage();
+        let id =
+            reflect_from_text(&db, &index, "kelex", "kelex-owned reflection").expect("reflect");
+
+        let err = recall_by_id(&db, "rafters", &id, ArchiveMode::Hot).unwrap_err();
+        match err {
+            crate::error::LegionError::ReflectionRepoMismatch {
+                id: err_id,
+                actual,
+                expected,
+            } => {
+                assert_eq!(err_id, id);
+                assert_eq!(actual, "kelex");
+                assert_eq!(expected, "rafters");
+            }
+            other => panic!("expected ReflectionRepoMismatch, got: {other:?}"),
+        }
+    }
+
+    // --- #950: format_capped_banner Gist -> Card -> byte-slice fallback ---
+
+    #[test]
+    fn format_whoami_banner_uses_gist_when_it_fits_entrys_share() {
+        let lead = "Gist lead paragraph summarizing the point in one paragraph.";
+        let body = "z".repeat(3000);
+        let text = format!("{lead}\n\n{body}");
+        let out = format_whoami("legion", &[entry("g1", &text, false)]);
+
+        assert!(
+            out.contains(lead),
+            "lead paragraph should render, got: {out}"
+        );
+        assert!(
+            !out.contains(&"z".repeat(50)),
+            "body past the blank line must not render"
+        );
+        assert!(out.contains("legion recall --repo legion --id g1"));
+    }
+
+    #[test]
+    fn format_whoami_banner_falls_back_to_card_when_gist_too_large() {
+        let sentence = "Card sentence ends right here.";
+        let filler = "y".repeat(3000);
+        let text = format!("{sentence} {filler}\n\nMore text after the blank line.");
+        let out = format_whoami("legion", &[entry("c1", &text, false)]);
+
+        assert!(
+            out.contains(sentence),
+            "card sentence should render, got: {out}"
+        );
+        assert!(
+            !out.contains(&"y".repeat(50)),
+            "filler between the sentence and the blank line must not render"
+        );
+        assert!(out.contains("legion recall --repo legion --id c1"));
+    }
+
+    #[test]
+    fn format_whoami_banner_byte_slice_fallback_when_tier_boundary_too_large() {
+        // A Card boundary exists (". ") but it sits past the entry's byte
+        // share, so the cascade must fall all the way through to the raw
+        // truncate_at_char_boundary slice rather than emitting an
+        // oversized Card render.
+        let text = format!("{}. {}", "a".repeat(5000), "b".repeat(5000));
+        let out = format_whoami("legion", &[entry("x1", &text, false)]);
+
+        assert!(
+            out.contains(&"a".repeat(1000)),
+            "a run should be present (raw slice lands inside it), got truncated banner"
+        );
+        assert!(!out.contains(&"b".repeat(10)), "b run must not render");
+        assert!(
+            !out.contains(". b"),
+            "raw slice must not reach the sentence boundary at offset 5000"
+        );
+        assert!(out.contains("..."), "raw slice keeps its ellipsis marker");
+        assert!(out.contains("legion recall --repo legion --id x1"));
+    }
+
+    #[test]
+    fn format_whoami_banner_both_notice_lines_correctly_targeted() {
+        // Both notice code paths active in one banner: entry 0 (no tier
+        // boundary, raw-slice truncated) gets a per-entry `--id` pointer;
+        // enough further entries are starved below MIN_ENTRY_RENDER_BYTES
+        // to also fire the aggregate `--domain` pointer. The two must not
+        // collapse into one code path.
+        let solo_text = "x".repeat(800);
+        let filler_text = "x".repeat(400);
+        let mut entries = vec![entry("solo0", &solo_text, false)];
+        for i in 1..40 {
+            entries.push(entry(&format!("id{i}"), &filler_text, false));
+        }
+        let out = format_whoami("legion", &entries);
+
+        assert!(out.contains("legion recall --repo legion --id solo0"));
+        assert!(out.contains("more identity reflections truncated"));
+        assert!(out.contains("legion recall --repo legion --domain identity"));
     }
 }

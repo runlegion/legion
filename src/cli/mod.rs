@@ -25,6 +25,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::recall;
+
 use self::autonomy::AutonomyAction;
 use self::deliver::DeliverAction;
 use self::document::DocumentAction;
@@ -183,6 +185,29 @@ pub(crate) enum Commands {
         #[arg(long, conflicts_with_all = ["latest", "cosine_only", "context"])]
         domain: Option<String>,
 
+        /// Fetch exactly one reflection by id, bypassing search. The
+        /// fault-in half of tiered retrieval: pair with a `card`/`gist`
+        /// hit's id to pull its full body. Mutually exclusive with the
+        /// other search-mode selectors (--latest, --cosine-only, --domain,
+        /// --context) -- it is a fourth way to select WHAT to return.
+        /// --limit, --since, --until, --on, and --min-score are accepted
+        /// but not threaded into this fetch (a fetch-by-id is already
+        /// unambiguous, and the fetched reflection has no meaningful score
+        /// to threshold against -- applying --min-score here would make a
+        /// valid id vanish silently instead of erroring); --archives /
+        /// --include-archives DO apply, since they resolve the archive
+        /// mode this id lookup is filtered by.
+        #[arg(long, conflicts_with_all = ["latest", "cosine_only", "domain", "context"])]
+        id: Option<String>,
+
+        /// How much of each reflection's text to render: `card` (id +
+        /// first sentence), `gist` (id + lead paragraph), or `full`
+        /// (stored text verbatim -- the default, unchanged from today).
+        /// Mutually exclusive with --preview: pick one truncation axis,
+        /// not both. Composes with --id.
+        #[arg(long, value_enum, default_value_t = recall::Tier::Full, conflicts_with = "preview")]
+        tier: recall::Tier,
+
         /// Search ONLY archived reflections (the deep-dive). Default mode
         /// is hot-only; this flag inverts. Mutually exclusive with
         /// --include-archives. Applies to the BM25/hybrid, --domain, and
@@ -268,6 +293,11 @@ pub(crate) enum Commands {
         /// always human-formatted today).
         #[arg(long)]
         json: bool,
+
+        /// Same tier selector as `recall --tier`. Defaults to `full`.
+        /// Reflection mode only; has no effect on --symbol.
+        #[arg(long, value_enum, default_value_t = recall::Tier::Full)]
+        tier: recall::Tier,
 
         /// Only include reflections created on or after this date
         /// (YYYY-MM-DD, <N>d, <N>w, today, yesterday). Reflection mode

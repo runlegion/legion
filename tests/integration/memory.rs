@@ -1988,6 +1988,73 @@ fn recall_min_score_flag_accepted_by_parser() {
     );
 }
 
+#[test]
+fn recall_min_score_filters_normal_search_path() {
+    // Keeps the pre-#950 guarantee alive: the normal (non-`--id`) search
+    // path still honors `--min-score`. A threshold far above any
+    // attainable BM25/hybrid score must filter the match out entirely.
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--text",
+        "distinctive phrase for min score filtering",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "recall",
+        "--repo",
+        "test",
+        "--context",
+        "distinctive phrase filtering",
+        "--min-score",
+        "999",
+    ]));
+    assert!(
+        !stdout.contains("distinctive phrase for min score filtering"),
+        "expected --min-score to filter out the match on the normal search path, got: {stdout}"
+    );
+}
+
+#[test]
+fn recall_id_ignores_min_score() {
+    // Regression (#950 review, HIGH): recall_by_id hardcodes score 0.0,
+    // mirroring the other bypass-search paths (--domain, --latest), none
+    // of which produce a meaningful score. Before the fix, the min-score
+    // filter ran unconditionally after the id/domain/latest/cosine_only
+    // branch, so any positive --min-score silently emptied a valid --id
+    // fetch with exit 0 -- no error, just nothing. --min-score must be
+    // accepted-but-ignored on the --id path, same as
+    // --limit/--since/--until/--on.
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--text",
+        "fetched by id despite a high min score",
+    ]))
+    .trim()
+    .to_string();
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "recall",
+        "--repo",
+        "test",
+        "--id",
+        &id,
+        "--min-score",
+        "0.9",
+    ]));
+    assert!(
+        stdout.contains("fetched by id despite a high min score"),
+        "expected --id fetch to survive --min-score, got: {stdout}"
+    );
+}
+
 // --- Card C: reflect --dedupe-mode and --force ---
 
 #[test]

@@ -456,6 +456,8 @@ pub(crate) fn handle_recall(
     cosine_only: bool,
     min_score: Option<f32>,
     domain: Option<String>,
+    id: Option<String>,
+    tier: recall::Tier,
     archives: bool,
     include_archives: bool,
     since: Option<String>,
@@ -506,7 +508,14 @@ pub(crate) fn handle_recall(
         );
     }
 
-    let mut result = if let Some(ref dom) = domain {
+    let mut result = if let Some(ref fetch_id) = id {
+        // Fault-in fetch: bypasses search entirely. --limit/--since/
+        // --until/--on are accepted (clap does not reject them) but not
+        // threaded here -- a fetch by id is already unambiguous, per the
+        // flag help text on `Commands::Recall::id`. --archives /
+        // --include-archives DO apply, via `mode`, resolved above.
+        recall::recall_by_id(&database, &repo, fetch_id, mode)?
+    } else if let Some(ref dom) = domain {
         recall::recall_by_domain(&database, &repo, dom, limit, mode, &range)?
     } else if latest {
         recall::recall_latest(&database, &repo, limit, mode, &range)?
@@ -526,11 +535,22 @@ pub(crate) fn handle_recall(
             None => recall::recall_bm25(&database, &index, &repo, &context, limit, mode, &range)?,
         }
     };
-    // Apply min-score filter on hybrid/latest paths (cosine-only applies it inline).
-    if !cosine_only && let Some(threshold) = min_score {
+    // Apply min-score filter on hybrid/latest paths (cosine-only applies it
+    // inline). Skipped on the --id path: recall_by_id hardcodes score 0.0
+    // (correctly -- it mirrors --domain/--latest, the other bypass-search
+    // paths, none of which produce a meaningful score), so applying a
+    // positive --min-score threshold there would silently filter out a
+    // valid id with no error, contradicting the spec's intent that --id
+    // exits non-zero only on ReflectionNotFound/ReflectionRepoMismatch.
+    // --min-score is accepted-but-ignored on the --id path, same as
+    // --limit/--since/--until/--on above.
+    if id.is_none()
+        && !cosine_only
+        && let Some(threshold) = min_score
+    {
         recall::filter_by_min_score(&mut result, threshold);
     }
-    let output = recall::format_for_hook(&result, preview);
+    let output = recall::format_for_hook(&result, preview, tier);
     if !output.is_empty() {
         print!("{output}");
     }
@@ -554,7 +574,10 @@ pub(crate) fn handle_similar(
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        let output = recall::format_for_hook(&result, preview);
+        // `legion similar` gains no --tier flag (see cli::mod::Commands::
+        // Similar); this call site passes Tier::Full unconditionally,
+        // preserving today's behavior with no new surface.
+        let output = recall::format_for_hook(&result, preview, recall::Tier::Full);
         if !output.is_empty() {
             print!("{output}");
         }
@@ -562,11 +585,13 @@ pub(crate) fn handle_similar(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_consult(
     context: Option<String>,
     symbol: Option<String>,
     limit: usize,
     json: bool,
+    tier: recall::Tier,
     since: Option<String>,
     until: Option<String>,
     on: Option<String>,
@@ -584,7 +609,7 @@ pub(crate) fn handle_consult(
                 Some(model) => recall::consult(&database, &index, &model, &ctx, limit, &range)?,
                 None => recall::consult_bm25(&database, &index, &ctx, limit, &range)?,
             };
-            let output = recall::format_for_consult(&result);
+            let output = recall::format_for_consult(&result, tier);
             if output.is_empty() {
                 info!("[legion] no reflections matched context: \"{}\"", ctx);
             } else {
