@@ -19,7 +19,7 @@ pub use self::log::{mcp_log_dir, mcp_log_path, mcp_trace, most_recent_mcp_log};
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -189,11 +189,13 @@ pub fn run_stdio_loop(
         ],
     );
 
-    // Shared stdout writer. The Mutex serialises writes so lines never
-    // interleave.
+    // Stdout writer, owned outright by this loop. It was an
+    // `Arc<Mutex<..>>` while the notifier thread shared it and the Mutex
+    // kept the two writers' lines from interleaving; since #947 retired
+    // that thread the request loop is the sole writer, so there is nothing
+    // left to serialise against.
     let stdout = std::io::stdout();
-    let out: Arc<Mutex<std::io::BufWriter<std::io::Stdout>>> =
-        Arc::new(Mutex::new(std::io::BufWriter::new(stdout)));
+    let mut out: std::io::BufWriter<std::io::Stdout> = std::io::BufWriter::new(stdout);
 
     // Which repo the connected client belongs to, for attributing the tool
     // calls that arrive later in the session.
@@ -242,11 +244,9 @@ pub fn run_stdio_loop(
             );
             let id = Value::Null;
             let resp = error_response(&id, -32700, "message too large");
-            if let Ok(s) = serde_json::to_string(&resp)
-                && let Ok(mut locked) = out.lock()
-            {
-                let _ = writeln!(locked, "{s}");
-                let _ = locked.flush();
+            if let Ok(s) = serde_json::to_string(&resp) {
+                let _ = writeln!(out, "{s}");
+                let _ = out.flush();
             }
             continue;
         }
@@ -263,11 +263,9 @@ pub fn run_stdio_loop(
                 eprintln!("[legion mcp] parse error: {e}");
                 let id = Value::Null;
                 let resp = error_response(&id, -32700, "parse error");
-                if let Ok(s) = serde_json::to_string(&resp)
-                    && let Ok(mut locked) = out.lock()
-                {
-                    let _ = writeln!(locked, "{s}");
-                    let _ = locked.flush();
+                if let Ok(s) = serde_json::to_string(&resp) {
+                    let _ = writeln!(out, "{s}");
+                    let _ = out.flush();
                 }
                 continue;
             }
@@ -278,10 +276,8 @@ pub fn run_stdio_loop(
         {
             match serde_json::to_string(&response) {
                 Ok(s) => {
-                    if let Ok(mut locked) = out.lock() {
-                        let _ = writeln!(locked, "{s}");
-                        let _ = locked.flush();
-                    }
+                    let _ = writeln!(out, "{s}");
+                    let _ = out.flush();
                 }
                 Err(e) => {
                     eprintln!("[legion mcp] serialize error: {e}");
