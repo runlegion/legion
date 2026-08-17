@@ -1494,10 +1494,10 @@ mod tests {
         let db = test_db();
         db.insert_reflection("platform", "@kessel\nquestion -- review?", "team")
             .unwrap();
-        assert!(crate::signal::is_addressed_to(
-            "@kessel\nquestion -- review?",
-            "kessel"
-        ));
+        assert_eq!(
+            crate::signal::recipient_token("@kessel\nquestion -- review?"),
+            Some("kessel")
+        );
         let signals = db
             .get_unhandled_signals_for_repo("kessel", &["kessel".to_string()], None)
             .unwrap();

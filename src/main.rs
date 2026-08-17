@@ -261,7 +261,6 @@ fn run() -> error::Result<()> {
         Commands::Backfill => cli::memory::handle_backfill()?,
         Commands::Document { action } => cli::document::handle(action)?,
         Commands::SubIssue { action } => cli::issue::handle_sub_issue(action)?,
-        Commands::McpHealth { wait } => cli::misc::handle_mcp_health(wait)?,
         Commands::Now { banner: _, json } => cli::misc::handle_now(json)?,
         Commands::Init { force } => cli::misc::handle_init(force)?,
         Commands::Surface {

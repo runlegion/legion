@@ -13,10 +13,5 @@
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/legion",
       "args": ["mcp"]
     }
-  },
-  "channels": [
-    {
-      "server": "legion"
-    }
-  ]
+  }
 }

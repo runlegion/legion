@@ -101,13 +101,6 @@ pub fn recipient_token(text: &str) -> Option<&str> {
     Some(token)
 }
 
-/// Whether `text` is a signal whose recipient token equals `name` exactly
-/// (case-sensitive). Callers wanting case-insensitive matching compare
-/// [`recipient_token`] under their own normalization.
-pub fn is_addressed_to(text: &str, name: &str) -> bool {
-    recipient_token(text) == Some(name)
-}
-
 /// SQL LIKE patterns matching a signal addressed to `name`, anchored at the
 /// start of the text and mid-string, with and without the trailing-`:`
 /// decoration that [`recipient_token`] trims. Owned by the signal module so
@@ -455,15 +448,20 @@ mod tests {
         assert_eq!(recipient_token(""), None);
     }
 
+    /// Addressing is an exact, case-sensitive token match that tolerates the
+    /// trailing `:` decoration. These cases were pinned through the
+    /// `is_addressed_to` wrapper until #947 retired its last caller with the
+    /// MCP channel push; they assert the same contract directly against the
+    /// token rule that always implemented it.
     #[test]
-    fn is_addressed_to_is_exact_and_colon_tolerant() {
-        assert!(is_addressed_to("@kessel ping:open hello", "kessel"));
-        assert!(is_addressed_to("@kessel: please review", "kessel"));
-        assert!(!is_addressed_to("@kessel ping", "kesseltwo"));
-        assert!(!is_addressed_to("@kesseltwo ping", "kessel"));
+    fn recipient_token_match_is_exact_and_colon_tolerant() {
+        assert_eq!(recipient_token("@kessel ping:open hello"), Some("kessel"));
+        assert_eq!(recipient_token("@kessel: please review"), Some("kessel"));
+        assert_ne!(recipient_token("@kessel ping"), Some("kesseltwo"));
+        assert_ne!(recipient_token("@kesseltwo ping"), Some("kessel"));
         // Case-sensitive by contract; callers normalize if they want CI.
-        assert!(!is_addressed_to("@Kessel ping", "kessel"));
-        assert!(!is_addressed_to("not a signal", "kessel"));
+        assert_ne!(recipient_token("@Kessel ping"), Some("kessel"));
+        assert_eq!(recipient_token("not a signal"), None);
     }
 
     #[test]

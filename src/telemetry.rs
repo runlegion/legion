@@ -885,6 +885,22 @@ mod tests {
     }
 
     #[test]
+    fn historical_mcp_notification_row_still_deserializes() {
+        // #947 retired the lane that wrote these rows, but every
+        // `mcp_notification` row already in delivery.jsonl is the evidence
+        // the retirement was measured against -- the parity read has to
+        // keep parsing them after the writer is gone. Parsed from a literal
+        // line rather than round-tripped through `append_delivery`, whose
+        // path resolves via the process-global XDG_STATE_HOME that other
+        // tests in this file mutate.
+        let raw = r#"{"ts":"2026-08-17T04:04:38.123456+00:00","lane":"mcp_notification","repo":"rafters","reflection_id":"01a00de4-92b4-7293-baa2-8b430e0ff8f2"}"#;
+        let parsed: DeliveryRecord = serde_json::from_str(raw).expect("historical row must parse");
+        assert_eq!(parsed.lane, DeliveryLane::McpNotification);
+        assert_eq!(parsed.repo, "rafters");
+        assert_eq!(parsed.reflection_id, "01a00de4-92b4-7293-baa2-8b430e0ff8f2");
+    }
+
+    #[test]
     fn bypass_log_path_uses_xdg_state_home() {
         let saved_xdg = std::env::var("XDG_STATE_HOME").ok();
         // SAFETY: this test mutates process env. Cargo runs tests in parallel

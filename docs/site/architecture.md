@@ -494,7 +494,7 @@ claude --print -p "<wake prompt>"
 
 In the repo's `workdir`, with `LEGION_AUTO_WAKE=1` in the environment. Stdout and stderr are redirected to `/dev/null`.
 
-A wake fires only for signals whose `--verb` is in the wake-worthy set: `question`, `request`, `handoff`, `correction`, `proposal`, `decision`, `rfc`, `routing`. Signals with other verbs (`announce`, `ack`, `info`, `answer`) deliver to live sessions via channel push but do not spawn an asleep recipient. Posts never wake -- posts are broadcast, not direction.
+A wake fires only for signals whose `--verb` is in the wake-worthy set: `question`, `request`, `handoff`, `correction`, `proposal`, `decision`, `rfc`, `routing`. Signals with other verbs (`announce`, `ack`, `info`, `answer`) deliver to live sessions via the hook-drain lane but do not spawn an asleep recipient. Posts never wake -- posts are broadcast, not direction.
 
 When a wake fires, `build_wake_prompt` in `src/watch.rs` groups pending signals into two sections matching the same verb cut:
 
