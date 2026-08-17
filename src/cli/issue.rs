@@ -1032,6 +1032,32 @@ mod tests {
         );
     }
 
+    /// #961 review fix: the `--json` branch's None-body path
+    /// (`issue.body.as_deref().unwrap_or("")`) had no coverage.
+    /// `split_body_lossless("")` must yield an empty preamble and zero
+    /// sections, not a panic or a fabricated section.
+    #[test]
+    fn issue_view_json_serializes_none_body_as_empty_preamble_and_sections() {
+        // Mirrors the View arm's `issue.body.as_deref().unwrap_or("")` for a
+        // `None` body -- the same "" the arm would produce.
+        let (preamble, sections) = card_parse::split_body_lossless("");
+        let out = IssueViewJson {
+            number: 2,
+            title: "No body".to_owned(),
+            state: "closed".to_owned(),
+            url: "https://github.com/runlegion/legion/issues/2".to_owned(),
+            preamble,
+            sections: sections
+                .into_iter()
+                .map(|(heading, content)| IssueViewSection { heading, content })
+                .collect(),
+        };
+        let json = serde_json::to_string(&out).expect("serializes");
+
+        assert!(json.contains("\"preamble\":\"\""), "got: {json}");
+        assert!(json.contains("\"sections\":[]"), "got: {json}");
+    }
+
     #[test]
     fn render_view_text_handles_missing_body() {
         let issue = worksource::ExternalIssue {
@@ -1047,7 +1073,15 @@ mod tests {
         };
 
         let rendered = render_view_text(&issue);
-        assert!(rendered.contains("No body"));
-        assert!(rendered.contains("State: closed"));
+
+        // #961 review fix: assert_eq against the fully known expected
+        // string -- a None body renders as an empty slot ("\n\n\n\n"
+        // between the title line and State:), not omitted or panicking.
+        let expected = "# No body #2\n\n\n\nState: closed\n\
+                         URL: https://github.com/runlegion/legion/issues/2\n";
+        assert_eq!(
+            rendered, expected,
+            "a missing body must render as an empty slot, not be omitted"
+        );
     }
 }
