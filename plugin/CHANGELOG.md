@@ -1,5 +1,258 @@
 # Legion Changelog
 
+## 0.31.0
+
+Three of the four changes share a shape: the thing existed, was correct, and never
+reached the party that needed it. A wake attempt that died before its prompt submitted
+left the signals it carried marked delivered forever -- `watch_handled` rows are written
+at spawn success and nothing ever rolled them back -- so two signals for smugglr went
+silently and permanently missing on 2026-08-16 and surfaced only because the operator
+asked why smugglr had been quiet (#948, PR #955). An `answer` reached the asker's inbox
+and not the asker: `answer` ships `VerbShape::Record`, so the one party known to be
+BLOCKED on a reply was the only party the wake gate could not page (#949, PR #954). And
+the issue-writer agent -- template discipline, spec-slice transcription rules, the
+caller-prediction protocol -- lived in this repo's project-local `.claude/agents/`, so
+every other repo the plugin serves filed issues with none of it (#951, PR #953). The
+fourth is not that shape and is not dressed as one: tiered recall retrieval adds a
+`card`/`gist`/`full` contract to `recall` and `consult` plus a `recall --id` fault-in,
+because the corpus offers nothing between nothing and everything (#950, PR #956). Minor
+release rather than a patch: five net-new surfaces ship -- `recall --id`, `--tier` on
+both `recall` and `consult`, a `max_redelivery_attempts` watch config key, a
+`watch_redelivery` table, and `legion:issue-writer` in the plugin -- and two of the four
+changes alter behavior with no input change at all, since an answer can now spawn a live
+session where it never did and a failed wake now respawns.
+
+Read those last two together, because no issue or PR could: they compose into more
+spawns. Answer-wakes are a wake class the daemon did not previously have, and re-arm
+turns one spawn per signal into as many as four (one original plus three retries, the
+`max_redelivery_attempts` default). Both are bounded -- answer-wakes can never exceed the
+questions the sleeper actually asked and still have to clear the delegated-entry skip,
+the cooldown, the live-session lock and the concurrent-wake cap; re-arm is capped per
+`(signal_id, repo_name)` and gives up loudly -- but the bound is on rate, not on cost,
+and every spawn is a billed Claude session nobody typed. No schema migration:
+`watch_redelivery` is a `CREATE TABLE IF NOT EXISTS` in `create_tables`, which covers
+fresh and existing databases on next open, and it is host-local by design like
+`watch_handled`, absent from the sync wire's table constants, so a mixed-version cluster
+is unaffected. `full` stays the default tier everywhere, so no existing caller's output
+changes until it opts in -- including the four production hook scripts that pass
+`--preview`, whose parsing survives because clap's `--tier`/`--preview` conflict fires
+only on an explicit `--tier` occurrence and not on its default value. That last one was
+checked by running the CLI, not by reading the derive.
+
+### New
+
+- **An answer wakes the asker who slept waiting for it** (PR #954, #949). Sean's ruling,
+  2026-08-16: "an answer is wake worthy -- what if they slept waiting for it?" The
+  motivating case that night: veneer left questions on the board and slept, rafters
+  answered them, and veneer stayed asleep until its next unrelated wake. The fix is
+  CONDITIONAL, and deliberately does not live in the manifest: `answer` does not join
+  `WAKE_WORTHY_VERBS`, `is_wake_worthy("answer")` still returns `false`, and the shipped
+  wake set is unchanged -- because `src/status.rs` buckets its "WHAT CHANGED" list by
+  exact equality against `VerbShape::Record`, so reshaping `answer` would have silently
+  dropped every answer signal out of a view this issue was not scoped to repair. The one
+  line that did change in `plugin/verbs/default.toml` is a comment pointing readers at
+  `watch::WAKE_WORTHY_VERBS in src/watch.rs`, a path stale since #612; the const has
+  lived at `verbs::WAKE_WORTHY_VERBS` in `src/verbs.rs` ever since. Instead the
+  resolution fact is computed at SEND time and rides the signal: `legion signal` peeks
+  for the first still-pending wake-worthy ask the recipient authored and stamps
+  `resolves:<ask-id>` into the outgoing answer's details. Peeked BEFORE compose, because
+  #919's `retire_answered_for_author` destroys exactly that evidence synchronously later
+  in the same invocation, and a watch daemon polling afterwards -- possibly on another
+  host, per the sync model -- has nothing left to re-derive. The stamp is appended last
+  so a hand-typed `resolves` key cannot shadow the computed one, and a DB error there is
+  logged and swallowed: the stamp must never cost the signal itself. The wake gate then
+  reads the marker off the synced text with no DB query, exactly as `is_wake_worthy`
+  does, and spawns only past a DB-backed authenticity check -- the referenced ask must
+  have been authored by the repo about to be woken AND must itself have been wake-worthy.
+  Forged stamps never wake: a hand-typed `--details "resolves:whatever"` is refused, and
+  the check fails CLOSED via `unwrap_or(false)`, because an authenticity question nobody
+  could answer must not spawn a session. That check is the bound the whole feature rests
+  on -- answer-wakes can never exceed the questions the sleeper actually asked.
+  `signal_wakes_repo` replaces the bare `is_wake_worthy` call at the same point in
+  `poll_cycle`, so an answer-wake inherits the gates above and below it rather than
+  routing around them, and one extractor (`resolved_ask_id`) backs both the spawn gate
+  and the display bucketing so the two cannot disagree about what a marker is. The wake
+  prompt gains a third section, "YOUR ASK WAS ANSWERED", framed as unblocking rather than
+  work assignment. It is disjoint from the other two by construction rather than by
+  ordering: `signal_requires_reply` is exactly `is_wake_worthy`, which only matches
+  `VerbShape::Wake`, and `answer` is `Record`, so no signal can land in both buckets.
+  `REQUIRES A REPLY` routing is untouched -- an answer-triggered wake never enters
+  `legion pending-replies`.
+- **Tiered recall retrieval: `card`, `gist`, `full`, and `recall --id` to fault in the
+  rest** (PR #956, #950). `recall` and `consult` returned every hit's full stored `text`
+  on every call. Measured on this repo's own corpus rather than assumed: a five-hit
+  sample of `domain=workflow` roots ran 306 to 2444 bytes each, across 3633 reflections.
+  `--tier card` renders id plus first sentence (to the first `". "`, `"! "`, `"? "` or
+  newline, whichever starts earliest), `--tier gist` renders id plus lead paragraph (to
+  the first blank line), and `--tier full` is today's behavior and the default on both
+  commands. `recall --id <uuid>` is the other half of the contract: a caller holding a
+  card or a gist fetches the body by id, bypassing search entirely, mirroring the
+  existing `--domain`/`--latest` bypass shape. It fails with named errors rather than
+  emptiness -- `ReflectionNotFound` when the id does not resolve under the active archive
+  mode, `ReflectionRepoMismatch` when it resolves under a different repo, the same
+  variant `handle_forget`'s `--repo` safety check already uses. Both tiers report whether
+  they ACTUALLY truncated, and that boolean is load-bearing rather than cosmetic: text
+  with no paragraph or sentence boundary returns unmodified and reports `false`, because
+  a short reflection's card IS its full text, and a marker pointing at a fuller body that
+  does not exist sends the reader after nothing. When a render did truncate, the marker
+  names the fetch that completes it -- built from the HIT's own repo, not the result's,
+  because `find_similar_by_id` sets `result.repo` to `"(all)"` under `--cross-repo` and a
+  marker built from that field would print an unusable `legion recall --repo (all) --id
+  ...`. The boot banner's hand-rolled byte-slicer now routes through the same primitive:
+  an entry overflowing its fair share tries gist, then card, and falls back to the raw
+  byte slice only when neither natural boundary fits, which a single long sentence can
+  still fail. Only that last branch appends `"..."`, since a tier boundary is a clean cut
+  and an ellipsis would misrepresent it as a mid-word one. The two truncation notices
+  stay deliberately distinct: the per-entry one names that entry's own `--id`, while the
+  aggregate `"(N more ... truncated)"` covers entries dropped whole with no single id to
+  name and stays pointed at `--domain`. Scope the consolidation honestly -- this leaves
+  ONE implementation behind the banner and the tier CLI, not one in the codebase.
+  `--preview` remains its own axis, mutually exclusive with `--tier` because a caller
+  should pick one truncation rule and not two; `legion similar` pins `Tier::Full` and
+  gains no flag; and `src/surface.rs`'s two independent truncation helpers are untouched.
+  One correctness fix rode the same work, caught in review: `recall --id` hardcodes score
+  0.0 -- correctly, matching the other bypass-search paths, none of which produce a
+  meaningful score -- and the `--min-score` filter then ran unconditionally, so a valid id
+  with any positive threshold returned empty at exit 0. A silent vanish on the one path
+  whose entire contract is "this id, or a named error." The filter is now gated off the
+  id path and `--min-score` joins `--limit`/`--since`/`--until`/`--on` in the help text as
+  accepted-but-ignored there, so the behavior reads as a decision rather than an
+  oversight. Note the direction of that finding: the spec's own conflict list omitted
+  `min_score`, so this was a hole in the specification rather than a deviation from it.
+  Credit where owed -- progressive disclosure, card then gist then body on demand, is the
+  one genuinely better idea taken from the Valera-Studio harness review. Lead-paragraph
+  gists work unusually well here for a reason specific to this corpus: the house style
+  writes reflections verdict-first. Token thrift is the rationale and NOT a measured
+  deliverable; benchmarking waits for 1.0 per the operator's standing ruling.
+- **`legion:issue-writer` ships with the plugin** (PR #953, #951). The agent that turns a
+  messy problem description into a template-shaped issue -- prediction-scribe rules,
+  spec-slice transcription discipline, the premise-line requirement for untraced defect
+  work, the UNCLEAR clarification format -- was project-local, invocable only from
+  sessions whose working directory is this repo. `plugin/agents/` already shipped
+  changelog, dungeon-master, legion-explore, legion-prime, legion-review and
+  legion-verify; the one agent authoring the input every later stage consumes was missing
+  from that list. It moves in a single commit, which git recognizes as a rename at 86%
+  similarity, so no intermediate state has two live definitions of the name or zero. The
+  nine changed lines are exclusively de-hardcoding: "the legion repo" becomes target-repo
+  wording, `--repo legion` becomes `--repo <repo>`, the Interface-block and Dev Workflow
+  bullets shed their Rust/cargo assumptions, and `LegionError` is demoted from the error
+  convention to legion's example of one. Every protocol section is byte-identical, and
+  that is checkable rather than asserted -- none of their line ranges appear in the diff
+  at all. `reviewer.md` and `rust.md` stay project-local: they are legion's own
+  implementer and reviewer with legion-specific routing, and moving them is a separate
+  decision nobody has made.
+
+### Fixed
+
+- **A failed wake attempt re-arms the signals it stranded** (PR #955, #948). Found live,
+  not theorised. On 2026-08-16 the daemon logged `2 signal(s) for smugglr -- waking
+  agent`, then `spawned agent for smugglr`, then no submit confirmation, then the
+  dead-pid reaper settling the attempt failed -- and those two signals were never
+  delivered to anything, ever. `mark_signal_handled_for_repo` writes `watch_handled` at
+  spawn success, `get_unhandled_signals_for_repo` excludes anything carrying a matching
+  row, and nothing in the codebase ever deleted such a row on attempt failure; only the
+  time-cutoff prune and `rename_repo` ever deleted from that table at all. So the mark
+  said delivered and the delivery had not happened, permanently and silently. It surfaced
+  only because the operator asked why smugglr had been quiet, and the remediation was a
+  hand-typed replacement signal. Now an attempt settling to a failure terminal state
+  unmarks exactly the `(signal_id, repo_name)` pairs it carried, so the next poll
+  re-surfaces them -- subject to that poll's own lookback and expiry windows, which
+  re-arm does NOT override: a fresh signal resurfaces, a backdated one stays out, pinned
+  by a test composed against the real `WatchLoop` bound rather than a fixture. Per-repo
+  scoping falls out of `watch_handled`'s existing composite primary key rather than being
+  new logic to get right, so an `@all` broadcast's copies for other repos cannot be
+  touched by the delete. Three call sites get the hook rather than a generic FSM-state
+  listener: the dead-pid reaper, `reap_finished`'s submit-failed/budget-exceeded branch,
+  and its normal-reap `success == false` branch. Each fires only when
+  `record_wake_attempt_outcome` itself returned `Ok(())` and the status was not `"ok"`,
+  which combined with that function's terminal-is-sticky `WHERE` clause makes the
+  accounting exactly-once by construction -- only one site can win the terminal write for
+  a given attempt, and a losing call gets `Err` and never reaches the hook. That is a
+  passing regression test rather than a code comment: a losing racer leaves the counter
+  at 1. `Timeout` and `Abandoned` stay deliberately unhooked, both verified rather than
+  assumed -- `Timeout` has zero production callers, and `Abandoned` is written in the
+  `Err(spawn_agent(..))` arm, which runs strictly before any signal is marked handled, so
+  there is nothing to roll back. The bound is the cap and explicitly not the cooldown:
+  `CooldownTracker::is_cooling_down` returns `false` unconditionally during configured
+  work hours and its state is in-process, wiped by any daemon restart -- which is exactly
+  what the observed incident involved. The new host-local `watch_redelivery` table counts
+  attempts per `(signal_id, repo_name)`, and `max_redelivery_attempts` defaults to 3,
+  bounding a systematically crashing repo to four wasted spawns per signal. Exhaustion is
+  LOUD rather than a second silent loss: `watch_handled` is left in place, a prefix-free
+  bullpen post goes to the recipient repo and a prefixed line to stderr, matching
+  `QuotaPanicGate::check_and_post`'s convention exactly -- there is no later retry point
+  at which anyone would otherwise find out. The counter is never reset and has no reset
+  path, deliberately: a pair that eventually succeeds is never passed back through this
+  function, so "consecutive failures" and "total failures" are the same number for the
+  life of that pair. Adding a third repo-keyed table to `rename_repo` would have made a
+  third copy of the same delete-then-rename-in shape, so `carry_repo_keyed_table` was
+  extracted and `board_reads` and `watch_handled` rewired onto it -- table and column
+  names are call-site literals, never caller input. `tick_poll` prunes `watch_redelivery`
+  on the same retention cutoff that already prunes `watch_handled`.
+
+### Before you upgrade: issue-writer answers to a new name
+
+The move from `.claude/agents/` into `plugin/agents/` is the entire point of #951 -- the
+agent ships to every legion-equipped repo now -- but it also renames the invocation. The
+agent is `legion:issue-writer`, in the plugin namespace, and the bare `issue-writer` name
+is gone as of the merge. There is a gap between those two facts: the bare name
+disappeared when PR #953 landed, while the namespaced one resolves only once this plugin
+release propagates to a session's cache, so a session still holding the 0.30.0 plugin has
+neither. File issues with `legion issue create` directly until the release reaches you.
+The gap was accepted rather than bridged with a shim because a repo-wide search found
+zero live call sites on the bare name -- only historical CHANGELOG prose (PR #953, #951).
+
+### Known gaps, named rather than implied
+
+- **The new spawn volume is only half countable.** Re-arm's share is legible -- every
+  retry increments a `watch_redelivery` row, so the rate is queryable after the fact. An
+  answer-wake is not: `wake_attempts` records `attempt_id`, `persona_id`, `repo_name` and
+  a `signal_ids` JSON array with no column naming what triggered the wake, so separating
+  answer-wakes from verb-wakes means resolving `signal_ids` back to each signal's text.
+  Nothing in this release measures the combined effect the opening paragraph describes.
+- **The MCP `legion_signal` tool does not stamp `resolves`** (PR #954, #949). It bypasses
+  `handle_signal` entirely, so an answer sent through MCP carries no marker and wakes
+  nobody, however genuinely it resolves a pending ask. Not fixed here: it is a named
+  motivating instance in #952, which retires the MCP write surface altogether rather than
+  teaching it a second copy of this logic.
+- **`handle_signal` has no test harness, and this change inherits that** (PR #954, #949).
+  The will-not-wake warning suppression and the `answered_ask_id` multi-author loop share
+  one untested seam, because `handle_signal` opens the real data-dir DB. A pre-existing
+  boundary this work rides rather than widens, waived as one named gap rather than dressed
+  up as covered.
+- **A successful session can be re-woken once** (PR #955, #948). If `classify_session`
+  errors on a session that actually succeeded, `reap_finished` returns early leaving the
+  row running with a dead pid; the next tick's dead-pid reaper settles it failed and --
+  new as of this release -- re-arms its signals. Pre-existing plumbing interacting with
+  new behavior, bounded by the retry cap, out of #948's stated scope. A follow-up
+  candidate if it shows up in practice rather than in reasoning.
+- **Two Windows notes, one of them older than this release** (PR #954, #949). The
+  live-session answer-wake test is `#[cfg(unix)]`-gated: it records a session lock
+  holding our own pid and needs it to read back as alive, but `process_alive` shells out
+  to `kill -0` on unix and returns a flat `false` everywhere else, so on Windows
+  `poll_cycle` sails past the session-lock gate and the assertion fails on every run.
+  That assertion therefore does not run on Windows at all. The older one is worse and is
+  not fixed here: the sibling `poll_cycle_skips_when_session_lock_is_active` sets up the
+  identical scenario ungated but asserts only `spawned == 0`, which is true on Windows
+  whether or not the lock gate held, since the spawn fails there regardless. It has been
+  passing vacuously. Asserting on the `wake_attempts` table instead is what made the #949
+  tests non-vacuous and what surfaced the difference.
+- **`handle_rename`'s summary omits the new table** (PR #955, #948). The rename carries
+  `watch_redelivery` correctly and `RenameCounts` counts it, but the operator-facing
+  `eprintln` listing the other carried tables' counts does not print it. A reporting gap
+  in a file #948 does not name, left rather than expanding scope.
+- **Truncation is consolidated behind two surfaces, not across the codebase** (PR #956,
+  #950). `render_tier` now backs the boot banner and the tier CLI. `--preview` and
+  `card_parse::truncate_chars_with` remain a separate axis, `src/surface.rs` keeps two
+  more independent truncation helpers, and no stored-at-write-time summary field exists
+  -- gists are computed lead-paragraph-verbatim on every read. Each is a named follow-up
+  rather than an oversight.
+- **The tiers are unmeasured, and that is a ruling rather than an omission** (PR #956,
+  #950). No benchmarking, no token-cost comparison, no evidence beyond the corpus size
+  measurement that motivated the issue. Progressive disclosure is a well-founded idea
+  borrowed from a harness review, not a result observed on this corpus, and it waits for
+  1.0 before anyone claims a number.
+
 ## 0.30.0
 
 Two features, one shape: each takes something that reached the agent through exactly one
