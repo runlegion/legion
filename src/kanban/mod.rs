@@ -475,7 +475,7 @@ pub fn undefer_card(db: &Database, id: &str, note: Option<&str>) -> Result<Card>
         .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
 }
 
-/// Bind a document to a card (manual path; spec-gen uses the atomic insert).
+/// Bind a document to a card.
 ///
 /// Fails when the card is already bound, the document does not exist or is
 /// archived, or another live card is already bound to the document.

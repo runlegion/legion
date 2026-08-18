@@ -25,7 +25,6 @@ mod module_graph;
 mod prose_stdin;
 mod push;
 mod serve;
-mod spec_gen;
 mod sym_tree;
 mod task;
 mod uncertainty;
