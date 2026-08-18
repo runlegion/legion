@@ -1,11 +1,27 @@
 # Legion Changelog
 
-## Unreleased
+## 0.32.0
+
+Two changes, and issue #947 sits at the center of both. The removal is the one #947
+specified: the MCP notification channel is retired on the parity measurement built to
+authorize it, leaving the 0.30.0 hook drain as the sole live-session delivery lane
+(PR #963). The fix is for the tool that mangled #947 itself while that work was in
+flight: `legion issue view` printed a lossy projection of the issue body, `legion issue
+edit --body` wrote that projection back to GitHub as truth, and one view -> amend ->
+edit cycle flattened the retirement spec's seven section headings, silently (#961,
+PR #962). Minor release rather than a patch, on the 0.30.0 rule that the pre-1.0 minor
+digit is the architectural-shift bump: one of the two delivery lanes that release
+introduced is gone, and with it the `legion mcp-health` command, the
+`legion/notifier_health` method, and the `experimental.claude/channel` capability --
+while `issue view` changes its default output for every existing caller and gains
+`--json`. No schema migration and no new config key; anything scraping the old view
+output should move to `--json`, because the old output was exactly the artifact this
+release deletes for being unsafe to trust.
 
 ### Removed
 
-- **The MCP notification channel is retired** (#947). The `legion mcp` subprocess no
-  longer initiates messages: the polling thread that pushed
+- **The MCP notification channel is retired** (PR #963, #947). The `legion mcp`
+  subprocess no longer initiates messages: the polling thread that pushed
   `notifications/claude/channel` frames to stdout is gone, along with its heartbeat, the
   `legion/notifier_health` JSON-RPC method, the `legion mcp-health` probe that existed
   only to call it, and the `experimental.claude/channel` capability plus the `channels`
@@ -13,7 +29,9 @@
   subscribe. The hook-drain lane shipped in 0.30.0 (#941) is now the sole live-session
   delivery lane -- `plugin/hooks/delivery-drain.sh` runs `legion deliver drain` on
   UserPromptSubmit, PostToolUse and Stop and injects undelivered posts as
-  additionalContext -- and the `initialize` instructions now say so.
+  additionalContext -- and the `initialize` instructions now say so. The diff is
+  overwhelmingly the deletion itself: 1,410 lines removed against 434 added, the
+  additions dominated by the rewritten MCP integration suite.
 
   What authorized the removal was a measurement, not a preference. The dual-lane parity
   window ran in `delivery.jsonl` (`lane` tagged `hook` or `mcp_notification`, joined on
@@ -24,7 +42,10 @@
   not yet cold-start-seeded is structurally outside the window, not a miss. Sean accepted
   the one property the drain does not preserve, in writing, the same day: the retired
   push reached a live-but-IDLE session mid-turn, and the drain fires only on hook events,
-  so an idle session now hears nothing until its next prompt, tool call, or wake.
+  so an idle session now hears nothing until its next prompt, tool call, or wake. The
+  ruling's ground was cost as much as parity -- "it's a token hog. we can find better
+  ways of sending a few bytes not 100ks of data down the mcp" -- and the follow-up that
+  acceptance names is in the gaps below.
 
   What survives: the MCP server itself, its four tools (`legion_post`, `legion_reply`,
   `legion_signal`, `legion_task_respond`), `serverInfo.name`, the watch daemon's
@@ -32,7 +53,88 @@
   both lanes always shared, which the hook drain imports directly.
   `DeliveryLane::McpNotification` stays in the telemetry enum on purpose: every
   historical `mcp_notification` row in `delivery.jsonl` is the evidence this retirement
-  rests on, and it has to keep parsing after its writer is gone.
+  rests on, and it has to keep parsing after its writer is gone -- pinned by a test that
+  deserializes a real historical row.
+
+  The deletion bought one fix the spec did not ask for, surfaced by the simplify pass:
+  with the notifier thread gone, the stdout writer had exactly one writer left, and
+  flattening `Arc<Mutex<BufWriter<Stdout>>>` to plain ownership removed more than a
+  redundant lock. The old `if let Ok(..) = out.lock()` guards were silently lossy -- on
+  a poisoned lock the JSON-RPC response was simply never written, no error to the
+  client, no log line. There is no lock to poison now, so that failure mode is
+  structurally impossible rather than merely unobserved. And the negative test that
+  replaces the old channel suite earns a sentence, because a vacuous one would have
+  proven nothing: `mcp_subprocess_never_emits_channel_push_frame` retires the child by
+  dropping stdin and blocking on `wait()` -- no kill, no reap race, the #959 lesson --
+  and gates its quiet-window verdict on a `tools/list` liveness round-trip, so a dead
+  subprocess cannot pass as retired. Run against the pre-retirement binary it fails at
+  the push-frame assertion while the liveness guard still passes.
+
+### Fixed
+
+- **`legion issue view` prints the body it was given -- raw by default, byte-exact
+  structure under `--json`** (PR #962, #961). The default output was a re-derived
+  `card_parse` projection: generic sections dropped their `## ` prefix and rendered as
+  bare labels, Problem and Solution truncated to their first paragraph, and `- [ ]`
+  checklists rewrote as plain bullets. `legion issue edit --body` then wrote whatever it
+  was handed back to GitHub with no structural validation, and the pair worked as a
+  lossy photocopier: one view -> amend -> edit cycle on #947 flattened its seven section
+  headings on GitHub, silently. That is why #947's body had to be reconstructed before
+  this release's other half could clear its own close gate, and why the reconstruction
+  is a best-effort re-promotion rather than a restore -- GitHub's timeline held no
+  edited event to recover a prior revision from. The fix deletes the possibility instead
+  of improving the copy: the default view no longer parses at all -- title, number, the
+  stored body verbatim, then state and URL -- so a body with N headings prints all N,
+  because the body is printed rather than reconstructed. Structure moves to a new
+  `--json` mode: `{number, title, state, url, preamble, sections}`, built by
+  `card_parse::split_body_lossless`, which splits on `## ` headings without trimming so
+  that `preamble` plus `"## " + heading + content` for every section, in order,
+  reconstructs the body byte-for-byte -- pinned by round-trip fixtures down to the EOF
+  edge, where a final heading with no trailing newline yields `content == ""` and no
+  byte is invented. `preamble` is a plain `String`, `""` when the body opens on a
+  heading, so consumers never special-case absence. `extract_sections` was deliberately
+  not reused: it trims each section and drops everything before the first heading, both
+  fine for the kanban-side parse and both incompatible with byte-exactness. One
+  gate-connected parse defect rode the same scope: a body carrying both an
+  `## Acceptance criteria` and a `## Done When` heading -- exactly the dual-heading
+  shape the photocopier left on #947 -- used to assign `parsed.acceptance` per heading,
+  last-wins, so whichever section the walk visited second silently discarded the
+  first's criteria. It now extends, both survive in document order, and `pr write-check`
+  and verify read the merged list. `render_acceptance_block` and `render_trace_block`
+  (#907/#933) are deleted along with their six round-trip tests; the contract those
+  tests enforced -- viewer output must survive re-parsing -- now holds by construction,
+  since nothing is re-parsed. The replacement test pins the stored bytes appearing
+  unmodified in the default output, and the `--json` path is covered at the CLI boundary
+  by a test asserting every field by name and value -- which kills the mutant a bare
+  valid-JSON check would miss, a positional swap of two same-typed `String` fields.
+
+### Known gaps, named rather than implied
+
+- **The photocopier's other copies are unaudited** (PR #962, #961). #947 is
+  reconstructed; the sweep of the 15 other suspect issues whose bodies may carry the
+  same flattening is a named follow-up, as is the edit-time tripwire that would refuse a
+  body write that loses structure -- `issue edit --body` still validates nothing.
+  `card_parse`'s other lossy semantics (`first_paragraph` truncation,
+  `extract_checklist`) are untouched and now feed only the kanban-side parse, never the
+  viewer.
+- **A `## ` line inside a fenced code block splits as a section** (PR #962, #961).
+  `split_body_lossless` finds headings by line prefix and is fence-unaware. Review
+  raised it; refutation kept it, because reassembly is pure concatenation and stays
+  byte-exact wherever the splits fall -- a `--json` consumer walking `sections`
+  semantically can be surprised, a round-tripper cannot. Recorded as a follow-up
+  candidate rather than a defect.
+- **Idle-session delivery is an intent, not a mechanism** (PR #963, #947). The retired
+  push was the only lane that reached a live-but-idle session mid-turn. The follow-up
+  Sean's acceptance names is specified in intent only -- a budget-governed lane,
+  digest-batched, verb-gated, hard-capped, moving a few bytes where the push moved full
+  payloads -- and is to be filed as its own issue. Until it exists, idle means
+  unreachable until the next hook event or wake.
+- **Three channel-push mentions in docs and help text predate this branch and outlive
+  it** (PR #963, #947): docs/site/concepts.md, docs/site/getting-started.md, and the
+  CLI help in `src/cli/mod.rs` still say the push exists. Left for the standing docs
+  follow-up rather than expanding a deletion PR's scope; the two stalenesses the branch
+  itself created (`src/deliver.rs`'s module doc, `delivery-drain.sh`'s header) were
+  fixed in-branch.
 
 ## 0.31.0
 
