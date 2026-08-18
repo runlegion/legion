@@ -718,17 +718,11 @@ Documents with `doc_type=schema` are the schema registry. They serve two roles:
 
 When a schema document is created successfully, a pointer reflection is dual-written on `domain=schema` so `legion recall --domain schema` surfaces every landed schema with its document id and a human-readable summary. The canonical payload lives in the document; the reflection is the searchable pointer.
 
-### Spec-gen pipeline
+### Requirement derivation
 
-`legion spec-gen --repo <surface>` derives requirement documents from service-design inputs (#527). The `--repo` argument is the `surface` field on the source documents (e.g. "payments"), not a git repository name.
+A `requirement` document is the WHAT derived from a service-design WHY -- one requirement per `moment_of_truth` across a surface's `persona`, `journey`, `blueprint`, `painmatrix`, and `ecosystem` documents. This derivation is agent judgment, not a compiled transform: the Rust `spec-gen` command was removed in #821, because composing a requirement from a moment-of-truth is judgment work legion carries through the uncertainty engine and the audit log rather than a deterministic field-concatenation. The instrumented derivation skill that replaces it is tracked in #974. Note that automatic pre-storage schema validation was a spec-gen-only property: `legion document create` stores a non-`schema` payload as-is, so a derived requirement is checked against the `requirement` schema with `legion document validate --schema <id>` as an explicit step, not an automatic storage gate.
 
-Input types: `persona`, `journey`, `blueprint`, `painmatrix`, `ecosystem` -- all non-archived documents on the specified surface. One requirement candidate is derived per `moment_of_truth` entry across all inputs. Each candidate is validated against the `requirement` schema before storage.
-
-Idempotency key: `(traces_to, surface)`. A candidate whose `traces_to` value already exists for the surface is skipped. Re-running on unchanged input is always safe.
-
-`traces_to` convention: `<doc_id>#moment_of_truth[.n]` where `n` is the index within the source document's `moments_of_truth` array (zero-based). Each born card is born in `Backlog` status.
-
-Rejection classes: schema validation failure, source document not found, duplicate `(traces_to, surface)` pair.
+`traces_to` convention: `<doc_id>#moment_of_truth[.n]`, where `n` is the zero-based index within the source document's `moments_of_truth` array. `traces_to` is a required field on the `requirement` schema -- the provenance pointer from a requirement back to the moment it services, and the natural idempotency key when paired with the surface.
 
 ### Card-spec binding and bind guards
 
@@ -789,7 +783,7 @@ The source tree is organized into carved domain modules. File counts reflect the
 | `src/kanban/` | 3 | Kanban FSM and card parsing |
 | `src/worksource/` | 3 | Work source plugin bridge (issues, PRs, mod) |
 
-Other top-level modules in `src/` are single-file (e.g. `documents.rs`, `verify.rs`, `signal.rs`, `verbs.rs`, `spec_gen.rs`). Tests live alongside the code they test in `#[cfg(test)] mod tests` blocks. Integration tests are split across `tests/integration/` (one file per domain).
+Other top-level modules in `src/` are single-file (e.g. `documents.rs`, `verify.rs`, `signal.rs`, `verbs.rs`). Tests live alongside the code they test in `#[cfg(test)] mod tests` blocks. Integration tests are split across `tests/integration/` (one file per domain).
 
 ## File descriptor limit
 

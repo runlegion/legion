@@ -34,7 +34,6 @@ mod search;
 mod serve;
 mod signal;
 mod simplify_check;
-mod spec_gen;
 mod stats;
 mod status;
 mod statusline;
@@ -350,7 +349,6 @@ fn run() -> error::Result<()> {
             all_hosts,
             json,
         } => cli::ops::handle_health(history, all_hosts, json)?,
-        Commands::SpecGen { repo } => cli::spec_gen::handle(&repo)?,
     }
 
     Ok(())
