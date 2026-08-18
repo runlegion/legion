@@ -1,5 +1,37 @@
 # Legion Changelog
 
+## 0.32.1
+
+The verify-reframing release. `legion verify --issue <n>` has been the card-free verify
+path since #913 -- criteria read from the issue body, gate keyed
+`legion-verify:issue-<repo>#<n>`, nothing transitioned because there is no card to move --
+but every surface around it still led with the retired kanban card, so an agent asked to
+verify a defect concluded a card was required and stalled when none existed (kanban went
+doctrine-dead 2026-08-17). This flips `--issue` to the primary, documented path across the
+CLI help, the `legion-verify` skill, and the published docs, without changing the verdict
+logic or removing `--card`. Patch release: no new command, no wire-format change, no schema
+migration -- a correctness fix to framing plus a tightened test, with the `--card` code
+path left intact for the kanban CODE retirement to remove.
+
+### Fixed
+
+- **Verify stops steering callers to the dead card path** (PR #967, #966). The `Verify`
+  command's clap wiring flips which flag carries the requirement: `--issue` is now
+  `required_unless_present = "card"` where `--card` used to be `required_unless_present =
+  "issue"`, so invoking `legion verify --repo <r>` with neither target produces a clap
+  error that names `--issue`, not `--card` -- the missing-target message now points at the
+  live path instead of the retired one. The command help in `src/cli/mod.rs` leads with
+  issue-based verify and documents `--card` as the legacy kanban path retiring with kanban
+  itself; `src/cli/verify.rs`'s dispatch doc and error string follow. The `legion-verify`
+  SKILL.md (bumped to v1.1.0) is rewritten so its procedure loads acceptance criteria via
+  `legion issue view` and records via `legion verify --issue`, with no step instructing
+  `legion kanban view` or `--card`, and its frontmatter no longer frames verify as gating
+  "a card's fate". `docs/site/llms.txt` and `llms-full.txt` publish `legion verify --repo
+  <r> --issue <n>` as the verify surface. `--card` still works unchanged -- exactly one of
+  the two remains required, and the destructure-by-name field reorder is safe -- and
+  `verify_requires_a_target` is tightened to assert the error names `--issue`, pinning the
+  reframing against regression.
+
 ## 0.32.0
 
 Two changes, and issue #947 sits at the center of both. The removal is the one #947
