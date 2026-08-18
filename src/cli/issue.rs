@@ -2,7 +2,7 @@
 
 use clap::Subcommand;
 
-use crate::cli::util::{audit, open_db};
+use crate::cli::util::{audit, inline_or_stdin, open_db};
 use crate::db::card_criteria;
 use crate::{card_parse, db, error, worksource};
 
@@ -758,7 +758,11 @@ pub(crate) fn handle(action: IssueAction) -> error::Result<()> {
     Ok(())
 }
 
-pub(crate) fn handle_comment(repo: String, number: u64, body: String) -> error::Result<()> {
+pub(crate) fn handle_comment(repo: String, number: u64, body: Option<String>) -> error::Result<()> {
+    // #917: the only lane for this body is `--body` or stdin -- no
+    // `--transcript`-shaped alternative exists for a comment.
+    let body: String = inline_or_stdin(body, "--body")?;
+
     let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
     let database = open_db()?;
 

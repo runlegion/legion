@@ -22,6 +22,7 @@ mod mcp;
 mod memory;
 mod mesh;
 mod module_graph;
+mod prose_stdin;
 mod push;
 mod serve;
 mod spec_gen;

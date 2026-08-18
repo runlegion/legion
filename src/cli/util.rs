@@ -102,6 +102,41 @@ pub(crate) fn read_file_or_stdin(
     }
 }
 
+/// Resolve a prose body from an inline flag value or stdin (#917). Returns
+/// the inline value when present; otherwise reads stdin -- but fails fast
+/// with a clear error when stdin is a terminal instead of blocking on EOF,
+/// so a forgotten flag in an interactive call does not hang. The piped/
+/// redirected form is the only shell-safe one: backticks/$() in an inline
+/// double-quoted arg are command-substituted before legion runs.
+///
+/// Also refuses a blank result (empty, or whitespace-only once trimmed)
+/// regardless of where it came from -- one check here means `comment`,
+/// `commit`, `reflect`, and `post` never each carry their own copy of it.
+pub(crate) fn inline_or_stdin(
+    inline: Option<String>,
+    flag: &str,
+) -> Result<String, error::LegionError> {
+    let resolved: String = match inline {
+        Some(value) => value,
+        None => {
+            use std::io::IsTerminal as _;
+            if std::io::stdin().is_terminal() {
+                return Err(error::LegionError::WorkSource(format!(
+                    "{flag} not provided and stdin is a terminal -- pass {flag} or pipe the \
+                     body on stdin"
+                )));
+            }
+            read_file_or_stdin(None, flag)?
+        }
+    };
+    if resolved.trim().is_empty() {
+        return Err(error::LegionError::WorkSource(format!(
+            "{flag} is empty -- pass a non-empty value or pipe non-empty content on stdin"
+        )));
+    }
+    Ok(resolved)
+}
+
 /// Similarity threshold pinned on every `git diff -M` invocation in
 /// [`git_changed_files`] (#779). Passed explicitly on the command line so the
 /// coverage set never drifts with a repo's (or a contributor's global)

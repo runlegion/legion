@@ -82,7 +82,9 @@ pub(crate) enum Commands {
         #[arg(long, value_delimiter = ',', required = true)]
         repo: Vec<String>,
 
-        /// Reflection text (mutually exclusive with --transcript)
+        /// Reflection text (mutually exclusive with --transcript). Omit
+        /// both to read from stdin (#917) -- the only shell-safe way to
+        /// pass text containing backticks or $(...).
         #[arg(long, conflicts_with = "transcript")]
         text: Option<String>,
 
@@ -332,7 +334,9 @@ pub(crate) enum Commands {
         #[arg(long, value_delimiter = ',', required = true)]
         repo: Vec<String>,
 
-        /// Post text (mutually exclusive with --transcript)
+        /// Post text (mutually exclusive with --transcript). Omit both to
+        /// read from stdin (#917) -- the only shell-safe way to pass text
+        /// containing backticks or $(...).
         #[arg(long, conflicts_with = "transcript")]
         text: Option<String>,
 
@@ -858,9 +862,10 @@ pub(crate) enum Commands {
         #[arg(long)]
         number: u64,
 
-        /// Comment body
+        /// Comment body. Omit to read from stdin (#917) -- the only
+        /// shell-safe way to pass a body containing backticks or $(...).
         #[arg(long)]
-        body: String,
+        body: Option<String>,
     },
 
     /// Manage pull requests via work source plugins
@@ -934,7 +939,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         repo: String,
 
-        /// Commit message. Mutually exclusive with --message-file.
+        /// Commit message. Mutually exclusive with --message-file. Omit
+        /// both to read from stdin (#917) -- the only shell-safe way to
+        /// pass a message containing backticks or $(...).
         #[arg(long)]
         message: Option<String>,
 

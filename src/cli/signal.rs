@@ -7,7 +7,7 @@ use crate::cli::datadir::data_dir;
 use crate::cli::memory::{
     backfill_embeddings, run_compound_command_with_meta, try_load_embed_model,
 };
-use crate::cli::util::{open_db, open_db_and_index};
+use crate::cli::util::{inline_or_stdin, open_db, open_db_and_index};
 use crate::{board, db, error, reflect, signal, task, verbs, watch};
 
 pub(crate) fn handle_post(
@@ -18,6 +18,14 @@ pub(crate) fn handle_post(
     tags: Option<String>,
     follows: Option<String>,
 ) -> error::Result<()> {
+    // #917: only fall to stdin when NEITHER alternative was given -- an
+    // explicit --transcript must never be shadowed by a stray stdin pipe.
+    let text: Option<String> = if text.is_none() && transcript.is_none() {
+        Some(inline_or_stdin(None, "--text")?)
+    } else {
+        text
+    };
+
     // Redirect @self posts to reflect -- they're private, not for the team
     let is_self_post = text.as_deref().is_some_and(|t| {
         let lower = t.trim_start().to_lowercase();

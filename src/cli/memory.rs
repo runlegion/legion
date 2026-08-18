@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::index_cmd::run_consult_symbol;
-use crate::cli::util::{audit, open_db, open_db_and_index};
+use crate::cli::util::{audit, inline_or_stdin, open_db, open_db_and_index};
 use crate::{db, embed, error, recall, reflect, search};
 
 /// Controls near-duplicate detection behavior on `legion reflect`.
@@ -186,6 +186,14 @@ pub(crate) fn handle_reflect(
     force: bool,
     dedupe_mode: DedupeMode,
 ) -> error::Result<()> {
+    // #917: only fall to stdin when NEITHER alternative was given -- an
+    // explicit --transcript must never be shadowed by a stray stdin pipe.
+    let text: Option<String> = if text.is_none() && transcript.is_none() {
+        Some(inline_or_stdin(None, "--text")?)
+    } else {
+        text
+    };
+
     let domain = if whoami {
         Some("identity".to_owned())
     } else {
