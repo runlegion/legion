@@ -31,7 +31,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::cli::util::{audit, inline_or_stdin, open_db, relay_and_capture_stderr};
+use crate::cli::util::{audit, inline_or_stdin_unless, open_db, relay_and_capture_stderr};
 use crate::verify::GateResult;
 use crate::{db, error};
 
@@ -104,16 +104,11 @@ pub(crate) fn handle_commit(
     message_file: Option<String>,
     card: Option<String>,
 ) -> error::Result<()> {
-    // #917: only fall to stdin when NEITHER alternative was given -- an
-    // explicit --message-file must never be shadowed by a stray stdin pipe.
-    // Resolved here (not inside `resolve_message`) so that function stays a
-    // pure, directly-unit-testable three-way match with no real stdin in
-    // its own test suite.
-    let message: Option<String> = if message.is_none() && message_file.is_none() {
-        Some(inline_or_stdin(None, "--message")?)
-    } else {
-        message
-    };
+    // #917: fall to stdin only when neither --message nor --message-file was
+    // given. Resolved here (not inside `resolve_message`) so that function
+    // stays a pure, directly-unit-testable three-way match with no real
+    // stdin in its own test suite.
+    let message = inline_or_stdin_unless(message, message_file.is_some(), "--message")?;
 
     // Argument-shape errors are resolved before anything is audited: no
     // mutation has been attempted yet, so there is nothing to record.

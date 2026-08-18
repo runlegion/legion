@@ -137,6 +137,25 @@ pub(crate) fn inline_or_stdin(
     Ok(resolved)
 }
 
+/// [`inline_or_stdin`] for a verb that also has a mutually-exclusive
+/// alternative body source (`reflect`/`post` `--transcript`, `commit`
+/// `--message-file`): fall to stdin ONLY when the inline value and the
+/// alternative are both absent, so an explicit alternative is never
+/// shadowed by a stray stdin pipe. Returns `inline` unchanged when the
+/// alternative is present, so the caller's existing three-way resolution
+/// still sees a `None` it must reconcile with the alternative.
+pub(crate) fn inline_or_stdin_unless(
+    inline: Option<String>,
+    alternative_present: bool,
+    flag: &str,
+) -> Result<Option<String>, error::LegionError> {
+    if inline.is_none() && !alternative_present {
+        Ok(Some(inline_or_stdin(None, flag)?))
+    } else {
+        Ok(inline)
+    }
+}
+
 /// Similarity threshold pinned on every `git diff -M` invocation in
 /// [`git_changed_files`] (#779). Passed explicitly on the command line so the
 /// coverage set never drifts with a repo's (or a contributor's global)
