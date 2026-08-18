@@ -554,25 +554,26 @@ DONE
 VERIFY (v0.16.2)
 --------------------------------------------------------------------------------
 
-    legion verify --repo <repo> --card <card>
+    legion verify --repo <repo> --issue <n>
 
-Final gate before a card reaches Done. Reads per-criterion verdicts
-(pass/fail/uncertain plus evidence) as JSON from --verdicts-file or stdin,
-loads the card's acceptance criteria, and decides the card's fate:
+Terminal evidence gate before finished work is called done. Issues are the
+work source of record; the legacy --card path is retiring with kanban. Reads
+per-criterion verdicts (pass/fail/uncertain plus evidence) as JSON from
+--verdicts-file or stdin, loads the issue's acceptance criteria, and decides
+the work's fate:
 
-    Every criterion Pass with evidence:   card may transition to Done;
-                                          records a clean legion-verify:<card>
-                                          gate.
-    Any Fail:                             hard-blocks the transition.
+    Every criterion Pass with evidence:   records a clean
+                                          legion-verify:issue-<repo>#<n> gate;
+                                          the issue's close gate is unblocked.
+    Any Fail:                             hard-blocks.
     Any Uncertain, or Pass with no
-    evidence:                             routes the card to needs-input
-                                          for a human.
-    Card has no acceptance criteria:      hard-blocks outright.
+    evidence:                             needs a human to adjudicate.
+    Issue has no acceptance criteria:     hard-blocks outright.
 
 Verdicts JSON shape:
     [{"criterion": "...", "verdict": "pass|fail|uncertain", "evidence": "..."}, ...]
 
-`legion done` is verify-gated for cards that have acceptance criteria.
+`legion issue close` is verify-gated for issues that have acceptance criteria.
 
 --------------------------------------------------------------------------------
 QUALITY-GATE

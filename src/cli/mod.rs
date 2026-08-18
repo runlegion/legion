@@ -1029,44 +1029,47 @@ pub(crate) enum Commands {
         action: QualityGateAction,
     },
 
-    /// Verify a card's acceptance criteria before it can reach Done (#520).
-    /// Reads per-criterion verdicts (pass/fail/uncertain + evidence) as JSON
-    /// from --verdicts-file or stdin, loads the card's acceptance criteria,
-    /// and decides the card's fate: every criterion Pass with evidence allows
-    /// ->Done (records a clean legion-verify:<card> gate); any Fail hard-blocks;
-    /// any Uncertain (or a Pass with no evidence) routes the card to NeedsInput
-    /// for a human. A card with no acceptance criteria is blocked outright.
+    /// Record a verify verdict for finished work -- the terminal evidence
+    /// gate (#520, #913). Reads per-criterion verdicts (pass/fail/uncertain +
+    /// evidence) as JSON from --verdicts-file or stdin, loads the work's
+    /// acceptance criteria, and decides its fate: every criterion Pass with
+    /// evidence records a clean gate; any Fail hard-blocks; any Uncertain (or
+    /// a Pass with no evidence) needs a human. Work with no acceptance
+    /// criteria is blocked outright.
     ///
-    /// Acceptance-criteria precedence: when the card has a `document_id`,
-    /// the bound document's top-level `verification.acceptance` array is
-    /// consulted first; a missing or empty block (or an unparseable payload)
-    /// falls back to `tasks.acceptance`. A dangling `document_id` -- the
-    /// document does not exist -- is a hard error.
+    /// Verify GitHub-issue work with --issue -- issues are the work source of
+    /// record. The legacy --card path verifies a kanban card and is retiring
+    /// with kanban itself. Exactly one of the two is required.
     Verify {
         /// Repository name (resolves work source config from watch.toml)
         #[arg(long)]
         repo: String,
 
-        /// Kanban card ID whose acceptance criteria are being verified.
-        /// Mutually exclusive with --issue.
-        #[arg(long, required_unless_present = "issue", conflicts_with = "issue")]
-        card: Option<String>,
-
-        /// Work-source issue number to verify instead of a card (#913).
+        /// Work-source issue number to verify (#913) -- the primary path.
         ///
         /// Criteria come from the issue body, parsed by the same reader
         /// `legion pr write-check --issue` uses, so the gate that opens a PR
-        /// and the gate that closes the work check the same text. For a repo
-        /// whose work is issue-shaped and never produces cards, this is the
-        /// only path to a verify verdict -- before it, `verify` was reachable
-        /// only through `card.document_id` and such a repo silently got
-        /// simplify, pr-write and review but never the final evidence gate.
+        /// and the gate that closes the work check the same text. An untraced
+        /// issue is verified against its own acceptance criteria; a `## Traces
+        /// to` issue is verified against the referenced requirement.
         ///
         /// Records `legion-verify:issue-<repo>#<n>`. Transitions nothing:
         /// there is no card to move, so the verdict is the gate row and the
         /// exit code.
-        #[arg(long)]
+        #[arg(long, required_unless_present = "card")]
         issue: Option<u64>,
+
+        /// Kanban card ID to verify -- the LEGACY path, retiring with kanban.
+        /// New work is issue-shaped; prefer --issue. Mutually exclusive with
+        /// --issue.
+        ///
+        /// Acceptance-criteria precedence: when the card has a `document_id`,
+        /// the bound document's top-level `verification.acceptance` array is
+        /// consulted first; a missing or empty block (or an unparseable
+        /// payload) falls back to `tasks.acceptance`. A dangling `document_id`
+        /// -- the document does not exist -- is a hard error.
+        #[arg(long, conflicts_with = "issue")]
+        card: Option<String>,
 
         /// Path to a JSON file with the per-criterion verdicts. Reads stdin
         /// when omitted. Shape: `[{"criterion": "...", "verdict":
