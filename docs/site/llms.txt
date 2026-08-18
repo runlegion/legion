@@ -43,6 +43,11 @@ legion pr create --repo <name> --title "<title>" [--body "<body>"] [--task <card
 legion pr review --repo <name> ...
 legion pr merge --repo <name> ...
 legion comment --repo <name> --number <n> --body "<body>"
+# Prose-body verbs (reflect --text, post --text, comment --body, commit --message)
+# read the body from STDIN when the inline flag is omitted -- pipe or redirect any
+# body whose backticks or $(...) must survive verbatim. An inline double-quoted body
+# is command-substituted by the shell before legion runs, which silently mangles it:
+#   printf '%s' "$BODY" | legion comment --repo <name> --number <n>
 legion needs --repo <name>
 legion document create --doc-type <type> --owner <agent> [--from <path>]
 legion document list [--doc-type <type>] [--surface <s>] [--status <s>] [--archived]

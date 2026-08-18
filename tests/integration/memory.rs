@@ -1451,12 +1451,19 @@ fn stats_on_empty_db() {
 fn reflect_no_input_errors() {
     let dir = tempfile::tempdir().unwrap();
 
-    // clap allows the call but the binary returns an error since
-    // neither --text nor --transcript is provided.
-    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args(["reflect", "--repo", "test"]));
+    // clap allows the call but, since neither --text nor --transcript is
+    // provided, the binary now falls back to stdin (#917). Piping an empty
+    // body here still refuses -- with the "is empty" error, since an empty
+    // pipe is not a terminal.
+    let out = run_with_stdin(
+        legion_cmd(dir.path()).args(["reflect", "--repo", "test"]),
+        b"",
+    );
+    assert!(!out.status.success(), "expected the command to fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("no reflection text provided"),
-        "expected missing input error, got: {stderr}"
+        stderr.contains("--text is empty"),
+        "expected empty-body error, got: {stderr}"
     );
 }
 
