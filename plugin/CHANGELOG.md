@@ -1,5 +1,48 @@
 # Legion Changelog
 
+## 0.33.0
+
+The shell-safe-body release. The prose-body verbs -- `reflect --text`, `post --text`,
+`comment --body`, and `commit --message` -- now read their body from STDIN when the inline
+flag is omitted, closing the hazard where a body containing backticks or `$(...)` had to
+travel through argv and the shell command-substituted it before legion ever saw the text,
+silently mangling a reflection or commit message that looked correct in the source. A piped
+or redirected body never reaches the shell's argument evaluation, so the content arrives
+verbatim. The inline flag still works for short, substitution-free bodies. Minor release on
+the pre-1.0 rule that an additive input surface is the minor bump: the verbs gain a second,
+safer way to receive their payload, but no existing invocation changes behavior, there is no
+wire-format change and no schema migration. This progresses #917 without closing it -- the
+remaining prose verbs (`issue create`/`edit`, `pr edit`, `signal --note`) still take a body
+only inline, and unifying the spelling across every prose verb is follow-up.
+
+### Added
+
+- **Prose verbs read the body from stdin** (PR #971, #917). A shared helper,
+  `inline_or_stdin` in `src/cli/util.rs`, resolves a prose body from the inline flag when
+  present and otherwise reads stdin. It fails fast with a named error when stdin is a
+  terminal instead of blocking on EOF, so a forgotten flag in an interactive call reports
+  "pass the flag or pipe the body" rather than hanging, and it rejects a blank result --
+  empty or whitespace-only once trimmed -- from either source, so the empty-body check
+  lives in one place instead of four. `comment --body` becomes optional and calls the base
+  helper directly. `reflect --text`, `post --text` (each with a `--transcript` alternative)
+  and `commit --message` (with `--message-file`) route through `inline_or_stdin_unless`,
+  which falls to stdin only when the inline flag and its alternative body source are both
+  absent, so an explicit alternative is never shadowed by a stray pipe. `docs/site/llms.txt`
+  now documents the shell-quoting hazard and the piped stdin-safe form for these four verbs.
+
+### Fixed
+
+- **Issue-writer discovers the ISSUE_TEMPLATE instead of hardcoding one spelling** (PR #971,
+  #970). The issue-writer agent hardcoded the exact path
+  `.github/ISSUE_TEMPLATE/implementation-task.md` (kebab-case), so a repo naming its
+  template `implementation_task.md`, or a GitHub default like `bug_report.md` that uses an
+  underscore, read as template-missing and the agent STOPped on a template that was present
+  under a different spelling. `plugin/agents/issue-writer.md` now resolves the template by
+  listing `.github/ISSUE_TEMPLATE/` -- matching `implementation[-_]task.md`
+  case-insensitively, falling back to the sole `.md` template when there is exactly one, and
+  STOPping with what it saw only when neither resolves. The description and the
+  template-you-follow note are updated to say the filename may be hyphen or underscore.
+
 ## 0.32.1
 
 The verify-reframing release. `legion verify --issue <n>` has been the card-free verify
