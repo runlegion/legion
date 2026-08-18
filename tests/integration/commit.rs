@@ -729,3 +729,81 @@ fn commit_preflight_fires_for_every_truthy_gpgsign_spelling() {
         );
     }
 }
+
+/// #917: the commit message piped on stdin (no --message / --message-file)
+/// reaches git byte-identical -- backticks and $(...) survive, because the
+/// body never passes through the shell as an argv element.
+#[cfg(unix)]
+#[test]
+fn commit_message_from_stdin_survives_backticks_and_command_substitution() {
+    let _guard = RealRepoConfigGuard::new();
+    let repo = setup_repo_with_staged_change();
+    let data_dir = tempfile::tempdir().unwrap();
+    let before = head_sha(repo.path());
+
+    let message = "fix(#917): repro in `src/cli/util.rs`\n\
+                   \n\
+                   Reproduce with $(cargo test --bin legion).\n\
+                   \n\
+                   Co-Authored-By: Legion Test <fixture@example.invalid>\n";
+
+    let out = run_with_stdin(
+        commit_cmd(data_dir.path(), repo.path()).args(["commit", "--repo", "test-agent"]),
+        message.as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(before, head_sha(repo.path()), "expected HEAD to advance");
+
+    let body = head_message(repo.path());
+    assert!(
+        body.contains("`src/cli/util.rs`"),
+        "literal backticks must survive the stdin path, got: {body}"
+    );
+    assert!(
+        body.contains("$(cargo test --bin legion)"),
+        "literal $(...) must survive the stdin path uninterpreted, got: {body}"
+    );
+}
+
+/// #917: an explicit --message-file is never shadowed by a stray stdin pipe --
+/// the file wins and stdin is not read, mirroring the reflect --transcript guard.
+#[cfg(unix)]
+#[test]
+fn commit_message_file_is_not_shadowed_by_stdin() {
+    let _guard = RealRepoConfigGuard::new();
+    let repo = setup_repo_with_staged_change();
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let msg_file = data_dir.path().join("msg.txt");
+    std::fs::write(&msg_file, GOOD_MESSAGE).unwrap();
+
+    let out = run_with_stdin(
+        commit_cmd(data_dir.path(), repo.path()).args([
+            "commit",
+            "--repo",
+            "test-agent",
+            "--message-file",
+            msg_file.to_str().unwrap(),
+        ]),
+        b"STDIN THAT MUST BE IGNORED -- --message-file was given",
+    );
+    assert!(
+        out.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let body = head_message(repo.path());
+    assert!(
+        body.contains("feat(#854): add a thing"),
+        "the --message-file content must win, got: {body}"
+    );
+    assert!(
+        !body.contains("STDIN THAT MUST BE IGNORED"),
+        "stdin must not be read when --message-file is given, got: {body}"
+    );
+}

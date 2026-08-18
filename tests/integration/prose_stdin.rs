@@ -3,9 +3,11 @@
 //! inline `--body "...`command`..."` and silently drops the substituted
 //! text before legion ever sees it).
 //!
-//! Covers the two distinct shapes: `comment` has no alternative input lane
-//! (its only prose flag is `--body`), while `reflect` has `--transcript` as
-//! an alternative that the stdin fallback must never shadow.
+//! Covers the distinct shapes: `comment` has no alternative input lane (its
+//! only prose flag is `--body`), while `reflect` and `post` have `--transcript`
+//! as an alternative that the stdin fallback must never shadow. `commit`'s
+//! stdin path (and its `--message-file`-not-shadowed guard) lives in
+//! `commit.rs`, where the git fixture harness already exists.
 
 use crate::common::*;
 use std::path::Path;
@@ -212,6 +214,48 @@ fn reflect_inline_text_still_works() {
         "plain inline reflection",
     ]));
     assert_uuid_format(stdout.trim());
+}
+
+// ---------------------------------------------------------------------------
+// post -- stored to the bullpen (no plugin hop), read back cross-repo via
+// `legion bullpen`, mirroring bullpen.rs::post_and_bullpen_roundtrip. post
+// shares reflect's `--transcript` alternative and the same
+// `inline_or_stdin_unless` guard, already covered by the reflect transcript
+// test, so post asserts the stdin round-trip only.
+// ---------------------------------------------------------------------------
+
+/// A post body piped on stdin, with neither `--text` nor `--transcript`, is
+/// stored and reads back verbatim in the bullpen -- backticks and `$(...)`
+/// intact.
+#[test]
+fn post_body_from_stdin_survives_backticks_and_command_substitution_verbatim() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let payload: &[u8] = b"regression in `src/cli/util.rs` -- repro $(cargo test)";
+
+    let out = run_with_stdin(
+        legion_cmd(dir.path()).args(["post", "--repo", "prose-stdin-post"]),
+        payload,
+    );
+    assert!(
+        out.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "expected a post id on stdout"
+    );
+
+    let bullpen = run_ok(legion_cmd(dir.path()).args(["bullpen", "--repo", "prose-stdin-reader"]));
+    assert!(
+        bullpen.contains("`src/cli/util.rs`"),
+        "expected the literal backticked path to survive into the bullpen, got: {bullpen}"
+    );
+    assert!(
+        bullpen.contains("$(cargo test)"),
+        "expected the literal $(...) to survive uninterpreted, got: {bullpen}"
+    );
 }
 
 /// `--transcript` is not shadowed by the stdin fallback: when a transcript
