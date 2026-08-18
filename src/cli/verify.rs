@@ -1213,9 +1213,9 @@ pub(crate) fn resolve_spec_criteria(
     Ok(Some(criteria))
 }
 
-/// Dispatch `legion verify` to the card path or the issue path (#913).
+/// Dispatch `legion verify` to the issue path (#913) or the legacy card path.
 ///
-/// Clap guarantees exactly one of `--card` / `--issue` is present
+/// Clap guarantees exactly one of `--issue` / `--card` is present
 /// (`required_unless_present` + `conflicts_with`), so the final arm is
 /// unreachable in practice and refuses rather than defaulting to a path the
 /// caller did not ask for.
@@ -1230,7 +1230,7 @@ pub(crate) fn handle_verify(
         (Some(card), None) => handle_verify_card(card, verdicts_file, deviation),
         (None, Some(issue)) => handle_verify_issue(&repo, issue, verdicts_file, deviation),
         _ => Err(error::LegionError::WorkSource(
-            "legion verify needs exactly one of --card or --issue".into(),
+            "legion verify needs exactly one of --issue or --card".into(),
         )),
     }
 }

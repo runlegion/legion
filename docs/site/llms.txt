@@ -38,7 +38,7 @@ legion kanban create --from <repo> --to <repo> --text "<description>" --priority
 legion kanban list --repo <name>
 legion issue create --repo <name> --title "<title>" [--body "<body>"] [--labels <csv>] [--assignee <login>]
 legion sync --repo <name>
-legion verify --repo <name> --card <id> [--verdicts-file <path>]
+legion verify --repo <name> --issue <n> [--verdicts-file <path>]
 legion pr create --repo <name> --title "<title>" [--body "<body>"] [--task <card-id>] [--reviewer <login>]
 legion pr review --repo <name> ...
 legion pr merge --repo <name> ...

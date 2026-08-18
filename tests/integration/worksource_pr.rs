@@ -3581,7 +3581,9 @@ fn verify_issue_refuses_deviation() {
 }
 
 /// Exactly one target is required. Neither given is a parse error, not a
-/// silent default onto some card.
+/// silent default onto some card. #966: with kanban retiring, `--issue` is
+/// the primary path -- the missing-target error must name it, not steer the
+/// caller to the legacy `--card`.
 #[test]
 fn verify_requires_a_target() {
     let dir = tempfile::tempdir().unwrap();
@@ -3589,8 +3591,8 @@ fn verify_requires_a_target() {
     let (_stdout, stderr) =
         run_fail(legion_cmd(dir.path()).args(["verify", "--repo", "no-such-repo"]));
     assert!(
-        stderr.contains("--card") || stderr.contains("--issue"),
-        "expected clap to name the required target flags, got: {stderr}"
+        stderr.contains("--issue"),
+        "missing-target error should name --issue as the primary path, got: {stderr}"
     );
 }
 
