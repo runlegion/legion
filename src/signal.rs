@@ -46,8 +46,8 @@ pub(crate) fn is_broadcast_address(to: &str) -> bool {
 /// filter. A single leading `@` is stripped from `to` before comparison so a
 /// caller passing "@all" or "@legion" is handled the same as the bare forms.
 ///
-/// Shared by both the CLI (`cli/signal.rs`) and MCP (`mcp/tools.rs`) signal
-/// guards so the sentinel set and stripping logic cannot drift between surfaces.
+/// Used by the CLI (`cli/signal.rs`) signal guard so the sentinel set and
+/// stripping logic have one definition.
 pub(crate) fn is_self_address(repos: &[String], to: &str) -> bool {
     // Broadcast sentinels are never self-addresses; they fan out to everyone.
     if is_broadcast_address(to) {
@@ -215,9 +215,9 @@ pub fn parse_details_arg(details: &str) -> Vec<(String, String)> {
 
 /// Compose-and-validate entry point for the signal send path (#612).
 ///
-/// Both send surfaces -- the CLI `legion signal` arm and the MCP
-/// `legion_signal` tool -- call this one function, so send-time validation
-/// cannot diverge between them (the MCP arm bypassed the #587
+/// The CLI `legion signal` arm calls this one function, so send-time
+/// validation lives in a single place rather than being re-derived at each
+/// call site (the retired MCP `legion_signal` tool bypassed the #587
 /// required-fields gate entirely before this existed). In order:
 ///
 /// 1. Parse the `details` wire argument via [`parse_details_arg`].

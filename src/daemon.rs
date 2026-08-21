@@ -1,8 +1,7 @@
-/// Legion daemon: three tokio tasks in one process.
+/// Legion daemon: two tokio tasks in one process.
 ///
 /// 1. Channel (HTTP) -- SSE pub/sub + REST endpoints (/sse, /api/feed, /api/tasks, /api/post)
 /// 2. Watch          -- signal polling + auto-wake (the existing watch.rs loop)
-/// 3. MCP (optional) -- JSON-RPC 2.0 over stdio for Claude Code tool integration
 ///
 /// The daemon starts all tasks and shuts down cleanly on SIGINT/SIGTERM.
 use std::path::{Path, PathBuf};
@@ -10,7 +9,6 @@ use std::time::Duration;
 
 use crate::channel;
 use crate::error::{LegionError, Result};
-use crate::mcp;
 use crate::watch;
 
 /// PID lock file name for the daemon process (separate from watch.pid).
@@ -511,16 +509,13 @@ pub struct DaemonConfig {
     pub data_dir: PathBuf,
     /// HTTP port for the channel server.
     pub port: u16,
-    /// Whether to start the MCP stdio server.
-    pub enable_mcp: bool,
 }
 
 /// Run the legion daemon.
 ///
-/// Spawns three tokio tasks:
+/// Spawns two tokio tasks:
 ///   - HTTP server (axum) on `config.port`
 ///   - Watch loop (background)
-///   - MCP stdio server (when `config.enable_mcp` is true, in spawn_blocking)
 ///
 /// Blocks until SIGINT/SIGTERM. All tasks are cancelled on shutdown.
 pub fn run_daemon(config: DaemonConfig) -> Result<()> {
@@ -529,9 +524,9 @@ pub fn run_daemon(config: DaemonConfig) -> Result<()> {
 
     let result = runtime.block_on(run_daemon_async(config));
 
-    // Give blocking threads (e.g. MCP stdin loop) up to 2 seconds to exit before
-    // the runtime forcibly drops them. Without this, a blocking task stuck on
-    // read_until() holds the OS thread alive until the process exits.
+    // Give any blocking tasks up to 2 seconds to exit before the runtime
+    // forcibly drops them. Without this, a blocking task stuck on a
+    // blocking read would hold the OS thread alive until the process exits.
     runtime.shutdown_timeout(Duration::from_secs(2));
 
     result
@@ -539,16 +534,6 @@ pub fn run_daemon(config: DaemonConfig) -> Result<()> {
 
 async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     let data_dir = config.data_dir.clone();
-
-    // --mcp mode: stdio-only per-session subprocess spawned by Claude Code via
-    // plugin.json mcpServers. Skip HTTP server bind and watch loop -- those are
-    // singleton concerns that run via `legion daemon` without --mcp, independently.
-    // Running them per-session causes :3131 bind conflicts across concurrent
-    // sessions and duplicate watch loops that can trigger recursive agent spawns.
-    if config.enable_mcp {
-        return run_mcp_stdio_only(data_dir).await;
-    }
-
     let port = config.port;
 
     eprintln!("[legion daemon] starting on port {port}");
@@ -613,44 +598,6 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
 
     eprintln!("[legion daemon] shutdown complete");
     Ok(())
-}
-
-/// Run the MCP stdio server without HTTP bind or watch loop.
-///
-/// Each Claude Code session spawns its own `legion daemon --mcp` subprocess via
-/// plugin.json mcpServers, so this path must be cheap and isolated: no network
-/// port, no cross-session coordination, no watch-loop side effects. When stdin
-/// closes (CC session ends), `run_stdio_loop` returns and this process exits.
-///
-/// The broadcast channel is constructed locally even though no HTTP subscribers
-/// exist in this mode, because the MCP tool handlers in `mcp.rs` call
-/// `tx.send()` unconditionally to notify would-be channel listeners. The sender
-/// must be live for those calls to be no-op sends instead of panics.
-async fn run_mcp_stdio_only(data_dir: PathBuf) -> Result<()> {
-    eprintln!("[legion daemon] MCP stdio-only mode (no HTTP, no watch)");
-    eprintln!(
-        "[legion daemon] note: embed model not loaded -- posts via MCP will not be similarity-searchable until card 019d7991-2eab lands"
-    );
-
-    let (tx, _rx) = channel::new_broadcast();
-    let version = env!("CARGO_PKG_VERSION").to_string();
-
-    let handle = tokio::task::spawn_blocking(move || mcp::run_stdio_loop(data_dir, version, tx));
-
-    match handle.await {
-        Ok(Ok(())) => {
-            eprintln!("[legion daemon] mcp loop exited; shutting down");
-            Ok(())
-        }
-        Ok(Err(e)) => {
-            eprintln!("[legion daemon] mcp loop error: {e}; shutting down");
-            Err(e)
-        }
-        Err(e) => {
-            eprintln!("[legion daemon] mcp task panic: {e}; shutting down");
-            Err(LegionError::Server(format!("mcp task panic: {e}")))
-        }
-    }
 }
 
 /// Run the watch loop inside a tokio task.

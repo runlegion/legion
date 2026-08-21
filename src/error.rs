@@ -148,9 +148,6 @@ pub enum LegionError {
     #[error("health error: {0}")]
     Health(String),
 
-    #[error("MCP invalid argument: {0}")]
-    McpInvalidArgument(String),
-
     #[error("cluster config error: {0}")]
     Config(String),
 

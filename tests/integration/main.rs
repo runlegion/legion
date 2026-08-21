@@ -18,7 +18,6 @@ mod governance;
 mod index_telemetry;
 mod inventory_freshness;
 mod kanban;
-mod mcp;
 mod memory;
 mod mesh;
 mod module_graph;

@@ -7,8 +7,8 @@ use crate::cli::datadir::data_dir;
 use crate::cli::memory::try_load_embed_model;
 use crate::cli::util::{open_db, open_db_and_index};
 use crate::{
-    daemon, error, identity_generate, init, kanban, mcp, now, recall, serve, stats, status,
-    statusline, surface, task, watch, worksource,
+    daemon, error, identity_generate, init, kanban, now, recall, serve, stats, status, statusline,
+    surface, task, watch, worksource,
 };
 
 #[derive(Subcommand)]
@@ -358,56 +358,11 @@ pub(crate) fn handle_task(action: TaskAction) -> error::Result<()> {
     Ok(())
 }
 
-pub(crate) fn handle_mcp() -> error::Result<()> {
-    let base = data_dir()?;
-    let version = env!("CARGO_PKG_VERSION").to_string();
-    let (tx, _rx) = tokio::sync::broadcast::channel(16);
-    mcp::run_stdio_loop(base, version, tx)?;
-    Ok(())
-}
-
-pub(crate) fn handle_mcp_logs(pid: Option<u32>, tail: bool) -> error::Result<()> {
-    let path = match pid {
-        Some(p) => mcp::mcp_log_path(p)?,
-        None => match mcp::most_recent_mcp_log()? {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "[legion] no MCP log files found at {}",
-                    mcp::mcp_log_dir()?.display()
-                );
-                return Ok(());
-            }
-        },
-    };
-    if !path.exists() {
-        eprintln!("[legion] log file does not exist: {}", path.display());
-        return Ok(());
-    }
-    if tail {
-        let status = std::process::Command::new("tail")
-            .args(["-F", "-n", "+1"])
-            .arg(&path)
-            .status()
-            .map_err(error::LegionError::Io)?;
-        if !status.success() {
-            return Err(error::LegionError::WorkSource(format!(
-                "tail exited with status {status}"
-            )));
-        }
-    } else {
-        let contents = std::fs::read_to_string(&path)?;
-        print!("{contents}");
-    }
-    Ok(())
-}
-
 pub(crate) fn handle_daemon(port: u16) -> error::Result<()> {
     let base = data_dir()?;
     daemon::run_daemon(daemon::DaemonConfig {
         data_dir: base,
         port,
-        enable_mcp: false,
     })?;
     Ok(())
 }

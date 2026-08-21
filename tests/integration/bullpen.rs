@@ -222,8 +222,8 @@ fn signal_with_details() {
 #[test]
 fn signal_missing_required_fields_fails_on_cli_surface() {
     // The #587 gate, exercised through the binary: rfc requires 'budget'.
-    // The MCP twin of this test lives in src/mcp tool-call tests -- both
-    // surfaces go through signal::compose (#612).
+    // Enforced in signal::compose (#612), the CLI's sole validation entry
+    // point since the MCP legion_signal tool retired (#952).
     let dir = tempfile::tempdir().unwrap();
 
     let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([

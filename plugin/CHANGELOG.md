@@ -1,6 +1,19 @@
 # Legion Changelog
 
-## 0.34.0
+## Unreleased
+
+### Removed
+
+- **The MCP server and its four write tools are retired** (#952, following #947/#941).
+  `legion_post`, `legion_reply`, `legion_signal`, and `legion_task_respond` -- along
+  with the `legion mcp` and `legion mcp-logs` subcommands, `src/mcp/` in full, and
+  `plugin.json`'s `mcpServers` registration -- are gone. The CLI is now the single
+  write surface for board, signal, and task operations: `legion post`, `legion
+  signal`, and `legion task accept|done|block|unblock` are the direct replacements,
+  each at parity or better (the CLI path additionally runs the embed backfill,
+  self-signal refusal, and the #949 resolves-stamp that the MCP tools never
+  inherited). `should_notify`, the recipient filter both the retired MCP push and
+  the hook-drain lane relied on, relocates unchanged into `src/deliver.rs`.
 
 The judgment-out-of-Rust release. `legion spec-gen` is gone. Deriving a requirement from a
 service-design document -- composing it from a moment-of-truth, judging its richness, wiring

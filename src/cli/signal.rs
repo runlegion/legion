@@ -132,9 +132,9 @@ pub(crate) fn handle_signal(
     };
     let details: Option<String> = stamp_resolves(details.as_deref(), resolves_id.as_deref());
 
-    // One compose/validate entry point shared with the MCP legion_signal
-    // tool (#612): details wire parsing, the #587 required-fields gate,
-    // and the note length cap all live in signal::compose.
+    // One compose/validate entry point (#612): details wire parsing, the
+    // #587 required-fields gate, and the note length cap all live in
+    // signal::compose.
     let text = signal::compose(
         &to,
         &verb,

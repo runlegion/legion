@@ -986,25 +986,6 @@ pub(crate) enum Commands {
         action: Option<WatchAction>,
     },
 
-    /// MCP stdio server for Claude Code channel integration
-    Mcp,
-
-    /// Show or tail the most recent MCP process log file (#395). Each MCP
-    /// subprocess redirects its stderr to a per-PID file under
-    /// `~/Library/Logs/legion/mcp/<pid>.log` (macOS) or the XDG state dir
-    /// (Linux). Use this to see notifier seed errors, per-poll cursor state,
-    /// per-post deliver decisions, and write failures that would otherwise
-    /// be swallowed by Claude Code's MCP transport.
-    McpLogs {
-        /// Specific PID to tail (default: most recently modified .log file).
-        #[arg(long)]
-        pid: Option<u32>,
-        /// Follow the file (like `tail -f`). Default prints existing
-        /// contents and exits.
-        #[arg(long)]
-        tail: bool,
-    },
-
     /// Start the legion daemon (channel + watch)
     Daemon {
         /// HTTP port for the channel server

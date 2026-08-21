@@ -7,11 +7,5 @@
     "email": "sean@silvius.me"
   },
   "repository": "https://github.com/runlegion/legion",
-  "license": "MIT",
-  "mcpServers": {
-    "legion": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/legion",
-      "args": ["mcp"]
-    }
-  }
+  "license": "MIT"
 }
