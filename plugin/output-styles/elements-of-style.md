@@ -1,8 +1,8 @@
 ---
-name: elements-of-style
-description: Apply plain-English writing principles to user-facing communication and authored prose. Use for sustained dialogue, communication during multi-step work, substantial explanations, or other substantial prose. Skip brief, direct exchanges and tasks with no substantial prose.
-version: 1.0.0
-user-invocable: false
+name: Elements of Style
+description: Plain-English prose guidance (Strunk's Elements of Style) for user-facing writing
+keep-coding-instructions: true
+force-for-plugin: true
 ---
 
 # Elements of style
