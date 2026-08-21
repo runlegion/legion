@@ -890,3 +890,70 @@ fn undefer_on_a_work_item_never_deferred_is_a_no_op() {
     // No prior `legion defer` call -- must not error.
     run_ok(legion_cmd(dir.path()).args(["undefer", "--work-item", "never-deferred"]));
 }
+
+// --- legion goal (#934): identity via the queue seam, content via a
+// separate per-id lookup -- see cli::misc::handle_goal. ---
+
+#[test]
+fn goal_prints_nothing_when_no_card_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["goal", "--repo", "kelex"]));
+    assert_eq!(stdout, "", "no Accepted card means no goal banner");
+}
+
+#[test]
+fn goal_prints_the_accepted_cards_text_and_id() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "kanban",
+        "create",
+        "--from",
+        "sean",
+        "--to",
+        "kelex",
+        "--text",
+        "ship the goal seam",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(dir.path()).args(["kanban", "assign", "--id", &id, "--to", "kelex"]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "accept", "--id", &id]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["goal", "--repo", "kelex"]));
+    assert!(
+        stdout.contains("ship the goal seam"),
+        "goal banner must carry the accepted card's text: {stdout}"
+    );
+    assert!(
+        stdout.contains(&id),
+        "goal banner must cite the card id: {stdout}"
+    );
+}
+
+#[test]
+fn goal_ignores_accepted_cards_for_other_repos() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "kanban",
+        "create",
+        "--from",
+        "sean",
+        "--to",
+        "other-repo",
+        "--text",
+        "not this repo's goal",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(dir.path()).args(["kanban", "assign", "--id", &id, "--to", "other-repo"]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "accept", "--id", &id]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["goal", "--repo", "kelex"]));
+    assert_eq!(
+        stdout, "",
+        "an accepted card for a different repo must not leak into this repo's goal"
+    );
+}

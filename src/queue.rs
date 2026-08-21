@@ -41,6 +41,15 @@ pub fn peek_work(db: &Database, repo: &str) -> Result<Option<QueueItem>> {
     db.peek_next_pending_work(repo)
 }
 
+/// Ids of every accepted work item for `repo`, in board-goal priority
+/// order.
+///
+/// Backs `legion goal` (#934) -- see `db::queue::accepted_work_item_ids`
+/// for why this stays identity-only.
+pub fn accepted_work_items(db: &Database, repo: &str) -> Result<Vec<String>> {
+    db.accepted_work_item_ids(repo)
+}
+
 /// Complete a work item: transition it to `done`.
 ///
 /// Refused (not silently ignored) when the item is not currently in an
@@ -103,6 +112,17 @@ mod tests {
         let card = db.get_card_by_id(&id).unwrap().expect("exists");
         assert_eq!(card.status.to_string(), "done");
         assert_eq!(card.note.as_deref(), Some("done note"));
+    }
+
+    #[test]
+    fn accepted_work_items_returns_ids_of_accepted_cards_only() {
+        let db = test_db();
+        let id = insert_pending(&db, "kelex");
+        next_work(&db, "kelex").unwrap(); // claims it -> accepted
+        insert_pending(&db, "kelex"); // stays pending
+
+        let ids = accepted_work_items(&db, "kelex").unwrap();
+        assert_eq!(ids, vec![id]);
     }
 
     #[test]

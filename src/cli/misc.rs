@@ -475,12 +475,17 @@ pub(crate) fn handle_daemon_restart(port: u16) -> error::Result<()> {
 
 pub(crate) fn handle_goal(repo: String) -> error::Result<()> {
     let database = open_db()?;
-    let cards = kanban::list_cards(
-        &database,
-        &repo,
-        kanban::Direction::Inbound,
-        kanban::CardScope::WorkingSet,
-    )?;
+    // Identity (#934): which cards are the active goal comes from the
+    // card-independent queue seam (`accepted` status only, no `CardScope`
+    // dependency). Content -- text, acceptance -- is a separate lookup per
+    // id, the same split `handle_work` already uses.
+    let ids: Vec<String> = queue::accepted_work_items(&database, &repo)?;
+    let mut cards: Vec<kanban::Card> = Vec::with_capacity(ids.len());
+    for id in &ids {
+        if let Some(card) = database.get_card_by_id(id)? {
+            cards.push(card);
+        }
+    }
     // Prints nothing when no card is Accepted -- the goal is "cleared"
     // by board state alone (AC: clears on terminal/blocked).
     if let Some(goal) = kanban::format_active_goal(&cards) {

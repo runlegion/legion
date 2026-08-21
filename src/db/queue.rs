@@ -55,6 +55,31 @@ fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueItem> {
 }
 
 impl Database {
+    /// Ids of every `status = 'accepted'` work item for `repo`, ordered the
+    /// same way inbound cards are ordered for the board (priority, then
+    /// sort_order, then newest-first) -- matches
+    /// `kanban::list_cards(Direction::Inbound, CardScope::WorkingSet)`
+    /// narrowed to `Accepted` by `kanban::format_active_goal`, expressed
+    /// directly as a status-literal query so this seam needs neither the
+    /// `Direction` nor `CardScope` enums.
+    ///
+    /// Backs `legion goal` (#934): *which* cards are the active goal is
+    /// legion-specific scheduling state, so it lives here; *what the card
+    /// says* stays a separate content lookup at the caller
+    /// (`cli::misc::handle_goal` reads each id back via `get_card_by_id`
+    /// for `kanban::format_active_goal`), the same identity-then-content
+    /// split `queue::next_work` / `handle_work` already uses.
+    pub fn accepted_work_item_ids(&self, repo: &str) -> Result<Vec<String>> {
+        let sql = format!(
+            "SELECT id FROM tasks WHERE to_repo = ?1 AND status = 'accepted' \
+             AND deleted_at IS NULL ORDER BY {PRIORITY_ORDER}, sort_order ASC, created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![repo], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
     /// Peek at the next pending work item for a repo without claiming it.
     ///
     /// Selects highest priority, then lowest sort_order, then oldest --
@@ -296,6 +321,40 @@ mod tests {
             .expect("complete from in-review");
         let card = db.get_card_by_id(&id).unwrap().expect("exists");
         assert_eq!(card.status.to_string(), "done");
+    }
+
+    #[test]
+    fn accepted_work_item_ids_returns_only_accepted_rows_for_repo() {
+        let db = test_db();
+        let accepted_id = insert_pending(&db, "kelex", crate::kanban::Priority::Med);
+        db.force_move_card(&accepted_id, "accepted", None).unwrap();
+        let pending_id = insert_pending(&db, "kelex", crate::kanban::Priority::Med);
+        let other_repo_id = insert_pending(&db, "other", crate::kanban::Priority::Med);
+        db.force_move_card(&other_repo_id, "accepted", None)
+            .unwrap();
+
+        let ids = db.accepted_work_item_ids("kelex").unwrap();
+        assert_eq!(ids, vec![accepted_id]);
+        assert!(!ids.contains(&pending_id));
+    }
+
+    #[test]
+    fn accepted_work_item_ids_orders_by_priority_then_newest_first() {
+        let db = test_db();
+        let low_id = insert_pending(&db, "kelex", crate::kanban::Priority::Low);
+        db.force_move_card(&low_id, "accepted", None).unwrap();
+        let high_id = insert_pending(&db, "kelex", crate::kanban::Priority::High);
+        db.force_move_card(&high_id, "accepted", None).unwrap();
+
+        let ids = db.accepted_work_item_ids("kelex").unwrap();
+        assert_eq!(ids, vec![high_id, low_id], "high priority sorts first");
+    }
+
+    #[test]
+    fn accepted_work_item_ids_empty_when_none_accepted() {
+        let db = test_db();
+        insert_pending(&db, "kelex", crate::kanban::Priority::Med);
+        assert!(db.accepted_work_item_ids("kelex").unwrap().is_empty());
     }
 
     #[test]
