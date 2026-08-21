@@ -36,8 +36,6 @@ pub use tracker::AgentTracker;
 #[allow(unused_imports)]
 pub use config::{BroadcastTarget, Recipient};
 #[allow(unused_imports)]
-pub use gates::check_auto_unblock;
-#[allow(unused_imports)]
 pub use locks::release_pid_lock;
 #[allow(unused_imports)]
 pub use signals::{is_wake_worthy, resolves_pending_ask};
@@ -275,17 +273,16 @@ impl WatchLoop {
             self.log_prefix,
             self.config.max_redelivery_attempts,
         );
-        // #778: auto-revert delegated cards whose attempt is no longer live.
+        // #778: auto-revert delegated work whose attempt is no longer live.
         // Runs AFTER the two reapers above so an attempt that just went
         // terminal this tick is already reflected in wake_attempts.state --
         // reap-before-mutate, the same ordering lesson #679's own reaper
         // finalization fix (f45e7e5) encoded for lease release vs heartbeat.
-        reap_delegated_cards(&self.db, self.log_prefix);
-        // #816: wake deferred cards whose wake_at has passed.
-        reap_deferred_cards(&self.db, &self.host, self.log_prefix);
+        reap_delegated_work(&self.db, self.log_prefix);
         // #934: wake card-independent deferred work items whose wake_at has
-        // passed. Coexists with the card sweep above -- #931 removes the
-        // card surface, not this tick, so both run until then.
+        // passed. #931 removed the card surface (and its own defer sweep,
+        // `reap_deferred_cards`) entirely -- this is the only defer sweep
+        // left.
         reap_deferred_work_items(&self.db, &self.host, self.log_prefix);
         if let Err(e) = self.db.heartbeat_persona_leases(&self.host, self.lease_ttl) {
             eprintln!("{} lease heartbeat error: {e}", self.log_prefix);
@@ -389,44 +386,6 @@ impl WatchLoop {
         if let Err(e) = self.db.prune_watch_redelivery(&cutoff) {
             eprintln!("{} watch_redelivery prune error: {e}", self.log_prefix);
         }
-    }
-
-    /// Run one auto-reconcile tick (#654): scan the whole board for
-    /// shipped-pending drift (active-local cards whose linked GitHub issue is
-    /// already CLOSED/MERGED) and cancel those cards locally so the board a
-    /// woken agent grooms reflects GitHub reality instead of stale `pending`
-    /// rows.
-    ///
-    /// Only this safe, purely-local direction is automated. The destructive
-    /// direction (close-stale, which closes live GitHub issues from local
-    /// state) is never run here -- it stays a manual `legion kanban reconcile
-    /// --close-stale` action. A scan error or per-card cancel failure is
-    /// logged and the tick returns; it never aborts the loop.
-    ///
-    /// The caller gates the cadence on `config.reconcile_interval_secs` and
-    /// only invokes this when that interval is non-zero.
-    pub fn tick_reconcile(&mut self) {
-        let report = match crate::kanban::reconcile::scan_drift(&self.db, None, self.log_prefix) {
-            Ok(report) => report,
-            Err(e) => {
-                eprintln!("{} reconcile scan error: {e}", self.log_prefix);
-                return;
-            }
-        };
-
-        if report.shipped_pending.is_empty() {
-            return;
-        }
-
-        let (cancelled, failed) = crate::kanban::reconcile::cancel_shipped_pending(
-            &self.db,
-            &report.shipped_pending,
-            self.log_prefix,
-        );
-        eprintln!(
-            "{} reconcile: auto-cancelled {cancelled} shipped-pending card(s), {failed} failed",
-            self.log_prefix
-        );
     }
 }
 
@@ -573,27 +532,31 @@ pub(crate) fn rearm_or_abandon(
 /// work still happening anywhere," not "did I personally spawn it."
 ///
 /// Discovery (#934) reads `wake_attempts` directly via
-/// `Database::live_linked_wake_attempts` instead of scanning cards for
-/// `status = 'delegated'` -- the sweep no longer needs `CardStatus::
-/// Delegated` to find its candidates, only the work-item link itself.
-/// Liveness still runs through `Database::work_item_is_live`, the same
-/// predicate the entry gate (`kanban::delegate_card`) and the stop.sh
-/// subcommand both read, so all three agree by construction (the #679 "one
-/// predicate" lesson). The revert is telemetried: a descriptive note lands
-/// on the card (readable via `legion kanban view`) and an INFO line is
-/// logged, so a silent abandonment never has zero trace -- consistent with
-/// the dead-pid reaper immediately above.
+/// `Database::live_linked_wake_attempts` -- the sweep needs only the
+/// work-item link itself, never any card/task table. Liveness runs through
+/// `Database::work_item_is_live`, the same predicate the stop.sh gate 1b
+/// subcommand reads, so the two agree by construction (the #679 "one
+/// predicate" lesson). The revert is telemetried: an INFO line is logged,
+/// so a silent abandonment never has zero trace -- consistent with the
+/// dead-pid reaper immediately above.
 ///
-/// Today every `work_item_id` is a kanban card id, so the revert itself
-/// still goes through `kanban::undelegate_card` to keep the card's visible
-/// status in sync with the cleared link. If that card-specific revert
-/// fails (e.g. the card already moved off `Delegated` some other way), the
-/// wake_attempts link is cleared directly so the next sweep does not
-/// re-discover the same stale row forever.
+/// #931 removed the card surface, including `kanban::undelegate_card` (the
+/// old revert step, which kept a card's visible status in sync with the
+/// cleared link). There is no card status left to sync: reverting now is
+/// exactly clearing the wake_attempts link, nothing else.
 ///
 /// An error from the DB scan or a single row's revert is logged and
 /// swallowed; the health tick must never abort over one bad row.
-fn reap_delegated_cards(db: &Database, log_prefix: &str) {
+///
+/// The `DELEGATION_STALE_AFTER_SECS` window matches `legion watch
+/// status`'s own staleness default (`cli::watch::WatchAction::Status`), so
+/// an operator reading "alive" from that command and this sweep agree on
+/// the same window. `pub(crate)` so `legion delegated-needs-attention`
+/// (the stop.sh gate 1b backing command) uses the identical window this
+/// sweep does.
+pub(crate) const DELEGATION_STALE_AFTER_SECS: u64 = 120;
+
+fn reap_delegated_work(db: &Database, log_prefix: &str) {
     let linked = match db.live_linked_wake_attempts(None) {
         Ok(v) => v,
         Err(e) => {
@@ -610,9 +573,7 @@ fn reap_delegated_cards(db: &Database, log_prefix: &str) {
             continue;
         };
 
-        let live = match db
-            .work_item_is_live(&work_item_id, crate::kanban::DELEGATION_STALE_AFTER_SECS)
-        {
+        let live = match db.work_item_is_live(&work_item_id, DELEGATION_STALE_AFTER_SECS) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!(
@@ -626,126 +587,34 @@ fn reap_delegated_cards(db: &Database, log_prefix: &str) {
         }
 
         eprintln!(
-            "{log_prefix} delegated reaper: work item {work_item_id} (repo {}) no longer live -- reverting",
+            "{log_prefix} delegated reaper: work item {work_item_id} (repo {}) no longer live -- clearing the link",
             attempt.repo_name
         );
 
-        if let Err(e) = crate::kanban::undelegate_card(
-            db,
-            &work_item_id,
-            Some("auto-reverted: delegated attempt no longer live"),
-        ) {
+        if let Err(e) = db.clear_wake_attempt_work_item(&work_item_id) {
             eprintln!(
-                "{log_prefix} delegated reaper: failed to revert card {work_item_id}: {e} -- clearing the stale link directly"
-            );
-            if let Err(e2) = db.clear_wake_attempt_work_item(&work_item_id) {
-                eprintln!(
-                    "{log_prefix} delegated reaper: failed to clear stale link for {work_item_id}: {e2}"
-                );
-            }
-        }
-    }
-}
-
-/// Wake `Deferred` cards whose `wake_at` has passed (#816): reverts each to
-/// its pre-defer status via `kanban::undefer_card` (the SAME function the
-/// manual `legion kanban undefer` CLI path uses -- one revert function, not
-/// one per call site, mirroring the #679 lesson the delegated reaper above
-/// already applies via `undelegate_card`) and posts a wake-worthy `routing`
-/// signal naming the card to its owner (`to_repo`).
-///
-/// The signal is authored as `host`, not a repo name: the recipient-side
-/// self-address filter (`get_unhandled_signals_for_repo`'s `r.repo !=
-/// ?repo_param`) drops a signal whose author equals its own repo, and
-/// legion's own kanban board routinely has `to_repo == "legion"` -- an
-/// author fixed to a real repo name (e.g. "legion") would silently never
-/// wake that repo's own deferred cards. A machine hostname lives in a
-/// different namespace from project repo names, so it cannot collide with
-/// a legitimate `to_repo`. The signal is inserted directly via
-/// `insert_reflection_with_meta` (no search index) rather than through
-/// `board::post_from_text_with_meta` -- `WatchLoop` carries no `SearchIndex`
-/// handle, and the wake mechanism itself reads directly from the
-/// `reflections` table, not the search index (mirrors `QuotaPanicGate::
-/// check_and_post`'s identical unindexed system post).
-///
-/// An error from the DB scan, a single card's revert, or a single card's
-/// wake signal is logged and swallowed; the health tick must never abort
-/// over one bad row.
-///
-/// Liveness caveat (same honest limitation `#778`'s delegated reaper
-/// carries, review-requested for this sweep too): this only fires while
-/// `legion watch` (standalone or the daemon) is actually running for the
-/// repo -- `tick_health` is this function's only caller. A card deferred
-/// while no watch process is alive for its repo sits in `Deferred` past its
-/// `wake_at` until one starts and runs a health tick; nothing else polls
-/// for due wakes. Unlike `Delegated`, there is no `stop.sh` backstop for
-/// this gap -- Deferred does not block Stop by design, so a late wake is a
-/// missed page, not a stuck agent. `legion kanban undefer` is the manual
-/// escape hatch if an operator notices a card overdue.
-fn reap_deferred_cards(db: &Database, host: &str, log_prefix: &str) {
-    let now = chrono::Utc::now().to_rfc3339();
-    let due = match db.get_deferred_cards_due(&now) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{log_prefix} deferred reaper: scan error: {e}");
-            return;
-        }
-    };
-
-    for card in due {
-        let reverted =
-            match crate::kanban::undefer_card(db, &card.id, Some("auto-woken: wake_at reached")) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!(
-                        "{log_prefix} deferred reaper: failed to revert card {}: {e}",
-                        card.id
-                    );
-                    continue;
-                }
-            };
-
-        eprintln!(
-            "{log_prefix} deferred reaper: card {} (repo {}) wake_at reached -- reverted to {}",
-            card.id, card.to_repo, reverted.status
-        );
-
-        let summary = crate::card_parse::truncate_chars(&card.text, 100);
-        let note = format!(
-            "card {} \"{summary}\" is back in {}",
-            card.id, reverted.status
-        );
-        let text = crate::signal::format_signal(&card.to_repo, "routing", None, Some(&note), &[]);
-        if let Err(e) = db.insert_reflection_with_meta(
-            host,
-            &text,
-            "team",
-            &crate::db::ReflectionMeta::default(),
-        ) {
-            eprintln!(
-                "{log_prefix} deferred reaper: wake signal failed for card {}: {e}",
-                card.id
+                "{log_prefix} delegated reaper: failed to clear stale link for {work_item_id}: {e}"
             );
         }
     }
 }
 
 /// Wake card-independent deferred work items whose `wake_at` has passed
-/// (#934): the card-free counterpart to `reap_deferred_cards` above, reading
-/// `deferrals` (keyed on an opaque work-item id + owning repo) instead of
-/// `tasks`. Clears the deferral and posts a wake-worthy `routing` signal
-/// naming the work item to its owning repo.
+/// (#934), reading `deferrals` (keyed on an opaque work-item id + owning
+/// repo). Clears the deferral and posts a wake-worthy `routing` signal
+/// naming the work item to its owning repo. #931 removed the card-scoped
+/// predecessor (`reap_deferred_cards`) -- this is the only defer sweep now.
 ///
-/// The signal is authored as `host`, not a repo name, for the same reason
-/// `reap_deferred_cards` uses `host`: the recipient-side self-address filter
-/// drops a signal whose author equals its own repo, and a deferred work
-/// item's owning repo can legitimately be `"legion"` -- a fixed repo-name
-/// author would silently never wake legion's own deferrals (#816/#817).
+/// The signal is authored as `host`, not a repo name: the recipient-side
+/// self-address filter drops a signal whose author equals its own repo,
+/// and a deferred work item's owning repo can legitimately be `"legion"` --
+/// a fixed repo-name author would silently never wake legion's own
+/// deferrals (#816/#817).
 ///
 /// An error from the DB scan, a single row's clear, or a single row's wake
 /// signal is logged and swallowed; the health tick must never abort over one
-/// bad row. Same liveness caveat as `reap_deferred_cards`: this only fires
-/// while `legion watch` is running for the work item's repo.
+/// bad row. Liveness caveat: this only fires while `legion watch` is
+/// running for the work item's repo.
 fn reap_deferred_work_items(db: &Database, host: &str, log_prefix: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     let due = match db.deferrals_due(&now) {
@@ -879,8 +748,6 @@ pub fn run(data_dir: &Path) -> Result<()> {
     // Timer intervals are read from the loop-owned config.
     let poll_interval: Duration = Duration::from_secs(state.config.poll_interval_secs);
     let health_interval: Duration = Duration::from_secs(state.config.health_poll_secs);
-    // Auto-reconcile (#654) runs on a slow cadence; 0 disables it entirely.
-    let reconcile_interval: Duration = Duration::from_secs(state.config.reconcile_interval_secs);
 
     // Use checked_sub so a near-zero system clock cannot overflow and panic.
     let mut poll_timer: Instant = Instant::now()
@@ -889,9 +756,6 @@ pub fn run(data_dir: &Path) -> Result<()> {
     let mut health_timer: Instant = Instant::now()
         .checked_sub(health_interval)
         .unwrap_or_else(Instant::now);
-    // Reconcile starts at `now` so the first pass fires one full interval
-    // after startup -- see the daemon driver for the probe-storm rationale.
-    let mut reconcile_timer: Instant = Instant::now();
 
     eprintln!(
         "[legion watch] watching repos: {}",
@@ -915,14 +779,6 @@ pub fn run(data_dir: &Path) -> Result<()> {
         if poll_timer.elapsed() >= poll_interval {
             state.tick_poll();
             poll_timer = Instant::now();
-        }
-
-        // Auto-reconcile on its own slow interval (0 disables).
-        if state.config.reconcile_interval_secs > 0
-            && reconcile_timer.elapsed() >= reconcile_interval
-        {
-            state.tick_reconcile();
-            reconcile_timer = Instant::now();
         }
 
         std::thread::sleep(Duration::from_secs(1));
@@ -1097,26 +953,6 @@ mod tests {
         assert!(
             after.is_empty(),
             "informational signal should be handled after tick_poll with Proceed gate"
-        );
-    }
-
-    /// `tick_reconcile` on a board with no cards is a quiet no-op (#654).
-    ///
-    /// The scan finds nothing to probe (no cards have a linked issue), so it
-    /// returns an empty report and cancels nothing. This proves the daemon's
-    /// auto-reconcile wiring is safe to fire on an idle board without a live
-    /// work source -- the real cancel path is covered in
-    /// `kanban::reconcile::tests`.
-    #[test]
-    fn watch_loop_tick_reconcile_empty_board_is_noop() {
-        let (db, _index, _dir) = test_storage();
-        let mut state = test_watch_loop(db, "[legion test]");
-        // Must not panic and must leave the (empty) board untouched.
-        state.tick_reconcile();
-        let cards = crate::kanban::board_cards(&state.db).expect("board cards");
-        assert!(
-            cards.is_empty(),
-            "no cards should exist after reconcile no-op"
         );
     }
 
@@ -1615,323 +1451,93 @@ mod tests {
         );
     }
 
-    // -- delegated-card reaper (#778) -----------------------------------------
-
-    fn insert_delegated_card(db: &Database, repo: &str, text: &str) -> String {
-        db.insert_card(
-            "kelex",
-            repo,
-            text,
-            None,
-            crate::kanban::Priority::Med,
-            None,
-            None,
-            None,
-            None,
-            None,
-            crate::kanban::CardStatus::Delegated,
-        )
-        .expect("insert delegated card")
-    }
+    // -- delegated-work reaper (#778, card-free since #931) -------------------
 
     #[test]
-    fn reap_delegated_cards_reverts_when_attempt_went_terminal() {
+    fn reap_delegated_work_clears_link_when_attempt_went_terminal() {
         let (db, _index, _dir) = test_storage();
         db.upsert_watch_heartbeat("test-host", 1, "0.1.0", 1, None)
             .expect("heartbeat");
 
-        let card_id = insert_delegated_card(&db, "test-repo", "delegated, then died");
+        let work_item_id = "item-died";
         let attempt_id = uuid::Uuid::now_v7().to_string();
         db.enqueue_wake_attempt(&attempt_id, "test-persona", "test-repo", &[])
             .expect("enqueue");
         db.try_claim_wake_attempt(&attempt_id, "test-host")
             .expect("claim");
-        db.set_wake_attempt_work_item(&attempt_id, &card_id)
+        db.set_wake_attempt_work_item(&attempt_id, work_item_id)
             .expect("link");
         db.record_wake_attempt_outcome(&attempt_id, "ok", "productive")
             .expect("terminal");
 
-        reap_delegated_cards(&db, "[test]");
+        reap_delegated_work(&db, "[test]");
 
-        let card = db
-            .get_card_by_id(&card_id)
-            .expect("get")
-            .expect("card exists");
-        assert_eq!(
-            card.status,
-            crate::kanban::CardStatus::Accepted,
-            "a delegated card whose attempt went terminal must auto-revert to accepted"
-        );
         assert!(
-            card.note
-                .as_deref()
-                .is_some_and(|n| n.contains("no longer live")),
-            "revert must be telemetried via the card note; got: {:?}",
-            card.note
+            !db.work_item_is_live(work_item_id, DELEGATION_STALE_AFTER_SECS)
+                .expect("liveness check"),
+            "still not live after the sweep"
         );
-    }
-
-    /// #934 review fix, MED: the self-heal fallback (`clear_wake_attempt_work_item`
-    /// when `undelegate_card` itself errors). A card can leave `Delegated`
-    /// by a path other than `undelegate_card` -- `Cancel` is legal from any
-    /// active state (state.rs's `(s, Action::Cancel) if s != Done` arm) --
-    /// leaving the wake_attempts link stale: still pointing at a card that
-    /// is no longer `Delegated`. When the reaper later finds that link (the
-    /// attempt has since gone terminal, so `work_item_is_live` reads
-    /// false), `undelegate_card` fails (`Action::Undelegate` is illegal
-    /// from `Cancelled`), and the fallback must clear the link directly --
-    /// otherwise the same stale row would surface on every future sweep
-    /// forever.
-    #[test]
-    fn reap_delegated_cards_clears_stale_link_when_undelegate_fails() {
-        let (db, _index, _dir) = test_storage();
-        db.upsert_watch_heartbeat("test-host", 1, "0.1.0", 1, None)
-            .expect("heartbeat");
-
-        let card_id = insert_delegated_card(&db, "test-repo", "delegated, then cancelled");
-        let attempt_id = uuid::Uuid::now_v7().to_string();
-        db.enqueue_wake_attempt(&attempt_id, "test-persona", "test-repo", &[])
-            .expect("enqueue");
-        db.try_claim_wake_attempt(&attempt_id, "test-host")
-            .expect("claim");
-        db.set_wake_attempt_work_item(&attempt_id, &card_id)
-            .expect("link");
-
-        // Move the card off Delegated a way other than undelegate_card --
-        // the wake_attempts link is untouched by this, so it goes stale.
-        crate::kanban::transition_card(
-            &db,
-            &card_id,
-            crate::kanban::Action::Cancel,
-            Some("cancelled directly, bypassing undelegate"),
-        )
-        .expect("cancel is legal from any active state");
-
-        // Terminate the attempt so work_item_is_live reads false and the
-        // reaper attempts a revert.
-        db.record_wake_attempt_outcome(&attempt_id, "ok", "productive")
-            .expect("terminal");
-
-        reap_delegated_cards(&db, "[test]");
-
-        // undelegate_card errors here (Undelegate is illegal from
-        // Cancelled), so the fallback branch must have cleared the link
-        // directly rather than leaving it stale forever.
         let attempt = db
             .get_wake_attempt(&attempt_id)
             .expect("get")
             .expect("attempt exists");
         assert!(
             attempt.work_item_id.is_none(),
-            "the stale link must be cleared even though undelegate_card itself errored"
+            "a terminal attempt's link must be cleared by the sweep"
         );
-
-        // The card itself must be untouched by the failed revert attempt --
-        // still Cancelled, not silently moved to something else.
-        let card = db
-            .get_card_by_id(&card_id)
-            .expect("get")
-            .expect("card exists");
-        assert_eq!(card.status, crate::kanban::CardStatus::Cancelled);
     }
 
     #[test]
-    fn reap_delegated_cards_leaves_live_delegation_alone() {
+    fn reap_delegated_work_leaves_live_delegation_alone() {
         let (db, _index, _dir) = test_storage();
         db.upsert_watch_heartbeat("test-host", 1, "0.1.0", 1, None)
             .expect("heartbeat");
 
-        let card_id = insert_delegated_card(&db, "test-repo", "delegated, still running");
+        let work_item_id = "item-running";
         let attempt_id = uuid::Uuid::now_v7().to_string();
         db.enqueue_wake_attempt(&attempt_id, "test-persona", "test-repo", &[])
             .expect("enqueue");
         db.try_claim_wake_attempt(&attempt_id, "test-host")
             .expect("claim");
-        db.set_wake_attempt_work_item(&attempt_id, &card_id)
+        db.set_wake_attempt_work_item(&attempt_id, work_item_id)
             .expect("link");
 
-        reap_delegated_cards(&db, "[test]");
+        reap_delegated_work(&db, "[test]");
 
-        let card = db
-            .get_card_by_id(&card_id)
+        let attempt = db
+            .get_wake_attempt(&attempt_id)
             .expect("get")
-            .expect("card exists");
+            .expect("attempt exists");
         assert_eq!(
-            card.status,
-            crate::kanban::CardStatus::Delegated,
-            "a delegated card with a live attempt must not be touched"
+            attempt.work_item_id.as_deref(),
+            Some(work_item_id),
+            "a live delegation's link must not be touched"
         );
     }
 
     #[test]
-    fn reap_delegated_cards_reverts_when_daemon_heartbeat_is_absent() {
+    fn reap_delegated_work_clears_link_when_daemon_heartbeat_is_absent() {
         let (db, _index, _dir) = test_storage();
         // No upsert_watch_heartbeat call.
 
-        let card_id = insert_delegated_card(&db, "test-repo", "no heartbeat at all");
+        let work_item_id = "item-no-heartbeat";
         let attempt_id = uuid::Uuid::now_v7().to_string();
         db.enqueue_wake_attempt(&attempt_id, "test-persona", "test-repo", &[])
             .expect("enqueue");
         db.try_claim_wake_attempt(&attempt_id, "test-host")
             .expect("claim");
-        db.set_wake_attempt_work_item(&attempt_id, &card_id)
+        db.set_wake_attempt_work_item(&attempt_id, work_item_id)
             .expect("link");
 
-        reap_delegated_cards(&db, "[test]");
+        reap_delegated_work(&db, "[test]");
 
-        let card = db
-            .get_card_by_id(&card_id)
+        let attempt = db
+            .get_wake_attempt(&attempt_id)
             .expect("get")
-            .expect("card exists");
-        assert_eq!(
-            card.status,
-            crate::kanban::CardStatus::Accepted,
+            .expect("attempt exists");
+        assert!(
+            attempt.work_item_id.is_none(),
             "an in-flight attempt with no daemon heartbeat is still not verifiably live"
-        );
-    }
-
-    // -- deferred-card reaper (#816) -------------------------------------------
-
-    fn insert_deferred_card(db: &Database, repo: &str, text: &str, wake_at: &str) -> String {
-        let id = db
-            .insert_card(
-                "kelex",
-                repo,
-                text,
-                None,
-                crate::kanban::Priority::Med,
-                None,
-                None,
-                None,
-                None,
-                None,
-                crate::kanban::CardStatus::Deferred,
-            )
-            .expect("insert deferred card");
-        db.set_card_deferred(&id, None, wake_at, "accepted")
-            .expect("set deferred");
-        id
-    }
-
-    #[test]
-    fn reap_deferred_cards_reverts_and_wakes_when_due() {
-        let (db, _index, _dir) = test_storage();
-        let card_id =
-            insert_deferred_card(&db, "test-repo", "past due", "2020-01-01T00:00:00+00:00");
-
-        reap_deferred_cards(&db, "test-host", "[test]");
-
-        let card = db
-            .get_card_by_id(&card_id)
-            .expect("get")
-            .expect("card exists");
-        assert_eq!(
-            card.status,
-            crate::kanban::CardStatus::Accepted,
-            "a due deferred card must revert to its pre-defer status"
-        );
-        assert!(card.wake_at.is_none(), "wake_at must be cleared on revert");
-        assert!(
-            card.pre_defer_status.is_none(),
-            "pre_defer_status must be cleared on revert"
-        );
-
-        let pending = find_pending_signals(&db, "test-repo", &["test-repo".to_string()], None)
-            .expect("find pending");
-        assert_eq!(
-            pending.len(),
-            1,
-            "the card's owner must have a pending wake signal"
-        );
-        assert!(
-            pending[0].1.contains(&card_id),
-            "the wake signal must name the card: {}",
-            pending[0].1
-        );
-    }
-
-    #[test]
-    fn reap_deferred_cards_leaves_future_wake_at_alone() {
-        let (db, _index, _dir) = test_storage();
-        let card_id =
-            insert_deferred_card(&db, "test-repo", "not due yet", "2099-01-01T00:00:00+00:00");
-
-        reap_deferred_cards(&db, "test-host", "[test]");
-
-        let card = db
-            .get_card_by_id(&card_id)
-            .expect("get")
-            .expect("card exists");
-        assert_eq!(
-            card.status,
-            crate::kanban::CardStatus::Deferred,
-            "a not-yet-due deferred card must be left alone"
-        );
-
-        let pending = find_pending_signals(&db, "test-repo", &["test-repo".to_string()], None)
-            .expect("find pending");
-        assert!(
-            pending.is_empty(),
-            "no wake signal should be sent before wake_at"
-        );
-    }
-
-    /// The wake signal's author must never collide with the recipient
-    /// (`to_repo`), since `find_pending_signals`/`get_unhandled_signals_for_repo`
-    /// drop any signal whose author equals the repo being polled -- and
-    /// legion's own board routinely has `to_repo == "legion"`. Using the
-    /// deferred card's OWN `to_repo` as the author (the bug a naive fixed
-    /// `"legion"` sender would reproduce) would silently swallow the wake;
-    /// this test pins that the chosen author (the watch host) never does.
-    #[test]
-    fn reap_deferred_cards_wakes_owner_even_when_to_repo_is_legion() {
-        let (db, _index, _dir) = test_storage();
-        let card_id =
-            insert_deferred_card(&db, "legion", "dogfood defer", "2020-01-01T00:00:00+00:00");
-
-        reap_deferred_cards(&db, "test-host", "[test]");
-
-        let pending = find_pending_signals(&db, "legion", &["legion".to_string()], None)
-            .expect("find pending");
-        assert_eq!(
-            pending.len(),
-            1,
-            "a deferred card owned by 'legion' must still wake its owner; got: {pending:?}"
-        );
-        assert!(pending[0].1.contains(&card_id));
-    }
-
-    /// Full `tick_health` integration: a deferred card with a past wake_at
-    /// is reverted and its owner woken by a single tick, not just by
-    /// calling `reap_deferred_cards` directly. Proves the sweep is actually
-    /// wired into the health tick, not just unit-testable in isolation.
-    #[test]
-    fn watch_loop_tick_health_wakes_due_deferred_card() {
-        let (db, _index, _dir) = test_storage();
-        let card_id = insert_deferred_card(
-            &db,
-            "test-repo",
-            "tick wakes me",
-            "2020-01-01T00:00:00+00:00",
-        );
-
-        let mut state = test_watch_loop(db, "[legion test]");
-        state.tick_health();
-
-        let card = state
-            .db
-            .get_card_by_id(&card_id)
-            .expect("get")
-            .expect("card exists");
-        assert_eq!(card.status, crate::kanban::CardStatus::Accepted);
-
-        let pending =
-            find_pending_signals(&state.db, "test-repo", &["test-repo".to_string()], None)
-                .expect("find pending");
-        assert_eq!(
-            pending.len(),
-            1,
-            "tick_health must wake the deferred card's owner"
         );
     }
 

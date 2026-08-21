@@ -79,17 +79,17 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
-    /// Get card deltas for multi-node sync.
+    /// Get task deltas for multi-node sync.
     ///
-    /// Returns all cards (tasks table) that have been modified or soft-deleted
-    /// since the given timestamp. Used for delta synchronization between nodes.
+    /// Returns all `tasks` rows (`legion task` inter-agent delegation, #931:
+    /// no longer kanban cards too) that have been modified or soft-deleted
+    /// since the given timestamp. Used for delta synchronization between
+    /// nodes.
     #[allow(dead_code)] // Used by sync broadcast in #249
     pub fn get_card_deltas_since(&self, since: &str) -> Result<Vec<CardDelta>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, from_repo, to_repo, text, context, priority, status, note, \
-             labels, parent_card_id, source_url, source_type, sort_order, \
-             created_at, updated_at, deleted_at, assigned_at, started_at, completed_at, \
-             problem, solution, acceptance \
+             created_at, updated_at, deleted_at \
              FROM tasks \
              WHERE updated_at > ?1 OR deleted_at > ?1 \
              ORDER BY COALESCE(updated_at, deleted_at) ASC",
@@ -105,20 +105,9 @@ impl Database {
                 priority: row.get(5)?,
                 status: row.get(6)?,
                 note: row.get(7)?,
-                labels: row.get(8)?,
-                parent_card_id: row.get(9)?,
-                source_url: row.get(10)?,
-                source_type: row.get(11)?,
-                sort_order: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
-                deleted_at: row.get(15)?,
-                assigned_at: row.get(16)?,
-                started_at: row.get(17)?,
-                completed_at: row.get(18)?,
-                problem: row.get(19)?,
-                solution: row.get(20)?,
-                acceptance: row.get(21)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+                deleted_at: row.get(10)?,
             })
         })?;
 
@@ -504,7 +493,7 @@ impl Database {
         Ok(())
     }
 
-    /// Apply a peer's card delta with last-write-wins merge (#536). Same
+    /// Apply a peer's task delta with last-write-wins merge (#536). Same
     /// LWW rule as [`Self::apply_reflection_delta`].
     pub fn apply_card_delta(&self, delta: &crate::sync::CardDelta) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -523,12 +512,9 @@ impl Database {
             None => {
                 tx.execute(
                     "INSERT INTO tasks \
-                     (id, from_repo, to_repo, text, context, priority, status, note, labels, \
-                      parent_card_id, source_url, source_type, sort_order, created_at, \
-                      updated_at, deleted_at, assigned_at, started_at, completed_at, \
-                      problem, solution, acceptance) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
-                             ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                     (id, from_repo, to_repo, text, context, priority, status, note, \
+                      created_at, updated_at, deleted_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     rusqlite::params![
                         &delta.id,
                         &delta.from_repo,
@@ -538,20 +524,9 @@ impl Database {
                         &delta.priority,
                         &delta.status,
                         &delta.note,
-                        &delta.labels,
-                        &delta.parent_card_id,
-                        &delta.source_url,
-                        &delta.source_type,
-                        &delta.sort_order,
                         &delta.created_at,
                         &delta.updated_at,
                         &delta.deleted_at,
-                        &delta.assigned_at,
-                        &delta.started_at,
-                        &delta.completed_at,
-                        &delta.problem,
-                        &delta.solution,
-                        &delta.acceptance,
                     ],
                 )?;
             }
@@ -560,10 +535,8 @@ impl Database {
                 if delta_ts > local_ts {
                     tx.execute(
                         "UPDATE tasks SET from_repo = ?2, to_repo = ?3, text = ?4, context = ?5, \
-                         priority = ?6, status = ?7, note = ?8, labels = ?9, parent_card_id = ?10, \
-                         source_url = ?11, source_type = ?12, sort_order = ?13, created_at = ?14, \
-                         updated_at = ?15, deleted_at = ?16, assigned_at = ?17, started_at = ?18, \
-                         completed_at = ?19, problem = ?20, solution = ?21, acceptance = ?22 \
+                         priority = ?6, status = ?7, note = ?8, created_at = ?9, \
+                         updated_at = ?10, deleted_at = ?11 \
                          WHERE id = ?1",
                         rusqlite::params![
                             &delta.id,
@@ -574,20 +547,9 @@ impl Database {
                             &delta.priority,
                             &delta.status,
                             &delta.note,
-                            &delta.labels,
-                            &delta.parent_card_id,
-                            &delta.source_url,
-                            &delta.source_type,
-                            &delta.sort_order,
                             &delta.created_at,
                             &delta.updated_at,
                             &delta.deleted_at,
-                            &delta.assigned_at,
-                            &delta.started_at,
-                            &delta.completed_at,
-                            &delta.problem,
-                            &delta.solution,
-                            &delta.acceptance,
                         ],
                     )?;
                 }
@@ -985,36 +947,12 @@ mod tests {
     fn get_card_deltas_since_returns_modified_cards() {
         let db = test_db();
 
-        // Insert two cards.
+        // Insert two tasks.
         let id1 = db
-            .insert_card(
-                "kelex",
-                "legion",
-                "task 1",
-                None,
-                crate::kanban::Priority::Med,
-                None,
-                None,
-                None,
-                None,
-                None,
-                crate::kanban::CardStatus::Pending,
-            )
+            .insert_task("kelex", "legion", "task 1", None, "med")
             .unwrap();
         let _id2 = db
-            .insert_card(
-                "kelex",
-                "legion",
-                "task 2",
-                None,
-                crate::kanban::Priority::High,
-                None,
-                None,
-                None,
-                None,
-                None,
-                crate::kanban::CardStatus::Pending,
-            )
+            .insert_task("kelex", "legion", "task 2", None, "high")
             .unwrap();
 
         // Use an old cutoff -- both should appear.
@@ -1037,24 +975,12 @@ mod tests {
         let db = test_db();
 
         let id = db
-            .insert_card(
-                "kelex",
-                "legion",
-                "will delete",
-                None,
-                crate::kanban::Priority::Low,
-                None,
-                None,
-                None,
-                None,
-                None,
-                crate::kanban::CardStatus::Backlog,
-            )
+            .insert_task("kelex", "legion", "will delete", None, "low")
             .unwrap();
 
-        // Soft delete the card.
+        // Soft delete the task.
         std::thread::sleep(std::time::Duration::from_millis(10));
-        db.soft_delete_card(&id).unwrap();
+        db.soft_delete_task(&id).unwrap();
 
         // Should still appear in deltas with deleted_at set.
         let deltas = db.get_card_deltas_since("2020-01-01T00:00:00Z").unwrap();
@@ -1113,23 +1039,11 @@ mod tests {
         let r = db.insert_reflection("kelex", "to delete", "self").unwrap();
         db.soft_delete_reflection(&r.id).unwrap();
 
-        // Insert and soft delete a card.
-        let card_id = db
-            .insert_card(
-                "kelex",
-                "legion",
-                "to delete",
-                None,
-                crate::kanban::Priority::Med,
-                None,
-                None,
-                None,
-                None,
-                None,
-                crate::kanban::CardStatus::Backlog,
-            )
+        // Insert and soft delete a task.
+        let task_id = db
+            .insert_task("kelex", "legion", "to delete", None, "med")
             .unwrap();
-        db.soft_delete_card(&card_id).unwrap();
+        db.soft_delete_task(&task_id).unwrap();
 
         // Insert and soft delete a schedule.
         let sched_id = db
@@ -1357,20 +1271,9 @@ mod tests {
             priority: "med".into(),
             status: "pending".into(),
             note: None,
-            labels: None,
-            parent_card_id: None,
-            source_url: None,
-            source_type: None,
-            sort_order: 0,
             created_at: "2026-06-01T00:00:00Z".into(),
             updated_at: "2026-06-02T00:00:00Z".into(),
             deleted_at: None,
-            assigned_at: None,
-            started_at: None,
-            completed_at: None,
-            problem: None,
-            solution: None,
-            acceptance: None,
         };
         db.apply_card_delta(&delta).unwrap();
 

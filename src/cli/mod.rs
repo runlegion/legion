@@ -8,7 +8,6 @@ pub(crate) mod deliver;
 pub(crate) mod document;
 pub(crate) mod index_cmd;
 pub(crate) mod issue;
-pub(crate) mod kanban;
 pub(crate) mod memory;
 pub(crate) mod misc;
 pub(crate) mod ops;
@@ -31,7 +30,6 @@ use self::deliver::DeliverAction;
 use self::document::DocumentAction;
 use self::index_cmd::SymAction;
 use self::issue::{IssueAction, SubIssueAction};
-use self::kanban::KanbanAction;
 use self::memory::DedupeMode;
 use self::misc::TaskAction;
 use self::ops::{ClusterAction, MeshAction, TelemetryAction, UncertaintyAction};
@@ -779,39 +777,60 @@ pub(crate) enum Commands {
         repo: String,
     },
 
-    /// Announce completed work and notify blocked agents
+    /// Announce completed work and notify blocked agents (#931: closes the
+    /// linked work-source issue instead of transitioning a kanban card --
+    /// the card surface is gone, issues are the work source of record).
+    ///
+    /// Runs the exact same verify gate and close path as
+    /// `legion issue close`: the two must never diverge on whether a clean
+    /// verdict is required before Done.
     Done {
         /// Repository name
         #[arg(long)]
         repo: String,
 
-        /// Description of what was completed
+        /// Description of what was completed. Posted as the team
+        /// announcement, and (when `--number` is given) as the issue's
+        /// closing comment.
         #[arg(long)]
         text: String,
 
-        /// Card ID to mark as complete (optional). When the card has
-        /// acceptance criteria, a clean `legion verify` verdict must
-        /// exist for it before Done is accepted; exits non-zero otherwise.
+        /// Work-source issue number to close as part of this Done
+        /// (optional -- a Done with no linked issue just posts the
+        /// announcement). When the issue declares acceptance criteria (or
+        /// traces to a requirement), a clean `legion verify` verdict must
+        /// exist for it; exits non-zero otherwise.
         #[arg(long)]
-        id: Option<String>,
+        number: Option<u64>,
+
+        /// Additional closing comment, appended after `--text`. Rarely
+        /// needed -- `--text` alone already becomes the closing comment.
+        #[arg(long)]
+        comment: Option<String>,
+
+        /// Close despite a failed or missing verify verdict (#930). Same
+        /// override contract as `legion issue close --force`.
+        #[arg(long, requires = "force_reason")]
+        force: bool,
+
+        /// Why the verify verdict is being overridden. Required with --force.
+        #[arg(long)]
+        force_reason: Option<String>,
     },
 
-    /// Get next work item from the scheduler
+    /// Get the next candidate work item: the highest-priority open issue
+    /// on the repo's configured work source (#931 -- sourced live, no
+    /// local queue/board).
     Work {
         /// Repository name
         #[arg(long)]
         repo: String,
 
-        /// Peek only (don't auto-accept the card)
+        /// Present for CLI compatibility. Picking never claims anything
+        /// any more (there is no local "accepted" state left to claim
+        /// against, see `queue`'s module doc comment), so this is a no-op.
         #[arg(long)]
         peek: bool,
-    },
-
-    /// Sync issues from work source into kanban board
-    Sync {
-        /// Repository name
-        #[arg(long)]
-        repo: String,
     },
 
     /// Multi-node cluster sync (LAN broadcast with encryption)
@@ -820,13 +839,7 @@ pub(crate) enum Commands {
         action: ClusterAction,
     },
 
-    /// Manage the kanban board
-    Kanban {
-        #[command(subcommand)]
-        action: KanbanAction,
-    },
-
-    /// Manage delegated tasks between agents (deprecated, use kanban)
+    /// Manage delegated tasks between agents (deprecated, use work-source issues)
     Task {
         #[command(subcommand)]
         action: TaskAction,
@@ -948,7 +961,8 @@ pub(crate) enum Commands {
         #[arg(long)]
         message_file: Option<String>,
 
-        /// Kanban card this commit belongs to, recorded on the audit row.
+        /// Opaque work-item label recorded on the audit row (#931: the
+        /// kanban card this used to name is gone).
         #[arg(long)]
         card: Option<String>,
     },
@@ -1024,15 +1038,14 @@ pub(crate) enum Commands {
     /// a Pass with no evidence) needs a human. Work with no acceptance
     /// criteria is blocked outright.
     ///
-    /// Verify GitHub-issue work with --issue -- issues are the work source of
-    /// record. The legacy --card path verifies a kanban card and is retiring
-    /// with kanban itself. Exactly one of the two is required.
+    /// Verify GitHub-issue work -- issues are the work source of record
+    /// (#931 removed the legacy kanban --card path; the card is gone).
     Verify {
         /// Repository name (resolves work source config from watch.toml)
         #[arg(long)]
         repo: String,
 
-        /// Work-source issue number to verify (#913) -- the primary path.
+        /// Work-source issue number to verify (#913).
         ///
         /// Criteria come from the issue body, parsed by the same reader
         /// `legion pr write-check --issue` uses, so the gate that opens a PR
@@ -1043,20 +1056,8 @@ pub(crate) enum Commands {
         /// Records `legion-verify:issue-<repo>#<n>`. Transitions nothing:
         /// there is no card to move, so the verdict is the gate row and the
         /// exit code.
-        #[arg(long, required_unless_present = "card")]
-        issue: Option<u64>,
-
-        /// Kanban card ID to verify -- the LEGACY path, retiring with kanban.
-        /// New work is issue-shaped; prefer --issue. Mutually exclusive with
-        /// --issue.
-        ///
-        /// Acceptance-criteria precedence: when the card has a `document_id`,
-        /// the bound document's top-level `verification.acceptance` array is
-        /// consulted first; a missing or empty block (or an unparseable
-        /// payload) falls back to `tasks.acceptance`. A dangling `document_id`
-        /// -- the document does not exist -- is a hard error.
-        #[arg(long, conflicts_with = "issue")]
-        card: Option<String>,
+        #[arg(long)]
+        issue: u64,
 
         /// Path to a JSON file with the per-criterion verdicts. Reads stdin
         /// when omitted. Shape: `[{"criterion": "...", "verdict":
@@ -1065,8 +1066,8 @@ pub(crate) enum Commands {
         verdicts_file: Option<String>,
 
         /// Spec-revision deviation gate (#554): assert that the work
-        /// diverges from the card's frozen acceptance criteria, naming why.
-        /// Checked against the card's `ReplanRecord` before verdicts are
+        /// diverges from the issue's frozen acceptance criteria, naming why.
+        /// Checked against the issue's `ReplanRecord` before verdicts are
         /// read: a ratified record lets verify proceed against the revised
         /// AC as normal; without one, verify hard-blocks as an unratified
         /// deviation (docs/decisions/2026-05-31-spec-revision-protocol.md).
@@ -1116,16 +1117,6 @@ pub(crate) enum Commands {
         /// Opaque identifier of the work item to wake.
         #[arg(long)]
         work_item: String,
-    },
-
-    /// Board-derived goal (#525): print the active Accepted card's acceptance
-    /// criteria framed as the agent's completion condition, to carry across
-    /// turns. Native `/goal` cannot be set programmatically, so SessionStart
-    /// emits this each session; it is empty when nothing is in progress.
-    Goal {
-        /// Repository name (the agent whose active card to read).
-        #[arg(long)]
-        repo: String,
     },
 
     /// Show current system health and recent trend

@@ -1,10 +1,6 @@
 //! Issue operations against a work source plugin (carved from
 //! worksource.rs, #615).
 
-use crate::db::Database;
-use crate::kanban;
-use std::collections::HashSet;
-
 use crate::error::{LegionError, Result};
 
 use super::{plugin_call, plugin_call_raw};
@@ -34,34 +30,14 @@ pub struct ExternalIssue {
     pub updated_at: Option<String>,
 }
 
-/// List issues from a work source plugin.
-///
-/// Fail-closed: a missing plugin is an error, not an empty list. A sync
-/// against a missing plugin must surface the misconfiguration rather than
-/// report the tracker as empty.
-pub fn list_issues(
-    plugin_name: &str,
-    github_repo: &str,
-    workdir: &str,
-) -> Result<Vec<ExternalIssue>> {
-    plugin_call(
-        plugin_name,
-        &["list"],
-        &[
-            ("LEGION_WS_REPO", github_repo),
-            ("LEGION_WS_WORKDIR", workdir),
-        ],
-    )
-}
-
 /// List work-source issues with state/label filters, for `legion issue
 /// list` (#750): backlog enumeration -- number/title/state/updated-at --
-/// against the work source's live state, not the local kanban cache.
+/// against the work source's live state.
 ///
-/// Deliberately a separate plugin verb (`list-issues`) from `list_issues`
-/// (used by `sync`, always open/unfiltered) rather than adding params to
-/// that call, so sync's behavior cannot shift as a side effect of this
-/// verb's defaults changing.
+/// A separate plugin verb (`list-issues`) from the retired `sync` verb
+/// (`list`, always open/unfiltered, #931 removed its only Rust caller)
+/// rather than adding params to that call, so this verb's own defaults
+/// stay independent.
 ///
 /// Fail-closed like the other list ops: a missing plugin is an error, not
 /// an empty list (see `require_plugin`).
@@ -289,115 +265,14 @@ pub fn comment(plugin_name: &str, github_repo: &str, number: u64, body: &str) ->
     Ok(())
 }
 
-/// Sync issues from a work source into the kanban board.
-///
-/// Creates cards for issues that don't already have a linked card.
-/// Returns the number of new cards created.
-///
-/// Fail-closed: a sync against a missing plugin is an error, not a
-/// successful zero-issue sync (the #190 lesson, via `list_issues`).
-pub fn sync_issues(
-    db: &Database,
-    plugin_name: &str,
-    source_repo: &str,
-    workdir: &str,
-    legion_repo: &str,
-) -> Result<u64> {
-    let issues = list_issues(plugin_name, source_repo, workdir)?;
-    if issues.is_empty() {
-        return Ok(0);
-    }
-
-    let existing_cards = kanban::board_cards(db)?;
-    let existing_urls: HashSet<String> = existing_cards
-        .iter()
-        .filter_map(|c| c.source_url.as_ref())
-        .cloned()
-        .collect();
-
-    let mut created = 0u64;
-    for issue in &issues {
-        // Skip issues that already have a card. This skip is load-bearing for
-        // born-Backlog: an already-imported card may have been promoted past
-        // Backlog (Assign -> Pending -> ...) by operator consensus. Re-importing
-        // it -- or turning this skip into an upsert -- would silently reset that
-        // status back to Backlog and discard the consent. Do not change to an
-        // upsert without preserving the existing card's status.
-        if issue.url.is_empty() || existing_urls.contains(&issue.url) {
-            continue;
-        }
-
-        let label_names: Vec<String> = issue
-            .labels
-            .iter()
-            .filter_map(|l| {
-                l.as_object()
-                    .and_then(|obj| obj.get("name").and_then(|n| n.as_str()))
-                    .or_else(|| l.as_str())
-                    .map(String::from)
-            })
-            .collect();
-
-        let labels = if label_names.is_empty() {
-            None
-        } else {
-            Some(label_names.join(","))
-        };
-
-        let priority = if label_names.iter().any(|l| l == "critical") {
-            kanban::Priority::Critical
-        } else if label_names.iter().any(|l| l == "high" || l == "priority") {
-            kanban::Priority::High
-        } else {
-            kanban::Priority::Med
-        };
-
-        // born-Backlog: synced issues are created in Backlog via create_card's
-        // default. Do NOT introduce a status here -- promotion to Pending is an
-        // explicit Assign (operator consensus / planfile), never a side effect of
-        // import. Routing imports through create_card is what keeps AC #2 true.
-        kanban::create_card(
-            db,
-            legion_repo,
-            legion_repo,
-            &issue.title,
-            issue.body.as_deref(),
-            priority,
-            labels.as_deref(),
-            None,
-            Some(&issue.url),
-            Some(plugin_name),
-            issue.created_at.as_deref(),
-        )?;
-        created += 1;
-    }
-
-    Ok(created)
-}
-
-/// Extract the issue number from a source URL.
-pub fn extract_issue_number(url: &str) -> Option<u64> {
-    url.rsplit('/').next().and_then(|s| s.parse().ok())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The list ops were the last holdouts of the silent-empty policy:
-    /// a missing plugin returned `Ok(Vec::new())`, so a sync against a
+    /// The list ops were the last holdouts of the silent-empty policy: a
+    /// missing plugin returned `Ok(Vec::new())`, so a sync against a
     /// missing plugin reported zero issues as success (the #190 shape).
-    /// All three now fail closed through `require_plugin`.
-    #[test]
-    fn list_issues_returns_worksource_error_when_plugin_missing() {
-        let result = list_issues("nonexistent-plugin-xyz", "owner/repo", "/tmp");
-        assert!(
-            matches!(result, Err(LegionError::WorkSource(_))),
-            "expected WorkSource error, got {:?}",
-            result
-        );
-    }
-
+    /// This one now fails closed through `require_plugin`.
     #[test]
     fn list_all_issues_returns_worksource_error_when_plugin_missing() {
         let result = list_all_issues("nonexistent-plugin-xyz", "owner/repo", "open", None);
@@ -416,16 +291,6 @@ mod tests {
             "expected WorkSource error, got {:?}",
             result
         );
-    }
-
-    #[test]
-    fn extract_issue_number_from_url() {
-        assert_eq!(
-            extract_issue_number("https://github.com/runlegion/legion/issues/42"),
-            Some(42)
-        );
-        assert_eq!(extract_issue_number("not-a-url"), None);
-        assert_eq!(extract_issue_number(""), None);
     }
 
     /// Regression guard for the PR #227 silent-fallthrough fix.

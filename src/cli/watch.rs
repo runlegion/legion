@@ -102,6 +102,28 @@ pub(crate) enum WatchAction {
         #[arg(long, default_value = "120")]
         stale_after_secs: u64,
     },
+
+    /// List delegated work items whose linked wake attempt is NOT
+    /// verifiably live (#778, card-free since #931): the watch daemon
+    /// heartbeat is stale/absent, or the linked wake_attempts row is
+    /// missing or terminal. Used by `stop.sh`'s delegated-liveness gate as
+    /// the fail-closed last-line-of-defense for the case `tick_health`'s
+    /// own auto-revert sweep cannot reach -- the watch daemon itself being
+    /// down. An empty result means every delegated work item for the repo
+    /// is either accounted for or genuinely still live -- in practice this
+    /// is always empty today, since #931 removed the only entry point that
+    /// ever linked a wake attempt to a work item
+    /// (`legion kanban delegate`); the query and the gate survive as
+    /// legion-only infrastructure for whatever eventually replaces it.
+    DelegatedNeedsAttention {
+        /// Repository name
+        #[arg(long)]
+        repo: String,
+
+        /// Emit JSONL (one summary object per line) instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -501,6 +523,46 @@ pub(crate) fn handle(action: Option<WatchAction>) -> error::Result<()> {
         }) => {
             let db = open_db()?;
             run_watch_status(&db, recent, stale_after_secs)?;
+        }
+        Some(WatchAction::DelegatedNeedsAttention { repo, json }) => {
+            let db = open_db()?;
+            let needs_attention: Vec<crate::wake_attempts::WakeAttempt> = db
+                .live_linked_wake_attempts(Some(&repo))?
+                .into_iter()
+                .filter(|attempt| {
+                    let Some(work_item_id) = attempt.work_item_id.as_deref() else {
+                        return false;
+                    };
+                    !db.work_item_is_live(work_item_id, watch::DELEGATION_STALE_AFTER_SECS)
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            if json {
+                for attempt in &needs_attention {
+                    let Some(work_item_id) = attempt.work_item_id.as_deref() else {
+                        continue;
+                    };
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "work_item_id": work_item_id,
+                            "attempt_id": attempt.attempt_id,
+                            "repo": attempt.repo_name,
+                        })
+                    );
+                }
+            } else {
+                for attempt in &needs_attention {
+                    let Some(work_item_id) = attempt.work_item_id.as_deref() else {
+                        continue;
+                    };
+                    println!(
+                        "- {} (attempt {}, repo {})",
+                        work_item_id, attempt.attempt_id, attempt.repo_name
+                    );
+                }
+            }
         }
     }
     Ok(())

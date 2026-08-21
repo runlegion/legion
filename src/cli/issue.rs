@@ -2,7 +2,7 @@
 
 use clap::Subcommand;
 
-use crate::cli::util::{audit, inline_or_stdin, open_db};
+use crate::cli::util::{audit, inline_or_stdin, open_db, open_db_and_index};
 use crate::db::card_criteria;
 use crate::{card_parse, db, error, worksource};
 
@@ -98,24 +98,22 @@ fn validate_trace(database: &db::Database, trace: &[card_parse::TraceBullet]) ->
     Ok(())
 }
 
-/// Gate `legion issue close` on a clean verify verdict (#930).
+/// Gate an issue close on a clean verify verdict (#930).
 ///
 /// Returns a short label for the audit row describing which path was taken.
 ///
-/// Why this lives here rather than only on the card path: `verify` is the only
-/// card-keyed gate, and until now the ONLY place it was enforced was
-/// `handle_done`'s card-keyed lookup (`cli/kanban.rs`). `legion issue close`
-/// checked nothing, and the issue-keyed verdict added for card-free repos is
-/// exit-code-only -- the row is recorded and nothing ever reads it back. So for
-/// any repo working from issues rather than cards, which is now most of them,
-/// verify was advisory. smugglr ran an entire epic in which simplify, pr-write
-/// and review all fired, verify never did, and nothing reported the absence.
-///
-/// The card path does NOT pass through here: `legion done` closes its linked
-/// issue via `propagate_card_close_to_worksource`, which resolves the work
-/// source itself and calls `close_issue` directly. That path is gated by
-/// `handle_done`'s own check, so the two do not double-gate and neither leaves
-/// a hole.
+/// The single close gate for BOTH `legion issue close` and `legion done`
+/// (#931): before the card surface's removal, `legion done`'s card-keyed
+/// lookup was a SEPARATE enforcement point from this one, each independently
+/// gating its own close path so neither left a hole. Now that the card path
+/// is gone, `close_issue_gated` below is the only close path there is, and
+/// both commands route through it -- there is no second copy of this check
+/// left to drift out of sync with this one. Before this gate existed at
+/// all, `legion issue close` checked nothing, and the issue-keyed verdict
+/// added for card-free repos was exit-code-only -- the row was recorded and
+/// nothing ever read it back. smugglr ran an entire epic in which simplify,
+/// pr-write and review all fired, verify never did, and nothing reported
+/// the absence.
 ///
 /// An issue declaring no acceptance criteria AND no trace is not gated --
 /// matching the card rule, where a chore with no criteria can reach Done.
@@ -130,7 +128,7 @@ fn validate_trace(database: &db::Database, trace: &[card_parse::TraceBullet]) ->
 /// `acceptance` is empty. Without this, a traced issue with no restated
 /// criteria would close ungated: #930's hole, reopened through the door
 /// #933 opened.
-fn check_verify_before_close(
+pub(crate) fn check_verify_before_close(
     database: &db::Database,
     plugin_name: &str,
     source_repo: &str,
@@ -231,6 +229,168 @@ fn check_verify_before_close(
             Ok("overridden")
         }
     }
+}
+
+/// Arguments for `close_issue_gated`, grouped into a struct so the function
+/// stays under clippy's argument-count lint.
+struct CloseIssueArgs<'a> {
+    repo: &'a str,
+    plugin_name: &'a str,
+    source_repo: &'a str,
+    number: u64,
+    comment: Option<&'a str>,
+    force: bool,
+    force_reason: Option<&'a str>,
+}
+
+/// Close an issue via a work source plugin, gated on a clean verify verdict
+/// (#930), and audit the result. Shared by `IssueAction::Close`'s handler
+/// and `legion done` (#931) so the two can never diverge on whether a
+/// clean verdict is required before a work item is marked done -- they are
+/// the same close, reached two ways, not two copies of the same check.
+fn close_issue_gated(database: &db::Database, args: CloseIssueArgs) -> error::Result<()> {
+    let CloseIssueArgs {
+        repo,
+        plugin_name,
+        source_repo,
+        number,
+        comment,
+        force,
+        force_reason,
+    } = args;
+    let gate = check_verify_before_close(
+        database,
+        plugin_name,
+        source_repo,
+        number,
+        force,
+        force_reason,
+    )?;
+
+    worksource::close_issue(plugin_name, source_repo, number, comment)?;
+
+    // The override reason rides the audit row, not just stderr: a bypass
+    // that is only visible in the terminal of whoever ran it is not
+    // recorded at all.
+    let details = serde_json::json!({
+        "comment": comment,
+        "verify": gate,
+        "force_reason": force_reason,
+    });
+    let details_str = details.to_string();
+    audit(
+        database,
+        &db::AuditInput {
+            agent: repo,
+            action: "close-issue",
+            target_type: "issue",
+            target_ref: &number.to_string(),
+            task_id: None,
+            source_type: plugin_name,
+            details: Some(&details_str),
+            // A bypassed gate must be visible in the DEFAULT audit listing,
+            // which prints the outcome and not the details JSON. Recording
+            // the override only in details would put it where nobody looks
+            // unless they already suspect it -- which is the failure this
+            // gate exists to close, one level up.
+            outcome: if gate.starts_with("overridden") {
+                "override"
+            } else {
+                "success"
+            },
+        },
+    );
+
+    println!("closed issue #{} on {}", number, source_repo);
+    Ok(())
+}
+
+/// `legion done` (#931): announce completed work and notify blocked
+/// agents, closing the linked work-source issue (when `--number` is given)
+/// through the exact same gated close path `legion issue close` uses.
+///
+/// Before the card surface's removal, `legion done --id <card>` gated on a
+/// card-keyed verify verdict via its own inline check; that check and
+/// `legion issue close`'s were two separate enforcement points that had to
+/// be kept in sync by hand. There is only one close path now
+/// (`close_issue_gated`), so the two commands cannot drift apart on
+/// whether a clean verdict is required.
+pub(crate) fn handle_done(
+    repo: String,
+    text: String,
+    number: Option<u64>,
+    comment: Option<String>,
+    force: bool,
+    force_reason: Option<String>,
+) -> error::Result<()> {
+    let (database, index) = open_db_and_index()?;
+
+    if let Some(number) = number {
+        let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
+        // `--text` is the primary closing comment (matching the pre-#931
+        // card path, where the done-text became the GitHub closing
+        // comment); `--comment` appends when also given.
+        let closing_comment = match &comment {
+            Some(c) => format!("{text}\n\n{c}"),
+            None => text.clone(),
+        };
+        close_issue_gated(
+            &database,
+            CloseIssueArgs {
+                repo: &repo,
+                plugin_name: &plugin_name,
+                source_repo: &source_repo,
+                number,
+                comment: Some(&closing_comment),
+                force,
+                force_reason: force_reason.as_deref(),
+            },
+        )?;
+    }
+
+    let announcement = format!("{repo} completed: {text}");
+    let reflection = database.insert_reflection_with_meta(
+        &repo,
+        &announcement,
+        "team",
+        &db::ReflectionMeta::default(),
+    )?;
+    if let Err(e) = index.add(
+        &reflection.id,
+        &reflection.repo,
+        &announcement,
+        &reflection.created_at,
+    ) {
+        eprintln!("[legion] search index add failed: {e}");
+    }
+    info!("[legion] done: {text}");
+
+    let blocked_agents = crate::status::find_blocked_agents(&database, &repo)?;
+    for agent in &blocked_agents {
+        let notify_text = format!(
+            "@{agent} announce from {repo} -- {repo} completed: {text}. Your blocker may be cleared."
+        );
+        let notify_ref = database.insert_reflection_with_meta(
+            &repo,
+            &notify_text,
+            "team",
+            &db::ReflectionMeta::default(),
+        )?;
+        if let Err(e) = index.add(
+            &notify_ref.id,
+            &notify_ref.repo,
+            &notify_text,
+            &notify_ref.created_at,
+        ) {
+            eprintln!("[legion] search index add failed: {e}");
+        }
+        info!("[legion] notified {agent} (was blocked on {repo})");
+    }
+
+    if blocked_agents.is_empty() {
+        info!("[legion] no blocked agents found");
+    }
+    Ok(())
 }
 
 /// Render the default (non-JSON) `legion issue view` output: title, the raw
@@ -636,51 +796,18 @@ pub(crate) fn handle(action: IssueAction) -> error::Result<()> {
             let (plugin_name, source_repo, _workdir) = worksource::require_worksource(&repo)?;
             let database = open_db()?;
 
-            let gate = check_verify_before_close(
+            close_issue_gated(
                 &database,
-                &plugin_name,
-                &source_repo,
-                number,
-                force,
-                force_reason.as_deref(),
-            )?;
-
-            worksource::close_issue(&plugin_name, &source_repo, number, comment.as_deref())?;
-
-            // The override reason rides the audit row, not just stderr: a
-            // bypass that is only visible in the terminal of whoever ran it
-            // is not recorded at all.
-            let details = serde_json::json!({
-                "comment": comment,
-                "verify": gate,
-                "force_reason": force_reason,
-            });
-            let details_str = details.to_string();
-            audit(
-                &database,
-                &db::AuditInput {
-                    agent: &repo,
-                    action: "close-issue",
-                    target_type: "issue",
-                    target_ref: &number.to_string(),
-                    task_id: None,
-                    source_type: &plugin_name,
-                    details: Some(&details_str),
-                    // A bypassed gate must be visible in the DEFAULT audit
-                    // listing, which prints the outcome and not the details
-                    // JSON. Recording the override only in details would put
-                    // it where nobody looks unless they already suspect it --
-                    // which is the failure this gate exists to close, one
-                    // level up.
-                    outcome: if gate.starts_with("overridden") {
-                        "override"
-                    } else {
-                        "success"
-                    },
+                CloseIssueArgs {
+                    repo: &repo,
+                    plugin_name: &plugin_name,
+                    source_repo: &source_repo,
+                    number,
+                    comment: comment.as_deref(),
+                    force,
+                    force_reason: force_reason.as_deref(),
                 },
-            );
-
-            println!("closed issue #{} on {}", number, source_repo);
+            )?;
         }
         IssueAction::Reopen {
             repo,

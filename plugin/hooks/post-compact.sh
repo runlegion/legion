@@ -3,7 +3,7 @@
 # The compaction summary is STALE. This hook provides ground truth.
 #
 # The core banner (identity, operating contract, pending replies,
-# checkpoint, index status, kanban, goal, autonomy budget) is assembled by
+# checkpoint, index status, current work, autonomy budget) is assembled by
 # lib/boot-sections.sh (#879) via emit_boot_core -- the SAME driver
 # session-start.sh calls. Before #879 this hook emitted only a standalone
 # checkpoint block, so compaction silently dropped identity, the operating
@@ -98,7 +98,7 @@ fi
 # `/legion:surface` renders all four in full, on demand.
 #
 # Core banner: identity, operating contract, pending replies, checkpoint,
-# index status, kanban, goal, autonomy budget (#879). This is the same
+# index status, current work, autonomy budget (#879). This is the same
 # emit_boot_core call session-start.sh makes -- the checkpoint reflection
 # that used to get its own "LEGION CHECKPOINT (stored before compaction)"
 # wrapper here now rides inside this block like every other session, and

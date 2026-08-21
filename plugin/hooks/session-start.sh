@@ -2,11 +2,11 @@
 # Legion SessionStart hook: focused bootstrap.
 #
 # Session-only side effects live here: marker cleanup, index warm, daemon
-# supervisor, watch lock, GitHub sync (see below). The banner itself --
-# identity, operating contract, pending replies, checkpoint, index status,
-# kanban, goal, autonomy budget -- is assembled by lib/boot-sections.sh
-# (#879), the SAME driver post-compact.sh calls, so the two SessionStart
-# matchers cannot drift out of sync the way they did before #879.
+# supervisor, watch lock. The banner itself -- identity, operating
+# contract, pending replies, checkpoint, index status, current work,
+# autonomy budget -- is assembled by lib/boot-sections.sh (#879), the SAME
+# driver post-compact.sh calls, so the two SessionStart matchers cannot
+# drift out of sync the way they did before #879.
 #
 # Everything else (bulk recall, surface, bullpen) is pulled on demand
 # during the session via recall/consult/bullpen commands.
@@ -56,17 +56,14 @@ rm -f "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
 # allowed to add latency or fail the hook.
 ("$LEGION" watch session-start --repo "$REPO" --pid "$PPID" >/dev/null 2>&1 &)
 
-# Sync GitHub issues into kanban (5-second timeout, opt-out via LEGION_NO_SYNC=1)
-if [ "${LEGION_NO_SYNC:-}" != "1" ]; then
-  if command -v gtimeout >/dev/null 2>&1; then
-    gtimeout 5 "$LEGION" sync --repo "$REPO" >/dev/null 2>>"$LOG"
-  else
-    perl -e 'alarm 5; exec @ARGV' -- "$LEGION" sync --repo "$REPO" >/dev/null 2>>"$LOG"
-  fi
-fi
+# #931: the GitHub-issues-into-kanban sync (`legion sync`, 5s timeout,
+# opt-out via LEGION_NO_SYNC=1) that used to run here is gone with the
+# card surface -- `legion work`/boot_section_work source live from the
+# work source on each call (see src/queue.rs's module doc comment), so
+# there is no local cache left to keep warm.
 
 # Banner assembly: identity, operating contract, pending replies,
-# checkpoint, index status, kanban, goal, autonomy budget -- in that order
+# checkpoint, index status, current work, autonomy budget -- in that order
 # (LEGION_BOOT_SECTIONS in lib/boot-sections.sh). See that file for why the
 # order is fixed and why no per-hook section list lives here anymore.
 # Guarded: the source above is deliberately non-fatal, so a missing lib

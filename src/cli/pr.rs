@@ -6,7 +6,7 @@ use crate::cli::datadir::data_dir;
 use crate::cli::util::{audit, git_head_commit_and_branch, open_db, read_file_or_stdin};
 use crate::db::quality_gates::QualityGateInput;
 use crate::verify::{GateProvenance, GateResult};
-use crate::{board, card_parse, db, error, kanban, pr_view, pr_write, search, worksource};
+use crate::{board, card_parse, db, error, pr_view, pr_write, search, worksource};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum PrAction {
@@ -44,7 +44,8 @@ pub(crate) enum PrAction {
         #[arg(long)]
         reviewer: Option<String>,
 
-        /// Kanban card ID to link (stores PR URL on the card)
+        /// Opaque work-item label recorded on the audit row (#931: the
+        /// kanban card this used to link against is gone).
         #[arg(long)]
         task: Option<String>,
 
@@ -249,7 +250,8 @@ pub(crate) enum PrAction {
         #[arg(long)]
         keep_branch: bool,
 
-        /// Kanban card ID to transition to done
+        /// Opaque work-item label recorded on the audit row (#931: the
+        /// kanban card this used to transition to done is gone).
         #[arg(long)]
         task: Option<String>,
 
@@ -548,12 +550,16 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 reviewer.as_deref(),
             )?;
 
-            // Store PR URL on the kanban card if linked
+            // #931: `--task` used to look up a kanban card and (per its own
+            // comment, though the lookup never actually wrote anything) note
+            // the link. The card is gone; `--task` is now purely an opaque
+            // label recorded on the audit row below, mirroring `legion
+            // commit --card`.
             if let Some(ref task_id) = task {
-                // Update the card's context with the PR URL
-                if let Some(_card) = database.get_card_by_id(task_id)? {
-                    eprintln!("[legion] linked PR #{} to card {}", created.number, task_id);
-                }
+                eprintln!(
+                    "[legion] PR #{} tagged with task {}",
+                    created.number, task_id
+                );
             }
 
             let details = serde_json::json!({
@@ -1058,55 +1064,20 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
             let merge_outcome =
                 worksource::merge_pr(&plugin_name, &source_repo, number, &strategy, !keep_branch)?;
 
-            // A queued PR (#630) has not actually merged yet -- the base
-            // branch's merge queue completes it asynchronously, possibly
-            // after re-running CI. Firing the kanban-done transition and
-            // issue-close side effects here would mark the card/issue done
-            // before the merge has happened, so both are skipped when
-            // queued and left for the queue's own completion to be
-            // reconciled later.
-            if !merge_outcome.queued {
-                // Transition kanban card to done if linked
-                if let Some(ref task_id) = task {
-                    match kanban::transition_card(
-                        &database,
-                        task_id,
-                        kanban::Action::Done,
-                        Some(&format!("PR #{} merged", number)),
-                    ) {
-                        Ok(_) => eprintln!("[legion] card {} marked done", task_id),
-                        Err(e) => eprintln!(
-                            "[legion] warning: could not complete card {}: {}",
-                            task_id, e
-                        ),
-                    }
-
-                    // Close the linked issue if the card has a source URL,
-                    // using a generated merge comment so the GitHub issue
-                    // records which PR merge closed it.
-                    if let Some(card) = database.get_card_by_id(task_id)?
-                        && let Some(ref url) = card.source_url
-                        && let Some(issue_num) = worksource::extract_issue_number(url)
-                        && let Some(ref source) = card.source_type
-                    {
-                        let merge_comment =
-                            format!("Closed by PR #{number} merge via legion kanban propagation.");
-                        if let Err(e) = worksource::close_issue(
-                            source,
-                            &source_repo,
-                            issue_num,
-                            Some(&merge_comment),
-                        ) {
-                            eprintln!(
-                                "[legion] warning: could not close issue #{}: {}",
-                                issue_num, e
-                            );
-                        } else {
-                            eprintln!("[legion] closed issue #{}", issue_num);
-                        }
-                    }
-                }
-            }
+            // #931: this used to transition a linked kanban card to Done and
+            // then close its linked GitHub issue directly via
+            // `worksource::close_issue` -- bypassing the verify gate
+            // (`check_verify_before_close`) `legion issue close`/`legion
+            // done` both go through. The card is gone, and there is no
+            // card-free way to reconstruct "which issue does this PR close"
+            // here without re-adding a gate-bypassing close path. `pr create
+            // --closes` already appends `Closes #N` to the PR body, which
+            // GitHub's own merge handling acts on natively -- the issue
+            // still closes, just through GitHub's mechanism instead of a
+            // second, ungated legion write. `legion done`/`legion issue
+            // close` remain the gated way to close an issue from legion
+            // itself. `task` (below) is still recorded on the audit row as
+            // an opaque label, same as `pr create --task`.
 
             // delete_branch records the effective outcome, not just the
             // request: the queue path never passes --delete-branch (branch

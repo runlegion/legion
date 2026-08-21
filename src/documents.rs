@@ -147,18 +147,19 @@ impl Database {
     /// not the current one is rejected by `verify::decide_spec` as an
     /// unknown criterion id, same as an id that never existed.
     ///
-    /// Two guards on the whole-payload replace (#882 review, MED-5):
-    /// refuses an already-archived document (archiving is meant to be
-    /// terminal for editing, mirroring `archive_document`'s own filter),
-    /// and -- when a live (non-cancelled) card is bound to this document --
-    /// refuses a payload that drops the top-level `meta` object. The
-    /// governed transition sync (`sync_bound_document`, `db::kanban`)
-    /// hard-errors on a payload with no `meta` object to write `status`
-    /// into, so a revise that dropped it would permanently wedge the bound
-    /// card in a status it cannot leave through the governed path. This is
-    /// the same invariant `archive_document` already enforces just above
-    /// (orphaning a card from its spec is unacceptable) applied to
-    /// structural corruption instead of archival.
+    /// Guard on the whole-payload replace (#882 review, MED-5): refuses an
+    /// already-archived document (archiving is meant to be terminal for
+    /// editing, mirroring `archive_document`'s own filter).
+    ///
+    /// A second guard used to run here -- when a live (non-cancelled) card
+    /// was bound to this document, a payload dropping the top-level `meta`
+    /// object was refused, because the governed transition sync
+    /// (`sync_bound_document`, formerly `db::kanban`) hard-errored on a
+    /// payload with no `meta` object to write `status` into. #931 removed
+    /// the card surface, including card<->document binding
+    /// (`bind_card_to_document`, `tasks.document_id`) and its governed sync
+    /// -- there is no card left that could be wedged by a dropped `meta`
+    /// object, so the guard has nothing left to protect and is gone with it.
     pub fn revise_document(&self, id: &str, payload: &str) -> Result<Document> {
         let existing = self
             .get_document(id)?
@@ -171,19 +172,6 @@ impl Database {
 
         let now = Utc::now().to_rfc3339();
         let normalized_payload = normalize_payload_criteria(id, payload)?;
-
-        if let Some(card_id) = self.live_card_bound_to_document(id)? {
-            let has_meta = serde_json::from_str::<serde_json::Value>(&normalized_payload)
-                .ok()
-                .is_some_and(|v| v.get("meta").is_some_and(|m| m.is_object()));
-            if !has_meta {
-                return Err(LegionError::WorkSource(format!(
-                    "document '{id}' is bound to live card '{card_id}': the revised payload \
-                     must keep a top-level 'meta' object, or the card's governed status \
-                     transitions would be permanently wedged"
-                )));
-            }
-        }
 
         let rows = self.conn.execute(
             "UPDATE documents SET payload = ?1, revision = revision + 1, updated_at = ?2 \
@@ -286,17 +274,12 @@ impl Database {
     /// `updated_at`. Idempotent: archiving an already-archived doc is
     /// a no-op success. Returns the updated Document.
     ///
-    /// Errors when the document is bound to a live (non-cancelled, non-deleted)
-    /// kanban card (#528): archiving a live requirement while work is in flight
-    /// would orphan the card from its spec.
+    /// Used to refuse archiving a document bound to a live kanban card
+    /// (#528): archiving a live requirement while work is in flight would
+    /// orphan the card from its spec. #931 removed card<->document binding
+    /// along with the rest of the card surface, so there is no longer a
+    /// card that could be orphaned this way, and the guard is gone with it.
     pub fn archive_document(&self, id: &str) -> Result<Document> {
-        // Guard: refuse archive when a live card is bound to this document.
-        if let Some(card_id) = self.live_card_bound_to_document(id)? {
-            return Err(LegionError::WorkSource(format!(
-                "document '{id}' cannot be archived: live card '{card_id}' is bound to it"
-            )));
-        }
-
         let now = Utc::now().to_rfc3339();
         let rows = self.conn.execute(
             "UPDATE documents \
@@ -826,69 +809,10 @@ mod tests {
         assert!(err.to_string().contains("not found"));
     }
 
-    // -- archive guard: bound-live-card protection (#528) ------------------
-
-    fn insert_bound_card(db: &Database, doc_id: &str) -> String {
-        let card_id = db
-            .insert_card(
-                "legion",
-                "legion",
-                "bound card",
-                None,
-                crate::kanban::Priority::Med,
-                None,
-                None,
-                None,
-                None,
-                None,
-                crate::kanban::CardStatus::Accepted,
-            )
-            .expect("insert card");
-        db.bind_card_to_document(&card_id, doc_id).expect("bind");
-        card_id
-    }
-
-    /// archive_document errors when a live (non-cancelled) card is bound.
-    #[test]
-    fn archive_document_blocked_by_live_bound_card() {
-        let db = test_db();
-        let mut m = sample_meta("requirement", "mail");
-        m.id = Some("FR-LIVE");
-        db.insert_document(&m, "{}").unwrap();
-
-        let card_id = insert_bound_card(&db, "FR-LIVE");
-
-        let err = db.archive_document("FR-LIVE").unwrap_err();
-        assert!(
-            err.to_string().contains("cannot be archived"),
-            "archive must be blocked: {err}"
-        );
-        assert!(
-            err.to_string().contains(&card_id),
-            "error must name the blocking card: {err}"
-        );
-    }
-
-    /// archive_document succeeds when the bound card is cancelled.
-    #[test]
-    fn archive_document_allowed_when_bound_card_is_cancelled() {
-        let db = test_db();
-        let mut m = sample_meta("requirement", "mail");
-        m.id = Some("FR-CANCEL");
-        // force_move_card to "cancelled" now runs the same document-sync as
-        // the governed move path (#753), so the payload needs a "meta"
-        // object for the sync to have somewhere to write "status" into.
-        db.insert_document(&m, r#"{"meta":{}}"#).unwrap();
-
-        let card_id = insert_bound_card(&db, "FR-CANCEL");
-        // Cancel the card.
-        db.force_move_card(&card_id, "cancelled", None)
-            .expect("cancel card");
-
-        // Now archive_document should succeed.
-        let doc = db.archive_document("FR-CANCEL").expect("archive");
-        assert!(doc.archived_at.is_some(), "should be archived");
-    }
+    // The archive/revise guards this section used to test (refusing to
+    // archive or revise a document with a live card bound) were removed
+    // along with card<->document binding itself (#931) -- see
+    // `archive_document`'s and `revise_document`'s doc comments.
 
     // -- schema payload validation (#526) ---------------------------------
 
@@ -1210,72 +1134,10 @@ mod tests {
         assert!(err.to_string().contains("not found"));
     }
 
-    // -- revise guard: bound-live-card protection + archived filter (#882 review, MED-5) --
-
-    /// A document bound to a live card must keep its `meta` object across a
-    /// revise -- the governed transition sync (`sync_bound_document`,
-    /// src/db/kanban.rs) hard-errors on a payload with no `meta` object, so
-    /// dropping it would wedge the card in a status it cannot leave through
-    /// the governed path. Mirrors `archive_document_blocked_by_live_bound_card`.
-    #[test]
-    fn revise_document_blocked_when_bound_card_would_be_wedged() {
-        let db = test_db();
-        let mut m = sample_meta("requirement", "mail");
-        m.id = Some("FR-WEDGE");
-        db.insert_document(&m, r#"{"meta":{}}"#).unwrap();
-
-        let card_id = insert_bound_card(&db, "FR-WEDGE");
-
-        // The revise payload drops 'meta' entirely.
-        let err = db.revise_document("FR-WEDGE", "{}").unwrap_err();
-        assert!(
-            err.to_string().contains("meta"),
-            "error must name the missing 'meta' object: {err}"
-        );
-        assert!(
-            err.to_string().contains(&card_id) || err.to_string().contains("live"),
-            "error must explain the live-card wedge risk: {err}"
-        );
-
-        // Refused: the original payload (with meta) must still be in place.
-        let fetched = db.get_document("FR-WEDGE").unwrap().unwrap();
-        assert!(fetched.payload.contains("meta"));
-    }
-
-    /// The same document, same drop-meta payload, succeeds once the bound
-    /// card is cancelled (no longer live) -- mirrors
-    /// `archive_document_allowed_when_bound_card_is_cancelled`.
-    #[test]
-    fn revise_document_allowed_when_bound_card_is_cancelled() {
-        let db = test_db();
-        let mut m = sample_meta("requirement", "mail");
-        m.id = Some("FR-WEDGE-CANCEL");
-        db.insert_document(&m, r#"{"meta":{}}"#).unwrap();
-
-        let card_id = insert_bound_card(&db, "FR-WEDGE-CANCEL");
-        db.force_move_card(&card_id, "cancelled", None)
-            .expect("cancel card");
-
-        let revised = db.revise_document("FR-WEDGE-CANCEL", "{}").expect("revise");
-        assert_eq!(revised.payload, "{}");
-    }
-
-    /// A document bound to a live card may still be revised as long as the
-    /// new payload keeps a `meta` object -- the guard only refuses payloads
-    /// that would actually wedge the card, not every revise of a bound doc.
-    #[test]
-    fn revise_document_allowed_when_bound_card_and_meta_preserved() {
-        let db = test_db();
-        let mut m = sample_meta("requirement", "mail");
-        m.id = Some("FR-WEDGE-OK");
-        db.insert_document(&m, r#"{"meta":{}}"#).unwrap();
-        insert_bound_card(&db, "FR-WEDGE-OK");
-
-        let revised = db
-            .revise_document("FR-WEDGE-OK", r#"{"meta":{"status":"draft"}}"#)
-            .expect("revise with meta preserved must succeed");
-        assert!(revised.payload.contains("meta"));
-    }
+    // The revise guard this section used to test (refusing to drop 'meta'
+    // from a document bound to a live card) was removed along with
+    // card<->document binding itself (#931) -- see `revise_document`'s doc
+    // comment.
 
     /// An archived document cannot be revised (the revise UPDATE now also
     /// filters `archived_at IS NULL`, not just `deleted_at IS NULL`).

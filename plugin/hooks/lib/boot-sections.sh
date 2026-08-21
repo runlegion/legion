@@ -147,21 +147,18 @@ boot_section_index() {
   "$LEGION" index "$REPO" --status --banner 2>>"$LOG"
 }
 
-# Work source -- what's on my plate.
-boot_section_kanban() {
-  local kanban
-  kanban=$("$LEGION" kanban list --repo "$REPO" 2>>"$LOG")
-  if [ -n "$kanban" ]; then
-    printf '[Legion] Current work:\n%s' "$kanban"
+# Work source -- what's on my plate (#931: sourced live from the repo's
+# configured work-source issues, no local board/goal state survives -- see
+# src/queue.rs's module doc comment for why picking never claims anything,
+# which is also why there is no separate goal section any more: "goal" was
+# the active Accepted card's criteria, and there is no local "accepted"
+# state left to derive it from).
+boot_section_work() {
+  local work
+  work=$("$LEGION" work --repo "$REPO" --peek 2>>"$LOG")
+  if [ -n "$work" ]; then
+    printf '[Legion] Current work:\n%s' "$work"
   fi
-}
-
-# Board-derived goal (#525) -- the active Accepted card's acceptance
-# criteria, framed as the completion condition the agent carries this
-# session. Native /goal cannot be set programmatically, so legion re-derives
-# it from the board here. Empty when nothing is in progress.
-boot_section_goal() {
-  "$LEGION" goal --repo "$REPO" 2>>"$LOG"
 }
 
 # Autonomy budget (#524) -- remind the agent it has sanctioned units to
@@ -177,7 +174,7 @@ boot_section_budget() {
 # defaulted to generic Claude prose instead of reading its identity chain).
 # This array is now the ONLY place section order is decided -- it used to
 # be re-derived independently by each hook's comment numbering.
-LEGION_BOOT_SECTIONS=(now identity whatami pending checkpoint index kanban goal budget)
+LEGION_BOOT_SECTIONS=(now identity whatami pending checkpoint index work budget)
 
 # emit_boot_core -- render every section in LEGION_BOOT_SECTIONS, in order,
 # skipping empty ones, and print the joined result. No arguments. No
