@@ -833,7 +833,7 @@ pub(crate) enum Commands {
     },
 
     /// Hook-side delivery drain (#941): the code-side counterpart to the
-    /// MCP notification lane's push
+    /// retired MCP notification lane's push (#947)
     Deliver {
         #[command(subcommand)]
         action: DeliverAction,

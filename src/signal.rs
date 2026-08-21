@@ -198,7 +198,7 @@ pub fn parse_signal(text: &str) -> Option<Signal> {
 /// split on the first colon, both sides trimmed. Pairs without a colon are
 /// skipped. This is the inverse-adjacent grammar to [`parse_details_block`],
 /// which parses the braced display form `{k: v, k: v}`; the wire form is
-/// what the two send surfaces (CLI `--details`, MCP `details`) accept.
+/// what the CLI `--details` flag accepts.
 pub fn parse_details_arg(details: &str) -> Vec<(String, String)> {
     details
         .split(',')
@@ -694,7 +694,7 @@ mod tests {
         assert!(validate_note(&"a".repeat(MAX_SIGNAL_NOTE_LENGTH)).is_ok());
     }
 
-    // -- is_self_address (shared CLI + MCP guard) ---------------------------
+    // -- is_self_address (CLI signal guard) ----------------------------------
 
     #[test]
     fn is_self_address_rejects_same_repo() {
