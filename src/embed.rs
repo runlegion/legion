@@ -71,13 +71,13 @@ pub fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
 
 /// Deserialize an embedding from SQLite BLOB bytes.
 pub fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
+    // as_chunks::<4>() yields &[u8; 4] directly (its .1 remainder of any
+    // trailing bytes is ignored, matching the old chunks_exact(4)).
     bytes
-        .chunks_exact(4)
-        .map(|chunk| {
-            // chunks_exact(4) guarantees exactly 4 bytes per chunk
-            let arr: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            f32::from_le_bytes(arr)
-        })
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&chunk| f32::from_le_bytes(chunk))
         .collect()
 }
 
