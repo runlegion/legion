@@ -6,6 +6,7 @@ mod cluster;
 mod css;
 mod daemon;
 mod db;
+mod defer;
 mod deliver;
 mod documents;
 mod embed;
@@ -333,6 +334,13 @@ fn run() -> error::Result<()> {
             deviation,
         } => cli::verify::handle_verify(repo, card, issue, verdicts_file, deviation)?,
         Commands::Autonomy { action } => cli::autonomy::handle(action)?,
+        Commands::Defer {
+            work_item,
+            repo,
+            until,
+            note,
+        } => cli::misc::handle_defer(work_item, repo, until, note)?,
+        Commands::Undefer { work_item } => cli::misc::handle_undefer(work_item)?,
         Commands::Goal { repo } => cli::misc::handle_goal(repo)?,
         Commands::Statusline { json } => cli::misc::handle_statusline(json)?,
         Commands::Mesh { action } => cli::ops::handle_mesh(action)?,

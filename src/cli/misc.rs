@@ -7,7 +7,7 @@ use crate::cli::datadir::data_dir;
 use crate::cli::memory::try_load_embed_model;
 use crate::cli::util::{open_db, open_db_and_index};
 use crate::{
-    daemon, error, identity_generate, init, kanban, mcp, now, recall, serve, stats, status,
+    daemon, defer, error, identity_generate, init, kanban, mcp, now, recall, serve, stats, status,
     statusline, surface, task, watch, worksource,
 };
 
@@ -290,6 +290,34 @@ pub(crate) fn handle_work(repo: String, peek: bool) -> error::Result<()> {
     match card {
         Some(c) => print!("{}", kanban::format_work_card(&c)),
         None => info!("[legion] no pending work for {repo}"),
+    }
+    Ok(())
+}
+
+/// `legion defer` (#934): the card-independent counterpart to
+/// `legion kanban defer`. `--until` parsing and future-time validation are
+/// owned by `defer::defer_work_item` so every caller gets the same
+/// refusal for the same input; the deferral is keyed on `--work-item`, not
+/// a card row.
+pub(crate) fn handle_defer(
+    work_item: String,
+    repo: String,
+    until: String,
+    note: Option<String>,
+) -> error::Result<()> {
+    let database = open_db()?;
+    defer::defer_work_item(&database, &work_item, &repo, &until, note.as_deref())?;
+    println!("{work_item}");
+    Ok(())
+}
+
+/// `legion undefer` (#934): wake a deferred work item early. A no-op, not
+/// an error, when the work item was not deferred.
+pub(crate) fn handle_undefer(work_item: String) -> error::Result<()> {
+    let database = open_db()?;
+    match defer::undefer_work_item(&database, &work_item)? {
+        Some(_) => println!("{work_item}"),
+        None => info!("[legion] {work_item} was not deferred"),
     }
     Ok(())
 }

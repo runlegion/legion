@@ -143,16 +143,21 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
 
 /// Column migrations for `wake_attempts`.
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
-    // Migration: card_id linkage for delegated cards (#778). Nullable --
-    // the overwhelming majority of wake_attempts rows are plain auto-wake
-    // spawns with no delegated card behind them. Set once by
-    // `Database::set_wake_attempt_card` when `kanban::delegate_card` links
-    // an Accepted card to a live attempt; read back by
-    // `Database::delegated_card_is_live` (the entry gate, the tick_health
-    // auto-revert sweep, and the stop.sh delegated-liveness subcommand all
-    // share that one predicate, per the #679 "one predicate" lesson --
-    // LIVE_LEASE_WHERE above is the sibling precedent for wake leases).
-    // No REFERENCES clause -- PRAGMA foreign_keys is not enabled globally,
+    // Migration: card_id linkage for delegated work (#778, generalized
+    // #934). Nullable -- the overwhelming majority of wake_attempts rows
+    // are plain auto-wake spawns with no delegated work behind them. Set
+    // once by `Database::set_wake_attempt_work_item` when
+    // `kanban::delegate_card` links an Accepted card to a live attempt;
+    // read back by `Database::work_item_is_live` (the entry gate, the
+    // tick_health auto-revert sweep, and the stop.sh delegated-liveness
+    // subcommand all share that one predicate, per the #679 "one
+    // predicate" lesson -- LIVE_LEASE_WHERE above is the sibling precedent
+    // for wake leases). The column stays named `card_id` (migrations are
+    // one-way; no rename) even though every reader now treats it as an
+    // opaque work-item id (#934) -- today the only writer is
+    // `kanban::delegate_card`, so the value is always a kanban card id in
+    // practice, but nothing above this migration assumes that. No
+    // REFERENCES clause -- PRAGMA foreign_keys is not enabled globally,
     // matching `tasks.document_id` (Migration 16, src/db/kanban.rs).
     if !Database::has_column(conn, "wake_attempts", "card_id")? {
         conn.execute_batch("ALTER TABLE wake_attempts ADD COLUMN card_id TEXT;")?;
@@ -459,7 +464,7 @@ fn map_wake_attempt_row(
         outcome: row.get(12)?,
         deleted_at: row.get(13)?,
         updated_at: row.get(14)?,
-        card_id: row.get(15)?,
+        work_item_id: row.get(15)?,
     })
 }
 
@@ -694,19 +699,22 @@ impl Database {
         Ok(row)
     }
 
-    /// Link a wake_attempts row to the kanban card it is delegated work
-    /// for (#778). A metadata write, not an FSM transition -- the caller
-    /// (`kanban::delegate_card`) is responsible for having already checked
-    /// the attempt is live and unclaimed before calling this. Returns
-    /// `WakeAttemptNotFound` when the row is absent or soft-deleted, same
-    /// contract as `set_wake_attempt_pid`.
-    pub fn set_wake_attempt_card(&self, attempt_id: &str, card_id: &str) -> Result<()> {
+    /// Link a wake_attempts row to the opaque work item it is delegated
+    /// work for (#778, generalized #934). A metadata write, not an FSM
+    /// transition -- the caller (`kanban::delegate_card`, today the only
+    /// caller, always passing a card id) is responsible for having already
+    /// checked the attempt is live and unclaimed before calling this.
+    /// Returns `WakeAttemptNotFound` when the row is absent or
+    /// soft-deleted, same contract as `set_wake_attempt_pid`. Underlying
+    /// column stays `card_id` (no rename); only the Rust-facing name and
+    /// meaning generalized.
+    pub fn set_wake_attempt_work_item(&self, attempt_id: &str, work_item_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let updated = self.conn.execute(
             "UPDATE wake_attempts \
              SET card_id = ?1, updated_at = ?2 \
              WHERE attempt_id = ?3 AND deleted_at IS NULL",
-            rusqlite::params![card_id, &now, attempt_id],
+            rusqlite::params![work_item_id, &now, attempt_id],
         )?;
         if updated == 1 {
             Ok(())
@@ -715,27 +723,28 @@ impl Database {
         }
     }
 
-    /// Clear the `card_id` link on whatever wake_attempts row currently
-    /// points at `card_id` (#778 review fix -- see `kanban::undelegate_card`
-    /// for why this must run on every Undelegate, not just some). Matches
-    /// by `card_id`, not by `attempt_id`, so the caller does not need to
-    /// have looked the linked row up first. A no-op, not an error, when
-    /// nothing is currently linked -- `Undelegate` on a card that was never
-    /// actually delegated (shouldn't happen given the FSM, but this is a
-    /// plain UPDATE, not an FSM transition) must not fail the caller.
-    pub fn clear_wake_attempt_card(&self, card_id: &str) -> Result<()> {
+    /// Clear the work-item link on whatever wake_attempts row currently
+    /// points at `work_item_id` (#778 review fix, generalized #934 -- see
+    /// `kanban::undelegate_card` for why this must run on every Undelegate,
+    /// not just some). Matches by the linked value, not by `attempt_id`, so
+    /// the caller does not need to have looked the linked row up first. A
+    /// no-op, not an error, when nothing is currently linked -- undelegating
+    /// work that was never actually delegated (shouldn't happen given the
+    /// FSM, but this is a plain UPDATE, not an FSM transition) must not
+    /// fail the caller.
+    pub fn clear_wake_attempt_work_item(&self, work_item_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "UPDATE wake_attempts SET card_id = NULL, updated_at = ?1 \
              WHERE card_id = ?2 AND deleted_at IS NULL",
-            rusqlite::params![&now, card_id],
+            rusqlite::params![&now, work_item_id],
         )?;
         Ok(())
     }
 
-    /// Find a live, not-yet-claimed-by-a-card wake_attempts row for a repo
-    /// -- the auto-discovery path `kanban::delegate_card` falls back to
-    /// when the caller does not pass `--attempt-id` explicitly. Newest
+    /// Find a live, not-yet-claimed wake_attempts row for a repo -- the
+    /// auto-discovery path `kanban::delegate_card` falls back to when the
+    /// caller does not pass `--attempt-id` explicitly. Newest
     /// (`spawned_at DESC`) wins when more than one is in flight; callers
     /// that need a specific one among several should pass `--attempt-id`.
     /// A `Claimed` row has no `spawned_at` yet (NULL), which SQLite sorts
@@ -762,14 +771,14 @@ impl Database {
         Ok(row)
     }
 
-    /// Fetch the wake_attempts row linked to a card, if any (#778). Most
-    /// recent by `updated_at` when more than one row was ever linked
-    /// (re-delegation after a manual undelegate) -- only one is meaningful
-    /// at a time since `delegate_card` only ever sets `card_id` on a
-    /// currently-live, currently-unclaimed row.
-    pub fn get_wake_attempt_by_card(
+    /// Fetch the wake_attempts row linked to a work item, if any (#778,
+    /// generalized #934). Most recent by `updated_at` when more than one
+    /// row was ever linked (re-delegation after a manual undelegate) --
+    /// only one is meaningful at a time since `delegate_card` only ever
+    /// links a currently-live, currently-unclaimed row.
+    pub fn get_wake_attempt_by_work_item(
         &self,
-        card_id: &str,
+        work_item_id: &str,
     ) -> Result<Option<crate::wake_attempts::WakeAttempt>> {
         let sql = format!(
             "SELECT {WAKE_ATTEMPT_COLUMNS} FROM wake_attempts \
@@ -779,15 +788,45 @@ impl Database {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let row = stmt
-            .query_row(rusqlite::params![card_id], map_wake_attempt_row)
+            .query_row(rusqlite::params![work_item_id], map_wake_attempt_row)
             .optional()?;
         Ok(row)
     }
 
-    /// The single definition of "this card's delegated work is still
-    /// live" (#778, mirroring the #679 `LIVE_LEASE_WHERE` lesson: one
-    /// shared predicate, not one per call site that can silently
-    /// diverge). Composed of two independent halves, BOTH required:
+    /// Every wake_attempts row currently linked to a work item (#934): the
+    /// delegated-work liveness sweep's discovery step. Unlike the card-scan
+    /// predecessor (`Database::get_delegated_cards`, still used for the
+    /// card-surface reporting view in `legion kanban delegated-needs-
+    /// attention`), this reads `wake_attempts` directly and never touches
+    /// `tasks.status` -- the sweep that reaps dead delegations no longer
+    /// needs `CardStatus::Delegated` to find its candidates, only the
+    /// work-item link itself. Includes rows in any FSM state (not just
+    /// in-flight): a row that went terminal without ever being explicitly
+    /// undelegated (e.g. a crash) still carries a stale link that needs
+    /// reaping, and `work_item_is_live` below correctly reads a terminal
+    /// row as not-live. `repo` filters to one board when `Some`, mirroring
+    /// `get_delegated_cards`'s optional scope.
+    pub fn live_linked_wake_attempts(
+        &self,
+        repo: Option<&str>,
+    ) -> Result<Vec<crate::wake_attempts::WakeAttempt>> {
+        let sql = format!(
+            "SELECT {WAKE_ATTEMPT_COLUMNS} FROM wake_attempts \
+             WHERE card_id IS NOT NULL AND (?1 IS NULL OR repo_name = ?1) \
+               AND deleted_at IS NULL \
+             ORDER BY updated_at ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![repo], map_wake_attempt_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// The single definition of "this work item's delegated work is still
+    /// live" (#778, generalized #934, mirroring the #679 `LIVE_LEASE_WHERE`
+    /// lesson: one shared predicate, not one per call site that can
+    /// silently diverge). Composed of two independent halves, BOTH
+    /// required:
     ///
     /// 1. The watch daemon's heartbeat is fresh (`watch_heartbeat_alive`).
     ///    `tick_health`'s auto-revert sweep runs *inside* that daemon, so a
@@ -795,20 +834,25 @@ impl Database {
     ///    wake_attempts row honest -- treating a daemon-down attempt as
     ///    live would let a genuinely dead delegation coast on a frozen
     ///    "running" row forever.
-    /// 2. The card's linked wake_attempts row (via `get_wake_attempt_by_card`)
-    ///    exists and is in an in-flight FSM state.
+    /// 2. The work item's linked wake_attempts row (via
+    ///    `get_wake_attempt_by_work_item`) exists and is in an in-flight
+    ///    FSM state.
     ///
     /// Absence of either signal reads as NOT live -- this is a fail-closed
     /// predicate by construction (`Option::None` and a stale heartbeat both
     /// fall through to `Ok(false)`, never `Ok(true)`), because it backs the
     /// entry gate, the auto-revert sweep, AND the stop.sh last-line-of-
     /// defense check -- an ambiguous "maybe" must never read as "safe to
-    /// stop."
-    pub fn delegated_card_is_live(&self, card_id: &str, stale_after_secs: u64) -> Result<bool> {
+    /// stop." Nothing here reads `tasks.status`: the predicate has always
+    /// been keyed purely on the wake_attempts link and the daemon
+    /// heartbeat, which is why it needed no change to satisfy #934's "no
+    /// MOVE capability depends on a card row/column/status" requirement --
+    /// only its name and parameter needed generalizing.
+    pub fn work_item_is_live(&self, work_item_id: &str, stale_after_secs: u64) -> Result<bool> {
         if !self.watch_heartbeat_alive(stale_after_secs)? {
             return Ok(false);
         }
-        match self.get_wake_attempt_by_card(card_id)? {
+        match self.get_wake_attempt_by_work_item(work_item_id)? {
             Some(attempt) => Ok(attempt.state.is_in_flight()),
             None => Ok(false),
         }
@@ -1394,7 +1438,7 @@ mod tests {
             .get_wake_attempt(&id)
             .unwrap()
             .expect("row survives reopen");
-        assert!(row.card_id.is_none(), "card_id defaults to NULL");
+        assert!(row.work_item_id.is_none(), "card_id defaults to NULL");
     }
 
     #[test]
@@ -1689,44 +1733,48 @@ mod tests {
         assert!(matches!(err, LegionError::WakeAttemptNotFound(_)));
     }
 
-    // -- card_id linkage + delegated liveness (#778) -------------------------
+    // -- work-item linkage + delegated liveness (#778, generalized #934) -----
 
     #[test]
-    fn set_wake_attempt_card_links_and_is_readable_back() {
+    fn set_wake_attempt_work_item_links_and_is_readable_back() {
         let db = test_db();
         let id = wake_id("link");
         db.enqueue_wake_attempt(&id, "legion", "legion", &[])
             .unwrap();
         db.try_claim_wake_attempt(&id, "host-a").unwrap();
 
-        db.set_wake_attempt_card(&id, "card-1").unwrap();
+        db.set_wake_attempt_work_item(&id, "card-1").unwrap();
 
         let row = db.get_wake_attempt(&id).unwrap().expect("row");
-        assert_eq!(row.card_id.as_deref(), Some("card-1"));
+        assert_eq!(row.work_item_id.as_deref(), Some("card-1"));
 
-        let by_card = db
-            .get_wake_attempt_by_card("card-1")
+        let by_work_item = db
+            .get_wake_attempt_by_work_item("card-1")
             .unwrap()
-            .expect("linked row found by card_id");
-        assert_eq!(by_card.attempt_id, id);
+            .expect("linked row found by work item id");
+        assert_eq!(by_work_item.attempt_id, id);
     }
 
     #[test]
-    fn set_wake_attempt_card_errors_on_missing_row() {
+    fn set_wake_attempt_work_item_errors_on_missing_row() {
         let db = test_db();
         let err = db
-            .set_wake_attempt_card("no-such", "card-1")
+            .set_wake_attempt_work_item("no-such", "card-1")
             .expect_err("missing row must error");
         assert!(matches!(err, LegionError::WakeAttemptNotFound(_)));
     }
 
     #[test]
-    fn get_wake_attempt_by_card_returns_none_when_unlinked() {
+    fn get_wake_attempt_by_work_item_returns_none_when_unlinked() {
         let db = test_db();
         let id = wake_id("unlinked");
         db.enqueue_wake_attempt(&id, "legion", "legion", &[])
             .unwrap();
-        assert!(db.get_wake_attempt_by_card("card-1").unwrap().is_none());
+        assert!(
+            db.get_wake_attempt_by_work_item("card-1")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1740,24 +1788,24 @@ mod tests {
         let found = db
             .find_live_wake_attempt_for_repo("legion")
             .unwrap()
-            .expect("in-flight, unclaimed-by-card row must be found");
+            .expect("in-flight, unclaimed row must be found");
         assert_eq!(found.attempt_id, id);
     }
 
     #[test]
-    fn find_live_wake_attempt_for_repo_skips_rows_already_linked_to_a_card() {
+    fn find_live_wake_attempt_for_repo_skips_rows_already_linked_to_a_work_item() {
         let db = test_db();
         let id = wake_id("already-linked");
         db.enqueue_wake_attempt(&id, "legion", "legion", &[])
             .unwrap();
         db.try_claim_wake_attempt(&id, "host-a").unwrap();
-        db.set_wake_attempt_card(&id, "card-1").unwrap();
+        db.set_wake_attempt_work_item(&id, "card-1").unwrap();
 
         assert!(
             db.find_live_wake_attempt_for_repo("legion")
                 .unwrap()
                 .is_none(),
-            "a row already claimed by a card must not be handed out again"
+            "a row already claimed by a work item must not be handed out again"
         );
     }
 
@@ -1780,22 +1828,22 @@ mod tests {
     }
 
     #[test]
-    fn delegated_card_is_live_false_when_daemon_heartbeat_absent() {
+    fn work_item_is_live_false_when_daemon_heartbeat_absent() {
         let db = test_db();
         let id = wake_id("no-heartbeat");
         db.enqueue_wake_attempt(&id, "legion", "legion", &[])
             .unwrap();
         db.try_claim_wake_attempt(&id, "host-a").unwrap();
-        db.set_wake_attempt_card(&id, "card-1").unwrap();
+        db.set_wake_attempt_work_item(&id, "card-1").unwrap();
 
         // Attempt is genuinely in-flight, but no watch daemon has ever
         // beaten -- the predicate must still read false (fail closed):
         // nothing is left to keep the row honest.
-        assert!(!db.delegated_card_is_live("card-1", 120).unwrap());
+        assert!(!db.work_item_is_live("card-1", 120).unwrap());
     }
 
     #[test]
-    fn delegated_card_is_live_true_when_both_halves_hold() {
+    fn work_item_is_live_true_when_both_halves_hold() {
         let db = test_db();
         db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
             .unwrap();
@@ -1803,13 +1851,13 @@ mod tests {
         db.enqueue_wake_attempt(&id, "legion", "legion", &[])
             .unwrap();
         db.try_claim_wake_attempt(&id, "host-a").unwrap();
-        db.set_wake_attempt_card(&id, "card-1").unwrap();
+        db.set_wake_attempt_work_item(&id, "card-1").unwrap();
 
-        assert!(db.delegated_card_is_live("card-1", 120).unwrap());
+        assert!(db.work_item_is_live("card-1", 120).unwrap());
     }
 
     #[test]
-    fn delegated_card_is_live_false_when_attempt_went_terminal() {
+    fn work_item_is_live_false_when_attempt_went_terminal() {
         let db = test_db();
         db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
             .unwrap();
@@ -1817,22 +1865,86 @@ mod tests {
         db.enqueue_wake_attempt(&id, "legion", "legion", &[])
             .unwrap();
         db.try_claim_wake_attempt(&id, "host-a").unwrap();
-        db.set_wake_attempt_card(&id, "card-1").unwrap();
+        db.set_wake_attempt_work_item(&id, "card-1").unwrap();
         db.record_wake_attempt_outcome(&id, "error", "died")
             .unwrap();
 
         assert!(
-            !db.delegated_card_is_live("card-1", 120).unwrap(),
+            !db.work_item_is_live("card-1", 120).unwrap(),
             "a heartbeat-alive daemon with a terminal attempt is still not live"
         );
     }
 
     #[test]
-    fn delegated_card_is_live_false_when_card_has_no_linked_attempt() {
+    fn work_item_is_live_false_when_no_linked_attempt() {
         let db = test_db();
         db.upsert_watch_heartbeat("host-a", 1, "0.1.0", 1, None)
             .unwrap();
-        assert!(!db.delegated_card_is_live("no-such-card", 120).unwrap());
+        assert!(!db.work_item_is_live("no-such-work-item", 120).unwrap());
+    }
+
+    // -- live_linked_wake_attempts (#934) -------------------------------------
+
+    #[test]
+    fn live_linked_wake_attempts_returns_only_linked_rows() {
+        let db = test_db();
+        let linked = wake_id("linked");
+        db.enqueue_wake_attempt(&linked, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&linked, "host-a").unwrap();
+        db.set_wake_attempt_work_item(&linked, "card-1").unwrap();
+
+        let unlinked = wake_id("unlinked");
+        db.enqueue_wake_attempt(&unlinked, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&unlinked, "host-a").unwrap();
+
+        let rows = db.live_linked_wake_attempts(None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].attempt_id, linked);
+    }
+
+    #[test]
+    fn live_linked_wake_attempts_includes_terminal_rows_needing_reap() {
+        // A row that went terminal without ever being explicitly
+        // undelegated still carries a stale link -- the sweep's discovery
+        // step must surface it so the liveness check (which reads it as
+        // not-live) can trigger the revert.
+        let db = test_db();
+        let id = wake_id("terminal-linked");
+        db.enqueue_wake_attempt(&id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&id, "host-a").unwrap();
+        db.set_wake_attempt_work_item(&id, "card-1").unwrap();
+        db.record_wake_attempt_outcome(&id, "error", "died")
+            .unwrap();
+
+        let rows = db.live_linked_wake_attempts(None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].attempt_id, id);
+    }
+
+    #[test]
+    fn live_linked_wake_attempts_filters_by_repo_when_given() {
+        let db = test_db();
+        let legion_id = wake_id("legion-linked");
+        db.enqueue_wake_attempt(&legion_id, "legion", "legion", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&legion_id, "host-a").unwrap();
+        db.set_wake_attempt_work_item(&legion_id, "card-1").unwrap();
+
+        let other_id = wake_id("huttspawn-linked");
+        db.enqueue_wake_attempt(&other_id, "huttspawn", "huttspawn", &[])
+            .unwrap();
+        db.try_claim_wake_attempt(&other_id, "host-a").unwrap();
+        db.set_wake_attempt_work_item(&other_id, "card-2").unwrap();
+
+        let scoped = db.live_linked_wake_attempts(Some("legion")).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].attempt_id, legion_id);
+
+        let all = db.live_linked_wake_attempts(None).unwrap();
+        assert_eq!(all.len(), 2, "None scans every repo");
     }
 
     #[test]

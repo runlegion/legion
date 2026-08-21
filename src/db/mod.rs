@@ -11,6 +11,7 @@ mod autonomy;
 mod board;
 pub(crate) mod card_criteria;
 pub mod css_symbols;
+mod defer;
 mod documents;
 pub(crate) mod findings;
 mod health;
@@ -131,6 +132,7 @@ impl Database {
         board::create_tables(conn)?;
         kanban::create_tables(conn)?;
         card_criteria::create_tables(conn)?;
+        defer::create_tables(conn)?;
         schedules::create_tables(conn)?;
         health::create_tables(conn)?;
         audit::create_tables(conn)?;

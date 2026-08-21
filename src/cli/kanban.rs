@@ -1055,9 +1055,7 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
             let delegated = database.get_delegated_cards(Some(&repo))?;
             let mut needs_attention = Vec::new();
             for card in delegated {
-                if !database
-                    .delegated_card_is_live(&card.id, kanban::DELEGATION_STALE_AFTER_SECS)?
-                {
+                if !database.work_item_is_live(&card.id, kanban::DELEGATION_STALE_AFTER_SECS)? {
                     needs_attention.push(card);
                 }
             }
