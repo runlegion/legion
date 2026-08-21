@@ -839,3 +839,54 @@ fn kanban_defer_refuses_from_needs_input() {
         "2099-01-01",
     ]));
 }
+
+// --- legion defer / undefer (#934, card-independent) ---
+
+#[test]
+fn defer_and_undefer_round_trip_via_cli() {
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "defer",
+        "--work-item",
+        "item-1",
+        "--repo",
+        "kelex",
+        "--until",
+        "2099-01-01",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["undefer", "--work-item", "item-1"]));
+    assert_eq!(
+        stdout.trim(),
+        "item-1",
+        "undefer must echo the work item id when a deferral existed"
+    );
+}
+
+#[test]
+fn defer_refuses_past_until() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "defer",
+        "--work-item",
+        "item-1",
+        "--repo",
+        "kelex",
+        "--until",
+        "2020-01-01",
+    ]));
+    assert!(
+        stderr.contains("not in the future"),
+        "expected a not-in-the-future refusal, got: {stderr}"
+    );
+}
+
+#[test]
+fn undefer_on_a_work_item_never_deferred_is_a_no_op() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // No prior `legion defer` call -- must not error.
+    run_ok(legion_cmd(dir.path()).args(["undefer", "--work-item", "never-deferred"]));
+}

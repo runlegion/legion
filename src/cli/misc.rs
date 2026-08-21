@@ -7,8 +7,8 @@ use crate::cli::datadir::data_dir;
 use crate::cli::memory::try_load_embed_model;
 use crate::cli::util::{open_db, open_db_and_index};
 use crate::{
-    daemon, defer, error, identity_generate, init, kanban, mcp, now, recall, serve, stats, status,
-    statusline, surface, task, watch, worksource,
+    daemon, defer, error, identity_generate, init, kanban, mcp, now, queue, recall, serve, stats,
+    status, statusline, surface, task, watch, worksource,
 };
 
 #[derive(Subcommand)]
@@ -281,14 +281,25 @@ pub(crate) fn handle_work(repo: String, peek: bool) -> error::Result<()> {
         }
     }
 
-    let card = if peek {
-        kanban::peek_work(&database, &repo)?
+    // Selection runs through the card-independent queue seam (#934): it
+    // reads and writes only identity + scheduling fields, never card
+    // content. Display content is a separate lookup below -- today's
+    // work-item id is always a card id, so the lookup succeeds in
+    // practice, but the seam itself does not depend on that being true.
+    let item = if peek {
+        queue::peek_work(&database, &repo)?
     } else {
-        kanban::next_work(&database, &repo)?
+        queue::next_work(&database, &repo)?
     };
 
-    match card {
-        Some(c) => print!("{}", kanban::format_work_card(&c)),
+    match item {
+        Some(item) => match database.get_card_by_id(&item.id)? {
+            Some(card) => print!("{}", kanban::format_work_card(&card)),
+            None => println!(
+                "[Legion] Next task: {} (priority: {}, status: {})",
+                item.id, item.priority, item.status
+            ),
+        },
         None => info!("[legion] no pending work for {repo}"),
     }
     Ok(())

@@ -20,6 +20,7 @@ pub mod inventory;
 mod kanban;
 pub mod module_edges;
 pub(crate) mod quality_gates;
+mod queue;
 mod reflections;
 pub(crate) mod replan;
 mod schedules;

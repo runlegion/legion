@@ -28,6 +28,7 @@ mod now;
 mod pr_view;
 mod pr_write;
 mod pty;
+mod queue;
 mod recall;
 mod reflect;
 mod scip;
