@@ -172,13 +172,19 @@ pub struct WakeAttempt {
     pub outcome: Option<String>,
     pub deleted_at: Option<String>,
     pub updated_at: String,
-    /// Kanban card this attempt is delegated work for (#778). `None` for
-    /// the common case of a wake_attempt that is not standing in for a
-    /// delegated card. Set once, via `Database::set_wake_attempt_card`, by
-    /// `kanban::delegate_card` at the same time the card transitions to
-    /// `Delegated` -- the linkage `delegated_card_is_live` reads back to
-    /// decide whether the delegation is still real.
-    pub card_id: Option<String>,
+    /// Opaque work-item id this attempt is delegated work for (#778, #934).
+    /// `None` for the common case of a wake_attempt that is not standing in
+    /// for delegated work. Deliberately untyped: today the only caller is
+    /// `kanban::delegate_card`, so the value is always a kanban card id, but
+    /// nothing in this column or the liveness check below assumes that --
+    /// it is stored and read back as an opaque identifier. Set once, via
+    /// `Database::set_wake_attempt_work_item`, by `kanban::delegate_card` at
+    /// the same time the card transitions to `Delegated` -- the linkage
+    /// `Database::work_item_is_live` reads back to decide whether the
+    /// delegation is still real. The underlying SQL column stays named
+    /// `card_id` (migrations are one-way; no rename) -- only this field's
+    /// name and meaning generalized (#934).
+    pub work_item_id: Option<String>,
 }
 
 #[cfg(test)]

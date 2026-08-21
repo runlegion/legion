@@ -745,6 +745,10 @@ pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> err
 
     // Validate card transition BEFORE posting announcements
     if let Some(ref card_id) = id {
+        // Captured from the AC-check lookup below so the done-transition
+        // routing decision after it (#934) does not need a second fetch.
+        let mut document_id: Option<String> = None;
+
         // Verify gate (#520): a card with acceptance criteria cannot
         // reach Done until `legion verify` recorded a clean verdict for
         // it. The gate is card-keyed (legion-verify:<card_id>), so it
@@ -752,6 +756,7 @@ pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> err
         // with no criteria (chores) are not gated. Done is the terminal
         // QA gate for a solo team, so there is no --skip here.
         if let Some(card) = database.get_card_by_id(card_id)? {
+            document_id = card.document_id.clone();
             // Resolve AC with spec-document precedence (#644): a spec-bound card
             // gates on the bound document's verification.acceptance, not
             // tasks.acceptance. A dangling document_id is a hard error here too,
@@ -809,7 +814,21 @@ pub(crate) fn handle_done(repo: String, text: String, id: Option<String>) -> err
             }
         }
 
-        kanban::transition_card(&database, card_id, kanban::Action::Done, Some(&text))?;
+        // Done-transition routing (#934): a card with no bound document has
+        // nothing for `transition_card`'s document-sync branch to do (it
+        // reads `card.document_id`, which is `None` here), so routing it
+        // through the card-independent queue seam instead
+        // (`queue::complete_work`) changes no observable behavior while
+        // giving the seam its production caller. A document-bound card
+        // still goes through `transition_card` so its spec sync (#528)
+        // keeps running -- the seam deliberately does not replicate that,
+        // since replicating it would re-import a dependency on the card
+        // surface this move is meant to shed.
+        if document_id.is_none() {
+            crate::queue::complete_work(&database, card_id, Some(&text))?;
+        } else {
+            kanban::transition_card(&database, card_id, kanban::Action::Done, Some(&text))?;
+        }
         println!("{card_id}");
 
         // Close the linked external issue if present, using the
@@ -1055,9 +1074,7 @@ pub(crate) fn handle(action: KanbanAction) -> error::Result<()> {
             let delegated = database.get_delegated_cards(Some(&repo))?;
             let mut needs_attention = Vec::new();
             for card in delegated {
-                if !database
-                    .delegated_card_is_live(&card.id, kanban::DELEGATION_STALE_AFTER_SECS)?
-                {
+                if !database.work_item_is_live(&card.id, kanban::DELEGATION_STALE_AFTER_SECS)? {
                     needs_attention.push(card);
                 }
             }

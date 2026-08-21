@@ -839,3 +839,121 @@ fn kanban_defer_refuses_from_needs_input() {
         "2099-01-01",
     ]));
 }
+
+// --- legion defer / undefer (#934, card-independent) ---
+
+#[test]
+fn defer_and_undefer_round_trip_via_cli() {
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "defer",
+        "--work-item",
+        "item-1",
+        "--repo",
+        "kelex",
+        "--until",
+        "2099-01-01",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["undefer", "--work-item", "item-1"]));
+    assert_eq!(
+        stdout.trim(),
+        "item-1",
+        "undefer must echo the work item id when a deferral existed"
+    );
+}
+
+#[test]
+fn defer_refuses_past_until() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "defer",
+        "--work-item",
+        "item-1",
+        "--repo",
+        "kelex",
+        "--until",
+        "2020-01-01",
+    ]));
+    assert!(
+        stderr.contains("not in the future"),
+        "expected a not-in-the-future refusal, got: {stderr}"
+    );
+}
+
+#[test]
+fn undefer_on_a_work_item_never_deferred_is_a_no_op() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // No prior `legion defer` call -- must not error.
+    run_ok(legion_cmd(dir.path()).args(["undefer", "--work-item", "never-deferred"]));
+}
+
+// --- legion goal (#934): identity via the queue seam, content via a
+// separate per-id lookup -- see cli::misc::handle_goal. ---
+
+#[test]
+fn goal_prints_nothing_when_no_card_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["goal", "--repo", "kelex"]));
+    assert_eq!(stdout, "", "no Accepted card means no goal banner");
+}
+
+#[test]
+fn goal_prints_the_accepted_cards_text_and_id() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "kanban",
+        "create",
+        "--from",
+        "sean",
+        "--to",
+        "kelex",
+        "--text",
+        "ship the goal seam",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(dir.path()).args(["kanban", "assign", "--id", &id, "--to", "kelex"]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "accept", "--id", &id]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["goal", "--repo", "kelex"]));
+    assert!(
+        stdout.contains("ship the goal seam"),
+        "goal banner must carry the accepted card's text: {stdout}"
+    );
+    assert!(
+        stdout.contains(&id),
+        "goal banner must cite the card id: {stdout}"
+    );
+}
+
+#[test]
+fn goal_ignores_accepted_cards_for_other_repos() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "kanban",
+        "create",
+        "--from",
+        "sean",
+        "--to",
+        "other-repo",
+        "--text",
+        "not this repo's goal",
+    ]))
+    .trim()
+    .to_string();
+    run_ok(legion_cmd(dir.path()).args(["kanban", "assign", "--id", &id, "--to", "other-repo"]));
+    run_ok(legion_cmd(dir.path()).args(["kanban", "accept", "--id", &id]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["goal", "--repo", "kelex"]));
+    assert_eq!(
+        stdout, "",
+        "an accepted card for a different repo must not leak into this repo's goal"
+    );
+}

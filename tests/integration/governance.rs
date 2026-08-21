@@ -866,6 +866,18 @@ fn done_gate_spec_bound_card_keys_on_spec_criteria() {
         stdout.trim() == card,
         "expected done to echo the card id, got: {stdout}"
     );
+
+    // #934: a document-bound card's Done transition must still route
+    // through the document-sync path (`kanban::transition_card`), not the
+    // card-independent queue seam -- the bound document's status must be
+    // updated to "verified", the same as before the routing split.
+    let doc_view =
+        run_ok(legion_cmd(data).args(["document", "view", "FR-DONE-GATE-001", "--json"]));
+    let doc_json: serde_json::Value = serde_json::from_str(&doc_view).expect("valid json");
+    assert_eq!(
+        doc_json["status"], "verified",
+        "a document-bound card's Done must still sync the bound document's status: {doc_view}"
+    );
 }
 
 // #644: unbound card gates on tasks.acceptance exactly as before. This test
@@ -932,6 +944,16 @@ fn done_gate_unbound_card_keys_on_tasks_acceptance() {
         "--id",
         &card,
     ]));
+
+    // #934: an unbound card (no document_id) routes its Done-transition
+    // through the card-independent queue seam (`queue::complete_work`)
+    // rather than `kanban::transition_card`. Confirm the observable result
+    // is identical to the pre-#934 behavior: status reaches "done" and the
+    // done-text lands as the card's note.
+    let view = run_ok(legion_cmd(data).args(["kanban", "view", "--id", &card, "--json"]));
+    let card_json: serde_json::Value = serde_json::from_str(&view).expect("valid json");
+    assert_eq!(card_json["status"], "done");
+    assert_eq!(card_json["note"], "unbound done");
 }
 
 // #644: the Done gate error for a spec-bound card must identify the spec source

@@ -268,7 +268,7 @@ pub const DELEGATION_STALE_AFTER_SECS: u64 = 120;
 /// Delegate an Accepted card to a live, watch-spawned wake attempt (#778).
 ///
 /// Entry into `Delegated` is refused unless BOTH halves of
-/// `Database::delegated_card_is_live`'s predicate would hold immediately
+/// `Database::work_item_is_live`'s predicate would hold immediately
 /// after linking: the watch daemon's heartbeat is fresh, and the named (or
 /// auto-discovered) wake_attempts row is in an in-flight FSM state for this
 /// card's repo. A `Delegated` that could be entered without a live process
@@ -319,7 +319,7 @@ pub fn delegate_card(
             attempt.state.as_str()
         )));
     }
-    if let Some(existing) = attempt.card_id.as_deref()
+    if let Some(existing) = attempt.work_item_id.as_deref()
         && existing != id
     {
         return Err(LegionError::DelegationRefused(format!(
@@ -335,44 +335,52 @@ pub fn delegate_card(
         ));
     }
 
-    // Transition BEFORE linking (review fix, #778): `transition_card` is the
-    // only check here that validates `card.status == Accepted`. Linking the
-    // attempt first meant a delegate call against a Pending/Blocked/InReview
-    // card would still burn the attempt (`set_wake_attempt_card` commits,
-    // then `transition_card` fails) -- silently poisoning
-    // `find_live_wake_attempt_for_repo`'s `card_id IS NULL` filter for that
-    // attempt's remaining lifetime with no card ever reaching `Delegated` to
-    // let the reaper clear it. Ordered this way, a transition failure never
-    // touches the attempt row at all; and if the write order flips on some
-    // future edit and `set_wake_attempt_card` itself fails after a
-    // successful transition, the card is `Delegated` with no link, which
-    // `delegated_card_is_live` reads as not-live -- `tick_health` reverts it
-    // next tick instead of leaking a silent bypass.
-    let updated = transition_card(
-        db,
+    // Transition and link, atomically (#934 review fix, HIGH): the
+    // `Accepted -> Delegated` status write and the wake_attempts link write
+    // happen in one SQL transaction (`Database::delegate_card_transition`),
+    // not two separate unwrapped calls. `transition_card`'s FSM check still
+    // validates `card.status == Accepted` first (via `transition` below,
+    // same as `transition_card` does internally) -- a rejected transition
+    // touches neither row, same as before. What changed is the success
+    // case: previously, if the link write failed AFTER a successful
+    // transition, the card was left `Delegated` with no linked
+    // wake_attempts row, and `reap_delegated_cards`'s identity-keyed
+    // discovery (`live_linked_wake_attempts`, #934) scans wake_attempts, not
+    // card status, so it would never find that card to auto-revert it --
+    // the daemon's auto-heal would silently stop covering it. Sharing one
+    // transaction closes that gap by construction: either both writes land,
+    // or neither does, so `Delegated` without a link is now unreachable.
+    let new_status = transition(card.status, Action::Delegate)?;
+    let ts = timestamp_for_action(&Action::Delegate);
+    db.delegate_card_transition(crate::db::DelegateTransitionArgs {
         id,
-        Action::Delegate,
-        Some(&format!("delegated to wake attempt {}", attempt.attempt_id)),
-    )?;
-    db.set_wake_attempt_card(&attempt.attempt_id, id)?;
-    Ok(updated)
+        status: &new_status.to_string(),
+        note: Some(&format!("delegated to wake attempt {}", attempt.attempt_id)),
+        timestamp: ts,
+        document_id: card.document_id.as_deref(),
+        attempt_id: &attempt.attempt_id,
+        work_item_id: id,
+    })?;
+    db.get_card_by_id(id)?
+        .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
 }
 
 /// Undelegate a card (#778): the inverse of `delegate_card`. Transitions
-/// `Delegated -> Accepted` and clears the `card_id` link on whatever
+/// `Delegated -> Accepted` and clears the work-item link on whatever
 /// wake_attempts row was pointing at this card, so a resolved delegation can
 /// never leave a stale link behind (review fix: a prior version left the
-/// link in place, and `get_wake_attempt_by_card`'s `updated_at DESC`
+/// link in place, and `get_wake_attempt_by_work_item`'s `updated_at DESC`
 /// disambiguation could then resurrect a long-dead attempt as "the" linked
 /// one once a fresh re-delegation to a different attempt aged past it,
 /// causing a spurious auto-revert of a genuinely live delegation).
 ///
-/// Used by both the manual `legion kanban undelegate` CLI path and
-/// `tick_health`'s auto-revert sweep, so the two can never diverge on
-/// whether the link gets cleared.
+/// Used by the manual `legion kanban undelegate` CLI path, `tick_health`'s
+/// auto-revert sweep, and (#934) `watch::reap_delegated_cards`'s
+/// identity-keyed discovery, so none of the three can diverge on whether
+/// the link gets cleared.
 pub fn undelegate_card(db: &Database, id: &str, note: Option<&str>) -> Result<Card> {
     let card = transition_card(db, id, Action::Undelegate, note)?;
-    db.clear_wake_attempt_card(id)?;
+    db.clear_wake_attempt_work_item(id)?;
     Ok(card)
 }
 
@@ -425,7 +433,7 @@ pub fn defer_card(db: &Database, id: &str, wake_at: &str, note: Option<&str>) ->
 /// to whichever status the card was deferred FROM -- `Accepted` or
 /// `Pending`, read from the card's own `pre_defer_status` -- and clears
 /// both defer fields so a resolved defer never leaves a stale `wake_at`
-/// behind (mirroring `undelegate_card`'s `clear_wake_attempt_card` call).
+/// behind (mirroring `undelegate_card`'s `clear_wake_attempt_work_item` call).
 ///
 /// The pure `transition` function only knows a single (conservative)
 /// target for `(Deferred, Undefer)`; the real target is data-dependent (see
@@ -856,7 +864,7 @@ mod tests {
         assert_eq!(card.status, CardStatus::Delegated);
 
         let linked = db
-            .get_wake_attempt_by_card(&id)
+            .get_wake_attempt_by_work_item(&id)
             .expect("lookup")
             .expect("linked attempt");
         assert_eq!(linked.attempt_id, attempt_id);
@@ -888,7 +896,7 @@ mod tests {
             .expect("delegate");
         assert_eq!(card.status, CardStatus::Delegated);
         let linked = db
-            .get_wake_attempt_by_card(&id)
+            .get_wake_attempt_by_work_item(&id)
             .expect("lookup")
             .expect("linked attempt");
         assert_eq!(linked.attempt_id, attempt_b);
@@ -979,7 +987,7 @@ mod tests {
     /// Review regression (#778): `delegate_card` must not link the attempt
     /// before validating the card is `Accepted` -- linking first would burn
     /// the attempt (excluded from auto-discovery forever via `card_id IS
-    /// NULL`) on every failed delegate call against a non-Accepted card.
+    /// NULL`, the underlying column; the Rust-facing name is `work_item_id`, #934) on every failed delegate call against a non-Accepted card.
     #[test]
     fn delegate_card_does_not_poison_attempt_when_card_is_not_accepted() {
         let (db, _index, _dir) = test_storage();
@@ -1005,8 +1013,8 @@ mod tests {
             .expect("get")
             .expect("row exists");
         assert!(
-            attempt.card_id.is_none(),
-            "a failed delegate must not poison the attempt's card_id link"
+            attempt.work_item_id.is_none(),
+            "a failed delegate must not poison the attempt's work-item link"
         );
         let discoverable = db
             .find_live_wake_attempt_for_repo("legion")
@@ -1016,7 +1024,7 @@ mod tests {
     }
 
     /// Review regression (#778): `undelegate_card` must clear the attempt's
-    /// `card_id` link, not just move the card's status.
+    /// work-item link, not just move the card's status.
     #[test]
     fn undelegate_card_clears_the_attempt_link() {
         let (db, _index, _dir) = test_storage();
@@ -1036,7 +1044,9 @@ mod tests {
         assert_eq!(card.status, CardStatus::Accepted);
 
         assert!(
-            db.get_wake_attempt_by_card(&id).expect("lookup").is_none(),
+            db.get_wake_attempt_by_work_item(&id)
+                .expect("lookup")
+                .is_none(),
             "no attempt should still be linked to the card after undelegate"
         );
         let attempt = db
@@ -1044,17 +1054,17 @@ mod tests {
             .expect("get")
             .expect("row exists");
         assert!(
-            attempt.card_id.is_none(),
-            "the formerly-linked attempt's card_id must be cleared"
+            attempt.work_item_id.is_none(),
+            "the formerly-linked attempt's work-item link must be cleared"
         );
     }
 
     /// Review regression (#778): without clearing the link on undelegate, a
     /// terminal old attempt (A) could later out-rank a genuinely live new
-    /// attempt (B) in `get_wake_attempt_by_card`'s `updated_at DESC`
+    /// attempt (B) in `get_wake_attempt_by_work_item`'s `updated_at DESC`
     /// disambiguation once A's terminal-outcome write landed after B's link
     /// -- causing a spurious auto-revert of a live delegation. This proves
-    /// `delegated_card_is_live` reads B, not the long-cleared A, regardless
+    /// `work_item_is_live` reads B, not the long-cleared A, regardless
     /// of write-order timing between the two.
     #[test]
     fn redelegate_after_undelegate_is_not_confused_by_the_old_attempt() {
@@ -1089,12 +1099,12 @@ mod tests {
             .expect("a terminates");
 
         let linked = db
-            .get_wake_attempt_by_card(&id)
+            .get_wake_attempt_by_work_item(&id)
             .expect("lookup")
             .expect("b is linked");
         assert_eq!(linked.attempt_id, attempt_b, "must resolve to b, not a");
         assert!(
-            db.delegated_card_is_live(&id, DELEGATION_STALE_AFTER_SECS)
+            db.work_item_is_live(&id, DELEGATION_STALE_AFTER_SECS)
                 .expect("liveness check"),
             "the live delegation to b must read as live, unaffected by a's terminal outcome"
         );

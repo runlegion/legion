@@ -711,9 +711,45 @@ impl Database {
         document_id: Option<&str>,
         expected_from_status: Option<&str>,
     ) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
-
         let tx = self.conn.unchecked_transaction()?;
+        Self::transition_card_status_tx(
+            &tx,
+            id,
+            status,
+            note,
+            timestamp,
+            document_id,
+            expected_from_status,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The card-status UPDATE and document sync from
+    /// `transition_card_status_with_sync`, taking the caller's already-open
+    /// transaction instead of opening its own (#934 review fix, HIGH).
+    ///
+    /// Extracted so `kanban::delegate_card` can run the status transition
+    /// and the wake_attempts link write (`db::wake::set_wake_attempt_work_item_tx`)
+    /// in ONE transaction -- see `Database::delegate_card_transition`
+    /// (db/wake.rs). Before that combinator existed, the two writes were
+    /// separate unwrapped calls: a link-write failure after a successful
+    /// transition left the card `Delegated` with no linked wake_attempts
+    /// row, and `reap_delegated_cards`'s identity-keyed discovery
+    /// (`live_linked_wake_attempts`, #934) scans wake_attempts, not card
+    /// status, so it would never find that card to auto-revert it. Sharing
+    /// this transaction closes the gap by construction: either both writes
+    /// land or neither does.
+    pub(crate) fn transition_card_status_tx(
+        tx: &rusqlite::Transaction,
+        id: &str,
+        status: &str,
+        note: Option<&str>,
+        timestamp: CardTimestamp,
+        document_id: Option<&str>,
+        expected_from_status: Option<&str>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
 
         // -- update the card row --
         // When expected_from_status is Some, the WHERE clause includes
@@ -777,10 +813,9 @@ impl Database {
             && let Some(typed) = card_status_typed
             && let Some(spec_status) = Self::requirement_status_for_card_status(typed)
         {
-            Self::sync_bound_document(&tx, doc_id, spec_status, &now)?;
+            Self::sync_bound_document(tx, doc_id, spec_status, &now)?;
         }
 
-        tx.commit()?;
         Ok(())
     }
 

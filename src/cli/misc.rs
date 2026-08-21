@@ -7,8 +7,8 @@ use crate::cli::datadir::data_dir;
 use crate::cli::memory::try_load_embed_model;
 use crate::cli::util::{open_db, open_db_and_index};
 use crate::{
-    daemon, error, identity_generate, init, kanban, now, recall, serve, stats, status, statusline,
-    surface, task, watch, worksource,
+    daemon, defer, error, identity_generate, init, kanban, now, queue, recall, serve, stats,
+    status, statusline, surface, task, watch, worksource,
 };
 
 #[derive(Subcommand)]
@@ -281,15 +281,54 @@ pub(crate) fn handle_work(repo: String, peek: bool) -> error::Result<()> {
         }
     }
 
-    let card = if peek {
-        kanban::peek_work(&database, &repo)?
+    // Selection runs through the card-independent queue seam (#934): it
+    // reads and writes only identity + scheduling fields, never card
+    // content. Display content is a separate lookup below -- today's
+    // work-item id is always a card id, so the lookup succeeds in
+    // practice, but the seam itself does not depend on that being true.
+    let item = if peek {
+        queue::peek_work(&database, &repo)?
     } else {
-        kanban::next_work(&database, &repo)?
+        queue::next_work(&database, &repo)?
     };
 
-    match card {
-        Some(c) => print!("{}", kanban::format_work_card(&c)),
+    match item {
+        Some(item) => match database.get_card_by_id(&item.id)? {
+            Some(card) => print!("{}", kanban::format_work_card(&card)),
+            None => println!(
+                "[Legion] Next task: {} (priority: {}, status: {})",
+                item.id, item.priority, item.status
+            ),
+        },
         None => info!("[legion] no pending work for {repo}"),
+    }
+    Ok(())
+}
+
+/// `legion defer` (#934): the card-independent counterpart to
+/// `legion kanban defer`. `--until` parsing and future-time validation are
+/// owned by `defer::defer_work_item` so every caller gets the same
+/// refusal for the same input; the deferral is keyed on `--work-item`, not
+/// a card row.
+pub(crate) fn handle_defer(
+    work_item: String,
+    repo: String,
+    until: String,
+    note: Option<String>,
+) -> error::Result<()> {
+    let database = open_db()?;
+    defer::defer_work_item(&database, &work_item, &repo, &until, note.as_deref())?;
+    println!("{work_item}");
+    Ok(())
+}
+
+/// `legion undefer` (#934): wake a deferred work item early. A no-op, not
+/// an error, when the work item was not deferred.
+pub(crate) fn handle_undefer(work_item: String) -> error::Result<()> {
+    let database = open_db()?;
+    match defer::undefer_work_item(&database, &work_item)? {
+        Some(_) => println!("{work_item}"),
+        None => info!("[legion] {work_item} was not deferred"),
     }
     Ok(())
 }
@@ -391,12 +430,17 @@ pub(crate) fn handle_daemon_restart(port: u16) -> error::Result<()> {
 
 pub(crate) fn handle_goal(repo: String) -> error::Result<()> {
     let database = open_db()?;
-    let cards = kanban::list_cards(
-        &database,
-        &repo,
-        kanban::Direction::Inbound,
-        kanban::CardScope::WorkingSet,
-    )?;
+    // Identity (#934): which cards are the active goal comes from the
+    // card-independent queue seam (`accepted` status only, no `CardScope`
+    // dependency). Content -- text, acceptance -- is a separate lookup per
+    // id, the same split `handle_work` already uses.
+    let ids: Vec<String> = queue::accepted_work_items(&database, &repo)?;
+    let mut cards: Vec<kanban::Card> = Vec::with_capacity(ids.len());
+    for id in &ids {
+        if let Some(card) = database.get_card_by_id(id)? {
+            cards.push(card);
+        }
+    }
     // Prints nothing when no card is Accepted -- the goal is "cleared"
     // by board state alone (AC: clears on terminal/blocked).
     if let Some(goal) = kanban::format_active_goal(&cards) {

@@ -1083,6 +1083,41 @@ pub(crate) enum Commands {
         action: AutonomyAction,
     },
 
+    /// Defer a work item until a future time (#934): the card-independent
+    /// counterpart to `legion kanban defer`. No work source (GitHub issues,
+    /// etc.) has a field for "wake me up at time T" -- this is legion's own
+    /// state, keyed on an opaque work-item id rather than a card row, so it
+    /// works whether or not a card exists behind that id.
+    Defer {
+        /// Opaque identifier of the work item to defer (today, typically a
+        /// kanban card id; not required to be one).
+        #[arg(long)]
+        work_item: String,
+
+        /// Repository to wake when `--until` passes.
+        #[arg(long)]
+        repo: String,
+
+        /// When to wake: `YYYY-MM-DD`, `<N>d`, `<N>w`, or `today`, parsed
+        /// forward from now (same grammar as `legion kanban defer --until`).
+        /// Must resolve to a future time.
+        #[arg(long)]
+        until: String,
+
+        /// Optional note carried on the deferral.
+        #[arg(long)]
+        note: Option<String>,
+    },
+
+    /// Wake a deferred work item early (#934), returning it to the
+    /// scheduled sweep's care no longer needed. A no-op, not an error, if
+    /// the work item was not deferred.
+    Undefer {
+        /// Opaque identifier of the work item to wake.
+        #[arg(long)]
+        work_item: String,
+    },
+
     /// Board-derived goal (#525): print the active Accepted card's acceptance
     /// criteria framed as the agent's completion condition, to carry across
     /// turns. Native `/goal` cannot be set programmatically, so SessionStart
