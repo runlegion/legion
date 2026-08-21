@@ -1,19 +1,101 @@
 # Legion Changelog
 
-## Unreleased
+## 0.35.0
+
+The single-write-surface release. Two whole write surfaces are gone at once. The MCP
+server and its four write tools (`legion_post`, `legion_reply`, `legion_signal`,
+`legion_task_respond`) are retired, so the CLI is now the only way to write to the board,
+to signals, and to task state. The kanban card surface -- the local card schema, its full
+CRUD verb set, the dashboard card endpoints, the Stop-hook card gates, and the `legion
+sync` and `legion goal` commands -- is removed; `legion work` and `legion done` now source
+live from the repo's configured work source (its issues) instead of a locally claimed
+card, and the close-verify gate (#930) is the single shared close check behind both
+`legion issue close` and `legion done`. Before that removal, everything the card surface
+carried that legion still needs -- deferral, delegation liveness, replan records, and the
+pick-next/done queue seam -- was first reclassified onto card-independent homes keyed on an
+opaque `work_item_id`, including a new `deferrals` table. Alongside the removals, a new
+Elements of Style output style shapes the prose of every agent whenever legion is enabled.
+Minor release on the pre-1.0 rule -- precedent 0.32.0 and 0.34.0 -- that the minor digit is
+the architectural-shift bump: two write surfaces are struck out in one release. Minor does
+not mean non-breaking here: the cross-node `CardDelta` wire protocol narrows from ~22 fields
+to the 11 that `legion task` still uses, which pre-#931 cluster peers cannot parse, and a
+schema addition ships (the `deferrals` table). No card data is dropped from existing
+databases -- the card-only tables and columns are left inert per the one-way migration rule.
+
+### Added
+
+- **Card-independent homes for what the card surface carried** (PR #983, #934). Ahead of
+  removing the card board, each piece of state that legion still needs but that had been
+  keyed on a kanban card was reclassified onto a card-free home keyed on an opaque
+  `work_item_id` (a Rust-facing name only -- the underlying SQL columns keep their `card_id`
+  names, since migrations are one-way). Deferral gets a new dedicated `deferrals` table
+  (`src/db/defer.rs`, registered in `src/db/mod.rs`), reached by two new top-level commands
+  `legion defer --work-item --repo --until` and `legion undefer --work-item`, with
+  `watch::reap_deferred_work_items` waking items at `wake_at`; unlike the card version it
+  carries no `pre_defer_status`, because a bare deferral has no state machine to revert into.
+  Delegation liveness moves off `tasks.status`: the watch reaper now discovers delegated
+  work through `Database::live_linked_wake_attempts`, a `wake_attempts`-only scan, and
+  `WakeAttempt`/`ReplanRecord` generalize their `card_id` fields to `work_item_id`. The
+  pick-next selection and the done-transition move into a queue seam (`src/queue.rs`,
+  `src/db/queue.rs`) that reads and writes only work-item identity and scheduling fields,
+  never card content, so neither module depends on the kanban code. Delegation is also made
+  atomic: `Database::delegate_card_transition` writes the status transition and the
+  `wake_attempts` link under one SQL transaction, so a work item can never reach the
+  delegated state without the link that the new discovery scan relies on to auto-revert it.
+
+- **Elements of Style output style** (PR #985, #984; content PR #981, #980). Plain-English
+  prose guidance drawn from Strunk's *Elements of Style* now ships as a Claude Code output
+  style at `plugin/output-styles/elements-of-style.md` (auto-discovered, no `plugin.json`
+  entry). It shipped first as a plugin skill in #981 and was moved to an output style in
+  #985, because a skill loads only on a task-description match whereas this guidance shapes
+  how every response is written. `force-for-plugin: true` applies it to every agent whenever
+  legion is enabled, and `keep-coding-instructions: true` layers it on top of Claude Code's
+  software-engineering behavior rather than replacing it; its own scope note exempts code and
+  other non-prose artifacts.
+
+### Changed
+
+- **The cross-node `CardDelta` wire protocol narrows to the fields `legion task` still uses**
+  (PR #986, #931). With the card columns gone, `get_card_deltas_since`/`apply_card_delta`
+  (`src/db/sync.rs`) drop from ~22 selected fields to 11 (`id`, `from_repo`, `to_repo`,
+  `text`, `context`, `priority`, `status`, `note`, `created_at`, `updated_at`, `deleted_at`);
+  the card-only columns (`labels`, `parent_card_id`, `source_url`, `source_type`,
+  `sort_order`, `problem`, `solution`, `acceptance`, and the timestamp trio) leave the
+  protocol. This is a deliberate breaking change for pre-#931 cluster peers, which cannot
+  parse the narrowed delta.
 
 ### Removed
 
-- **The MCP server and its four write tools are retired** (#952, following #947/#941).
-  `legion_post`, `legion_reply`, `legion_signal`, and `legion_task_respond` -- along
-  with the `legion mcp` and `legion mcp-logs` subcommands, `src/mcp/` in full, and
-  `plugin.json`'s `mcpServers` registration -- are gone. The CLI is now the single
-  write surface for board, signal, and task operations: `legion post`, `legion
-  signal`, and `legion task accept|done|block|unblock` are the direct replacements,
-  each at parity or better (the CLI path additionally runs the embed backfill,
-  self-signal refusal, and the #949 resolves-stamp that the MCP tools never
-  inherited). `should_notify`, the recipient filter both the retired MCP push and
-  the hook-drain lane relied on, relocates unchanged into `src/deliver.rs`.
+- **The MCP server and its four write tools are retired** (PR #982, #952; follows #947/#941).
+  `legion_post`, `legion_reply`, `legion_signal`, and `legion_task_respond` -- along with the
+  `legion mcp` and `legion mcp-logs` subcommands, `src/mcp/` in full, and `plugin.json`'s
+  `mcpServers` registration -- are gone. The CLI is now the single write surface for board,
+  signal, and task operations: `legion post`, `legion signal`, and `legion task
+  accept|done|block|unblock` are the direct replacements, each at parity or better (the CLI
+  path additionally runs the embed backfill, self-signal refusal, and the #949 resolves-stamp
+  that the MCP tools never inherited). `should_notify`, the recipient filter both the retired
+  MCP push and the hook-drain lane relied on, relocates unchanged into `src/deliver.rs`.
+
+- **The kanban card surface is removed** (PR #986, #931). The card schema, its full CRUD verb
+  set (`create/update/accept/block/defer/delegate/review/need-input/resume/replan/cancel/
+  assign/reopen/delete/bind/service-criteria/reconcile`), the dashboard `/api/kanban*`
+  endpoints, the hourly reconcile timer, the Stop-hook board reads, and the `legion sync` and
+  `legion goal` commands are all deleted, taking `src/kanban/*`, `src/cli/kanban.rs`, and the
+  bulk of `src/db/kanban.rs` with them (~12,700 lines removed). `legion work` and `legion
+  done` are repointed at the repo's configured work source: `queue::next_work`/`peek_work`
+  select live from the work-source issues rather than a locally claimed `tasks` row -- the old
+  atomic-claim race safety has no work-source equivalent, and that loss is accepted per the
+  issue's own ruling. Every enforcement point previously reached through a card was verified
+  to have a card-free path before deletion: the close-verify gate runs through
+  `check_verify_before_close`/`close_issue_gated` (#930), shared by `legion issue close` and
+  `legion done`, and the spec-bound verify path runs through issue-trace resolution (#933).
+  Two gaps are named rather than silently dropped: the Stop-hook's in-progress "Accepted
+  kanban card" gate is removed with no card-free equivalent, since a local "accepted" claim
+  has no work-source analog; and the delegated-work-liveness Stop gate stays wired but is
+  currently vacuous, because the only writer that linked a `wake_attempt` to a work item was
+  `kanban delegate` -- sound infrastructure with no current writer, not an enforcement gap.
+  The card-only tables and columns are left inert on existing databases per the one-way
+  migration rule; `src/db/kanban.rs` retains only the legacy `legion task` CRUD surface.
 
 ## 0.34.0
 
