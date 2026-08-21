@@ -1,5 +1,78 @@
 # Legion Changelog
 
+## 0.34.0
+
+The judgment-out-of-Rust release. `legion spec-gen` is gone. Deriving a requirement from a
+service-design document -- composing it from a moment-of-truth, judging its richness, wiring
+its provenance -- is judgment work, but it had been written as a deterministic Rust
+field-concatenation, which contradicts legion's own architecture: the uncertainty engine and
+the audit log exist so agent judgment can be weighted and traced from OUTSIDE Rust, not
+compiled into a transform that carries no trust signal. This release removes the Rust
+implementation (#821); the instrumented-skill replacement is coordinated under #974 and has
+NOT shipped here, so a caller who ran `legion spec-gen` has no in-binary replacement in 0.34.0.
+The requirement JSON schema documents in the registry are untouched, so they remain available
+for the skill to validate against when it lands. Alongside the removal, a new PreToolUse hook
+nudges an `ls` of an indexed repo's tree toward `legion sym tree`/`legion sym list`, the same
+directory-structure question answered from the SCIP index instead of a filesystem walk. Minor
+release on the pre-1.0 rule -- set as precedent by 0.32.0 -- that the minor digit is the
+architectural-shift bump: a whole command surface, `legion spec-gen`, is removed along with its
+dispatch, its two spec-gen-only DB helpers, and its test file, while a hook surface is added.
+There is no wire-format change and no schema migration, and the requirement schema documents
+stay put.
+
+### Added
+
+- **`ls` of an indexed repo's tree points at `legion sym`** (PR #977, #976). A new PreToolUse
+  hook, `plugin/hooks/pre-bash-ls.sh` (registered in `plugin/hooks/hooks.json`), closes the
+  gap the grep-rewrite chain left open: `grep`/`rg`/`find`/`fd` were already intercepted and
+  steered onto `legion sym`, but `ls` slipped through, so an agent exploring an indexed repo's
+  structure billed a directory walk where the SCIP index already holds the answer. The hook
+  fires only when the target resolves INSIDE this repo's covered-and-indexed tree -- a bare
+  `ls`, `ls <relative>`, or `ls <absolute>` under `$CWD` qualifies; `ls /tmp/scratch`, `ls ..`,
+  or any target outside the tree passes through untouched, because sym does not index it. Unlike
+  the grep hook's deny tier, this one only ever INJECTS and always lets the command run: `ls` is
+  not a lossless equivalent of `sym tree`, since `ls -l` shows metadata and `ls` shows the
+  non-source files (READMEs, configs, dotfiles) that live outside the index, so refusing it
+  would suppress information sym cannot reproduce. It honors the shared soft-bypass affordance
+  (`# legion-bypass:` sentinel / `LEGION_BYPASS_GREP=1`), writing one `telemetry record-bypass`
+  row on a bypass so the sym-under-serving signal is captured, and can be disabled with
+  `LEGION_SKIP_PRE_BASH_LS=1`. The plain inject path writes no telemetry, because an injected
+  suggestion is not an escape and `ls` fires far too often to record without flooding the log.
+  `plugin/hooks/test-pre-bash-ls.sh` pins the gate behavior, and `plugin/hooks/README.md`'s
+  boundary table records the hook's ADVISORY (inject-only) verdict.
+
+### Fixed
+
+- **`embedding_from_bytes` compiles clean under Rust 1.98's clippy** (PR #977). Deserializing an
+  embedding from a SQLite BLOB now uses `slice::as_chunks::<4>()`, which yields `&[u8; 4]`
+  directly, in place of `chunks_exact(4)` with a manual four-element index into each chunk that
+  the newer clippy flagged. The trailing-remainder handling is unchanged -- `as_chunks`'s
+  ignored `.1` remainder matches the old `chunks_exact` behavior of dropping any partial tail --
+  so the decoded floats are byte-for-byte identical; this is a lint-forward cleanup, not a
+  behavior change.
+
+### Removed
+
+- **`legion spec-gen` and the Rust requirement-derivation path are deleted** (PR #975, #821).
+  Removed in full: `src/spec_gen.rs` and `src/cli/spec_gen.rs`, the `SpecGen` command variant
+  and its dispatch arm, both `mod spec_gen` declarations (`src/main.rs`, `src/cli/mod.rs`), the
+  integration suite `tests/integration/spec_gen.rs` and its registration, and the two
+  spec-gen-only DB helpers `Document::insert_requirement_with_card` (`src/documents.rs`) and the
+  module-private `find_requirement_schema` -- both confirmed via `legion sym` refs to have had
+  no caller outside spec-gen before deletion. A stale doc comment on `kanban::bind_document` that
+  compared itself to "spec-gen's atomic insert" was corrected since the thing it referenced no
+  longer exists, and `docs/site/architecture.md` is reframed from documenting the `legion
+  spec-gen` command to describing requirement derivation as a skill. Nothing replaces the
+  command in the binary in this release; the instrumented skill is coordinated under #974 and
+  is out of scope here. The design does not lose the three properties the Rust guaranteed,
+  because each rests on a primitive that already exists: `traces_to` provenance via `legion
+  document create --traces-to`, idempotent dedup as a query over existing requirement docs, and
+  atomic requirement-doc-plus-card creation via the audited `document create` and kanban
+  primitives -- with the skill, when it lands, expected to witness an uncertainty prediction per
+  derived requirement and record the derivation in the audit log, so judgment is weighted and
+  traced instead of hardcoded. This PR alone is almost entirely deletion: 1,775 lines removed
+  against 5 added.
+
 ## 0.33.0
 
 The shell-safe-body release. The prose-body verbs -- `reflect --text`, `post --text`,
