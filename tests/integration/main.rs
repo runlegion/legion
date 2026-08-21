@@ -17,7 +17,6 @@ mod find_file;
 mod governance;
 mod index_telemetry;
 mod inventory_freshness;
-mod kanban;
 mod memory;
 mod mesh;
 mod module_graph;

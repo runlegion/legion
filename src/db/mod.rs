@@ -20,9 +20,7 @@ pub mod inventory;
 mod kanban;
 pub mod module_edges;
 pub(crate) mod quality_gates;
-mod queue;
 mod reflections;
-pub(crate) mod replan;
 mod schedules;
 mod scip;
 mod sessions;
@@ -36,11 +34,9 @@ mod wake;
 
 pub use audit::AuditInput;
 pub use board::{HOOK_DRAIN_CURSOR_SUFFIX, RedeliveryOutcome};
-pub use kanban::CardTimestamp;
 pub use reflections::{Reflection, ReflectionMeta};
 pub use schedules::{Schedule, validate_hhmm};
 pub use stats::DashboardRepoStats;
-pub use wake::DelegateTransitionArgs;
 
 use std::path::Path;
 use std::time::Duration;
@@ -133,7 +129,6 @@ impl Database {
         reflections::create_tables(conn)?;
         board::create_tables(conn)?;
         kanban::create_tables(conn)?;
-        card_criteria::create_tables(conn)?;
         defer::create_tables(conn)?;
         schedules::create_tables(conn)?;
         health::create_tables(conn)?;
@@ -151,7 +146,6 @@ impl Database {
         inventory::create_tables(conn)?;
         module_edges::create_tables(conn)?;
         css_symbols::create_tables(conn)?;
-        replan::create_tables(conn)?;
         tx.commit()?;
 
         reflections::migrate(conn)?;

@@ -806,27 +806,24 @@ fn pr_merge_treats_pre_630_empty_output_as_direct_merge() {
         plugin_root.path(),
         &pr_merge_pre_630_empty_output_stub_plugin(),
     );
-    let card = setup_linked_done_eligible_card(data_dir.path());
 
-    let out = run_ok_output(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
-        "pr", "merge", "--repo", "stub", "--number", "42", "--task", &card,
-    ]));
+    let out = run_ok_output(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["pr", "merge", "--repo", "stub", "--number", "42"]),
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stdout.contains("PR #42 merged on owner/stub"),
         "expected blank stdout to be treated as a direct merge, got: {stdout}"
-    );
-    assert!(
-        stderr.contains(&format!("card {} marked done", card)),
-        "expected the kanban-done transition to still fire on the legacy empty-output contract, got: {stderr}"
     );
 }
 
 /// Non-queue repo (AC #2): `merge` reports `{"queued": false}` and `pr merge`
 /// must behave exactly as before this change -- the same "PR #N merged on
-/// R" message, plus the kanban-done transition and linked-issue close still
-/// fire when `--task` is given.
+/// R" message. #931 removed the kanban-done transition and linked-issue
+/// close side effects `--task` used to trigger (there is no card to
+/// transition and no card-derived issue to close any more; `--task` is now
+/// purely an opaque audit-row label, mirroring `legion commit --card`).
 #[cfg(unix)]
 #[test]
 fn pr_merge_direct_when_not_queued_behaves_as_before() {
@@ -837,31 +834,27 @@ fn pr_merge_direct_when_not_queued_behaves_as_before() {
         plugin_root.path(),
         &pr_merge_stub_plugin(r#"{"queued":false}"#),
     );
-    let card = setup_linked_done_eligible_card(data_dir.path());
 
     let out = run_ok_output(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
-        "pr", "merge", "--repo", "stub", "--number", "42", "--task", &card,
+        "pr", "merge", "--repo", "stub", "--number", "42", "--task", "note-42",
     ]));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stdout.contains("PR #42 merged on owner/stub"),
         "expected the unchanged direct-merge message, got: {stdout}"
     );
+
+    let audit_out =
+        run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "merge", "--json"]));
     assert!(
-        stderr.contains(&format!("card {} marked done", card)),
-        "expected the kanban-done transition to still fire, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("closed issue #42"),
-        "expected the linked-issue close to still fire, got: {stderr}"
+        audit_out.contains("note-42"),
+        "expected the --task label on the merge audit row, got: {audit_out}"
     );
 }
 
 /// Queue-enabled base branch (AC #1): `merge` reports `{"queued": true}` and
-/// `pr merge` must enqueue instead of failing, report the enqueue (not
-/// "merged") in its message, and must NOT fire the kanban-done transition or
-/// linked-issue close -- the PR has not actually merged yet.
+/// `pr merge` must enqueue instead of failing, and report the enqueue (not
+/// "merged") in its message.
 #[cfg(unix)]
 #[test]
 fn pr_merge_enqueues_when_queued_skips_done_side_effects() {
@@ -872,13 +865,12 @@ fn pr_merge_enqueues_when_queued_skips_done_side_effects() {
         plugin_root.path(),
         &pr_merge_stub_plugin(r#"{"queued":true}"#),
     );
-    let card = setup_linked_done_eligible_card(data_dir.path());
 
-    let out = run_ok_output(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
-        "pr", "merge", "--repo", "stub", "--number", "42", "--task", &card,
-    ]));
+    let out = run_ok_output(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["pr", "merge", "--repo", "stub", "--number", "42"]),
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stdout.contains("enqueued") && stdout.contains("owner/stub"),
         "expected an enqueue message naming the repo, got: {stdout}"
@@ -886,14 +878,6 @@ fn pr_merge_enqueues_when_queued_skips_done_side_effects() {
     assert!(
         !stdout.contains("PR #42 merged on owner/stub"),
         "must not claim the PR merged when it was only enqueued, got: {stdout}"
-    );
-    assert!(
-        !stderr.contains("marked done"),
-        "must not transition the kanban card before the queue actually merges, got: {stderr}"
-    );
-    assert!(
-        !stderr.contains("closed issue"),
-        "must not close the linked issue before the queue actually merges, got: {stderr}"
     );
 }
 
@@ -1127,16 +1111,16 @@ fn pr_create_skip_gates_bypasses_gate_check() {
     );
 }
 
-/// Test that `legion sync` returns an error when no work source is configured.
-/// This verifies the command parses and executes, even when it fails.
+/// `legion work` fails closed (not silently "no work") when no work source
+/// is configured for the repo (#931: `queue::peek_work`/`next_work` source
+/// live from the work source, via `require_worksource`, with no local sync
+/// step left to test separately -- `legion sync` is gone with it).
 #[test]
-fn sync_command_errors_without_worksource_config() {
+fn work_command_errors_without_worksource_config() {
     let data_dir = tempfile::tempdir().unwrap();
 
-    // Run sync for a repo with no watch.toml entry - should fail gracefully
-
     let (_stdout, stderr) =
-        run_fail(legion_cmd(data_dir.path()).args(["sync", "--repo", "nonexistent-repo"]));
+        run_fail(legion_cmd(data_dir.path()).args(["work", "--repo", "nonexistent-repo"]));
     assert!(
         stderr.contains("no work source configured"),
         "expected 'no work source configured' error, got: {stderr}"
@@ -2269,79 +2253,51 @@ esac
 /// it to a Done-eligible state (Backlog -> assign -> accept). Shared by
 /// the Done propagation tests.
 #[cfg(unix)]
-fn setup_linked_done_eligible_card(data_dir: &std::path::Path) -> String {
-    let card = run_ok(legion_cmd(data_dir).args([
-        "kanban",
-        "create",
-        "--from",
-        "sean",
-        "--to",
-        "stub",
-        "--text",
-        "linked work",
-        "--source-url",
-        "https://github.com/owner/stub/issues/42",
-        "--source-type",
-        "github",
-    ]))
-    .trim()
-    .to_string();
-    run_ok(legion_cmd(data_dir).args(["kanban", "assign", "--id", &card, "--to", "stub"]));
-    run_ok(legion_cmd(data_dir).args(["kanban", "accept", "--id", &card]));
-    card
-}
-
-/// #610 behavior fix: `legion done --id` with a linked external issue now
-/// folds through `propagate_card_close_to_worksource`, so the close writes
-/// the same audit row `legion kanban cancel` writes. The inline copy this
-/// replaced closed the issue with no audit trail.
+/// #931: `legion done --number` closes the linked work-source issue
+/// through the exact same gated path `legion issue close` uses
+/// (`close_issue_gated`), so it writes the same `close-issue` audit row.
+/// Card<->issue linking (`propagate_card_close_to_worksource`) is gone with
+/// the card surface; `--number` names the issue directly.
 #[cfg(unix)]
 #[test]
 fn done_with_linked_issue_propagates_close_and_writes_audit_row() {
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
     setup_pr_read_stub(data_dir.path(), plugin_root.path(), &close_stub_plugin(0));
-    let card = setup_linked_done_eligible_card(data_dir.path());
 
-    let stderr = run_ok_stderr(
-        pr_read_cmd(data_dir.path(), plugin_root.path())
-            .args(["done", "--repo", "stub", "--text", "shipped", "--id", &card]),
-    );
+    let stdout = run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "done", "--repo", "stub", "--text", "shipped", "--number", "42",
+    ]));
     assert!(
-        stderr.contains("closed github issue #42"),
-        "expected the propagation breadcrumb, got: {stderr}"
+        stdout.contains("closed issue #42 on owner/stub"),
+        "expected the close confirmation, got: {stdout}"
     );
 
     let audit_out = run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "close-issue"]));
     assert!(
         audit_out.contains("#42"),
-        "expected a close-issue audit row for the propagated close, got: {audit_out}"
-    );
-    assert!(
-        audit_out.contains(&card),
-        "expected the audit row to carry the card id as task, got: {audit_out}"
+        "expected a close-issue audit row for the closed issue, got: {audit_out}"
     );
 }
 
-/// #610: when close propagation fails, `legion done` still succeeds (the
-/// card is Done locally) but emits the same stdout WARNING line
-/// `legion kanban cancel` emits, instead of the old stderr-only failure
-/// scripted callers could not see.
+/// A `legion done --number` whose issue close FAILS at the plugin returns a
+/// non-zero exit and surfaces the plugin's failure -- there is no local
+/// card state left to leave in an inconsistent "done locally, not closed
+/// upstream" partial-success shape (#931 removed that whole class of
+/// warning along with `propagate_card_close_to_worksource`).
 #[cfg(unix)]
 #[test]
 fn done_propagation_failure_warns_on_stdout() {
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
     setup_pr_read_stub(data_dir.path(), plugin_root.path(), &close_stub_plugin(1));
-    let card = setup_linked_done_eligible_card(data_dir.path());
 
-    let stdout = run_ok(
-        pr_read_cmd(data_dir.path(), plugin_root.path())
-            .args(["done", "--repo", "stub", "--text", "shipped", "--id", &card]),
-    );
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "done", "--repo", "stub", "--text", "shipped", "--number", "42",
+    ]));
     assert!(
-        stdout.contains("propagation FAILED"),
-        "expected the stdout partial-failure warning, got: {stdout}"
+        stderr.contains("plugin failed"),
+        "expected the plugin failure to surface, got: {stderr}"
     );
 }
 
@@ -3553,10 +3509,12 @@ fn verify_issue_errors_without_worksource_config() {
     );
 }
 
-/// `--deviation` is a card-only gate: it is adjudicated against the card's
-/// ratified `ReplanRecord`, and an issue has nowhere to record one. It must
-/// refuse rather than accept an assertion nothing checks -- and it must do so
-/// before touching the work source, so the refusal is deterministic.
+/// `--deviation` was a card-only gate: it was adjudicated against the
+/// card's ratified `ReplanRecord`, and an issue has nowhere to record one.
+/// #931 removed the card (and the ReplanRecord adjudication with it); the
+/// flag stays on the CLI surface purely to refuse explicitly rather than
+/// fail as an unrecognized argument, and it must do so before touching the
+/// work source, so the refusal is deterministic.
 #[test]
 fn verify_issue_refuses_deviation() {
     let dir = tempfile::tempdir().unwrap();
@@ -3571,7 +3529,7 @@ fn verify_issue_refuses_deviation() {
         "the criteria were wrong",
     ]));
     assert!(
-        stderr.contains("--deviation needs a card"),
+        stderr.contains("--deviation is not supported for issue verification"),
         "expected the deviation refusal, got: {stderr}"
     );
     assert!(
@@ -3580,10 +3538,8 @@ fn verify_issue_refuses_deviation() {
     );
 }
 
-/// Exactly one target is required. Neither given is a parse error, not a
-/// silent default onto some card. #966: with kanban retiring, `--issue` is
-/// the primary path -- the missing-target error must name it, not steer the
-/// caller to the legacy `--card`.
+/// `--issue` is required (#931 removed the legacy `--card` alternative
+/// clap used to accept in its place).
 #[test]
 fn verify_requires_a_target() {
     let dir = tempfile::tempdir().unwrap();
@@ -3592,27 +3548,7 @@ fn verify_requires_a_target() {
         run_fail(legion_cmd(dir.path()).args(["verify", "--repo", "no-such-repo"]));
     assert!(
         stderr.contains("--issue"),
-        "missing-target error should name --issue as the primary path, got: {stderr}"
-    );
-}
-
-/// Both targets together is a parse error rather than one silently winning.
-#[test]
-fn verify_rejects_card_and_issue_together() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
-        "verify",
-        "--repo",
-        "no-such-repo",
-        "--card",
-        "019d0000-0000-7000-8000-000000000000",
-        "--issue",
-        "42",
-    ]));
-    assert!(
-        stderr.contains("cannot be used with") || stderr.contains("conflict"),
-        "expected a clap conflict error, got: {stderr}"
+        "missing-target error should name --issue, got: {stderr}"
     );
 }
 

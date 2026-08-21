@@ -376,33 +376,6 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     truncate_chars_with(s, max, "...")
 }
 
-/// Format a card summary from stored structured fields.
-/// Accepts the pre-parsed fields directly -- no reconstruction needed.
-pub fn card_summary(
-    problem: Option<&str>,
-    acceptance: Option<&str>,
-    context: Option<&str>,
-) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-
-    if let Some(p) = problem {
-        parts.push(truncate_chars(p, 120));
-    }
-
-    if let Some(acc) = acceptance {
-        let count = acc.lines().count();
-        if count > 0 {
-            parts.push(format!("[{count} criteria]"));
-        }
-    }
-
-    if parts.is_empty() {
-        return context.map(|c| truncate_chars(c, 120));
-    }
-
-    Some(parts.join(" "))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,19 +508,6 @@ mod tests {
     fn first_paragraph_extracts_correctly() {
         let text = "First line.\nSecond line.\n\nSecond paragraph.";
         assert_eq!(first_paragraph(text), "First line. Second line.");
-    }
-
-    #[test]
-    fn card_summary_with_problem_and_criteria() {
-        let summary = card_summary(Some("Things are broken"), Some("a\nb"), None).expect("summary");
-        assert!(summary.contains("Things are broken"));
-        assert!(summary.contains("[2 criteria]"));
-    }
-
-    #[test]
-    fn card_summary_fallback_to_context() {
-        let summary = card_summary(None, None, Some("Raw description")).expect("summary");
-        assert_eq!(summary, "Raw description");
     }
 
     // -- #933: `## Traces to` trace-format contract -------------------------

@@ -20,8 +20,6 @@ mod health;
 mod identity_generate;
 mod init;
 mod inventory;
-#[allow(dead_code)] // Items used by tests + pending surface/status/serve migration
-mod kanban;
 mod mesh;
 mod now;
 mod pr_view;
@@ -294,11 +292,16 @@ fn run() -> error::Result<()> {
         Commands::Serve { port } => cli::misc::handle_serve(port)?,
         Commands::Status { repo, json } => cli::misc::handle_status(repo, json)?,
         Commands::Needs { repo } => cli::misc::handle_needs(repo)?,
-        Commands::Done { repo, text, id } => cli::kanban::handle_done(repo, text, id)?,
+        Commands::Done {
+            repo,
+            text,
+            number,
+            comment,
+            force,
+            force_reason,
+        } => cli::issue::handle_done(repo, text, number, comment, force, force_reason)?,
         Commands::Work { repo, peek } => cli::misc::handle_work(repo, peek)?,
-        Commands::Sync { repo } => cli::misc::handle_sync(repo)?,
         Commands::Cluster { action } => cli::ops::handle_cluster(action)?,
-        Commands::Kanban { action } => cli::kanban::handle(action)?,
         Commands::Task { action } => cli::misc::handle_task(action)?,
         Commands::Deliver { action } => cli::deliver::handle(action)?,
         Commands::Schedule { action } => cli::schedule::handle(action)?,
@@ -326,11 +329,10 @@ fn run() -> error::Result<()> {
         Commands::QualityGate { action } => cli::verify::handle_quality_gate(action)?,
         Commands::Verify {
             repo,
-            card,
             issue,
             verdicts_file,
             deviation,
-        } => cli::verify::handle_verify(repo, card, issue, verdicts_file, deviation)?,
+        } => cli::verify::handle_verify(repo, issue, verdicts_file, deviation)?,
         Commands::Autonomy { action } => cli::autonomy::handle(action)?,
         Commands::Defer {
             work_item,
@@ -339,7 +341,6 @@ fn run() -> error::Result<()> {
             note,
         } => cli::misc::handle_defer(work_item, repo, until, note)?,
         Commands::Undefer { work_item } => cli::misc::handle_undefer(work_item)?,
-        Commands::Goal { repo } => cli::misc::handle_goal(repo)?,
         Commands::Statusline { json } => cli::misc::handle_statusline(json)?,
         Commands::Mesh { action } => cli::ops::handle_mesh(action)?,
         Commands::Usage {

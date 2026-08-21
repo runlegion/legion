@@ -14,9 +14,7 @@ use crate::db::quality_gates::{
 use crate::finding_gate::{self, FindingSeverity, FindingStatus};
 use crate::gate_trust::emit_gate_trust;
 use crate::verify::{GateProvenance, GateResult};
-use crate::{
-    card_parse, db, documents, error, gate_registry, kanban, simplify_check, verify, worksource,
-};
+use crate::{card_parse, db, documents, error, gate_registry, simplify_check, verify, worksource};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum QualityGateAction {
@@ -1023,144 +1021,6 @@ fn print_stats_table(stats: &[QualityGateStats]) {
     }
 }
 
-/// Resolve acceptance criteria for a card, with spec-document precedence (#528, #644).
-///
-/// Shared by `handle_verify` and `handle_done` so both gates key on the same
-/// AC source: spec-bound cards gate on the bound document's criteria, not
-/// `tasks.acceptance`.
-///
-/// Returns `(criteria, source_label)`.
-///
-/// Precedence:
-/// 1. When the card has a `document_id` AND the bound document's payload has a
-///    non-empty `verification.criteria` array (id-carrying, #882 step 1), the
-///    `text` of each entry becomes the AC. Source label: `"spec:<document_id>"`.
-///    This is checked first: when a document carries both shapes (mid-transition
-///    onto the new format), the id-carrying one is authoritative.
-/// 2. Else, when the bound document's payload has a non-empty legacy
-///    `verification.acceptance` array (plain strings, no ids), those strings
-///    become the AC. Source label: `"spec:<document_id>"`. Kept readable
-///    indefinitely so a document never revised onto `verification.criteria`
-///    keeps gating normally.
-/// 3. When the card has a `document_id` but the document cannot be found, this
-///    is a hard error -- a bound card whose spec has vanished must not silently
-///    fall back; verify must not paper over a dangling reference. This matches
-///    the behavior of `transition_card_status_with_sync`, which also hard-errors
-///    on a missing bound document.
-/// 4. When the bound document exists but has no `verification` block, or
-///    neither array is present (or is present but empty), or the payload
-///    cannot be parsed (corrupt doc), falls back to `tasks.acceptance` with
-///    source `"card"`. This is a graceful degrade for a spec that has
-///    nothing to check yet -- distinct from rule 5 below.
-/// 5. HARD ERROR (#882 review, HIGH-2): when either array is present and
-///    non-empty but contains a malformed entry -- a `criteria` entry whose
-///    `text` is missing, non-string, or blank, or an `acceptance` entry
-///    that is not a non-blank string -- the call refuses, naming the
-///    offending index and field, rather than silently dropping the entry
-///    and gating on a shrunk criteria set. Fail closed: an unresolvable
-///    spec entry is not a spec.
-/// 6. When the card has no `document_id`: `tasks.acceptance`. Source `"card"`.
-///
-/// Note: this returns criterion *text* only, for the count/gating check
-/// `handle_done` performs. `handle_verify`'s new-format path additionally
-/// calls `resolve_spec_criteria` for the id-carrying criteria it needs to
-/// validate a `SpecAcResult`'s `criterion_id` citations against --
-/// `resolve_spec_criteria` fails closed on the same shape of malformed
-/// entry, for the same reason.
-pub(crate) fn resolve_acceptance_criteria(
-    database: &crate::db::Database,
-    card: &kanban::Card,
-) -> error::Result<(Vec<String>, String)> {
-    if let Some(ref doc_id) = card.document_id {
-        // The document must exist. A dangling document_id is a hard error: the
-        // spec that was authoritative has been deleted while work was in flight.
-        let doc = database.get_document(doc_id)?.ok_or_else(|| {
-            error::LegionError::WorkSource(format!(
-                "card '{}' has document_id '{doc_id}' but the document does not exist; \
-                 verify cannot proceed with a dangling spec reference",
-                card.id
-            ))
-        })?;
-
-        // Parse the payload and look for verification.criteria / .acceptance.
-        // A corrupt payload or a missing verification block is non-fatal:
-        // fall back to tasks.acceptance so a structural gap in the spec does
-        // not hard-block verify (the intent is that the human fills in the
-        // spec).
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&doc.payload) {
-            if let Some(arr) = value
-                .get("verification")
-                .and_then(|v| v.get("criteria"))
-                .and_then(|c| c.as_array())
-                && !arr.is_empty()
-            {
-                // A non-empty array is a real spec fragment: every entry must
-                // resolve to a usable criterion, or the malformed entry is
-                // refused outright (HIGH-2 review fix). Silently dropping a
-                // bad entry here would shrink the enforced criteria set and
-                // let verify PASS on partial coverage -- fail closed instead:
-                // an unresolvable spec entry is not a spec.
-                let mut criteria: Vec<String> = Vec::with_capacity(arr.len());
-                for (idx, entry) in arr.iter().enumerate() {
-                    match entry.get("text").and_then(|t| t.as_str()) {
-                        Some(text) if !text.trim().is_empty() => {
-                            criteria.push(text.trim().to_string());
-                        }
-                        Some(_) => {
-                            return Err(error::LegionError::WorkSource(format!(
-                                "document '{doc_id}' verification.criteria[{idx}].text is \
-                                 blank -- a malformed spec entry is refused, not silently \
-                                 dropped"
-                            )));
-                        }
-                        None => {
-                            return Err(error::LegionError::WorkSource(format!(
-                                "document '{doc_id}' verification.criteria[{idx}] is missing \
-                                 a string 'text' field -- a malformed spec entry is refused, \
-                                 not silently dropped"
-                            )));
-                        }
-                    }
-                }
-                return Ok((criteria, format!("spec:{doc_id}")));
-            }
-            if let Some(arr) = value
-                .get("verification")
-                .and_then(|v| v.get("acceptance"))
-                .and_then(|a| a.as_array())
-                && !arr.is_empty()
-            {
-                let mut criteria: Vec<String> = Vec::with_capacity(arr.len());
-                for (idx, entry) in arr.iter().enumerate() {
-                    match entry.as_str() {
-                        Some(text) if !text.trim().is_empty() => {
-                            criteria.push(text.trim().to_string());
-                        }
-                        Some(_) => {
-                            return Err(error::LegionError::WorkSource(format!(
-                                "document '{doc_id}' verification.acceptance[{idx}] is blank \
-                                 -- a malformed spec entry is refused, not silently dropped"
-                            )));
-                        }
-                        None => {
-                            return Err(error::LegionError::WorkSource(format!(
-                                "document '{doc_id}' verification.acceptance[{idx}] is not a \
-                                 string -- a malformed spec entry is refused, not silently \
-                                 dropped"
-                            )));
-                        }
-                    }
-                }
-                return Ok((criteria, format!("spec:{doc_id}")));
-            }
-        }
-        // Document exists but has no usable criteria/acceptance: fall back.
-    }
-    // No document_id, or document exists without usable criteria/acceptance.
-    let criteria = verify::acceptance_items(card.acceptance.as_deref());
-    Ok((criteria, "card".to_string()))
-}
-
 /// Read the id-carrying `verification.criteria` array off a document's
 /// payload (#882 step 1). Returns `Ok(None)` when the array is absent or
 /// empty (a corrupt/unparseable payload also degrades to `Ok(None)`),
@@ -1213,26 +1073,16 @@ pub(crate) fn resolve_spec_criteria(
     Ok(Some(criteria))
 }
 
-/// Dispatch `legion verify` to the issue path (#913) or the legacy card path.
-///
-/// Clap guarantees exactly one of `--issue` / `--card` is present
-/// (`required_unless_present` + `conflicts_with`), so the final arm is
-/// unreachable in practice and refuses rather than defaulting to a path the
-/// caller did not ask for.
+/// `legion verify` (#913): issues are the work source of record. #931
+/// removed the legacy `--card` path this used to dispatch to alongside
+/// `--issue`.
 pub(crate) fn handle_verify(
     repo: String,
-    card: Option<String>,
-    issue: Option<u64>,
+    issue: u64,
     verdicts_file: Option<String>,
     deviation: Option<String>,
 ) -> error::Result<()> {
-    match (card, issue) {
-        (Some(card), None) => handle_verify_card(card, verdicts_file, deviation),
-        (None, Some(issue)) => handle_verify_issue(&repo, issue, verdicts_file, deviation),
-        _ => Err(error::LegionError::WorkSource(
-            "legion verify needs exactly one of --issue or --card".into(),
-        )),
-    }
+    handle_verify_issue(&repo, issue, verdicts_file, deviation)
 }
 
 /// Resolve an issue's `## Traces to` requirement bullets against live
@@ -1366,8 +1216,8 @@ fn handle_verify_issue(
 ) -> error::Result<()> {
     if deviation.is_some() {
         return Err(error::LegionError::WorkSource(
-            "--deviation needs a card: the spec-revision gate is adjudicated against the \
-             card's ratified ReplanRecord, and an issue has nowhere to record one. Revise \
+            "--deviation is not supported for issue verification (#931 retired the card \
+             it was adjudicated against, and no issue-shaped replacement exists). Revise \
              the issue's acceptance criteria instead, then verify against them."
                 .into(),
         ));
@@ -1379,10 +1229,7 @@ fn handle_verify_issue(
     let ext = worksource::view_issue(&plugin, &source_repo, issue)?;
     let parsed = card_parse::parse_issue_body(ext.body.as_deref().unwrap_or(""));
 
-    let target = VerifyTarget::Issue {
-        gate_key: verify::verify_gate_key_for_issue(&source_repo, issue),
-        label: format!("issue {source_repo}#{issue}"),
-    };
+    let target = VerifyTarget::issue(&source_repo, issue);
 
     // #933: one resolution, two gates -- the same shared resolver
     // `cli::pr`'s traced-criteria rendering uses, so pr-write and verify
@@ -1437,173 +1284,20 @@ fn handle_verify_issue(
     )
 }
 
-fn handle_verify_card(
-    card: String,
-    verdicts_file: Option<String>,
-    deviation: Option<String>,
-) -> error::Result<()> {
-    let database = open_db()?;
-
-    let card_row = database
-        .get_card_by_id(&card)?
-        .ok_or_else(|| error::LegionError::CardNotFound(card.clone()))?;
-
-    // AC source precedence (#528):
-    // 1. When the card has a bound document AND the document's payload has a
-    //    non-empty `verification.acceptance` array, those strings are the
-    //    canonical criteria -- the spec is authoritative.
-    // 2. Otherwise fall back to `tasks.acceptance` exactly as before.
-    let (acceptance, ac_source) = resolve_acceptance_criteria(&database, &card_row)?;
-
-    // Spec-revision deviation gate (#554,
-    // docs/decisions/2026-05-31-spec-revision-protocol.md). Checked before
-    // reading verdicts: an unratified deviation hard-blocks regardless of
-    // what the verdicts file claims, because the presence of a ratified
-    // `ReplanRecord` -- not the agent's self-reported verdicts -- is the
-    // signal that distinguishes a sanctioned re-plan from improvisation.
-    let ratified_replan_exists = database
-        .get_latest_replan_record(&card)?
-        .is_some_and(|r| r.ratified);
-    if let Some(verify::VerifyDecision::ReplanRequired { reason }) =
-        verify::replan_gate(deviation.as_deref(), ratified_replan_exists)
-    {
-        let (commit_hash, branch) = git_head_commit_and_branch()?;
-        let skill = verify::verify_gate_key(&card);
-        let details = serde_json::json!({
-            "skill": "legion-verify",
-            "card": card,
-            "decision": format!("ReplanRequired: {reason}"),
-        })
-        .to_string();
-        database.record_quality_gate(&QualityGateInput {
-            branch: &branch,
-            commit_hash: &commit_hash,
-            skill: &skill,
-            result: GateResult::Issues,
-            findings_count: 1,
-            details: Some(&details),
-            // legion-verify has no check validator -- asserted by necessity
-            // (#780), same as every other verify-recorded row below.
-            provenance: GateProvenance::Asserted,
-            base: None,
-        })?;
-        eprintln!("[legion] verify BLOCKED for card {card}: {reason}");
-        return Err(error::LegionError::ExitWith(1));
-    } else if let Some(reason) = deviation.as_deref() {
-        // A deviation was asserted but a ratified ReplanRecord covers it --
-        // proceed against the current (revised) AC via the normal decide()
-        // path below. Leave a breadcrumb so the asserted reason is not
-        // silently dropped from the audit trail.
-        eprintln!(
-            "[legion] verify: deviation ratified for card {card} ({reason}) -- \
-             auditing against the revised acceptance criteria"
-        );
-    }
-
-    // Read the agent's verdicts (file or stdin) once, as raw text. Which
-    // shape it parses as depends on whether the card resolves to a spec
-    // document carrying id-carrying `verification.criteria` (#882 step 3):
-    // that path uses the new resolvable-reference `SpecAcResult` format;
-    // every other card (no document, or a document only carrying the
-    // legacy `verification.acceptance` string array, or plain
-    // `tasks.acceptance`) keeps submitting the free-text `AcResult` format
-    // unchanged -- the card-path and legacy spec-path stay stranded-free.
-    let raw = read_file_or_stdin(verdicts_file.as_deref(), "--verdicts-file")?;
-
-    let spec_ctx = match &card_row.document_id {
-        Some(doc_id) => {
-            // resolve_acceptance_criteria above already proved this document
-            // exists (or hard-errored) -- re-fetching it here is cheap and
-            // keeps this block independent of that function's return shape.
-            let doc = database.get_document(doc_id)?.ok_or_else(|| {
-                error::LegionError::WorkSource(format!(
-                    "card '{}' has document_id '{doc_id}' but the document does not exist; \
-                     verify cannot proceed with a dangling spec reference",
-                    card_row.id
-                ))
-            })?;
-            resolve_spec_criteria(&doc)?.map(|criteria| {
-                let revision = database.document_revision(&doc.id).unwrap_or(1);
-                (doc.id.clone(), revision, criteria)
-            })
-        }
-        None => None,
-    };
-
-    let (decision, results_value, criteria_count) =
-        if let Some((spec_doc_id, spec_revision, criteria)) = spec_ctx {
-            let results: Vec<verify::SpecAcResult> = serde_json::from_str(&raw).map_err(|e| {
-                error::LegionError::WorkSource(format!(
-                    "failed to parse spec verdicts JSON (expected a list of \
-                     {{spec_doc_id, spec_revision, criterion_id, verdict, artifacts}}): {e}"
-                ))
-            })?;
-            let decision = verify::decide_spec(&criteria, &results, &spec_doc_id, spec_revision);
-            let results_value = serde_json::to_value(&results)?;
-            (decision, results_value, criteria.len())
-        } else {
-            let results: Vec<verify::AcResult> = serde_json::from_str(&raw).map_err(|e| {
-                error::LegionError::WorkSource(format!(
-                    "failed to parse verdicts JSON (expected a list of \
-                     {{criterion, verdict, evidence}}): {e}"
-                ))
-            })?;
-            let decision = verify::decide(&acceptance, &results);
-            let results_value = serde_json::to_value(&results)?;
-            (decision, results_value, acceptance.len())
-        };
-
-    finish_verify(
-        &database,
-        &VerifyTarget::Card(card),
-        &ac_source,
-        criteria_count,
-        decision,
-        results_value,
-    )
-}
-
-/// Record the verify gate and report the outcome. Shared by both verdict
-/// formats (#882 step 3): the legacy free-text `AcResult` path and the
-/// spec-bound `SpecAcResult` path decide independently (`decide` vs
-/// `decide_spec`), but recording the resulting `VerifyDecision` as a
-/// card-keyed gate and reporting it to the caller is identical either way.
-/// What a verify verdict is bound to: a kanban card, or a work-source issue
-/// with no card (#913).
-///
-/// Exists so `finish_verify` stays one function. Recording the gate and
-/// reporting the outcome are identical for both; only the gate key, the
-/// operator-facing noun, and which id lands in the details JSON differ.
-enum VerifyTarget {
-    Card(String),
-    Issue { gate_key: String, label: String },
+/// What a verify verdict is bound to: a work-source issue (#913). #931
+/// removed the card-bound target this used to be an enum over
+/// (`VerifyTarget::Card`) -- there is only one shape now, so this is a
+/// plain struct rather than a single-variant enum.
+struct VerifyTarget {
+    gate_key: String,
+    label: String,
 }
 
 impl VerifyTarget {
-    /// Quality-gate skill key. Card verdicts stay `legion-verify:<card>` so
-    /// `legion done`'s existing lookup is untouched.
-    fn gate_key(&self) -> String {
-        match self {
-            Self::Card(card) => verify::verify_gate_key(card),
-            Self::Issue { gate_key, .. } => gate_key.clone(),
-        }
-    }
-
-    /// How the target is named in operator-facing output.
-    fn label(&self) -> String {
-        match self {
-            Self::Card(card) => format!("card {card}"),
-            Self::Issue { label, .. } => label.clone(),
-        }
-    }
-
-    /// The identifying field for the gate's details JSON. Kept as distinct
-    /// keys rather than one polymorphic `target` field so anything already
-    /// reading `details.card` keeps working.
-    fn details_field(&self) -> (&'static str, serde_json::Value) {
-        match self {
-            Self::Card(card) => ("card", serde_json::Value::String(card.clone())),
-            Self::Issue { label, .. } => ("issue", serde_json::Value::String(label.clone())),
+    fn issue(source_repo: &str, issue: u64) -> Self {
+        Self {
+            gate_key: verify::verify_gate_key_for_issue(source_repo, issue),
+            label: format!("issue {source_repo}#{issue}"),
         }
     }
 }
@@ -1618,13 +1312,12 @@ fn finish_verify(
 ) -> error::Result<()> {
     // Record the verdict as a target-keyed gate so `legion done` can gate
     // on it regardless of which commit it runs on (e.g. post-merge).
-    let skill = target.gate_key();
-    let card = target.label();
+    let skill = target.gate_key.clone();
+    let card = target.label.clone();
     let (commit_hash, branch) = git_head_commit_and_branch()?;
-    let (id_field, id_value) = target.details_field();
     let details = serde_json::json!({
         "skill": "legion-verify",
-        id_field: id_value,
+        "issue": target.label,
         "ac_source": ac_source,
         "decision": format!("{decision:?}"),
         "results": results,
@@ -1635,7 +1328,6 @@ fn finish_verify(
         verify::VerifyDecision::NeedsInput { uncertain } => uncertain.len() as u64,
         verify::VerifyDecision::Incomplete { unaddressed } => *unaddressed as u64,
         verify::VerifyDecision::NoCheckableAc => 1,
-        verify::VerifyDecision::ReplanRequired { .. } => 1,
         verify::VerifyDecision::InvalidCriterionReference { details } => details.len() as u64,
         verify::VerifyDecision::Proceed => 0,
     };
@@ -1697,41 +1389,13 @@ fn finish_verify(
                 eprintln!("  - {c}");
             }
             // Route to a human rather than rubber-stamp ->Done. The gate is
-            // already recorded non-clean, so ->Done stays blocked even if the
-            // card is not in a state this transition accepts.
-            //
-            // Issue targets have no card to move: the non-clean gate row and
-            // the exit code ARE the block, and the human adjudication happens
-            // on the issue. Saying so beats a transition error that reads
-            // like a failure.
-            match target {
-                VerifyTarget::Card(card_id) => match kanban::transition_card(
-                    database,
-                    card_id,
-                    kanban::Action::NeedInput,
-                    Some("verify: unprovable acceptance criteria, needs human adjudication"),
-                ) {
-                    Ok(_) => eprintln!(
-                        "\nCard routed to NeedsInput. ->Done stays blocked until resolved."
-                    ),
-                    Err(e) => eprintln!(
-                        "\n->Done stays blocked. (Could not auto-move card to NeedsInput: \
-                         {e}; move it manually.)"
-                    ),
-                },
-                VerifyTarget::Issue { .. } => eprintln!(
-                    "\nRecorded as a non-clean verify gate. Adjudicate on the issue, \
-                     then re-verify."
-                ),
-            }
-            return Err(error::LegionError::ExitWith(1));
-        }
-        // `decide()`/`decide_spec()` never produce this variant themselves --
-        // it is returned only by `verify::replan_gate`, which `handle_verify`
-        // checks (and returns early on) before either decide function runs.
-        // Covered here for exhaustiveness against future callers.
-        verify::VerifyDecision::ReplanRequired { reason } => {
-            eprintln!("[legion] verify BLOCKED for {card}: {reason}");
+            // already recorded non-clean, so ->Done stays blocked regardless.
+            // There is no card to transition (#931): the non-clean gate row
+            // and the exit code ARE the block, and the human adjudication
+            // happens on the issue.
+            eprintln!(
+                "\nRecorded as a non-clean verify gate. Adjudicate on the issue, then re-verify."
+            );
             return Err(error::LegionError::ExitWith(1));
         }
         verify::VerifyDecision::InvalidCriterionReference { details: bad_refs } => {
@@ -1758,7 +1422,6 @@ mod tests {
     use super::*;
     use crate::db::testutil::test_db;
     use crate::documents::DocumentMeta;
-    use crate::kanban::{Card, CardStatus, Priority};
 
     // --- #840: the printed id must be usable by the consuming verb --------
 
@@ -1939,154 +1602,6 @@ mod tests {
         assert!(err.to_string().contains("--json"), "{err}");
     }
 
-    fn make_card(doc_id: Option<&str>, acceptance: Option<&str>) -> Card {
-        Card {
-            id: "card-test".to_string(),
-            from_repo: "legion".to_string(),
-            to_repo: "legion".to_string(),
-            text: "test card".to_string(),
-            context: None,
-            priority: Priority::Med,
-            status: CardStatus::Accepted,
-            note: None,
-            labels: None,
-            parent_card_id: None,
-            source_url: None,
-            source_type: None,
-            sort_order: 0,
-            created_at: "2026-06-12T00:00:00Z".to_string(),
-            updated_at: "2026-06-12T00:00:00Z".to_string(),
-            assigned_at: None,
-            started_at: None,
-            completed_at: None,
-            problem: None,
-            solution: None,
-            acceptance: acceptance.map(str::to_string),
-            document_id: doc_id.map(str::to_string),
-            wake_at: None,
-            pre_defer_status: None,
-        }
-    }
-
-    /// When no document_id, falls back to tasks.acceptance.
-    #[test]
-    fn resolve_ac_falls_back_to_tasks_acceptance_when_no_document() {
-        let db = test_db();
-        let card = make_card(None, Some("criterion one\ncriterion two"));
-        let (criteria, source) = resolve_acceptance_criteria(&db, &card).expect("resolve");
-        assert_eq!(criteria, vec!["criterion one", "criterion two"]);
-        assert_eq!(source, "card");
-    }
-
-    /// When document_id present but document has no verification block,
-    /// falls back to tasks.acceptance.
-    #[test]
-    fn resolve_ac_falls_back_when_doc_has_no_verification_block() {
-        let db = test_db();
-        let meta = DocumentMeta {
-            id: Some("doc-no-ver"),
-            doc_type: "requirement",
-            surface: Some("test"),
-            status: Some("draft"),
-            priority: None,
-            owner: "legion",
-        };
-        let payload = serde_json::json!({
-            "meta": {"id": "doc-no-ver", "type": "requirement", "surface": "test",
-                     "status": "draft", "priority": "SHOULD", "owner": "legion",
-                     "date": "2026-06-12", "author": "test"},
-            "title": "Test",
-            "description": "desc",
-            "traces_to": "x",
-            "depends_on": []
-        })
-        .to_string();
-        db.insert_document(&meta, &payload).expect("insert");
-
-        let card = make_card(Some("doc-no-ver"), Some("fallback criterion"));
-        let (criteria, source) = resolve_acceptance_criteria(&db, &card).expect("resolve");
-        assert_eq!(criteria, vec!["fallback criterion"]);
-        assert_eq!(source, "card");
-    }
-
-    /// When document has a non-empty verification.acceptance array,
-    /// those strings are the criteria.
-    #[test]
-    fn resolve_ac_uses_spec_verification_acceptance_when_present() {
-        let db = test_db();
-        let meta = DocumentMeta {
-            id: Some("doc-with-ver"),
-            doc_type: "requirement",
-            surface: Some("test"),
-            status: Some("draft"),
-            priority: None,
-            owner: "legion",
-        };
-        let payload = serde_json::json!({
-            "meta": {"id": "doc-with-ver", "type": "requirement", "surface": "test",
-                     "status": "draft", "priority": "SHOULD", "owner": "legion",
-                     "date": "2026-06-12", "author": "test"},
-            "title": "Test",
-            "description": "desc",
-            "traces_to": "x",
-            "depends_on": [],
-            "verification": {
-                "acceptance": [
-                    "spec criterion alpha",
-                    "spec criterion beta"
-                ]
-            }
-        })
-        .to_string();
-        db.insert_document(&meta, &payload).expect("insert");
-
-        // tasks.acceptance says something different -- the spec wins.
-        let card = make_card(Some("doc-with-ver"), Some("should be ignored"));
-        let (criteria, source) = resolve_acceptance_criteria(&db, &card).expect("resolve");
-        assert_eq!(
-            criteria,
-            vec!["spec criterion alpha", "spec criterion beta"]
-        );
-        assert_eq!(source, "spec:doc-with-ver");
-    }
-
-    /// When the document carries the new id-carrying `verification.criteria`
-    /// shape (#882 step 1), resolve_acceptance_criteria reads its `text`
-    /// fields and the source label is still `spec:<doc-id>` -- so
-    /// `handle_done`'s gating (which only inspects the returned Vec<String>,
-    /// never the ids) keeps working unchanged on a revised document.
-    #[test]
-    fn resolve_ac_uses_spec_verification_criteria_ids_when_present() {
-        let db = test_db();
-        let meta = DocumentMeta {
-            id: Some("doc-with-ids"),
-            doc_type: "requirement",
-            surface: Some("test"),
-            status: Some("draft"),
-            priority: None,
-            owner: "legion",
-        };
-        let payload = serde_json::json!({
-            "meta": {"id": "doc-with-ids", "type": "requirement", "surface": "test",
-                     "status": "draft", "priority": "SHOULD", "owner": "legion",
-                     "date": "2026-06-12", "author": "test"},
-            "verification": {
-                "criteria": [
-                    {"id": "crit-1", "text": "id criterion alpha"},
-                    {"id": "crit-2", "text": "id criterion beta"}
-                ]
-            }
-        })
-        .to_string();
-        db.insert_document(&meta, &payload).expect("insert");
-
-        // tasks.acceptance says something different -- the spec wins, as before.
-        let card = make_card(Some("doc-with-ids"), Some("should be ignored"));
-        let (criteria, source) = resolve_acceptance_criteria(&db, &card).expect("resolve");
-        assert_eq!(criteria, vec!["id criterion alpha", "id criterion beta"]);
-        assert_eq!(source, "spec:doc-with-ids");
-    }
-
     /// resolve_spec_criteria reads the id-carrying array; returns None when
     /// the document only carries the legacy string-array shape, so
     /// handle_verify's format dispatch falls back to the free-text path.
@@ -2131,145 +1646,6 @@ mod tests {
         .to_string();
         let doc = db.insert_document(&meta, &payload).expect("insert");
         assert!(resolve_spec_criteria(&doc).expect("resolve").is_none());
-    }
-
-    /// When the verification.acceptance array is empty, falls back to tasks.acceptance.
-    #[test]
-    fn resolve_ac_falls_back_when_verification_acceptance_is_empty() {
-        let db = test_db();
-        let meta = DocumentMeta {
-            id: Some("doc-empty-ver"),
-            doc_type: "requirement",
-            surface: Some("test"),
-            status: Some("draft"),
-            priority: None,
-            owner: "legion",
-        };
-        let payload = serde_json::json!({
-            "meta": {"id": "doc-empty-ver", "type": "requirement", "surface": "test",
-                     "status": "draft", "priority": "SHOULD", "owner": "legion",
-                     "date": "2026-06-12", "author": "test"},
-            "title": "Test",
-            "description": "desc",
-            "traces_to": "x",
-            "depends_on": [],
-            "verification": {"acceptance": []}
-        })
-        .to_string();
-        db.insert_document(&meta, &payload).expect("insert");
-
-        let card = make_card(Some("doc-empty-ver"), Some("fallback when spec empty"));
-        let (criteria, source) = resolve_acceptance_criteria(&db, &card).expect("resolve");
-        assert_eq!(criteria, vec!["fallback when spec empty"]);
-        assert_eq!(source, "card");
-    }
-
-    /// When the card has a document_id that refers to a non-existent document,
-    /// resolve_acceptance_criteria must hard-error. A dangling reference means
-    /// the spec was deleted while work was in flight; verify must not silently
-    /// fall back to tasks.acceptance in that state.
-    #[test]
-    fn resolve_ac_hard_errors_on_dangling_document_id() {
-        let db = test_db();
-        // Card points at a document that was never inserted.
-        let card = make_card(Some("nonexistent-doc-id"), Some("card fallback criterion"));
-        let err = resolve_acceptance_criteria(&db, &card)
-            .expect_err("expected hard error on dangling document_id");
-        assert!(
-            err.to_string().contains("nonexistent-doc-id"),
-            "error must name the missing document id, got: {err}"
-        );
-    }
-
-    /// HIGH-2 (#882 review): a `verification.criteria` entry missing its
-    /// `text` field must be REFUSED, not silently dropped -- dropping it
-    /// shrinks the enforced criteria set and verify would PASS on partial
-    /// coverage. The error must name the offending index.
-    #[test]
-    fn resolve_ac_refuses_criteria_entry_missing_text() {
-        let db = test_db();
-        let meta = DocumentMeta {
-            id: Some("doc-malformed-crit"),
-            doc_type: "requirement",
-            surface: None,
-            status: None,
-            priority: None,
-            owner: "legion",
-        };
-        let payload = serde_json::json!({
-            "verification": {
-                "criteria": [
-                    {"id": "crit-1", "text": "good criterion"},
-                    {"id": "crit-2"}
-                ]
-            }
-        })
-        .to_string();
-        db.insert_document(&meta, &payload).expect("insert");
-
-        let card = make_card(Some("doc-malformed-crit"), None);
-        let err = resolve_acceptance_criteria(&db, &card)
-            .expect_err("a malformed criteria entry must be refused, not dropped");
-        assert!(
-            err.to_string().contains("criteria[1]") && err.to_string().contains("'text' field"),
-            "error must name the offending index and field, got: {err}"
-        );
-    }
-
-    /// Same refusal for a blank (whitespace-only) `text` field.
-    #[test]
-    fn resolve_ac_refuses_criteria_entry_with_blank_text() {
-        let db = test_db();
-        let meta = DocumentMeta {
-            id: Some("doc-blank-crit"),
-            doc_type: "requirement",
-            surface: None,
-            status: None,
-            priority: None,
-            owner: "legion",
-        };
-        let payload = serde_json::json!({
-            "verification": {
-                "criteria": [{"id": "crit-1", "text": "   "}]
-            }
-        })
-        .to_string();
-        db.insert_document(&meta, &payload).expect("insert");
-
-        let card = make_card(Some("doc-blank-crit"), None);
-        let err = resolve_acceptance_criteria(&db, &card)
-            .expect_err("blank text must be refused, not dropped");
-        assert!(
-            err.to_string().contains("criteria[0].text is blank"),
-            "got: {err}"
-        );
-    }
-
-    /// Same refusal for a non-string entry in `verification.acceptance`.
-    #[test]
-    fn resolve_ac_refuses_non_string_acceptance_entry() {
-        let db = test_db();
-        let meta = DocumentMeta {
-            id: Some("doc-bad-acceptance"),
-            doc_type: "requirement",
-            surface: None,
-            status: None,
-            priority: None,
-            owner: "legion",
-        };
-        let payload = serde_json::json!({
-            "verification": {"acceptance": ["good one", 42]}
-        })
-        .to_string();
-        db.insert_document(&meta, &payload).expect("insert");
-
-        let card = make_card(Some("doc-bad-acceptance"), None);
-        let err = resolve_acceptance_criteria(&db, &card)
-            .expect_err("a non-string acceptance entry must be refused, not dropped");
-        assert!(
-            err.to_string().contains("acceptance[1] is not a string"),
-            "got: {err}"
-        );
     }
 
     /// HIGH-2 (#882 review): `resolve_spec_criteria` must REFUSE an entry

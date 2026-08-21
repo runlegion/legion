@@ -42,9 +42,6 @@ pub enum LegionError {
     #[error("invalid state transition: cannot {action} a task with status '{current}'")]
     InvalidTaskTransition { action: String, current: String },
 
-    #[error("card not found: {0}")]
-    CardNotFound(String),
-
     #[error("reflection not found: {0}")]
     ReflectionNotFound(String),
 
@@ -56,9 +53,6 @@ pub enum LegionError {
         actual: String,
         expected: String,
     },
-
-    #[error("invalid card transition: cannot {action} a card in status '{current}'")]
-    InvalidCardTransition { action: String, current: String },
 
     #[error(
         "repo '{repo}' already has a live identity root ({existing_id}) -- a second, \
@@ -87,12 +81,6 @@ pub enum LegionError {
          {repo} --domain workflow --text \"...\"`), then retag this one."
     )]
     RetagLastWorkflowRoot { id: String, repo: String },
-
-    #[error("invalid card status: {0}")]
-    InvalidCardStatus(String),
-
-    #[error("invalid priority: {0} (expected low, med, high, or critical)")]
-    InvalidPriority(String),
 
     #[error("work source error: {0}")]
     WorkSource(String),
@@ -268,9 +256,6 @@ pub enum LegionError {
          file) -- a resolved finding needs no disposition"
     )]
     FindingAlreadyResolved(String),
-
-    #[error("delegation refused: {0}")]
-    DelegationRefused(String),
 
     #[error("branch '{branch}' not found in any worktree checkout (searched: {searched})")]
     PushBranchNotFound { branch: String, searched: String },
@@ -470,12 +455,6 @@ mod tests {
         let err = LegionError::FindingAlreadyResolved("finding-2".to_string());
         assert!(err.to_string().contains("finding-2"));
         assert!(err.to_string().contains("RESOLVED"));
-    }
-
-    #[test]
-    fn delegation_refused_display() {
-        let err = LegionError::DelegationRefused("no live attempt".to_string());
-        assert_eq!(err.to_string(), "delegation refused: no live attempt");
     }
 
     #[test]

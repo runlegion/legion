@@ -468,23 +468,6 @@ fn map_wake_attempt_row(
     })
 }
 
-/// Arguments for `Database::delegate_card_transition` (#934 review fix,
-/// HIGH). Grouped into a struct rather than passed positionally so the
-/// method stays under clippy's argument-count lint -- `id` and
-/// `work_item_id` are kept as distinct fields (not collapsed into one) even
-/// though every current caller passes the same value for both, since the
-/// wake_attempts link is keyed on an opaque work-item id by design (#934),
-/// not on the card id specifically.
-pub struct DelegateTransitionArgs<'a> {
-    pub id: &'a str,
-    pub status: &'a str,
-    pub note: Option<&'a str>,
-    pub timestamp: crate::db::CardTimestamp,
-    pub document_id: Option<&'a str>,
-    pub attempt_id: &'a str,
-    pub work_item_id: &'a str,
-}
-
 #[allow(dead_code)] // wired by #488 / #489 / #490
 impl Database {
     /// Insert a new wake_attempts row in the `queued` state. The caller
@@ -718,13 +701,16 @@ impl Database {
 
     /// Link a wake_attempts row to the opaque work item it is delegated
     /// work for (#778, generalized #934). A metadata write, not an FSM
-    /// transition -- the caller (`kanban::delegate_card`, today the only
-    /// caller, always passing a card id) is responsible for having already
-    /// checked the attempt is live and unclaimed before calling this.
-    /// Returns `WakeAttemptNotFound` when the row is absent or
-    /// soft-deleted, same contract as `set_wake_attempt_pid`. Underlying
-    /// column stays `card_id` (no rename); only the Rust-facing name and
-    /// meaning generalized.
+    /// transition -- the caller is responsible for having already checked
+    /// the attempt is live and unclaimed before calling this. Returns
+    /// `WakeAttemptNotFound` when the row is absent or soft-deleted, same
+    /// contract as `set_wake_attempt_pid`. Underlying column stays
+    /// `card_id` (no rename); only the Rust-facing name and meaning
+    /// generalized. The card-bound entry point that used to be the only
+    /// caller (`kanban::delegate_card`) is gone (#931); this primitive and
+    /// the liveness read it backs (`work_item_is_live`) survive as the
+    /// legion-only delegated-wake-link state the card surface's removal
+    /// carries forward.
     pub fn set_wake_attempt_work_item(&self, attempt_id: &str, work_item_id: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         Self::set_wake_attempt_work_item_tx(&tx, attempt_id, work_item_id)?;
@@ -734,9 +720,7 @@ impl Database {
 
     /// The wake_attempts link UPDATE from `set_wake_attempt_work_item`,
     /// taking the caller's already-open transaction instead of opening its
-    /// own (#934 review fix, HIGH) -- see `Database::delegate_card_transition`
-    /// below for why this needs to share a transaction with the card-status
-    /// UPDATE.
+    /// own (#934 review fix, HIGH).
     pub(crate) fn set_wake_attempt_work_item_tx(
         tx: &rusqlite::Transaction,
         attempt_id: &str,
@@ -756,47 +740,15 @@ impl Database {
         }
     }
 
-    /// Atomically transition a card to `status` AND link a wake_attempts row
-    /// to it, in one SQL transaction (#934 review fix, HIGH).
-    ///
-    /// Backs `kanban::delegate_card`, replacing what used to be two separate
-    /// unwrapped calls (`transition_card` then `set_wake_attempt_work_item`).
-    /// If the link write failed after the transition succeeded, the card was
-    /// left `Delegated` with no linked wake_attempts row -- and
-    /// `reap_delegated_cards`'s identity-keyed discovery
-    /// (`live_linked_wake_attempts`, #934) scans wake_attempts, not card
-    /// status, so it would never see that card to auto-revert it. The old
-    /// card-status-scan reaper (`get_delegated_cards`) did catch this case;
-    /// the new discovery source does not, unless the two writes can never
-    /// diverge in the first place. Making them one transaction closes the
-    /// gap by construction instead of by widening what the reaper looks at:
-    /// either both writes land, or neither does, so a card can never reach
-    /// `Delegated` without a linked wake_attempts row backing it.
-    pub fn delegate_card_transition(&self, args: DelegateTransitionArgs) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        Database::transition_card_status_tx(
-            &tx,
-            args.id,
-            args.status,
-            args.note,
-            args.timestamp,
-            args.document_id,
-            None,
-        )?;
-        Self::set_wake_attempt_work_item_tx(&tx, args.attempt_id, args.work_item_id)?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Clear the work-item link on whatever wake_attempts row currently
-    /// points at `work_item_id` (#778 review fix, generalized #934 -- see
-    /// `kanban::undelegate_card` for why this must run on every Undelegate,
-    /// not just some). Matches by the linked value, not by `attempt_id`, so
-    /// the caller does not need to have looked the linked row up first. A
-    /// no-op, not an error, when nothing is currently linked -- undelegating
-    /// work that was never actually delegated (shouldn't happen given the
-    /// FSM, but this is a plain UPDATE, not an FSM transition) must not
-    /// fail the caller.
+    /// points at `work_item_id` (#778 review fix, generalized #934).
+    /// Matches by the linked value, not by `attempt_id`, so the caller does
+    /// not need to have looked the linked row up first. A no-op, not an
+    /// error, when nothing is currently linked -- reverting work that was
+    /// never actually linked must not fail the caller. The delegated-work
+    /// liveness reaper (`watch::reap_delegated_work`) calls this directly
+    /// once liveness fails; there is no card-status FSM step to run
+    /// alongside it any more (#931).
     pub fn clear_wake_attempt_work_item(&self, work_item_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
@@ -807,15 +759,14 @@ impl Database {
         Ok(())
     }
 
-    /// Find a live, not-yet-claimed wake_attempts row for a repo -- the
-    /// auto-discovery path `kanban::delegate_card` falls back to when the
-    /// caller does not pass `--attempt-id` explicitly. Newest
-    /// (`spawned_at DESC`) wins when more than one is in flight; callers
-    /// that need a specific one among several should pass `--attempt-id`.
-    /// A `Claimed` row has no `spawned_at` yet (NULL), which SQLite sorts
-    /// last in a DESC ordering -- a just-claimed, not-yet-spawned attempt
-    /// loses to any already-spawned one. Intentional: prefer handing the
-    /// caller a worker that has actually started over one still starting.
+    /// Find a live, not-yet-claimed wake_attempts row for a repo. Newest
+    /// (`spawned_at DESC`) wins when more than one is in flight. A `Claimed`
+    /// row has no `spawned_at` yet (NULL), which SQLite sorts last in a DESC
+    /// ordering -- a just-claimed, not-yet-spawned attempt loses to any
+    /// already-spawned one. Intentional: prefer handing the caller a worker
+    /// that has actually started over one still starting. The card-bound
+    /// auto-discovery caller (`kanban::delegate_card`) is gone (#931); kept
+    /// as surviving delegated-wake-link infrastructure.
     pub fn find_live_wake_attempt_for_repo(
         &self,
         repo_name: &str,
@@ -838,9 +789,9 @@ impl Database {
 
     /// Fetch the wake_attempts row linked to a work item, if any (#778,
     /// generalized #934). Most recent by `updated_at` when more than one
-    /// row was ever linked (re-delegation after a manual undelegate) --
-    /// only one is meaningful at a time since `delegate_card` only ever
-    /// links a currently-live, currently-unclaimed row.
+    /// row was ever linked (re-delegation after a manual clear) -- only one
+    /// is meaningful at a time since the link is only ever set against a
+    /// currently-live, currently-unclaimed row.
     pub fn get_wake_attempt_by_work_item(
         &self,
         work_item_id: &str,
@@ -859,18 +810,16 @@ impl Database {
     }
 
     /// Every wake_attempts row currently linked to a work item (#934): the
-    /// delegated-work liveness sweep's discovery step. Unlike the card-scan
-    /// predecessor (`Database::get_delegated_cards`, still used for the
-    /// card-surface reporting view in `legion kanban delegated-needs-
-    /// attention`), this reads `wake_attempts` directly and never touches
-    /// `tasks.status` -- the sweep that reaps dead delegations no longer
-    /// needs `CardStatus::Delegated` to find its candidates, only the
-    /// work-item link itself. Includes rows in any FSM state (not just
-    /// in-flight): a row that went terminal without ever being explicitly
-    /// undelegated (e.g. a crash) still carries a stale link that needs
-    /// reaping, and `work_item_is_live` below correctly reads a terminal
-    /// row as not-live. `repo` filters to one board when `Some`, mirroring
-    /// `get_delegated_cards`'s optional scope.
+    /// delegated-work liveness sweep's discovery step, and (#931) the
+    /// backing query for `legion delegated-needs-attention` now that the
+    /// card-scan predecessor (`get_delegated_cards`) is gone. Reads
+    /// `wake_attempts` directly and never touches any card/task table --
+    /// the sweep that reaps dead delegations needs only the work-item link
+    /// itself. Includes rows in any FSM state (not just in-flight): a row
+    /// that went terminal without ever being explicitly cleared (e.g. a
+    /// crash) still carries a stale link that needs reaping, and
+    /// `work_item_is_live` below correctly reads a terminal row as
+    /// not-live. `repo` filters to one board when `Some`.
     pub fn live_linked_wake_attempts(
         &self,
         repo: Option<&str>,
@@ -1829,90 +1778,9 @@ mod tests {
         assert!(matches!(err, LegionError::WakeAttemptNotFound(_)));
     }
 
-    // -- delegate_card_transition (#934 review fix, HIGH): the transition +
-    // link must be one transaction, not two separate writes. ---------------
-
-    fn insert_accepted_card(db: &Database) -> String {
-        db.insert_card(
-            "legion",
-            "kelex",
-            "delegate transition test",
-            None,
-            crate::kanban::Priority::Med,
-            None,
-            None,
-            None,
-            None,
-            None,
-            crate::kanban::CardStatus::Accepted,
-        )
-        .expect("insert accepted card")
-    }
-
-    #[test]
-    fn delegate_card_transition_updates_status_and_link_together() {
-        let db = test_db();
-        let card_id = insert_accepted_card(&db);
-        let attempt_id = wake_id("delegate-ok");
-        db.enqueue_wake_attempt(&attempt_id, "legion", "kelex", &[])
-            .unwrap();
-        db.try_claim_wake_attempt(&attempt_id, "host-a").unwrap();
-
-        db.delegate_card_transition(DelegateTransitionArgs {
-            id: &card_id,
-            status: "delegated",
-            note: Some("delegated to attempt"),
-            timestamp: crate::db::CardTimestamp::None,
-            document_id: None,
-            attempt_id: &attempt_id,
-            work_item_id: &card_id,
-        })
-        .expect("atomic delegate transition");
-
-        let card = db.get_card_by_id(&card_id).unwrap().expect("card exists");
-        assert_eq!(card.status.to_string(), "delegated");
-
-        let attempt = db
-            .get_wake_attempt(&attempt_id)
-            .unwrap()
-            .expect("attempt exists");
-        assert_eq!(attempt.work_item_id.as_deref(), Some(card_id.as_str()));
-    }
-
-    /// The regression this combinator exists to close: before
-    /// `delegate_card_transition`, the card-status write and the
-    /// wake_attempts link write were two separate unwrapped calls, so a
-    /// link-write failure after a successful transition left the card
-    /// `Delegated` with no link -- invisible to `reap_delegated_cards`'s
-    /// identity-keyed discovery. Forcing the link write to fail (a
-    /// nonexistent attempt id) and asserting the card status is UNCHANGED
-    /// proves the two writes now share a transaction: either both land, or
-    /// neither does.
-    #[test]
-    fn delegate_card_transition_rolls_back_card_status_when_link_write_fails() {
-        let db = test_db();
-        let card_id = insert_accepted_card(&db);
-
-        let err = db
-            .delegate_card_transition(DelegateTransitionArgs {
-                id: &card_id,
-                status: "delegated",
-                note: Some("delegated to attempt"),
-                timestamp: crate::db::CardTimestamp::None,
-                document_id: None,
-                attempt_id: "no-such-attempt",
-                work_item_id: &card_id,
-            })
-            .expect_err("link write against a missing attempt must error");
-        assert!(matches!(err, LegionError::WakeAttemptNotFound(_)));
-
-        let card = db.get_card_by_id(&card_id).unwrap().expect("card exists");
-        assert_eq!(
-            card.status.to_string(),
-            "accepted",
-            "a failed link write must roll back the card status write too"
-        );
-    }
+    // -- work-item link primitives survive the card surface's removal
+    // (#931): they were always keyed on an opaque work-item id, never on
+    // card-specific machinery. -------------------------------------------
 
     #[test]
     fn get_wake_attempt_by_work_item_returns_none_when_unlinked() {

@@ -61,10 +61,22 @@ impl ReflectionDelta {
     }
 }
 
-/// A kanban card row serialized for sync transmission.
+/// A `tasks` row (legacy inter-agent task delegation) serialized for sync
+/// transmission.
 ///
-/// Cards (tasks table) track work items delegated between agents.
-/// Status is serialized as String for cross-node compatibility.
+/// Named `CardDelta` historically: before #931 this table also carried
+/// kanban cards, and this delta type -- with no filter distinguishing the
+/// two -- synced whichever rows the table held. #931 removed the card
+/// content columns (text/context/problem/solution/acceptance were never
+/// unique to cards, but labels/source_url/parent_card_id/sort_order/
+/// assigned_at/started_at/completed_at were) from the protocol along with
+/// the schema; only the fields `src/task.rs` still writes remain. This is a
+/// breaking wire change for a peer running pre-#931 code -- its wider
+/// struct has no `#[serde(default)]` on the dropped fields, so it will fail
+/// to deserialize a packet built from this narrower shape. Deliberate: the
+/// issue that authorized this removal explicitly directs "the protocol
+/// changes WITH the schema," and rolling the whole fleet together is an
+/// operator decision, not something this type can paper over.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardDelta {
     pub id: String,
@@ -73,22 +85,11 @@ pub struct CardDelta {
     pub text: String,
     pub context: Option<String>,
     pub priority: String,
-    pub status: String, // String, not CardStatus, for serde compatibility
+    pub status: String, // String, not an enum, for serde compatibility
     pub note: Option<String>,
-    pub labels: Option<String>,
-    pub parent_card_id: Option<String>,
-    pub source_url: Option<String>,
-    pub source_type: Option<String>,
-    pub sort_order: i32,
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
-    pub assigned_at: Option<String>,
-    pub started_at: Option<String>,
-    pub completed_at: Option<String>,
-    pub problem: Option<String>,
-    pub solution: Option<String>,
-    pub acceptance: Option<String>,
 }
 
 /// A rate-limit sample serialized for sync transmission.

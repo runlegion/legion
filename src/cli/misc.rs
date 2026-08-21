@@ -7,8 +7,8 @@ use crate::cli::datadir::data_dir;
 use crate::cli::memory::try_load_embed_model;
 use crate::cli::util::{open_db, open_db_and_index};
 use crate::{
-    daemon, defer, error, identity_generate, init, kanban, now, queue, recall, serve, stats,
-    status, statusline, surface, task, watch, worksource,
+    daemon, defer, error, identity_generate, init, now, queue, recall, serve, stats, status,
+    statusline, surface, task, watch,
 };
 
 #[derive(Subcommand)]
@@ -269,38 +269,24 @@ pub(crate) fn handle_needs(repo: String) -> error::Result<()> {
     Ok(())
 }
 
+/// `legion work` (#931): the next candidate open issue from `repo`'s
+/// configured work source, highest priority first. `--peek` and its
+/// absence now resolve to the same read -- see `queue`'s module doc
+/// comment for why picking no longer claims anything -- but the CLI keeps
+/// routing through both `queue::peek_work` and `queue::next_work` so the
+/// flag still reads as intentional rather than silently ignored.
 pub(crate) fn handle_work(repo: String, peek: bool) -> error::Result<()> {
-    let database = open_db()?;
-
-    // Sync from external work sources before checking the queue
-    if let Some((plugin, source_repo, workdir)) = worksource::resolve_config(&repo) {
-        match worksource::sync_issues(&database, &plugin, &source_repo, &workdir, &repo) {
-            Ok(n) if n > 0 => info!("[legion] synced {n} new issues from {plugin}"),
-            Ok(_) => {}
-            Err(e) => eprintln!("[legion] work source sync failed: {e}"),
-        }
-    }
-
-    // Selection runs through the card-independent queue seam (#934): it
-    // reads and writes only identity + scheduling fields, never card
-    // content. Display content is a separate lookup below -- today's
-    // work-item id is always a card id, so the lookup succeeds in
-    // practice, but the seam itself does not depend on that being true.
     let item = if peek {
-        queue::peek_work(&database, &repo)?
+        queue::peek_work(&repo)?
     } else {
-        queue::next_work(&database, &repo)?
+        queue::next_work(&repo)?
     };
-
     match item {
-        Some(item) => match database.get_card_by_id(&item.id)? {
-            Some(card) => print!("{}", kanban::format_work_card(&card)),
-            None => println!(
-                "[Legion] Next task: {} (priority: {}, status: {})",
-                item.id, item.priority, item.status
-            ),
-        },
-        None => info!("[legion] no pending work for {repo}"),
+        Some(item) => println!(
+            "[Legion] Next: #{} {} (priority: {}) {}",
+            item.number, item.title, item.priority, item.id
+        ),
+        None => info!("[legion] no open work for {repo}"),
     }
     Ok(())
 }
@@ -329,20 +315,6 @@ pub(crate) fn handle_undefer(work_item: String) -> error::Result<()> {
     match defer::undefer_work_item(&database, &work_item)? {
         Some(_) => println!("{work_item}"),
         None => info!("[legion] {work_item} was not deferred"),
-    }
-    Ok(())
-}
-
-pub(crate) fn handle_sync(repo: String) -> error::Result<()> {
-    let database = open_db()?;
-
-    // Sync from external work sources. Unlike `legion work`, an
-    // unconfigured repo is a hard error here: syncing is the whole
-    // point of the command.
-    let (plugin, source_repo, workdir) = worksource::require_worksource(&repo)?;
-    let synced = worksource::sync_issues(&database, &plugin, &source_repo, &workdir, &repo)?;
-    if synced > 0 {
-        info!("[legion] synced {synced} new issues from {plugin}");
     }
     Ok(())
 }
@@ -425,27 +397,6 @@ pub(crate) fn handle_daemon_stop() -> error::Result<()> {
 pub(crate) fn handle_daemon_restart(port: u16) -> error::Result<()> {
     let base = data_dir()?;
     daemon::restart_detached(&base, port)?;
-    Ok(())
-}
-
-pub(crate) fn handle_goal(repo: String) -> error::Result<()> {
-    let database = open_db()?;
-    // Identity (#934): which cards are the active goal comes from the
-    // card-independent queue seam (`accepted` status only, no `CardScope`
-    // dependency). Content -- text, acceptance -- is a separate lookup per
-    // id, the same split `handle_work` already uses.
-    let ids: Vec<String> = queue::accepted_work_items(&database, &repo)?;
-    let mut cards: Vec<kanban::Card> = Vec::with_capacity(ids.len());
-    for id in &ids {
-        if let Some(card) = database.get_card_by_id(id)? {
-            cards.push(card);
-        }
-    }
-    // Prints nothing when no card is Accepted -- the goal is "cleared"
-    // by board state alone (AC: clears on terminal/blocked).
-    if let Some(goal) = kanban::format_active_goal(&cards) {
-        println!("{goal}");
-    }
     Ok(())
 }
 

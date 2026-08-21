@@ -47,7 +47,7 @@ fi
 legion_hook_covered || exit 0
 
 if echo "$CMD" | grep -qE 'legion\.db'; then
-  emit_deny "Blocked: this command references \`legion.db\` directly. Use the \`legion\` CLI instead. Legion is the sole API for legion state -- direct DB access bypasses migrations, constraints, and the audit log. Commands like \`legion kanban view\`, \`legion recall\`, \`legion bullpen\`, \`legion reflect\`, and \`legion status\` expose structured fields through the binary. If you need something the CLI does not expose, file an issue for a new CLI command or JSON output flag -- do not reach past the binary."
+  emit_deny "Blocked: this command references \`legion.db\` directly. Use the \`legion\` CLI instead. Legion is the sole API for legion state -- direct DB access bypasses migrations, constraints, and the audit log. Commands like \`legion issue view\`, \`legion recall\`, \`legion bullpen\`, \`legion reflect\`, and \`legion status\` expose structured fields through the binary. If you need something the CLI does not expose, file an issue for a new CLI command or JSON output flag -- do not reach past the binary."
   exit 0
 fi
 

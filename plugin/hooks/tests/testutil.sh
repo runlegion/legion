@@ -174,10 +174,13 @@ finish_tests() {
 #                            to exercise that path; this default does not
 #   FAKE_SNOOZE              `recall --domain snooze` body (default empty;
 #                            no fallback -- this IS the fallback tier)
-#   FAKE_KANBAN_ACCEPTED     `kanban list` -> one accepted card titled this
-#   FAKE_KANBAN_DELEGATED_DEAD  `kanban delegated-needs-attention` -> one
-#                            not-live delegated card titled this (#778)
-#   FAKE_GOAL                `goal` body
+#   FAKE_WORK_PEEK           `work --repo R --peek` -> one line naming this
+#                            (#931: `boot_section_work`'s "what's on my
+#                            plate" banner section)
+#   FAKE_DELEGATED_NEEDS_ATTENTION  `watch delegated-needs-attention --json`
+#                            -> one not-live delegated work-item row naming
+#                            this as its work_item_id (#778, card-free since
+#                            #931)
 #   FAKE_WHOAMI_BODY         `whoami` body below the standard banner header
 #   FAKE_WHATAMI_BODY        `whatami` body below the standard banner header
 #   FAKE_PENDING_REPLIES     `pending-replies` body (default empty)
@@ -235,6 +238,9 @@ case "${1:-}" in
   watch)
     if [ "${2:-}" = "list" ]; then
       printf '%s\n' "${FAKE_WATCH:-}"
+    elif [ "${2:-}" = "delegated-needs-attention" ] && [ -n "${FAKE_DELEGATED_NEEDS_ATTENTION:-}" ]; then
+      printf '{"work_item_id":"%s","attempt_id":"attempt-fixed-1","repo":"%s"}\n' \
+        "$FAKE_DELEGATED_NEEDS_ATTENTION" "${LEGION_REPO:-test}"
     fi
     ;;
   stats)
@@ -312,15 +318,16 @@ case "${1:-}" in
         ;;
     esac
     ;;
-  kanban)
-    if [ "${2:-}" = "list" ] && [ -n "${FAKE_KANBAN_ACCEPTED:-}" ]; then
-      printf '{"status":"accepted","id":"42","title":"%s"}\n' "$FAKE_KANBAN_ACCEPTED"
-    elif [ "${2:-}" = "delegated-needs-attention" ] && [ -n "${FAKE_KANBAN_DELEGATED_DEAD:-}" ]; then
-      printf '{"status":"delegated","id":"43","title":"%s"}\n' "$FAKE_KANBAN_DELEGATED_DEAD"
+  work)
+    # Real call: work --repo R --peek -- scan argv for --peek rather than
+    # pinning a position, matching the `recall` case's discrimination style.
+    has_peek="0"
+    for arg in "$@"; do
+      [ "$arg" = "--peek" ] && has_peek="1"
+    done
+    if [ "$has_peek" = "1" ] && [ -n "${FAKE_WORK_PEEK:-}" ]; then
+      printf '%s\n' "$FAKE_WORK_PEEK"
     fi
-    ;;
-  goal)
-    [ -n "${FAKE_GOAL:-}" ] && printf '%s\n' "$FAKE_GOAL"
     ;;
   whoami)
     echo "=== WHO YOU ARE -- READ THIS ==="

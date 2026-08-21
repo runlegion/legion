@@ -17,7 +17,7 @@
 #     boot-sections.sh; every boot_section_<name> defined in
 #     boot-sections.sh is registered in LEGION_BOOT_SECTIONS and vice
 #     versa; emit_boot_core's own body takes no arguments ($1/$@/$# absent).
-#   Tier 2 -- behavioral parity (the fail-before/pass-after proof): nine
+#   Tier 2 -- behavioral parity (the fail-before/pass-after proof): eight
 #     sentinel FAKE_* values run through both real hook scripts via
 #     make_plugin_root/make_stub_legion; every sentinel must appear in
 #     BOTH additionalContext outputs. Each sentinel is asserted on EACH
@@ -79,8 +79,7 @@ FORBIDDEN_PATTERNS=(
   '[$]\{?LEGION\}?"? +whoami'
   '[$]\{?LEGION\}?"? +whatami'
   '[$]\{?LEGION\}?"? +pending-replies'
-  '[$]\{?LEGION\}?"? +kanban'
-  '[$]\{?LEGION\}?"? +goal'
+  '[$]\{?LEGION\}?"? +work +--repo'
   '[$]\{?LEGION\}?"? +autonomy +status'
   '[$]\{?LEGION\}?"? +index'
   '[$]\{?LEGION\}?"? +now +--banner'
@@ -140,8 +139,7 @@ export FAKE_WHATAMI_BODY="SENTINEL_WHATAMI_ABC"
 export FAKE_PENDING_REPLIES="SENTINEL_PENDING_ABC"
 export FAKE_CHECKPOINT="SENTINEL_CHECKPOINT_ABC"
 export FAKE_INDEX_BANNER="SENTINEL_INDEX_ABC"
-export FAKE_KANBAN_ACCEPTED="SENTINEL_KANBAN_ABC"
-export FAKE_GOAL="SENTINEL_GOAL_ABC"
+export FAKE_WORK_PEEK="SENTINEL_WORK_ABC"
 export FAKE_AUTONOMY_BANNER="SENTINEL_AUTONOMY_ABC"
 
 SENTINELS=(
@@ -151,8 +149,7 @@ SENTINELS=(
   "SENTINEL_PENDING_ABC"
   "SENTINEL_CHECKPOINT_ABC"
   "SENTINEL_INDEX_ABC"
-  "SENTINEL_KANBAN_ABC"
-  "SENTINEL_GOAL_ABC"
+  "SENTINEL_WORK_ABC"
   "SENTINEL_AUTONOMY_ABC"
 )
 

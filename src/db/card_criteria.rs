@@ -1,44 +1,22 @@
-//! `card_criteria` join table (#882 step 1): which spec criteria a card
-//! declares it is servicing.
+//! Document-shaped criteria helpers (#882 step 1, #933, #931).
 //!
-//! Additive metadata alongside the existing whole-document `tasks.document_id`
-//! binding (`bind_card_to_document`) -- it does not replace it. A card must
-//! already be bound to a document before it can declare serviced criteria,
-//! and every declared id must exist in that document's current
-//! `verification.criteria` set (checked against the payload directly, not
-//! a separate projection table -- see the #882 step 1 design doc for why a
-//! `document_criteria` projection table was scoped out).
-
-use chrono::Utc;
-use rusqlite::{Connection, params};
+//! Originally this file also owned the `card_criteria` join table -- which
+//! spec criteria a card declared it was servicing. #933 moved that concept
+//! onto the issue (traced criteria are resolved from the requirement
+//! directly), and #931 removed the card-bound surface entirely: the table,
+//! `set_card_criteria`, and `card_criteria` are gone. What remains is
+//! document-shaped, not card-shaped, and has no card dependency at all.
 
 use super::Database;
-use crate::error::{LegionError, Result};
-
-/// `card_criteria` table (#882 step 1).
-pub(super) fn create_tables(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS card_criteria (
-            card_id TEXT NOT NULL,
-            criterion_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (card_id, criterion_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_card_criteria_card ON card_criteria(card_id);",
-    )?;
-    Ok(())
-}
 
 /// Read the set of criterion ids present in a document's payload
 /// (`verification.criteria[].id`). Returns an empty set for a payload with
 /// no such array, a corrupt payload, or a document still on the legacy
 /// id-less `verification.acceptance` shape.
 ///
-/// `pub(crate)` (#933): this check is document-shaped, not card-shaped --
-/// `cli::issue`'s create-time trace validation reuses it to refuse a
-/// `[criteria: ...]` bracket citing an id a traced requirement does not
-/// contain, the same rule `set_card_criteria` below already enforces for a
-/// card's declared criteria. One existence check, two callers.
+/// `pub(crate)`: `cli::issue`'s create-time trace validation uses this to
+/// refuse a `[criteria: ...]` bracket citing an id a traced requirement does
+/// not contain.
 pub(crate) fn valid_criterion_ids(payload: &str) -> std::collections::HashSet<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
         return std::collections::HashSet::new();
@@ -57,111 +35,33 @@ pub(crate) fn valid_criterion_ids(payload: &str) -> std::collections::HashSet<St
 }
 
 impl Database {
-    /// Replace the set of spec criteria a card declares it is servicing
-    /// (#882 step 1). Idempotent replace, not append: a re-run with a
-    /// shorter list drops the criteria left out.
-    ///
-    /// Errors when:
-    /// - The card does not exist.
-    /// - The card has no bound document (`tasks.document_id` is `None`) --
-    ///   bind it first via `legion kanban bind`.
-    /// - The bound document does not exist (dangling reference).
-    /// - The bound document has no id-carrying `verification.criteria`
-    ///   (still on the legacy string-array shape, or has none at all).
-    /// - Any requested id is not a member of that document's current
-    ///   criteria set -- same posture as verify's dangling-document_id hard
-    ///   error: a card cannot claim to service spec state that does not
-    ///   exist.
-    pub fn set_card_criteria(&self, card_id: &str, criterion_ids: &[String]) -> Result<()> {
-        let card = self
-            .get_card_by_id(card_id)?
-            .ok_or_else(|| LegionError::CardNotFound(card_id.to_string()))?;
-        let doc_id = card.document_id.ok_or_else(|| {
-            LegionError::WorkSource(format!(
-                "card '{card_id}' has no bound document -- bind it first \
-                 (`legion kanban bind --id {card_id} --document <doc>`) before \
-                 declaring serviced criteria"
-            ))
-        })?;
-        let doc = self.get_document(&doc_id)?.ok_or_else(|| {
-            LegionError::WorkSource(format!(
-                "card '{card_id}' is bound to document '{doc_id}' but it does not exist"
-            ))
-        })?;
-        let valid = valid_criterion_ids(&doc.payload);
-        if valid.is_empty() {
-            return Err(LegionError::WorkSource(format!(
-                "document '{doc_id}' has no id-carrying verification.criteria to service \
-                 (it may still be on the legacy verification.acceptance shape)"
-            )));
-        }
-        for id in criterion_ids {
-            if !valid.contains(id) {
-                return Err(LegionError::WorkSource(format!(
-                    "criterion id '{id}' does not exist in document '{doc_id}'s current criteria"
-                )));
-            }
-        }
-
-        let now = Utc::now().to_rfc3339();
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM card_criteria WHERE card_id = ?1",
-            params![card_id],
-        )?;
-        for id in criterion_ids {
-            tx.execute(
-                "INSERT INTO card_criteria (card_id, criterion_id, created_at) VALUES (?1, ?2, ?3)",
-                params![card_id, id, &now],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// List the criterion ids a card currently declares as serviced,
-    /// insertion order (i.e. `set_card_criteria`'s call order).
-    pub fn card_criteria(&self, card_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT criterion_id FROM card_criteria WHERE card_id = ?1 ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map(params![card_id], |row| row.get(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
     /// Which of `doc_id`'s criteria have a clean verify verdict recorded
     /// against them (#933): "a requirement can be asked which of its
     /// criteria have been serviced by a clean verdict", making completion
     /// computable rather than asserted. Document-shaped, like
-    /// `valid_criterion_ids` above -- it survives the card the same way
-    /// (this reads `legion-verify:*` gate rows, which exist for both the
-    /// card path and the card-free issue-trace path).
+    /// `valid_criterion_ids` above -- never depended on a card, so it needed
+    /// no change for #931.
     ///
     /// Scans every non-voided, clean `legion-verify:*` quality-gate row.
-    /// Both `verify::decide_spec` (card path) and `verify::decide_spec_multi`
-    /// (issue-trace path, #933) write their `SpecAcResult` verdicts into the
-    /// gate's `details.results[]` array, each entry carrying `spec_doc_id` +
-    /// `criterion_id` + `verdict`. A criterion counts as served when at
-    /// least one such row cites it against `doc_id` with verdict `"pass"`.
+    /// `verify::decide_spec_multi` (the issue-trace path) writes its
+    /// `SpecAcResult` verdicts into the gate's `details.results[]` array,
+    /// each entry carrying `spec_doc_id` + `criterion_id` + `verdict`. A
+    /// criterion counts as served when at least one such row cites it
+    /// against `doc_id` with verdict `"pass"`.
     /// Trust boundary (#945 review, #780/#882): rows written through
-    /// `legion verify` passed `decide_spec`/`decide_spec_multi`'s
-    /// referential checks (document, revision, criterion all resolved at
-    /// verdict time), but rows written through the free-form
-    /// `quality-gate record` path are NOT validated -- verify-family
-    /// skills have no check validator by design, and both paths record
-    /// `GateProvenance::Asserted`, so this scan cannot tell them apart. A
-    /// served mark here is therefore as trustworthy as the gate rows
-    /// themselves: self-declared, the system-wide gap #882 tracks. This
-    /// surface is read-only display (`legion document view`); nothing
-    /// gates on it.
+    /// `legion verify` passed `decide_spec_multi`'s referential checks
+    /// (document, revision, criterion all resolved at verdict time), but
+    /// rows written through the free-form `quality-gate record` path are
+    /// NOT validated -- verify-family skills have no check validator by
+    /// design, and both paths record `GateProvenance::Asserted`, so this
+    /// scan cannot tell them apart. A served mark here is therefore as
+    /// trustworthy as the gate rows themselves: self-declared, the
+    /// system-wide gap #882 tracks. This surface is read-only display
+    /// (`legion document view`); nothing gates on it.
     pub fn document_criteria_served(
         &self,
         doc_id: &str,
-    ) -> Result<std::collections::HashSet<String>> {
+    ) -> crate::error::Result<std::collections::HashSet<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT details FROM quality_gates \
              WHERE skill LIKE 'legion-verify:%' AND result = 'clean' AND voided_at IS NULL \
@@ -197,150 +97,34 @@ impl Database {
 mod tests {
     use super::*;
     use crate::db::testutil::test_db;
-    use crate::documents::DocumentMeta;
-    use crate::kanban::{CardStatus, Priority};
 
-    fn seed_doc_with_criteria(db: &Database, id: &str) -> Vec<String> {
-        let meta = DocumentMeta {
-            id: Some(id),
-            doc_type: "requirement",
-            surface: None,
-            status: None,
-            priority: None,
-            owner: "legion",
-        };
+    #[test]
+    fn valid_criterion_ids_reads_ids_from_verification_criteria() {
         let payload = serde_json::json!({
             "verification": {
                 "criteria": [
-                    {"text": "first"},
-                    {"text": "second"}
+                    {"id": "crit-a", "text": "first"},
+                    {"id": "crit-b", "text": "second"}
                 ]
             }
         })
         .to_string();
-        let doc = db.insert_document(&meta, &payload).expect("insert doc");
-        let value: serde_json::Value = serde_json::from_str(&doc.payload).unwrap();
-        value["verification"]["criteria"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| c["id"].as_str().unwrap().to_string())
-            .collect()
-    }
-
-    fn seed_bound_card(db: &Database, doc_id: &str) -> String {
-        let card_id = db
-            .insert_card(
-                "legion",
-                "legion",
-                "test card",
-                None,
-                Priority::Med,
-                None,
-                None,
-                None,
-                None,
-                None,
-                CardStatus::Accepted,
-            )
-            .expect("insert card");
-        db.bind_card_to_document(&card_id, doc_id).expect("bind");
-        card_id
+        let ids = valid_criterion_ids(&payload);
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("crit-a"));
+        assert!(ids.contains("crit-b"));
     }
 
     #[test]
-    fn set_and_read_card_criteria_round_trips() {
-        let db = test_db();
-        let ids = seed_doc_with_criteria(&db, "doc-crit-1");
-        let card_id = seed_bound_card(&db, "doc-crit-1");
-
-        db.set_card_criteria(&card_id, &ids).expect("declare");
-        let read = db.card_criteria(&card_id).expect("read");
-        assert_eq!(read, ids);
+    fn valid_criterion_ids_empty_for_legacy_acceptance_shape() {
+        let payload =
+            serde_json::json!({"verification": {"acceptance": ["plain string"]}}).to_string();
+        assert!(valid_criterion_ids(&payload).is_empty());
     }
 
     #[test]
-    fn set_card_criteria_is_a_replace_not_an_append() {
-        let db = test_db();
-        let ids = seed_doc_with_criteria(&db, "doc-crit-2");
-        let card_id = seed_bound_card(&db, "doc-crit-2");
-
-        db.set_card_criteria(&card_id, &ids).expect("declare both");
-        assert_eq!(db.card_criteria(&card_id).unwrap().len(), 2);
-
-        db.set_card_criteria(&card_id, &ids[..1])
-            .expect("declare one");
-        assert_eq!(db.card_criteria(&card_id).unwrap(), vec![ids[0].clone()]);
-    }
-
-    #[test]
-    fn set_card_criteria_rejects_unknown_id() {
-        let db = test_db();
-        seed_doc_with_criteria(&db, "doc-crit-3");
-        let card_id = seed_bound_card(&db, "doc-crit-3");
-
-        let err = db
-            .set_card_criteria(&card_id, &["bogus-id".to_string()])
-            .unwrap_err();
-        assert!(err.to_string().contains("does not exist"), "got: {err}");
-    }
-
-    #[test]
-    fn set_card_criteria_rejects_unbound_card() {
-        let db = test_db();
-        let card_id = db
-            .insert_card(
-                "legion",
-                "legion",
-                "unbound card",
-                None,
-                Priority::Med,
-                None,
-                None,
-                None,
-                None,
-                None,
-                CardStatus::Accepted,
-            )
-            .expect("insert card");
-
-        let err = db
-            .set_card_criteria(&card_id, &["whatever".to_string()])
-            .unwrap_err();
-        assert!(err.to_string().contains("no bound document"), "got: {err}");
-    }
-
-    #[test]
-    fn set_card_criteria_rejects_legacy_acceptance_only_document() {
-        let db = test_db();
-        let meta = DocumentMeta {
-            id: Some("doc-legacy-crit"),
-            doc_type: "requirement",
-            surface: None,
-            status: None,
-            priority: None,
-            owner: "legion",
-        };
-        db.insert_document(
-            &meta,
-            &serde_json::json!({"verification": {"acceptance": ["plain string"]}}).to_string(),
-        )
-        .expect("insert");
-        let card_id = seed_bound_card(&db, "doc-legacy-crit");
-
-        let err = db
-            .set_card_criteria(&card_id, &["whatever".to_string()])
-            .unwrap_err();
-        assert!(err.to_string().contains("no id-carrying"), "got: {err}");
-    }
-
-    #[test]
-    fn card_criteria_empty_for_card_with_no_declaration() {
-        let db = test_db();
-        let ids = seed_doc_with_criteria(&db, "doc-crit-4");
-        let card_id = seed_bound_card(&db, "doc-crit-4");
-        let _ = &ids;
-        assert!(db.card_criteria(&card_id).unwrap().is_empty());
+    fn valid_criterion_ids_empty_for_corrupt_payload() {
+        assert!(valid_criterion_ids("not json").is_empty());
     }
 
     // -- #933: `document_criteria_served` ------------------------------------

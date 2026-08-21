@@ -278,8 +278,9 @@ pub(crate) enum MeshAction {
         #[arg(long)]
         json: bool,
 
-        /// Kanban card ID this pick is for (reserved for future
+        /// Opaque work-item label this pick is for (reserved for future
         /// task-specific weighting; today a plain tag in the JSON output).
+        /// #931: the kanban card this used to name is gone.
         #[arg(long)]
         for_task: Option<String>,
     },
