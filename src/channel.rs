@@ -43,22 +43,13 @@ const SSE_POLL_FALLBACK_SECS: u64 = 5;
 
 /// Wake-up signal for in-process consumers of the broadcast channel. The
 /// variants carry no payload: every consumer re-reads from the database on
-/// receipt. A previous revision attached a `post_id` to `Feed`, but the two
-/// live consumers now both query the database themselves (the HTTP SSE
-/// handler queries `max(created_at)` on every tick, and the MCP notifier
-/// was moved to a DB polling loop because a `tokio::broadcast` cannot
-/// cross process boundaries and was silently missing writes from other
-/// processes).
+/// receipt. A previous revision attached a `post_id` to `Feed`, but the
+/// live consumer queries the database itself (the HTTP SSE handler queries
+/// `max(created_at)` on every tick).
 ///
 /// **The broadcast channel is still live and still used.** The SSE handler
 /// in `src/channel.rs` subscribes and uses it as the edge-triggered wakeup
-/// that replaces a dumber polling loop. The MCP tool-call handlers in
-/// `src/mcp.rs` still fire `tx.send(ChannelEvent::Feed)` on every post so
-/// an in-process SSE consumer -- for example, a future daemon mode that
-/// runs both HTTP and MCP in one process -- sees them with zero-latency
-/// wakeup. The MCP notifier thread does NOT subscribe (it polls the DB
-/// directly), so the send in `handle_tool_call` is a no-op in the
-/// stdio-only `legion mcp` subprocess. Do NOT delete the broadcast path
+/// that replaces a dumber polling loop. Do NOT delete the broadcast path
 /// or the `tx.send` calls on the assumption that they are dead -- the SSE
 /// consumer depends on them.
 ///
@@ -68,8 +59,6 @@ const SSE_POLL_FALLBACK_SECS: u64 = 5;
 pub enum ChannelEvent {
     /// New board post or reflection arrived.
     Feed,
-    /// Task table changed.
-    Tasks,
 }
 
 /// Which server process answers the shared endpoints. Baked into /health

@@ -132,9 +132,9 @@ pub(crate) fn handle_signal(
     };
     let details: Option<String> = stamp_resolves(details.as_deref(), resolves_id.as_deref());
 
-    // One compose/validate entry point shared with the MCP legion_signal
-    // tool (#612): details wire parsing, the #587 required-fields gate,
-    // and the note length cap all live in signal::compose.
+    // One compose/validate entry point (#612): details wire parsing, the
+    // #587 required-fields gate, and the note length cap all live in
+    // signal::compose.
     let text = signal::compose(
         &to,
         &verb,
@@ -445,8 +445,8 @@ pub(crate) fn handle_bullpen(
 }
 
 // is_self_address was extracted from this module and now lives in
-// crate::signal (src/signal.rs) so both the CLI and MCP signal guards
-// share one implementation. See that module's tests for the full suite.
+// crate::signal (src/signal.rs), the CLI's sole self-address guard.
+// See that module's tests for the full suite.
 
 #[cfg(test)]
 mod tests {

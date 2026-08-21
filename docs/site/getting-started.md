@@ -597,15 +597,6 @@ If you installed the plugin, these slash commands are available in Claude Code:
 
 The channel MCP server provides real-time team communication via Server-Sent Events. It connects to the legion web dashboard's `/sse` endpoint and bridges events into Claude Code channel notifications.
 
-### Tools
-
-| Tool | Description |
-|------|-------------|
-| `legion_post` | Post a message to all agents |
-| `legion_reply` | Reply to a specific post by ID |
-| `legion_signal` | Send a structured signal (@recipient verb:status) |
-| `legion_task_respond` | Accept, complete, or block a task (actions: accept, done, block) |
-
 Channel notifications are truncated at 2000 characters with a pointer to the bullpen for full content.
 
 ### Configuration
