@@ -335,27 +335,34 @@ pub fn delegate_card(
         ));
     }
 
-    // Transition BEFORE linking (review fix, #778): `transition_card` is the
-    // only check here that validates `card.status == Accepted`. Linking the
-    // attempt first meant a delegate call against a Pending/Blocked/InReview
-    // card would still burn the attempt (`set_wake_attempt_work_item`
-    // commits, then `transition_card` fails) -- silently poisoning
-    // `find_live_wake_attempt_for_repo`'s `card_id IS NULL` filter for that
-    // attempt's remaining lifetime with no card ever reaching `Delegated` to
-    // let the reaper clear it. Ordered this way, a transition failure never
-    // touches the attempt row at all; and if the write order flips on some
-    // future edit and `set_wake_attempt_work_item` itself fails after a
-    // successful transition, the card is `Delegated` with no link, which
-    // `work_item_is_live` reads as not-live -- `tick_health` reverts it
-    // next tick instead of leaking a silent bypass.
-    let updated = transition_card(
-        db,
+    // Transition and link, atomically (#934 review fix, HIGH): the
+    // `Accepted -> Delegated` status write and the wake_attempts link write
+    // happen in one SQL transaction (`Database::delegate_card_transition`),
+    // not two separate unwrapped calls. `transition_card`'s FSM check still
+    // validates `card.status == Accepted` first (via `transition` below,
+    // same as `transition_card` does internally) -- a rejected transition
+    // touches neither row, same as before. What changed is the success
+    // case: previously, if the link write failed AFTER a successful
+    // transition, the card was left `Delegated` with no linked
+    // wake_attempts row, and `reap_delegated_cards`'s identity-keyed
+    // discovery (`live_linked_wake_attempts`, #934) scans wake_attempts, not
+    // card status, so it would never find that card to auto-revert it --
+    // the daemon's auto-heal would silently stop covering it. Sharing one
+    // transaction closes that gap by construction: either both writes land,
+    // or neither does, so `Delegated` without a link is now unreachable.
+    let new_status = transition(card.status, Action::Delegate)?;
+    let ts = timestamp_for_action(&Action::Delegate);
+    db.delegate_card_transition(crate::db::DelegateTransitionArgs {
         id,
-        Action::Delegate,
-        Some(&format!("delegated to wake attempt {}", attempt.attempt_id)),
-    )?;
-    db.set_wake_attempt_work_item(&attempt.attempt_id, id)?;
-    Ok(updated)
+        status: &new_status.to_string(),
+        note: Some(&format!("delegated to wake attempt {}", attempt.attempt_id)),
+        timestamp: ts,
+        document_id: card.document_id.as_deref(),
+        attempt_id: &attempt.attempt_id,
+        work_item_id: id,
+    })?;
+    db.get_card_by_id(id)?
+        .ok_or_else(|| LegionError::CardNotFound(id.to_string()))
 }
 
 /// Undelegate a card (#778): the inverse of `delegate_card`. Transitions

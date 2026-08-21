@@ -40,6 +40,7 @@ pub use kanban::CardTimestamp;
 pub use reflections::{Reflection, ReflectionMeta};
 pub use schedules::{Schedule, validate_hhmm};
 pub use stats::DashboardRepoStats;
+pub use wake::DelegateTransitionArgs;
 
 use std::path::Path;
 use std::time::Duration;

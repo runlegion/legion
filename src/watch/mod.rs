@@ -1671,6 +1671,70 @@ mod tests {
         );
     }
 
+    /// #934 review fix, MED: the self-heal fallback (`clear_wake_attempt_work_item`
+    /// when `undelegate_card` itself errors). A card can leave `Delegated`
+    /// by a path other than `undelegate_card` -- `Cancel` is legal from any
+    /// active state (state.rs's `(s, Action::Cancel) if s != Done` arm) --
+    /// leaving the wake_attempts link stale: still pointing at a card that
+    /// is no longer `Delegated`. When the reaper later finds that link (the
+    /// attempt has since gone terminal, so `work_item_is_live` reads
+    /// false), `undelegate_card` fails (`Action::Undelegate` is illegal
+    /// from `Cancelled`), and the fallback must clear the link directly --
+    /// otherwise the same stale row would surface on every future sweep
+    /// forever.
+    #[test]
+    fn reap_delegated_cards_clears_stale_link_when_undelegate_fails() {
+        let (db, _index, _dir) = test_storage();
+        db.upsert_watch_heartbeat("test-host", 1, "0.1.0", 1, None)
+            .expect("heartbeat");
+
+        let card_id = insert_delegated_card(&db, "test-repo", "delegated, then cancelled");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        db.enqueue_wake_attempt(&attempt_id, "test-persona", "test-repo", &[])
+            .expect("enqueue");
+        db.try_claim_wake_attempt(&attempt_id, "test-host")
+            .expect("claim");
+        db.set_wake_attempt_work_item(&attempt_id, &card_id)
+            .expect("link");
+
+        // Move the card off Delegated a way other than undelegate_card --
+        // the wake_attempts link is untouched by this, so it goes stale.
+        crate::kanban::transition_card(
+            &db,
+            &card_id,
+            crate::kanban::Action::Cancel,
+            Some("cancelled directly, bypassing undelegate"),
+        )
+        .expect("cancel is legal from any active state");
+
+        // Terminate the attempt so work_item_is_live reads false and the
+        // reaper attempts a revert.
+        db.record_wake_attempt_outcome(&attempt_id, "ok", "productive")
+            .expect("terminal");
+
+        reap_delegated_cards(&db, "[test]");
+
+        // undelegate_card errors here (Undelegate is illegal from
+        // Cancelled), so the fallback branch must have cleared the link
+        // directly rather than leaving it stale forever.
+        let attempt = db
+            .get_wake_attempt(&attempt_id)
+            .expect("get")
+            .expect("attempt exists");
+        assert!(
+            attempt.work_item_id.is_none(),
+            "the stale link must be cleared even though undelegate_card itself errored"
+        );
+
+        // The card itself must be untouched by the failed revert attempt --
+        // still Cancelled, not silently moved to something else.
+        let card = db
+            .get_card_by_id(&card_id)
+            .expect("get")
+            .expect("card exists");
+        assert_eq!(card.status, crate::kanban::CardStatus::Cancelled);
+    }
+
     #[test]
     fn reap_delegated_cards_leaves_live_delegation_alone() {
         let (db, _index, _dir) = test_storage();
