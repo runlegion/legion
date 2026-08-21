@@ -445,8 +445,8 @@ pub(crate) fn handle_bullpen(
 }
 
 // is_self_address was extracted from this module and now lives in
-// crate::signal (src/signal.rs) so both the CLI and MCP signal guards
-// share one implementation. See that module's tests for the full suite.
+// crate::signal (src/signal.rs), the CLI's sole self-address guard.
+// See that module's tests for the full suite.
 
 #[cfg(test)]
 mod tests {

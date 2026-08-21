@@ -15,6 +15,8 @@
   inherited). `should_notify`, the recipient filter both the retired MCP push and
   the hook-drain lane relied on, relocates unchanged into `src/deliver.rs`.
 
+## 0.34.0
+
 The judgment-out-of-Rust release. `legion spec-gen` is gone. Deriving a requirement from a
 service-design document -- composing it from a moment-of-truth, judging its richness, wiring
 its provenance -- is judgment work, but it had been written as a deterministic Rust
