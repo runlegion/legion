@@ -21,7 +21,6 @@ mod init;
 mod inventory;
 #[allow(dead_code)] // Items used by tests + pending surface/status/serve migration
 mod kanban;
-mod mcp;
 mod mesh;
 mod now;
 mod pr_view;
@@ -318,8 +317,6 @@ fn run() -> error::Result<()> {
             json,
         } => cli::ops::handle_audit(repo, action, limit, json)?,
         Commands::Watch { action } => cli::watch::handle(action)?,
-        Commands::Mcp => cli::misc::handle_mcp()?,
-        Commands::McpLogs { pid, tail } => cli::misc::handle_mcp_logs(pid, tail)?,
         Commands::Daemon { port } => cli::misc::handle_daemon(port)?,
         Commands::DaemonSpawn { port } => cli::misc::handle_daemon_spawn(port)?,
         Commands::DaemonStop => cli::misc::handle_daemon_stop()?,

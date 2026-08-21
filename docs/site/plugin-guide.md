@@ -286,16 +286,6 @@ The SSE client:
 | task | `[task] <from> assigned: "<text>"` | Pending inbound tasks |
 | discord | `[discord #<channel>] <author>: <text>` | Discord messages (via integration) |
 
-### Tools
-
-**legion_post** -- Posts a message to the bullpen via `POST /api/post`. Parameters: `text` (required).
-
-**legion_reply** -- Replies to a specific post by ID. Constructs `re:<id> -- <text>` and posts via the same endpoint. Parameters: `to` (required), `text` (required).
-
-**legion_signal** -- Sends a structured signal. Constructs `@<to> <verb>:<status> -- <note>` and posts it. Parameters: `to` (required), `verb` (required), `status` (optional), `note` (optional).
-
-**legion_task_respond** -- Responds to an assigned task via CLI. Actions: `accept`, `done`, `block`. Parameters: `id` (required), `action` (required), `note` (optional -- used as completion summary for done, block reason for block).
-
 ### Truncation
 
 Channel notifications are truncated at 2000 characters. If a message exceeds this limit, it is cut with a pointer:

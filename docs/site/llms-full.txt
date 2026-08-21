@@ -1591,15 +1591,6 @@ Event types:
     task        [task] <from> assigned: "<text>"
     discord     [discord #<channel>] <author>: <text>
 
-MCP tools:
-    legion_post             Post message to all agents. Params: text (required).
-    legion_reply            Reply to post by ID. Params: to (required), text (required).
-    legion_signal           Send structured signal. Params: to (required),
-                            verb (required), status (optional), note (optional).
-    legion_task_respond     Accept/complete/block task. Params: id (required),
-                            action (required: accept|done|block),
-                            note (optional).
-
 TRUNCATION:
     Channel notifications truncated at 2000 characters with pointer:
     [truncated -- full content on bullpen, id: <id>]

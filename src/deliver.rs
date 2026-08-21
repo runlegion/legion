@@ -24,7 +24,7 @@
 
 use crate::db::{Database, HOOK_DRAIN_CURSOR_SUFFIX, Reflection};
 use crate::error::Result;
-use crate::mcp::notifier;
+use crate::signal as sig;
 
 /// Batch size cap for a single drain call. Half the 100-row cap the
 /// retired MCP notifier used: drains fire per hook event, far more often
@@ -49,10 +49,10 @@ pub fn hook_reader_key(repo: &str) -> String {
 /// so two concurrent sessions on the same repo cannot double-deliver a
 /// post; see that method's docs for the loser's two safe outcomes.
 ///
-/// Applies the delivery decision `notifier::should_notify(text, repo,
-/// Some(repo))` -- the filter the retired MCP push lane was also judged
-/// against, kept as the single notion of "should this post reach this
-/// agent" rather than re-derived for the hook lane.
+/// Applies the delivery decision `should_notify(text, repo, Some(repo))` --
+/// the filter the retired MCP push lane was also judged against, kept as
+/// the single notion of "should this post reach this agent" rather than
+/// re-derived for the hook lane.
 ///
 /// This function records NO telemetry: a claimed post is drained, not yet
 /// delivered. The `lane = "hook"` `DeliveryRecord` is written by the CLI
@@ -66,8 +66,59 @@ pub fn drain_for_hook(db: &Database, repo: &str) -> Result<Vec<Reflection>> {
 
     Ok(batch
         .into_iter()
-        .filter(|post| notifier::should_notify(&post.text, &post.repo, Some(repo)))
+        .filter(|post| should_notify(&post.text, &post.repo, Some(repo)))
         .collect())
+}
+
+/// Determine whether a notification for a post should be delivered to this client.
+///
+/// Rules (applied in order):
+/// 1. If the text starts with `@all`, deliver unconditionally (broadcast signal).
+/// 2. If the text starts with `@<client_repo>` (direct mention), deliver.
+/// 3. If the text starts with `@` but NOT addressed to this client, suppress.
+/// 4. If `client_repo` is known and the post's `repo` equals `client_repo`, suppress
+///    (the client wrote it; no need to echo a general musing back to its author).
+/// 5. Otherwise (general musing, no `@` prefix, from a different agent), deliver.
+///
+/// Recipient parsing is `signal::recipient_token` -- the single addressing
+/// rule (#612): first-whitespace token after the leading `@`, trailing `:`
+/// trimmed. An empty recipient (`@` alone) or a recipient that itself begins
+/// with `@` (e.g. `@@all`, which looks like a broadcast but isn't) is NOT
+/// treated as `@all` or any named target -- the post falls through the
+/// signal branch and is suppressed. This is deliberately strict: if an agent
+/// fat-fingers a broadcast as `@@all`, it should silently fail rather than
+/// silently succeed with the wrong-looking prefix.
+///
+/// Relocated from `src/mcp/notifier.rs` (#952) when the MCP server and its
+/// notification-channel push (already retired in #947) were removed
+/// entirely; this hook-drain lane (`drain_for_hook`, above) is now the
+/// filter's sole caller.
+pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool {
+    if sig::is_signal(text) {
+        // Reject malformed prefixes (`@` alone, `@@all`) -- suppressed
+        // rather than passed to the @all / named-target branches.
+        let Some(recipient) = sig::recipient_token(text) else {
+            return false;
+        };
+
+        if recipient == "all" {
+            return true;
+        }
+        if let Some(cr) = client_repo {
+            return recipient == cr;
+        }
+        // No client_repo known -- suppress signals (can't verify recipient).
+        return false;
+    }
+
+    // General musing: suppress own posts, deliver everything else.
+    if let Some(cr) = client_repo
+        && repo == cr
+    {
+        return false;
+    }
+
+    true
 }
 
 #[cfg(test)]
@@ -270,5 +321,68 @@ mod tests {
         // proving the suppressed rows were not left behind for re-scan.
         let second = drain_for_hook(&db, "legion").unwrap();
         assert!(second.is_empty());
+    }
+
+    #[test]
+    fn notification_filter_passes_at_all() {
+        // @all signals should reach every client regardless of repo.
+        assert!(
+            should_notify("@all hello team", "smugglr", Some("kelex")),
+            "@all must pass filter for kelex"
+        );
+        assert!(
+            should_notify("@all hello team", "smugglr", Some("smugglr")),
+            "@all must pass even for the poster's own client if the post repo differs"
+        );
+    }
+
+    #[test]
+    fn notification_filter_suppresses_wrong_recipient() {
+        // A signal to @vault must not reach @kelex.
+        assert!(
+            !should_notify("@vault review:approved", "smugglr", Some("kelex")),
+            "@vault signal must be suppressed for kelex client"
+        );
+        // A signal to @kelex MUST reach kelex.
+        assert!(
+            should_notify("@kelex review:approved", "smugglr", Some("kelex")),
+            "@kelex signal must reach kelex client"
+        );
+        // Own post must be suppressed.
+        assert!(
+            !should_notify("hello team", "kelex", Some("kelex")),
+            "own posts must be suppressed"
+        );
+        // General musing from another agent must reach the client.
+        assert!(
+            should_notify("just thinking about things", "smugglr", Some("kelex")),
+            "general musings from others must reach kelex"
+        );
+    }
+
+    #[test]
+    fn notification_filter_rejects_malformed_signal_prefixes() {
+        // `@` alone is not a broadcast -- no recipient token at all.
+        assert!(
+            !should_notify("@ hello", "smugglr", Some("kelex")),
+            "lone @ must be suppressed"
+        );
+        // `@@all foo` looks like a broadcast but recipient parses as `@all`,
+        // which starts with `@` -- rejected as malformed rather than silently
+        // routed as if the user meant @all.
+        assert!(
+            !should_notify("@@all urgent", "smugglr", Some("kelex")),
+            "@@all must be suppressed, not routed as @all"
+        );
+        // `@@` alone with no recipient.
+        assert!(
+            !should_notify("@@", "smugglr", Some("kelex")),
+            "@@ alone must be suppressed"
+        );
+        // Trailing colon is stripped, so `@kelex:` still reaches kelex.
+        assert!(
+            should_notify("@kelex: review:approved", "smugglr", Some("kelex")),
+            "trailing colon on recipient must still reach the target"
+        );
     }
 }

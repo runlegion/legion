@@ -121,10 +121,9 @@ pub fn run_with_stdin(cmd: &mut Command, payload: &[u8]) -> Output {
 /// Legion's schema migrations are not concurrency-safe at first-open time:
 /// two processes racing to ALTER TABLE on a fresh DB produce "duplicate
 /// column name" errors. Any test that runs more than one legion process
-/// against the same data dir must warm the schema first. The MCP push
-/// bridge test documents the original race and keeps its own inline warmup
-/// (it moves untouched per the #608 audit); every new multi-process test
-/// should call this instead.
+/// against the same data dir must warm the schema first. The original race
+/// was documented by the (since-retired, #952) MCP push bridge test's own
+/// inline warmup; every new multi-process test should call this instead.
 pub fn warm_schema(data_dir: &Path) {
     run_ok(legion_cmd(data_dir).args(["post", "--repo", "warmup-repo", "--text", "schema warmup"]));
 }
