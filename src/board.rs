@@ -152,7 +152,24 @@ pub fn bullpen_archived(db: &Database) -> Result<Vec<Reflection>> {
 
 /// Format bullpen posts for display.
 ///
-/// Signals are rendered as compact one-liners. Musings get full text.
+/// Every post renders its stored text VERBATIM. A post body is prose: it is
+/// stored as bytes and displayed as bytes, and nothing in it is parsed,
+/// extracted, or relocated on the way to a reader.
+///
+/// This function used to render a post that parsed as a signal by
+/// RECONSTRUCTING the line from `parse_signal`'s fields via
+/// `format_signal_compact`. That silently corrupted prose: any post opening
+/// with `@name` armed the parser, `parse_signal` claimed the first `{`
+/// anywhere in the body as its details block, and the rebuilt line hoisted
+/// that span up beside the verb while the sentence it came from rendered
+/// gutted. Because `details` is a `HashMap`, the reconstruction also lost
+/// key order and dropped duplicate keys, so one post could render two ways
+/// on two reads. The corruption was invisible to the author: the write path
+/// stored the text intact and only the render path mangled it.
+///
+/// Signal parsing still runs -- for ROUTING (see `find_pending_signals` and
+/// the wake gate). It no longer decides how a body is displayed.
+///
 /// Returns an empty string when there are no posts.
 pub fn format_bullpen(posts: &[Reflection]) -> String {
     if posts.is_empty() {
@@ -163,14 +180,7 @@ pub fn format_bullpen(posts: &[Reflection]) -> String {
 
     for p in posts {
         let date = db::format_date(&p.created_at);
-        if let Some(sig) = signal::parse_signal(&p.text) {
-            output.push_str(&format!(
-                "- {}\n",
-                signal::format_signal_compact(&sig, &p.repo, date)
-            ));
-        } else {
-            output.push_str(&format!("- [{}] {} ({})\n", p.repo, p.text, date));
-        }
+        output.push_str(&format!("- [{}] {} ({})\n", p.repo, p.text, date));
     }
 
     output
@@ -277,6 +287,47 @@ mod tests {
 
         let count = bullpen_count(&db, "platform").expect("count");
         assert_eq!(count, 2);
+    }
+
+    /// The regression that made this the default: a prose post opening with
+    /// `@name` armed `parse_signal`, which claimed the first `{` ANYWHERE in
+    /// the body as its details block. `format_bullpen` then rendered a
+    /// RECONSTRUCTION, hoisting that span up beside the verb and gutting the
+    /// sentence it came from. Reported from the field (shingle, 2026-08-22)
+    /// as a post whose text said a tool WORKED rendering with the failure
+    /// marker as its headline -- the inverted meaning, not a cosmetic slip.
+    #[test]
+    fn format_bullpen_renders_at_prefixed_prose_verbatim() {
+        let text = "@rafters EVAL of 0.2.3, plus the calibration run.\n\n\
+                    rafters_generate returns real snippets, no {stub-marker}.";
+        let posts = vec![Reflection {
+            id: "id-1".into(),
+            repo: "shingle".into(),
+            text: text.into(),
+            created_at: "2026-08-22T12:00:00Z".into(),
+            updated_at: None,
+            audience: "team".into(),
+            domain: None,
+            tags: None,
+            recall_count: 0,
+            last_recalled_at: None,
+            parent_id: None,
+        }];
+
+        let out = format_bullpen(&posts);
+
+        assert!(
+            out.contains(text),
+            "the stored body must appear verbatim, unparsed and unrelocated; got:\n{out}"
+        );
+        assert!(
+            out.contains("no {stub-marker}."),
+            "the brace span must stay in the sentence it was written in; got:\n{out}"
+        );
+        assert!(
+            !out.contains("EVAL {stub-marker}"),
+            "a span from later in the body must never be hoisted beside the verb; got:\n{out}"
+        );
     }
 
     #[test]
