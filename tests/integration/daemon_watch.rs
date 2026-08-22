@@ -309,3 +309,60 @@ fn watch_add_rejects_nonexistent_workdir() {
         "/nonexistent/path/that/does/not/exist",
     ]));
 }
+
+/// #996: the interactive-session lock must be claimed on `resume`, not only on
+/// cold start.
+///
+/// The bug this guards: the lock was written from `session-start.sh` under
+/// `matcher: "startup"` alone, so a session begun with `claude --resume` never
+/// wrote one. Watch could not see the live agent, spawned a duplicate into its
+/// working tree, and killing that duplicate only freed the lock for the next
+/// poll to spawn another. Two agents committed to one branch minutes apart.
+///
+/// This asserts wiring rather than behavior on purpose. The dispatch that picks
+/// a matcher belongs to Claude Code, not to legion, so there is nothing of ours
+/// to exercise -- but the regression is precisely a matcher that stops covering
+/// a case, and that is a string in a manifest we own.
+#[test]
+fn session_lock_hook_fires_on_resume_not_only_startup() {
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/hooks/hooks.json"),
+    )
+    .expect("plugin/hooks/hooks.json is readable");
+
+    let group = manifest
+        .split("\"matcher\"")
+        .find(|chunk| chunk.contains("session-lock.sh"))
+        .expect("session-lock.sh must be wired under a SessionStart matcher");
+
+    let matcher = group
+        .split('"')
+        .nth(1)
+        .expect("the matcher value must be a string");
+
+    assert!(
+        matcher.contains("resume"),
+        "the session lock must be claimed on resume; matcher was {matcher:?}"
+    );
+    assert!(
+        matcher.contains("startup"),
+        "and must still be claimed on cold start; matcher was {matcher:?}"
+    );
+}
+
+/// The lock has exactly one owner. It used to be taken inline by
+/// `session-start.sh`; leaving that call behind alongside the dedicated hook
+/// would mean two scripts racing to write the same file, and would let someone
+/// "fix" a future lock bug in the copy that is not wired for resume.
+#[test]
+fn session_start_hook_no_longer_claims_the_lock_itself() {
+    let script = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/hooks/session-start.sh"),
+    )
+    .expect("plugin/hooks/session-start.sh is readable");
+
+    assert!(
+        !script.contains("watch session-start"),
+        "session-start.sh must delegate the lock to session-lock.sh (#996)"
+    );
+}
