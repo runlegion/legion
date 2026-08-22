@@ -414,6 +414,37 @@ mod tests {
         );
     }
 
+    /// The routing consequence of the first-line bound, pinned: `format_signal`
+    /// always writes the details block immediately after `verb:status` and puts
+    /// the note AFTER it, so a multi-line note never pushes details past the
+    /// first newline. `resolved_ask_id` reads `details["resolves"]` to decide an
+    /// answer-wake (#949), so if the bound could ever hide a real details block
+    /// the wake would silently stop firing -- a worse bug than the display
+    /// corruption the bound fixes. This test is the guard on that assumption.
+    #[test]
+    fn parse_signal_reads_details_when_the_note_spans_lines() {
+        let text = format_signal(
+            "legion",
+            "answer",
+            None,
+            Some("first line of the note\nsecond line, with a {brace} in prose"),
+            &[("resolves".to_string(), "ask-1".to_string())],
+        );
+
+        let sig = parse_signal(&text).expect("parses");
+
+        assert_eq!(
+            sig.details.get("resolves").map(String::as_str),
+            Some("ask-1"),
+            "details written on the signal's own line must survive a multi-line note; got {:?}",
+            sig.details
+        );
+        assert!(
+            crate::watch::resolves_pending_ask(&text),
+            "the answer-wake marker must still resolve through the routing predicate"
+        );
+    }
+
     /// The bound must not break a real signal: `legion signal` writes the
     /// details block on the signal's own line, and that must still parse.
     #[test]
