@@ -144,7 +144,23 @@ pub fn parse_signal(text: &str) -> Option<Signal> {
     let (_, rest) = split_first_word(after_at)?;
 
     // Parse verb:status or just verb:
-    let (verb_part, after_verb) = if let Some(brace_pos) = rest.find('{') {
+    //
+    // The details-block scan is bounded to the FIRST LINE of the signal.
+    // It used to be `rest.find('{')` over the whole body, so a brace
+    // anywhere -- a JSON sample, a config fragment, a code snippet in
+    // paragraph nine -- was claimed as the details block belonging to the
+    // verb on line one, swallowing every sentence in between into
+    // `verb_part`. Senders emit signals via `legion signal`, which always
+    // writes the details block on the signal's own line, so bounding the
+    // scan costs nothing real and stops multi-paragraph prose posts from
+    // being reinterpreted from the bottom up.
+    //
+    // Residual, deliberate: a brace mid-sentence on the FIRST line is still
+    // read as a details block. That is the format's genuine ambiguity rather
+    // than a scan bug, and it no longer corrupts display now that
+    // `board::format_bullpen` renders stored text verbatim.
+    let first_line_end = rest.find('\n').unwrap_or(rest.len());
+    let (verb_part, after_verb) = if let Some(brace_pos) = rest[..first_line_end].find('{') {
         let before_brace = rest[..brace_pos].trim();
         let after_brace = &rest[brace_pos..];
         (before_brace.to_string(), after_brace.to_string())
@@ -293,40 +309,6 @@ pub fn format_signal(
     output
 }
 
-/// Format a signal compactly for bullpen display (one-liner).
-pub fn format_signal_compact(signal: &Signal, repo: &str, date: &str) -> String {
-    let status_part = signal
-        .status
-        .as_deref()
-        .map(|s| format!(":{}", s))
-        .unwrap_or_default();
-
-    let details_part = if signal.details.is_empty() {
-        String::new()
-    } else {
-        let pairs: Vec<String> = signal
-            .details
-            .iter()
-            .map(|(k, v)| format!("{}: {}", k, v))
-            .collect();
-        format!(" {{{}}}", pairs.join(", "))
-    };
-
-    let trailing_part = signal
-        .trailing
-        .as_deref()
-        .map(|t| {
-            let clean = t.strip_prefix("-- ").unwrap_or(t);
-            format!(" -- {}", clean)
-        })
-        .unwrap_or_default();
-
-    format!(
-        "[{}] @{} {}{}{}{}  ({})",
-        repo, signal.recipient, signal.verb, status_part, details_part, trailing_part, date
-    )
-}
-
 /// Split the first whitespace-delimited word from a string.
 fn split_first_word(s: &str) -> Option<(String, String)> {
     let trimmed = s.trim();
@@ -413,6 +395,67 @@ fn parse_details_block(s: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `parse_signal` used to scan the WHOLE body for `{`, so a brace in a
+    /// later paragraph became the details block for the verb on line one and
+    /// every sentence between them was swallowed into `verb_part`. The scan
+    /// is bounded to the first line now.
+    #[test]
+    fn parse_signal_ignores_a_brace_below_the_first_line() {
+        let text = "@rafters eval\n\nthe tool returns real snippets, no {stub-marker}.";
+        let sig = parse_signal(text).expect("still parses as a signal");
+
+        assert_eq!(sig.recipient, "rafters");
+        assert_eq!(sig.verb, "eval");
+        assert!(
+            sig.details.is_empty(),
+            "a brace below the first line is prose, not a details block; got {:?}",
+            sig.details
+        );
+    }
+
+    /// The routing consequence of the first-line bound, pinned: `format_signal`
+    /// always writes the details block immediately after `verb:status` and puts
+    /// the note AFTER it, so a multi-line note never pushes details past the
+    /// first newline. `resolved_ask_id` reads `details["resolves"]` to decide an
+    /// answer-wake (#949), so if the bound could ever hide a real details block
+    /// the wake would silently stop firing -- a worse bug than the display
+    /// corruption the bound fixes. This test is the guard on that assumption.
+    #[test]
+    fn parse_signal_reads_details_when_the_note_spans_lines() {
+        let text = format_signal(
+            "legion",
+            "answer",
+            None,
+            Some("first line of the note\nsecond line, with a {brace} in prose"),
+            &[("resolves".to_string(), "ask-1".to_string())],
+        );
+
+        let sig = parse_signal(&text).expect("parses");
+
+        assert_eq!(
+            sig.details.get("resolves").map(String::as_str),
+            Some("ask-1"),
+            "details written on the signal's own line must survive a multi-line note; got {:?}",
+            sig.details
+        );
+        assert!(
+            crate::watch::resolves_pending_ask(&text),
+            "the answer-wake marker must still resolve through the routing predicate"
+        );
+    }
+
+    /// The bound must not break a real signal: `legion signal` writes the
+    /// details block on the signal's own line, and that must still parse.
+    #[test]
+    fn parse_signal_still_reads_a_first_line_details_block() {
+        let sig = parse_signal("@kelex review:done {pr: 42}").expect("parses");
+
+        assert_eq!(sig.recipient, "kelex");
+        assert_eq!(sig.verb, "review");
+        assert_eq!(sig.status.as_deref(), Some("done"));
+        assert_eq!(sig.details.get("pr").map(String::as_str), Some("42"));
+    }
 
     #[test]
     fn is_signal_detects_at_prefix() {
@@ -652,19 +695,6 @@ mod tests {
     }
 
     #[test]
-    fn format_signal_compact_display() {
-        let signal = Signal {
-            recipient: "legion".into(),
-            verb: "review".into(),
-            status: Some("approved".into()),
-            details: HashMap::new(),
-            trailing: None,
-        };
-        let output = format_signal_compact(&signal, "kelex", "2026-03-09");
-        assert_eq!(output, "[kelex] @legion review:approved  (2026-03-09)");
-    }
-
-    #[test]
     fn roundtrip_format_parse() {
         let formatted = format_signal(
             "platform",
@@ -768,21 +798,6 @@ mod tests {
         assert!(
             is_self_address(&["legion".to_string()], "@legion"),
             "@legion with leading @ must still be caught as self-address"
-        );
-    }
-
-    #[test]
-    fn compact_display_with_note_no_double_dashes() {
-        let formatted = format_signal("all", "announce", None, Some("Phase 2.1 shipped"), &[]);
-        let parsed = parse_signal(&formatted).unwrap();
-        let compact = format_signal_compact(&parsed, "legion", "2026-03-09");
-        assert!(
-            !compact.contains("-- --"),
-            "should not have double dashes: {compact}"
-        );
-        assert!(
-            compact.contains("Phase 2.1 shipped"),
-            "should contain note: {compact}"
         );
     }
 }
