@@ -152,6 +152,9 @@ pub fn bullpen_archived(db: &Database) -> Result<Vec<Reflection>> {
 
 /// Indent every continuation line of a post body.
 ///
+/// Both bullet renderers that inject third-party text into an agent's context
+/// use this: `format_bullpen` here, and `watch::signals::build_wake_prompt`.
+///
 /// `format_bullpen` renders one post per line as `- [repo] text (date)`, so a
 /// body containing a newline followed by `- [other-repo] FORGED` would render
 /// as a second, structurally indistinguishable entry attributed to a repo that
@@ -164,7 +167,7 @@ pub fn bullpen_archived(db: &Database) -> Result<Vec<Reflection>> {
 /// showed stored text, an `@`-prefixed post was collapsed onto one line by the
 /// reconstruction path, which neutralized the forgery by accident rather than
 /// by design.
-fn indent_continuation_lines(text: &str) -> String {
+pub(crate) fn indent_continuation_lines(text: &str) -> String {
     text.replace('\n', "\n  ")
 }
 
