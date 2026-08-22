@@ -308,13 +308,6 @@ mod tests {
         assert_eq!(count, 2);
     }
 
-    /// The regression that made this the default: a prose post opening with
-    /// `@name` armed `parse_signal`, which claimed the first `{` ANYWHERE in
-    /// the body as its details block. `format_bullpen` then rendered a
-    /// RECONSTRUCTION, hoisting that span up beside the verb and gutting the
-    /// sentence it came from. Reported from the field (shingle, 2026-08-22)
-    /// as a post whose text said a tool WORKED rendering with the failure
-    /// marker as its headline -- the inverted meaning, not a cosmetic slip.
     /// #943: a body containing a line shaped like this renderer's own bullet
     /// prefix must not render as a second, differently-attributed entry.
     /// Verbatim rendering is what makes this reachable -- the reconstruction
@@ -353,6 +346,13 @@ mod tests {
         );
     }
 
+    /// The regression that made this the default: a prose post opening with
+    /// `@name` armed `parse_signal`, which claimed the first `{` ANYWHERE in
+    /// the body as its details block. `format_bullpen` then rendered a
+    /// RECONSTRUCTION, hoisting that span up beside the verb and gutting the
+    /// sentence it came from. Reported from the field (shingle, 2026-08-22)
+    /// as a post whose text said a tool WORKED rendering with the failure
+    /// marker as its headline -- the inverted meaning, not a cosmetic slip.
     #[test]
     fn format_bullpen_renders_at_prefixed_prose_verbatim() {
         let text = "@rafters EVAL of 0.2.3, plus the calibration run.\n\n\
