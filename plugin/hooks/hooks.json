@@ -26,6 +26,16 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session-lock.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
