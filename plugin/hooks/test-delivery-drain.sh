@@ -74,6 +74,14 @@ assert_empty "a second PostToolUse in the window is still debounced" "$pt_out"
 stop_out=$(run_hook '{"hook_event_name":"Stop","cwd":"/tmp/legion-test","session_id":"drain-test-stop","tool_name":""}')
 assert_contains "Stop within the debounce window still drains" "$stop_out" "turn-end drain"
 assert_contains "the Stop drain tags the Stop event" "$stop_out" '"hookEventName": "Stop"'
+
+# The Stop drain wrote the sentinel, so a tool-call flurry right after it is
+# debounced as before -- the exemption is for Stop only, not a reset of the
+# window (#1000 Behavior: "A Stop drain still writes the sentinel"). With
+# FAKE_DELIVER_DRAIN still set, a non-debounced PostToolUse would surface
+# "turn-end drain"; asserting empty proves the Stop-written sentinel held.
+post_stop_out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"drain-test-stop","tool_name":"Edit"}')
+assert_empty "a PostToolUse right after the Stop is debounced by the Stop-written sentinel" "$post_stop_out"
 unset LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS FAKE_DELIVER_DRAIN
 
 echo "==> delivery with no MCP subprocess: the hook lane delivers without ever invoking legion mcp"
