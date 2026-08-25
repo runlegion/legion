@@ -236,6 +236,119 @@ fn uncertainty_roll_produces_a_calibration_snapshot() {
     assert_eq!(arr[0]["brier_score"], 0.0);
 }
 
+#[test]
+fn uncertainty_roll_spread_produces_one_snapshot_row_per_bucket() {
+    // #359 acceptance: "emit fake predictions across a cohort with a
+    // confidence spread, witness them, run roll, assert snapshot rows
+    // match expected buckets" -- driven through the real `legion
+    // uncertainty` CLI surface (emit/witness/roll/calibration), not the
+    // storage layer directly.
+    //
+    // `cohort_key` is itself derived from (surface, model, model_version,
+    // confidence-decile) at emit time (`uncertainty::types::cohort_key`),
+    // so three predictions spread across three different deciles land in
+    // THREE cohorts, not one -- each contributing exactly one bucket to
+    // this surface's reliability diagram. That is the real shape #359's
+    // daemon cron will see in production, so `cohorts_rolled` and
+    // `buckets_written` are equal here (3 and 3), unlike the storage-layer
+    // test below which forces multiple buckets into a single cohort to
+    // exercise `roll_calibration`'s internal fan-out directly.
+    //
+    // Three buckets, two predictions each: enough to prove `roll` emits
+    // multiple distinct snapshot rows end-to-end without the process-spawn
+    // cost of a ~100-prediction run through the CLI (100 emits + 100
+    // witnesses = 200 spawned binaries). The exhaustive 100-prediction /
+    // all-ten-bucket bucket-math case lives at the storage layer
+    // (`uncertainty::storage::tests::roll_calibration_spread_across_all_ten_buckets`),
+    // where it runs in milliseconds against an in-memory db.
+    let dir = tempfile::tempdir().unwrap();
+    let surface = "legion.spread-test";
+
+    // (claimed_confidence, outcome_correctness) pairs, two per bucket, for
+    // buckets 1 ([0.1,0.2)), 4 ([0.4,0.5)), and 8 ([0.8,0.9)).
+    let cases: &[(f64, f64)] = &[
+        (0.15, 0.1),
+        (0.18, 0.2),
+        (0.45, 0.5),
+        (0.48, 0.4),
+        (0.85, 0.9),
+        (0.88, 0.8),
+    ];
+
+    for (i, (claimed, outcome)) in cases.iter().enumerate() {
+        let fingerprint = format!("fp-spread-{i}");
+        let emit = run_ok(legion_cmd(dir.path()).args([
+            "uncertainty",
+            "emit",
+            "--surface",
+            surface,
+            "--feature-key",
+            "scip.refactor",
+            "--input-fingerprint",
+            &fingerprint,
+            "--model",
+            "claude-opus-4-7",
+            "--model-version",
+            "4.7",
+            "--claimed-confidence",
+            &claimed.to_string(),
+            "--payload",
+            "{}",
+        ]));
+        let emit_out: serde_json::Value = serde_json::from_str(emit.trim()).unwrap();
+        let id = emit_out["id"].as_str().unwrap().to_string();
+
+        run_ok(legion_cmd(dir.path()).args([
+            "uncertainty",
+            "witness",
+            &id,
+            "--outcome-label",
+            "shipped",
+            "--outcome-correctness",
+            &outcome.to_string(),
+        ]));
+    }
+
+    let roll_stdout = run_ok(legion_cmd(dir.path()).args(["uncertainty", "roll", "--json"]));
+    let roll_out: serde_json::Value = serde_json::from_str(roll_stdout.trim()).unwrap();
+    // Three deciles touched -> three distinct cohort_keys -> three cohorts,
+    // each rolling exactly one bucket.
+    assert_eq!(roll_out["cohorts_rolled"], 3);
+    assert_eq!(roll_out["buckets_written"], 3);
+    assert_eq!(roll_out["predictions_scored"], 6);
+
+    let calibration_stdout = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "calibration",
+        "--surface",
+        surface,
+        "--json",
+    ]));
+    let snaps: serde_json::Value = serde_json::from_str(calibration_stdout.trim()).unwrap();
+    let arr = snaps.as_array().unwrap();
+    assert_eq!(arr.len(), 3, "expected one row per populated bucket");
+
+    // list_calibration_snapshots orders by bucket_lower ASC.
+    let expected_lowers = [0.1, 0.4, 0.8];
+    let expected_uppers = [0.2, 0.5, 0.9];
+    for (row, (expected_lower, expected_upper)) in arr
+        .iter()
+        .zip(expected_lowers.iter().zip(expected_uppers.iter()))
+    {
+        assert_eq!(row["prediction_count"], 2);
+        let lower = row["bucket_lower"].as_f64().unwrap();
+        let upper = row["bucket_upper"].as_f64().unwrap();
+        assert!(
+            (lower - expected_lower).abs() < 1e-9,
+            "bucket_lower {lower} should be {expected_lower}"
+        );
+        assert!(
+            (upper - expected_upper).abs() < 1e-9,
+            "bucket_upper {upper} should be {expected_upper}"
+        );
+    }
+}
+
 // Gated on #[cfg(unix)] because the test spawns bash to run the hook
 // scripts directly. Same gate pattern other shell-script-bearing tests
 // in this file use. Windows CI still runs every cargo-only test in the

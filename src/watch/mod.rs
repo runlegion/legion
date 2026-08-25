@@ -419,6 +419,16 @@ impl WatchLoop {
         // health pressure must not delay them. Each is fail-open: an error
         // is logged and the poll cycle continues, matching every other
         // maintenance sweep in this file.
+        //
+        // Restart cost: `last_orphan_sweep`/`last_calibration_roll` start
+        // `None`, and `interval_elapsed` treats `None` as due -- so every
+        // daemon start runs BOTH jobs immediately, including a full
+        // calibration-roll, even if the previous process ran one seconds
+        // before restarting. This is accepted, not a bug: both jobs are
+        // idempotent (soft-delete + insert), the in-process-only state is
+        // what the #359 scope deliberately chose over adding config/schema
+        // for the cadence, and a mints-a-tombstone-per-restart cost is
+        // bounded by however often the daemon actually restarts.
         let cron_now = Instant::now();
         if interval_elapsed(self.last_orphan_sweep, ORPHAN_SWEEP_MIN_INTERVAL, cron_now) {
             run_orphan_sweep(&self.db, self.log_prefix);
@@ -1837,5 +1847,64 @@ mod tests {
             crate::uncertainty::types::PredictionState::Orphaned,
             "tick_poll must run the #359 orphan-sweep job and orphan the stale prediction"
         );
+    }
+
+    /// End-to-end proof the calibration-roll job is actually wired to
+    /// `Database::roll_calibration`, symmetric with the orphan-sweep wiring
+    /// test above: on an empty db `run_calibration_roll` is a no-op, so
+    /// only seeding a witnessed prediction and observing a snapshot appear
+    /// proves the call is real (a timestamp-only assertion would pass even
+    /// if the wiring silently called the wrong function).
+    #[test]
+    fn watch_loop_tick_poll_calibration_roll_produces_a_snapshot() {
+        use crate::uncertainty::types::{
+            Confidence, Correctness, OutcomeLabel, Prediction, PredictionInput,
+        };
+
+        let (db, _index, _dir) = test_storage();
+        let input = PredictionInput {
+            surface: "legion.task".into(),
+            feature_key: "test.feature".into(),
+            input_fingerprint: "fp-cron-roll-test".into(),
+            model: "claude-opus-4-7".into(),
+            model_version: "4.7".into(),
+            claimed_confidence: Confidence::from_f64(0.8).unwrap(),
+            prediction_payload: serde_json::json!({}),
+            orphan_after: None,
+        };
+        let mut prediction = Prediction::new(input);
+        db.insert_prediction(&prediction)
+            .expect("insert prediction");
+        prediction
+            .witness(
+                OutcomeLabel::Shipped,
+                serde_json::json!({}),
+                Correctness::from_f64(0.8).unwrap(),
+                "2026-06-01T00:00:00+00:00",
+            )
+            .expect("witness prediction");
+        db.update_prediction(&prediction)
+            .expect("persist witnessed prediction");
+
+        assert!(
+            db.list_calibration_snapshots(Some("legion.task"), None)
+                .expect("list snapshots before tick")
+                .is_empty(),
+            "no snapshot should exist before the daemon cron has run"
+        );
+
+        let mut state = test_watch_loop(db, "[legion test]");
+        state.tick_poll();
+
+        let snaps = state
+            .db
+            .list_calibration_snapshots(Some("legion.task"), None)
+            .expect("list snapshots after tick");
+        assert_eq!(
+            snaps.len(),
+            1,
+            "tick_poll must run the #359 calibration-roll job and produce a snapshot"
+        );
+        assert_eq!(snaps[0].prediction_count, 1);
     }
 }

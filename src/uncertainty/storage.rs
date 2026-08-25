@@ -819,6 +819,173 @@ mod tests {
         assert!((snap.brier_score - 0.06625).abs() < 1e-9);
     }
 
+    /// Seed a witnessed prediction under a caller-chosen `cohort_key`
+    /// rather than the one `Prediction::new` derives from
+    /// `claimed_confidence` (see `cohort_key()` in `types.rs`). Real emit
+    /// traffic never does this -- `cohort_key` is itself decile-derived, so
+    /// two predictions with different tenths-bucket confidences always land
+    /// in different cohorts. `roll_calibration`'s per-cohort bucketing must
+    /// still be correct if it is ever handed a cohort spanning multiple
+    /// deciles (a future cohort-key scheme change, backfilled/migrated
+    /// data, or hand-authored rows), so this helper forces that shape
+    /// directly rather than relying on it to arise naturally.
+    fn seed_witnessed_with_cohort(
+        db: &crate::db::Database,
+        cohort_key: &str,
+        claimed: f64,
+        outcome: f64,
+    ) -> Prediction {
+        let input = PredictionInput {
+            surface: "legion.spread".into(),
+            feature_key: "test.feature".into(),
+            input_fingerprint: format!("fp-{claimed}-{outcome}-{}", uuid::Uuid::now_v7()),
+            model: "claude-opus-4-7".into(),
+            model_version: "4.7".into(),
+            claimed_confidence: Confidence::from_f64(claimed).unwrap(),
+            prediction_payload: serde_json::json!({}),
+            orphan_after: None,
+        };
+        let mut p = Prediction::new(input);
+        p.cohort_key = cohort_key.to_string();
+        db.insert_prediction(&p).unwrap();
+        p.witness(
+            OutcomeLabel::Shipped,
+            serde_json::json!({}),
+            Correctness::from_f64(outcome).unwrap(),
+            "2026-06-01T00:00:00+00:00",
+        )
+        .unwrap();
+        db.update_prediction(&p).unwrap();
+        p
+    }
+
+    /// Same override as `seed_witnessed_with_cohort`, for an orphaned row.
+    fn seed_orphaned_with_cohort(db: &crate::db::Database, cohort_key: &str, claimed: f64) {
+        let input = PredictionInput {
+            surface: "legion.spread".into(),
+            feature_key: "test.feature".into(),
+            input_fingerprint: format!("fp-orphan-{claimed}-{}", uuid::Uuid::now_v7()),
+            model: "claude-opus-4-7".into(),
+            model_version: "4.7".into(),
+            claimed_confidence: Confidence::from_f64(claimed).unwrap(),
+            prediction_payload: serde_json::json!({}),
+            orphan_after: Some("2026-05-01T00:00:00+00:00".into()),
+        };
+        let mut p = Prediction::new(input);
+        p.cohort_key = cohort_key.to_string();
+        p.orphan("2026-06-01T00:00:00+00:00").unwrap();
+        db.insert_prediction(&p).unwrap();
+    }
+
+    /// #359 acceptance: "roll produces correct bucket counts/means/Brier".
+    ///
+    /// Covers what the single-bucket tests above cannot: multi-bucket
+    /// fan-out through `roll_calibration`'s `BTreeMap<i64, Vec<_>>`
+    /// grouping, the `bucket_lower`/`bucket_upper` assignment for every one
+    /// of the ten fixed buckets, and the
+    /// `((claimed * 10.0).floor() as i64).clamp(0, 9)` boundary --
+    /// `claimed_confidence = 1.0` floors to 10 before the clamp pulls it
+    /// back to bucket 9, a branch no other test in this file exercises.
+    ///
+    /// 100 witnessed predictions, all forced into ONE cohort via
+    /// `seed_witnessed_with_cohort` (see that helper's doc comment for why
+    /// this cannot happen through the normal emit path), spread across all
+    /// ten deciles.
+    #[test]
+    fn roll_calibration_spread_across_all_ten_buckets() {
+        let db = test_db();
+        let cohort_key = "legion.spread:claude-opus-4-7:4.7:forced-multi-bucket";
+
+        // Buckets 1..=8 ([0.1,0.2) .. [0.8,0.9)): 10 perfectly-calibrated
+        // predictions each, claimed == outcome == the bucket midpoint.
+        for bucket_idx in 1..=8i64 {
+            let midpoint = (bucket_idx as f64 * 10.0 + 5.0) / 100.0;
+            for _ in 0..10 {
+                seed_witnessed_with_cohort(&db, cohort_key, midpoint, midpoint);
+            }
+        }
+
+        // Bucket 0 ([0.0, 0.1)): 9 at the midpoint plus the 0.0 lower
+        // endpoint -- exercises idx == 0 via both the ordinary floor path
+        // and the boundary value itself.
+        for _ in 0..9 {
+            seed_witnessed_with_cohort(&db, cohort_key, 0.05, 0.05);
+        }
+        seed_witnessed_with_cohort(&db, cohort_key, 0.0, 0.0);
+
+        // Bucket 9 ([0.9, 1.0]): 9 at the midpoint plus the 1.0 upper
+        // endpoint -- the only input in this suite that exercises the
+        // `.clamp(0, 9)` branch (`(1.0 * 10.0).floor() as i64 == 10`).
+        for _ in 0..9 {
+            seed_witnessed_with_cohort(&db, cohort_key, 0.95, 0.95);
+        }
+        seed_witnessed_with_cohort(&db, cohort_key, 1.0, 1.0);
+
+        // Three orphans in the same cohort: must not move any bucket's
+        // math, but must show up identically on every bucket row -- the
+        // schema's "silence is signal" invariant makes orphan_count a
+        // cohort-wide count replicated onto every bucket, not a per-bucket
+        // count.
+        seed_orphaned_with_cohort(&db, cohort_key, 0.5);
+        seed_orphaned_with_cohort(&db, cohort_key, 0.6);
+        seed_orphaned_with_cohort(&db, cohort_key, 0.7);
+
+        let summary = db.roll_calibration("2026-06-04T00:00:00+00:00").unwrap();
+        assert_eq!(summary.cohorts_rolled, 1);
+        assert_eq!(summary.buckets_written, 10);
+        assert_eq!(summary.predictions_scored, 100);
+
+        let snaps = db
+            .list_calibration_snapshots(Some("legion.spread"), Some("claude-opus-4-7"))
+            .unwrap();
+        assert_eq!(
+            snaps.len(),
+            10,
+            "every one of the ten fixed buckets must produce exactly one row"
+        );
+
+        // list_calibration_snapshots orders by bucket_lower ASC, so index i
+        // corresponds to bucket i.
+        for (idx, snap) in snaps.iter().enumerate() {
+            assert_eq!(
+                snap.prediction_count, 10,
+                "bucket {idx} should have exactly 10 predictions"
+            );
+            assert_eq!(
+                snap.orphan_count, 3,
+                "orphan_count must replicate cohort-wide onto bucket {idx}"
+            );
+            let expected_lower = idx as f64 / 10.0;
+            let expected_upper = if idx == 9 {
+                1.0
+            } else {
+                (idx as f64 + 1.0) / 10.0
+            };
+            assert!(
+                (snap.bucket_lower - expected_lower).abs() < 1e-9,
+                "bucket {idx} lower should be {expected_lower}, got {}",
+                snap.bucket_lower
+            );
+            assert!(
+                (snap.bucket_upper - expected_upper).abs() < 1e-9,
+                "bucket {idx} upper should be {expected_upper}, got {}",
+                snap.bucket_upper
+            );
+            // Every bucket here is perfectly calibrated (claimed == outcome
+            // for every seeded row): Brier must be ~0.
+            assert!(
+                snap.brier_score.abs() < 1e-9,
+                "bucket {idx} brier should be ~0 (perfectly calibrated), got {}",
+                snap.brier_score
+            );
+        }
+
+        // Bucket 0's claimed mean: (9 * 0.05 + 1 * 0.0) / 10 = 0.045.
+        assert!((snaps[0].claimed_confidence - 0.045).abs() < 1e-9);
+        // Bucket 9's claimed mean: (9 * 0.95 + 1 * 1.0) / 10 = 0.955.
+        assert!((snaps[9].claimed_confidence - 0.955).abs() < 1e-9);
+    }
+
     #[test]
     fn roll_calibration_perfectly_calibrated_cohort_yields_zero_brier() {
         let db = test_db();
