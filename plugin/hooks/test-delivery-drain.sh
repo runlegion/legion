@@ -54,6 +54,28 @@ calls_after_second=$(grep -c '^deliver drain' "$LEGION_STUB_LOG")
 assert_eq "still only one deliver-drain call after the debounced firing" "$calls_after_second" "1"
 unset LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS FAKE_DELIVER_DRAIN
 
+echo "==> stop bypasses the debounce: a Stop within the window still drains (#1000)"
+: > "$LEGION_STUB_LOG"
+export LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS=60
+export FAKE_DELIVER_DRAIN="[Legion] Bullpen (1 posts):
+- [rafters] turn-end drain (2026-08-25)"
+
+# Prime the sentinel with a PostToolUse drain, so the debounce window is open.
+prime_out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"drain-test-stop","tool_name":"Edit"}')
+assert_contains "priming PostToolUse drains" "$prime_out" "turn-end drain"
+
+# Regression guard: a non-Stop event inside the window is still debounced --
+# the exemption must not have disabled the debounce wholesale.
+pt_out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"drain-test-stop","tool_name":"Edit"}')
+assert_empty "a second PostToolUse in the window is still debounced" "$pt_out"
+
+# The fix: a Stop in the same window MUST still drain -- it fires once per
+# turn and is the last chance before the session goes idle.
+stop_out=$(run_hook '{"hook_event_name":"Stop","cwd":"/tmp/legion-test","session_id":"drain-test-stop","tool_name":""}')
+assert_contains "Stop within the debounce window still drains" "$stop_out" "turn-end drain"
+assert_contains "the Stop drain tags the Stop event" "$stop_out" '"hookEventName": "Stop"'
+unset LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS FAKE_DELIVER_DRAIN
+
 echo "==> delivery with no MCP subprocess: the hook lane delivers without ever invoking legion mcp"
 : > "$LEGION_STUB_LOG"
 export FAKE_DELIVER_DRAIN="[Legion] Bullpen (1 posts):
