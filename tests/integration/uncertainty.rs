@@ -237,6 +237,131 @@ fn uncertainty_roll_produces_a_calibration_snapshot() {
 }
 
 #[test]
+fn uncertainty_sweep_now_dispatches_to_sweep_orphans_only() {
+    // #359 acceptance: "Both jobs runnable manually via `legion uncertainty
+    // calibrate-now` / `legion uncertainty sweep-now` for testing" --
+    // `sweep-now` must call ONLY Database::sweep_orphans, unlike `roll`
+    // (sweep-then-roll under one shared `now`). The sweep SQL semantics
+    // themselves (which rows actually flip to orphaned) are already
+    // covered by uncertainty::storage::tests::
+    // sweep_orphans_marks_only_emitted_past_orphan_after; this test proves
+    // the CLI dispatch and the single-job isolation instead: a witnessed
+    // prediction sitting ready to be rolled must NOT produce a calibration
+    // snapshot as a side effect of running sweep-now.
+    let dir = tempfile::tempdir().unwrap();
+    let emit = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "emit",
+        "--surface",
+        "legion.sweep-now-test",
+        "--feature-key",
+        "scip.refactor",
+        "--input-fingerprint",
+        "fp-sweep-now-1",
+        "--model",
+        "claude-opus-4-7",
+        "--model-version",
+        "4.7",
+        "--claimed-confidence",
+        "0.9",
+        "--payload",
+        "{}",
+    ]));
+    let emit_out: serde_json::Value = serde_json::from_str(emit.trim()).unwrap();
+    let id = emit_out["id"].as_str().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "witness",
+        id,
+        "--outcome-label",
+        "shipped",
+        "--outcome-correctness",
+        "0.9",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["uncertainty", "sweep-now", "--json"]));
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["predictions_swept"], 0);
+    // Only key in the sweep-now JSON shape -- proves it does not also
+    // report roll output.
+    assert!(parsed.get("cohorts_rolled").is_none());
+
+    let calibration_stdout = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "calibration",
+        "--surface",
+        "legion.sweep-now-test",
+        "--json",
+    ]));
+    let snaps: serde_json::Value = serde_json::from_str(calibration_stdout.trim()).unwrap();
+    assert!(
+        snaps.as_array().unwrap().is_empty(),
+        "sweep-now must not also roll calibration"
+    );
+}
+
+#[test]
+fn uncertainty_calibrate_now_dispatches_to_roll_calibration_only() {
+    // #359 acceptance, other half: `calibrate-now` must call ONLY
+    // Database::roll_calibration, not sweep first. Mirrors
+    // `uncertainty_roll_produces_a_calibration_snapshot` but through the
+    // single-job verb, proving the CLI dispatch and JSON shape
+    // (cohorts_rolled/buckets_written/predictions_scored, no
+    // predictions_swept key).
+    let dir = tempfile::tempdir().unwrap();
+    let emit = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "emit",
+        "--surface",
+        "legion.calibrate-now-test",
+        "--feature-key",
+        "scip.refactor",
+        "--input-fingerprint",
+        "fp-calibrate-now-1",
+        "--model",
+        "claude-opus-4-7",
+        "--model-version",
+        "4.7",
+        "--claimed-confidence",
+        "0.9",
+        "--payload",
+        "{}",
+    ]));
+    let emit_out: serde_json::Value = serde_json::from_str(emit.trim()).unwrap();
+    let id = emit_out["id"].as_str().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "witness",
+        id,
+        "--outcome-label",
+        "shipped",
+        "--outcome-correctness",
+        "0.9",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["uncertainty", "calibrate-now", "--json"]));
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["cohorts_rolled"], 1);
+    assert_eq!(parsed["buckets_written"], 1);
+    assert_eq!(parsed["predictions_scored"], 1);
+    assert!(parsed.get("predictions_swept").is_none());
+
+    let calibration_stdout = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "calibration",
+        "--surface",
+        "legion.calibrate-now-test",
+        "--json",
+    ]));
+    let snaps: serde_json::Value = serde_json::from_str(calibration_stdout.trim()).unwrap();
+    let arr = snaps.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["prediction_count"], 1);
+}
+
+#[test]
 fn uncertainty_roll_spread_produces_one_snapshot_row_per_bucket() {
     // #359 acceptance: "emit fake predictions across a cohort with a
     // confidence spread, witness them, run roll, assert snapshot rows
