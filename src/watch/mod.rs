@@ -65,6 +65,20 @@ pub fn resolve_host_id() -> String {
 /// flooding it. Shared by both watch modes so the throttle is identical.
 pub const HEARTBEAT_LOG_CADENCE: u64 = 10;
 
+/// Minimum spacing between #359 orphan-sweep runs inside `tick_poll`.
+///
+/// Deliberately in-process loop state (see `WatchLoop::last_orphan_sweep`)
+/// rather than config: the cadence is coarse enough that a daemon restart
+/// re-running the job a little early is harmless -- `sweep_orphans` is a
+/// bounded, idempotent `UPDATE ... WHERE state = 'emitted'`.
+pub const ORPHAN_SWEEP_MIN_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Minimum spacing between #359 calibration-roll runs inside `tick_poll`.
+/// Nightly cadence; see `ORPHAN_SWEEP_MIN_INTERVAL` for the in-process-state
+/// rationale. `roll_calibration` replaces each cohort's snapshot rows
+/// idempotently (soft-delete + insert), so an early re-run is harmless too.
+pub const CALIBRATION_ROLL_MIN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Shared per-iteration state for the watch poll loop.
 ///
 /// Both the standalone `watch::run` (sync, `std::thread::sleep`) and the
@@ -105,6 +119,16 @@ pub struct WatchLoop {
     pub retention_cutoff: chrono::Duration,
     /// Running count of health ticks elapsed; drives the throttled heartbeat log.
     pub health_tick_count: u64,
+    /// Wall-clock time the #359 orphan-sweep job last ran, or `None` if it
+    /// has never run this process lifetime. In-process loop state only --
+    /// mirrors `health_tick_count`'s throttle, not config or schema, so a
+    /// daemon restart simply re-runs the job on its next due check rather
+    /// than needing a persisted cadence.
+    pub last_orphan_sweep: Option<Instant>,
+    /// Wall-clock time the #359 calibration-roll job last ran, or `None` if
+    /// it has never run this process lifetime. Same in-process-only
+    /// convention as `last_orphan_sweep`.
+    pub last_calibration_roll: Option<Instant>,
     /// PID of the running watch process (daemon or standalone).
     pub pid: u32,
     /// Cargo package version string for heartbeat rows.
@@ -161,6 +185,8 @@ impl WatchLoop {
             spawn_mode,
             retention_cutoff: chrono::Duration::days(config.retention_days as i64),
             health_tick_count: 0,
+            last_orphan_sweep: None,
+            last_calibration_roll: None,
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION"),
             log_prefix,
@@ -385,6 +411,81 @@ impl WatchLoop {
         }
         if let Err(e) = self.db.prune_watch_redelivery(&cutoff) {
             eprintln!("{} watch_redelivery prune error: {e}", self.log_prefix);
+        }
+
+        // #359: uncertainty-engine daemon cron. Runs unconditionally (not
+        // gated behind the spawn gate above) -- these are bounded DB
+        // maintenance jobs unrelated to agent spawning, so quota-panic or
+        // health pressure must not delay them. Each is fail-open: an error
+        // is logged and the poll cycle continues, matching every other
+        // maintenance sweep in this file.
+        //
+        // Restart cost: `last_orphan_sweep`/`last_calibration_roll` start
+        // `None`, and `interval_elapsed` treats `None` as due -- so every
+        // daemon start runs BOTH jobs immediately, including a full
+        // calibration-roll, even if the previous process ran one seconds
+        // before restarting. This is accepted, not a bug: both jobs are
+        // idempotent (soft-delete + insert), the in-process-only state is
+        // what the #359 scope deliberately chose over adding config/schema
+        // for the cadence, and a mints-a-tombstone-per-restart cost is
+        // bounded by however often the daemon actually restarts.
+        let cron_now = Instant::now();
+        if interval_elapsed(self.last_orphan_sweep, ORPHAN_SWEEP_MIN_INTERVAL, cron_now) {
+            run_orphan_sweep(&self.db, self.log_prefix);
+            self.last_orphan_sweep = Some(cron_now);
+        }
+        if interval_elapsed(
+            self.last_calibration_roll,
+            CALIBRATION_ROLL_MIN_INTERVAL,
+            cron_now,
+        ) {
+            run_calibration_roll(&self.db, self.log_prefix);
+            self.last_calibration_roll = Some(cron_now);
+        }
+    }
+}
+
+/// Pure predicate: has at least `interval` elapsed since `last_run`?
+/// `None` (never run) is always due. Pulled out of `tick_poll` so the
+/// daemon-tick cadence for the #359 cron jobs is unit-testable without
+/// spinning a real loop or waiting on wall-clock time -- mirrors the
+/// `wake_cap_reached` / `sample_crosses_threshold` pattern elsewhere in
+/// this module tree.
+fn interval_elapsed(last_run: Option<Instant>, interval: Duration, now: Instant) -> bool {
+    match last_run {
+        None => true,
+        Some(t) => now.saturating_duration_since(t) >= interval,
+    }
+}
+
+/// Run the #359 orphan-sweep job: mark stale `emitted` predictions
+/// `orphaned` past their `orphan_after` deadline. Fail-open -- an error is
+/// logged and swallowed so a bad row or a transient DB error never aborts
+/// the poll cycle (mirrors `reap_dead_pid_attempts` and the other
+/// `tick_health` reapers above).
+fn run_orphan_sweep(db: &Database, log_prefix: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    eprintln!("{log_prefix} uncertainty orphan-sweep: starting");
+    match db.sweep_orphans(&now) {
+        Ok(n) => eprintln!("{log_prefix} uncertainty orphan-sweep: complete, {n} orphaned"),
+        Err(e) => eprintln!("{log_prefix} uncertainty orphan-sweep: error: {e} -- continuing"),
+    }
+}
+
+/// Run the #359 calibration-roll job: recompute bucketed calibration
+/// snapshots for every cohort with witnessed data. Fail-open, same
+/// convention as `run_orphan_sweep`.
+fn run_calibration_roll(db: &Database, log_prefix: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    eprintln!("{log_prefix} uncertainty calibration-roll: starting");
+    match db.roll_calibration(&now) {
+        Ok(summary) => eprintln!(
+            "{log_prefix} uncertainty calibration-roll: complete, {} cohort(s), {} bucket(s), \
+             {} prediction(s) scored",
+            summary.cohorts_rolled, summary.buckets_written, summary.predictions_scored
+        ),
+        Err(e) => {
+            eprintln!("{log_prefix} uncertainty calibration-roll: error: {e} -- continuing")
         }
     }
 }
@@ -913,6 +1014,8 @@ mod tests {
             spawn_mode: SpawnMode::Print,
             retention_cutoff: chrono::Duration::days(7),
             health_tick_count: 0,
+            last_orphan_sweep: None,
+            last_calibration_roll: None,
             pid: std::process::id(),
             version: "0.0.0-test",
             log_prefix,
@@ -1633,5 +1736,175 @@ mod tests {
             1,
             "tick_health must wake the deferred work item's owner"
         );
+    }
+
+    // -- #359 uncertainty-engine daemon cron ---------------------------------
+
+    #[test]
+    fn interval_elapsed_true_when_never_run() {
+        let now = Instant::now();
+        assert!(interval_elapsed(None, Duration::from_secs(3600), now));
+    }
+
+    #[test]
+    fn interval_elapsed_false_before_interval() {
+        let now = Instant::now();
+        let last = now - Duration::from_secs(1800);
+        assert!(!interval_elapsed(
+            Some(last),
+            Duration::from_secs(3600),
+            now
+        ));
+    }
+
+    #[test]
+    fn interval_elapsed_true_at_and_after_interval() {
+        let now = Instant::now();
+        let exactly = now - Duration::from_secs(3600);
+        assert!(interval_elapsed(
+            Some(exactly),
+            Duration::from_secs(3600),
+            now
+        ));
+        let past = now - Duration::from_secs(3700);
+        assert!(interval_elapsed(Some(past), Duration::from_secs(3600), now));
+    }
+
+    /// `tick_poll` runs both #359 cron jobs on the first tick (never run
+    /// before -- `interval_elapsed` treats `None` as due) and skips them on
+    /// an immediately-following tick, since neither the 1-hour orphan-sweep
+    /// nor the 24-hour calibration-roll window has elapsed. Drives the real
+    /// `WatchLoop::tick_poll` (not the bare predicate) so the wiring itself
+    /// -- not just `interval_elapsed` in isolation -- is under test, without
+    /// spinning a real daemon or waiting on wall-clock time.
+    #[test]
+    fn watch_loop_tick_poll_runs_uncertainty_cron_on_first_tick_then_skips() {
+        let (db, _index, _dir) = test_storage();
+        let mut state = test_watch_loop(db, "[legion test]");
+
+        assert!(state.last_orphan_sweep.is_none());
+        assert!(state.last_calibration_roll.is_none());
+
+        state.tick_poll();
+
+        let first_sweep = state
+            .last_orphan_sweep
+            .expect("orphan-sweep must run on the first tick (never-run is due)");
+        let first_roll = state
+            .last_calibration_roll
+            .expect("calibration-roll must run on the first tick (never-run is due)");
+
+        state.tick_poll();
+
+        // Neither job's minimum interval has elapsed between the two ticks
+        // (they run back-to-back in the same test), so the last-run
+        // timestamps must not move.
+        assert_eq!(
+            state.last_orphan_sweep,
+            Some(first_sweep),
+            "orphan-sweep must be skipped inside its 1-hour minimum interval"
+        );
+        assert_eq!(
+            state.last_calibration_roll,
+            Some(first_roll),
+            "calibration-roll must be skipped inside its 24-hour minimum interval"
+        );
+    }
+
+    /// End-to-end proof the orphan-sweep job is actually wired to
+    /// `Database::sweep_orphans`, not just that the timestamp gate fires: a
+    /// prediction past its `orphan_after` deadline is `emitted` before the
+    /// tick and `orphaned` after it.
+    #[test]
+    fn watch_loop_tick_poll_orphan_sweep_transitions_stale_prediction() {
+        use crate::uncertainty::types::{Confidence, Prediction, PredictionInput};
+
+        let (db, _index, _dir) = test_storage();
+        let input = PredictionInput {
+            surface: "legion.task".into(),
+            feature_key: "test.feature".into(),
+            input_fingerprint: "fp-cron-test".into(),
+            model: "claude-opus-4-7".into(),
+            model_version: "4.7".into(),
+            claimed_confidence: Confidence::from_f64(0.8).unwrap(),
+            prediction_payload: serde_json::json!({}),
+            orphan_after: Some("2020-01-01T00:00:00+00:00".into()),
+        };
+        let prediction = Prediction::new(input);
+        db.insert_prediction(&prediction)
+            .expect("insert stale prediction");
+
+        let mut state = test_watch_loop(db, "[legion test]");
+        state.tick_poll();
+
+        let refreshed = state
+            .db
+            .get_prediction(&prediction.id)
+            .expect("get prediction")
+            .expect("prediction still exists");
+        assert_eq!(
+            refreshed.state,
+            crate::uncertainty::types::PredictionState::Orphaned,
+            "tick_poll must run the #359 orphan-sweep job and orphan the stale prediction"
+        );
+    }
+
+    /// End-to-end proof the calibration-roll job is actually wired to
+    /// `Database::roll_calibration`, symmetric with the orphan-sweep wiring
+    /// test above: on an empty db `run_calibration_roll` is a no-op, so
+    /// only seeding a witnessed prediction and observing a snapshot appear
+    /// proves the call is real (a timestamp-only assertion would pass even
+    /// if the wiring silently called the wrong function).
+    #[test]
+    fn watch_loop_tick_poll_calibration_roll_produces_a_snapshot() {
+        use crate::uncertainty::types::{
+            Confidence, Correctness, OutcomeLabel, Prediction, PredictionInput,
+        };
+
+        let (db, _index, _dir) = test_storage();
+        let input = PredictionInput {
+            surface: "legion.task".into(),
+            feature_key: "test.feature".into(),
+            input_fingerprint: "fp-cron-roll-test".into(),
+            model: "claude-opus-4-7".into(),
+            model_version: "4.7".into(),
+            claimed_confidence: Confidence::from_f64(0.8).unwrap(),
+            prediction_payload: serde_json::json!({}),
+            orphan_after: None,
+        };
+        let mut prediction = Prediction::new(input);
+        db.insert_prediction(&prediction)
+            .expect("insert prediction");
+        prediction
+            .witness(
+                OutcomeLabel::Shipped,
+                serde_json::json!({}),
+                Correctness::from_f64(0.8).unwrap(),
+                "2026-06-01T00:00:00+00:00",
+            )
+            .expect("witness prediction");
+        db.update_prediction(&prediction)
+            .expect("persist witnessed prediction");
+
+        assert!(
+            db.list_calibration_snapshots(Some("legion.task"), None)
+                .expect("list snapshots before tick")
+                .is_empty(),
+            "no snapshot should exist before the daemon cron has run"
+        );
+
+        let mut state = test_watch_loop(db, "[legion test]");
+        state.tick_poll();
+
+        let snaps = state
+            .db
+            .list_calibration_snapshots(Some("legion.task"), None)
+            .expect("list snapshots after tick");
+        assert_eq!(
+            snaps.len(),
+            1,
+            "tick_poll must run the #359 calibration-roll job and produce a snapshot"
+        );
+        assert_eq!(snaps[0].prediction_count, 1);
     }
 }

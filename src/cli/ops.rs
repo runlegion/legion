@@ -197,6 +197,42 @@ pub(crate) enum UncertaintyAction {
         json: bool,
     },
 
+    /// Run the calibration write side (#359): sweep stale `emitted`
+    /// predictions into `orphaned`, then roll fresh calibration snapshots
+    /// for every cohort with witnessed data. Both steps share one `now`
+    /// timestamp so a sweep-then-roll invocation is internally consistent
+    /// (a row orphaned by the sweep is excluded from the same roll's
+    /// bucket math, but still counted in that cohort's `orphan_count`).
+    Roll {
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run ONLY the orphan-sweep half of #359's write side: mark stale
+    /// `emitted` predictions `orphaned` past their `orphan_after` deadline.
+    /// This is the same job the daemon cron runs hourly
+    /// (`watch::WatchLoop::tick_poll`) -- exposed manually here so an
+    /// operator can force a sweep between daemon ticks without waiting, or
+    /// exercise it directly in a test. `roll` remains the daemon-equivalent
+    /// one-shot (sweep-then-roll) and the backfill entry point; this and
+    /// `calibrate-now` are the individual halves for manual/testing use.
+    SweepNow {
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run ONLY the calibration-roll half of #359's write side: recompute
+    /// bucketed calibration snapshots for every cohort with witnessed data.
+    /// Same daemon-cron-equivalent relationship as `sweep-now` above, but
+    /// for the nightly `roll_calibration` job.
+    CalibrateNow {
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Witness a `surface=legion.gate` prediction from a DECORRELATED
     /// source outside the review pipeline -- an operator (e.g. reading a
     /// pre-push diff, or a post-merge report) saying whether a recorded
@@ -494,6 +530,70 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
                 for r in &rows {
                     writeln!(out, "{:<32} {:<8}", r.surface, r.count)?;
                 }
+            }
+        }
+
+        UncertaintyAction::Roll { json } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            let swept = database
+                .sweep_orphans(&now)
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            let rolled = database
+                .roll_calibration(&now)
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            if json {
+                let out_json = serde_json::json!({
+                    "predictions_swept": swept,
+                    "cohorts_rolled": rolled.cohorts_rolled,
+                    "buckets_written": rolled.buckets_written,
+                    "predictions_scored": rolled.predictions_scored,
+                });
+                writeln!(out, "{}", serde_json::to_string(&out_json)?)?;
+            } else {
+                writeln!(
+                    out,
+                    "[legion uncertainty roll] swept {swept} orphan(s), rolled {} cohort(s) \
+                     into {} bucket(s) from {} scored prediction(s)",
+                    rolled.cohorts_rolled, rolled.buckets_written, rolled.predictions_scored,
+                )?;
+            }
+        }
+
+        UncertaintyAction::SweepNow { json } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            let swept = database
+                .sweep_orphans(&now)
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            if json {
+                let out_json = serde_json::json!({ "predictions_swept": swept });
+                writeln!(out, "{}", serde_json::to_string(&out_json)?)?;
+            } else {
+                writeln!(
+                    out,
+                    "[legion uncertainty sweep-now] swept {swept} orphan(s)"
+                )?;
+            }
+        }
+
+        UncertaintyAction::CalibrateNow { json } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            let rolled = database
+                .roll_calibration(&now)
+                .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
+            if json {
+                let out_json = serde_json::json!({
+                    "cohorts_rolled": rolled.cohorts_rolled,
+                    "buckets_written": rolled.buckets_written,
+                    "predictions_scored": rolled.predictions_scored,
+                });
+                writeln!(out, "{}", serde_json::to_string(&out_json)?)?;
+            } else {
+                writeln!(
+                    out,
+                    "[legion uncertainty calibrate-now] rolled {} cohort(s) into {} bucket(s) \
+                     from {} scored prediction(s)",
+                    rolled.cohorts_rolled, rolled.buckets_written, rolled.predictions_scored,
+                )?;
             }
         }
 
