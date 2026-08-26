@@ -16,6 +16,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{LegionError, Result};
+use crate::uncertainty::types::PredictionState;
 
 /// One row in `bypass.jsonl`. Captures who escaped which enforcement hook on
 /// what query, plus whether the index even had hits to redirect to. The last
@@ -173,6 +174,48 @@ pub fn etc_usage_log_path() -> PathBuf {
 /// failure must never fail the query that produced it.
 pub fn append_etc_usage(record: &EtcUsageRecord) -> Result<()> {
     append_jsonl(&etc_usage_log_path(), record)
+}
+
+/// One row per compare-and-swap conflict rejected on the UNATTENDED
+/// auto-witness path (#1003 follow-up). `witness_simplify_from_review_nonblocking`
+/// is deliberately non-blocking -- a witness failure must never break gate
+/// recording -- so a `PredictionStateConflict` there previously vanished into
+/// an `eprintln!` with no queryable trace. This record makes that specific
+/// failure countable without touching the swallow's non-blocking contract:
+/// the caller still swallows the error and returns `()`; this row is written
+/// alongside, best-effort, same as the other logs in this module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WitnessConflictRecord {
+    pub ts: DateTime<Utc>,
+    /// Uncertainty surface the witnessed prediction belongs to (always
+    /// `gate_trust::GATE_SURFACE` for this call site today; carried
+    /// explicitly so a reader never has to hardcode the assumption).
+    pub surface: String,
+    /// Gate skill whose prediction the witness attempt targeted (always
+    /// `gate_trust::SIMPLIFY_SKILL` for this call site today).
+    pub skill: String,
+    pub commit_hash: String,
+    pub prediction_id: String,
+    /// The state the CAS write expected the row to still be in -- what the
+    /// witness path read before its in-memory transition. The DB's actual
+    /// current state is not captured here (`UncertaintyError::PredictionStateConflict`
+    /// does not carry it); a reader confirms the resurrection-shaped race by
+    /// cross-referencing `prediction_id` against the row's current state
+    /// (e.g. `legion uncertainty orphans`), not from this field alone.
+    pub expected_state: PredictionState,
+}
+
+/// Resolve the canonical witness-conflict log path (sibling of `bypass.jsonl`,
+/// same `XDG_STATE_HOME` / `$HOME/.local/state/legion` resolution as
+/// `bypass_log_path` / `delivery_log_path` / `etc_usage_log_path`).
+pub fn witness_conflict_log_path() -> PathBuf {
+    bypass_log_dir().join("witness-conflicts.jsonl")
+}
+
+/// Append one record. Best-effort: a telemetry write failure must never fail
+/// the witness call that produced it (matches append_bypass / append_delivery).
+pub fn append_witness_conflict(record: &WitnessConflictRecord) -> Result<()> {
+    append_jsonl(&witness_conflict_log_path(), record)
 }
 
 /// Append one serializable record as a single JSONL line, creating parent
@@ -514,6 +557,52 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         let parsed: EtcUsageRecord = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(parsed, rec);
+    }
+
+    /// Mirrors `etc_usage_round_trip`: write via the shared `append_jsonl`
+    /// helper to a temp path (not the process-global `witness_conflict_log_path()`
+    /// -- see `bypass_log_path_uses_xdg_state_home`'s comment on why), read
+    /// the raw line back, assert equality.
+    #[test]
+    fn witness_conflict_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("witness-conflicts.jsonl");
+        let rec = WitnessConflictRecord {
+            ts: Utc::now(),
+            surface: "legion.gate".to_string(),
+            skill: "legion-simplify".to_string(),
+            commit_hash: "deadbeefcafe".to_string(),
+            prediction_id: "pred-1".to_string(),
+            expected_state: PredictionState::Emitted,
+        };
+        append_jsonl(&path, &rec).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: WitnessConflictRecord = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(parsed, rec);
+    }
+
+    /// `expected_state` must serialize to the bare lowercase string
+    /// `PredictionState::as_str()` produces -- catches an accidental future
+    /// change to `PredictionState`'s serde attributes silently breaking this
+    /// record's shape.
+    #[test]
+    fn witness_conflict_expected_state_serializes_to_as_str_form() {
+        let rec = WitnessConflictRecord {
+            ts: Utc::now(),
+            surface: "legion.gate".to_string(),
+            skill: "legion-simplify".to_string(),
+            commit_hash: "deadbeefcafe".to_string(),
+            prediction_id: "pred-1".to_string(),
+            expected_state: PredictionState::Emitted,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(
+            json.contains(&format!(
+                "\"expected_state\":\"{}\"",
+                PredictionState::Emitted.as_str()
+            )),
+            "expected_state must serialize to the bare as_str() form; got: {json}"
+        );
     }
 
     /// `extract` (#708) rows use the same schema: `pattern` carries the
