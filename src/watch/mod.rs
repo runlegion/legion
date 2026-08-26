@@ -1875,6 +1875,7 @@ mod tests {
         let mut prediction = Prediction::new(input);
         db.insert_prediction(&prediction)
             .expect("insert prediction");
+        let prev_state = prediction.state;
         prediction
             .witness(
                 OutcomeLabel::Shipped,
@@ -1883,7 +1884,7 @@ mod tests {
                 "2026-06-01T00:00:00+00:00",
             )
             .expect("witness prediction");
-        db.update_prediction(&prediction)
+        db.update_prediction(&prediction, prev_state)
             .expect("persist witnessed prediction");
 
         assert!(

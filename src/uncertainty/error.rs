@@ -47,6 +47,22 @@ pub enum UncertaintyError {
     #[error("prediction not found: {0}")]
     PredictionNotFound(String),
 
+    /// A compare-and-swap write was rejected: the row exists, but its
+    /// current DB state no longer matches the state the caller last read.
+    ///
+    /// Distinct from `PredictionNotFound` -- the row is not missing, it
+    /// moved under the caller (e.g. the hourly orphan sweep flipped
+    /// `emitted -> orphaned` between a witness path's read and its write).
+    /// The write must not silently apply over a state transition that
+    /// happened out from under it, so `update_prediction` surfaces this
+    /// instead of treating the zero-rows-affected result as success or as
+    /// a missing row.
+    #[error("prediction {id} write rejected: row is no longer in state {expected:?}")]
+    PredictionStateConflict {
+        id: String,
+        expected: PredictionState,
+    },
+
     /// Underlying database error.
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
