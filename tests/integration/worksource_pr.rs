@@ -998,9 +998,15 @@ fn quality_gate_record_refuses_clean_for_check_gated_skill() {
 
 /// #780: `record --result issues` is still allowed for a check-gated skill --
 /// only a manufactured "clean" is the ground-truth risk.
+///
+/// #1008: a positive `--findings-count` must be backed by a matching
+/// `--details-json` `findings[]` entry -- the contradiction guard now fires
+/// for `issues` too, not only `clean` -- so this test's `--details-json`
+/// carries the one finding its `--findings-count 1` asserts.
 #[test]
 fn quality_gate_record_allows_issues_for_check_gated_skill() {
     let dir = tempfile::tempdir().unwrap();
+    let details = r#"{"findings":[{"file":"src/foo.rs","line":1,"severity":"MED","summary":"x"}]}"#;
 
     let id = run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
@@ -1011,6 +1017,8 @@ fn quality_gate_record_allows_issues_for_check_gated_skill() {
         "issues",
         "--findings-count",
         "1",
+        "--details-json",
+        details,
     ]))
     .trim()
     .to_string();
@@ -1018,10 +1026,17 @@ fn quality_gate_record_allows_issues_for_check_gated_skill() {
 }
 
 /// `legion quality-gate record` with findings-count and details-json succeeds.
+///
+/// #1008: `details`'s `findings[]` must actually carry 2 entries to match
+/// `--findings-count 2` -- an empty array here used to be exactly the
+/// silent-acceptance bug this issue closed for an `issues` result.
 #[test]
 fn quality_gate_record_with_details() {
     let dir = tempfile::tempdir().unwrap();
-    let details = r#"{"result":"issues","findings_count":2,"findings":[]}"#;
+    let details = r#"{"result":"issues","findings_count":2,"findings":[
+        {"file":"src/foo.rs","line":1,"severity":"MED","summary":"a"},
+        {"file":"src/bar.rs","line":2,"severity":"LOW","summary":"b"}
+    ]}"#;
 
     let id = run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
@@ -1038,6 +1053,136 @@ fn quality_gate_record_with_details() {
     .trim()
     .to_string();
     assert_uuid_format(&id);
+}
+
+/// #1008: `quality-gate record --result issues` with a `--details-json` that
+/// yields FEWER structured findings than the asserted `--findings-count`
+/// must be refused, not just for `--result clean`. Reproduces the live
+/// `fix/359-roller-daemon-tick` payload exactly: a bare JSON array (no
+/// top-level `findings` key) whose entries use `issue` instead of the pinned
+/// `summary` key -- `extract_findings_from_value` cannot parse this shape at
+/// all, so it silently yields zero `RawFinding`s while `--findings-count 1`
+/// claims one. Before this issue, that call was silently accepted for an
+/// `issues` result, recording a gate row whose `findings_count` diverged
+/// from the (empty) persisted `quality_gate_findings` ledger.
+#[test]
+fn quality_gate_record_issues_result_with_malformed_details_json_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let malformed =
+        r#"[{"severity":"MED","file":"x.rs","issue":"bad","fix":"do X","blocking":false}]"#;
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "issues",
+        "--findings-count",
+        "1",
+        "--details-json",
+        malformed,
+    ]));
+    assert!(
+        stderr.contains("0 findings were extracted"),
+        "expected the findings-count contradiction refusal, got: {stderr}"
+    );
+
+    let gates_json = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
+    let gates: Vec<serde_json::Value> =
+        serde_json::from_str(&gates_json).expect("expected a JSON array");
+    assert!(
+        gates.is_empty(),
+        "a refused record must not write a gate row, got: {gates:?}"
+    );
+
+    let findings_json =
+        run_ok(legion_cmd(dir.path()).args(["quality-gate", "finding-list", "--json"]));
+    let findings: Vec<serde_json::Value> =
+        serde_json::from_str(&findings_json).expect("expected a JSON array");
+    assert!(
+        findings.is_empty(),
+        "a refused record must not persist finding rows, got: {findings:?}"
+    );
+}
+
+/// #1008: the conforming counterpart -- a well-formed `--details-json` whose
+/// `findings` array matches `--findings-count` records the gate and persists
+/// exactly N finding rows, queryable via `finding-list` (status `pending`)
+/// and dispositionable via `finding-disposition --id`.
+#[test]
+fn quality_gate_record_issues_result_with_conforming_details_json_persists_and_dispositions() {
+    let dir = tempfile::tempdir().unwrap();
+    let conforming = r#"{"decision":"issues","findings":[
+        {"file":"x.rs","line":12,"severity":"MED","summary":"real problem"}
+    ]}"#;
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "issues",
+        "--findings-count",
+        "1",
+        "--details-json",
+        conforming,
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&id);
+
+    let findings_json = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "finding-list",
+        "--skill",
+        "legion-review",
+        "--json",
+    ]));
+    let findings: Vec<serde_json::Value> =
+        serde_json::from_str(&findings_json).expect("expected a JSON array");
+    assert_eq!(
+        findings.len(),
+        1,
+        "expected exactly one persisted finding, got: {findings:?}"
+    );
+    let finding = &findings[0];
+    assert_eq!(finding["file"].as_str().unwrap(), "x.rs");
+    assert_eq!(finding["line"].as_i64().unwrap(), 12);
+    assert_eq!(finding["severity"].as_str().unwrap(), "med");
+    assert_eq!(finding["summary"].as_str().unwrap(), "real problem");
+    assert_eq!(finding["status"].as_str().unwrap(), "pending");
+
+    let finding_id = finding["id"].as_str().unwrap().to_string();
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "finding-disposition",
+        "--id",
+        &finding_id,
+        "--reason",
+        "won't fix: out of scope for #1008",
+    ]));
+
+    let findings_after_json = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "finding-list",
+        "--skill",
+        "legion-review",
+        "--json",
+    ]));
+    let findings_after: Vec<serde_json::Value> =
+        serde_json::from_str(&findings_after_json).expect("expected a JSON array");
+    assert_eq!(findings_after.len(), 1);
+    assert_eq!(findings_after[0]["id"].as_str().unwrap(), finding_id);
+    assert_eq!(
+        findings_after[0]["status"].as_str().unwrap(),
+        "dispositioned"
+    );
+    assert_eq!(
+        findings_after[0]["disposition_reason"].as_str().unwrap(),
+        "won't fix: out of scope for #1008"
+    );
 }
 
 /// `legion pr create` exits 1 with a clear error when no quality gate exists for HEAD.
@@ -2337,7 +2482,9 @@ fn quality_gate_list_empty_json_prints_empty_array() {
 fn quality_gate_list_shows_recorded_rows() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Seed two rows with different skills.
+    // Seed two rows with different skills. No --findings-count here: this
+    // test only checks that skill/result render, and #1008's contradiction
+    // guard now refuses a positive count with no matching --details-json.
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
         "record",
@@ -2345,8 +2492,6 @@ fn quality_gate_list_shows_recorded_rows() {
         "legion-simplify",
         "--result",
         "issues",
-        "--findings-count",
-        "3",
     ]));
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
@@ -2417,6 +2562,12 @@ fn quality_gate_list_filter_by_skill() {
 #[test]
 fn quality_gate_list_filter_by_result() {
     let dir = tempfile::tempdir().unwrap();
+    // #1008: --findings-count 2 must be backed by a matching --details-json
+    // findings[] array, or the contradiction guard now refuses this record.
+    let details = r#"{"findings":[
+        {"file":"src/foo.rs","line":1,"severity":"MED","summary":"a"},
+        {"file":"src/bar.rs","line":2,"severity":"LOW","summary":"b"}
+    ]}"#;
 
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
@@ -2435,6 +2586,8 @@ fn quality_gate_list_filter_by_result() {
         "issues",
         "--findings-count",
         "2",
+        "--details-json",
+        details,
     ]));
 
     let stdout =
@@ -2597,7 +2750,10 @@ fn quality_gate_void_missing_id_exits_nonzero() {
 #[test]
 fn quality_gate_list_json_emits_array_with_details() {
     let dir = tempfile::tempdir().unwrap();
-    let details = r#"{"findings":[]}"#;
+    // #1008: an empty `findings` array with a positive --findings-count is
+    // exactly the contradiction the guard now refuses -- carry one entry so
+    // this record succeeds.
+    let details = r#"{"findings":[{"file":"src/foo.rs","line":1,"severity":"MED","summary":"a"}]}"#;
 
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
@@ -2662,7 +2818,9 @@ fn quality_gate_stats_empty_json_prints_empty_array() {
 fn quality_gate_stats_shows_per_skill_aggregates() {
     let dir = tempfile::tempdir().unwrap();
 
-    // 2 runs for legion-review: 1 clean, 1 issues (1 finding).
+    // 2 runs for legion-review: 1 clean, 1 issues (1 finding). #1008: the
+    // issues run's --findings-count 1 needs a matching --details-json entry
+    // or the contradiction guard refuses it.
     run_ok(legion_cmd(dir.path()).args([
         "quality-gate",
         "record",
@@ -2680,6 +2838,8 @@ fn quality_gate_stats_shows_per_skill_aggregates() {
         "issues",
         "--findings-count",
         "1",
+        "--details-json",
+        r#"{"findings":[{"file":"src/foo.rs","line":1,"severity":"MED","summary":"a"}]}"#,
     ]));
 
     let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "stats"]));
@@ -2699,8 +2859,24 @@ fn quality_gate_stats_shows_per_skill_aggregates() {
 fn quality_gate_stats_json_shape() {
     let dir = tempfile::tempdir().unwrap();
 
-    // 3 runs: 1 clean, 2 issues.
-    for _ in 0..2 {
+    // 3 runs: 1 clean, 2 issues. The clean run must be recorded FIRST here:
+    // once the two issues runs below persist their (#1008-required) findings
+    // as PENDING for (branch "s"), a clean record afterwards would be
+    // refused by the separate finding-resolution gate (#773) for carrying
+    // unresolved prior findings -- stats aggregation is order-independent,
+    // so recording clean first sidesteps that unrelated guard entirely.
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "s",
+        "--result",
+        "clean",
+    ]));
+    // #1008: each issues run's --findings-count 1 needs a matching
+    // --details-json entry or the contradiction guard refuses it. Distinct
+    // file per run so persist_raw_findings's dedup does not collapse them.
+    for file in ["src/foo.rs", "src/bar.rs"] {
         run_ok(legion_cmd(dir.path()).args([
             "quality-gate",
             "record",
@@ -2710,16 +2886,12 @@ fn quality_gate_stats_json_shape() {
             "issues",
             "--findings-count",
             "1",
+            "--details-json",
+            &format!(
+                r#"{{"findings":[{{"file":"{file}","line":1,"severity":"MED","summary":"a"}}]}}"#
+            ),
         ]));
     }
-    run_ok(legion_cmd(dir.path()).args([
-        "quality-gate",
-        "record",
-        "--skill",
-        "s",
-        "--result",
-        "clean",
-    ]));
 
     let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "stats", "--json"]));
     let parsed: serde_json::Value =
@@ -3948,6 +4120,9 @@ fn issue_close_refused_when_verify_verdict_is_not_clean() {
         &close_stub_plugin_with_criteria(),
     );
 
+    // No --findings-count here: this test only cares that a non-clean
+    // verdict blocks the close, and #1008's contradiction guard now refuses
+    // a positive count recorded via the CLI with no matching --details-json.
     run_ok(legion_cmd(data_dir.path()).args([
         "quality-gate",
         "record",
@@ -3955,8 +4130,6 @@ fn issue_close_refused_when_verify_verdict_is_not_clean() {
         "legion-verify:issue-owner/stub#42",
         "--result",
         "issues",
-        "--findings-count",
-        "1",
     ]));
 
     let (_stdout, stderr) = run_fail(
