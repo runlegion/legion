@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::db::Database;
 
@@ -118,9 +118,35 @@ impl Database {
     }
 
     /// Persist a prediction whose state has advanced (witness / calibrate /
-    /// orphan / retire). UPDATE keyed by id; updated_at is taken from the
-    /// in-memory row so callers control the timestamp.
-    pub fn update_prediction(&self, p: &Prediction) -> Result<()> {
+    /// orphan / retire). UPDATE keyed by id AND a compare-and-swap on
+    /// `expected_prev_state`; updated_at is taken from the in-memory row so
+    /// callers control the timestamp.
+    ///
+    /// `expected_prev_state` closes a TOCTOU (#1003): every write caller
+    /// does read (`get_prediction`) -> in-memory `Prediction` transition ->
+    /// this write, with no lock held across the gap. `sweep_orphans` (or
+    /// any other writer) can move the row's state in that gap -- most
+    /// concretely, the hourly orphan sweep flipping `emitted -> orphaned`
+    /// under a witness that read the row while it was still `emitted`. The
+    /// caller passes the state it read BEFORE applying its own in-memory
+    /// transition (`Prediction::witness`/`orphan`/etc. mutate `p.state` in
+    /// place, so the prior value must be captured before calling them);
+    /// the UPDATE only applies when the row's current DB state still
+    /// matches that value, so a write that raced a state change never
+    /// silently lands.
+    ///
+    /// A zero-rows-affected result is disambiguated by a follow-up read:
+    /// no row at all (or soft-deleted) is `PredictionNotFound`; a row that
+    /// exists but is no longer in `expected_prev_state` is
+    /// `PredictionStateConflict`. That follow-up read is not atomic with
+    /// the UPDATE, but the only thing it can get wrong under a further
+    /// race is which error variant is reported -- the UPDATE itself is the
+    /// single atomic statement that decides whether the write applies.
+    pub fn update_prediction(
+        &self,
+        p: &Prediction,
+        expected_prev_state: PredictionState,
+    ) -> Result<()> {
         let payload_json = serde_json::to_string(&p.prediction_payload)?;
         let outcome_payload_json = match &p.outcome_payload {
             Some(v) => Some(serde_json::to_string(v)?),
@@ -137,7 +163,7 @@ impl Database {
              outcome_correctness = ?5, \
              witnessed_at = ?6, \
              updated_at = ?7 \
-             WHERE id = ?8 AND deleted_at IS NULL",
+             WHERE id = ?8 AND state = ?9 AND deleted_at IS NULL",
             params![
                 payload_json,
                 p.state.as_str(),
@@ -147,10 +173,25 @@ impl Database {
                 p.witnessed_at,
                 p.updated_at,
                 p.id,
+                expected_prev_state.as_str(),
             ],
         )?;
         if rows == 0 {
-            return Err(UncertaintyError::PredictionNotFound(p.id.clone()));
+            let still_present: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM uncertainty_prediction WHERE id = ?1 AND deleted_at IS NULL",
+                    params![p.id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            return Err(match still_present {
+                Some(_) => UncertaintyError::PredictionStateConflict {
+                    id: p.id.clone(),
+                    expected: expected_prev_state,
+                },
+                None => UncertaintyError::PredictionNotFound(p.id.clone()),
+            });
         }
         Ok(())
     }
@@ -537,6 +578,7 @@ mod tests {
         let db = test_db();
         let mut p = Prediction::new(fresh_input());
         db.insert_prediction(&p).unwrap();
+        let prev_state = p.state;
         p.witness(
             OutcomeLabel::Shipped,
             serde_json::json!({ "actual_tokens": 1400 }),
@@ -544,7 +586,7 @@ mod tests {
             "2026-05-12T10:00:00+00:00",
         )
         .unwrap();
-        db.update_prediction(&p).unwrap();
+        db.update_prediction(&p, prev_state).unwrap();
         let fetched = db.get_prediction(&p.id).unwrap().unwrap();
         assert_eq!(fetched.state, PredictionState::Witnessed);
         assert_eq!(fetched.outcome_label, Some(OutcomeLabel::Shipped));
@@ -555,8 +597,48 @@ mod tests {
     fn update_prediction_missing_returns_not_found() {
         let db = test_db();
         let p = Prediction::new(fresh_input());
-        let err = db.update_prediction(&p).unwrap_err();
+        let err = db.update_prediction(&p, p.state).unwrap_err();
         assert!(matches!(err, UncertaintyError::PredictionNotFound(_)));
+    }
+
+    #[test]
+    fn update_prediction_rejects_write_when_row_was_swept_to_orphaned() {
+        let db = test_db();
+        let mut input = fresh_input();
+        input.orphan_after = Some("2026-05-01T00:00:00+00:00".into());
+        let mut p = Prediction::new(input);
+        db.insert_prediction(&p).unwrap();
+
+        // Mirrors the witness path: capture the state read before the race
+        // window (Emitted) prior to applying any in-memory transition.
+        let prev_state = p.state;
+
+        // The hourly sweep (#359) fires in the gap and moves the row to
+        // Orphaned before the witness write lands.
+        let swept = db.sweep_orphans("2026-06-01T00:00:00+00:00").unwrap();
+        assert_eq!(swept, 1);
+
+        // The in-memory witness transition still succeeds -- it only knows
+        // the state it read before the sweep raced it.
+        p.witness(
+            OutcomeLabel::Shipped,
+            serde_json::json!({}),
+            Correctness::from_f64(0.9).unwrap(),
+            "2026-06-02T00:00:00+00:00",
+        )
+        .unwrap();
+
+        // The CAS-guarded write must reject: the row's DB state moved out
+        // from under it.
+        let err = db.update_prediction(&p, prev_state).unwrap_err();
+        assert!(matches!(
+            err,
+            UncertaintyError::PredictionStateConflict { .. }
+        ));
+
+        // The row must remain Orphaned, not resurrected to Witnessed.
+        let fetched = db.get_prediction(&p.id).unwrap().unwrap();
+        assert_eq!(fetched.state, PredictionState::Orphaned);
     }
 
     #[test]
@@ -633,6 +715,7 @@ mod tests {
         );
         // Once witnessed it is no longer Emitted -> the lookup skips it.
         let mut p2 = db.get_prediction(&p.id).unwrap().unwrap();
+        let prev_state = p2.state;
         p2.witness(
             OutcomeLabel::Shipped,
             serde_json::json!({}),
@@ -640,7 +723,7 @@ mod tests {
             "2026-06-29T00:00:00+00:00",
         )
         .unwrap();
-        db.update_prediction(&p2).unwrap();
+        db.update_prediction(&p2, prev_state).unwrap();
         assert!(
             db.latest_emitted_by_fingerprint("legion.task", "fp-1")
                 .unwrap()
@@ -670,6 +753,7 @@ mod tests {
         };
         let mut p = Prediction::new(input);
         db.insert_prediction(&p).unwrap();
+        let prev_state = p.state;
         p.witness(
             OutcomeLabel::Shipped,
             serde_json::json!({}),
@@ -677,7 +761,7 @@ mod tests {
             "2026-06-01T00:00:00+00:00",
         )
         .unwrap();
-        db.update_prediction(&p).unwrap();
+        db.update_prediction(&p, prev_state).unwrap();
         p
     }
 
@@ -729,6 +813,7 @@ mod tests {
         c_input.orphan_after = Some(past.into());
         let mut c = Prediction::new(c_input);
         db.insert_prediction(&c).unwrap();
+        let c_prev_state = c.state;
         c.witness(
             OutcomeLabel::Shipped,
             serde_json::json!({}),
@@ -736,7 +821,7 @@ mod tests {
             now,
         )
         .unwrap();
-        db.update_prediction(&c).unwrap();
+        db.update_prediction(&c, c_prev_state).unwrap();
 
         // D: emitted, orphan_after None -> sweep disabled for this row.
         let mut d_input = fresh_input();
@@ -848,6 +933,7 @@ mod tests {
         let mut p = Prediction::new(input);
         p.cohort_key = cohort_key.to_string();
         db.insert_prediction(&p).unwrap();
+        let prev_state = p.state;
         p.witness(
             OutcomeLabel::Shipped,
             serde_json::json!({}),
@@ -855,7 +941,7 @@ mod tests {
             "2026-06-01T00:00:00+00:00",
         )
         .unwrap();
-        db.update_prediction(&p).unwrap();
+        db.update_prediction(&p, prev_state).unwrap();
         p
     }
 

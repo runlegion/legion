@@ -237,8 +237,12 @@ pub fn witness_simplify_from_review(
         "witnessed_by": "legion-review",
         "review_found_issues": review_found_issues,
     });
+    // Captured before the in-memory transition below (which mutates
+    // `prediction.state` in place) so the CAS write can guard against the
+    // orphan sweep racing this read (#1003).
+    let prev_state = prediction.state;
     prediction.witness(label, payload, Correctness::from_f64(correctness)?, &now)?;
-    db.update_prediction(&prediction)?;
+    db.update_prediction(&prediction, prev_state)?;
     Ok(true)
 }
 
@@ -333,8 +337,11 @@ pub fn witness_gate_external(
         "witnessed_by": "operator",
         "correct": correct,
     });
+    // Captured before the in-memory transition below (see
+    // `witness_simplify_from_review` for why -- same TOCTOU guard, #1003).
+    let prev_state = prediction.state;
     prediction.witness(label, payload, Correctness::from_f64(correctness)?, &now)?;
-    db.update_prediction(&prediction)?;
+    db.update_prediction(&prediction, prev_state)?;
     Ok(Some(prediction.id))
 }
 
@@ -777,8 +784,9 @@ mod tests {
         let row = gate_row("legion-simplify", GateResult::Clean, 0);
         let id = emit_gate_prediction(&db, &row).unwrap();
         let mut prediction = db.get_prediction(&id).unwrap().unwrap();
+        let prev_state = prediction.state;
         prediction.orphan("2026-07-08T00:00:00+00:00").unwrap();
-        db.update_prediction(&prediction).unwrap();
+        db.update_prediction(&prediction, prev_state).unwrap();
 
         let rows = db.count_orphans_by_surface(Some(GATE_SURFACE)).unwrap();
         assert_eq!(rows.len(), 1);

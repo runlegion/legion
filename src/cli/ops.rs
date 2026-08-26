@@ -465,12 +465,17 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
                 .ok_or_else(|| {
                     error::LegionError::WorkSource(format!("prediction not found: {prediction_id}"))
                 })?;
+            // Captured before the in-memory transition below so the CAS
+            // write can detect the orphan sweep racing this read (#1003):
+            // a row swept to `orphaned` in the gap must reject this write
+            // rather than silently resurrect to `witnessed`.
+            let prev_state = prediction.state;
             let now = chrono::Utc::now().to_rfc3339();
             prediction
                 .witness(label, payload_value, correctness, &now)
                 .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
             database
-                .update_prediction(&prediction)
+                .update_prediction(&prediction, prev_state)
                 .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
             let out_json = serde_json::json!({
                 "id": prediction.id,
