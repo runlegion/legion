@@ -74,6 +74,27 @@ Avoid unnecessary coined terms and labels. Prefer established terms and plain de
 Introduce and define a new term when it clarifies a recurring distinction. Use one stable term
 for one concept. Show importance through concrete facts, mechanisms, or effects.
 
+#### House habit-words
+
+A specific set of abstractions gets reached for out of habit, where a plain word says it
+better. These are style, not precision. Avoid them, and use the plain word:
+
+- *corpus* -> the reflections, the records, memory
+- *doctrine* -> the rule, the policy, how we work
+- *substrate* -> the foundation, the base, or name the thing itself
+- *thesis* / *on-thesis* -> the point, on point
+- *seam* -> the gap, the join, the boundary
+- *canon* -> the rules, the single source of truth
+- *load-bearing* -> critical, essential, what holds it up
+- *surface* used as a verb -> show, raise, flag, bring up
+- reflexive *honest* / *honestly* -> usually delete it, and state the thing plainly
+
+A second set is precise when it means its exact thing and mere flavour otherwise. Reach for it
+only for that exact meaning, never as decoration: *invariant* (a rule that must always hold),
+*provenance* (where a record came from), *verdict* (a review's pass-or-fail decision), *lane* (a
+named delivery path), *drift* (measured divergence from a spec). When the exact sense is not what
+you mean, use the plain word.
+
 Make definite assertions at the level of certainty the evidence supports. Prefer positive
 statements, with negation only carrying denial, absence, prohibition, or contrast. Prefer active
 voice when it clarifies who acts, while keeping passive voice when the receiver or result is
