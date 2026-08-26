@@ -16,6 +16,17 @@
 # TIME rather than a one-shot flag, so the hook re-arms after the debounce
 # window instead of firing exactly once per session.
 #
+# Stop is EXEMPT from the debounce (#1000). Stop fires once per turn and is
+# the last chance to drain before a session goes idle, where no further hook
+# fires until the agent acts again. Because Stop follows the last tool call,
+# it almost always lands inside the window a prior PostToolUse just opened --
+# so debouncing it swallowed the turn-end drain in the common case, leaving a
+# post that arrived late in the turn unseen. The debounce still governs
+# UserPromptSubmit and PostToolUse, whose whole risk is per-tool-call
+# shell-out volume; Stop has neither that volume nor a later drain to fall
+# back on. A Stop drain that finds nothing new emits nothing and the turn
+# ends normally, so the exemption cannot loop.
+#
 # Error handling: legion failures are logged to /tmp/legion-hook-errors.log.
 # The hook always exits 0 so a degraded legion never blocks the turn.
 
@@ -62,7 +73,11 @@ mkdir -p "$CACHE_DIR" 2>>"$LOG"
 SENTINEL="${CACHE_DIR}/delivery-drain-last-${SAFE_SESSION}"
 
 NOW=$(date +%s)
-if [ -f "$SENTINEL" ]; then
+# Stop is never debounced (see header): it fires once per turn and is the
+# last drain before idle. Only UserPromptSubmit/PostToolUse consult the
+# window. Stop still updates the sentinel below, so a drain it performs
+# debounces the next tool-call flurry as usual.
+if [ "$EVENT_NAME" != "Stop" ] && [ -f "$SENTINEL" ]; then
   LAST=$(cat "$SENTINEL" 2>/dev/null)
   case "$LAST" in
     '' | *[!0-9]*) LAST=0 ;;
