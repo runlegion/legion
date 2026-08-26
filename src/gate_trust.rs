@@ -60,7 +60,9 @@
 use crate::db::Database;
 use crate::db::quality_gates::QualityGateRow;
 use crate::gate_registry;
+use crate::telemetry::WitnessConflictRecord;
 use crate::uncertainty::error::Result as UncertaintyResult;
+use crate::uncertainty::error::UncertaintyError;
 use crate::uncertainty::storage::orphan_after_from_ttl;
 use crate::uncertainty::types::{
     Confidence, Correctness, OutcomeLabel, Prediction, PredictionInput,
@@ -69,6 +71,14 @@ use crate::verify::{GateProvenance, GateResult};
 
 /// The uncertainty surface all gate verdicts emit under.
 pub const GATE_SURFACE: &str = "legion.gate";
+
+/// Gate skill this module's witness paths target. Was a bare `"legion-simplify"`
+/// literal in `witness_simplify_from_review`'s `gate_fingerprint(...)` call,
+/// which the witness-conflict telemetry (#1009) would otherwise have had to
+/// duplicate again -- two string literals in one file that must agree with no
+/// compiler check. Named once so the fingerprint and the observability record
+/// cannot drift apart.
+const SIMPLIFY_SKILL: &str = "legion-simplify";
 
 /// Days a gate prediction waits for a witness before the engine's sweep
 /// orphans it (orphans are excluded from calibration).
@@ -210,7 +220,7 @@ pub fn witness_simplify_from_review(
     commit_hash: &str,
     review_found_issues: bool,
 ) -> UncertaintyResult<bool> {
-    let fingerprint = gate_fingerprint("legion-simplify", commit_hash);
+    let fingerprint = gate_fingerprint(SIMPLIFY_SKILL, commit_hash);
     let Some(mut prediction) = db.latest_emitted_by_fingerprint(GATE_SURFACE, &fingerprint)? else {
         return Ok(false);
     };
@@ -246,14 +256,61 @@ pub fn witness_simplify_from_review(
     Ok(true)
 }
 
+/// Map a witness failure to the telemetry row it should produce, or `None`
+/// for every failure mode except the #1003 CAS conflict. Pure (the caller
+/// supplies `ts` rather than this fn calling `Utc::now()` itself) so the
+/// mapping is deterministically unit-testable by constructing an
+/// `UncertaintyError` directly -- the real TOCTOU race cannot be forced
+/// through `witness_simplify_from_review` from outside (its read,
+/// in-memory transition, and write happen inside one function call with no
+/// seam to interleave `sweep_orphans`), so this is the level at which the
+/// new behavior is actually tested.
+fn witness_conflict_record(
+    skill: &str,
+    commit_hash: &str,
+    ts: chrono::DateTime<chrono::Utc>,
+    err: &UncertaintyError,
+) -> Option<WitnessConflictRecord> {
+    match err {
+        UncertaintyError::PredictionStateConflict { id, expected } => Some(WitnessConflictRecord {
+            ts,
+            surface: GATE_SURFACE.to_string(),
+            skill: skill.to_string(),
+            commit_hash: commit_hash.to_string(),
+            prediction_id: id.clone(),
+            expected_state: *expected,
+        }),
+        _ => None,
+    }
+}
+
 /// Non-blocking witness for the gate-record handler: log on failure, never
 /// propagate. Like emit, a witness problem must not break gate recording.
+///
+/// Additionally, on the #1003 CAS-conflict failure mode specifically, writes
+/// a `WitnessConflictRecord` (#1009) so the conflict is countable -- this is
+/// additive alongside the existing `eprintln!`, which stays unconditional and
+/// unchanged: the non-blocking, gate-recording-safe contract this fn exists
+/// for is untouched. The telemetry write's own `Err` branch (the JSONL append
+/// itself failing) is a second non-propagating eprintln with no forcing test:
+/// forcing it needs a corrupted/unwritable state-dir fixture, the same
+/// unforceable-by-construction class already documented for this module's
+/// other non-blocking swallow (`emit_gate_trust_wrapper_runs_and_emits`).
+/// Accepted, not chased.
 pub fn witness_simplify_from_review_nonblocking(
     db: &Database,
     commit_hash: &str,
     review_found_issues: bool,
 ) {
     if let Err(e) = witness_simplify_from_review(db, commit_hash, review_found_issues) {
+        if let Some(record) =
+            witness_conflict_record(SIMPLIFY_SKILL, commit_hash, chrono::Utc::now(), &e)
+            && let Err(log_err) = crate::telemetry::append_witness_conflict(&record)
+        {
+            eprintln!(
+                "[legion] gate-trust witness-conflict telemetry write failed (non-fatal): {log_err}"
+            );
+        }
         eprintln!("[legion] gate-trust witness failed (non-fatal): {e}");
     }
 }
@@ -792,5 +849,74 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].surface, GATE_SURFACE);
         assert_eq!(rows[0].count, 1);
+    }
+
+    // -- #1009: witness-conflict telemetry ------------------------------
+
+    #[test]
+    fn witness_conflict_record_maps_prediction_state_conflict() {
+        use crate::uncertainty::types::PredictionState;
+        let ts = chrono::Utc::now();
+        let err = UncertaintyError::PredictionStateConflict {
+            id: "pred-1".to_string(),
+            expected: PredictionState::Emitted,
+        };
+        let record = witness_conflict_record(SIMPLIFY_SKILL, "deadbeefcafe", ts, &err)
+            .expect("a PredictionStateConflict must map to a record");
+        assert_eq!(record.ts, ts);
+        assert_eq!(record.surface, GATE_SURFACE);
+        assert_eq!(record.skill, "legion-simplify");
+        assert_eq!(record.commit_hash, "deadbeefcafe");
+        assert_eq!(record.prediction_id, "pred-1");
+        assert_eq!(record.expected_state, PredictionState::Emitted);
+    }
+
+    #[test]
+    fn witness_conflict_record_is_none_for_prediction_not_found() {
+        let err = UncertaintyError::PredictionNotFound("pred-1".to_string());
+        assert!(
+            witness_conflict_record(SIMPLIFY_SKILL, "deadbeefcafe", chrono::Utc::now(), &err)
+                .is_none(),
+            "only the CAS conflict variant should map to a record"
+        );
+    }
+
+    #[test]
+    fn witness_conflict_record_is_none_for_illegal_transition() {
+        use crate::uncertainty::types::PredictionState;
+        let err = UncertaintyError::IllegalTransition {
+            from: PredictionState::Orphaned,
+            to: PredictionState::Witnessed,
+        };
+        assert!(
+            witness_conflict_record(SIMPLIFY_SKILL, "deadbeefcafe", chrono::Utc::now(), &err)
+                .is_none(),
+            "only the CAS conflict variant should map to a record"
+        );
+    }
+
+    #[test]
+    fn nonblocking_witness_still_returns_unit_and_writes_no_record_on_ordinary_no_op() {
+        let db = test_db();
+        // Precondition: no emitted `legion-simplify` prediction exists for
+        // this commit, so the inner fn returns `Ok(false)` -- the ordinary
+        // no-matching-row no-op, not an `Err`. Pinned explicitly so a future
+        // change that turns this path into an `Err` (e.g. `PredictionNotFound`)
+        // fails this test rather than silently starting to reach the
+        // telemetry write.
+        assert!(!witness_simplify_from_review(&db, "nosuchcommit", true).unwrap());
+        // The wrapper's `if let Err(e) = ...` guard never opens on `Ok`, so
+        // `witness_conflict_record` / `append_witness_conflict` are never
+        // reached: no record is written, and the call still just returns
+        // `()` without panicking.
+        witness_simplify_from_review_nonblocking(&db, "nosuchcommit", true);
+    }
+
+    #[test]
+    fn witness_conflict_log_path_uses_the_documented_filename() {
+        // The only read surface for this record is the operator one-liner
+        // named in the issue (`jq -c . witness-conflicts.jsonl`), so the
+        // filename itself is load-bearing.
+        assert!(crate::telemetry::witness_conflict_log_path().ends_with("witness-conflicts.jsonl"));
     }
 }
