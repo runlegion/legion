@@ -332,7 +332,14 @@ fn run_sym_etc(database: &db::Database, shape: EtcShape) -> error::Result<()> {
             hidden,
             no_ignore,
             json,
-        } => run_etc_find_content(&pattern, repo, ext, fixed_strings, hidden, no_ignore, json),
+        } => {
+            // #1010: checked here (rather than threading `database` into
+            // `run_etc_find_content`, which is already at the 7-argument
+            // clippy ceiling) since `run_sym_etc` already holds both the
+            // repo scope and the database handle.
+            maybe_warn_worktree_divergence(database, repo.as_deref());
+            run_etc_find_content(&pattern, repo, ext, fixed_strings, hidden, no_ignore, json)
+        }
         EtcShape::Extract { path, field, json } => run_etc_extract(&path, &field, json),
         EtcShape::FindFile {
             query,
@@ -1031,6 +1038,111 @@ fn format_freshness_line(s: &SnapshotFreshness, now: chrono::DateTime<chrono::Ut
     }
 }
 
+/// #1010 guard: `legion sym`/`legion index` resolve a repo to the single
+/// path `watch.toml` has registered for it, so invoked from inside a
+/// linked git worktree on a divergent branch they silently answer for the
+/// registered (primary) checkout instead. Sean's decision on #1010: a
+/// guard, not worktree-aware resolution or a per-checkout index --
+/// divergence is rare, the harm is that it is silent, so make it loud
+/// without changing what is answered or the exit code.
+///
+/// `basis_dir` is the directory this invocation should be judged from --
+/// the process cwd for every surface except `legion index --file`, which
+/// uses the `--file` argument's own directory instead (its cwd may be
+/// unrelated to the file at all). Returns `None` (no warning) when: there
+/// is no git context at `basis_dir` (outside any checkout, `git`
+/// unavailable, or any git error -- all treated alike, per the issue's
+/// error-handling requirement: the guard never fails the command); the
+/// invoking checkout canonicalizes to the same path as `registered_workdir`
+/// (this invocation IS the registered checkout, nothing to warn about);
+/// `basis_dir`'s checkout is not the SAME underlying repository as
+/// `registered_workdir` (see `inventory::git_common_dir` -- an unrelated
+/// repo happening to be checked out at cwd must never be reported as a
+/// divergent worktree of `repo`); or `head_at_index` and the invoking
+/// checkout's HEAD are not both known and different (nothing to compare,
+/// or no drift -- mirrors `head_drift`'s "both present and differ" rule).
+fn worktree_divergence_warning(
+    basis_dir: &Path,
+    repo: &str,
+    registered_workdir: &Path,
+    head_at_index: Option<&str>,
+) -> Option<String> {
+    let invoking_toplevel = inventory::current_toplevel(basis_dir)?;
+    let canon_invoking = std::fs::canonicalize(&invoking_toplevel).unwrap_or(invoking_toplevel);
+    let canon_registered = std::fs::canonicalize(registered_workdir)
+        .unwrap_or_else(|_| registered_workdir.to_path_buf());
+    if canon_invoking == canon_registered {
+        return None;
+    }
+
+    // Identity gate: `canon_invoking` must be a linked worktree of the SAME
+    // repository as `canon_registered`, not merely a different directory.
+    // Without this, running `legion sym refs --repo X` from inside ANY
+    // other git checkout -- an entirely ordinary thing to do, since `sym`
+    // is meant to answer for a named repo regardless of where the operator
+    // is sitting -- would compare two unrelated histories and warn on
+    // nearly every invocation, which is as useless as never warning at all.
+    let invoking_common = inventory::git_common_dir(&canon_invoking)?;
+    let registered_common = inventory::git_common_dir(&canon_registered)?;
+    if invoking_common != registered_common {
+        return None;
+    }
+
+    let invoking_head = inventory::current_head(&canon_invoking)?;
+    if !head_drift(head_at_index, Some(invoking_head.as_str())) {
+        return None;
+    }
+    let index_head_disp = head_at_index.map(short_sha).unwrap_or("none");
+    Some(format!(
+        "{repo}: invoked from worktree {} (HEAD {}) -- WARNING: the indexed checkout is {} \
+         (HEAD {index_head_disp}); this worktree's branch was not seen by the last index, so \
+         results may be stale or incomplete for it. Re-run 'legion index {repo}' from this \
+         worktree, or invoke from {}",
+        canon_invoking.display(),
+        short_sha(&invoking_head),
+        canon_registered.display(),
+        canon_registered.display(),
+    ))
+}
+
+/// Print `worktree_divergence_warning`'s line to stderr for `repo` when it
+/// fires (#1010). Resolves `repo`'s registered workdir from `watch.toml`
+/// and its last-indexed HEAD from `inventory_snapshots` -- any failure to
+/// read either (malformed watch.toml, repo not registered, no snapshot
+/// yet) degrades to silence rather than an error, matching the guard's
+/// "never fails the command" contract. Shared by every explicit-`--repo`
+/// query surface named in #1010 (`sym def/refs/impl/hover`, `sym etc
+/// find-content`, `sym etc find-file`, `sym tree`); a query with no
+/// `--repo` (cross-repo) is out of scope here -- comparing the invoking
+/// checkout against every OTHER, unrelated repo in `watch.toml` would
+/// produce a warning that is itself misleading rather than useful.
+fn maybe_warn_worktree_divergence(database: &db::Database, repo: Option<&str>) {
+    let Some(repo_name) = repo else {
+        return;
+    };
+    let Ok(base) = data_dir() else {
+        return;
+    };
+    let watch_path = base.join("watch.toml");
+    let Ok(all_repos) = watch::list_repos_in_config(&watch_path) else {
+        return;
+    };
+    let Some(registered) = resolve_repo_workdir(&all_repos, repo_name) else {
+        return;
+    };
+    let Ok(Some(snapshot)) = database.get_inventory_snapshot(repo_name) else {
+        return;
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    if let Some(line) =
+        worktree_divergence_warning(&cwd, repo_name, &registered, snapshot.head.as_deref())
+    {
+        eprintln!("[legion] {line}");
+    }
+}
+
 /// `sym tree` (#706): a structured, cross-repo view of the file inventory
 /// (`Database::list_file_inventory`) -- no filesystem walk at query time.
 /// `--repo` omitted means cross-repo over whatever the inventory table
@@ -1050,6 +1162,7 @@ fn run_sym_tree(
 ) -> error::Result<()> {
     use std::io::Write;
 
+    maybe_warn_worktree_divergence(database, repo.as_deref());
     let scan = scan_tree(
         database,
         repo.as_deref(),
@@ -1276,6 +1389,7 @@ fn run_etc_find_file(
 ) -> error::Result<()> {
     use std::io::Write;
 
+    maybe_warn_worktree_divergence(database, repo.as_deref());
     let scan = scan_find_file(database, repo.as_deref(), query, role);
 
     let usage = telemetry::EtcUsageRecord {
@@ -1859,6 +1973,166 @@ mod freshness_tests {
     }
 }
 
+#[cfg(test)]
+mod worktree_divergence_tests {
+    use super::*;
+
+    /// Run `git` in `dir` with an isolated global/system config (never a
+    /// real `git config` write) but WITHOUT `common::fixture_git_command`'s
+    /// `GIT_DIR`/`GIT_WORK_TREE` overrides: those are hardcoded to `<dir>/
+    /// .git`, which is a plain FILE (not a directory) inside a linked
+    /// worktree, so forcing them would break every fixture command run
+    /// there. Plain directory-based discovery (`current_dir` only) resolves
+    /// both a primary checkout and a linked worktree correctly.
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let mut full_args: Vec<&str> = vec![
+            "-c",
+            "user.name=Legion Test Fixture",
+            "-c",
+            "user.email=legion-test-fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        full_args.extend_from_slice(args);
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(&full_args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn in {dir:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} exited non-zero in {dir:?}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn returns_none_when_basis_dir_has_no_git_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let registered = tempfile::tempdir().unwrap();
+        assert_eq!(
+            worktree_divergence_warning(dir.path(), "r", registered.path(), Some("aaa")),
+            None
+        );
+    }
+
+    #[test]
+    fn returns_none_when_basis_dir_is_the_registered_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q", "-b", "main"]);
+        git_in(dir.path(), &["commit", "--allow-empty", "-q", "-m", "init"]);
+        assert_eq!(
+            worktree_divergence_warning(dir.path(), "r", dir.path(), Some("stale-sha")),
+            None,
+            "invoking from the registered workdir itself is never a divergence"
+        );
+    }
+
+    #[test]
+    fn returns_none_for_an_unrelated_repo_even_when_heads_differ() {
+        // The identity gate (#1010, `inventory::git_common_dir`): two
+        // completely unrelated repos will almost always have differing
+        // HEADs, but that must never be reported as a "divergent worktree".
+        let unrelated = tempfile::tempdir().unwrap();
+        let registered = tempfile::tempdir().unwrap();
+        git_in(unrelated.path(), &["init", "-q", "-b", "main"]);
+        git_in(
+            unrelated.path(),
+            &["commit", "--allow-empty", "-q", "-m", "unrelated"],
+        );
+        git_in(registered.path(), &["init", "-q", "-b", "main"]);
+        git_in(
+            registered.path(),
+            &["commit", "--allow-empty", "-q", "-m", "registered"],
+        );
+        assert_eq!(
+            worktree_divergence_warning(
+                unrelated.path(),
+                "r",
+                registered.path(),
+                Some("0000000000000000000000000000000000000000")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn warns_naming_both_heads_for_a_linked_worktree_on_a_divergent_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q", "-b", "main"]);
+        git_in(
+            dir.path(),
+            &["commit", "--allow-empty", "-q", "-m", "initial"],
+        );
+        let primary_head = {
+            let out = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git_in(
+            dir.path(),
+            &["worktree", "add", "wt", "-b", "feature-branch"],
+        );
+        let worktree_dir = dir.path().join("wt");
+        git_in(
+            &worktree_dir,
+            &[
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "only on feature-branch",
+            ],
+        );
+        let worktree_head = {
+            let out = std::process::Command::new("git")
+                .current_dir(&worktree_dir)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let line = worktree_divergence_warning(&worktree_dir, "r", dir.path(), Some(&primary_head))
+            .expect("a linked worktree on a divergent branch must warn");
+        assert!(line.contains("WARNING"), "got: {line}");
+        assert!(line.contains(short_sha(&primary_head)), "got: {line}");
+        assert!(line.contains(short_sha(&worktree_head)), "got: {line}");
+    }
+
+    #[test]
+    fn returns_none_when_worktree_head_matches_indexed_head() {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q", "-b", "main"]);
+        git_in(
+            dir.path(),
+            &["commit", "--allow-empty", "-q", "-m", "initial"],
+        );
+        let head = {
+            let out = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git_in(
+            dir.path(),
+            &["worktree", "add", "wt", "-b", "feature-branch"],
+        );
+        let worktree_dir = dir.path().join("wt");
+
+        assert_eq!(
+            worktree_divergence_warning(&worktree_dir, "r", dir.path(), Some(&head)),
+            None,
+            "the worktree has not moved past the indexed HEAD -- nothing to warn about"
+        );
+    }
+}
+
 /// Read the diff source -- file path or "-" for stdin -- and run impact
 /// radius analysis against the repo's SCIP index. Prints sorted output
 /// (highest refs_count first) as either text or JSON.
@@ -2429,6 +2703,7 @@ where
         no_index_found(repo.as_deref(), lang.as_deref());
         return Err(error::LegionError::ExitWith(1));
     }
+    maybe_warn_worktree_divergence(database, repo.as_deref());
 
     // Skip non-rust indexes for `impl` queries (SCIP only models the
     // relationship for languages with traits/interfaces). Stay quiet
@@ -2491,6 +2766,7 @@ fn run_hover_query(
         no_index_found(repo.as_deref(), lang.as_deref());
         return Err(error::LegionError::ExitWith(1));
     }
+    maybe_warn_worktree_divergence(database, repo.as_deref());
     let mut hover: Option<sym::HoverInfo> = None;
     for idx in &indexes {
         if let Some(h) = sym::query_hover(&idx.blob, name, &idx.repo, &idx.lang)? {
@@ -2783,44 +3059,67 @@ pub(crate) fn handle_index(
     // ancestors of the file path against watch.toml workdirs.
     // Falls through to the named-repo path with a synthesized repo
     // name so the indexer + upsert loop is the single code path.
-    let (repo, entry): (String, &watch::WatchRepoConfig) = match (repo, file.as_ref()) {
-        (_, Some(file_path)) => {
-            let canon = std::fs::canonicalize(file_path).map_err(|e| {
-                error::LegionError::WatchConfig(format!(
-                    "cannot canonicalize {}: {e}",
-                    file_path.display()
-                ))
-            })?;
-            let owner = repos
-                .iter()
-                .find(|r| {
-                    std::fs::canonicalize(&r.workdir)
-                        .map(|w| canon.starts_with(&w))
-                        .unwrap_or(false)
-                })
-                .ok_or_else(|| {
+    // `basis_dir` is the directory the #1010 worktree-divergence guard
+    // below judges this invocation from: the `--file` argument's own
+    // directory (the operator may run `legion index --file <path>` from
+    // anywhere, so the process cwd would not name the right checkout) when
+    // `--file` was given, else the process cwd for the plain `<repo>` form.
+    let (repo, entry, basis_dir): (String, &watch::WatchRepoConfig, PathBuf) =
+        match (repo, file.as_ref()) {
+            (_, Some(file_path)) => {
+                let canon = std::fs::canonicalize(file_path).map_err(|e| {
                     error::LegionError::WatchConfig(format!(
-                        "no watch.toml entry owns {} -- file is outside every watched workdir",
-                        canon.display()
+                        "cannot canonicalize {}: {e}",
+                        file_path.display()
                     ))
                 })?;
-            (owner.name.clone(), owner)
-        }
-        (Some(name), None) => {
-            let owner = repos.iter().find(|r| r.name == name).ok_or_else(|| {
+                let owner = repos
+                    .iter()
+                    .find(|r| {
+                        std::fs::canonicalize(&r.workdir)
+                            .map(|w| canon.starts_with(&w))
+                            .unwrap_or(false)
+                    })
+                    .ok_or_else(|| {
+                        error::LegionError::WatchConfig(format!(
+                            "no watch.toml entry owns {} -- file is outside every watched workdir",
+                            canon.display()
+                        ))
+                    })?;
+                let basis = canon.parent().map(Path::to_path_buf).unwrap_or(canon);
+                (owner.name.clone(), owner, basis)
+            }
+            (Some(name), None) => {
+                let owner = repos.iter().find(|r| r.name == name).ok_or_else(|| {
                 error::LegionError::WatchConfig(format!(
                     "repo '{name}' not in watch.toml. Add it with `legion watch add {name} <path>`."
                 ))
             })?;
-            (name, owner)
-        }
-        (None, None) => {
-            return Err(error::LegionError::WatchConfig(
-                "either <repo> or --file <path> is required".to_string(),
-            ));
-        }
-    };
+                let basis = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                (name, owner, basis)
+            }
+            (None, None) => {
+                return Err(error::LegionError::WatchConfig(
+                    "either <repo> or --file <path> is required".to_string(),
+                ));
+            }
+        };
     let repo_path = PathBuf::from(&entry.workdir);
+
+    // #1010 guard: warn (never fail) when the checkout this invocation is
+    // actually running from differs from the registered workdir with a
+    // HEAD the last `legion index` run never saw. A second DB handle is
+    // opened here (the main one below is opened after the workdir-exists
+    // check, which this guard must not depend on) -- best-effort, so a
+    // failure to open it just skips the guard rather than erroring the
+    // index run.
+    if let Ok(guard_db) = open_db()
+        && let Ok(Some(snapshot)) = guard_db.get_inventory_snapshot(&repo)
+        && let Some(line) =
+            worktree_divergence_warning(&basis_dir, &repo, &repo_path, snapshot.head.as_deref())
+    {
+        eprintln!("[legion] {line}");
+    }
 
     // Serialize concurrent index runs on this repo: an older run's stale
     // live-paths walk snapshot must not prune inventory rows a newer
