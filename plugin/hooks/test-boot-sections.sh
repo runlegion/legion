@@ -258,14 +258,6 @@ assert_eq "stale-with-nested-parens still resolves the beat text" \
   "[Legion] Watch: stale (last beat: clock skew (future timestamp)) -- run legion daemon-restart" "$WATCH_OUT"
 assert_rc "clock-skew stale returns 0" 0 "$WATCH_RC"
 
-echo "==> boot_section_watch: stale with no parenthetical at all -> banner without an age (fallback arm)"
-export FAKE_WATCH_STATUS=$'status:  stale\nhost:    testhost'
-WATCH_OUT=$(boot_section_watch)
-WATCH_RC=$?
-assert_eq "no-parenthetical stale still gets a banner, not silence" \
-  "[Legion] Watch: stale -- run legion daemon-restart" "$WATCH_OUT"
-assert_rc "no-parenthetical stale returns 0" 0 "$WATCH_RC"
-
 echo "==> boot_section_watch: not running (absent) -> one banner line"
 export FAKE_WATCH_STATUS=$'status:  absent\n         no heartbeat row found -- daemon has never run or DB is fresh\n\nwake attempts: none recorded'
 WATCH_OUT=$(boot_section_watch)

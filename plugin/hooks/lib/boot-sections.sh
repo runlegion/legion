@@ -176,13 +176,6 @@ boot_section_watch() {
       beat="${beat%)}"
       printf '[Legion] Watch: stale (last beat: %s) -- run legion daemon-restart' "$beat"
       ;;
-    *"status:"*"stale"*)
-      # Same remedy, no age to report -- a future run_watch_status format
-      # that drops the "(last beat: ...)" parenthetical must still surface
-      # a banner rather than silently falling through to invisibility,
-      # which is the exact failure #997 exists to fix.
-      printf '[Legion] Watch: stale -- run legion daemon-restart'
-      ;;
   esac
 }
 

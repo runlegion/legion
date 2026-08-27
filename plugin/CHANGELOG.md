@@ -1,33 +1,5 @@
 # Legion Changelog
 
-## Unreleased
-
-### Fixed
-
-- **Daemon supervisor cold-starts `legion daemon-spawn`, never the deprecated `legion serve`,
-  and every restart path is `legion daemon-restart`** (#997). The plugin's SessionStart
-  supervisor (`plugin/hooks/_legion-daemon-supervisor.sh`) used to run `legion serve`
-  (dashboard-only, no watch loop) whenever nothing answered `:3131`, so watch stayed dead on a
-  fresh machine until someone started a daemon by hand. The cold path now runs `legion
-  daemon-spawn` (idempotent) instead. Every restart path -- version drift, same-version build
-  drift (#698), and a malformed `/health` response -- now goes through `legion daemon-restart`
-  regardless of role, including a legacy `serve` process or a pre-#613 binary reporting no role
-  at all; `kill_stale_daemon` and the script's own pidfile handling are deleted, since
-  `daemon-stop`/`daemon-restart` already own pidfile tracking, orphan-on-port recovery, and
-  SIGTERM-then-SIGKILL (`src/daemon.rs:451-499`). Fail-open is unchanged: any probe or spawn
-  error still exits 0 silently.
-
-### Added
-
-- **Watch status in the boot banner** (#997). `boot_section_watch`
-  (`plugin/hooks/lib/boot-sections.sh`), registered right after `index` in
-  `LEGION_BOOT_SECTIONS`, adds a one-line banner section for the watch heartbeat: silent when
-  `legion watch status` reports alive, one line naming the stale age (`[Legion] Watch: stale
-  (last beat: 6h ago) -- run legion daemon-restart`) or absence (`[Legion] Watch: not running --
-  run legion daemon-spawn`) otherwise. Before this, a dead or stale watch loop was invisible at
-  boot even though index staleness already had this treatment. Any error from the status call
-  is silent and never fails the banner, matching every other section's fail-open contract.
-
 ## 0.35.0
 
 The single-write-surface release. Two whole write surfaces are gone at once. The MCP

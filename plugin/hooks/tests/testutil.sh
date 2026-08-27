@@ -193,12 +193,14 @@ finish_tests() {
 #   FAKE_BULLPEN_COUNT       `bullpen --count` body (default empty)
 #   FAKE_PREDICTION_ID       `uncertainty emit` row id (pred-fixed-1)
 #   FAKE_WITNESS_LOG=<file>  `uncertainty witness` appends its argv here
-#   FAKE_SPAWN_LOG=<file>    `serve` or `daemon-spawn` appends "spawned at
-#                            <epoch>" here; `daemon-restart` appends
-#                            "daemon-restart at <epoch>" (#997: the
-#                            supervisor's cold-start path calls
-#                            `daemon-spawn`, never `serve`, but the stub
-#                            keeps the `serve` case for any other caller)
+#   FAKE_SPAWN_LOG=<file>    `daemon-spawn` appends "spawned at <epoch>"
+#                            here; `daemon-restart` appends "daemon-restart
+#                            at <epoch>" (#997: the supervisor's cold-start
+#                            path calls `daemon-spawn`, never the deprecated
+#                            `serve` -- no `serve` case exists in this stub
+#                            any more, so a caller that regresses back to
+#                            invoking it gets an unhandled, silently-empty
+#                            case rather than a quiet pass)
 #   LEGION_TEST_MARKER=<file> `telemetry ...` appends its argv (sans
 #                            leading "telemetry") here
 #   FAKE_DELIVER_DRAIN      `deliver drain` body (default empty, #941)
@@ -383,9 +385,6 @@ case "${1:-}" in
         echo "$@" >> "${FAKE_WITNESS_LOG:-/dev/null}"
         ;;
     esac
-    ;;
-  serve)
-    echo "spawned at $(date +%s)" >> "${FAKE_SPAWN_LOG:-/dev/null}"
     ;;
   daemon-spawn)
     echo "spawned at $(date +%s)" >> "${FAKE_SPAWN_LOG:-/dev/null}"

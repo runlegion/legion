@@ -4,8 +4,8 @@
 # Probes `GET http://localhost:3131/health`. Acts on these outcomes:
 #
 #   1. Healthy + version and build match local binary:  silent no-op.
-#   2. Unreachable:                                      spawn `legion
-#      daemon-spawn` detached (cold start).
+#   2. Unreachable:                                      spawn via `legion
+#      daemon-spawn` (cold start).
 #   3. Healthy but version drift, build drift (same
 #      version), or a malformed health response:          `legion
 #      daemon-restart`, regardless of role -- a legacy `serve` process or a
@@ -71,20 +71,17 @@ fi
 # supervisor falls back to version-only behavior.
 LOCAL_BUILD=$("$LEGION_BIN" --version 2>/dev/null | sed -n 's/.*(build \(.*\))$/\1/p')
 
-# Spawn helper: cold start via `legion daemon-spawn` (#997) -- idempotent,
-# starts the daemon (channel + watch loop), never the deprecated
-# dashboard-only `serve` subcommand. Detach via setsid (Linux) or nohup
-# (mac). Both available on macOS bash; setsid is Linux-only so we try it
-# then fall back.
+# Spawn helper: cold start via `legion daemon-spawn` (#997) -- never the
+# deprecated dashboard-only `serve` subcommand. `daemon-spawn` is itself the
+# detaching, idempotent entry point (it forks the daemon and returns), so
+# this call is synchronous -- exactly like restart_daemon's call to
+# `daemon-restart` below -- rather than wrapped in its own setsid/nohup/`&`.
+# Backgrounding it here would detach the WRAPPER, not the daemon, and log a
+# pid ($!) that belongs to a process that has already exited.
 spawn_daemon() {
   local reason="$1"
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$LEGION_BIN" daemon-spawn >/dev/null 2>>"$LOG" < /dev/null &
-  else
-    nohup "$LEGION_BIN" daemon-spawn >/dev/null 2>>"$LOG" < /dev/null &
-  fi
-  disown 2>/dev/null || true
-  echo "[legion-daemon-supervisor] daemon: ${reason} (pid $!)" >> "$LOG"
+  echo "[legion-daemon-supervisor] ${reason}; spawning via daemon-spawn" >> "$LOG"
+  "$LEGION_BIN" daemon-spawn >/dev/null 2>>"$LOG"
 }
 
 # Restart whoever currently answers the port via `legion daemon-restart`
