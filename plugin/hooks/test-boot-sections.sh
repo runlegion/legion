@@ -82,6 +82,7 @@ FORBIDDEN_PATTERNS=(
   '[$]\{?LEGION\}?"? +work +--repo'
   '[$]\{?LEGION\}?"? +autonomy +status'
   '[$]\{?LEGION\}?"? +index'
+  '[$]\{?LEGION\}?"? +watch +status'
   '[$]\{?LEGION\}?"? +now +--banner'
   '--domain +checkpoint'
 )
@@ -139,6 +140,12 @@ export FAKE_WHATAMI_BODY="SENTINEL_WHATAMI_ABC"
 export FAKE_PENDING_REPLIES="SENTINEL_PENDING_ABC"
 export FAKE_CHECKPOINT="SENTINEL_CHECKPOINT_ABC"
 export FAKE_INDEX_BANNER="SENTINEL_INDEX_ABC"
+# #997: boot_section_watch does not echo FAKE_WATCH_STATUS verbatim like the
+# other sections do -- it re-renders a one-line banner around the "last
+# beat" text it extracts. Shaping the stub's beat text as the sentinel
+# itself (rather than the whole line) is what lets it survive that
+# re-render and still prove sequencing.
+export FAKE_WATCH_STATUS="status:  stale  (last beat: SENTINEL_WATCH_ABC)"
 export FAKE_WORK_PEEK="SENTINEL_WORK_ABC"
 export FAKE_AUTONOMY_BANNER="SENTINEL_AUTONOMY_ABC"
 
@@ -149,6 +156,7 @@ SENTINELS=(
   "SENTINEL_PENDING_ABC"
   "SENTINEL_CHECKPOINT_ABC"
   "SENTINEL_INDEX_ABC"
+  "SENTINEL_WATCH_ABC"
   "SENTINEL_WORK_ABC"
   "SENTINEL_AUTONOMY_ABC"
 )
@@ -207,5 +215,73 @@ unset FAKE_SNOOZE
 echo "==> sections render in LEGION_BOOT_SECTIONS order on BOTH hooks (#338)"
 assert_sentinel_order "session-start.sh" "$SESSION_START_OUT"
 assert_sentinel_order "post-compact.sh" "$POST_COMPACT_OUT"
+
+# ===================== boot_section_watch, direct (#997) ===================
+#
+# The behavioral-parity block above only exercises the "stale" shape (it
+# needs the section to render so the sentinel can prove ordering). The
+# other two shapes -- "alive" (silent) and "absent" (not running) -- and the
+# fail-open contract on a broken binary are tested here by calling the
+# function directly rather than through a full hook run. $LEGION and
+# LEGION_HOOK_LOG are already set (make_plugin_root sourced lib/prelude.sh
+# above); LOG is set the same way session-start.sh/post-compact.sh set it
+# before sourcing this file.
+LOG="$LEGION_HOOK_LOG"
+# shellcheck source=lib/boot-sections.sh
+source "$BOOT_SECTIONS_SRC"
+
+# Realistic multi-line bodies (matching run_watch_status's actual output
+# shape -- see src/cli/watch.rs) rather than single-line stand-ins: proves
+# `head -n 1` actually discards the host/pid/version/beat/wake-attempts
+# lines that follow the status line on every real response, not just on a
+# stub shaped to make the test trivially pass.
+echo "==> boot_section_watch: alive -> silent, rc 0"
+export FAKE_WATCH_STATUS=$'status:  alive\nhost:    testhost\npid:     4242\nversion: 9.9.9\nrepos:   3\nbeat:    2026-08-27T00:00:00Z\n\nwake attempts: none recorded'
+WATCH_OUT=$(boot_section_watch)
+WATCH_RC=$?
+assert_empty "alive emits nothing" "$WATCH_OUT"
+assert_rc "alive returns 0" 0 "$WATCH_RC"
+
+echo "==> boot_section_watch: stale -> one banner line naming the beat age"
+export FAKE_WATCH_STATUS=$'status:  stale  (last beat: 6h ago)\nhost:    testhost\npid:     4242\nversion: 9.9.9\nrepos:   3\nbeat:    2026-08-26T18:00:00Z'
+WATCH_OUT=$(boot_section_watch)
+WATCH_RC=$?
+assert_eq "stale emits the one-line banner" \
+  "[Legion] Watch: stale (last beat: 6h ago) -- run legion daemon-restart" "$WATCH_OUT"
+assert_rc "stale returns 0" 0 "$WATCH_RC"
+
+echo "==> boot_section_watch: stale with no last-beat parenthetical -> banner without an age (hardening)"
+export FAKE_WATCH_STATUS=$'status:  stale  (last beat: clock skew (future timestamp))'
+WATCH_OUT=$(boot_section_watch)
+WATCH_RC=$?
+assert_eq "stale-with-nested-parens still resolves the beat text" \
+  "[Legion] Watch: stale (last beat: clock skew (future timestamp)) -- run legion daemon-restart" "$WATCH_OUT"
+assert_rc "clock-skew stale returns 0" 0 "$WATCH_RC"
+
+echo "==> boot_section_watch: stale with no parenthetical at all -> banner without an age (fallback arm)"
+export FAKE_WATCH_STATUS=$'status:  stale\nhost:    testhost'
+WATCH_OUT=$(boot_section_watch)
+WATCH_RC=$?
+assert_eq "no-parenthetical stale still gets a banner, not silence" \
+  "[Legion] Watch: stale -- run legion daemon-restart" "$WATCH_OUT"
+assert_rc "no-parenthetical stale returns 0" 0 "$WATCH_RC"
+
+echo "==> boot_section_watch: not running (absent) -> one banner line"
+export FAKE_WATCH_STATUS=$'status:  absent\n         no heartbeat row found -- daemon has never run or DB is fresh\n\nwake attempts: none recorded'
+WATCH_OUT=$(boot_section_watch)
+WATCH_RC=$?
+assert_eq "absent emits the not-running banner" \
+  "[Legion] Watch: not running -- run legion daemon-spawn" "$WATCH_OUT"
+assert_rc "absent returns 0" 0 "$WATCH_RC"
+
+echo "==> boot_section_watch: legion binary errors -> silent, rc 0 (fail-open)"
+export FAKE_BROKEN=1
+WATCH_OUT=$(boot_section_watch)
+WATCH_RC=$?
+unset FAKE_BROKEN
+assert_empty "broken binary emits nothing" "$WATCH_OUT"
+assert_rc "broken binary returns 0" 0 "$WATCH_RC"
+
+unset FAKE_WATCH_STATUS
 
 finish_tests

@@ -147,6 +147,45 @@ boot_section_index() {
   "$LEGION" index "$REPO" --status --banner 2>>"$LOG"
 }
 
+# Watch heartbeat (#997) -- silent when the watch loop is alive, one line
+# (index-status style) when it is stale or not running at all. Before this,
+# a dead or stale watch loop was invisible at boot -- an agent had no signal
+# that wakes/nudges were not happening, unlike index staleness which
+# boot_section_index already surfaces. Host-wide (no --repo: `legion watch
+# status` is not scoped to a repo). Any error (missing binary, non-zero
+# exit, unrecognized output) prints nothing and never fails the banner --
+# same fail-open contract as every other section.
+boot_section_watch() {
+  local out first_line beat
+  out=$("$LEGION" watch status 2>>"$LOG") || return 0
+  first_line=$(printf '%s\n' "$out" | head -n 1)
+  case "$first_line" in
+    "status:  alive")
+      return 0
+      ;;
+    "status:  absent")
+      printf '[Legion] Watch: not running -- run legion daemon-spawn'
+      ;;
+    *"status:"*"stale"*"(last beat: "*)
+      # e.g. "status:  stale  (last beat: 6h ago)" -- strip everything up to
+      # (and including) the "(last beat: " literal, then the ONE trailing
+      # ")" (not a wildcarded "*)" strip -- a clock-skew beat's own text
+      # carries a nested "(future timestamp)" and a wildcard strip would eat
+      # into it).
+      beat="${first_line#*(last beat: }"
+      beat="${beat%)}"
+      printf '[Legion] Watch: stale (last beat: %s) -- run legion daemon-restart' "$beat"
+      ;;
+    *"status:"*"stale"*)
+      # Same remedy, no age to report -- a future run_watch_status format
+      # that drops the "(last beat: ...)" parenthetical must still surface
+      # a banner rather than silently falling through to invisibility,
+      # which is the exact failure #997 exists to fix.
+      printf '[Legion] Watch: stale -- run legion daemon-restart'
+      ;;
+  esac
+}
+
 # Work source -- what's on my plate (#931: sourced live from the repo's
 # configured work-source issues, no local board/goal state survives -- see
 # src/queue.rs's module doc comment for why picking never claims anything,
@@ -174,7 +213,7 @@ boot_section_budget() {
 # defaulted to generic Claude prose instead of reading its identity chain).
 # This array is now the ONLY place section order is decided -- it used to
 # be re-derived independently by each hook's comment numbering.
-LEGION_BOOT_SECTIONS=(now identity whatami pending checkpoint index work budget)
+LEGION_BOOT_SECTIONS=(now identity whatami pending checkpoint index watch work budget)
 
 # emit_boot_core -- render every section in LEGION_BOOT_SECTIONS, in order,
 # skipping empty ones, and print the joined result. No arguments. No

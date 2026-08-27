@@ -193,11 +193,18 @@ finish_tests() {
 #   FAKE_BULLPEN_COUNT       `bullpen --count` body (default empty)
 #   FAKE_PREDICTION_ID       `uncertainty emit` row id (pred-fixed-1)
 #   FAKE_WITNESS_LOG=<file>  `uncertainty witness` appends its argv here
-#   FAKE_SPAWN_LOG=<file>    `serve` appends "spawned at <epoch>" here;
-#                            `daemon-restart` appends "daemon-restart at <epoch>"
+#   FAKE_SPAWN_LOG=<file>    `serve` or `daemon-spawn` appends "spawned at
+#                            <epoch>" here; `daemon-restart` appends
+#                            "daemon-restart at <epoch>" (#997: the
+#                            supervisor's cold-start path calls
+#                            `daemon-spawn`, never `serve`, but the stub
+#                            keeps the `serve` case for any other caller)
 #   LEGION_TEST_MARKER=<file> `telemetry ...` appends its argv (sans
 #                            leading "telemetry") here
 #   FAKE_DELIVER_DRAIN      `deliver drain` body (default empty, #941)
+#   FAKE_WATCH_STATUS        `watch status` body (default empty, simulating
+#                            an unreachable/erroring binary -- #997's
+#                            `boot_section_watch` treats that as silent)
 make_stub_legion() {
   local path="$1"
   cat > "$path" <<'EOF'
@@ -241,6 +248,11 @@ case "${1:-}" in
     elif [ "${2:-}" = "delegated-needs-attention" ] && [ -n "${FAKE_DELEGATED_NEEDS_ATTENTION:-}" ]; then
       printf '{"work_item_id":"%s","attempt_id":"attempt-fixed-1","repo":"%s"}\n' \
         "$FAKE_DELEGATED_NEEDS_ATTENTION" "${LEGION_REPO:-test}"
+    elif [ "${2:-}" = "status" ]; then
+      # #997: boot_section_watch's data source. FAKE_WATCH_STATUS carries the
+      # whole `legion watch status` body (default empty, matching a binary
+      # that exits non-zero or an empty response).
+      [ -n "${FAKE_WATCH_STATUS:-}" ] && printf '%s\n' "$FAKE_WATCH_STATUS"
     fi
     ;;
   stats)
@@ -373,6 +385,9 @@ case "${1:-}" in
     esac
     ;;
   serve)
+    echo "spawned at $(date +%s)" >> "${FAKE_SPAWN_LOG:-/dev/null}"
+    ;;
+  daemon-spawn)
     echo "spawned at $(date +%s)" >> "${FAKE_SPAWN_LOG:-/dev/null}"
     ;;
   daemon-restart)

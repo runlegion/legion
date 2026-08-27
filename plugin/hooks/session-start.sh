@@ -3,10 +3,10 @@
 #
 # Session-only side effects live here: marker cleanup, index warm, daemon
 # supervisor, watch lock. The banner itself -- identity, operating
-# contract, pending replies, checkpoint, index status, current work,
-# autonomy budget -- is assembled by lib/boot-sections.sh (#879), the SAME
-# driver post-compact.sh calls, so the two SessionStart matchers cannot
-# drift out of sync the way they did before #879.
+# contract, pending replies, checkpoint, index status, watch status,
+# current work, autonomy budget -- is assembled by lib/boot-sections.sh
+# (#879), the SAME driver post-compact.sh calls, so the two SessionStart
+# matchers cannot drift out of sync the way they did before #879.
 #
 # Everything else (bulk recall, surface, bullpen) is pulled on demand
 # during the session via recall/consult/bullpen commands.
@@ -45,9 +45,13 @@ rm -f "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
 # Warm the Tantivy index in the background
 ("$LEGION" recall --repo "$REPO" --context warmup --limit 1 >/dev/null 2>&1 &)
 
-# Dashboard daemon supervisor (#321): probe /health, (re)spawn as needed.
-# Backgrounded with stdin closed so SessionStart latency does not include
-# the curl probe or the legion serve spawn handshake.
+# Daemon supervisor (#321, #997): probe /health, (re)spawn as needed via
+# `legion daemon-spawn` (cold start) or `legion daemon-restart` (version
+# drift, build drift, or a malformed health response) -- never the
+# deprecated dashboard-only `serve` subcommand, so watch comes up on a cold
+# machine without anyone starting a daemon by hand. Backgrounded with stdin
+# closed so SessionStart latency does not include the curl probe or the
+# spawn/restart handshake.
 (bash "${CLAUDE_PLUGIN_ROOT}/hooks/_legion-daemon-supervisor.sh" >/dev/null 2>&1 < /dev/null &)
 
 # The interactive-session lock moved to its own hook, session-lock.sh (#996).
@@ -62,9 +66,10 @@ rm -f "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
 # there is no local cache left to keep warm.
 
 # Banner assembly: identity, operating contract, pending replies,
-# checkpoint, index status, current work, autonomy budget -- in that order
-# (LEGION_BOOT_SECTIONS in lib/boot-sections.sh). See that file for why the
-# order is fixed and why no per-hook section list lives here anymore.
+# checkpoint, index status, watch status, current work, autonomy budget --
+# in that order (LEGION_BOOT_SECTIONS in lib/boot-sections.sh). See that
+# file for why the order is fixed and why no per-hook section list lives
+# here anymore.
 # Guarded: the source above is deliberately non-fatal, so a missing lib
 # costs the banner, not the side effects that already ran.
 OUTPUT=""
