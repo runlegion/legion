@@ -309,9 +309,16 @@ mod tests {
             perms.set_mode(0o755);
             script.as_file().set_permissions(perms).expect("chmod");
         }
-        let path = script.path().to_string_lossy().into_owned();
+        // Close the write handle before exec'ing the script: on Linux,
+        // running a binary that is still open for writing fails with
+        // ETXTBSY ("text file busy") -- the same class #682/#685 already
+        // hit. `into_temp_path` drops the `File` (closing the fd) while
+        // keeping the file on disk as a `TempPath` that still cleans up on
+        // drop, so the handle must stay bound past the assertions below.
+        let path = script.into_temp_path();
+        let path_str = path.to_string_lossy().into_owned();
 
-        let sessions = list_live_sessions(&path);
+        let sessions = list_live_sessions(&path_str);
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].pid, 123);
         assert_eq!(sessions[0].name, "kelex");
