@@ -97,50 +97,49 @@ fn add_worktree(repo_dir: &std::path::Path) -> std::path::PathBuf {
     repo_dir.join("wt")
 }
 
-/// #1010 acceptance test 1: `sym refs` from a linked worktree whose branch
-/// has moved past the indexed HEAD warns, naming both HEADs.
-///
-/// Builds a real SCIP index via the `scip-rust` PATH-shim technique from
-/// `index_telemetry.rs::index_and_sym_def_refs_roundtrip_against_fixture_repo`
-/// (a pre-built protobuf blob copied into place, rather than depending on a
-/// real `rust-analyzer`/`scip-rust` binary) so the test is hermetic and
-/// fast; the guard itself does not care about SCIP content, only HEADs, but
-/// `sym refs` needs a real index row to answer at all.
+/// Build a minimal but real SCIP index for `repo_name` at `repo_dir` via the
+/// `scip-rust` PATH-shim technique from `index_telemetry.rs`'s
+/// `index_and_sym_def_refs_roundtrip_against_fixture_repo` (a pre-built
+/// protobuf blob copied into place, rather than depending on a real
+/// `rust-analyzer`/`scip-rust` binary) -- hermetic and fast; the guard
+/// itself does not care about SCIP content, only HEADs, but `sym
+/// refs`/`sym list` need a real index row to answer at all. Commits a
+/// `Cargo.toml` + `src/lib.rs` defining `Greeter`/`hello` to a real git repo
+/// (caller must `seed_watch_toml` first), runs `legion index repo_name`,
+/// and returns the repo's HEAD at index time. Shared by every test here
+/// that needs a queryable SCIP index rather than just an inventory
+/// snapshot.
 #[cfg(unix)]
-#[test]
-fn sym_refs_warns_when_invoked_from_divergent_worktree() {
+fn seed_scip_fixture(
+    data_dir: &std::path::Path,
+    repo_dir: &std::path::Path,
+    repo_name: &str,
+) -> String {
     use protobuf::Message;
     use scip::types::{Document, Index, Occurrence, SymbolRole};
     use std::os::unix::fs::PermissionsExt;
 
-    let _guard = RealRepoConfigGuard::new();
-    let data_dir = tempfile::tempdir().expect("data dir");
-    let repo_dir = tempfile::tempdir().expect("repo dir");
-
     std::fs::write(
-        repo_dir.path().join("Cargo.toml"),
-        "[package]\nname = \"wtguard\"\nversion = \"0.1.0\"\n",
+        repo_dir.join("Cargo.toml"),
+        format!("[package]\nname = \"{repo_name}\"\nversion = \"0.1.0\"\n"),
     )
     .expect("write fixture");
-    std::fs::create_dir_all(repo_dir.path().join("src")).expect("mkdir");
+    std::fs::create_dir_all(repo_dir.join("src")).expect("mkdir");
     std::fs::write(
-        repo_dir.path().join("src/lib.rs"),
+        repo_dir.join("src/lib.rs"),
         "pub struct Greeter;\npub fn hello() {}\n",
     )
     .expect("write fixture");
 
-    git_in(repo_dir.path(), &["init", "-q", "-b", "main"]);
-    git_in(repo_dir.path(), &["add", "."]);
-    git_in(repo_dir.path(), &["commit", "-q", "-m", "initial"]);
-    let primary_head = git_head(repo_dir.path());
+    git_in(repo_dir, &["init", "-q", "-b", "main"]);
+    git_in(repo_dir, &["add", "."]);
+    git_in(repo_dir, &["commit", "-q", "-m", "initial"]);
+    let primary_head = git_head(repo_dir);
 
-    seed_watch_toml(data_dir.path(), &[("wtguard", repo_dir.path())]);
-
-    // Build + install the scip-rust shim.
-    let symbol = "rust-analyzer cargo wtguard 0.1.0 src/lib.rs/Greeter#";
+    let symbol = format!("rust-analyzer cargo {repo_name} 0.1.0 src/lib.rs/Greeter#");
     let occurrence = |range: Vec<i32>, is_def: bool| {
         let mut o = Occurrence::new();
-        o.symbol = symbol.to_string();
+        o.symbol = symbol.clone();
         o.range = range;
         if is_def {
             o.symbol_roles = SymbolRole::Definition as i32;
@@ -156,7 +155,7 @@ fn sym_refs_warns_when_invoked_from_divergent_worktree() {
     let mut scip_index = Index::new();
     scip_index.documents = vec![document];
     let blob = scip_index.write_to_bytes().expect("serialize scip index");
-    let blob_path = data_dir.path().join("fixture-index.scip");
+    let blob_path = data_dir.join(format!("{repo_name}-fixture-index.scip"));
     std::fs::write(&blob_path, &blob).expect("write blob");
 
     let shim_dir = tempfile::tempdir().expect("shim dir");
@@ -172,10 +171,25 @@ fn sym_refs_warns_when_invoked_from_divergent_worktree() {
     let shim_path = format!("{}:/usr/bin:/bin", shim_dir.path().display());
 
     run_ok(
-        legion_cmd(data_dir.path())
+        legion_cmd(data_dir)
             .env("PATH", &shim_path)
-            .args(["index", "wtguard"]),
+            .args(["index", repo_name]),
     );
+
+    primary_head
+}
+
+/// #1010 acceptance test 1: `sym refs` from a linked worktree whose branch
+/// has moved past the indexed HEAD warns, naming both HEADs.
+#[cfg(unix)]
+#[test]
+fn sym_refs_warns_when_invoked_from_divergent_worktree() {
+    let _guard = RealRepoConfigGuard::new();
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+
+    seed_watch_toml(data_dir.path(), &[("wtguard", repo_dir.path())]);
+    let primary_head = seed_scip_fixture(data_dir.path(), repo_dir.path(), "wtguard");
 
     // A linked worktree, checked out on a branch that carries one commit
     // the indexed HEAD never saw -- exactly #1003's "a caller that exists
@@ -220,10 +234,57 @@ fn sym_refs_warns_when_invoked_from_divergent_worktree() {
     );
 }
 
+/// #1010 review finding MED 2(a): `sym list` also warns -- a different
+/// SCIP-reading dispatch path (`run_sym_list`) than `sym refs`/`sym def`/
+/// `sym impl`/`sym hover` (`run_location_query`/`run_hover_query`), guarded
+/// separately in `run_sym_list` because `sym list --lang css` diverts to
+/// `run_css_sym_list` before ever reaching those.
+#[cfg(unix)]
+#[test]
+fn sym_list_warns_when_invoked_from_divergent_worktree() {
+    let _guard = RealRepoConfigGuard::new();
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+
+    seed_watch_toml(data_dir.path(), &[("symlistguard", repo_dir.path())]);
+    let primary_head = seed_scip_fixture(data_dir.path(), repo_dir.path(), "symlistguard");
+
+    let worktree_dir = add_worktree(repo_dir.path());
+    std::fs::write(
+        worktree_dir.join("src/lib.rs"),
+        "pub struct Greeter;\npub fn hello() {}\npub fn hello2() { hello(); }\n",
+    )
+    .expect("write fixture");
+    git_in(&worktree_dir, &["add", "."]);
+    git_in(
+        &worktree_dir,
+        &["commit", "-q", "-m", "add hello2 call site"],
+    );
+    let worktree_head = git_head(&worktree_dir);
+    assert_ne!(primary_head, worktree_head, "fixture must actually diverge");
+
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .current_dir(&worktree_dir)
+            .args(["sym", "list", "--repo", "symlistguard"]),
+    );
+    assert!(
+        stderr.contains("WARNING"),
+        "expected a worktree-divergence warning, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&primary_head[..7]),
+        "expected the indexed HEAD to be named, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&worktree_head[..7]),
+        "expected the invoking worktree's HEAD to be named, got:\n{stderr}"
+    );
+}
+
 /// #1010 acceptance test 2: `sym etc find-content` from the same divergent
 /// worktree also warns -- the live-scan/inventory read path, not the SCIP
 /// blob path.
-#[cfg(unix)]
 #[test]
 fn find_content_warns_when_invoked_from_divergent_worktree() {
     let _guard = RealRepoConfigGuard::new();
@@ -278,13 +339,152 @@ fn find_content_warns_when_invoked_from_divergent_worktree() {
     );
 }
 
+/// #1010 review finding MED 1: `sym etc find-content` with NO `--repo` --
+/// the default scope for every guarded surface, and the exact shape the
+/// issue's own example uses (`sym refs update_prediction`, no `--repo`) --
+/// still warns for the one repo whose common dir actually matches the
+/// invoking worktree, and stays silent about a SECOND, unrelated repo
+/// registered in the same watch.toml even though that repo is ALSO
+/// indexed (so it has a real snapshot a naive, non-identity-gated loop
+/// could wrongly compare against).
+#[test]
+fn find_content_with_no_repo_flag_warns_for_matching_repo_only() {
+    let _guard = RealRepoConfigGuard::new();
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let other_dir = tempfile::tempdir().expect("other repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+
+    std::fs::write(repo_dir.path().join("NOTES.md"), "needle-token here\n").expect("write");
+    git_in(repo_dir.path(), &["init", "-q", "-b", "main"]);
+    git_in(repo_dir.path(), &["add", "."]);
+    git_in(repo_dir.path(), &["commit", "-q", "-m", "initial"]);
+    let primary_head = git_head(repo_dir.path());
+
+    std::fs::write(other_dir.path().join("OTHER.md"), "unrelated\n").expect("write");
+    git_in(other_dir.path(), &["init", "-q", "-b", "main"]);
+    git_in(other_dir.path(), &["add", "."]);
+    git_in(other_dir.path(), &["commit", "-q", "-m", "other initial"]);
+
+    seed_watch_toml(
+        data_dir.path(),
+        &[
+            ("fcnorepoguard", repo_dir.path()),
+            ("otherrepo", other_dir.path()),
+        ],
+    );
+    run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["index", "fcnorepoguard"]),
+    );
+    run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["index", "otherrepo"]),
+    );
+
+    let worktree_dir = add_worktree(repo_dir.path());
+    std::fs::write(worktree_dir.join("EXTRA.md"), "more content\n").expect("write");
+    git_in(&worktree_dir, &["add", "."]);
+    git_in(&worktree_dir, &["commit", "-q", "-m", "add extra doc"]);
+    let worktree_head = git_head(&worktree_dir);
+    assert_ne!(primary_head, worktree_head, "fixture must actually diverge");
+
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .current_dir(&worktree_dir)
+            .args(["sym", "etc", "find-content", "needle-token"]),
+    );
+    assert!(
+        stderr.contains("WARNING"),
+        "expected a worktree-divergence warning for the matching repo, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("fcnorepoguard"),
+        "expected the warning to name the matching repo, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("otherrepo"),
+        "must not mention the unrelated repo at all, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&primary_head[..7]),
+        "expected the indexed HEAD to be named, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&worktree_head[..7]),
+        "expected the invoking worktree's HEAD to be named, got:\n{stderr}"
+    );
+}
+
+/// #1010 review finding LOW 2: the bare `legion index <repo>` form (no
+/// `--file`) also warns when invoked from a divergent worktree -- the guard
+/// covers both call shapes of `legion index`, not just `--file`. The
+/// seeding `legion index plainguard` run MUST happen first so an
+/// `inventory_snapshots` row exists before the divergence-invoking second
+/// run; without that seed, `warn_worktree_divergence` early-returns on a
+/// missing snapshot and this test would pass vacuously (no warning either
+/// way). That seeding run's own cwd -- wherever `cargo test` happens to run
+/// from -- is itself an unrelated repo relative to the fixture, which the
+/// identity gate keeps silent on its own.
+#[test]
+fn plain_index_warns_when_invoked_from_divergent_worktree() {
+    let _guard = RealRepoConfigGuard::new();
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+
+    std::fs::write(repo_dir.path().join("README.md"), "docs only\n").expect("write");
+    git_in(repo_dir.path(), &["init", "-q", "-b", "main"]);
+    git_in(repo_dir.path(), &["add", "."]);
+    git_in(repo_dir.path(), &["commit", "-q", "-m", "initial"]);
+    let primary_head = git_head(repo_dir.path());
+
+    seed_watch_toml(data_dir.path(), &[("plainguard", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "plainguard"]));
+
+    let worktree_dir = add_worktree(repo_dir.path());
+    std::fs::write(
+        worktree_dir.join("NOTES.md"),
+        "new file only on the branch\n",
+    )
+    .expect("write");
+    git_in(&worktree_dir, &["add", "."]);
+    git_in(&worktree_dir, &["commit", "-q", "-m", "add notes"]);
+    let worktree_head = git_head(&worktree_dir);
+    assert_ne!(primary_head, worktree_head, "fixture must actually diverge");
+
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .current_dir(&worktree_dir)
+            .args(["index", "plainguard"]),
+    );
+    assert!(
+        stderr.contains("WARNING"),
+        "expected a worktree-divergence warning, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&primary_head[..7]),
+        "expected the indexed HEAD to be named, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&worktree_head[..7]),
+        "expected the invoking worktree's HEAD to be named, got:\n{stderr}"
+    );
+    let canon_wt = worktree_dir.canonicalize().expect("canonicalize worktree");
+    assert!(
+        stderr.contains(canon_wt.to_str().expect("utf8 path")),
+        "expected the worktree path to be named, got:\n{stderr}"
+    );
+}
+
 /// #1010 acceptance test 3: `legion index --file <path-under-worktree>`
 /// warns too. Unlike the previous two tests, this invocation passes no
 /// `--repo` and is not run with `.current_dir` set to the worktree at all --
 /// the guard must derive the invoking checkout from the `--file` argument's
 /// own directory, exactly as the issue specifies, since the operator can
 /// run `legion index --file <path>` from anywhere.
-#[cfg(unix)]
 #[test]
 fn index_file_warns_when_invoked_from_worktree_owning_repo() {
     let _guard = RealRepoConfigGuard::new();
@@ -362,7 +562,15 @@ fn find_file_from_primary_checkout_with_matching_head_is_unchanged() {
     git_in(repo_dir.path(), &["commit", "-q", "-m", "initial"]);
 
     seed_watch_toml(data_dir.path(), &[("primaryguard", repo_dir.path())]);
-    run_ok(legion_cmd(data_dir.path()).args(["index", "primaryguard"]));
+    // This seeding run's own cwd is wherever `cargo test` happens to run
+    // from -- an unrelated repo relative to `primaryguard`'s fixture, which
+    // the identity gate must keep silent on its own; asserted here to close
+    // the negative direction for the plain `legion index <repo>` form too.
+    let seed_stderr = run_ok_stderr(legion_cmd(data_dir.path()).args(["index", "primaryguard"]));
+    assert!(
+        !seed_stderr.contains("WARNING"),
+        "an unrelated repo at cwd must never warn, got:\n{seed_stderr}"
+    );
 
     let out = legion_cmd(data_dir.path())
         .env("XDG_STATE_HOME", state_dir.path())
@@ -393,5 +601,116 @@ fn find_file_from_primary_checkout_with_matching_head_is_unchanged() {
         out.status.code(),
         Some(0),
         "exit code must be exactly what it was before this guard existed"
+    );
+}
+
+/// #1010 review finding MED 2(b): `sym impact` (`run_sym_impact`) is a
+/// third, separate SCIP-reading dispatch path from `run_location_query`
+/// and `run_sym_list`, and needs its own guard call.
+#[cfg(unix)]
+#[test]
+fn sym_impact_warns_when_invoked_from_divergent_worktree() {
+    let _guard = RealRepoConfigGuard::new();
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+
+    seed_watch_toml(data_dir.path(), &[("impactguard", repo_dir.path())]);
+    let primary_head = seed_scip_fixture(data_dir.path(), repo_dir.path(), "impactguard");
+
+    let worktree_dir = add_worktree(repo_dir.path());
+    std::fs::write(
+        worktree_dir.join("src/lib.rs"),
+        "pub struct Greeter;\npub fn hello() {}\npub fn hello2() { hello(); }\n",
+    )
+    .expect("write fixture");
+    git_in(&worktree_dir, &["add", "."]);
+    git_in(
+        &worktree_dir,
+        &["commit", "-q", "-m", "add hello2 call site"],
+    );
+    let worktree_head = git_head(&worktree_dir);
+    assert_ne!(primary_head, worktree_head, "fixture must actually diverge");
+
+    // A trivial unified diff naming a line inside src/lib.rs -- `sym
+    // impact` only needs the diff to parse; the impact-radius result
+    // itself is not what this test is checking.
+    let diff_path = worktree_dir.join("change.diff");
+    std::fs::write(
+        &diff_path,
+        "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n pub struct Greeter;\n-pub fn hello() {}\n+pub fn hello() { }\n",
+    )
+    .expect("write diff");
+
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .current_dir(&worktree_dir)
+            .args([
+                "sym",
+                "impact",
+                "--repo",
+                "impactguard",
+                "--diff",
+                diff_path.to_str().expect("utf8 path"),
+            ]),
+    );
+    assert!(
+        stderr.contains("WARNING"),
+        "expected a worktree-divergence warning, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&primary_head[..7]),
+        "expected the indexed HEAD to be named, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&worktree_head[..7]),
+        "expected the invoking worktree's HEAD to be named, got:\n{stderr}"
+    );
+}
+
+/// #1010 review finding MED 2(c): `sym def --lang css` dispatches to
+/// `run_css_sym_def`, a code path `run_location_query` never touches (css
+/// is not a SCIP language) -- guarded directly in `run_sym_action`'s
+/// `SymAction::Def` arm before the css/non-css split. No SCIP shim needed:
+/// css symbols come straight from the file-inventory walk.
+#[test]
+fn sym_def_css_warns_when_invoked_from_divergent_worktree() {
+    let _guard = RealRepoConfigGuard::new();
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+
+    std::fs::write(repo_dir.path().join("style.css"), ".foo { color: red; }\n")
+        .expect("write fixture");
+    git_in(repo_dir.path(), &["init", "-q", "-b", "main"]);
+    git_in(repo_dir.path(), &["add", "."]);
+    git_in(repo_dir.path(), &["commit", "-q", "-m", "initial"]);
+    let primary_head = git_head(repo_dir.path());
+
+    seed_watch_toml(data_dir.path(), &[("cssguard", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "cssguard"]));
+
+    let worktree_dir = add_worktree(repo_dir.path());
+    std::fs::write(worktree_dir.join("EXTRA.css"), ".bar { color: blue; }\n")
+        .expect("write fixture");
+    git_in(&worktree_dir, &["add", "."]);
+    git_in(&worktree_dir, &["commit", "-q", "-m", "add extra css"]);
+    let worktree_head = git_head(&worktree_dir);
+    assert_ne!(primary_head, worktree_head, "fixture must actually diverge");
+
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .current_dir(&worktree_dir)
+            .args(["sym", "def", ".foo", "--lang", "css", "--repo", "cssguard"]),
+    );
+    assert!(
+        stderr.contains("WARNING"),
+        "expected a worktree-divergence warning, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&primary_head[..7]),
+        "expected the indexed HEAD to be named, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&worktree_head[..7]),
+        "expected the invoking worktree's HEAD to be named, got:\n{stderr}"
     );
 }
