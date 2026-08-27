@@ -3,8 +3,8 @@
 # The compaction summary is STALE. This hook provides ground truth.
 #
 # The core banner (identity, operating contract, pending replies,
-# checkpoint, index status, current work, autonomy budget) is assembled by
-# lib/boot-sections.sh (#879) via emit_boot_core -- the SAME driver
+# checkpoint, index status, watch status, current work, autonomy budget)
+# is assembled by lib/boot-sections.sh (#879) via emit_boot_core -- the SAME driver
 # session-start.sh calls. Before #879 this hook emitted only a standalone
 # checkpoint block, so compaction silently dropped identity, the operating
 # contract, pending replies, the work source, and the autonomy budget with

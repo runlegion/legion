@@ -22,6 +22,10 @@ export FAKE_VERSION="9.9.9"
 # suffix and compares against /health's build_id on a version match.
 export FAKE_BUILD="localbuild"
 export FAKE_SPAWN_LOG="$WORK/scratch/spawned.log"
+# #997: records every stub-legion invocation's full argv, so a test can
+# assert the exact subcommand used (`daemon-spawn` vs `serve`) rather than
+# relying only on FAKE_SPAWN_LOG's shared "spawned at" text.
+export LEGION_STUB_LOG="$WORK/scratch/stub-argv.log"
 
 # Redirect /tmp/legion-hook-errors.log to a per-test path: copy the hook to
 # a per-test variant and rewrite the LOG var.
@@ -49,6 +53,10 @@ case "$mode" in
   match_build_unknown) echo '{"status":"ok","version":"9.9.9","build_id":"unknown","role":"daemon","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
   mismatch) echo '{"status":"ok","version":"1.0.0","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
   mismatch_daemon) echo '{"status":"ok","version":"1.0.0","role":"daemon","started_at":"2026-05-10T00:00:00Z","uptime_secs":10}' ;;
+  # #997 acceptance criterion: a malformed-role (empty string, as a
+  # pre-#613 binary or a transitional build might report) response still
+  # goes through daemon-restart, never a pidfile kill + serve.
+  mismatch_empty_role) echo '{"version":"0.0.1","role":""}' ;;
   malformed) echo 'not json' ;;
 esac
 EOF
@@ -56,10 +64,10 @@ EOF
 }
 
 reset_log() {
-  rm -f "$TEST_LOG" "$FAKE_SPAWN_LOG"
+  rm -f "$TEST_LOG" "$FAKE_SPAWN_LOG" "$LEGION_STUB_LOG"
 }
 
-echo "==> /health unreachable -> spawn fresh"
+echo "==> /health unreachable -> daemon-spawn cold start, never serve (#997)"
 reset_log
 write_curl_stub refused
 bash "$HOOK_PATH"
@@ -67,6 +75,8 @@ wait
 sleep 0.3
 assert_file_contains "spawned at least once" "$FAKE_SPAWN_LOG" "spawned at"
 assert_file_contains "log notes started-fresh reason" "$TEST_LOG" "started fresh"
+assert_file_contains "cold start calls daemon-spawn" "$LEGION_STUB_LOG" "daemon-spawn"
+assert_file_not_contains "cold start never calls serve" "$LEGION_STUB_LOG" "^serve$"
 
 echo "==> /health empty body -> spawn fresh"
 reset_log
@@ -120,13 +130,14 @@ assert_file_contains "daemon bounced on build drift" "$FAKE_SPAWN_LOG" "daemon-r
 assert_file_not_contains "no serve spawned over the daemon" "$FAKE_SPAWN_LOG" "spawned at"
 assert_file_contains "log notes build drift" "$TEST_LOG" "daemon build oldbuild != local build localbuild"
 
-echo "==> /health version match + build drift + role=serve -> replace (#698)"
+echo "==> /health version match + build drift + role=serve -> daemon-restart, not a serve spawn (#997)"
 reset_log
 write_curl_stub match_build_drift_serve
 bash "$HOOK_PATH"
 wait
 sleep 0.3
-assert_file_contains "serve replaced on build drift" "$FAKE_SPAWN_LOG" "spawned at"
+assert_file_contains "daemon-restart used for a legacy serve role" "$FAKE_SPAWN_LOG" "daemon-restart at"
+assert_file_not_contains "no cold-start spawn over an answering serve" "$FAKE_SPAWN_LOG" "spawned at"
 assert_file_contains "log notes build drift" "$TEST_LOG" "daemon build oldbuild != local build localbuild"
 
 echo "==> /health version match + build_id unknown -> silent no-op (indeterminate)"
@@ -137,13 +148,14 @@ wait
 sleep 0.3
 assert_file_absent "no spawn when daemon build_id is unknown" "$FAKE_SPAWN_LOG"
 
-echo "==> /health version mismatch -> replace"
+echo "==> /health version mismatch, no role (pre-#613 binary) -> daemon-restart, not a serve spawn (#997)"
 reset_log
 write_curl_stub mismatch
 bash "$HOOK_PATH"
 wait
 sleep 0.3
-assert_file_contains "spawned replacement" "$FAKE_SPAWN_LOG" "spawned at"
+assert_file_contains "daemon-restart used even with no role reported" "$FAKE_SPAWN_LOG" "daemon-restart at"
+assert_file_not_contains "no cold-start spawn on version drift" "$FAKE_SPAWN_LOG" "spawned at"
 assert_file_contains "log notes replacement" "$TEST_LOG" "daemon v1.0.0 != local v9.9.9"
 
 echo "==> /health version mismatch with role=daemon -> daemon-restart, never a serve spawn"
@@ -154,15 +166,26 @@ wait
 sleep 0.3
 assert_file_contains "daemon bounced in place" "$FAKE_SPAWN_LOG" "daemon-restart at"
 assert_file_not_contains "no serve spawned over the daemon" "$FAKE_SPAWN_LOG" "spawned at"
-assert_file_contains "log notes in-place restart" "$TEST_LOG" "restarting daemon in place"
+assert_file_contains "log notes in-place restart" "$TEST_LOG" "restarting via daemon-restart"
 
-echo "==> /health malformed JSON -> respawn"
+echo "==> /health {version:0.0.1, role:\"\"} vs local 9.9.9 -> daemon-restart, not a kill+serve (#997 AC2)"
+reset_log
+write_curl_stub mismatch_empty_role
+bash "$HOOK_PATH"
+wait
+sleep 0.3
+assert_file_contains "daemon-restart used for an empty-role response" "$FAKE_SPAWN_LOG" "daemon-restart at"
+assert_file_not_contains "no cold-start spawn for an empty-role response" "$FAKE_SPAWN_LOG" "spawned at"
+assert_file_not_contains "no serve invocation logged for an empty-role response" "$LEGION_STUB_LOG" "^serve$"
+
+echo "==> /health malformed JSON -> daemon-restart, not a serve spawn (#997)"
 reset_log
 write_curl_stub malformed
 bash "$HOOK_PATH"
 wait
 sleep 0.3
-assert_file_contains "spawned replacement on malformed JSON" "$FAKE_SPAWN_LOG" "spawned at"
+assert_file_contains "daemon-restart used on malformed health" "$FAKE_SPAWN_LOG" "daemon-restart at"
+assert_file_not_contains "no cold-start spawn on malformed health" "$FAKE_SPAWN_LOG" "spawned at"
 assert_file_contains "log notes malformed-health respawn" "$TEST_LOG" "malformed health response"
 
 echo "==> LEGION_SKIP_DAEMON_SUPERVISOR=1 -> silent skip"
