@@ -20,6 +20,7 @@
 //! sole place post/signal text travels to a live session.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -101,13 +102,58 @@ pub fn list_live_sessions(claude_bin: &str) -> Vec<LiveSession> {
 }
 
 /// Resolve `path` to its canonical form, falling back to the raw string when
-/// canonicalization fails (path does not exist, permission denied, etc). A
+/// canonicalization fails (path does not exist, permission denied, etc), then
+/// run it through [`normalize_path_for_comparison`] so two independently
+/// resolved paths for the same directory compare equal on every platform. A
 /// fallback rather than a `None` keeps comparison total: two non-existent
 /// paths that are textually identical still match.
 fn canonical_or_raw(path: &str) -> String {
-    std::fs::canonicalize(path)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| path.to_string())
+    let resolved: PathBuf = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    normalize_path_for_comparison(&resolved)
+}
+
+/// Normalize an already-resolved path into a form that compares equal across
+/// the two independent sources `find_live_session_for_workdir` reconciles:
+/// `std::fs::canonicalize`'s output for `WatchRepoConfig::workdir`, and
+/// whatever `cwd` the harness reports for a live session via
+/// `claude agents --json`.
+///
+/// Three normalizations, in order:
+/// 1. Strip Windows' `\\?\` verbatim-path prefix via
+///    [`crate::graph::strip_verbatim_prefix`] -- the SAME helper the module
+///    graph engine uses for the identical reason (#710/#359): on Windows,
+///    `std::fs::canonicalize` hands back the verbatim form, but there is no
+///    guarantee the OTHER side of a comparison (here, the harness's own `cwd`
+///    report) is also verbatim. Left unstripped, a canonicalized `workdir`
+///    would carry the prefix while a plain-form `cwd` would not, so every
+///    comparison would disagree on Windows even for the same directory.
+/// 2. Normalize `\` to `/` so a backslash-separated Windows path and a
+///    forward-slash one compare equal, and trim a single trailing separator
+///    (but never collapse a bare root) so a `workdir` written with a
+///    trailing slash in watch.toml still matches.
+/// 3. Lowercase, but ONLY when compiled for Windows (`cfg!(windows)`, not a
+///    runtime OS sniff -- the binary either was or was not built for a
+///    case-insensitive-by-convention filesystem). NTFS is case-insensitive
+///    by default, so `C:\Users\Foo` and `C:\Users\FOO` name the same
+///    directory; Linux is case-sensitive, where lowercasing would wrongly
+///    fold two DIFFERENT real directories together. macOS is usually
+///    case-insensitive too, but is excluded deliberately: both sides there
+///    already go through `std::fs::canonicalize` (or a byte-identical raw
+///    fallback), which resolves to the actual on-disk casing, so the two
+///    sides already agree without needing to fold case.
+fn normalize_path_for_comparison(path: &Path) -> String {
+    let stripped = crate::graph::strip_verbatim_prefix(path);
+    let forward_slashes = stripped.to_string_lossy().replace('\\', "/");
+    let trimmed = if forward_slashes.len() > 1 {
+        forward_slashes.trim_end_matches('/').to_string()
+    } else {
+        forward_slashes
+    };
+    if cfg!(windows) {
+        trimmed.to_ascii_lowercase()
+    } else {
+        trimmed
+    }
 }
 
 /// Find the live session, if any, whose `cwd` canonicalizes to the same
@@ -363,6 +409,73 @@ mod tests {
         assert!(
             find_live_session_for_workdir(&sessions, &other.path().to_string_lossy()).is_none()
         );
+    }
+
+    // -- normalize_path_for_comparison (#999, Windows cross-platform fix) -------
+
+    #[test]
+    fn normalize_path_for_comparison_strips_windows_verbatim_prefix() {
+        // The DOS-drive verbatim form std::fs::canonicalize hands back on
+        // Windows must compare equal to its plain form -- this is a pure
+        // string transform (no `cfg(windows)` gate), so it is exercised the
+        // same way on every CI platform.
+        let verbatim = normalize_path_for_comparison(Path::new(r"\\?\C:\Users\Foo\Bar"));
+        let plain = normalize_path_for_comparison(Path::new(r"C:\Users\Foo\Bar"));
+        assert_eq!(
+            verbatim, plain,
+            "a \\\\?\\ verbatim prefix must not survive normalization"
+        );
+    }
+
+    #[test]
+    fn normalize_path_for_comparison_strips_windows_unc_verbatim_prefix() {
+        let verbatim = normalize_path_for_comparison(Path::new(r"\\?\UNC\server\share\repo"));
+        let plain = normalize_path_for_comparison(Path::new(r"\\server\share\repo"));
+        assert_eq!(verbatim, plain, "the \\\\?\\UNC\\ variant must also strip");
+    }
+
+    #[test]
+    fn normalize_path_for_comparison_normalizes_separators() {
+        let backslash = normalize_path_for_comparison(Path::new(r"C:\Users\Foo\Bar"));
+        let forward = normalize_path_for_comparison(Path::new("C:/Users/Foo/Bar"));
+        assert_eq!(
+            backslash, forward,
+            "backslash- and forward-slash-separated forms of the same path must match"
+        );
+    }
+
+    #[test]
+    fn normalize_path_for_comparison_trims_one_trailing_separator() {
+        let with_slash = normalize_path_for_comparison(Path::new("/tmp/repo/"));
+        let without = normalize_path_for_comparison(Path::new("/tmp/repo"));
+        assert_eq!(with_slash, without);
+
+        // A bare root must not be collapsed to an empty string.
+        assert_eq!(normalize_path_for_comparison(Path::new("/")), "/");
+    }
+
+    #[test]
+    fn normalize_path_for_comparison_is_case_insensitive_only_when_built_for_windows() {
+        // NTFS is case-insensitive by convention (C:\Users\Foo and
+        // C:\Users\FOO name the same directory); Linux is case-sensitive,
+        // where folding case would wrongly merge two DIFFERENT directories.
+        // `cfg!(windows)` selects the expected outcome so this test pins the
+        // correct contract on whichever platform actually compiles it,
+        // including real Windows CI.
+        let lower = normalize_path_for_comparison(Path::new("/tmp/Foo/Bar"));
+        let upper = normalize_path_for_comparison(Path::new("/tmp/FOO/BAR"));
+        if cfg!(windows) {
+            assert_eq!(
+                lower, upper,
+                "Windows paths must compare case-insensitively"
+            );
+        } else {
+            assert_ne!(
+                lower, upper,
+                "non-Windows paths must stay case-sensitive -- folding case here \
+                 would wrongly merge two distinct real directories"
+            );
+        }
     }
 
     // -- should_nudge (#999) ----------------------------------------------------

@@ -700,6 +700,11 @@ mod tests {
     /// (signal-only, @-addressed) returns empty for this repo; the nudge path
     /// must still be reachable and must still see this post as undrained via
     /// `repo_has_undrained_data`'s `should_notify` rule 5 (#999 HIGH-1 fix).
+    ///
+    /// `#[cfg(unix)]`: its only caller is `#[cfg(unix)]`-gated (see that
+    /// test's note) -- gated the same way so it is not flagged as dead code
+    /// on a non-Unix build.
+    #[cfg(unix)]
     fn seed_undrained_general_post(db: &Database, repo: &str) {
         db.insert_reflection("kelex", "seed", "team")
             .expect("insert seed");
@@ -708,6 +713,18 @@ mod tests {
             .expect("insert general post");
     }
 
+    // `#[cfg(unix)]`: this test's precondition is `SessionLockTracker::
+    // active_pid` reporting the test process's OWN pid as a live held
+    // session (via `record_interactive` + `process_alive`), and
+    // `process_alive` is documented to always return `false` on non-Unix
+    // (locks.rs) -- the same reason locks.rs's own
+    // `session_lock_active_for_fresh_live_pid` and its siblings are gated
+    // the identical way. Without the gate, `active_pid` returns `None` on
+    // Windows, the whole nudge branch (including the path-match this test
+    // is not really about) is skipped structurally, and the courier is
+    // never dispatched -- a pre-existing Windows limitation of the session
+    // lock layer, not a defect in this issue's nudge-matching logic.
+    #[cfg(unix)]
     #[test]
     fn poll_cycle_dispatches_courier_when_idle_with_data_and_not_cooling() {
         let (db, _index, data_dir) = test_storage();
@@ -896,6 +913,11 @@ mod tests {
         );
     }
 
+    // See the `#[cfg(unix)]` note on
+    // `poll_cycle_dispatches_courier_when_idle_with_data_and_not_cooling` --
+    // this test's precondition assertion (nudge cooldown recorded) has the
+    // same `active_pid`-must-actually-fire dependency.
+    #[cfg(unix)]
     #[test]
     fn poll_cycle_nudge_does_not_consume_the_wake_cooldown_slot() {
         // A nudge must track its cooldown entirely separately from the wake
@@ -978,6 +1000,9 @@ mod tests {
         assert_eq!(attempts[0].repo_name, "nudgetest");
     }
 
+    // See the `#[cfg(unix)]` note on
+    // `poll_cycle_dispatches_courier_when_idle_with_data_and_not_cooling`.
+    #[cfg(unix)]
     #[test]
     fn poll_cycle_dispatches_courier_for_a_general_post_with_no_signal_at_all() {
         // #999 HIGH-1 regression test: `find_pending_signals` is
@@ -1033,6 +1058,9 @@ mod tests {
         );
     }
 
+    // See the `#[cfg(unix)]` note on
+    // `poll_cycle_dispatches_courier_when_idle_with_data_and_not_cooling`.
+    #[cfg(unix)]
     #[test]
     fn poll_cycle_nudges_despite_an_active_wake_cooldown() {
         // #999 HIGH-2 regression test, the direction the earlier

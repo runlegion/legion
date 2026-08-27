@@ -211,7 +211,13 @@ fn to_repo_relative(path: &Path) -> String {
 /// above for why the two must agree before `strip_prefix` compares them). A
 /// no-op when the prefix is absent, so safe to call unconditionally on every
 /// platform and every path, not just ones that came from Windows.
-fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+///
+/// `pub(crate)`: also reused by `watch::nudge`'s idle-session cwd matching
+/// (#999), which hits the identical verbatim-vs-plain disagreement between
+/// `std::fs::canonicalize`'s output and a `cwd` reported by another process.
+/// One helper for the whole crate rather than a second copy so the two
+/// call sites cannot silently diverge on what counts as "the prefix."
+pub(crate) fn strip_verbatim_prefix(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
     if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
