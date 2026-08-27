@@ -366,11 +366,15 @@ fn find_content_with_no_repo_flag_warns_for_matching_repo_only() {
     git_in(other_dir.path(), &["add", "."]);
     git_in(other_dir.path(), &["commit", "-q", "-m", "other initial"]);
 
+    // Registration order matters (#1010 review finding MED 3): the
+    // matching repo is registered SECOND so a shortcut that only checked
+    // `all_repos.first()` (instead of actually looping every entry) would
+    // fail this test.
     seed_watch_toml(
         data_dir.path(),
         &[
-            ("fcnorepoguard", repo_dir.path()),
             ("otherrepo", other_dir.path()),
+            ("fcnorepoguard", repo_dir.path()),
         ],
     );
     run_ok(
@@ -408,6 +412,70 @@ fn find_content_with_no_repo_flag_warns_for_matching_repo_only() {
     assert!(
         !stderr.contains("otherrepo"),
         "must not mention the unrelated repo at all, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&primary_head[..7]),
+        "expected the indexed HEAD to be named, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&worktree_head[..7]),
+        "expected the invoking worktree's HEAD to be named, got:\n{stderr}"
+    );
+}
+
+/// #1010 review finding MED 1 (correction): `sym imports` (`run_sym_
+/// edges`, also backing `sym importers`) warns too. An earlier review pass
+/// wrongly excluded this surface as "reads module_edges, not SCIP" --
+/// `module_edges` is populated by the SAME `legion index` walk of the SAME
+/// registered workdir as every other guarded surface, so an import that
+/// exists only on the invoking worktree's branch is exactly as invisible
+/// to it as a worktree-only SCIP call site. No SCIP shim needed: module
+/// edges come straight from the TS/JS import-parse pass that already runs
+/// as part of `legion index`, independent of any SCIP indexer.
+#[test]
+fn sym_imports_warns_when_invoked_from_divergent_worktree() {
+    let _guard = RealRepoConfigGuard::new();
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+
+    std::fs::create_dir_all(repo_dir.path().join("src")).expect("mkdir");
+    std::fs::write(
+        repo_dir.path().join("src/index.ts"),
+        "import { widget } from './widget';\nexport { widget };\n",
+    )
+    .expect("write fixture");
+    std::fs::write(
+        repo_dir.path().join("src/widget.ts"),
+        "export const widget = 1;\n",
+    )
+    .expect("write fixture");
+    git_in(repo_dir.path(), &["init", "-q", "-b", "main"]);
+    git_in(repo_dir.path(), &["add", "."]);
+    git_in(repo_dir.path(), &["commit", "-q", "-m", "initial"]);
+    let primary_head = git_head(repo_dir.path());
+
+    seed_watch_toml(data_dir.path(), &[("importsguard", repo_dir.path())]);
+    run_ok(legion_cmd(data_dir.path()).args(["index", "importsguard"]));
+
+    let worktree_dir = add_worktree(repo_dir.path());
+    std::fs::write(
+        worktree_dir.join("src/extra.ts"),
+        "import { widget } from './widget';\nexport { widget as extra };\n",
+    )
+    .expect("write fixture");
+    git_in(&worktree_dir, &["add", "."]);
+    git_in(&worktree_dir, &["commit", "-q", "-m", "add extra import"]);
+    let worktree_head = git_head(&worktree_dir);
+    assert_ne!(primary_head, worktree_head, "fixture must actually diverge");
+
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .current_dir(&worktree_dir)
+            .args(["sym", "imports", "src/index.ts", "--repo", "importsguard"]),
+    );
+    assert!(
+        stderr.contains("WARNING"),
+        "expected a worktree-divergence warning, got:\n{stderr}"
     );
     assert!(
         stderr.contains(&primary_head[..7]),
