@@ -88,6 +88,7 @@ better. These are style, not precision. Avoid them, and use the plain word:
 - *load-bearing* -> critical, essential, what holds it up
 - *surface* used as a verb -> show, raise, flag, bring up
 - reflexive *honest* / *honestly* -> usually delete it, and state the thing plainly
+- *conformance* -> following, meeting the spec, matching
 
 A second set is precise when it means its exact thing and mere flavour otherwise. Reach for it
 only for that exact meaning, never as decoration: *invariant* (a rule that must always hold),
