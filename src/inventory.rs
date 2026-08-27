@@ -160,39 +160,18 @@ pub fn walk_repo(repo_name: &str, repo_path: &Path) -> WalkOutcome {
     }
 }
 
-/// Best-effort `git rev-parse HEAD` against `repo_path`. Returns `None`
-/// (never an error) when the directory is not a git checkout, `git` is
-/// not on PATH, or the command exits non-zero or produces unparseable
-/// output -- this is a freshness signal, not a requirement for indexing
-/// or querying to proceed (#746).
-pub fn current_head(repo_path: &Path) -> Option<String> {
+/// Run `git <args>` in `dir` and return trimmed stdout, or `None` under one
+/// blanket "no usable git context" umbrella: `dir` is not inside a git
+/// checkout, `git` is not on PATH, the command exits non-zero, or its
+/// output is not valid UTF-8 or is empty after trimming. Every caller here
+/// (`current_head`, `current_toplevel`, `git_common_dir`) treats all of
+/// these alike -- never an error, just "nothing to report" -- so none of
+/// them need to distinguish the failure modes from one another; this is
+/// the shared spawn/status/decode/trim scaffold they were each
+/// reimplementing (#1010).
+fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8(output.stdout).ok()?;
-    let sha = sha.trim();
-    if sha.is_empty() {
-        None
-    } else {
-        Some(sha.to_string())
-    }
-}
-
-/// Best-effort `git rev-parse --show-toplevel` against `dir`. Returns `None`
-/// (never an error) under the same conditions as `current_head`: `dir` is
-/// not inside a git checkout, `git` is not on PATH, or the command exits
-/// non-zero or produces unparseable output (#1010). Used by the
-/// worktree-divergence guard to identify the checkout an invocation is
-/// actually running from, which may differ from the workdir `watch.toml`
-/// has registered for the repo being queried.
-pub fn current_toplevel(dir: &Path) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
+        .args(args)
         .current_dir(dir)
         .output()
         .ok()?;
@@ -204,8 +183,28 @@ pub fn current_toplevel(dir: &Path) -> Option<PathBuf> {
     if s.is_empty() {
         None
     } else {
-        Some(PathBuf::from(s))
+        Some(s.to_string())
     }
+}
+
+/// Best-effort `git rev-parse HEAD` against `repo_path`. Returns `None`
+/// (never an error) when the directory is not a git checkout, `git` is
+/// not on PATH, or the command exits non-zero or produces unparseable
+/// output -- this is a freshness signal, not a requirement for indexing
+/// or querying to proceed (#746).
+pub fn current_head(repo_path: &Path) -> Option<String> {
+    git_stdout(repo_path, &["rev-parse", "HEAD"])
+}
+
+/// Best-effort `git rev-parse --show-toplevel` against `dir`. Returns `None`
+/// (never an error) under the same conditions as `current_head`: `dir` is
+/// not inside a git checkout, `git` is not on PATH, or the command exits
+/// non-zero or produces unparseable output (#1010). Used by the
+/// worktree-divergence guard to identify the checkout an invocation is
+/// actually running from, which may differ from the workdir `watch.toml`
+/// has registered for the repo being queried.
+pub fn current_toplevel(dir: &Path) -> Option<PathBuf> {
+    git_stdout(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
 /// Best-effort `git rev-parse --git-common-dir` against `dir`, resolved to
@@ -223,20 +222,8 @@ pub fn current_toplevel(dir: &Path) -> Option<PathBuf> {
 /// to be checked out at cwd", and the latter must never be reported as a
 /// divergent worktree of the former.
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(dir)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let s = String::from_utf8(output.stdout).ok()?;
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let raw = Path::new(s);
+    let s = git_stdout(dir, &["rev-parse", "--git-common-dir"])?;
+    let raw = Path::new(&s);
     let joined = if raw.is_absolute() {
         raw.to_path_buf()
     } else {
