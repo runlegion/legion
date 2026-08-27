@@ -8,7 +8,7 @@
 //! `lang_for_ext` maps file extensions to the SCIP language tags used by
 //! `legion index`. Files whose extension has no mapping land with `lang = None`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use ignore::WalkBuilder;
@@ -160,27 +160,76 @@ pub fn walk_repo(repo_name: &str, repo_path: &Path) -> WalkOutcome {
     }
 }
 
+/// Run `git <args>` in `dir` and return trimmed stdout, or `None` under one
+/// blanket "no usable git context" umbrella: `dir` is not inside a git
+/// checkout, `git` is not on PATH, the command exits non-zero, or its
+/// output is not valid UTF-8 or is empty after trimming. Every caller here
+/// (`current_head`, `current_toplevel`, `git_common_dir`) treats all of
+/// these alike -- never an error, just "nothing to report" -- so none of
+/// them need to distinguish the failure modes from one another; this is
+/// the shared spawn/status/decode/trim scaffold they were each
+/// reimplementing (#1010).
+fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(output.stdout).ok()?;
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
 /// Best-effort `git rev-parse HEAD` against `repo_path`. Returns `None`
 /// (never an error) when the directory is not a git checkout, `git` is
 /// not on PATH, or the command exits non-zero or produces unparseable
 /// output -- this is a freshness signal, not a requirement for indexing
 /// or querying to proceed (#746).
 pub fn current_head(repo_path: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8(output.stdout).ok()?;
-    let sha = sha.trim();
-    if sha.is_empty() {
-        None
+    git_stdout(repo_path, &["rev-parse", "HEAD"])
+}
+
+/// Best-effort `git rev-parse --show-toplevel` against `dir`. Returns `None`
+/// (never an error) under the same conditions as `current_head`: `dir` is
+/// not inside a git checkout, `git` is not on PATH, or the command exits
+/// non-zero or produces unparseable output (#1010). Used by the
+/// worktree-divergence guard to identify the checkout an invocation is
+/// actually running from, which may differ from the workdir `watch.toml`
+/// has registered for the repo being queried.
+pub fn current_toplevel(dir: &Path) -> Option<PathBuf> {
+    git_stdout(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+}
+
+/// Best-effort `git rev-parse --git-common-dir` against `dir`, resolved to
+/// an absolute, canonicalized path (the command prints a path relative to
+/// `dir` for a plain, non-worktree checkout -- e.g. `.git` -- and an
+/// absolute path for a linked worktree). Returns `None` under the same
+/// conditions as `current_head`/`current_toplevel`.
+///
+/// Two checkouts sharing the same `git_common_dir` are the same underlying
+/// repository -- a linked worktree of it, or the primary checkout itself --
+/// which is the identity check the #1010 worktree-divergence guard needs
+/// before a HEAD mismatch means anything: comparing `current_toplevel` and
+/// `current_head` alone cannot tell "a worktree of this repo, on a
+/// different branch" apart from "a completely unrelated repo that happens
+/// to be checked out at cwd", and the latter must never be reported as a
+/// divergent worktree of the former.
+pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    let s = git_stdout(dir, &["rev-parse", "--git-common-dir"])?;
+    let raw = Path::new(&s);
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
     } else {
-        Some(sha.to_string())
-    }
+        dir.join(raw)
+    };
+    joined.canonicalize().ok()
 }
 
 #[cfg(test)]
@@ -506,5 +555,78 @@ mod tests {
         // repository -- `git rev-parse HEAD` must fail cleanly, not panic.
         fs::write(dir.path().join(".git"), b"").unwrap();
         assert_eq!(current_head(dir.path()), None);
+    }
+
+    #[test]
+    fn git_common_dir_resolves_relative_dot_git_for_plain_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git_fixture(dir.path(), &["init"]);
+
+        let canon_dir = dir.path().canonicalize().unwrap();
+        let got = git_common_dir(dir.path()).expect("real checkout has a common dir");
+        assert_eq!(got, canon_dir.join(".git"));
+    }
+
+    #[test]
+    fn git_common_dir_matches_between_primary_and_linked_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git_fixture(dir.path(), &["init"]);
+        fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        run_git_fixture(dir.path(), &["add", "a.txt"]);
+        run_git_fixture(dir.path(), &["commit", "-m", "initial"]);
+        run_git_fixture(
+            dir.path(),
+            &["worktree", "add", "wt", "-b", "feature-branch"],
+        );
+
+        let primary_common = git_common_dir(dir.path()).expect("primary has a common dir");
+        let worktree_common =
+            git_common_dir(&dir.path().join("wt")).expect("worktree has a common dir");
+        assert_eq!(
+            primary_common, worktree_common,
+            "a linked worktree must share its primary's common dir"
+        );
+    }
+
+    #[test]
+    fn git_common_dir_differs_between_unrelated_repos() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        run_git_fixture(a.path(), &["init"]);
+        run_git_fixture(b.path(), &["init"]);
+        assert_ne!(
+            git_common_dir(a.path()),
+            git_common_dir(b.path()),
+            "two unrelated repos must not resolve to the same common dir"
+        );
+    }
+
+    #[test]
+    fn git_common_dir_returns_none_for_non_git_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(git_common_dir(dir.path()), None);
+    }
+
+    #[test]
+    fn current_toplevel_reads_root_of_real_git_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git_fixture(dir.path(), &["init"]);
+
+        let canon_dir = dir.path().canonicalize().unwrap();
+        let got = current_toplevel(dir.path()).expect("real checkout has a toplevel");
+        assert_eq!(got.canonicalize().unwrap(), canon_dir);
+    }
+
+    #[test]
+    fn current_toplevel_returns_none_for_non_git_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(current_toplevel(dir.path()), None);
+    }
+
+    #[test]
+    fn current_toplevel_returns_none_for_directory_with_broken_git_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".git"), b"").unwrap();
+        assert_eq!(current_toplevel(dir.path()), None);
     }
 }

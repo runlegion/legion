@@ -29,3 +29,4 @@ mod uncertainty;
 mod usage;
 mod whoami_generate;
 mod worksource_pr;
+mod worktree_guard;
