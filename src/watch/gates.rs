@@ -91,9 +91,6 @@ pub fn poll_cycle(
         let recipient = repo.recipient();
         let names = repo.wake_addresses();
         let signals = find_pending_signals(db, &repo.name, &names, since)?;
-        if signals.is_empty() {
-            continue;
-        }
 
         // #849: a delegated entry never spawns. `agent` names the persona that
         // MAINTAINS this repo, and that persona wakes in its OWN workdir -- so
@@ -130,7 +127,13 @@ pub fn poll_cycle(
         // pruned mark resurrects this pending copy for exactly one cycle --
         // one log line, then re-marked here. Self-healing, so the prune needs
         // no delegation-aware special case.
-        if repo.is_delegated() {
+        // Guarded on non-empty signals so a delegated entry with nothing
+        // pending stays completely silent (falls through to the ordinary
+        // empty-signals continue below) rather than logging/marking on
+        // every empty poll -- preserves this block's exact original
+        // behavior now that the nudge path below no longer implies
+        // non-empty signals.
+        if !signals.is_empty() && repo.is_delegated() {
             eprintln!(
                 "[legion watch] skipping wake for delegated repo '{}' (owner: {})",
                 repo.name, recipient
@@ -146,16 +149,39 @@ pub fn poll_cycle(
             continue;
         }
 
-        if cooldown.is_cooling_down(&repo.name) {
-            continue;
-        }
-
-        if let Some(locks) = session_locks
+        // #999: the NUDGE path is evaluated BEFORE the two early continues
+        // below (empty signals, wake cooldown) that gate the WAKE-SPAWN
+        // path only -- see review findings HIGH-1/HIGH-2 on this issue.
+        //
+        // HIGH-1: `find_pending_signals` is signal-only (@-addressed via
+        // `get_unhandled_signals_for_repo`'s @-LIKE patterns). A repo whose
+        // only undrained mail is a general (non-@) bullpen post never
+        // appears in `signals` at all, so gating the nudge check behind
+        // "signals non-empty" made `repo_has_undrained_data` (which
+        // correctly handles general posts via `should_notify` rule 5)
+        // unreachable for that case -- the exact "OR undelivered bullpen
+        // posts" half of the AC.
+        //
+        // HIGH-2: the WAKE `CooldownTracker` and the NUDGE
+        // `NudgeCooldownTracker` are deliberately separate state (a nudge
+        // must never consume the wake slot), so a repo just woken for real
+        // must still be nudge-able while its WAKE cooldown is active --
+        // gating the nudge check behind the wake cooldown's `continue`
+        // defeated that separation even though the trackers themselves
+        // were never conflated.
+        //
+        // Never for a delegated entry (`#849` doctrine, unchanged by the
+        // above): the owner's own watch.toml entry is what interacts with
+        // its live session in the owner's own workdir, so a delegated
+        // entry never enters the wake OR nudge machinery for itself,
+        // regardless of signal state.
+        if !repo.is_delegated()
+            && let Some(locks) = session_locks
             && let Some(pid) = locks.active_pid(&repo.name)
         {
-            // #999: a live-but-IDLE session never drains its own mail -- the
-            // hook drain fires only on UserPromptSubmit/PostToolUse/Stop, all
-            // of which require a turn already underway. Before the "never
+            // A live-but-IDLE session never drains its own mail -- the hook
+            // drain fires only on UserPromptSubmit/PostToolUse/Stop, all of
+            // which require a turn already underway. Before the "never
             // spawn a worker into a live session" skip below (#996, which
             // STAYS -- this repo still does not get a second worker), check
             // whether the held session is idle with undrained data and, if
@@ -197,6 +223,16 @@ pub fn poll_cycle(
                 "[legion watch] skipping {}: active session (pid {})",
                 repo.name, pid
             );
+            continue;
+        }
+
+        // From here down is the WAKE-SPAWN path only -- both continues
+        // below are specific to it and must not gate the nudge path above.
+        if signals.is_empty() {
+            continue;
+        }
+
+        if cooldown.is_cooling_down(&repo.name) {
             continue;
         }
 
@@ -627,10 +663,11 @@ mod tests {
     }
 
     /// Seed a signal for `repo` AND make sure the hook-drain cursor sees it
-    /// as undrained -- the two conditions `poll_cycle`'s `active_pid` branch
-    /// checks before it will even look at a nudge (an empty `signals` list
-    /// short-circuits the whole loop iteration well before the branch is
-    /// reached; see the top of `poll_cycle`).
+    /// as undrained -- `repo_has_undrained_data`'s cold-start rule treats an
+    /// unseeded hook cursor as "nothing new" (mirroring
+    /// `deliver::drain_for_hook`'s own seed-at-watermark-delivers-nothing
+    /// contract), so a prior seed post plus one drain call is needed before
+    /// the signal below can register as genuinely undrained.
     fn seed_undrained_signal(db: &Database, repo: &str) {
         // Warm the hook-drain cursor past cold start FIRST: a cold cursor
         // reads as "nothing new" (`nudge::repo_has_undrained_data`'s own
@@ -656,6 +693,19 @@ mod tests {
         // is already "seen" from the hook lane's perspective after this one
         // call.
         crate::deliver::drain_for_hook(db, repo).expect("seed hook cursor at current watermark");
+    }
+
+    /// Seed ONLY a general (non-@) bullpen post for `repo`, warmed past the
+    /// hook-drain cold start -- deliberately NO signal. `find_pending_signals`
+    /// (signal-only, @-addressed) returns empty for this repo; the nudge path
+    /// must still be reachable and must still see this post as undrained via
+    /// `repo_has_undrained_data`'s `should_notify` rule 5 (#999 HIGH-1 fix).
+    fn seed_undrained_general_post(db: &Database, repo: &str) {
+        db.insert_reflection("kelex", "seed", "team")
+            .expect("insert seed");
+        crate::deliver::drain_for_hook(db, repo).expect("warm hook cursor past cold start");
+        db.insert_reflection("rafters", "just shipped the new palette work", "team")
+            .expect("insert general post");
     }
 
     #[test]
@@ -926,6 +976,128 @@ mod tests {
              proof the nudge did not consume the wake cooldown slot"
         );
         assert_eq!(attempts[0].repo_name, "nudgetest");
+    }
+
+    #[test]
+    fn poll_cycle_dispatches_courier_for_a_general_post_with_no_signal_at_all() {
+        // #999 HIGH-1 regression test: `find_pending_signals` is
+        // signal-only, so a repo whose only undrained mail is a general
+        // (non-@) bullpen post has an EMPTY `signals` list for the entire
+        // poll_cycle iteration. The nudge path must still be reached and
+        // must still dispatch, proving it is no longer gated behind the
+        // signal-only early continue.
+        let (db, _index, data_dir) = test_storage();
+        let config = nudge_test_config("nudgetest");
+        seed_undrained_general_post(&db, "nudgetest");
+
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+        locks
+            .record_interactive("nudgetest", std::process::id())
+            .expect("record interactive session");
+
+        let mut cooldown = CooldownTracker::new(300, None, None);
+        let mut tracker = AgentTracker::new();
+        let mut nudge_cooldown = NudgeCooldownTracker::new(300);
+        let live = nudge_live_session(nudge::SessionStatus::Idle);
+        let live_sessions = || vec![live.clone()];
+        let dispatched: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let mut courier_dispatch = |prompt: &str| {
+            dispatched.borrow_mut().push(prompt.to_string());
+            Ok(())
+        };
+
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            Some(&locks),
+            None,
+            None,
+            SpawnMode::Print,
+            &mut nudge_cooldown,
+            &live_sessions,
+            &mut courier_dispatch,
+        )
+        .expect("poll");
+
+        assert_eq!(
+            spawned, 0,
+            "the active_pid skip must still refuse a worker spawn into the live session (#996)"
+        );
+        assert_eq!(
+            dispatched.borrow().len(),
+            1,
+            "a repo with only a general (non-@) undrained post -- no signal at all -- \
+             must still be nudged"
+        );
+    }
+
+    #[test]
+    fn poll_cycle_nudges_despite_an_active_wake_cooldown() {
+        // #999 HIGH-2 regression test, the direction the earlier
+        // wake-cooldown-independence test did not cover: drive a REAL wake
+        // first (consuming the wake CooldownTracker's slot for this repo),
+        // then prove an idle session with undrained data is still nudged on
+        // the very next poll_cycle despite that active wake cooldown.
+        let (db, _index, data_dir) = test_storage();
+        let config = nudge_test_config("nudgetest");
+
+        // A wake-worthy signal with no live session yet: reaches the wake
+        // machinery and records a wake, consuming the wake cooldown slot.
+        // UNSPAWNABLE_WORKDIR means the spawn itself fails, but the cooldown
+        // is recorded unconditionally before the spawn attempt (`poll_cycle`
+        // records it inside the `Ok(child)` arm today only -- so drive the
+        // cooldown directly instead of relying on the failing spawn to set
+        // it, keeping this test about the READ side of the independence
+        // (nudge must ignore an already-active wake cooldown), not about
+        // reproducing exactly how the wake cooldown got set).
+        let mut cooldown = CooldownTracker::new(300, None, None);
+        cooldown.record_wake("nudgetest");
+        assert!(
+            cooldown.is_cooling_down("nudgetest"),
+            "precondition: the wake cooldown must be active"
+        );
+
+        // Now an interactive session goes idle with undrained data.
+        seed_undrained_signal(&db, "nudgetest");
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+        locks
+            .record_interactive("nudgetest", std::process::id())
+            .expect("record interactive session");
+
+        let mut tracker = AgentTracker::new();
+        let mut nudge_cooldown = NudgeCooldownTracker::new(300);
+        let live = nudge_live_session(nudge::SessionStatus::Idle);
+        let live_sessions = || vec![live.clone()];
+        let dispatched: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let mut courier_dispatch = |prompt: &str| {
+            dispatched.borrow_mut().push(prompt.to_string());
+            Ok(())
+        };
+
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            Some(&locks),
+            None,
+            None,
+            SpawnMode::Print,
+            &mut nudge_cooldown,
+            &live_sessions,
+            &mut courier_dispatch,
+        )
+        .expect("poll");
+
+        assert_eq!(spawned, 0);
+        assert_eq!(
+            dispatched.borrow().len(),
+            1,
+            "an idle session with undrained data must still be nudged even while the \
+             (separate) wake cooldown is active for the same repo"
+        );
     }
 
     #[test]

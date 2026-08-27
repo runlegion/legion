@@ -451,6 +451,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repo_has_undrained_data_true_for_a_general_post_from_another_repo() {
+        // The AC's "OR undelivered bullpen posts" half: a general (non-@)
+        // musing authored by a different repo is exactly `should_notify`
+        // rule 5 (deliver.rs) -- no `@` prefix, different author, so it
+        // delivers. `find_pending_signals` (signal-only, @-addressed) would
+        // never see this post at all; `repo_has_undrained_data` must still
+        // flag it so the nudge path (which no longer requires a non-empty
+        // `find_pending_signals` result -- see gates.rs HIGH-1 fix) can act
+        // on it.
+        let db = test_db();
+        db.insert_reflection("kelex", "seed", "team").expect("seed");
+        crate::deliver::drain_for_hook(&db, "legion").expect("prime drain");
+
+        db.insert_reflection("rafters", "just shipped the new palette work", "team")
+            .expect("insert general post");
+        assert!(
+            repo_has_undrained_data(&db, "legion"),
+            "a general post from a different repo must count as undrained data, \
+             even though it carries no @-signal find_pending_signals would ever see"
+        );
+    }
+
     // -- build_courier_prompt (#999) ---------------------------------------------
 
     #[test]
