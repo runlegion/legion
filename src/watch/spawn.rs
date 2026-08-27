@@ -3,6 +3,7 @@
 
 use std::path::Path;
 use std::process::Child;
+use std::time::{Duration, Instant};
 
 use crate::db::Database;
 use crate::error::{LegionError, Result};
@@ -357,6 +358,154 @@ pub fn spawn_agent(
             Ok(SpawnedChild::Pty(session))
         }
     }
+}
+
+/// Retry cadence for the courier's own submit-confirmation loop (#999).
+/// Deliberately simpler than the DB-backed protocol `AgentTracker::
+/// drive_submit_confirmation` runs for wake-spawned children (#649): a
+/// courier has no `wake_attempts` row to drive an FSM against, so this is a
+/// self-contained retry loop instead, using the same public
+/// `SpawnedChild`/`PtySession` primitives (`turn_started`, `send_keys`).
+const COURIER_SUBMIT_RETRY_MAX: u32 = 10;
+/// Spacing between courier submit-keystroke retries.
+const COURIER_SUBMIT_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+/// Overall wall-clock budget for a courier's one-shot turn (paste, submit
+/// confirm, `SendMessage` call, stop) before it is force-killed. Generous:
+/// a `SendMessage` call plus model latency should finish in well under a
+/// minute; this is a backstop against a wedge, not the expected runtime.
+const COURIER_SESSION_BUDGET: Duration = Duration::from_secs(180);
+
+/// Fixed scratch-directory name the courier runs in, resolved under the
+/// legion data dir (`<data_dir>/courier-scratch`). NEVER `repo.workdir`:
+/// `plugin/hooks/session-lock.sh` unconditionally writes
+/// `<basename-of-cwd>.session` on every SessionStart with no env-var guard,
+/// so a courier launched inside the nudged repo's own working tree would
+/// overwrite THAT repo's `.session` lock with the courier's own pid. Once
+/// the courier is later killed (its REPL never EOFs on its own -- see the
+/// budget loop below), the file would still name the courier's now-dead
+/// pid; the next poll's `active_pid` check would then read a dead pid,
+/// treat the repo as free, delete the stale lock, and let a worker spawn
+/// into the tree the REAL idle session still holds -- exactly the #996
+/// hole this whole feature exists to respect. Fixed (not per-dispatch
+/// random) so the ONE-TIME workspace-trust prompt Claude Code may show for
+/// an unfamiliar directory (2.1.226+ prompts per git repo, not inherited
+/// from a parent) is paid at most once across the daemon's lifetime,
+/// rather than on every single nudge.
+const COURIER_SCRATCH_DIR_NAME: &str = "courier-scratch";
+
+/// Spawn a short-lived PTY courier (#999): a `claude` session permitted to
+/// use `SendMessage`/`ListAgents` (via `--allowedTools`, so the tool call
+/// does not stall on a permission prompt -- proven a hard requirement by the
+/// manual PTY toy this design is based on), given a fixed content-free
+/// nudge prompt, and left to run its one turn to completion.
+///
+/// `--allowedTools`/`--allowed-tools` takes a commander.js variadic
+/// (`<tools...>`, confirmed against `claude --help` on 2.1.246: "Comma or
+/// space-separated list of tool names to allow") -- it consumes every
+/// following non-flag argv token, so `["--allowedTools", "SendMessage",
+/// "ListAgents"]` with no positional prompt argv after it (the prompt is
+/// injected via keystrokes below, never argv) collects both names into the
+/// allow-list with nothing left over to be misread as a prompt.
+///
+/// NOT `-p` (billing-dead, #494) and NOT a raw socket write -- this reuses
+/// exactly the `PtySpawnOptions`/`PtySession` path `spawn_agent`'s `Pty` arm
+/// already uses for wake spawns, with `args` populated (that arm hardcodes
+/// `&[]`). `LEGION_SPAWN_SOURCE=watch-pty` is the SAME marker a regular wake
+/// spawn stamps -- deliberately, not a distinct "watch-courier" value:
+/// `plugin/hooks/stop.sh` bypasses its incomplete-task and reflect-prompt
+/// gates on exactly that string (they are calibrated for operator-attended
+/// sessions and risk the 8-block stop-hook cap otherwise), and the courier
+/// needs that same bypass for the identical reason -- it is an atomic unit
+/// that exits through Stop on its one turn with no wake_attempts row to
+/// drive `session_end_handoff`'s usual `LEGION_WAKE_ATTEMPT_ID` path
+/// (harmlessly absent here; that branch just no-ops).
+///
+/// Fire-and-forget by design: the caller does not track the courier across
+/// poll cycles or through `AgentTracker` (which is wired to wake_attempts/
+/// lease/session-outcome bookkeeping a courier has no row for). Instead this
+/// function owns the courier's whole lifecycle itself, in a background
+/// thread that holds the `PtySession` until it exits or the session budget
+/// elapses: a `PtySession` gets killed by its own `Drop` impl once nothing
+/// still holds it, so returning before the courier's turn completes would
+/// kill it before it ever calls `SendMessage`. Returns as soon as the prompt
+/// is confirmed pasted; spawn/paste failures propagate, everything after
+/// that point is logged rather than surfaced (there is no caller left to
+/// hand a late failure to).
+pub fn spawn_courier(prompt: &str) -> Result<()> {
+    let scratch = crate::data_dir()?.join(COURIER_SCRATCH_DIR_NAME);
+    std::fs::create_dir_all(&scratch)?;
+
+    let env: [(&str, &str); 3] = [
+        ("LEGION_AUTO_WAKE", "1"),
+        ("LEGION_SPAWN_SOURCE", "watch-pty"),
+        // Pin the hook-facing repo identity explicitly rather than letting
+        // `plugin/hooks/lib/prelude.sh`'s `legion_hook_parse` derive it.
+        // That resolution prefers `$LEGION_REPO` from the inherited
+        // environment BEFORE falling back to `basename($CWD)` -- and
+        // `PtySpawnOptions.env` appends to, rather than replaces, the
+        // watch daemon's own environment. If the daemon process happens to
+        // have `LEGION_REPO` set to a real watched repo (plausible: it is
+        // an interactive-session convenience var), the courier would
+        // inherit it and `session-lock.sh` would write THAT repo's
+        // `.session` with the courier's pid -- the exact #996 hole the
+        // scratch-dir cwd above exists to close, reopened through the env
+        // instead of the cwd. Pinning it to the scratch dir's own name
+        // closes both doors with one fact.
+        ("LEGION_REPO", COURIER_SCRATCH_DIR_NAME),
+    ];
+    let args: [&str; 3] = ["--allowedTools", "SendMessage", "ListAgents"];
+    let mut opts = crate::pty::PtySpawnOptions::new("claude", &args, &scratch);
+    opts.env = &env;
+    let mut session = crate::pty::PtySession::spawn(opts)?;
+
+    let keystrokes = wrap_bracketed_paste(prompt);
+    if let Err(e) = session.write(&keystrokes) {
+        eprintln!("[legion watch] courier prompt paste failed: {}", e);
+        let _ = session.kill();
+        return Err(e);
+    }
+
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + COURIER_SESSION_BUDGET;
+        let mut retries: u32 = 0;
+        let mut last_enter = Instant::now();
+        loop {
+            match session.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[legion watch] courier wait error: {}", e);
+                    return;
+                }
+            }
+
+            if !session.saw_turn_start()
+                && retries < COURIER_SUBMIT_RETRY_MAX
+                && last_enter.elapsed() >= COURIER_SUBMIT_RETRY_INTERVAL
+            {
+                match session.write(SUBMIT_KEY) {
+                    Ok(()) => {
+                        retries += 1;
+                        last_enter = Instant::now();
+                    }
+                    Err(e) => {
+                        eprintln!("[legion watch] courier submit keystroke failed: {}", e);
+                        return;
+                    }
+                }
+            }
+
+            if Instant::now() >= deadline {
+                eprintln!("[legion watch] courier exceeded session budget -- terminating");
+                let _ = session.kill();
+                return;
+            }
+
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]

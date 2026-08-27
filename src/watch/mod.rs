@@ -10,6 +10,7 @@
 mod config;
 mod gates;
 mod locks;
+mod nudge;
 mod signals;
 mod spawn;
 mod tracker;
@@ -23,6 +24,8 @@ pub use locks::{
     CooldownTracker, PidLockGuard, SessionLockTracker, acquire_index_lock, acquire_pid_lock,
 };
 pub(crate) use locks::{process_alive, terminate_process};
+#[allow(unused_imports)]
+pub use nudge::{DEFAULT_CLAUDE_BIN, LiveSession, NudgeCooldownTracker, SessionStatus};
 pub use signals::{
     build_wake_prompt, directed_verb_will_not_wake, find_pending_signals, signal_requires_reply,
 };
@@ -103,6 +106,9 @@ pub struct WatchLoop {
     pub tracker: AgentTracker,
     /// Per-repo session-lock gate.
     pub session_locks: SessionLockTracker,
+    /// Per-repo idle-session nudge cooldown (#999), independent of the wake
+    /// `CooldownTracker` above -- a nudge must never consume the wake slot.
+    pub nudge_cooldown: nudge::NudgeCooldownTracker,
     /// Rolling health-pressure window.
     pub sampler: HealthSampler,
     /// Subscription-quota panic-stop gate.
@@ -173,6 +179,9 @@ impl WatchLoop {
             ),
             tracker: AgentTracker::new(),
             session_locks: SessionLockTracker::new(data_dir, config.session_lock_ttl_secs),
+            // #999: reuses `cooldown_secs` as the window length, per its own
+            // tracked state -- see the field doc above.
+            nudge_cooldown: nudge::NudgeCooldownTracker::new(config.cooldown_secs),
             sampler: HealthSampler::new(config.health_window_size),
             quota_gate: QuotaPanicGate::new(
                 config.quota_panic_threshold_pct,
@@ -361,6 +370,14 @@ impl WatchLoop {
             host: &self.host,
             ttl: self.lease_ttl,
         };
+        // #999: the real live-session detector (shells out to
+        // `claude agents --json`) and the real courier dispatcher (spawns a
+        // PTY-backed `claude` session). Both are pure closures over the
+        // production implementations so `poll_cycle` itself stays free of
+        // any direct dependency on a live `claude` binary -- the seam a unit
+        // test swaps out for a canned/no-op double.
+        let live_sessions = || nudge::list_live_sessions(nudge::DEFAULT_CLAUDE_BIN);
+        let mut courier_dispatch = |prompt: &str| spawn::spawn_courier(prompt);
 
         match evaluate_spawn_gate(
             &mut self.quota_gate,
@@ -378,6 +395,9 @@ impl WatchLoop {
                     Some(&lease_gate),
                     Some(&self.lookback),
                     self.spawn_mode,
+                    &mut self.nudge_cooldown,
+                    &live_sessions,
+                    &mut courier_dispatch,
                 ) {
                     Ok(n) if n > 0 => {
                         eprintln!("{} watch: {} agent(s) spawned", self.log_prefix, n);
@@ -1002,6 +1022,7 @@ mod tests {
             // Use a temp-style path; we don't need locks to actually fire in
             // these tests (no signals are wake-worthy enough to spawn).
             session_locks: SessionLockTracker::new(std::path::Path::new("/tmp"), 3600),
+            nudge_cooldown: nudge::NudgeCooldownTracker::new(config.cooldown_secs),
             sampler: HealthSampler::new(config.health_window_size),
             quota_gate: QuotaPanicGate::new(
                 config.quota_panic_threshold_pct,

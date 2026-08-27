@@ -16,6 +16,7 @@ use crate::error::Result;
 
 use super::config::WatchConfig;
 use super::locks::{CooldownTracker, SessionLockTracker};
+use super::nudge::{self, LiveSession, NudgeCooldownTracker};
 use super::signals::{
     build_wake_prompt, find_pending_signals, is_wake_worthy, resolved_ask_id,
     resolved_ask_is_authentic,
@@ -80,6 +81,9 @@ pub fn poll_cycle(
     lease_gate: Option<&PersonaLeaseGate<'_>>,
     since: Option<&str>,
     spawn_mode: SpawnMode,
+    nudge_cooldown: &mut NudgeCooldownTracker,
+    live_sessions: &dyn Fn() -> Vec<LiveSession>,
+    courier_dispatch: &mut dyn FnMut(&str) -> Result<()>,
 ) -> Result<u32> {
     let mut spawned: u32 = 0;
 
@@ -149,6 +153,46 @@ pub fn poll_cycle(
         if let Some(locks) = session_locks
             && let Some(pid) = locks.active_pid(&repo.name)
         {
+            // #999: a live-but-IDLE session never drains its own mail -- the
+            // hook drain fires only on UserPromptSubmit/PostToolUse/Stop, all
+            // of which require a turn already underway. Before the "never
+            // spawn a worker into a live session" skip below (#996, which
+            // STAYS -- this repo still does not get a second worker), check
+            // whether the held session is idle with undrained data and, if
+            // so, dispatch a content-free PTY courier so the session takes a
+            // turn and its own drain delivers, unchanged.
+            //
+            // The cooldown check runs FIRST, before `live_sessions()` shells
+            // out to `claude agents --json`: a cooling repo cannot nudge
+            // regardless of what detection would report, so there is no
+            // reason to pay a subprocess spawn on every poll for a repo
+            // already known to be skipped.
+            let cooling = nudge_cooldown.is_cooling_down(&repo.name);
+            if !cooling {
+                let live = live_sessions();
+                if let Some(target) = nudge::find_live_session_for_workdir(&live, &repo.workdir) {
+                    let has_data = nudge::repo_has_undrained_data(db, &repo.name);
+                    if nudge::should_nudge(target.status, has_data, cooling) {
+                        let prompt = nudge::build_courier_prompt(&repo.name, target);
+                        match courier_dispatch(&prompt) {
+                            Ok(()) => {
+                                nudge_cooldown.record_nudge(&repo.name);
+                                eprintln!(
+                                    "[legion watch] nudged idle session for {} (target pid {})",
+                                    repo.name, target.pid
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[legion watch] courier dispatch failed for {}: {}",
+                                    repo.name, e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             eprintln!(
                 "[legion watch] skipping {}: active session (pid {})",
                 repo.name, pid
@@ -537,12 +581,351 @@ mod tests {
             None,
             None,
             SpawnMode::Print,
+            &mut NudgeCooldownTracker::new(0),
+            &|| Vec::new(),
+            &mut |_prompt: &str| Ok(()),
         )
         .expect("poll");
         assert_eq!(
             spawned, 0,
             "active session lock must block a second wake for the same repo"
         );
+    }
+
+    // -- Idle-session nudge (#999) ---------------------------------------------
+
+    /// A watch.toml entry whose workdir never resolves. Reused here for the
+    /// same reason `UNSPAWNABLE_WORKDIR` (defined further below) exists: it
+    /// lets `canonical_or_raw` fall back to comparing the raw string on both
+    /// sides (the repo's `workdir` and the fixture `LiveSession.cwd`), so
+    /// these tests exercise the match/decision logic without needing a real
+    /// directory, and any spawn a mutated guard might trigger fails at
+    /// `chdir` instead of launching a real `claude` session.
+    const NUDGE_TEST_WORKDIR: &str = "/nonexistent/legion-999-nudge/workdir";
+
+    fn nudge_test_config(repo_name: &str) -> WatchConfig {
+        WatchConfig {
+            stagger_secs: 0,
+            repos: vec![WatchRepoConfig {
+                name: repo_name.to_string(),
+                workdir: NUDGE_TEST_WORKDIR.to_string(),
+                agent: None,
+                broadcast_tags: Vec::new(),
+                extra: toml::Table::new(),
+            }],
+            ..WatchConfig::default()
+        }
+    }
+
+    fn nudge_live_session(status: nudge::SessionStatus) -> LiveSession {
+        LiveSession {
+            pid: 424242,
+            cwd: NUDGE_TEST_WORKDIR.to_string(),
+            name: "kelex".to_string(),
+            status,
+        }
+    }
+
+    /// Seed a signal for `repo` AND make sure the hook-drain cursor sees it
+    /// as undrained -- the two conditions `poll_cycle`'s `active_pid` branch
+    /// checks before it will even look at a nudge (an empty `signals` list
+    /// short-circuits the whole loop iteration well before the branch is
+    /// reached; see the top of `poll_cycle`).
+    fn seed_undrained_signal(db: &Database, repo: &str) {
+        // Warm the hook-drain cursor past cold start FIRST: a cold cursor
+        // reads as "nothing new" (`nudge::repo_has_undrained_data`'s own
+        // cold-start rule, mirroring `deliver::drain_for_hook`'s), so the
+        // repo needs a prior seed post plus one drain call before the signal
+        // below can register as genuinely undrained.
+        db.insert_reflection("kelex", "seed", "team")
+            .expect("insert seed");
+        crate::deliver::drain_for_hook(db, repo).expect("warm hook cursor past cold start");
+        db.insert_reflection("kelex", &format!("@{repo} review:ready"), "team")
+            .expect("insert signal");
+    }
+
+    /// Seed a signal for `repo` whose hook-drain cursor has ALREADY been
+    /// warmed past it -- simulating a live session that already drained this
+    /// exact post on a prior turn, even though watch's own separate
+    /// `watch_handled` bookkeeping still shows the signal as unhandled.
+    fn seed_signal_already_hook_drained(db: &Database, repo: &str) {
+        db.insert_reflection("kelex", &format!("@{repo} review:ready"), "team")
+            .expect("insert signal");
+        // Cold-start seeds the hook-drain cursor at the CURRENT watermark
+        // (see `deliver::drain_for_hook`'s docs), so the post inserted above
+        // is already "seen" from the hook lane's perspective after this one
+        // call.
+        crate::deliver::drain_for_hook(db, repo).expect("seed hook cursor at current watermark");
+    }
+
+    #[test]
+    fn poll_cycle_dispatches_courier_when_idle_with_data_and_not_cooling() {
+        let (db, _index, data_dir) = test_storage();
+        let config = nudge_test_config("nudgetest");
+        seed_undrained_signal(&db, "nudgetest");
+
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+        locks
+            .record_interactive("nudgetest", std::process::id())
+            .expect("record interactive session");
+
+        let mut cooldown = CooldownTracker::new(300, None, None);
+        let mut tracker = AgentTracker::new();
+        let mut nudge_cooldown = NudgeCooldownTracker::new(300);
+        let live = nudge_live_session(nudge::SessionStatus::Idle);
+        let live_sessions = || vec![live.clone()];
+        let dispatched: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let mut courier_dispatch = |prompt: &str| {
+            dispatched.borrow_mut().push(prompt.to_string());
+            Ok(())
+        };
+
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            Some(&locks),
+            None,
+            None,
+            SpawnMode::Print,
+            &mut nudge_cooldown,
+            &live_sessions,
+            &mut courier_dispatch,
+        )
+        .expect("poll");
+
+        assert_eq!(
+            spawned, 0,
+            "the active_pid skip must still refuse a worker spawn into the live session (#996)"
+        );
+        let calls = dispatched.borrow();
+        assert_eq!(
+            calls.len(),
+            1,
+            "idle + undrained data + not cooling must dispatch exactly one courier"
+        );
+        assert!(calls[0].contains("nudgetest"));
+        assert!(
+            nudge_cooldown.is_cooling_down("nudgetest"),
+            "a dispatched nudge must record its own cooldown"
+        );
+    }
+
+    #[test]
+    fn poll_cycle_does_not_dispatch_courier_for_a_busy_session() {
+        let (db, _index, data_dir) = test_storage();
+        let config = nudge_test_config("nudgetest");
+        seed_undrained_signal(&db, "nudgetest");
+
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+        locks
+            .record_interactive("nudgetest", std::process::id())
+            .expect("record interactive session");
+
+        let mut cooldown = CooldownTracker::new(300, None, None);
+        let mut tracker = AgentTracker::new();
+        let mut nudge_cooldown = NudgeCooldownTracker::new(300);
+        let live = nudge_live_session(nudge::SessionStatus::Busy);
+        let live_sessions = || vec![live.clone()];
+        let mut dispatch_count = 0u32;
+        let mut courier_dispatch = |_: &str| {
+            dispatch_count += 1;
+            Ok(())
+        };
+
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            Some(&locks),
+            None,
+            None,
+            SpawnMode::Print,
+            &mut nudge_cooldown,
+            &live_sessions,
+            &mut courier_dispatch,
+        )
+        .expect("poll");
+
+        assert_eq!(spawned, 0);
+        assert_eq!(dispatch_count, 0, "a busy session must never be nudged");
+        assert!(!nudge_cooldown.is_cooling_down("nudgetest"));
+    }
+
+    #[test]
+    fn poll_cycle_does_not_dispatch_courier_when_no_undrained_data() {
+        let (db, _index, data_dir) = test_storage();
+        let config = nudge_test_config("nudgetest");
+        // Idle session, pending per watch's own bookkeeping, but already
+        // drained via the hook lane -- the exact scenario that motivates
+        // checking the hook cursor instead of trusting `find_pending_signals`.
+        seed_signal_already_hook_drained(&db, "nudgetest");
+
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+        locks
+            .record_interactive("nudgetest", std::process::id())
+            .expect("record interactive session");
+
+        let mut cooldown = CooldownTracker::new(300, None, None);
+        let mut tracker = AgentTracker::new();
+        let mut nudge_cooldown = NudgeCooldownTracker::new(300);
+        let live = nudge_live_session(nudge::SessionStatus::Idle);
+        let live_sessions = || vec![live.clone()];
+        let mut dispatch_count = 0u32;
+        let mut courier_dispatch = |_: &str| {
+            dispatch_count += 1;
+            Ok(())
+        };
+
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            Some(&locks),
+            None,
+            None,
+            SpawnMode::Print,
+            &mut nudge_cooldown,
+            &live_sessions,
+            &mut courier_dispatch,
+        )
+        .expect("poll");
+
+        assert_eq!(spawned, 0);
+        assert_eq!(
+            dispatch_count, 0,
+            "a repo with nothing new for the hook drain to find must not be nudged"
+        );
+    }
+
+    #[test]
+    fn poll_cycle_does_not_dispatch_courier_while_nudge_cooldown_is_active() {
+        let (db, _index, data_dir) = test_storage();
+        let config = nudge_test_config("nudgetest");
+        seed_undrained_signal(&db, "nudgetest");
+
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+        locks
+            .record_interactive("nudgetest", std::process::id())
+            .expect("record interactive session");
+
+        let mut cooldown = CooldownTracker::new(300, None, None);
+        let mut tracker = AgentTracker::new();
+        let mut nudge_cooldown = NudgeCooldownTracker::new(300);
+        nudge_cooldown.record_nudge("nudgetest");
+        let live = nudge_live_session(nudge::SessionStatus::Idle);
+        let live_sessions = || vec![live.clone()];
+        let mut dispatch_count = 0u32;
+        let mut courier_dispatch = |_: &str| {
+            dispatch_count += 1;
+            Ok(())
+        };
+
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            Some(&locks),
+            None,
+            None,
+            SpawnMode::Print,
+            &mut nudge_cooldown,
+            &live_sessions,
+            &mut courier_dispatch,
+        )
+        .expect("poll");
+
+        assert_eq!(spawned, 0);
+        assert_eq!(
+            dispatch_count, 0,
+            "a repo already within its nudge cooldown must not be nudged again"
+        );
+    }
+
+    #[test]
+    fn poll_cycle_nudge_does_not_consume_the_wake_cooldown_slot() {
+        // A nudge must track its cooldown entirely separately from the wake
+        // CooldownTracker -- otherwise a nudge would silently suppress a
+        // later genuine wake-worthy spawn for the same repo.
+        let (db, _index, data_dir) = test_storage();
+        let config = nudge_test_config("nudgetest");
+        seed_undrained_signal(&db, "nudgetest");
+
+        let locks = SessionLockTracker::new(data_dir.path(), 3600);
+        locks
+            .record_interactive("nudgetest", std::process::id())
+            .expect("record interactive session");
+
+        let mut cooldown = CooldownTracker::new(300, None, None);
+        let mut tracker = AgentTracker::new();
+        let mut nudge_cooldown = NudgeCooldownTracker::new(300);
+        let live = nudge_live_session(nudge::SessionStatus::Idle);
+        let live_sessions = || vec![live.clone()];
+        let mut courier_dispatch = |_: &str| Ok(());
+
+        let spawned = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            Some(&locks),
+            None,
+            None,
+            SpawnMode::Print,
+            &mut nudge_cooldown,
+            &live_sessions,
+            &mut courier_dispatch,
+        )
+        .expect("poll");
+        assert_eq!(spawned, 0);
+        assert!(
+            nudge_cooldown.is_cooling_down("nudgetest"),
+            "precondition: the nudge must have recorded its own cooldown"
+        );
+        assert!(
+            !cooldown.is_cooling_down("nudgetest"),
+            "a nudge must never call CooldownTracker::record_wake -- the wake slot must stay open"
+        );
+
+        // The interactive session ends; a genuine wake-worthy signal then
+        // arrives. With the wake cooldown proven untouched above, this must
+        // still reach the wake machinery -- evidenced by a wake_attempt row,
+        // per the UNSPAWNABLE_WORKDIR convention used throughout this file
+        // (a successful spawn would bill a live `claude` session per test run).
+        locks
+            .release_interactive("nudgetest")
+            .expect("release interactive session");
+        db.insert_reflection("kelex", "@nudgetest question:help", "team")
+            .expect("insert wake-worthy signal");
+
+        let spawned2 = poll_cycle(
+            &db,
+            &config,
+            &mut cooldown,
+            &mut tracker,
+            Some(&locks),
+            None,
+            None,
+            SpawnMode::Print,
+            &mut nudge_cooldown,
+            &live_sessions,
+            &mut courier_dispatch,
+        )
+        .expect("poll 2");
+        assert_eq!(spawned2, 0, "the bogus workdir must fail the spawn");
+
+        let attempts = db.recent_wake_attempts(50).expect("list attempts");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "a wake-worthy signal after a nudge must still reach the wake machinery -- \
+             proof the nudge did not consume the wake cooldown slot"
+        );
+        assert_eq!(attempts[0].repo_name, "nudgetest");
     }
 
     #[test]
@@ -589,6 +972,9 @@ mod tests {
             Some(&gate),
             None,
             SpawnMode::Print,
+            &mut NudgeCooldownTracker::new(0),
+            &|| Vec::new(),
+            &mut |_prompt: &str| Ok(()),
         )
         .expect("poll");
         assert_eq!(
@@ -712,6 +1098,9 @@ mod tests {
             Some(&gate),
             None,
             SpawnMode::Print,
+            &mut NudgeCooldownTracker::new(0),
+            &|| Vec::new(),
+            &mut |_prompt: &str| Ok(()),
         )
         .expect("poll");
 
@@ -764,6 +1153,9 @@ mod tests {
             Some(&gate),
             None,
             SpawnMode::Print,
+            &mut NudgeCooldownTracker::new(0),
+            &|| Vec::new(),
+            &mut |_prompt: &str| Ok(()),
         )
         .expect("poll");
 
@@ -813,6 +1205,9 @@ mod tests {
             Some(&gate),
             None,
             SpawnMode::Print,
+            &mut NudgeCooldownTracker::new(0),
+            &|| Vec::new(),
+            &mut |_prompt: &str| Ok(()),
         )
         .expect("poll");
 
@@ -865,6 +1260,9 @@ mod tests {
             None,
             None,
             SpawnMode::Print,
+            &mut NudgeCooldownTracker::new(0),
+            &|| Vec::new(),
+            &mut |_prompt: &str| Ok(()),
         )
         .expect("poll");
         assert_eq!(spawned, 0, "the bogus workdir must fail the spawn");
@@ -950,6 +1348,9 @@ mod tests {
             Some(&gate),
             None,
             SpawnMode::Print,
+            &mut NudgeCooldownTracker::new(0),
+            &|| Vec::new(),
+            &mut |_prompt: &str| Ok(()),
         )
         .expect("poll");
         assert_eq!(spawned, 0, "the bogus workdir must fail both spawns");
@@ -1042,6 +1443,9 @@ mod tests {
             None,
             None,
             SpawnMode::Print,
+            &mut NudgeCooldownTracker::new(0),
+            &|| Vec::new(),
+            &mut |_prompt: &str| Ok(()),
         )
         .expect("poll");
         assert_eq!(spawned, 0, "cooling repo should be skipped");
@@ -1105,6 +1509,9 @@ mod tests {
             None,
             None,
             SpawnMode::Print,
+            &mut NudgeCooldownTracker::new(0),
+            &|| Vec::new(),
+            &mut |_prompt: &str| Ok(()),
         )
         .expect("poll");
 
@@ -1167,6 +1574,9 @@ mod tests {
             None,
             None,
             SpawnMode::Print,
+            &mut NudgeCooldownTracker::new(0),
+            &|| Vec::new(),
+            &mut |_prompt: &str| Ok(()),
         )
         .expect("poll")
     }
