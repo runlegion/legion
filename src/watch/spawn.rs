@@ -393,19 +393,42 @@ const COURIER_SESSION_BUDGET: Duration = Duration::from_secs(180);
 /// rather than on every single nudge.
 const COURIER_SCRATCH_DIR_NAME: &str = "courier-scratch";
 
+/// Exact argv the courier's `claude` invocation is spawned with (#1001).
+///
+/// `--restricted` (2.1.248) is the courier's shape ready-made: it strips
+/// Bash/code-running tools and WebFetch unless `--tools` names them,
+/// confines file tools to the working directory, refuses `bypassPermissions`,
+/// and ignores user/project/local settings files -- so the legion plugin's
+/// hooks do not load inside the courier at all (the scratch-dir/`LEGION_REPO`
+/// pinning below is belt-and-braces against that, not the only guard).
+/// `--tools SendMessage ListAgents` controls which tools EXIST in the
+/// session under that confinement; `--allowedTools SendMessage ListAgents`
+/// (unchanged from #999) controls which of those existing tools skip the
+/// permission prompt -- the courier needs both, or `SendMessage` would exist
+/// but still stall on a prompt no human is attached to answer.
+///
+/// `--allowedTools`/`--allowed-tools` and `--tools` each take a commander.js
+/// variadic (`<tools...>`, confirmed against `claude --help` on 2.1.251)
+/// that consumes every following non-flag argv token, so this sequence --
+/// two variadic runs back to back, each terminated by the next `--flag` --
+/// collects the two names into each list with no positional prompt argv
+/// left over to be misread as a prompt (the prompt is injected via
+/// keystrokes below, never argv).
+const COURIER_ARGS: [&str; 7] = [
+    "--restricted",
+    "--tools",
+    "SendMessage",
+    "ListAgents",
+    "--allowedTools",
+    "SendMessage",
+    "ListAgents",
+];
+
 /// Spawn a short-lived PTY courier (#999): a `claude` session permitted to
-/// use `SendMessage`/`ListAgents` (via `--allowedTools`, so the tool call
+/// use `SendMessage`/`ListAgents` (via [`COURIER_ARGS`], so the tool call
 /// does not stall on a permission prompt -- proven a hard requirement by the
 /// manual PTY toy this design is based on), given a fixed content-free
 /// nudge prompt, and left to run its one turn to completion.
-///
-/// `--allowedTools`/`--allowed-tools` takes a commander.js variadic
-/// (`<tools...>`, confirmed against `claude --help` on 2.1.246: "Comma or
-/// space-separated list of tool names to allow") -- it consumes every
-/// following non-flag argv token, so `["--allowedTools", "SendMessage",
-/// "ListAgents"]` with no positional prompt argv after it (the prompt is
-/// injected via keystrokes below, never argv) collects both names into the
-/// allow-list with nothing left over to be misread as a prompt.
 ///
 /// NOT `-p` (billing-dead, #494) and NOT a raw socket write -- this reuses
 /// exactly the `PtySpawnOptions`/`PtySession` path `spawn_agent`'s `Pty` arm
@@ -453,8 +476,7 @@ pub fn spawn_courier(prompt: &str) -> Result<()> {
         // closes both doors with one fact.
         ("LEGION_REPO", COURIER_SCRATCH_DIR_NAME),
     ];
-    let args: [&str; 3] = ["--allowedTools", "SendMessage", "ListAgents"];
-    let mut opts = crate::pty::PtySpawnOptions::new("claude", &args, &scratch);
+    let mut opts = crate::pty::PtySpawnOptions::new("claude", &COURIER_ARGS, &scratch);
     opts.env = &env;
     let mut session = crate::pty::PtySession::spawn(opts)?;
 
@@ -469,9 +491,22 @@ pub fn spawn_courier(prompt: &str) -> Result<()> {
         let deadline = Instant::now() + COURIER_SESSION_BUDGET;
         let mut retries: u32 = 0;
         let mut last_enter = Instant::now();
+        // Logged at most once, the moment the turn is first observed to
+        // start -- this is the evidence a live #1001 verification run cites
+        // (the ring-buffer excerpt proving the courier's turn began under
+        // --restricted), read via the same diagnostics-only `output_tail`
+        // the module doc already sanctions rather than any control-flow use.
+        let mut logged_turn_start = false;
         loop {
             match session.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) => {
+                    eprintln!(
+                        "[legion watch] courier exited ({:?}); ring buffer tail: {}",
+                        status,
+                        String::from_utf8_lossy(&session.output_tail())
+                    );
+                    return;
+                }
                 Ok(None) => {}
                 Err(e) => {
                     eprintln!("[legion watch] courier wait error: {}", e);
@@ -479,7 +514,16 @@ pub fn spawn_courier(prompt: &str) -> Result<()> {
                 }
             }
 
-            if !session.saw_turn_start()
+            let turn_started = session.saw_turn_start();
+            if turn_started && !logged_turn_start {
+                logged_turn_start = true;
+                eprintln!(
+                    "[legion watch] courier turn started; ring buffer tail: {}",
+                    String::from_utf8_lossy(&session.output_tail())
+                );
+            }
+
+            if !turn_started
                 && retries < COURIER_SUBMIT_RETRY_MAX
                 && last_enter.elapsed() >= COURIER_SUBMIT_RETRY_INTERVAL
             {
@@ -496,7 +540,10 @@ pub fn spawn_courier(prompt: &str) -> Result<()> {
             }
 
             if Instant::now() >= deadline {
-                eprintln!("[legion watch] courier exceeded session budget -- terminating");
+                eprintln!(
+                    "[legion watch] courier exceeded session budget -- terminating; ring buffer tail: {}",
+                    String::from_utf8_lossy(&session.output_tail())
+                );
                 let _ = session.kill();
                 return;
             }
@@ -549,6 +596,34 @@ mod tests {
     fn spawn_mode_as_str_matches_env_values() {
         assert_eq!(SpawnMode::Print.as_str(), "print");
         assert_eq!(SpawnMode::Pty.as_str(), "pty");
+    }
+
+    // -- COURIER_ARGS (#1001) ------------------------------------------------
+
+    #[test]
+    fn courier_args_is_exact_restricted_tools_allowedtools_sequence() {
+        // Pins the exact argv the courier spawns with: --restricted and
+        // --tools ahead of the pre-existing --allowedTools, with no
+        // positional prompt token trailing either variadic run (the prompt
+        // is injected via keystrokes, never argv -- see spawn_courier).
+        assert_eq!(
+            COURIER_ARGS,
+            [
+                "--restricted",
+                "--tools",
+                "SendMessage",
+                "ListAgents",
+                "--allowedTools",
+                "SendMessage",
+                "ListAgents",
+            ]
+        );
+        assert_eq!(
+            COURIER_ARGS.last(),
+            Some(&"ListAgents"),
+            "the allowedTools variadic must be the last argv token -- nothing \
+             positional follows it"
+        );
     }
 
     // -- send_keys (#648) ---------------------------------------------------
@@ -730,5 +805,58 @@ mod tests {
             session_file.exists(),
             "the wake-spawned path must NOT delete the interactive .session file"
         );
+    }
+
+    // -- live #1001 verification (NEVER run in CI) --------------------------
+
+    /// Drives the REAL `spawn_courier` path against a live interactive
+    /// session and captures the evidence #1001's acceptance criteria ask
+    /// for: whether `SendMessage` completes under `--restricted` (via the
+    /// courier's own ring-buffer eprintln lines, see `spawn_courier` above)
+    /// and whether the target actually receives the nudge (confirmed
+    /// out-of-band by the target itself -- this test has no way to read the
+    /// target's inbox, only to prove the courier ran its turn).
+    ///
+    /// `#[ignore]`d so it never runs under `cargo test`/CI: it spawns a real
+    /// interactive `claude` process against a real live session and needs a
+    /// human-named target. Run it explicitly:
+    ///
+    ///   LEGION_1001_COURIER_TARGET=<ListAgents name> cargo test --bin legion \
+    ///     -- --ignored live_courier_reaches_named_target --nocapture
+    ///
+    /// Never uses `claude -p`/`--print` (billing-dead, #494) -- this is the
+    /// same PTY `spawn_courier` a real poll cycle calls, so `SendMessage`
+    /// rides the subscription. The target is addressed by its `ListAgents`
+    /// name (never by pid/socket, per the module doc), read live via
+    /// `nudge::list_live_sessions` rather than hardcoded, so the same test
+    /// works against whichever session the operator points it at.
+    #[ignore]
+    #[test]
+    fn live_courier_reaches_named_target() {
+        let target_name = std::env::var("LEGION_1001_COURIER_TARGET").expect(
+            "set LEGION_1001_COURIER_TARGET to the target session's ListAgents name before \
+             running this ignored test",
+        );
+
+        let sessions =
+            crate::watch::nudge::list_live_sessions(crate::watch::nudge::DEFAULT_CLAUDE_BIN);
+        let target = sessions
+            .iter()
+            .find(|s| s.name == target_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no live interactive session named {target_name:?} in `claude agents --json`"
+                )
+            });
+
+        let prompt = crate::watch::nudge::build_courier_prompt("legion-1001-live-check", target);
+        spawn_courier(&prompt).expect("spawn_courier must accept the spawn + paste");
+
+        // spawn_courier is fire-and-forget (see its docs): the courier runs
+        // to completion (or the session budget) in a background thread this
+        // test does not own a handle to. Block long enough for that thread
+        // to finish and print its evidence lines before the test process
+        // exits and drops everything.
+        std::thread::sleep(COURIER_SESSION_BUDGET + Duration::from_secs(10));
     }
 }
