@@ -40,18 +40,26 @@
 #    wake-worthy signal sat unanswered for forty minutes because nothing
 #    stopped the turn from ending while it was open -- delivery-drain.sh's
 #    additionalContext note was easy to read past. This gate re-checks
-#    `legion pending-replies --repo $REPO` (the same REQUIRES A REPLY set
-#    boot and post-compact render) at Stop time and hard-blocks
-#    (decision:block) when it is non-empty, naming the open ask(s) in the
-#    reason. Ignores stop_hook_active for the same reason gate 1 does: the
-#    obligation must keep blocking across a continuation, not just once --
-#    the harness's 8-block cap is its own backstop. Placed BEFORE gate 3's
-#    marker checks on purpose: an ask can be open on a Stop that touched no
-#    files (no WORK_MARKER) and this gate must still fire on that Stop, not
-#    only on ones that happened to do file work. Clears itself: replying to
-#    the signal is what empties `pending-replies` next time (`cli::signal::
-#    handle_signal`'s `retire_answered_signals` retires the ask on reply),
-#    not a marker file.
+#    `legion pending-replies --repo $REPO --directed` at Stop time and
+#    hard-blocks (decision:block) when it is non-empty, naming the open
+#    ask(s) in the reason. `--directed` excludes @all/@everyone broadcasts
+#    (review finding, HIGH 1): a broadcast ask cannot be retired by any
+#    single reply, so including it here would let one `@all` hard-block
+#    every agent's Stop fleet-wide with no way to clear it. Coverage-gated
+#    (review finding, HIGH 2) via `legion_hook_covered` -- $REPO is
+#    basename($CWD), which in a worktree is the worktree dir name, not the
+#    parent repo watch.toml knows -- so an uncovered cwd exits this gate
+#    cleanly instead of being judged against a name it is not. Ignores
+#    stop_hook_active for the same reason gate 1 does: the obligation must
+#    keep blocking across a continuation, not just once -- the harness's
+#    8-block cap is its own backstop. Placed BEFORE gate 3's marker checks
+#    on purpose: an ask can be open on a Stop that touched no files (no
+#    WORK_MARKER) and this gate must still fire on that Stop, not only on
+#    ones that happened to do file work. Clears itself: replying to the
+#    signal (never `--to all`, which retires nothing) is what empties
+#    `pending-replies` next time (`cli::signal::handle_signal`'s
+#    `retire_answered_signals` retires the ask on reply), not a marker
+#    file.
 #
 # 3. REFLECTION PROMPT. If work happened this session and the reflection
 #    hasn't fired yet, nudge for one via hookSpecificOutput.additionalContext
@@ -173,16 +181,45 @@ fi
 
 # ---------- (2) Pending-replies gate (#1020) ----------
 #
+# Coverage-gated (#353), like delivery-drain.sh: $REPO here is
+# basename($CWD) (legion_hook_parse), which in a git worktree is the
+# WORKTREE directory name, not the parent repo's name in watch.toml --
+# e.g. "1020-drain-last", never "legion". `legion_hook_covered` (the same
+# gate delivery-drain.sh already applies) exits this gate cleanly for an
+# uncovered cwd, so a worktree session is never judged against a repo
+# name it is not. Worktree-to-parent-repo identity resolution is a
+# separate follow-up; this only keeps the gate from acting on the wrong
+# name.
+#
+# --directed drops @all/@everyone broadcasts (see
+# `cli::signal::pending_reply_signals`): a broadcast ask cannot be
+# retired by any single reply -- `matching_pending_ask_ids` excludes
+# broadcasts on purpose, so a reply `--to all` retires nothing -- and this
+# gate must not be able to hard-block every agent's Stop fleet-wide on one
+# unretirable `@all`. Boot and post-compact keep the full set via plain
+# `legion pending-replies` (no --directed): broadcasts are still worth
+# surfacing there, just not hard-enforcing.
+#
 # Fail-open at the shell-call layer, same as gate (1): a missing legion
-# binary must never trap the agent. `legion pending-replies` itself
-# already renders nothing when the reply-required set is empty (see
-# board::format_pending_replies), so a non-empty result here IS the
-# obligation.
-if [ -x "$LEGION" ]; then
-  PENDING=$("$LEGION" pending-replies --repo "$REPO" 2>/dev/null)
+# binary must never trap the agent, and a DB/config failure is logged to
+# $LEGION_HOOK_LOG rather than silently disarming the gate (a bare
+# 2>/dev/null here would hide exactly the failure this gate exists to
+# catch). `legion pending-replies` itself already renders nothing when
+# the reply-required set is empty (see board::format_pending_replies), so
+# a non-empty result here IS the obligation.
+if legion_hook_covered && [ -x "$LEGION" ]; then
+  PENDING=$("$LEGION" pending-replies --repo "$REPO" --directed 2>>"$LEGION_HOOK_LOG")
 
   if [ -n "$PENDING" ]; then
-    emit_block "$PENDING"
+    REASON="Open directed asks for ${REPO}; the turn cannot end until each is answered:
+
+${PENDING}
+
+Reply with \`legion signal --repo ${REPO} --to <author> --verb answer ...\` (a reply --to all retires nothing).
+
+To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_STOP_BLOCK=1. The bypass writes one row to bypass.jsonl."
+
+    emit_block "$REASON"
     exit 0
   fi
 fi

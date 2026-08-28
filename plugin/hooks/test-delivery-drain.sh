@@ -122,6 +122,12 @@ assert_eq "last line is the fixed closing result line" "$last_line" "[Legion] En
 before_directed="${ctx_text%%which lane owns retries*}"
 assert_contains "the musing appears before the directed entry" "$before_directed" "a musing before the ask"
 assert_contains "the directed entry carries the REQUIRES A REPLY framing" "$ctx_text" "REQUIRES A REPLY"
+# The hook must actually invoke --split (not merely be configured with
+# stub content that happens to look combined) -- without this the
+# fixture above would pass identically if the hook stopped passing
+# --split entirely (caught by mutation review, #1020).
+assert_file_contains "the hook calls deliver drain with --split" "$LEGION_STUB_LOG" \
+  "deliver drain --repo legion-test --split"
 unset FAKE_DELIVER_DRAIN
 
 echo "==> empty drain output emits nothing"

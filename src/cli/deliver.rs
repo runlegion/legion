@@ -145,6 +145,18 @@ mod tests {
     use super::*;
     use crate::db::testutil::test_db;
 
+    /// A sink that refuses every write -- shared by the emit_drained and
+    /// emit_drained_split write-failure tests below.
+    struct FailingSink;
+    impl Write for FailingSink {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("sink refused"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("sink refused"))
+        }
+    }
+
     #[test]
     fn emit_drained_prints_seeded_post_then_empty_on_rerun() {
         let db = test_db();
@@ -175,21 +187,11 @@ mod tests {
 
     #[test]
     fn emit_drained_failure_precedes_telemetry_recording() {
-        // A sink that refuses every write: emit_drained must propagate the
-        // error, and handle_deliver_drain's ordering (emit before
+        // emit_drained must propagate a refused write, and
+        // handle_deliver_drain's ordering (emit before
         // record_hook_telemetry) means no DeliveryRecord is written for an
         // unemitted post. The ordering itself is structural -- this test
         // pins the propagation half.
-        struct FailingSink;
-        impl Write for FailingSink {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("sink refused"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Err(std::io::Error::other("sink refused"))
-            }
-        }
-
         let db = test_db();
         db.insert_reflection("seed", "sentinel", "team").unwrap();
         assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
@@ -266,5 +268,97 @@ mod tests {
         let mut out = Vec::new();
         emit_drained_split("legion", &[], &mut out).unwrap();
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn emit_drained_split_directed_only_batch_renders_no_musings_header() {
+        let db = test_db();
+        db.insert_reflection("seed", "sentinel", "team").unwrap();
+        assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
+
+        db.insert_reflection("kelex", "@legion question: which lane owns retries", "team")
+            .unwrap();
+        let posts = deliver::drain_for_hook(&db, "legion").unwrap();
+        assert_eq!(posts.len(), 1);
+
+        let mut out = Vec::new();
+        emit_drained_split("legion", &posts, &mut out).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+
+        assert!(
+            rendered.contains("REQUIRES A REPLY"),
+            "the directed set must still render with no musings present, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("[Legion] Bullpen ("),
+            "the musings header must not appear when there are no musings, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(SPLIT_SEPARATOR),
+            "no separator when there is nothing on the other side, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn emit_drained_split_failure_propagates() {
+        let db = test_db();
+        db.insert_reflection("seed", "sentinel", "team").unwrap();
+        assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
+        db.insert_reflection("rafters", "doomed musing", "team")
+            .unwrap();
+
+        let posts = deliver::drain_for_hook(&db, "legion").unwrap();
+        assert_eq!(posts.len(), 1);
+        assert!(
+            emit_drained_split("legion", &posts, &mut FailingSink).is_err(),
+            "a refused write must propagate, not be swallowed"
+        );
+    }
+
+    /// #1020 review (correcting the original board.rs placement of this
+    /// test): `legion pending-replies` and the hook drain's `--split`
+    /// directed bucket must render the SAME signal identically. This
+    /// drives BOTH real production call paths -- `cli::signal::
+    /// pending_reply_signals` (what `handle_pending_replies` calls) and
+    /// the actual private `emit_drained_split` (what the hook shells out
+    /// to via `--split`) -- rather than re-deriving either path's steps,
+    /// so a regression in either caller's wiring, not just in
+    /// `format_pending_replies` itself, would fail this test.
+    #[test]
+    fn directed_bucket_is_byte_identical_to_pending_replies_for_the_same_signal() {
+        use crate::cli::signal::pending_reply_signals;
+
+        let db = test_db();
+        db.insert_reflection("seed", "sentinel", "team").unwrap();
+        assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
+
+        db.insert_reflection(
+            "rafters",
+            "@legion question: which lane owns retries",
+            "team",
+        )
+        .unwrap();
+
+        // Path A: legion pending-replies's own query and formatting.
+        let reply_required = pending_reply_signals(&db, "legion", false).unwrap();
+        let pending_replies_output = board::format_pending_replies("legion", &reply_required);
+        assert!(
+            !pending_replies_output.is_empty(),
+            "expected a non-empty REQUIRES A REPLY block from the pending-replies path"
+        );
+
+        // Path B: the hook drain's --split directed bucket, via the real
+        // (private) emit_drained_split.
+        let drained = deliver::drain_for_hook(&db, "legion").unwrap();
+        let mut out = Vec::new();
+        emit_drained_split("legion", &drained, &mut out).unwrap();
+        let split_output = String::from_utf8(out).unwrap();
+
+        assert!(
+            split_output.contains(&pending_replies_output),
+            "the directed section of --split output must equal legion pending-replies' \
+             rendering for the same signal verbatim; split output was:\n{split_output}\n\
+             expected to find:\n{pending_replies_output}"
+        );
     }
 }

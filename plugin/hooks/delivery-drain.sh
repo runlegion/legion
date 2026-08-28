@@ -11,19 +11,28 @@
 # a2d4-1587442dbd36, after the missed rfc 01a04213 -- #1020): a wake-worthy
 # signal sat unanswered for forty minutes because the drain injected it as
 # one `[Legion] Delivered via hook drain:` note mid-stream inside a tool
-# result, indistinguishable from ordinary musings. Two things fixed that:
+# result, indistinguishable from ordinary musings. Two things address that:
 #
-#   1. hooks.json wires this hook as the LAST group for every event it
-#      runs on (UserPromptSubmit, PostToolUse, Stop), so its block is the
-#      last thing the model reads for that event.
-#   2. This hook's own output is a RESULT block with a fixed opening and
-#      closing line ($OPEN_LINE / $CLOSE_LINE below), never bare prose.
+#   1. hooks.json wires this hook as the LAST command in document order for
+#      every event it runs on (UserPromptSubmit, PostToolUse, Stop) -- see
+#      that file's group ordering. This is NECESSARY but not SUFFICIENT:
+#      Claude Code runs every matching hook for an event in parallel and
+#      does not document an order for concatenating their
+#      additionalContext ("passed to Claude together" is the extent of the
+#      documented contract; only permissionDecision has a documented
+#      order). Config order alone cannot guarantee this hook's block is
+#      the last thing read for an event -- do not rely on it for that.
+#   2. What actually carries the fix: this hook's own output is a RESULT
+#      block with a fixed opening and closing line ($OPEN_LINE / $CLOSE_LINE
+#      below), never bare prose, with directed wake-worthy signals -- in
+#      the `legion pending-replies` REQUIRES A REPLY shape, via the shared
+#      `board::format_pending_replies` formatter -- LAST inside it.
 #      `--split` has `legion deliver drain` do the sorting: musings (the
-#      existing lighter `[Legion] Bullpen (...)` header) come first,
-#      directed wake-worthy signals -- in the `legion pending-replies`
-#      REQUIRES A REPLY shape, via the shared `board::format_pending_
-#      replies` formatter -- come LAST inside the block. Nothing follows
-#      the closing line.
+#      existing lighter `[Legion] Bullpen (...)` header) come first, the
+#      directed set comes last, nothing follows the closing line. And
+#      stop.sh's pending-replies gate hard-blocks the turn outright while
+#      a directed ask is open -- a check that does not depend on read
+#      order at all, which is why it is the backstop, not (1).
 #
 # Wired into UserPromptSubmit, PostToolUse (alongside mark-work.sh), and
 # Stop -- three points in a turn where surfacing a mid-session post is

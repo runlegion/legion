@@ -125,13 +125,24 @@ pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool 
 /// Split a hook-drained batch into (musings, directed) for `legion deliver
 /// drain --split` (#1020).
 ///
-/// `directed` is exactly the set `legion pending-replies` renders --
-/// `watch::signal_requires_reply` is the same predicate
-/// `cli::signal::handle_pending_replies` filters on, so a directed post
-/// this call sees and a signal `find_pending_signals` sees land in the
-/// same bucket whenever both observe it. Everything else (informational
-/// signals, broadcasts, plain musings) goes to `musings`. Cloning is
-/// deliberate: the caller (`cli::deliver::handle_deliver_drain`) still
+/// `directed` is filtered by the same reply-required predicate
+/// (`watch::signal_requires_reply`, verb-only) `cli::signal::
+/// pending_reply_signals` filters on -- but it is NOT exactly the set
+/// `legion pending-replies` renders, for two reasons: (1) it is applied to
+/// the posts THIS drain window already claimed via the hook cursor, not a
+/// fresh DB query, so a signal `pending-replies` sees right now may not
+/// have been in any single drain's batch; and (2) the two paths reach
+/// their candidate posts through different addressing rules -- this
+/// drain's batch was already filtered by `should_notify` (exact-case
+/// match on the plain repo name, or `@all`), while `find_pending_signals`
+/// matches `wake_addresses()` (broadcast tags, case-insensitive LIKE).
+/// `signal_requires_reply` itself is verb-only and does not distinguish a
+/// directed ask from an `@all` broadcast, so a wake-worthy broadcast this
+/// call sees lands in `directed` here the same as it would in
+/// `pending-replies`'s un-filtered set -- this function makes no broadcast
+/// exception (see `cli::signal::pending_reply_signals`'s `directed_only`
+/// param for where that exception IS made, on the Stop-gate path). Cloning
+/// is deliberate: the caller (`cli::deliver::handle_deliver_drain`) still
 /// needs the full, unsplit batch afterward to record hook-lane telemetry
 /// for every drained post regardless of which bucket it landed in.
 pub fn split_drained(posts: &[Reflection]) -> (Vec<Reflection>, Vec<Reflection>) {

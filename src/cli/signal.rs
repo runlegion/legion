@@ -357,16 +357,46 @@ fn retire_answered_for_author(
     Ok(retired)
 }
 
-pub(crate) fn handle_pending_replies(repo: String) -> error::Result<()> {
-    let database = open_db()?;
+/// The reply-required signals directed at `repo` -- the query `legion
+/// pending-replies` runs before formatting (#1020).
+///
+/// Shared so a caller other than `handle_pending_replies` (currently the
+/// byte-identity test in `cli::deliver::tests`) exercises this SAME query
+/// rather than an independently re-derived copy of it.
+///
+/// `directed_only` mirrors the CLI's `--directed` flag: when true, drops
+/// any signal whose recipient token is a broadcast address (`@all` /
+/// `@everyone`). This exists because a broadcast ask cannot be retired by
+/// any single reply -- `matching_pending_ask_ids` below deliberately
+/// excludes broadcasts from its match, so a reply `--to all` retires
+/// nothing -- and stop.sh's Stop gate hard-blocks on this set, so it must
+/// not be able to hard-block every agent's Stop fleet-wide on one
+/// unretirable `@all` ask (#1020 review, HIGH 1).
+pub(crate) fn pending_reply_signals(
+    database: &db::Database,
+    repo: &str,
+    directed_only: bool,
+) -> error::Result<Vec<(String, String, String)>> {
+    let names = wake_names_for(repo)?;
 
-    let names = wake_names_for(&repo)?;
-
-    let signals = watch::find_pending_signals(&database, &repo, &names, None)?;
-    let reply_required: Vec<(String, String, String)> = signals
+    let signals = watch::find_pending_signals(database, repo, &names, None)?;
+    let mut reply_required: Vec<(String, String, String)> = signals
         .into_iter()
         .filter(|(_, text, _)| watch::signal_requires_reply(text))
         .collect();
+
+    if directed_only {
+        reply_required.retain(|(_, text, _)| {
+            signal::recipient_token(text).is_some_and(|r| !crate::signal::is_broadcast_address(r))
+        });
+    }
+
+    Ok(reply_required)
+}
+
+pub(crate) fn handle_pending_replies(repo: String, directed: bool) -> error::Result<()> {
+    let database = open_db()?;
+    let reply_required = pending_reply_signals(&database, &repo, directed)?;
 
     // Renders via board::format_pending_replies (#1020) -- the same
     // formatter the hook drain's --split directed bucket calls, so this
@@ -749,6 +779,56 @@ mod tests {
             rendered(&database, "rafters").len(),
             1,
             "rafters' copy of the same broadcast must be untouched"
+        );
+    }
+
+    // -- pending_reply_signals / --directed (#1020 review, HIGH 1) ----------
+
+    /// A wake-worthy `@all` broadcast cannot be retired by any single
+    /// reply (`matching_pending_ask_ids` excludes broadcasts on purpose),
+    /// so stop.sh's Stop gate must be able to see only the directed set --
+    /// this is the query `--directed` drives.
+    #[test]
+    fn pending_reply_signals_directed_only_drops_broadcasts_keeps_directed() {
+        let (database, _index, _dir) = crate::testutil::test_storage();
+        database
+            .insert_reflection(
+                "rafters",
+                "@legion question: which lane owns retries",
+                "team",
+            )
+            .expect("insert directed ask");
+        database
+            .insert_reflection("smugglr", "@all question: does anyone own this", "team")
+            .expect("insert broadcast ask");
+
+        let full = pending_reply_signals(&database, "legion", false).expect("full set");
+        assert_eq!(
+            full.len(),
+            2,
+            "both the directed ask and the broadcast are pending"
+        );
+
+        let directed = pending_reply_signals(&database, "legion", true).expect("directed only");
+        assert_eq!(directed.len(), 1, "the broadcast must be dropped");
+        assert!(
+            directed[0].1.contains("which lane owns retries"),
+            "the surviving entry must be the directed ask, got: {:?}",
+            directed[0]
+        );
+    }
+
+    #[test]
+    fn pending_reply_signals_directed_only_is_empty_when_only_broadcasts_are_pending() {
+        let (database, _index, _dir) = crate::testutil::test_storage();
+        database
+            .insert_reflection("smugglr", "@all decision: shipping 0.30.0 tonight", "team")
+            .expect("insert broadcast");
+
+        let directed = pending_reply_signals(&database, "legion", true).expect("directed only");
+        assert!(
+            directed.is_empty(),
+            "a lone broadcast must not survive --directed filtering, got: {directed:?}"
         );
     }
 }
