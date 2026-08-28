@@ -162,8 +162,8 @@ boot_section_index() {
 # --json`'s stable one-line form
 # (`{"status":"alive|stale|absent","last_beat_age":"<text>"|null}`) via
 # jq, the same status literals `render_status_json`'s doc comment and its
-# `render_status_json_tests` in src/cli/watch.rs pin byte-for-byte, and
-# this file's own test-boot-sections.sh FAKE_WATCH_STATUS fixtures use.
+# `watch_status_tests` in src/cli/watch.rs pin byte-for-byte, and this
+# file's own test-boot-sections.sh FAKE_WATCH_STATUS fixtures use.
 #
 # Two distinct failure modes, handled differently on purpose:
 #   - the CALL fails (missing jq, missing/broken binary, non-zero exit,

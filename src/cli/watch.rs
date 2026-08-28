@@ -207,6 +207,34 @@ fn humanize_age(age_secs: i64) -> String {
     }
 }
 
+/// Classify a heartbeat into the `(status label, beat-age text)` pair both
+/// [`render_status_json`]'s JSON line and [`run_watch_status`]'s prose
+/// render from. One classification, two renderers, so the two forms
+/// cannot drift from each other the way #1019 fixed the shell hook
+/// drifting from this command's prose.
+///
+/// `updated_at` is `None` for an absent heartbeat row and otherwise the
+/// beat's raw RFC3339 timestamp, the same shape [`classify_beat`] takes.
+/// The age text is `Some` only for `stale` -- clock skew reports as stale
+/// too, with the fixed "clock skew (future timestamp)" text, since it is
+/// never alive.
+fn status_report(
+    updated_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+    stale_after_secs: u64,
+) -> (&'static str, Option<String>) {
+    match updated_at {
+        None => ("absent", None),
+        Some(ts) => match classify_beat(ts, now, stale_after_secs) {
+            BeatLiveness::Alive => ("alive", None),
+            BeatLiveness::Stale { age_secs } => ("stale", Some(humanize_age(age_secs))),
+            BeatLiveness::ClockSkew { .. } => {
+                ("stale", Some("clock skew (future timestamp)".to_string()))
+            }
+        },
+    }
+}
+
 /// Render the `--json` line of `legion watch status`: exactly one line,
 /// `{"status":"alive|stale|absent","last_beat_age":"<text>"|null}` -- no
 /// trailing prose, no wake-attempts table.
@@ -218,31 +246,16 @@ fn humanize_age(age_secs: i64) -> String {
 /// banner with zero test signal on either side (#1019, surfaced in #1017's
 /// review). The three status literals here and the ones
 /// `plugin/hooks/test-boot-sections.sh`'s `FAKE_WATCH_STATUS` fixtures use
-/// are pinned byte-for-byte by `render_status_json_tests` below AND by
-/// that shell test -- change one without the other and one of the two
-/// suites fails.
-///
-/// `updated_at` is `None` for an absent heartbeat row and otherwise the
-/// beat's raw RFC3339 timestamp, the same shape [`classify_beat`] takes.
+/// are pinned byte-for-byte by `watch_status_tests` below AND by that
+/// shell test -- change one without the other and one of the two suites
+/// fails.
 fn render_status_json(
     updated_at: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
     stale_after_secs: u64,
 ) -> String {
-    let (status, last_beat_age): (&str, Option<String>) = match updated_at {
-        None => ("absent", None),
-        Some(ts) => match classify_beat(ts, now, stale_after_secs) {
-            BeatLiveness::Alive => ("alive", None),
-            BeatLiveness::Stale { age_secs } => ("stale", Some(humanize_age(age_secs))),
-            BeatLiveness::ClockSkew { .. } => {
-                ("stale", Some("clock skew (future timestamp)".to_string()))
-            }
-        },
-    };
-    match last_beat_age {
-        Some(age) => format!(r#"{{"status":"{status}","last_beat_age":"{age}"}}"#),
-        None => format!(r#"{{"status":"{status}","last_beat_age":null}}"#),
-    }
+    let (status, last_beat_age) = status_report(updated_at, now, stale_after_secs);
+    serde_json::json!({ "status": status, "last_beat_age": last_beat_age }).to_string()
 }
 
 /// Render the `legion watch status` output.
@@ -290,23 +303,11 @@ fn run_watch_status(
         }
         Some(ref hb) => {
             let now = chrono::Utc::now();
-            match classify_beat(&hb.updated_at, now, stale_after_secs) {
-                BeatLiveness::Alive => {
-                    writeln!(out, "status:  alive")?;
-                }
-                BeatLiveness::ClockSkew { .. } => {
-                    writeln!(
-                        out,
-                        "status:  stale  (last beat: clock skew (future timestamp))"
-                    )?;
-                }
-                BeatLiveness::Stale { age_secs } => {
-                    writeln!(
-                        out,
-                        "status:  stale  (last beat: {})",
-                        humanize_age(age_secs)
-                    )?;
-                }
+            let (status, last_beat_age) =
+                status_report(Some(&hb.updated_at), now, stale_after_secs);
+            match last_beat_age {
+                Some(age) => writeln!(out, "status:  {status}  (last beat: {age})")?,
+                None => writeln!(out, "status:  {status}")?,
             }
 
             writeln!(out, "host:    {}", hb.host)?;
