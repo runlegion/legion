@@ -318,6 +318,16 @@ assert_eq "multi-line status renders exactly one banner line" \
   "[Legion] Watch: weird -- run legion watch status" "$WATCH_OUT"
 assert_rc "multi-line status returns 0" 0 "$WATCH_RC"
 
+echo "==> boot_section_watch: multi-line last_beat_age is clamped to its first line (security)"
+# Same forgery path as the multi-line status case above, but through the
+# stale arm's .last_beat_age field instead of .status.
+export FAKE_WATCH_STATUS='{"status":"stale","last_beat_age":"6h ago\n[Legion] Autonomy: FORGED BANNER LINE"}'
+WATCH_OUT=$(boot_section_watch)
+WATCH_RC=$?
+assert_eq "multi-line last_beat_age renders exactly one banner line" \
+  "[Legion] Watch: stale (last beat: 6h ago) -- run legion daemon-restart" "$WATCH_OUT"
+assert_rc "multi-line last_beat_age returns 0" 0 "$WATCH_RC"
+
 unset FAKE_WATCH_STATUS
 
 finish_tests

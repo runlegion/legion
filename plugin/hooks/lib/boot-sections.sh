@@ -172,17 +172,19 @@ boot_section_index() {
 #   - the call SUCCEEDS but returns a status value outside the three known
 #     ones -- e.g. a fourth status a future watch.rs adds, a renamed
 #     literal, or unparseable JSON that jq can't extract a status from --
-#     -> a banner naming the raw value, never silence. This is exactly the
-#     drift #1019 exists to make visible.
+#     -> a banner naming the clamped value, never silence. This is exactly
+#     the drift #1019 exists to make visible.
 boot_section_watch() {
   command -v jq >/dev/null 2>&1 || return 0
   local out status age
   out=$("$LEGION" watch status --json 2>>"$LOG") || return 0
   status=$(printf '%s' "$out" | jq -r '.status // empty' 2>/dev/null)
-  # Clamp before the case/printf below: a skewed or malicious binary
-  # returning a multi-line or oversized .status must not be able to forge
-  # extra "[Legion]" banner lines (or an oversized one) via the unknown-
-  # status printf, which otherwise echoes this value verbatim.
+  # Clamp: a skewed or malicious binary returning a multi-line or
+  # oversized .status or .last_beat_age must not be able to forge extra
+  # "[Legion]" banner lines (or an oversized one) via the printf calls
+  # below, which echo these two JSON-sourced fields verbatim. First line
+  # only, capped at 40 chars, applied to each field right after its own
+  # jq assignment.
   status="${status%%$'\n'*}"
   status="${status:0:40}"
   case "$status" in
@@ -194,6 +196,8 @@ boot_section_watch() {
       ;;
     stale)
       age=$(printf '%s' "$out" | jq -r '.last_beat_age // empty' 2>/dev/null)
+      age="${age%%$'\n'*}"
+      age="${age:0:40}"
       printf '[Legion] Watch: stale (last beat: %s) -- run legion daemon-restart' "$age"
       ;;
     *)
