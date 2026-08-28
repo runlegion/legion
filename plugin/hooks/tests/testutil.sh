@@ -204,9 +204,19 @@ finish_tests() {
 #   LEGION_TEST_MARKER=<file> `telemetry ...` appends its argv (sans
 #                            leading "telemetry") here
 #   FAKE_DELIVER_DRAIN      `deliver drain` body (default empty, #941)
-#   FAKE_WATCH_STATUS        `watch status` body (default empty, simulating
-#                            an unreachable/erroring binary -- #997's
-#                            `boot_section_watch` treats that as silent)
+#   FAKE_WATCH_STATUS        `watch status --json` body: one JSON line,
+#                            e.g. {"status":"alive","last_beat_age":null}
+#                            (default empty; #1019's `boot_section_watch`
+#                            treats a NON-ZERO EXIT from this call as
+#                            silent, but empty/unparseable output on a
+#                            zero exit -- what leaving this unset produces
+#                            -- still renders a banner naming the empty
+#                            status, since that is itself outside the
+#                            three known values. Use FAKE_BROKEN=1 to
+#                            simulate the actually-silent case: the call
+#                            failing outright. See src/cli/watch.rs's
+#                            `render_status_json` for the literal status
+#                            values this must match)
 make_stub_legion() {
   local path="$1"
   cat > "$path" <<'EOF'
@@ -250,10 +260,12 @@ case "${1:-}" in
     elif [ "${2:-}" = "delegated-needs-attention" ] && [ -n "${FAKE_DELEGATED_NEEDS_ATTENTION:-}" ]; then
       printf '{"work_item_id":"%s","attempt_id":"attempt-fixed-1","repo":"%s"}\n' \
         "$FAKE_DELEGATED_NEEDS_ATTENTION" "${LEGION_REPO:-test}"
-    elif [ "${2:-}" = "status" ]; then
-      # #997: boot_section_watch's data source. FAKE_WATCH_STATUS carries the
-      # whole `legion watch status` body (default empty, matching a binary
-      # that exits non-zero or an empty response).
+    elif [ "${2:-}" = "status" ] && [ "${3:-}" = "--json" ]; then
+      # #1019: boot_section_watch's data source, switched from prose to a
+      # single JSON line so the hook never pattern-matches watch.rs's prose
+      # literals (#997's original defect). FAKE_WATCH_STATUS carries the
+      # whole `legion watch status --json` body (default empty, matching a
+      # binary that exits non-zero or returns nothing).
       [ -n "${FAKE_WATCH_STATUS:-}" ] && printf '%s\n' "$FAKE_WATCH_STATUS"
     fi
     ;;

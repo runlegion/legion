@@ -152,29 +152,49 @@ boot_section_index() {
 # a dead or stale watch loop was invisible at boot -- an agent had no signal
 # that wakes/nudges were not happening, unlike index staleness which
 # boot_section_index already surfaces. Host-wide (no --repo: `legion watch
-# status` is not scoped to a repo). Any error (missing binary, non-zero
-# exit, unrecognized output) prints nothing and never fails the banner --
-# same fail-open contract as every other section.
+# status` is not scoped to a repo).
+#
+# #1019: this used to switch on `legion watch status`'s PROSE first line
+# (`status:  alive` / `status:  stale  (last beat: ...)` / `status:
+# absent`) with nothing coupling those literals to src/cli/watch.rs -- a
+# reformat of the prose muted this section with zero test failure on
+# either side (surfaced in #1017's review). It now reads `watch status
+# --json`'s stable one-line form
+# (`{"status":"alive|stale|absent","last_beat_age":"<text>"|null}`) via
+# jq, the same status literals `render_status_json`'s doc comment and its
+# `render_status_json_tests` in src/cli/watch.rs pin byte-for-byte, and
+# this file's own test-boot-sections.sh FAKE_WATCH_STATUS fixtures use.
+#
+# Two distinct failure modes, handled differently on purpose:
+#   - the CALL fails (missing jq, missing/broken binary, non-zero exit,
+#     unparseable JSON that jq can't extract a status from) -> silent,
+#     same fail-open contract as every other section. This is a call-layer
+#     problem, not a signal worth surfacing.
+#   - the call SUCCEEDS but returns a status value outside the three known
+#     ones -- e.g. a fourth status a future watch.rs adds, or a renamed
+#     literal -- -> a banner naming the raw value, never silence. This is
+#     exactly the drift #1019 exists to make visible.
 boot_section_watch() {
-  local out first_line beat
-  out=$("$LEGION" watch status 2>>"$LOG") || return 0
-  first_line=$(printf '%s\n' "$out" | head -n 1)
-  case "$first_line" in
-    "status:  alive")
+  command -v jq >/dev/null 2>&1 || return 0
+  local out status age
+  out=$("$LEGION" watch status --json 2>>"$LOG") || return 0
+  status=$(printf '%s' "$out" | jq -r '.status // empty' 2>/dev/null)
+  case "$status" in
+    alive)
       return 0
       ;;
-    "status:  absent")
+    absent)
       printf '[Legion] Watch: not running -- run legion daemon-spawn'
       ;;
-    *"status:"*"stale"*"(last beat: "*)
-      # e.g. "status:  stale  (last beat: 6h ago)" -- strip everything up to
-      # (and including) the "(last beat: " literal, then the ONE trailing
-      # ")" (not a wildcarded "*)" strip -- a clock-skew beat's own text
-      # carries a nested "(future timestamp)" and a wildcard strip would eat
-      # into it).
-      beat="${first_line#*(last beat: }"
-      beat="${beat%)}"
-      printf '[Legion] Watch: stale (last beat: %s) -- run legion daemon-restart' "$beat"
+    stale)
+      age=$(printf '%s' "$out" | jq -r '.last_beat_age // empty' 2>/dev/null)
+      printf '[Legion] Watch: stale (last beat: %s) -- run legion daemon-restart' "$age"
+      ;;
+    *)
+      # Unknown status value (possibly empty, if the call succeeded but
+      # jq could not find .status at all) -- print it rather than stay
+      # silent, per #1019.
+      printf '[Legion] Watch: %s -- run legion watch status' "$status"
       ;;
   esac
 }

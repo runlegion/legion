@@ -140,12 +140,13 @@ export FAKE_WHATAMI_BODY="SENTINEL_WHATAMI_ABC"
 export FAKE_PENDING_REPLIES="SENTINEL_PENDING_ABC"
 export FAKE_CHECKPOINT="SENTINEL_CHECKPOINT_ABC"
 export FAKE_INDEX_BANNER="SENTINEL_INDEX_ABC"
-# #997: boot_section_watch does not echo FAKE_WATCH_STATUS verbatim like the
-# other sections do -- it re-renders a one-line banner around the "last
-# beat" text it extracts. Shaping the stub's beat text as the sentinel
-# itself (rather than the whole line) is what lets it survive that
-# re-render and still prove sequencing.
-export FAKE_WATCH_STATUS="status:  stale  (last beat: SENTINEL_WATCH_ABC)"
+# #997/#1019: boot_section_watch does not echo FAKE_WATCH_STATUS verbatim
+# like the other sections do -- it re-renders a one-line banner around the
+# "last beat" text it extracts from the JSON's last_beat_age field.
+# Shaping the stub's beat text as the sentinel itself (rather than the
+# whole JSON line) is what lets it survive that re-render and still prove
+# sequencing.
+export FAKE_WATCH_STATUS='{"status":"stale","last_beat_age":"SENTINEL_WATCH_ABC"}'
 export FAKE_WORK_PEEK="SENTINEL_WORK_ABC"
 export FAKE_AUTONOMY_BANNER="SENTINEL_AUTONOMY_ABC"
 
@@ -230,28 +231,33 @@ LOG="$LEGION_HOOK_LOG"
 # shellcheck source=lib/boot-sections.sh
 source "$BOOT_SECTIONS_SRC"
 
-# Realistic multi-line bodies (matching run_watch_status's actual output
-# shape -- see src/cli/watch.rs) rather than single-line stand-ins: proves
-# `head -n 1` actually discards the host/pid/version/beat/wake-attempts
-# lines that follow the status line on every real response, not just on a
-# stub shaped to make the test trivially pass.
+# #1019: FAKE_WATCH_STATUS now carries the single JSON line
+# `legion watch status --json` emits (see src/cli/watch.rs's
+# render_status_json) rather than a multi-line prose stand-in -- the whole
+# point of the fix is that this section reads that JSON with jq instead of
+# pattern-matching prose.
 echo "==> boot_section_watch: alive -> silent, rc 0"
-export FAKE_WATCH_STATUS=$'status:  alive\nhost:    testhost\npid:     4242\nversion: 9.9.9\nrepos:   3\nbeat:    2026-08-27T00:00:00Z\n\nwake attempts: none recorded'
+export FAKE_WATCH_STATUS='{"status":"alive","last_beat_age":null}'
 WATCH_OUT=$(boot_section_watch)
 WATCH_RC=$?
 assert_empty "alive emits nothing" "$WATCH_OUT"
 assert_rc "alive returns 0" 0 "$WATCH_RC"
 
 echo "==> boot_section_watch: stale -> one banner line naming the beat age"
-export FAKE_WATCH_STATUS=$'status:  stale  (last beat: 6h ago)\nhost:    testhost\npid:     4242\nversion: 9.9.9\nrepos:   3\nbeat:    2026-08-26T18:00:00Z'
+export FAKE_WATCH_STATUS='{"status":"stale","last_beat_age":"6h ago"}'
 WATCH_OUT=$(boot_section_watch)
 WATCH_RC=$?
 assert_eq "stale emits the one-line banner" \
   "[Legion] Watch: stale (last beat: 6h ago) -- run legion daemon-restart" "$WATCH_OUT"
 assert_rc "stale returns 0" 0 "$WATCH_RC"
 
-echo "==> boot_section_watch: stale with no last-beat parenthetical -> banner without an age (hardening)"
-export FAKE_WATCH_STATUS=$'status:  stale  (last beat: clock skew (future timestamp))'
+echo "==> boot_section_watch: stale with nested parens in the beat text (hardening)"
+# The prose form used to strip a trailing ")" with a wildcard, which a
+# clock-skew beat's own nested "(future timestamp)" text could trip up
+# (see the old version of this comment in git history). jq extracting a
+# JSON string field sidesteps that fragility entirely -- this test proves
+# the nested-parens text still round-trips intact.
+export FAKE_WATCH_STATUS='{"status":"stale","last_beat_age":"clock skew (future timestamp)"}'
 WATCH_OUT=$(boot_section_watch)
 WATCH_RC=$?
 assert_eq "stale-with-nested-parens still resolves the beat text" \
@@ -259,7 +265,7 @@ assert_eq "stale-with-nested-parens still resolves the beat text" \
 assert_rc "clock-skew stale returns 0" 0 "$WATCH_RC"
 
 echo "==> boot_section_watch: not running (absent) -> one banner line"
-export FAKE_WATCH_STATUS=$'status:  absent\n         no heartbeat row found -- daemon has never run or DB is fresh\n\nwake attempts: none recorded'
+export FAKE_WATCH_STATUS='{"status":"absent","last_beat_age":null}'
 WATCH_OUT=$(boot_section_watch)
 WATCH_RC=$?
 assert_eq "absent emits the not-running banner" \
@@ -273,6 +279,33 @@ WATCH_RC=$?
 unset FAKE_BROKEN
 assert_empty "broken binary emits nothing" "$WATCH_OUT"
 assert_rc "broken binary returns 0" 0 "$WATCH_RC"
+
+echo "==> boot_section_watch: unrecognized status value -> banner, never silence (#1019)"
+# This is the regression #1019 exists to prevent: a status literal in
+# watch.rs drifting out from under this hook must be VISIBLE, not muted.
+# A fourth status value (or a renamed one) the hook has no case for still
+# produces a banner naming the raw value, rather than falling through to
+# silence the way the old prose-matching version would have.
+export FAKE_WATCH_STATUS='{"status":"degraded","last_beat_age":null}'
+WATCH_OUT=$(boot_section_watch)
+WATCH_RC=$?
+assert_eq "unrecognized status emits a banner naming the raw value" \
+  "[Legion] Watch: degraded -- run legion watch status" "$WATCH_OUT"
+assert_rc "unrecognized status returns 0" 0 "$WATCH_RC"
+
+echo "==> boot_section_watch: call succeeds but output has no parseable .status -> banner, not silence"
+# Distinguishes "the call itself failed" (silent, tested above via
+# FAKE_BROKEN) from "the call succeeded but the shape drifted" (visible).
+# jq can't find .status in non-JSON output, so status resolves to empty --
+# which is itself outside the three known values and must still surface,
+# not fall through to silence the way the pre-#1019 unmatched-case default
+# did.
+export FAKE_WATCH_STATUS='not json at all'
+WATCH_OUT=$(boot_section_watch)
+WATCH_RC=$?
+assert_eq "unparseable output still emits a banner" \
+  "[Legion] Watch:  -- run legion watch status" "$WATCH_OUT"
+assert_rc "unparseable output returns 0" 0 "$WATCH_RC"
 
 unset FAKE_WATCH_STATUS
 
