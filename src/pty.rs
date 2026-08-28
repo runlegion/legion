@@ -31,6 +31,14 @@ const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 40;
 const DEFAULT_RING_BYTES: usize = 64 * 1024;
 const READ_CHUNK_BYTES: usize = 4 * 1024;
+/// Bound for [`PtySession::output_tail_lossy`]'s excerpt (#1001). The ring
+/// buffer itself caps at `DEFAULT_RING_BYTES` (64 KiB) of raw, unrotated
+/// terminal output including every ANSI escape/cursor-movement byte; a
+/// caller logging that much on every event (e.g. a courier's stderr line to
+/// an unrotated daemon log) would grow the log without bound. 2 KiB is
+/// enough to carry a handful of rendered lines -- the evidence a live
+/// verification run actually cites -- without that cost.
+const OUTPUT_TAIL_LOSSY_BYTES: usize = 2 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct PtySpawnOptions<'a> {
@@ -231,6 +239,17 @@ impl PtySession {
         }
     }
 
+    /// A short, log-safe rendering of the ring buffer's tail (#1001): at
+    /// most the last [`OUTPUT_TAIL_LOSSY_BYTES`] bytes of [`Self::output_tail`],
+    /// lossily decoded to UTF-8, with every control character other than
+    /// `\n` escaped (`char::escape_debug`) so raw ANSI/cursor-movement
+    /// bytes cannot turn a log line into an unreadable terminal-redraw
+    /// dump. For diagnostics only -- callers that need turn-start control
+    /// flow still read the raw bytes via [`Self::saw_turn_start`].
+    pub fn output_tail_lossy(&self) -> String {
+        lossy_tail(&self.output_tail())
+    }
+
     /// Has a Claude turn started in this session's output?
     ///
     /// The confirmed-submit protocol (#649) uses this to decide when to
@@ -278,6 +297,22 @@ fn has_turn_start_marker(bytes: &[u8]) -> bool {
         .windows(NEEDLE.len())
         .enumerate()
         .any(|(i, w)| w == NEEDLE && i > 0 && bytes[i - 1].is_ascii_digit())
+}
+
+/// Truncate-and-escape logic behind [`PtySession::output_tail_lossy`] (#1001).
+/// Pulled out as a free function, same convention as [`has_turn_start_marker`]
+/// above, so the truncation/escaping rule is unit-testable without a live PTY.
+fn lossy_tail(raw: &[u8]) -> String {
+    let start = raw.len().saturating_sub(OUTPUT_TAIL_LOSSY_BYTES);
+    let mut out = String::with_capacity(OUTPUT_TAIL_LOSSY_BYTES);
+    for c in String::from_utf8_lossy(&raw[start..]).chars() {
+        if c == '\n' || !c.is_control() {
+            out.push(c);
+        } else {
+            out.extend(c.escape_debug());
+        }
+    }
+    out
 }
 
 impl Drop for PtySession {
@@ -388,6 +423,47 @@ mod tests {
         ));
         assert!(!has_turn_start_marker(b"tokens"));
         assert!(!has_turn_start_marker(b" tokens"));
+    }
+
+    // -- lossy_tail (#1001) --------------------------------------------------
+
+    #[test]
+    fn lossy_tail_escapes_control_bytes_but_keeps_newlines() {
+        // A raw ANSI cursor-movement/color sequence must not survive into a
+        // log line unescaped -- ESC (0x1b) is a control byte -- while an
+        // ordinary newline stays literal so multi-line evidence (e.g. a
+        // courier's delivery line) still reads as separate lines.
+        let raw = b"before\x1b[31mred\x1b[0m\nafter";
+        let out = lossy_tail(raw);
+        assert!(!out.contains('\u{1b}'), "raw ESC bytes must not survive");
+        assert!(out.contains("\\u{1b}"), "ESC must appear escaped: {out:?}");
+        assert!(
+            out.contains('\n'),
+            "a literal newline must be preserved, not escaped: {out:?}"
+        );
+        assert!(out.contains("before") && out.contains("after"));
+    }
+
+    #[test]
+    fn lossy_tail_caps_at_output_tail_lossy_bytes() {
+        let raw = vec![b'x'; OUTPUT_TAIL_LOSSY_BYTES * 4];
+        let out = lossy_tail(&raw);
+        assert!(
+            out.len() <= OUTPUT_TAIL_LOSSY_BYTES,
+            "lossy_tail must cap at OUTPUT_TAIL_LOSSY_BYTES; got {} bytes",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn lossy_tail_keeps_only_the_tail_of_a_longer_buffer() {
+        let mut raw = vec![b'a'; OUTPUT_TAIL_LOSSY_BYTES];
+        raw.extend_from_slice(b"THE-TAIL-MARKER");
+        let out = lossy_tail(&raw);
+        assert!(
+            out.ends_with("THE-TAIL-MARKER"),
+            "must keep the END of the buffer, not the start: {out:?}"
+        );
     }
 
     fn run_until<F: FnMut() -> bool>(deadline_ms: u64, mut f: F) -> bool {
