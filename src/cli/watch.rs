@@ -105,9 +105,9 @@ pub(crate) enum WatchAction {
         /// Emit the stable machine-readable form instead of prose: exactly
         /// one line, `{"status":"alive|stale|absent","last_beat_age":"<text>"|null}`.
         /// Added for #1019 so a shell hook (`boot_section_watch`) never has
-        /// to pattern-match this command's prose output -- see
-        /// `render_status_json`'s doc comment for the drift the two sides
-        /// guard against.
+        /// to pattern-match this command's prose output.
+        // See `render_status_json`'s doc comment for the drift the two
+        // sides guard against.
         #[arg(long)]
         json: bool,
     },
@@ -209,9 +209,14 @@ fn humanize_age(age_secs: i64) -> String {
 
 /// Classify a heartbeat into the `(status label, beat-age text)` pair both
 /// [`render_status_json`]'s JSON line and [`run_watch_status`]'s prose
-/// render from. One classification, two renderers, so the two forms
-/// cannot drift from each other the way #1019 fixed the shell hook
-/// drifting from this command's prose.
+/// render from. The alive/stale labels and the age text are
+/// single-sourced here, so those two forms cannot drift from each other
+/// the way #1019 fixed the shell hook drifting from this command's prose.
+/// The `absent` label is also written by this function, but
+/// `run_watch_status`'s prose `None` arm prints its own literal
+/// `"status:  absent"` plus an explanation line this function has no
+/// equivalent for, rather than calling this function -- so `absent`
+/// itself is still two-sourced.
 ///
 /// `updated_at` is `None` for an absent heartbeat row and otherwise the
 /// beat's raw RFC3339 timestamp, the same shape [`classify_beat`] takes.

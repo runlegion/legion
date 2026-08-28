@@ -253,10 +253,9 @@ assert_rc "stale returns 0" 0 "$WATCH_RC"
 
 echo "==> boot_section_watch: stale with nested parens in the beat text (hardening)"
 # The prose form used to strip a trailing ")" with a wildcard, which a
-# clock-skew beat's own nested "(future timestamp)" text could trip up
-# (see the old version of this comment in git history). jq extracting a
-# JSON string field sidesteps that fragility entirely -- this test proves
-# the nested-parens text still round-trips intact.
+# clock-skew beat's own nested "(future timestamp)" text could trip up. jq
+# extracting a JSON string field sidesteps that fragility entirely -- this
+# test proves the nested-parens text still round-trips intact.
 export FAKE_WATCH_STATUS='{"status":"stale","last_beat_age":"clock skew (future timestamp)"}'
 WATCH_OUT=$(boot_section_watch)
 WATCH_RC=$?
@@ -306,6 +305,18 @@ WATCH_RC=$?
 assert_eq "unparseable output still emits a banner" \
   "[Legion] Watch:  -- run legion watch status" "$WATCH_OUT"
 assert_rc "unparseable output returns 0" 0 "$WATCH_RC"
+
+echo "==> boot_section_watch: multi-line status value is clamped to its first line (security)"
+# A skewed or malicious binary returning a .status containing an embedded
+# newline must not be able to forge a second "[Legion]"-shaped banner
+# line via the unknown-status printf, which otherwise echoes the value
+# verbatim. jq -r turns this JSON string's \n escape into a real newline.
+export FAKE_WATCH_STATUS='{"status":"weird\nsecond line","last_beat_age":null}'
+WATCH_OUT=$(boot_section_watch)
+WATCH_RC=$?
+assert_eq "multi-line status renders exactly one banner line" \
+  "[Legion] Watch: weird -- run legion watch status" "$WATCH_OUT"
+assert_rc "multi-line status returns 0" 0 "$WATCH_RC"
 
 unset FAKE_WATCH_STATUS
 

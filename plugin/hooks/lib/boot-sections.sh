@@ -166,19 +166,25 @@ boot_section_index() {
 # file's own test-boot-sections.sh FAKE_WATCH_STATUS fixtures use.
 #
 # Two distinct failure modes, handled differently on purpose:
-#   - the CALL fails (missing jq, missing/broken binary, non-zero exit,
-#     unparseable JSON that jq can't extract a status from) -> silent,
-#     same fail-open contract as every other section. This is a call-layer
-#     problem, not a signal worth surfacing.
+#   - the CALL fails (missing jq, missing/broken binary, non-zero exit) ->
+#     silent, same fail-open contract as every other section. This is a
+#     call-layer problem, not a signal worth surfacing.
 #   - the call SUCCEEDS but returns a status value outside the three known
-#     ones -- e.g. a fourth status a future watch.rs adds, or a renamed
-#     literal -- -> a banner naming the raw value, never silence. This is
-#     exactly the drift #1019 exists to make visible.
+#     ones -- e.g. a fourth status a future watch.rs adds, a renamed
+#     literal, or unparseable JSON that jq can't extract a status from --
+#     -> a banner naming the raw value, never silence. This is exactly the
+#     drift #1019 exists to make visible.
 boot_section_watch() {
   command -v jq >/dev/null 2>&1 || return 0
   local out status age
   out=$("$LEGION" watch status --json 2>>"$LOG") || return 0
   status=$(printf '%s' "$out" | jq -r '.status // empty' 2>/dev/null)
+  # Clamp before the case/printf below: a skewed or malicious binary
+  # returning a multi-line or oversized .status must not be able to forge
+  # extra "[Legion]" banner lines (or an oversized one) via the unknown-
+  # status printf, which otherwise echoes this value verbatim.
+  status="${status%%$'\n'*}"
+  status="${status:0:40}"
   case "$status" in
     alive)
       return 0
