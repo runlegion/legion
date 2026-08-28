@@ -101,6 +101,15 @@ pub(crate) enum WatchAction {
         /// reported as stale. Defaults to twice the poll interval (120s).
         #[arg(long, default_value = "120")]
         stale_after_secs: u64,
+
+        /// Emit the stable machine-readable form instead of prose: exactly
+        /// one line, `{"status":"alive|stale|absent","last_beat_age":"<text>"|null}`.
+        /// Added for #1019 so a shell hook (`boot_section_watch`) never has
+        /// to pattern-match this command's prose output.
+        // See `render_status_json`'s doc comment for the drift the two
+        // sides guard against.
+        #[arg(long)]
+        json: bool,
     },
 
     /// List delegated work items whose linked wake attempt is NOT
@@ -198,19 +207,96 @@ fn humanize_age(age_secs: i64) -> String {
     }
 }
 
+/// Classify a heartbeat into the `(status label, beat-age text)` pair both
+/// [`render_status_json`]'s JSON line and [`run_watch_status`]'s prose
+/// render from. The alive/stale labels and the age text are
+/// single-sourced here, so those two forms cannot drift from each other
+/// the way #1019 fixed the shell hook drifting from this command's prose.
+/// The `absent` label is also written by this function, but
+/// `run_watch_status`'s prose `None` arm prints its own literal
+/// `"status:  absent"` plus an explanation line this function has no
+/// equivalent for, rather than calling this function -- so `absent`
+/// itself is still two-sourced.
+///
+/// `updated_at` is `None` for an absent heartbeat row and otherwise the
+/// beat's raw RFC3339 timestamp, the same shape [`classify_beat`] takes.
+/// The age text is `Some` only for `stale` -- clock skew reports as stale
+/// too, with the fixed "clock skew (future timestamp)" text, since it is
+/// never alive.
+fn status_report(
+    updated_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+    stale_after_secs: u64,
+) -> (&'static str, Option<String>) {
+    match updated_at {
+        None => ("absent", None),
+        Some(ts) => match classify_beat(ts, now, stale_after_secs) {
+            BeatLiveness::Alive => ("alive", None),
+            BeatLiveness::Stale { age_secs } => ("stale", Some(humanize_age(age_secs))),
+            BeatLiveness::ClockSkew { .. } => {
+                ("stale", Some("clock skew (future timestamp)".to_string()))
+            }
+        },
+    }
+}
+
+/// Render the `--json` line of `legion watch status`: exactly one line,
+/// `{"status":"alive|stale|absent","last_beat_age":"<text>"|null}` -- no
+/// trailing prose, no wake-attempts table.
+///
+/// This exists because `boot_section_watch`
+/// (`plugin/hooks/lib/boot-sections.sh`) used to switch on this command's
+/// prose output verbatim (`status:  alive`, `status:  stale  (last beat:
+/// ...)`, `status:  absent`); a reformat of the prose muted the boot
+/// banner with zero test signal on either side (#1019, surfaced in #1017's
+/// review). The three status literals here and the ones
+/// `plugin/hooks/test-boot-sections.sh`'s `FAKE_WATCH_STATUS` fixtures use
+/// are pinned byte-for-byte by `watch_status_tests` below AND by that
+/// shell test -- change one without the other and one of the two suites
+/// fails.
+fn render_status_json(
+    updated_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+    stale_after_secs: u64,
+) -> String {
+    let (status, last_beat_age) = status_report(updated_at, now, stale_after_secs);
+    serde_json::json!({ "status": status, "last_beat_age": last_beat_age }).to_string()
+}
+
 /// Render the `legion watch status` output.
 ///
 /// Classifies the watch daemon as alive, stale, or absent by comparing
 /// the heartbeat's `updated_at` against `now - stale_after_secs`. Also
 /// prints the daemon version, repo count, and recent wake attempts so
 /// the operator can confirm that the daemon is not just alive but working.
-fn run_watch_status(db: &db::Database, recent: u32, stale_after_secs: u64) -> error::Result<()> {
+///
+/// `json` selects [`render_status_json`]'s stable one-line form instead --
+/// no prose, no wake-attempts table -- for a caller (a shell hook) that
+/// needs to parse the result rather than read it.
+fn run_watch_status(
+    db: &db::Database,
+    recent: u32,
+    stale_after_secs: u64,
+    json: bool,
+) -> error::Result<()> {
     use std::io::Write;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
     let beat = db.get_watch_heartbeat(None)?;
+
+    if json {
+        let now = chrono::Utc::now();
+        let updated_at: Option<&str> = beat.as_ref().map(|hb| hb.updated_at.as_str());
+        writeln!(
+            out,
+            "{}",
+            render_status_json(updated_at, now, stale_after_secs)
+        )?;
+        out.flush()?;
+        return Ok(());
+    }
 
     match beat {
         None => {
@@ -222,23 +308,11 @@ fn run_watch_status(db: &db::Database, recent: u32, stale_after_secs: u64) -> er
         }
         Some(ref hb) => {
             let now = chrono::Utc::now();
-            match classify_beat(&hb.updated_at, now, stale_after_secs) {
-                BeatLiveness::Alive => {
-                    writeln!(out, "status:  alive")?;
-                }
-                BeatLiveness::ClockSkew { .. } => {
-                    writeln!(
-                        out,
-                        "status:  stale  (last beat: clock skew (future timestamp))"
-                    )?;
-                }
-                BeatLiveness::Stale { age_secs } => {
-                    writeln!(
-                        out,
-                        "status:  stale  (last beat: {})",
-                        humanize_age(age_secs)
-                    )?;
-                }
+            let (status, last_beat_age) =
+                status_report(Some(&hb.updated_at), now, stale_after_secs);
+            match last_beat_age {
+                Some(age) => writeln!(out, "status:  {status}  (last beat: {age})")?,
+                None => writeln!(out, "status:  {status}")?,
             }
 
             writeln!(out, "host:    {}", hb.host)?;
@@ -520,9 +594,10 @@ pub(crate) fn handle(action: Option<WatchAction>) -> error::Result<()> {
         Some(WatchAction::Status {
             recent,
             stale_after_secs,
+            json,
         }) => {
             let db = open_db()?;
-            run_watch_status(&db, recent, stale_after_secs)?;
+            run_watch_status(&db, recent, stale_after_secs, json)?;
         }
         Some(WatchAction::DelegatedNeedsAttention { repo, json }) => {
             let db = open_db()?;
@@ -668,5 +743,51 @@ mod watch_status_tests {
         assert_eq!(humanize_age(42), "42s ago");
         assert_eq!(humanize_age(300), "5m ago");
         assert_eq!(humanize_age(7200), "2h ago");
+    }
+
+    // Pins the exact literals `boot_section_watch`
+    // (plugin/hooks/lib/boot-sections.sh) and its FAKE_WATCH_STATUS test
+    // fixtures (plugin/hooks/test-boot-sections.sh) key off of via jq.
+    // Changing any of these strings without updating the hook fails one of
+    // the two suites -- that coupling is the point of #1019.
+
+    #[test]
+    fn json_status_alive_literal() {
+        // 20s old, 90s window -> alive.
+        let beat = "2026-05-07T11:59:40Z";
+        assert_eq!(
+            render_status_json(Some(beat), now(), 90),
+            r#"{"status":"alive","last_beat_age":null}"#
+        );
+    }
+
+    #[test]
+    fn json_status_stale_literal() {
+        // 5 minutes old, 90s window -> stale, humanized as "5m ago".
+        let beat = "2026-05-07T11:55:00Z";
+        assert_eq!(
+            render_status_json(Some(beat), now(), 90),
+            r#"{"status":"stale","last_beat_age":"5m ago"}"#
+        );
+    }
+
+    #[test]
+    fn json_status_clock_skew_reads_as_stale_literal() {
+        // Future timestamp -> clock skew, reported as a stale status (never
+        // alive) with a fixed last_beat_age text, matching the prose form's
+        // "clock skew (future timestamp)" wording.
+        let beat = "2026-05-07T12:00:10Z";
+        assert_eq!(
+            render_status_json(Some(beat), now(), 90),
+            r#"{"status":"stale","last_beat_age":"clock skew (future timestamp)"}"#
+        );
+    }
+
+    #[test]
+    fn json_status_absent_literal() {
+        assert_eq!(
+            render_status_json(None, now(), 90),
+            r#"{"status":"absent","last_beat_age":null}"#
+        );
     }
 }
