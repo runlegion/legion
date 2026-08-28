@@ -9,11 +9,23 @@
 //!
 //! REJECTED designs, so a future reader does not re-propose them: a daemon
 //! writing `/tmp/cc-socks/<pid>.sock` directly (no sanctioned external-writer
-//! protocol, and the harness now classifier-blocks raw socket addressing),
-//! and `claude --print -p` (billing-dead, #494). The courier is spawned via
+//! protocol, and the harness now classifier-blocks raw socket addressing --
+//! the socket directory is not even fixed across versions, 2.1.232 hardened
+//! it and 2.1.248 added a per-user fallback, so a live target is always
+//! addressed by its `ListAgents` name, never by socket path), and
+//! `claude --print -p` (billing-dead, #494). The courier is spawned via
 //! the existing PTY path (`spawn::spawn_courier`) and its ONLY action is to
 //! call the harness `SendMessage` tool -- see that function's docs for how
 //! its lifecycle is kept self-contained.
+//!
+//! LIMIT (2.1.224 `crossSessionInbound`): a target session running with
+//! bypassed permissions (`--dangerously-skip-permissions` or
+//! `permission-mode bypassPermissions`) holds an inbound `SendMessage` for
+//! human approval rather than delivering it, so watch cannot wake such a
+//! session by nudging it -- the message just sits unread. `claude agents
+//! --json` does not expose a session's permission mode, so the daemon has
+//! no way to detect this case and skip the nudge; it is a documented gap,
+//! not a bug to fix here.
 //!
 //! The nudge carries NO payload: it is not a second delivery lane, only a
 //! "take a turn" tap. The DB-backed hook drain (`crate::deliver`) remains the
@@ -48,12 +60,9 @@ pub enum SessionStatus {
     Busy,
 }
 
-/// One interactive session as reported by `claude agents --json`.
-///
-/// Deliberately does NOT `deny_unknown_fields`: the harness is free to add
-/// fields to this output across versions, and a forward-compatible reader
-/// must ignore what it does not need rather than fail the whole parse.
-#[derive(Debug, Clone, Deserialize)]
+/// One interactive, nudge-eligible session, already filtered and validated
+/// from the raw `claude agents --json` output by [`list_live_sessions`].
+#[derive(Debug, Clone)]
 pub struct LiveSession {
     pub pid: u32,
     pub cwd: String,
@@ -61,15 +70,63 @@ pub struct LiveSession {
     pub status: SessionStatus,
 }
 
+/// One row of raw `claude agents --json` output, every field optional.
+///
+/// On 2.1.250+ the array mixes interactive rows (`pid`, `cwd`, `name`,
+/// `status`) with background rows (`kind: "background"`, `state`, no `pid`
+/// or `status`) -- see the module doc. All-optional fields let a single row
+/// deserialize regardless of which shape it is; [`Self::into_live_session`]
+/// then decides whether it qualifies. Deliberately does NOT
+/// `deny_unknown_fields`: the harness is free to add fields across versions,
+/// and a forward-compatible reader must ignore what it does not need.
+#[derive(Debug, Clone, Deserialize)]
+struct RawLiveSessionRow {
+    pid: Option<u32>,
+    cwd: Option<String>,
+    name: Option<String>,
+    status: Option<SessionStatus>,
+    kind: Option<String>,
+}
+
+impl RawLiveSessionRow {
+    /// Keep this row as a [`LiveSession`] only when `kind` is `"interactive"`
+    /// (or absent, for harnesses that predate the `kind` field) and every
+    /// field a nudge needs (`pid`, `cwd`, `name`, `status`) is present.
+    /// Everything else -- background rows, and any row simply missing a
+    /// required field -- is not nudge-eligible and is dropped.
+    fn into_live_session(self) -> Option<LiveSession> {
+        match self.kind.as_deref() {
+            None | Some("interactive") => {}
+            Some(_) => return None,
+        }
+        Some(LiveSession {
+            pid: self.pid?,
+            cwd: self.cwd?,
+            name: self.name?,
+            status: self.status?,
+        })
+    }
+}
+
 /// Shell out to `<claude_bin> agents --json` and parse the live interactive
 /// sessions it reports.
 ///
 /// Fails OPEN on every fault -- a missing/erroring binary, a non-zero exit,
-/// or unparseable JSON all yield an empty `Vec` (logged to stderr, never
-/// `Err`). This mirrors the sibling fail-open arms already in `poll_cycle`
-/// (a missing lease, a DB read error, etc. skip rather than abort the whole
-/// poll cycle): a detection failure here must cost one missed nudge
-/// opportunity, not a poll-cycle panic.
+/// or top-level unparseable JSON all yield an empty `Vec` (logged to
+/// stderr, never `Err`). This mirrors the sibling fail-open arms already in
+/// `poll_cycle` (a missing lease, a DB read error, etc. skip rather than
+/// abort the whole poll cycle): a detection failure here must cost one
+/// missed nudge opportunity, not a poll-cycle panic.
+///
+/// Parses per row, not per array: the top level is decoded only as far as
+/// `Vec<serde_json::Value>` (so one malformed element cannot fail the
+/// whole array the way a top-level `Vec<LiveSession>` decode would), and
+/// each element is then decoded and filtered independently by
+/// [`RawLiveSessionRow::into_live_session`]. A background row, a row with
+/// an unrecognized `status` value, or any other row-level shape mismatch
+/// costs only that one row. Skipped rows are logged once per call (not once
+/// per row) with each row's `kind`/`state`, read straight from the raw JSON
+/// so the log line survives even a row that failed to decode at all.
 pub fn list_live_sessions(claude_bin: &str) -> Vec<LiveSession> {
     let output = match std::process::Command::new(claude_bin)
         .args(["agents", "--json"])
@@ -90,15 +147,49 @@ pub fn list_live_sessions(claude_bin: &str) -> Vec<LiveSession> {
         return Vec::new();
     }
 
-    match serde_json::from_slice::<Vec<LiveSession>>(&output.stdout) {
-        Ok(sessions) => sessions,
+    let rows: Vec<serde_json::Value> = match serde_json::from_slice(&output.stdout) {
+        Ok(rows) => rows,
         Err(e) => {
             eprintln!(
                 "[legion watch] nudge: failed to parse `{claude_bin} agents --json` output: {e}"
             );
-            Vec::new()
+            return Vec::new();
+        }
+    };
+
+    let mut sessions = Vec::with_capacity(rows.len());
+    let mut skipped: Vec<String> = Vec::new();
+    for row in rows {
+        let kind_hint = row
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let state_hint = row
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none")
+            .to_string();
+        match serde_json::from_value::<RawLiveSessionRow>(row) {
+            Ok(raw) => match raw.into_live_session() {
+                Some(session) => sessions.push(session),
+                None => skipped.push(format!("kind={kind_hint} state={state_hint}")),
+            },
+            Err(e) => skipped.push(format!(
+                "kind={kind_hint} state={state_hint} (unparseable row: {e})"
+            )),
         }
     }
+
+    if !skipped.is_empty() {
+        eprintln!(
+            "[legion watch] nudge: skipped {} row(s) from `{claude_bin} agents --json`: {}",
+            skipped.len(),
+            skipped.join("; ")
+        );
+    }
+
+    sessions
 }
 
 /// Resolve `path` to its canonical form, falling back to the raw string when
@@ -370,6 +461,104 @@ mod tests {
         assert_eq!(sessions[0].name, "kelex");
         assert_eq!(sessions[0].status, SessionStatus::Idle);
         assert_eq!(sessions[1].status, SessionStatus::Busy);
+    }
+
+    /// Write a throwaway executable that `cat`s the given JSON to stdout and
+    /// exits 0, standing in for `claude agents --json`. Shared by the
+    /// per-row parsing tests below (#1001) so each one only has to supply
+    /// its fixture body.
+    #[cfg(unix)]
+    fn write_fake_agents_script(json: &str) -> tempfile::TempPath {
+        use std::io::Write;
+        let mut script = tempfile::NamedTempFile::new().expect("tempfile");
+        writeln!(script, "#!/bin/sh\ncat <<'EOF'\n{json}\nEOF").expect("write script");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = script.as_file().metadata().expect("meta").permissions();
+            perms.set_mode(0o755);
+            script.as_file().set_permissions(perms).expect("chmod");
+        }
+        // See list_live_sessions_parses_fixture_json above for why the
+        // write handle must be closed (ETXTBSY, #682/#685) before exec.
+        script.into_temp_path()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_live_sessions_skips_background_row_and_keeps_interactive_rows() {
+        // The captured 2.1.250 shape (#1001): a background row with no
+        // `pid`/`status` sits alongside two interactive rows. Before this
+        // fix, deserializing the whole array as `Vec<LiveSession>` failed on
+        // the background row and `list_live_sessions` returned nothing at
+        // all -- the courier never fired. One malformed/background row must
+        // not cost the other rows.
+        let json = r#"[
+            {"id":"899e9ef3","cwd":"/Volumes/store/projects/rafters-studio/eavesdrop","kind":"background","startedAt":1781028569738,"sessionId":"899e9ef3-1158-46d4-bda5-dbcfb8087a71","name":"open other agents","state":"blocked"},
+            {"pid":82824,"cwd":"/Volumes/store/projects/runlegion/legion","kind":"interactive","startedAt":1787879899769,"sessionId":"eb70d394-7e58-4644-80e1-1ac66174d99f","name":"legion-48","status":"busy"},
+            {"pid":424242,"cwd":"/tmp/idle-repo","kind":"interactive","startedAt":1787879899770,"sessionId":"aaaaaaaa-1158-46d4-bda5-dbcfb8087a71","name":"kelex","status":"idle"}
+        ]"#;
+        let path = write_fake_agents_script(json);
+        let path_str = path.to_string_lossy().into_owned();
+
+        let sessions = list_live_sessions(&path_str);
+        assert_eq!(
+            sessions.len(),
+            2,
+            "the background row must be skipped, the two interactive rows kept"
+        );
+        assert!(
+            sessions.iter().any(|s| s.name == "legion-48"
+                && s.pid == 82824
+                && s.status == SessionStatus::Busy)
+        );
+        assert!(
+            sessions
+                .iter()
+                .any(|s| s.name == "kelex" && s.status == SessionStatus::Idle),
+            "the idle interactive row must survive and report idle"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_live_sessions_skips_row_missing_pid_and_keeps_the_rest() {
+        let json = r#"[
+            {"cwd":"/tmp/no-pid","kind":"interactive","name":"headless","status":"idle"},
+            {"pid":1,"cwd":"/tmp/ok","kind":"interactive","name":"kelex","status":"idle"}
+        ]"#;
+        let path = write_fake_agents_script(json);
+        let path_str = path.to_string_lossy().into_owned();
+
+        let sessions = list_live_sessions(&path_str);
+        assert_eq!(
+            sessions.len(),
+            1,
+            "the row missing pid must be dropped, the well-formed row kept"
+        );
+        assert_eq!(sessions[0].name, "kelex");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_live_sessions_skips_row_with_unrecognized_status_and_keeps_the_rest() {
+        // A future harness value for `status` (anything other than
+        // idle/busy) must fail only its own row -- top-level parsing is
+        // `Vec<serde_json::Value>`, not `Vec<LiveSession>`, specifically so
+        // a row-level type mismatch like this cannot fail the whole array.
+        let json = r#"[
+            {"pid":1,"cwd":"/tmp/thinking","kind":"interactive","name":"weird","status":"thinking"},
+            {"pid":2,"cwd":"/tmp/ok","kind":"interactive","name":"kelex","status":"busy"}
+        ]"#;
+        let path = write_fake_agents_script(json);
+        let path_str = path.to_string_lossy().into_owned();
+
+        let sessions = list_live_sessions(&path_str);
+        assert_eq!(
+            sessions.len(),
+            1,
+            "an unrecognized status value must drop only its own row"
+        );
+        assert_eq!(sessions[0].name, "kelex");
     }
 
     // -- find_live_session_for_workdir (#999) ----------------------------------
