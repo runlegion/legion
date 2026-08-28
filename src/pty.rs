@@ -31,13 +31,23 @@ const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 40;
 const DEFAULT_RING_BYTES: usize = 64 * 1024;
 const READ_CHUNK_BYTES: usize = 4 * 1024;
-/// Bound for [`PtySession::output_tail_lossy`]'s excerpt (#1001). The ring
-/// buffer itself caps at `DEFAULT_RING_BYTES` (64 KiB) of raw, unrotated
-/// terminal output including every ANSI escape/cursor-movement byte; a
-/// caller logging that much on every event (e.g. a courier's stderr line to
-/// an unrotated daemon log) would grow the log without bound. 2 KiB is
-/// enough to carry a handful of rendered lines -- the evidence a live
-/// verification run actually cites -- without that cost.
+/// Bound for [`PtySession::output_tail_lossy`]'s RAW INPUT slice (#1001) --
+/// this caps how much of [`PtySession::output_tail`]'s bytes are read
+/// before escaping, NOT the length of the escaped string that comes out.
+/// The ring buffer itself caps at `DEFAULT_RING_BYTES` (64 KiB) of raw,
+/// unrotated terminal output including every ANSI escape/cursor-movement
+/// byte; a caller logging that much on every event (e.g. a courier's
+/// stderr line to an unrotated daemon log) would grow the log without
+/// bound. 2 KiB of raw input is enough to carry a handful of rendered
+/// lines -- the evidence a live verification run actually cites -- without
+/// that cost. Because `char::escape_debug` can expand one control byte
+/// (e.g. ESC, `0x1b`) into up to six output chars (`\u{1b}`), the escaped
+/// string this bounds the INPUT of can be up to `OUTPUT_TAIL_LOSSY_BYTES *
+/// 6` long in the worst case (an input that is nothing but control bytes)
+/// -- see [`PtySession::output_tail_lossy`]'s doc. No further output-side
+/// cap is applied: a daemon log line up to ~12 KiB in that adversarial
+/// worst case is judged an acceptable bound, and truncating the ALREADY-
+/// escaped string risks cutting a multi-char escape sequence in half.
 const OUTPUT_TAIL_LOSSY_BYTES: usize = 2 * 1024;
 
 #[derive(Debug, Clone)]
@@ -239,13 +249,20 @@ impl PtySession {
         }
     }
 
-    /// A short, log-safe rendering of the ring buffer's tail (#1001): at
-    /// most the last [`OUTPUT_TAIL_LOSSY_BYTES`] bytes of [`Self::output_tail`],
-    /// lossily decoded to UTF-8, with every control character other than
-    /// `\n` escaped (`char::escape_debug`) so raw ANSI/cursor-movement
-    /// bytes cannot turn a log line into an unreadable terminal-redraw
-    /// dump. For diagnostics only -- callers that need turn-start control
-    /// flow still read the raw bytes via [`Self::saw_turn_start`].
+    /// A short, log-safe rendering of the ring buffer's tail (#1001): reads
+    /// at most the last [`OUTPUT_TAIL_LOSSY_BYTES`] bytes of
+    /// [`Self::output_tail`] (that bound is on the RAW INPUT only -- see
+    /// its doc), lossily decoded to UTF-8, with every control character
+    /// other than `\n` escaped (`char::escape_debug`) so raw ANSI/cursor-
+    /// movement bytes cannot turn a log line into an unreadable terminal-
+    /// redraw dump. The escaped OUTPUT string is not itself length-capped,
+    /// so it can be up to `OUTPUT_TAIL_LOSSY_BYTES * 6` long in the worst
+    /// case where the input is nothing but escapable control bytes (each
+    /// can expand to up to 6 chars, e.g. ESC becomes `\u{1b}`) -- typical
+    /// terminal output is mostly printable text and escapes far less than
+    /// that in practice. For diagnostics only -- callers that need
+    /// turn-start control flow still read the raw bytes via
+    /// [`Self::saw_turn_start`].
     pub fn output_tail_lossy(&self) -> String {
         lossy_tail(&self.output_tail())
     }
@@ -304,7 +321,13 @@ fn has_turn_start_marker(bytes: &[u8]) -> bool {
 /// above, so the truncation/escaping rule is unit-testable without a live PTY.
 fn lossy_tail(raw: &[u8]) -> String {
     let start = raw.len().saturating_sub(OUTPUT_TAIL_LOSSY_BYTES);
-    let mut out = String::with_capacity(OUTPUT_TAIL_LOSSY_BYTES);
+    // No capacity hint: escape_debug can expand a control byte into up to
+    // six output chars (see OUTPUT_TAIL_LOSSY_BYTES's doc), so
+    // `with_capacity(OUTPUT_TAIL_LOSSY_BYTES)` would undersize the common
+    // case where the input needs escaping at all -- String grows as
+    // needed regardless, so a wrong guess only costs a reallocation, not
+    // correctness, but an accurate guess isn't cheap to compute either.
+    let mut out = String::new();
     for c in String::from_utf8_lossy(&raw[start..]).chars() {
         if c == '\n' || !c.is_control() {
             out.push(c);
@@ -445,12 +468,21 @@ mod tests {
     }
 
     #[test]
-    fn lossy_tail_caps_at_output_tail_lossy_bytes() {
-        let raw = vec![b'x'; OUTPUT_TAIL_LOSSY_BYTES * 4];
+    fn lossy_tail_caps_raw_input_and_bounds_worst_case_escaped_output() {
+        // Plain printable bytes never escape, so they would never actually
+        // exercise the OUTPUT-side bound documented on
+        // OUTPUT_TAIL_LOSSY_BYTES -- feed ESC (0x1b) instead, the worst
+        // case for escape_debug's expansion (six output chars per input
+        // byte, e.g. `\u{1b}`), to prove the escaped string stays within
+        // the documented `OUTPUT_TAIL_LOSSY_BYTES * 6` worst-case bound
+        // rather than being length-capped itself (it is not -- only the
+        // RAW INPUT slice taken from output_tail is capped).
+        let raw = vec![0x1bu8; OUTPUT_TAIL_LOSSY_BYTES * 4];
         let out = lossy_tail(&raw);
         assert!(
-            out.len() <= OUTPUT_TAIL_LOSSY_BYTES,
-            "lossy_tail must cap at OUTPUT_TAIL_LOSSY_BYTES; got {} bytes",
+            out.len() <= OUTPUT_TAIL_LOSSY_BYTES * 6,
+            "escaped output must stay within the documented worst-case 6x \
+             bound on the raw-input cap; got {} bytes",
             out.len()
         );
     }
