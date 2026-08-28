@@ -1,5 +1,269 @@
 # Legion Changelog
 
+## 0.36.0
+
+The idle-mail release. Since #963 retired the MCP push, the hook drain has been the only
+lane by which a live session receives board posts and signals, and it fires only when the
+agent is doing something -- so a session that had gone idle heard nothing, a directed ask
+arrived as one compact line inside a tool result and was talked past, and a turn could end
+with that ask still open. This release closes each of those gaps in turn. Watch now sees the
+idle session and dispatches a short-lived PTY courier whose one job is to `SendMessage` it
+"you have mail; take a turn", after which the session's own drain -- unchanged -- delivers;
+a follow-up makes that courier survive the Claude Code 2.1.248+ harness, which had broken
+its roster parse outright. The drain's output becomes a delimited result block, emitted last
+for every event it runs on, with directed signals at the end in the same `REQUIRES A REPLY`
+shape boot uses, and a new Stop gate refuses to end a turn while a directed ask is open.
+Around the delivery work: the SessionStart supervisor cold-starts `legion daemon-spawn`
+instead of the deprecated `legion serve`, so the watch loop is alive on a fresh machine and
+its health shows in the boot banner; `legion sym` and `legion index` warn when invoked from
+a worktree whose HEAD diverges from the indexed checkout; and the uncertainty engine's math
+plane lands -- an hourly orphan sweep, a nightly calibration roll, and a compare-and-swap on
+the witness write that the sweep made racy. Minor release on the pre-1.0 rule that an added
+surface is the minor bump: #1013 adds a feature -- watch gains the courier -- and #1004 adds
+three `legion uncertainty` verbs and two daemon jobs. There is no wire-format change and no
+schema migration. Two behavior changes are worth knowing before upgrade: the Stop hook now
+blocks a turn that has an open directed ask (bypass with `LEGION_SKIP_STOP_BLOCK=1`, audited),
+and the daemon supervisor's cold path spawns a daemon, not a dashboard-only server.
+
+### Added
+
+- **Watch nudges idle sessions through a PTY `SendMessage` courier** (PR #1013, #999). Watch
+  already skips a repo with a live session, correctly (#996), but the better-behaved case
+  lost: a repo with nobody home got a spawn carrying its mail, a repo with an idle agent
+  sitting in it got silence. A new `src/watch/nudge.rs` shells `claude agents --json`,
+  matches a live session to a watched repo by canonicalized `cwd` against the registered
+  `workdir`, and fails open to an empty list on a missing binary, non-zero exit, or bad JSON.
+  In `poll_cycle`'s `active_pid` branch, ahead of the untouched never-spawn-into-a-live-tree
+  `continue`, a session that is idle while the repo has undrained data and is outside its
+  nudge cooldown gets a courier: `spawn::spawn_courier` starts a `claude` session through the
+  same `PtySession` path watch uses to wake sleepers (subscription-billed; not `-p`, which is
+  billing-dead, and not a raw socket, which the harness blocks), with `--allowedTools
+  SendMessage ListAgents` so the tool call never stalls on a permission prompt, run from a
+  scratch dir under the legion data dir with `LEGION_REPO=courier-scratch` so the courier's
+  own hooks can never claim the nudged repo's lock (the #996 env-inheritance hole). Its
+  prompt carries only the repo name and the target's name and pid, never post or
+  signal text -- the nudge is not a second delivery lane -- and it identifies as
+  `legion-watch`, not as the repo it nudges for. The idle agent wakes on the message, and its
+  hook drain delivers. The nudge cooldown is a per-repo `NudgeCooldownTracker` independent of
+  the wake cooldown in both directions. Named rather than hidden: the target is the first
+  session the roster lists for the workdir, matched by cwd, not cross-checked against the pid
+  holding the session lock, so two terminals on one workdir could route the nudge to the
+  wrong one.
+
+- **Uncertainty calibration roller, orphan sweep, and daemon cron** (PR #1004, #359). The
+  data plane has stored predictions since v0.15 -- 2247 rows in production, 285 witnessed --
+  but nothing computed calibration or swept orphans, so `legion uncertainty calibration`
+  returned `[]` and 1035 past-deadline predictions sat un-transitioned. The July write-side
+  branch (`4edbc19`) is cherry-picked forward and the piece it deferred is built:
+  `Database::sweep_orphans` marks stale `emitted` predictions `orphaned`, and
+  `Database::roll_calibration` computes fixed-width 0.1 point-Brier buckets per cohort as an
+  idempotent soft-delete-and-insert. Both run inside `WatchLoop::tick_poll` -- the sweep at
+  most hourly, the roll at most nightly -- gated on an in-process last-run timestamp the way
+  the heartbeat throttle is, logged with row counts, and fail-open, so an error never stops
+  the poll cycle. Three manual verbs expose the jobs: `legion uncertainty roll` (sweep then
+  roll, the backfill entry point), `sweep-now`, and `calibrate-now`, each with `--json`. The
+  production backfill is a post-merge operator step, not run from CI. `legion daemon status`
+  does not report the jobs; they log to stderr like the sibling reapers.
+
+### Changed
+
+- **The delivery drain emits last and as a result block; Stop blocks on an open directed
+  ask** (PR #1024, #1020). A wake-worthy `rfc` sat unanswered for forty minutes on 2026-08-27
+  because the drain delivered it as one compact line among musings inside a `PostToolUse`
+  result mid-pipeline, and nothing stopped the turn from ending with it open. The drain's
+  output is now wrapped between `[Legion] Delivery drain result:` and `[Legion] End delivery
+  drain result.`, with nothing after the closing line; inside it, musings come first through
+  `format_bullpen`, then a `---` separator only when both buckets are non-empty, then the
+  directed signals in the `REQUIRES A REPLY` shape. That shape now has one renderer,
+  `board::format_pending_replies`, shared by boot, post-compact, and the drain, and its query
+  is `cli::signal::pending_reply_signals`, so the drain's entry for a signal is byte-identical
+  to what `legion pending-replies` prints for it. `legion deliver drain` gains `--split`,
+  which does the sorting in the binary so the hook never parses posts. `plugin/hooks/
+  hooks.json` moves `delivery-drain.sh` into a final `PostToolUse` group after the edit and
+  task matcher groups (`UserPromptSubmit` and `Stop` already ended with it) -- and the hook's
+  own header says why document order is not the mechanism: Claude Code runs matching hooks
+  in parallel with no documented `additionalContext` order, so the delimited block and the
+  Stop gate carry the fix. That gate runs `legion pending-replies --repo <repo> --directed`
+  and blocks while the result is non-empty, with a reason that names each ask and tells the
+  agent to reply `--to <author>` (a reply `--to all` retires nothing); it honors the existing
+  `LEGION_SKIP_STOP_BLOCK=1` bypass, recorded, sits below the watch-pty exemption, and is
+  guarded by `legion_hook_covered` so a name legion has no footprint for is never blocked.
+  The new `--directed` flag on `legion pending-replies` drops `@all`/`@everyone` broadcasts,
+  because hard-blocking every agent's Stop on one broadcast post is the wrong weight; boot
+  and post-compact keep the full set. Left for follow-ups: the wake prompt's opening
+  sentence still renders inside the drain block (#1028), and the bullpen attribution field
+  is still unindented (#1027).
+
+- **The house habit-words are named in the Elements of Style output style** (PR #1006, #1005;
+  PR #1015, #1014). The style told the author to avoid unnecessary coined terms but named no
+  offenders, so a recurring set kept appearing where a plain word reads better. A frequency
+  pass over 1827 reflections from the last three months found them empirically. A new `####
+  House habit-words` subsection in `plugin/output-styles/elements-of-style.md` lists the
+  outright-avoid words with their plain replacements -- corpus, doctrine, substrate, thesis,
+  seam, canon, load-bearing, "surface" as a verb, reflexive honest/honestly, and, added by
+  #1015, conformance -- and a second tier to use only in their exact sense, never as
+  decoration: invariant, provenance, verdict, lane, drift. The added prose uses none of the
+  words it bans. The writer skill and the per-site writer voices are untouched.
+
+### Fixed
+
+- **The watch courier survives the 2.1.248+ harness** (PR #1025, #1001). The #1013 courier
+  parsed `claude agents --json` as one `Vec<LiveSession>` with `pid`, `name`, and `status`
+  required. On Claude Code 2.1.250+ that roster also carries background rows (`kind:
+  "background"`, `state: "blocked"`, no `pid`, no `status`), so one such row failed the whole
+  array, the fail-open arm returned an empty list, and the courier never nudged anyone, with
+  only a daemon stderr line to show for it. `list_live_sessions` now decodes the top level as
+  `Vec<serde_json::Value>` and each row on its own through an all-optional `RawLiveSessionRow`,
+  keeping a row only when `kind` is `interactive` or absent and `pid`, `cwd`, `name`, and
+  `status` are all present; skipped rows are logged once per call with their `kind`/`state`,
+  and a row with an unrecognized `status` drops only itself. The spawn argv is now the
+  `COURIER_ARGS` const `--restricted --strict-mcp-config --tools SendMessage ListAgents
+  --allowedTools SendMessage ListAgents`, with nothing positional after it (the prompt still
+  enters by bracketed paste): `--restricted` removes Bash and the code-running tools and
+  ignores user, project, and local settings files, `--tools` allowlists the two tool names the
+  courier needs, and `--strict-mcp-config` keeps MCP servers from `~/.claude.json` out.
+  Because the daemon inherits its starting session's env, `spawn_courier` also pins
+  `CLAUDE_CODE_ENABLE_AUTO_MODE=0` and clears `CLAUDE_CODE_MESSAGING_SOCKET` and
+  `CLAUDE_CODE_MESSAGING_TOKEN`. The flags were proven by a live PTY run against a real
+  session: `SendMessage` completed with no permission prompt and the nudge arrived with its
+  exact text. The `nudge.rs` module doc now states the contract: a target running with
+  bypassed permissions holds an inbound `SendMessage` for human approval under
+  `crossSessionInbound` (2.1.224), so watch cannot wake it and cannot detect it either, since
+  the roster does not expose permission mode; and targets are addressed by their `ListAgents`
+  name, never by socket path, because the socket directory is not fixed. Recipients see the
+  harness's auto-generated session title as the sender, not `legion-watch`; that is a
+  nudge-text question left for its own issue.
+
+- **The daemon supervisor cold-starts `daemon-spawn`, restarts through `daemon-restart`, and
+  boot shows watch status** (PR #1017, #997). The SessionStart supervisor handled a running
+  daemon correctly since #613, but when nothing answered `:3131` its `spawn_daemon` ran
+  `legion serve`, the deprecated dashboard-only process, so the watch loop stayed dead on a
+  fresh machine until someone started a daemon by hand; measured 2026-08-21, `legion watch
+  status` reported a beat six hours old while serve was healthy and nothing showed it. The
+  cold path now runs `legion daemon-spawn`, every restart path (version drift, same-version
+  build drift, malformed health) goes through `legion daemon-restart` regardless of the
+  reported role, and the script's own pidfile and kill code are deleted because the Rust side
+  owns pidfile tracking, orphan-on-port recovery, and SIGTERM-then-SIGKILL. The literal
+  `legion serve` no longer appears in the script. A new `watch` section in
+  `plugin/hooks/lib/boot-sections.sh`, placed right after `index` in `LEGION_BOOT_SECTIONS`,
+  prints nothing when watch is alive, `[Legion] Watch: not running -- run legion
+  daemon-spawn` when absent, `[Legion] Watch: stale (last beat: ...) -- run legion
+  daemon-restart` when stale, and nothing with exit 0 when the status call fails. Shell only;
+  `legion watch` and `legion serve` remain as commands.
+
+- **`legion watch status --json` gives the boot banner a form pinned on both sides** (PR
+  #1023, #1019). The #1017 section switched on the prose first line of `legion watch status`,
+  and nothing on the Rust side knew those strings mattered: a reformat would have muted the
+  banner while every test stayed green. `legion watch status --json` now emits exactly one
+  line, `{"status":"alive|stale|absent","last_beat_age":"<text>"|null}`, rendered from a
+  single `status_report` classification that the prose form also consumes, and four unit
+  tests in `src/cli/watch.rs` assert the line byte-for-byte for each reachable state (clock
+  skew reads as stale). `boot_section_watch` reads that line with jq; a status outside the
+  three known values prints `[Legion] Watch: <value> -- run legion watch status` instead of
+  falling through to silence, and both JSON-sourced fields are clamped to their first line
+  and 40 characters so a skewed binary cannot forge extra `[Legion]` lines through the
+  banner. The shell stub answers only `watch status --json` and its fixtures carry the same
+  three literals the Rust tests pin, so neither side can move alone. The prose form is
+  unchanged in every byte.
+
+- **`legion sym` and `legion index` warn when invoked from a worktree that diverges from the
+  indexed checkout** (PR #1018, #1010). Both commands resolve a repo to the single path
+  `watch.toml` registers, so run from inside a linked worktree on another branch they
+  answered for the primary checkout and said nothing; that is how `sym refs` missed a caller
+  that existed only on #1003's branch, which `cargo build` then caught. By the decision on the
+  issue this is a guard, not worktree-aware resolution: `worktree_divergence_warning` in
+  `src/cli/index_cmd.rs` derives the invoking checkout from cwd (or from the `--file`
+  argument's directory for `legion index --file`), confirms it is a linked worktree of the
+  same repository through `git rev-parse --git-common-dir` -- without that identity check,
+  running `sym` from any unrelated checkout would warn on almost every call -- compares its
+  HEAD to the `head_at_index` the last index recorded, and when they differ prints one
+  `WARNING` line on stderr naming both HEADs and the worktree path, then answers exactly as
+  before. It covers the SCIP readers (`sym def/refs/impl/hover/list/impact/imports/importers`
+  and the `--lang css` arms), the live-scan surfaces (`sym etc find-content`, `find-file`,
+  `sym tree`), and `legion index` with and without `--file`, where the warning adds that the
+  run indexes the registered checkout in full, never the worktree or the named file. With no
+  `--repo`, the guard checks every registered repo and the identity gate keeps all but the
+  matching one silent. Output and exit code never change, and any git failure is treated as
+  no git context. `inventory::git_stdout` is the shared git runner the simplify pass
+  extracted.
+
+- **`update_prediction` is guarded by a compare-and-swap on the prior state** (PR #1007,
+  #1003). The witness path reads a prediction, applies `Prediction::witness()` in memory, and
+  writes it back with no lock across the gap. #1004's hourly sweep can flip the row `emitted
+  -> orphaned` in that gap, and the old blind `UPDATE ... WHERE id = ?` then silently
+  resurrected it to `witnessed`, breaking the terminal-state invariant -- a race #359 raised
+  from rare to hourly. `update_prediction` now takes the state the caller read and adds `AND
+  state = ?` to the UPDATE, so a stale write matches zero rows. A zero-row result is
+  disambiguated by a follow-up SELECT into the existing `PredictionNotFound` or the new
+  `UncertaintyError::PredictionStateConflict { id, expected }`; the doc comment says the
+  SELECT is not atomic with the UPDATE and bounds the consequence to which error is reported,
+  never whether the write applied. Every caller -- the `legion uncertainty witness` arm and
+  both `gate_trust` witness paths -- captures the prior state before the in-place transition.
+  A test drives the race deterministically: sweep the row to `orphaned`, attempt the witness
+  write, assert the conflict and that the row stays `orphaned`. The smugglr sync-delta path is
+  a second writer of `state` with no such guard, but there is no inbound apply path for
+  predictions today, so that is forward-looking rather than a live gap.
+
+- **The unattended witness path records a CAS conflict to telemetry** (PR #1011, #1009).
+  `witness_simplify_from_review_nonblocking` in `src/gate_trust.rs` swallows every witness
+  error to stderr by design, since a witness problem must not break gate recording -- so the
+  most probable real occurrence of the #1003 race left no queryable trace. A
+  `PredictionStateConflict` rejected there now also appends a `WitnessConflictRecord` to
+  `witness-conflicts.jsonl` in the bypass-log dir, following the append-only `DeliveryRecord`
+  precedent; the write is additive, its own failure does not propagate, and the JSONL rows
+  are the read surface (no list command). Only this path is instrumented;
+  `witness_gate_external` propagates its error to the operator already.
+
+- **The findings-count contradiction guard fires for any gate result** (PR #1012, #1008).
+  `legion quality-gate record --result issues` accepted a call that claimed N findings but
+  persisted zero: `findings_count_contradicts_extraction` fired only for `clean` results, so an
+  `issues` call with a malformed or schema-mismatched `--details-json` wrote a gate row
+  reading `findings_count:N` over an empty `quality_gate_findings` ledger -- reproduced from
+  the live `fix/359-roller-daemon-tick` payload. The guard drops its `Clean`-only condition
+  and fires for any result at both the `record` and `check` arms, refusing the call with no
+  row written; seven existing tests that relied on the permissive behavior now supply
+  well-formed payloads. Named residual: `legion verify --issue` (`finish_verify`) calls
+  `record_quality_gate` directly and bypasses this guard, so that third write path can still
+  diverge the same way.
+
+- **The bullpen renders post bodies verbatim** (PR #995, #992; closes #943). `format_bullpen`
+  printed a reconstruction built from `parse_signal`'s fields instead of the stored text, so
+  any post opening with `@name` was reinterpreted, a brace anywhere in the body was claimed as
+  signal syntax, and the rebuilt line hoisted that span beside the verb while its own sentence
+  rendered gutted -- a display bug that could invert a post's meaning. The write path was
+  never affected; reading the reported post back from storage shows it intact, so no archived
+  post needs repair. The renderer now prints `p.text` directly, the `format_signal_compact`
+  reconstructor is deleted rather than left unwired, and `parse_signal` bounds its
+  details-block scan to the first line, since `format_signal` always writes the details block
+  there, so a brace two paragraphs down no longer changes routing (the verb gate and the
+  #949 answer-wake path are both pinned by tests). Verbatim rendering reopened the #943
+  entry-forgery hole -- the old reconstruction collapsed bodies onto one line by accident --
+  so a shared `indent_continuation_lines` now indents every line after the first in both
+  `format_bullpen` and `watch::signals::build_wake_prompt`, and no continuation line can
+  begin with the `- [` bullet prefix.
+
+- **The session lock is claimed on resume, not only on cold start** (PR #998, #996). A session
+  started with `claude --resume` held no session lock, so `legion watch` could not see a live
+  agent on the repo and spawned a duplicate into its working tree. The lock call moves out of
+  `session-start.sh` into its own hook, `plugin/hooks/session-lock.sh`, wired under
+  `matcher: "startup|resume|clear"`; the two could not share a matcher, because the lock must
+  be held however a live session began while the boot banner must not be re-emitted into a
+  resumed transcript. The preemption path that terminates a watch-spawned worker when an
+  interactive session claims the repo was never broken; it was only unreachable on resume,
+  and it was observed firing live once the lock was written. `fork` and `compact` are
+  excluded on purpose: compaction keeps the pid and the lock has no TTL to refresh, and a
+  fork is a second live process on one repo that a single-pid lock cannot name.
+
+- **The delivery drain's Stop pass is never debounced** (PR #1002, #1000).
+  `plugin/hooks/delivery-drain.sh` debounces repeat firings with a 10s per-session sentinel
+  so `PostToolUse`, which fires on every tool call, does not shell out to `legion deliver
+  drain` each time. The debounce was event-agnostic, and `Stop` fires once per turn right
+  after the last tool call, so it almost always landed inside the window a prior
+  `PostToolUse` had opened and its drain was discarded -- and `Stop` is the last drain before
+  a session goes idle, so a post or signal that arrived late in a turn sat unseen. `Stop` now
+  skips the debounce check while still writing the sentinel, so the turn-end drain always
+  runs and the following flurry still debounces.
+
 ## 0.35.0
 
 The single-write-surface release. Two whole write surfaces are gone at once. The MCP
