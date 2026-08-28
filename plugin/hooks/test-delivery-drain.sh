@@ -1,11 +1,12 @@
 #!/bin/bash
-# Test runner for the hook-side delivery-drain hook (#941).
+# Test runner for the hook-side delivery-drain hook (#941, #1020).
 #
 # Verifies delivery-drain.sh surfaces drained bullpen posts as
-# additionalContext, debounces repeat firings within one session, and does
-# all of this without ever invoking `legion mcp` -- this hook's whole
-# point is a delivery path that does not depend on the MCP subprocess
-# push existing at all.
+# additionalContext, debounces repeat firings within one session, wraps its
+# output in the fixed HOOK OUTPUT DOCTRINE result block with the directed
+# (REQUIRES A REPLY) set last, and does all of this without ever invoking
+# `legion mcp` -- this hook's whole point is a delivery path that does not
+# depend on the MCP subprocess push existing at all.
 #
 # Run from anywhere:
 #
@@ -15,6 +16,12 @@ set -u
 
 # shellcheck source=tests/testutil.sh
 source "$(dirname "${BASH_SOURCE[0]}")/tests/testutil.sh"
+
+echo "==> hooks.json: delivery-drain.sh is the last hook command of the last group for UserPromptSubmit, PostToolUse, and Stop (#1020)"
+for event in UserPromptSubmit PostToolUse Stop; do
+  last_cmd=$(jq -r --arg ev "$event" '.hooks[$ev] | last | .hooks | last | .command' "$HOOKS_SRC_DIR/hooks.json")
+  assert_contains "delivery-drain.sh is the last hook for $event" "$last_cmd" "delivery-drain.sh"
+done
 
 make_plugin_root delivery-drain.sh
 
@@ -92,6 +99,29 @@ out=$(run_hook '{"hook_event_name":"Stop","cwd":"/tmp/legion-test","session_id":
 assert_contains "delivers the post via the hook lane alone" "$out" "delivered without mcp"
 assert_contains "tags the Stop event" "$out" '"hookEventName": "Stop"'
 assert_not_contains "never starts an MCP subprocess" "$(cat "$LEGION_STUB_LOG")" "^mcp"
+unset FAKE_DELIVER_DRAIN
+
+echo "==> result block: fixed opening/closing lines wrap the drain, with the directed (REQUIRES A REPLY) entry after the musing (#1020)"
+: > "$LEGION_STUB_LOG"
+export FAKE_DELIVER_DRAIN="[Legion] Bullpen (1 posts):
+- [rafters] a musing before the ask (2026-08-27)
+---
+You were auto-woken by legion watch. The following signal(s) are directed at you (legion-test).
+
+REQUIRES A REPLY -- these are directed questions and requests.
+
+- [from rafters] question: which lane owns retries (id: sig-1)"
+out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"drain-test-split","tool_name":"Edit"}')
+
+ctx_text=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
+first_line=$(printf '%s\n' "$ctx_text" | head -n 1)
+last_line=$(printf '%s\n' "$ctx_text" | tail -n 1)
+assert_eq "first line is the fixed opening result line" "$first_line" "[Legion] Delivery drain result:"
+assert_eq "last line is the fixed closing result line" "$last_line" "[Legion] End delivery drain result."
+
+before_directed="${ctx_text%%which lane owns retries*}"
+assert_contains "the musing appears before the directed entry" "$before_directed" "a musing before the ask"
+assert_contains "the directed entry carries the REQUIRES A REPLY framing" "$ctx_text" "REQUIRES A REPLY"
 unset FAKE_DELIVER_DRAIN
 
 echo "==> empty drain output emits nothing"

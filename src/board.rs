@@ -208,6 +208,28 @@ pub fn format_bullpen(posts: &[Reflection]) -> String {
     output
 }
 
+/// Render the REQUIRES A REPLY block for `signals` -- the exact shape
+/// `legion pending-replies` renders at boot and post-compact.
+///
+/// `signals` must already be the reply-required subset (see
+/// [`crate::watch::signal_requires_reply`]) -- this function does not
+/// filter, it only formats. Empty input renders nothing.
+///
+/// Extracted from `cli::signal::handle_pending_replies` (#1020) so the
+/// hook drain's `--split` directed bucket (`cli::deliver`) can render the
+/// identical entry for the identical signal `legion pending-replies`
+/// would: one shared formatter, so the REQUIRES A REPLY shape cannot
+/// drift between the three surfaces that show it (boot, post-compact,
+/// drain). See HOOK OUTPUT DOCTRINE, reflection 01a0421f-3bb1-7a91-a2d4-
+/// 1587442dbd36 -- the miss it fixes was a directed signal delivered as a
+/// note mid-stream instead of a result in this shape.
+pub fn format_pending_replies(repo_name: &str, signals: &[(String, String, String)]) -> String {
+    if signals.is_empty() {
+        return String::new();
+    }
+    crate::watch::build_wake_prompt(repo_name, signals)
+}
+
 /// Format unread bullpen count for display.
 ///
 /// Returns a combined message when posts or tasks are present.
@@ -646,5 +668,88 @@ mod tests {
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].text, "the board post");
         assert_eq!(posts[0].audience, "team");
+    }
+
+    #[test]
+    fn format_pending_replies_empty_input_renders_nothing() {
+        assert_eq!(format_pending_replies("legion", &[]), "");
+    }
+
+    #[test]
+    fn format_pending_replies_renders_the_requires_a_reply_framing() {
+        let signals = vec![(
+            "sig-1".to_string(),
+            "@legion question: which lane owns retries".to_string(),
+            "rafters".to_string(),
+        )];
+        let out = format_pending_replies("legion", &signals);
+        assert!(
+            out.contains("REQUIRES A REPLY"),
+            "expected the REQUIRES A REPLY framing, got:\n{out}"
+        );
+        assert!(
+            out.contains("which lane owns retries"),
+            "expected the signal text rendered verbatim, got:\n{out}"
+        );
+        assert!(
+            out.contains("sig-1"),
+            "expected the signal id rendered in its entry, got:\n{out}"
+        );
+    }
+
+    /// #1020: `legion pending-replies` (boot, post-compact) and the hook
+    /// drain's `--split` directed bucket must render the SAME signal
+    /// identically -- both callers route the reply-required set through
+    /// `format_pending_replies`, and this pins that CONTRACT end to end
+    /// (through each caller's own real query path) rather than just
+    /// re-asserting the function is deterministic.
+    #[test]
+    fn format_pending_replies_is_byte_identical_between_pending_replies_and_drain() {
+        use crate::db::testutil::test_db;
+        use crate::{deliver, watch};
+
+        let db = test_db();
+
+        // Prime the hook-drain cursor past cold start (it seeds from the
+        // watermark, not full history -- see deliver.rs's cold-start
+        // tests) so the signal inserted below is the first thing it sees.
+        db.insert_reflection("seed", "sentinel", "team").unwrap();
+        assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
+
+        db.insert_reflection(
+            "rafters",
+            "@legion question: which lane owns retries",
+            "team",
+        )
+        .unwrap();
+
+        // Path A: what `legion pending-replies` (boot, post-compact)
+        // renders -- find_pending_signals + the reply-required filter,
+        // exactly cli::signal::handle_pending_replies's own steps.
+        let names = vec!["legion".to_string()];
+        let signals = watch::find_pending_signals(&db, "legion", &names, None).unwrap();
+        let reply_required: Vec<(String, String, String)> = signals
+            .into_iter()
+            .filter(|(_, text, _)| watch::signal_requires_reply(text))
+            .collect();
+        let pending_replies_output = format_pending_replies("legion", &reply_required);
+
+        // Path B: the hook drain's --split directed bucket.
+        let drained = deliver::drain_for_hook(&db, "legion").unwrap();
+        let (_musings, directed) = deliver::split_drained(&drained);
+        let directed_tuples: Vec<(String, String, String)> = directed
+            .iter()
+            .map(|r| (r.id.clone(), r.text.clone(), r.repo.clone()))
+            .collect();
+        let drain_output = format_pending_replies("legion", &directed_tuples);
+
+        assert!(
+            !pending_replies_output.is_empty(),
+            "expected a non-empty REQUIRES A REPLY block from the pending-replies path"
+        );
+        assert_eq!(
+            pending_replies_output, drain_output,
+            "pending-replies and the drain must render the identical signal identically"
+        );
     }
 }

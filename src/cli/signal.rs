@@ -368,9 +368,11 @@ pub(crate) fn handle_pending_replies(repo: String) -> error::Result<()> {
         .filter(|(_, text, _)| watch::signal_requires_reply(text))
         .collect();
 
-    if !reply_required.is_empty() {
-        print!("{}", watch::build_wake_prompt(&repo, &reply_required));
-    }
+    // Renders via board::format_pending_replies (#1020) -- the same
+    // formatter the hook drain's --split directed bucket calls, so this
+    // command's output can never drift from what the drain shows for the
+    // same signal.
+    print!("{}", board::format_pending_replies(&repo, &reply_required));
     Ok(())
 }
 

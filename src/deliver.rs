@@ -25,6 +25,7 @@
 use crate::db::{Database, HOOK_DRAIN_CURSOR_SUFFIX, Reflection};
 use crate::error::Result;
 use crate::signal as sig;
+use crate::watch;
 
 /// Batch size cap for a single drain call. Half the 100-row cap the
 /// retired MCP notifier used: drains fire per hook event, far more often
@@ -121,10 +122,81 @@ pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool 
     true
 }
 
+/// Split a hook-drained batch into (musings, directed) for `legion deliver
+/// drain --split` (#1020).
+///
+/// `directed` is exactly the set `legion pending-replies` renders --
+/// `watch::signal_requires_reply` is the same predicate
+/// `cli::signal::handle_pending_replies` filters on, so a directed post
+/// this call sees and a signal `find_pending_signals` sees land in the
+/// same bucket whenever both observe it. Everything else (informational
+/// signals, broadcasts, plain musings) goes to `musings`. Cloning is
+/// deliberate: the caller (`cli::deliver::handle_deliver_drain`) still
+/// needs the full, unsplit batch afterward to record hook-lane telemetry
+/// for every drained post regardless of which bucket it landed in.
+pub fn split_drained(posts: &[Reflection]) -> (Vec<Reflection>, Vec<Reflection>) {
+    let mut musings = Vec::new();
+    let mut directed = Vec::new();
+    for post in posts {
+        if watch::signal_requires_reply(&post.text) {
+            directed.push(post.clone());
+        } else {
+            musings.push(post.clone());
+        }
+    }
+    (musings, directed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::testutil::test_db;
+
+    #[test]
+    fn split_drained_routes_reply_required_signals_to_directed() {
+        let musing = Reflection {
+            id: "id-musing".into(),
+            repo: "rafters".into(),
+            text: "just thinking about things".into(),
+            created_at: "2026-08-27T00:00:00Z".into(),
+            updated_at: None,
+            audience: "team".into(),
+            domain: None,
+            tags: None,
+            recall_count: 0,
+            last_recalled_at: None,
+            parent_id: None,
+        };
+        let informational = Reflection {
+            text: "@legion announce: shipped 0.30.0".into(),
+            ..musing.clone()
+        };
+        let directed_signal = Reflection {
+            id: "id-directed".into(),
+            text: "@legion question: which lane owns retries".into(),
+            ..musing.clone()
+        };
+
+        let (musings, directed) = split_drained(&[
+            musing.clone(),
+            informational.clone(),
+            directed_signal.clone(),
+        ]);
+
+        assert_eq!(musings.len(), 2, "musing + informational are not directed");
+        assert!(musings.iter().any(|p| p.id == musing.id));
+        assert!(musings.iter().any(|p| p.id == informational.id));
+
+        assert_eq!(directed.len(), 1);
+        assert_eq!(directed[0].id, directed_signal.id);
+    }
+
+    #[test]
+    fn split_drained_empty_input_yields_two_empty_buckets() {
+        let (musings, directed) = split_drained(&[]);
+        assert!(musings.is_empty());
+        assert!(directed.is_empty());
+    }
 
     #[test]
     fn drain_for_hook_delivers_each_post_exactly_once_across_two_calls() {

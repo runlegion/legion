@@ -1,7 +1,7 @@
 #!/bin/bash
 # Legion Stop hook.
 #
-# Two-layer enforcement on every Stop event:
+# Three-layer enforcement on every Stop event:
 #
 # 1. DELEGATED WORK LIVENESS GATE (#778, card-free since #931). A work item
 #    delegated to a watch-spawned wake attempt is sound only while an
@@ -35,14 +35,32 @@
 # gate, which is worse than an admittedly-absent one. This is reported as
 # a blocker in #931's work summary, not silently dropped.
 #
-# 2. REFLECTION PROMPT. If work happened this session and the reflection
+# 2. PENDING-REPLIES GATE (#1020, HOOK OUTPUT DOCTRINE -- Sean, 2026-08-27,
+#    reflection 01a0421f-3bb1-7a91-a2d4-1587442dbd36). A directed
+#    wake-worthy signal sat unanswered for forty minutes because nothing
+#    stopped the turn from ending while it was open -- delivery-drain.sh's
+#    additionalContext note was easy to read past. This gate re-checks
+#    `legion pending-replies --repo $REPO` (the same REQUIRES A REPLY set
+#    boot and post-compact render) at Stop time and hard-blocks
+#    (decision:block) when it is non-empty, naming the open ask(s) in the
+#    reason. Ignores stop_hook_active for the same reason gate 1 does: the
+#    obligation must keep blocking across a continuation, not just once --
+#    the harness's 8-block cap is its own backstop. Placed BEFORE gate 3's
+#    marker checks on purpose: an ask can be open on a Stop that touched no
+#    files (no WORK_MARKER) and this gate must still fire on that Stop, not
+#    only on ones that happened to do file work. Clears itself: replying to
+#    the signal is what empties `pending-replies` next time (`cli::signal::
+#    handle_signal`'s `retire_answered_signals` retires the ask on reply),
+#    not a marker file.
+#
+# 3. REFLECTION PROMPT. If work happened this session and the reflection
 #    hasn't fired yet, nudge for one via hookSpecificOutput.additionalContext
 #    (#569) -- non-error feedback that continues the turn so the agent acts on
 #    it, WITHOUT the hook-error labeling and 8-block cap that decision:block
 #    incurs. One-shot per session ($MARKER) + stop_hook_active guarded. Skip
 #    when nothing was learned.
 #
-# Bypass: LEGION_SKIP_STOP_BLOCK=1 env skips both gates. Writes a
+# Bypass: LEGION_SKIP_STOP_BLOCK=1 env skips all three gates. Writes a
 # telemetry row via `legion telemetry record-bypass` so the escape is
 # visible to #440's summary.
 
@@ -153,7 +171,23 @@ To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_
   fi
 fi
 
-# ---------- (2) Reflection prompt ----------
+# ---------- (2) Pending-replies gate (#1020) ----------
+#
+# Fail-open at the shell-call layer, same as gate (1): a missing legion
+# binary must never trap the agent. `legion pending-replies` itself
+# already renders nothing when the reply-required set is empty (see
+# board::format_pending_replies), so a non-empty result here IS the
+# obligation.
+if [ -x "$LEGION" ]; then
+  PENDING=$("$LEGION" pending-replies --repo "$REPO" 2>/dev/null)
+
+  if [ -n "$PENDING" ]; then
+    emit_block "$PENDING"
+    exit 0
+  fi
+fi
+
+# ---------- (3) Reflection prompt ----------
 #
 # Prevent re-fires: one reflect prompt per session
 MARKER="/tmp/legion-reflected-${CWD_HASH}"
