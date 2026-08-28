@@ -27,6 +27,27 @@
 //! no way to detect this case and skip the nudge; it is a documented gap,
 //! not a bug to fix here.
 //!
+//! The courier itself never appears as a row in `claude agents --json`
+//! while it is alive (live-verified, #1001) -- only its Unix-socket
+//! endpoint is externally visible, and to the RECIPIENT it surfaces as a
+//! `kind: "Remote Control"` peer in `ListAgents`, named from the courier
+//! session's own auto-generated summary (e.g. `"Legion-95 mail delivery"`),
+//! never from [`COURIER_IDENTITY`] -- `build_courier_prompt`'s instruction
+//! to self-identify as `COURIER_IDENTITY` governs only the courier's own
+//! reasoning about itself, not anything the harness exposes to the
+//! recipient. `list_live_sessions` (and by extension `should_nudge`) MUST
+//! NOT assume the courier is enumerable through this module's own
+//! detection path -- it is a one-shot actor outside the roster, not a
+//! session to be tracked or nudged in turn.
+//!
+//! Every call site re-derives its live-session list fresh (`watch::tick_poll`
+//! constructs a new `list_live_sessions` closure call on every poll tick,
+//! never a cached one) -- required because a session's `ListAgents` name AND
+//! pid can both change out from under a stable `sessionId` when the harness
+//! resumes it (live-verified, #1001: a target renamed and re-PID'd between
+//! dispatch and a live nudge run minutes later). A cached name/pid pairing
+//! would silently stop matching the same live session.
+//!
 //! The nudge carries NO payload: it is not a second delivery lane, only a
 //! "take a turn" tap. The DB-backed hook drain (`crate::deliver`) remains the
 //! sole place post/signal text travels to a live session.
