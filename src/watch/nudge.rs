@@ -178,19 +178,22 @@ pub fn list_live_sessions(claude_bin: &str) -> Vec<LiveSession> {
         }
     };
 
+    // Pull a string field straight from the raw JSON for a skip-log hint,
+    // independent of whether the row goes on to parse as `RawLiveSessionRow`
+    // at all -- so even a row that fails that decode still logs a useful
+    // `kind`/`state` rather than "unknown"/"none".
+    let hint = |row: &serde_json::Value, key: &str, default: &str| -> String {
+        row.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or(default)
+            .to_string()
+    };
+
     let mut sessions = Vec::with_capacity(rows.len());
     let mut skipped: Vec<String> = Vec::new();
     for row in rows {
-        let kind_hint = row
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let state_hint = row
-            .get("state")
-            .and_then(|v| v.as_str())
-            .unwrap_or("none")
-            .to_string();
+        let kind_hint = hint(&row, "kind", "unknown");
+        let state_hint = hint(&row, "state", "none");
         match serde_json::from_value::<RawLiveSessionRow>(row) {
             Ok(raw) => match raw.into_live_session() {
                 Some(session) => sessions.push(session),
@@ -450,17 +453,16 @@ mod tests {
         );
     }
 
+    /// Write a throwaway executable that `cat`s the given JSON to stdout and
+    /// exits 0, standing in for `claude agents --json`, and return the
+    /// sessions `list_live_sessions` parses from it. Shared by every
+    /// fixture-driven test below so each one only supplies its JSON body
+    /// and assertions.
     #[cfg(unix)]
-    #[test]
-    fn list_live_sessions_parses_fixture_json() {
+    fn sessions_from_fake_agents(json: &str) -> Vec<LiveSession> {
         use std::io::Write;
         let mut script = tempfile::NamedTempFile::new().expect("tempfile");
-        writeln!(
-            script,
-            "#!/bin/sh\ncat <<'EOF'\n[{{\"pid\":123,\"cwd\":\"/tmp\",\"name\":\"kelex\",\"status\":\"idle\"}},\
-             {{\"pid\":456,\"cwd\":\"/tmp/other\",\"name\":\"rafters\",\"status\":\"busy\"}}]\nEOF"
-        )
-        .expect("write script");
+        writeln!(script, "#!/bin/sh\ncat <<'EOF'\n{json}\nEOF").expect("write script");
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = script.as_file().metadata().expect("meta").permissions();
@@ -472,36 +474,25 @@ mod tests {
         // ETXTBSY ("text file busy") -- the same class #682/#685 already
         // hit. `into_temp_path` drops the `File` (closing the fd) while
         // keeping the file on disk as a `TempPath` that still cleans up on
-        // drop, so the handle must stay bound past the assertions below.
+        // drop, so the handle must stay bound past the `list_live_sessions`
+        // call below.
         let path = script.into_temp_path();
         let path_str = path.to_string_lossy().into_owned();
+        list_live_sessions(&path_str)
+    }
 
-        let sessions = list_live_sessions(&path_str);
+    #[cfg(unix)]
+    #[test]
+    fn list_live_sessions_parses_fixture_json() {
+        let sessions = sessions_from_fake_agents(
+            r#"[{"pid":123,"cwd":"/tmp","name":"kelex","status":"idle"},
+                {"pid":456,"cwd":"/tmp/other","name":"rafters","status":"busy"}]"#,
+        );
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].pid, 123);
         assert_eq!(sessions[0].name, "kelex");
         assert_eq!(sessions[0].status, SessionStatus::Idle);
         assert_eq!(sessions[1].status, SessionStatus::Busy);
-    }
-
-    /// Write a throwaway executable that `cat`s the given JSON to stdout and
-    /// exits 0, standing in for `claude agents --json`. Shared by the
-    /// per-row parsing tests below (#1001) so each one only has to supply
-    /// its fixture body.
-    #[cfg(unix)]
-    fn write_fake_agents_script(json: &str) -> tempfile::TempPath {
-        use std::io::Write;
-        let mut script = tempfile::NamedTempFile::new().expect("tempfile");
-        writeln!(script, "#!/bin/sh\ncat <<'EOF'\n{json}\nEOF").expect("write script");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = script.as_file().metadata().expect("meta").permissions();
-            perms.set_mode(0o755);
-            script.as_file().set_permissions(perms).expect("chmod");
-        }
-        // See list_live_sessions_parses_fixture_json above for why the
-        // write handle must be closed (ETXTBSY, #682/#685) before exec.
-        script.into_temp_path()
     }
 
     #[cfg(unix)]
@@ -513,15 +504,13 @@ mod tests {
         // the background row and `list_live_sessions` returned nothing at
         // all -- the courier never fired. One malformed/background row must
         // not cost the other rows.
-        let json = r#"[
+        let sessions = sessions_from_fake_agents(
+            r#"[
             {"id":"899e9ef3","cwd":"/Volumes/store/projects/rafters-studio/eavesdrop","kind":"background","startedAt":1781028569738,"sessionId":"899e9ef3-1158-46d4-bda5-dbcfb8087a71","name":"open other agents","state":"blocked"},
             {"pid":82824,"cwd":"/Volumes/store/projects/runlegion/legion","kind":"interactive","startedAt":1787879899769,"sessionId":"eb70d394-7e58-4644-80e1-1ac66174d99f","name":"legion-48","status":"busy"},
             {"pid":424242,"cwd":"/tmp/idle-repo","kind":"interactive","startedAt":1787879899770,"sessionId":"aaaaaaaa-1158-46d4-bda5-dbcfb8087a71","name":"kelex","status":"idle"}
-        ]"#;
-        let path = write_fake_agents_script(json);
-        let path_str = path.to_string_lossy().into_owned();
-
-        let sessions = list_live_sessions(&path_str);
+        ]"#,
+        );
         assert_eq!(
             sessions.len(),
             2,
@@ -543,14 +532,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn list_live_sessions_skips_row_missing_pid_and_keeps_the_rest() {
-        let json = r#"[
+        let sessions = sessions_from_fake_agents(
+            r#"[
             {"cwd":"/tmp/no-pid","kind":"interactive","name":"headless","status":"idle"},
             {"pid":1,"cwd":"/tmp/ok","kind":"interactive","name":"kelex","status":"idle"}
-        ]"#;
-        let path = write_fake_agents_script(json);
-        let path_str = path.to_string_lossy().into_owned();
-
-        let sessions = list_live_sessions(&path_str);
+        ]"#,
+        );
         assert_eq!(
             sessions.len(),
             1,
@@ -566,14 +553,12 @@ mod tests {
         // idle/busy) must fail only its own row -- top-level parsing is
         // `Vec<serde_json::Value>`, not `Vec<LiveSession>`, specifically so
         // a row-level type mismatch like this cannot fail the whole array.
-        let json = r#"[
+        let sessions = sessions_from_fake_agents(
+            r#"[
             {"pid":1,"cwd":"/tmp/thinking","kind":"interactive","name":"weird","status":"thinking"},
             {"pid":2,"cwd":"/tmp/ok","kind":"interactive","name":"kelex","status":"busy"}
-        ]"#;
-        let path = write_fake_agents_script(json);
-        let path_str = path.to_string_lossy().into_owned();
-
-        let sessions = list_live_sessions(&path_str);
+        ]"#,
+        );
         assert_eq!(
             sessions.len(),
             1,

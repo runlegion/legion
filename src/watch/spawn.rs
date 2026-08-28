@@ -487,6 +487,15 @@ pub fn spawn_courier(prompt: &str) -> Result<()> {
         return Err(e);
     }
 
+    // Ring-buffer-as-string, shared by the three courier-loop diagnostic
+    // lines below. A free function rather than a closure bound over
+    // `session`: the loop also holds `&mut session` (`try_wait`, `write`,
+    // `kill`), and a closure capturing `session` by reference would keep
+    // that borrow alive across those mutable calls.
+    fn ring_tail(session: &crate::pty::PtySession) -> String {
+        String::from_utf8_lossy(&session.output_tail()).into_owned()
+    }
+
     std::thread::spawn(move || {
         let deadline = Instant::now() + COURIER_SESSION_BUDGET;
         let mut retries: u32 = 0;
@@ -503,7 +512,7 @@ pub fn spawn_courier(prompt: &str) -> Result<()> {
                     eprintln!(
                         "[legion watch] courier exited ({:?}); ring buffer tail: {}",
                         status,
-                        String::from_utf8_lossy(&session.output_tail())
+                        ring_tail(&session)
                     );
                     return;
                 }
@@ -519,7 +528,7 @@ pub fn spawn_courier(prompt: &str) -> Result<()> {
                 logged_turn_start = true;
                 eprintln!(
                     "[legion watch] courier turn started; ring buffer tail: {}",
-                    String::from_utf8_lossy(&session.output_tail())
+                    ring_tail(&session)
                 );
             }
 
@@ -542,7 +551,7 @@ pub fn spawn_courier(prompt: &str) -> Result<()> {
             if Instant::now() >= deadline {
                 eprintln!(
                     "[legion watch] courier exceeded session budget -- terminating; ring buffer tail: {}",
-                    String::from_utf8_lossy(&session.output_tail())
+                    ring_tail(&session)
                 );
                 let _ = session.kill();
                 return;
