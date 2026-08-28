@@ -1,11 +1,38 @@
 #!/bin/bash
 # Legion hook-side delivery drain (#941): the live-session delivery lane.
-# Runs `legion deliver drain --repo "$REPO"` and injects any drained
-# bullpen posts/signals as additionalContext. It ran alongside the MCP
-# subprocess's `notifications/claude/channel` push through a dual-lane
-# parity window and became the sole live-session lane when that push was
-# retired (#947); unlike the push, it needs no model inference roundtrip
-# to fire.
+# Runs `legion deliver drain --repo "$REPO" --split` and injects any
+# drained bullpen posts/signals as a RESULT (not a note -- see the HOOK
+# OUTPUT DOCTRINE below). It ran alongside the MCP subprocess's
+# `notifications/claude/channel` push through a dual-lane parity window
+# and became the sole live-session lane when that push was retired
+# (#947); unlike the push, it needs no model inference roundtrip to fire.
+#
+# HOOK OUTPUT DOCTRINE (Sean, 2026-08-27, reflection 01a0421f-3bb1-7a91-
+# a2d4-1587442dbd36, after the missed rfc 01a04213 -- #1020): a wake-worthy
+# signal sat unanswered for forty minutes because the drain injected it as
+# one `[Legion] Delivered via hook drain:` note mid-stream inside a tool
+# result, indistinguishable from ordinary musings. Two things address that:
+#
+#   1. hooks.json wires this hook as the LAST command in document order for
+#      every event it runs on (UserPromptSubmit, PostToolUse, Stop) -- see
+#      that file's group ordering. This is NECESSARY but not SUFFICIENT:
+#      Claude Code runs every matching hook for an event in parallel and
+#      does not document an order for concatenating their
+#      additionalContext ("passed to Claude together" is the extent of the
+#      documented contract; only permissionDecision has a documented
+#      order). Config order alone cannot guarantee this hook's block is
+#      the last thing read for an event -- do not rely on it for that.
+#   2. What actually carries the fix: this hook's own output is a RESULT
+#      block with a fixed opening and closing line ($OPEN_LINE / $CLOSE_LINE
+#      below), never bare prose, with directed wake-worthy signals -- in
+#      the `legion pending-replies` REQUIRES A REPLY shape, via the shared
+#      `board::format_pending_replies` formatter -- LAST inside it.
+#      `--split` has `legion deliver drain` do the sorting: musings (the
+#      existing lighter `[Legion] Bullpen (...)` header) come first, the
+#      directed set comes last, nothing follows the closing line. And
+#      stop.sh's pending-replies gate hard-blocks the turn outright while
+#      a directed ask is open -- a check that does not depend on read
+#      order at all, which is why it is the backstop, not (1).
 #
 # Wired into UserPromptSubmit, PostToolUse (alongside mark-work.sh), and
 # Stop -- three points in a turn where surfacing a mid-session post is
@@ -25,7 +52,10 @@
 # UserPromptSubmit and PostToolUse, whose whole risk is per-tool-call
 # shell-out volume; Stop has neither that volume nor a later drain to fall
 # back on. A Stop drain that finds nothing new emits nothing and the turn
-# ends normally, so the exemption cannot loop.
+# ends normally, so the exemption cannot loop. Stop's own directed-signal
+# obligation is additionally hard-enforced by stop.sh's pending-replies
+# gate (#1020), which blocks the turn outright rather than relying on this
+# hook's softer additionalContext.
 #
 # Error handling: legion failures are logged to /tmp/legion-hook-errors.log.
 # The hook always exits 0 so a degraded legion never blocks the turn.
@@ -90,15 +120,23 @@ fi
 
 printf '%s' "$NOW" >"$SENTINEL" 2>/dev/null
 
-DRAINED=$("$LEGION" deliver drain --repo "$REPO" 2>>"$LOG")
+DRAINED=$("$LEGION" deliver drain --repo "$REPO" --split 2>>"$LOG")
 
 if [ -z "$DRAINED" ]; then
   exit 0
 fi
 
-CTX="[Legion] Delivered via hook drain:
+# Fixed opening and closing lines (#1020): this is a RESULT, not a note --
+# see the HOOK OUTPUT DOCTRINE above. --split already ordered $DRAINED as
+# musings, then a separator, then the directed REQUIRES A REPLY set;
+# nothing follows the closing line.
+OPEN_LINE="[Legion] Delivery drain result:"
+CLOSE_LINE="[Legion] End delivery drain result."
 
-${DRAINED}"
+CTX="${OPEN_LINE}
+${DRAINED}
+
+${CLOSE_LINE}"
 
 emit_context "$EVENT_NAME" "$CTX" 2>>"$LOG" || true
 

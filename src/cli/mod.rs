@@ -460,6 +460,22 @@ pub(crate) enum Commands {
         /// Repository name (the recipient)
         #[arg(long)]
         repo: String,
+
+        /// Drop @all/@everyone broadcasts, keeping only signals addressed
+        /// to this repo by name.
+        ///
+        /// A broadcast is not addressed to any one repo in particular, so
+        /// hard-blocking every agent's Stop over one broadcast post is
+        /// the wrong weight -- every repo that saw it would independently
+        /// stop, not just whichever one it was actually meant for.
+        /// stop.sh's Stop gate (#1020) uses this flag for that reason.
+        /// (A broadcast ask IS retirable by an ordinary directed reply --
+        /// `legion signal --to <author> --verb answer` clears it same as
+        /// any directed ask; only a reply `--to all` retires nothing.)
+        /// Boot and post-compact keep the full set (broadcasts are still
+        /// worth surfacing there, just not hard-enforcing).
+        #[arg(long)]
+        directed: bool,
     },
 
     /// Read the bullpen or check for unread posts

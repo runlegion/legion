@@ -1,7 +1,7 @@
 #!/bin/bash
 # Legion Stop hook.
 #
-# Two-layer enforcement on every Stop event:
+# Three-layer enforcement on every Stop event:
 #
 # 1. DELEGATED WORK LIVENESS GATE (#778, card-free since #931). A work item
 #    delegated to a watch-spawned wake attempt is sound only while an
@@ -35,14 +35,51 @@
 # gate, which is worse than an admittedly-absent one. This is reported as
 # a blocker in #931's work summary, not silently dropped.
 #
-# 2. REFLECTION PROMPT. If work happened this session and the reflection
+# 2. PENDING-REPLIES GATE (#1020, HOOK OUTPUT DOCTRINE -- Sean, 2026-08-27,
+#    reflection 01a0421f-3bb1-7a91-a2d4-1587442dbd36). A directed
+#    wake-worthy signal sat unanswered for forty minutes because nothing
+#    stopped the turn from ending while it was open -- delivery-drain.sh's
+#    additionalContext note was easy to read past. This gate re-checks
+#    `legion pending-replies --repo $REPO --directed` at Stop time and
+#    hard-blocks (decision:block) when it is non-empty, naming the open
+#    ask(s) in the reason. `--directed` excludes @all/@everyone broadcasts:
+#    a broadcast is not addressed to THIS agent in particular, and
+#    hard-blocking every agent's Stop over one broadcast post is the wrong
+#    weight -- every repo that saw it would independently stop on it, not
+#    just whichever one it was actually meant for. (A broadcast ask IS
+#    retirable by an ordinary directed reply -- `legion signal --to
+#    <author> --verb answer` clears it same as any directed ask; only a
+#    reply `--to all` retires nothing, and the block reason says so
+#    explicitly.) Guarded by `legion_hook_covered` -- $REPO is
+#    basename($CWD), which in a worktree is the worktree directory name,
+#    not the parent repo's watch.toml identity -- so a name with NO
+#    legion footprint at all (absent from watch.toml and with zero
+#    reflections) exits this gate cleanly. This is a heuristic, not a
+#    guarantee: a worktree basename becomes "covered" the moment anything
+#    reflects under it, at which point this guard no longer excludes it --
+#    what actually keeps a worktree session from inheriting the parent
+#    repo's broadcast asks is `--directed` itself, not coverage.
+#    Resolving a worktree's identity through the git common dir to its
+#    parent repo is the real follow-up; this guard only skips names
+#    legion has never heard of at all. Ignores stop_hook_active for the
+#    same reason gate 1 does: the obligation must keep blocking across a
+#    continuation, not just once -- the harness's 8-block cap is its own
+#    backstop. Placed BEFORE gate 3's marker checks on purpose: an ask can
+#    be open on a Stop that touched no files (no WORK_MARKER) and this
+#    gate must still fire on that Stop, not only on ones that happened to
+#    do file work. Clears itself: replying to the signal (never `--to
+#    all`, which retires nothing) is what empties `pending-replies` next
+#    time (`cli::signal::handle_signal`'s `retire_answered_signals`
+#    retires the ask on reply), not a marker file.
+#
+# 3. REFLECTION PROMPT. If work happened this session and the reflection
 #    hasn't fired yet, nudge for one via hookSpecificOutput.additionalContext
 #    (#569) -- non-error feedback that continues the turn so the agent acts on
 #    it, WITHOUT the hook-error labeling and 8-block cap that decision:block
 #    incurs. One-shot per session ($MARKER) + stop_hook_active guarded. Skip
 #    when nothing was learned.
 #
-# Bypass: LEGION_SKIP_STOP_BLOCK=1 env skips both gates. Writes a
+# Bypass: LEGION_SKIP_STOP_BLOCK=1 env skips all three gates. Writes a
 # telemetry row via `legion telemetry record-bypass` so the escape is
 # visible to #440's summary.
 
@@ -153,7 +190,57 @@ To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_
   fi
 fi
 
-# ---------- (2) Reflection prompt ----------
+# ---------- (2) Pending-replies gate (#1020) ----------
+#
+# Coverage-gated (#353), like delivery-drain.sh: $REPO here is
+# basename($CWD) (legion_hook_parse), which in a git worktree is the
+# WORKTREE directory name, not the parent repo's name in watch.toml --
+# e.g. "1020-drain-last", never "legion". `legion_hook_covered` (the same
+# gate delivery-drain.sh already applies) skips a name with NO legion
+# footprint at all -- absent from watch.toml AND with zero reflections.
+# This is a heuristic, not a guarantee: the moment anything reflects
+# under a worktree's basename, that name reads as "covered" and this
+# guard no longer excludes it. What actually keeps a worktree session
+# from inheriting the parent repo's broadcast asks is `--directed` below,
+# not coverage -- resolving a worktree's identity through the git common
+# dir to its parent repo is the real follow-up.
+#
+# --directed drops @all/@everyone broadcasts: a broadcast is not
+# addressed to THIS agent in particular, and hard-blocking every agent's
+# Stop over one broadcast post is the wrong weight -- every repo that saw
+# it would independently stop, not just whichever one it was meant for.
+# (A broadcast ask IS retirable by an ordinary directed reply -- `legion
+# signal --to <author> --verb answer` clears it same as any directed ask;
+# only a reply `--to all` retires nothing, which the block reason below
+# says explicitly.) Boot and post-compact keep the full set via plain
+# `legion pending-replies` (no --directed): broadcasts are still worth
+# surfacing there, just not hard-enforcing.
+#
+# Fail-open at the shell-call layer, same as gate (1): a missing legion
+# binary must never trap the agent, and a DB/config failure is logged to
+# $LEGION_HOOK_LOG rather than silently disarming the gate (a bare
+# 2>/dev/null here would hide exactly the failure this gate exists to
+# catch). `legion pending-replies` itself already renders nothing when
+# the reply-required set is empty (see board::format_pending_replies), so
+# a non-empty result here IS the obligation.
+if legion_hook_covered && [ -x "$LEGION" ]; then
+  PENDING=$("$LEGION" pending-replies --repo "$REPO" --directed 2>>"$LEGION_HOOK_LOG")
+
+  if [ -n "$PENDING" ]; then
+    REASON="Open directed asks for ${REPO}; the turn cannot end until each is answered:
+
+${PENDING}
+
+Reply with \`legion signal --repo ${REPO} --to <author> --verb answer ...\` (a reply --to all retires nothing).
+
+To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_STOP_BLOCK=1. The bypass writes one row to bypass.jsonl."
+
+    emit_block "$REASON"
+    exit 0
+  fi
+fi
+
+# ---------- (3) Reflection prompt ----------
 #
 # Prevent re-fires: one reflect prompt per session
 MARKER="/tmp/legion-reflected-${CWD_HASH}"

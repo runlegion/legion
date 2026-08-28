@@ -213,7 +213,9 @@ fn run() -> error::Result<()> {
         } => cli::signal::handle_signal(
             repo, to, verb, status, note, details, follows, domain, tags,
         )?,
-        Commands::PendingReplies { repo } => cli::signal::handle_pending_replies(repo)?,
+        Commands::PendingReplies { repo, directed } => {
+            cli::signal::handle_pending_replies(repo, directed)?
+        }
         Commands::Boost { id } => cli::memory::handle_boost(id)?,
         Commands::Resolve { id, reflection } => cli::memory::handle_resolve(id, reflection)?,
         Commands::Chain { id, full } => cli::memory::handle_chain(id, full)?,

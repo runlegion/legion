@@ -25,6 +25,7 @@
 use crate::db::{Database, HOOK_DRAIN_CURSOR_SUFFIX, Reflection};
 use crate::error::Result;
 use crate::signal as sig;
+use crate::watch;
 
 /// Batch size cap for a single drain call. Half the 100-row cap the
 /// retired MCP notifier used: drains fire per hook event, far more often
@@ -121,10 +122,92 @@ pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool 
     true
 }
 
+/// Split a hook-drained batch into (musings, directed) for `legion deliver
+/// drain --split` (#1020).
+///
+/// `directed` is filtered by the same reply-required predicate
+/// (`watch::signal_requires_reply`, verb-only) `cli::signal::
+/// pending_reply_signals` filters on -- but it is NOT exactly the set
+/// `legion pending-replies` renders, for two reasons: (1) it is applied to
+/// the posts THIS drain window already claimed via the hook cursor, not a
+/// fresh DB query, so a signal `pending-replies` sees right now may not
+/// have been in any single drain's batch; and (2) the two paths reach
+/// their candidate posts through different addressing rules -- this
+/// drain's batch was already filtered by `should_notify` (exact-case
+/// match on the plain repo name, or `@all`), while `find_pending_signals`
+/// matches `wake_addresses()` (broadcast tags, case-insensitive LIKE).
+/// `signal_requires_reply` itself is verb-only and does not distinguish a
+/// directed ask from an `@all` broadcast, so a wake-worthy broadcast this
+/// call sees lands in `directed` here the same as it would in
+/// `pending-replies`'s un-filtered set -- this function makes no broadcast
+/// exception (see `cli::signal::pending_reply_signals`'s `directed_only`
+/// param for where that exception IS made, on the Stop-gate path). Cloning
+/// is deliberate: the caller (`cli::deliver::handle_deliver_drain`) still
+/// needs the full, unsplit batch afterward to record hook-lane telemetry
+/// for every drained post regardless of which bucket it landed in.
+pub fn split_drained(posts: &[Reflection]) -> (Vec<Reflection>, Vec<Reflection>) {
+    let mut musings = Vec::new();
+    let mut directed = Vec::new();
+    for post in posts {
+        if watch::signal_requires_reply(&post.text) {
+            directed.push(post.clone());
+        } else {
+            musings.push(post.clone());
+        }
+    }
+    (musings, directed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::testutil::test_db;
+
+    #[test]
+    fn split_drained_routes_reply_required_signals_to_directed() {
+        let musing = Reflection {
+            id: "id-musing".into(),
+            repo: "rafters".into(),
+            text: "just thinking about things".into(),
+            created_at: "2026-08-27T00:00:00Z".into(),
+            updated_at: None,
+            audience: "team".into(),
+            domain: None,
+            tags: None,
+            recall_count: 0,
+            last_recalled_at: None,
+            parent_id: None,
+        };
+        let informational = Reflection {
+            text: "@legion announce: shipped 0.30.0".into(),
+            ..musing.clone()
+        };
+        let directed_signal = Reflection {
+            id: "id-directed".into(),
+            text: "@legion question: which lane owns retries".into(),
+            ..musing.clone()
+        };
+
+        let (musings, directed) = split_drained(&[
+            musing.clone(),
+            informational.clone(),
+            directed_signal.clone(),
+        ]);
+
+        assert_eq!(musings.len(), 2, "musing + informational are not directed");
+        assert!(musings.iter().any(|p| p.id == musing.id));
+        assert!(musings.iter().any(|p| p.id == informational.id));
+
+        assert_eq!(directed.len(), 1);
+        assert_eq!(directed[0].id, directed_signal.id);
+    }
+
+    #[test]
+    fn split_drained_empty_input_yields_two_empty_buckets() {
+        let (musings, directed) = split_drained(&[]);
+        assert!(musings.is_empty());
+        assert!(directed.is_empty());
+    }
 
     #[test]
     fn drain_for_hook_delivers_each_post_exactly_once_across_two_calls() {

@@ -263,11 +263,6 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/mark-work.sh",
             "timeout": 3
-          },
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/delivery-drain.sh",
-            "timeout": 8
           }
         ]
       },
@@ -328,6 +323,15 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/uncertainty-witness-on-completion.sh",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/delivery-drain.sh",
+            "timeout": 8
           }
         ]
       }
