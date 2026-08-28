@@ -366,12 +366,16 @@ fn retire_answered_for_author(
 ///
 /// `directed_only` mirrors the CLI's `--directed` flag: when true, drops
 /// any signal whose recipient token is a broadcast address (`@all` /
-/// `@everyone`). This exists because a broadcast ask cannot be retired by
-/// any single reply -- `matching_pending_ask_ids` below deliberately
-/// excludes broadcasts from its match, so a reply `--to all` retires
-/// nothing -- and stop.sh's Stop gate hard-blocks on this set, so it must
-/// not be able to hard-block every agent's Stop fleet-wide on one
-/// unretirable `@all` ask (#1020 review, HIGH 1).
+/// `@everyone`). This exists because a broadcast is not addressed to any
+/// one repo in particular, so stop.sh's Stop gate hard-blocking on it
+/// would be the wrong weight -- every repo that saw the broadcast would
+/// independently hard-block its own Stop, not just whichever one it was
+/// actually meant for (#1020 review, HIGH 1). This is NOT because a
+/// broadcast ask is unretirable: an ordinary directed reply (`legion
+/// signal --to <author> --verb answer`) retires it the same as any
+/// directed ask -- `matching_pending_ask_ids` below excludes broadcast
+/// REPLY RECIPIENTS from its match (a reply `--to all` retires nothing),
+/// which is a different exclusion than this one.
 pub(crate) fn pending_reply_signals(
     database: &db::Database,
     repo: &str,
@@ -784,10 +788,12 @@ mod tests {
 
     // -- pending_reply_signals / --directed (#1020 review, HIGH 1) ----------
 
-    /// A wake-worthy `@all` broadcast cannot be retired by any single
-    /// reply (`matching_pending_ask_ids` excludes broadcasts on purpose),
-    /// so stop.sh's Stop gate must be able to see only the directed set --
-    /// this is the query `--directed` drives.
+    /// A wake-worthy `@all` broadcast is not addressed to any one repo in
+    /// particular, so stop.sh's Stop gate hard-blocking every repo that
+    /// saw it would be the wrong weight -- this is the query `--directed`
+    /// drives to see only the directed set. (Retirability is not the
+    /// reason: an ordinary directed reply retires a broadcast ask same as
+    /// any other.)
     #[test]
     fn pending_reply_signals_directed_only_drops_broadcasts_keeps_directed() {
         let (database, _index, _dir) = crate::testutil::test_storage();

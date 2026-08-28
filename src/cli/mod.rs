@@ -464,14 +464,16 @@ pub(crate) enum Commands {
         /// Drop @all/@everyone broadcasts, keeping only signals addressed
         /// to this repo by name.
         ///
-        /// A broadcast ask cannot be retired by any single reply --
-        /// `cli::signal::matching_pending_ask_ids` excludes broadcast
-        /// addresses on purpose, so a reply `--to all` retires nothing.
-        /// stop.sh's Stop gate (#1020) uses this flag so one wake-worthy
-        /// `@all` cannot hard-block every agent's Stop fleet-wide with no
-        /// way to clear it by replying. Boot and post-compact keep the
-        /// full set (broadcasts are still worth surfacing there, just not
-        /// hard-enforcing).
+        /// A broadcast is not addressed to any one repo in particular, so
+        /// hard-blocking every agent's Stop over one broadcast post is
+        /// the wrong weight -- every repo that saw it would independently
+        /// stop, not just whichever one it was actually meant for.
+        /// stop.sh's Stop gate (#1020) uses this flag for that reason.
+        /// (A broadcast ask IS retirable by an ordinary directed reply --
+        /// `legion signal --to <author> --verb answer` clears it same as
+        /// any directed ask; only a reply `--to all` retires nothing.)
+        /// Boot and post-compact keep the full set (broadcasts are still
+        /// worth surfacing there, just not hard-enforcing).
         #[arg(long)]
         directed: bool,
     },

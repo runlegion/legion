@@ -427,6 +427,50 @@ mod tests {
         );
     }
 
+    /// Direct coverage of `indent_continuation_lines` itself (#1020 review
+    /// LOW), rather than only through `format_bullpen`: every line-break
+    /// form it guards must be indented exactly once, not zero or twice.
+    #[test]
+    fn indent_continuation_lines_indents_every_line_break_form_exactly_once() {
+        // \r\n is ONE line break -- must be indented once, not twice (a
+        // naive char-by-char '\r' guard plus a separate '\n' guard would
+        // double it).
+        assert_eq!(
+            indent_continuation_lines("first\r\nsecond"),
+            "first\r\n  second"
+        );
+        // Bare \r with no following \n.
+        assert_eq!(
+            indent_continuation_lines("first\rsecond"),
+            "first\r  second"
+        );
+        // Plain \n, unchanged from before this fix.
+        assert_eq!(
+            indent_continuation_lines("first\nsecond"),
+            "first\n  second"
+        );
+        // U+2028 LINE SEPARATOR.
+        assert_eq!(
+            indent_continuation_lines("first\u{2028}second"),
+            "first\u{2028}  second"
+        );
+        // U+2029 PARAGRAPH SEPARATOR.
+        assert_eq!(
+            indent_continuation_lines("first\u{2029}second"),
+            "first\u{2029}  second"
+        );
+        // Multiple breaks in one body, mixed forms, each indented once.
+        assert_eq!(
+            indent_continuation_lines("a\r\nb\rc\nd\u{2028}e\u{2029}f"),
+            "a\r\n  b\r  c\n  d\u{2028}  e\u{2029}  f"
+        );
+        // No line break at all: untouched.
+        assert_eq!(
+            indent_continuation_lines("no breaks here"),
+            "no breaks here"
+        );
+    }
+
     /// The regression that made this the default: a prose post opening with
     /// `@name` armed `parse_signal`, which claimed the first `{` ANYWHERE in
     /// the body as its details block. `format_bullpen` then rendered a

@@ -7,16 +7,24 @@
 # prompted this gate was a 40-minute-unanswered rfc (01a04213) whose only
 # surfacing was a hook drain note easy to read past. This gate re-checks
 # `legion pending-replies --repo $REPO --directed` (excluding
-# @all/@everyone broadcasts, which no single reply can retire -- review
-# finding HIGH 1) at Stop time and hard-blocks (decision:block) whenever
-# it is non-empty -- same LEGION_SKIP_STOP_BLOCK=1 bypass and 8-block
-# harness backstop as the delegated-liveness gate (#778), and it ignores
-# stop_hook_active for the same reason that gate does: the obligation
-# must keep blocking until it is actually answered, not until one
-# continuation turn passes. It is also coverage-gated via
-# `legion_hook_covered` (review finding HIGH 2): in a git worktree $REPO
-# is the worktree directory name, not the parent repo watch.toml knows,
-# so an uncovered cwd must not be judged against a name it is not.
+# @all/@everyone broadcasts -- review finding HIGH 1: a broadcast is not
+# addressed to this agent in particular, and hard-blocking every agent's
+# Stop over one broadcast post is the wrong weight, not that it cannot be
+# retired -- a directed reply DOES retire a broadcast ask same as any
+# other; only a reply `--to all` retires nothing) at Stop time and
+# hard-blocks (decision:block) whenever it is non-empty -- same
+# LEGION_SKIP_STOP_BLOCK=1 bypass and 8-block harness backstop as the
+# delegated-liveness gate (#778), and it ignores stop_hook_active for the
+# same reason that gate does: the obligation must keep blocking until it
+# is actually answered, not until one continuation turn passes. It is
+# also coverage-gated via `legion_hook_covered` (review finding HIGH 2):
+# in a git worktree $REPO is the worktree directory name, not the parent
+# repo watch.toml knows, so a name with no legion footprint at all is
+# skipped. This is a heuristic, not a guarantee -- a worktree basename
+# that has anything reflected under it reads as covered -- so what
+# actually protects a worktree session from a parent repo's broadcasts is
+# --directed, not coverage; see stop.sh's own comments for the full
+# reasoning.
 #
 # The other two Stop gates (delegated-liveness, reflection nudge) are
 # covered in test-stop-task-block.sh; this file is scoped to the new
@@ -58,13 +66,30 @@ assert_contains "decision:block present" "$out" '"decision": "block"'
 assert_contains "names the pending signal" "$out" "rafters asked something urgent"
 assert_contains "opens with true framing, not the raw wake-prompt preamble" "$out" \
   "Open directed asks for legion-test-1020; the turn cannot end until each is answered"
-assert_not_contains "does not carry the misleading auto-woken preamble" "$out" \
-  "You were auto-woken by legion watch"
 assert_contains "tells the agent how to reply" "$out" "legion signal --repo legion-test-1020 --to <author> --verb answer"
 assert_contains "warns that --to all retires nothing" "$out" "a reply --to all retires nothing"
 assert_contains "carries the bypass footer" "$out" "LEGION_SKIP_STOP_BLOCK=1"
 assert_file_contains "queries pending-replies with --directed" "$LEGION_STUB_LOG" \
   "pending-replies --repo legion-test-1020 --directed"
+
+echo "==> stop.sh's own true framing leads even when pending-replies' body carries the (production-real) auto-woken preamble"
+# format_pending_replies is build_wake_prompt verbatim, so production
+# $PENDING really does open with "You were auto-woken by legion watch"
+# (#1028 tracks moving that sentence). This stub fixture reproduces that
+# shape -- unlike the deleted assertion above, this one can actually fail:
+# it would if stop.sh ever stopped wrapping $PENDING in its own framing.
+rm -f "/tmp/legion-reflected-${CWD_HASH}"
+WAKE_PROMPT_SHAPED="You were auto-woken by legion watch. The following signal(s) are directed at you (legion-test-1020).
+
+REQUIRES A REPLY -- rafters asked something urgent (id: sig-1)"
+out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"pending-1b\"}" \
+  | FAKE_PENDING_REPLIES="$WAKE_PROMPT_SHAPED" \
+    bash "$STOP_HOOK")
+reason_first_line=$(printf '%s' "$out" | jq -r '.reason' | head -n 1)
+assert_eq "the block reason's first line is stop.sh's own framing, not pending-replies' preamble" \
+  "$reason_first_line" "Open directed asks for legion-test-1020; the turn cannot end until each is answered:"
+assert_contains "the wrapped preamble still carries the signal text further down" "$out" \
+  "rafters asked something urgent"
 
 echo "==> empty legion pending-replies does not block on this gate"
 rm -f "/tmp/legion-reflected-${CWD_HASH}"
