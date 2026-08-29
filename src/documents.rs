@@ -477,6 +477,128 @@ pub fn schema_violations(
         .collect()
 }
 
+/// Cap for both the literal JSON nesting depth and the `$ref` chain length
+/// a schema payload may carry before `compile_schema` ever sees it (#1062
+/// review, HIGH). `jsonschema` 0.52's compiler walks a schema with
+/// unbounded native recursion -- no depth or recursion-limit option
+/// anywhere in its public `ValidationOptions` -- so a schema with a few
+/// hundred single-hop `$ref` aliases in a flat `definitions` map, or a few
+/// hundred levels of plain object nesting with no `$ref` at all, overflows
+/// the stack. That is a stack-guard-page trap (`SIGABRT`), not a panic --
+/// `catch_unwind` never sees it, so it takes the whole daemon process down
+/// regardless of which thread compiles the schema, and no thread-stack
+/// size closes it: the measured crash floor (~500 hops, ~18 KB) sits far
+/// below the 4 MiB request-body cap, so a bigger stack only raises the bar
+/// the attacker's budget still clears. Every real landed schema is far
+/// under 64 of either.
+const MAX_SCHEMA_DEPTH: usize = 64;
+
+/// Guard `root` against the two shapes that crash `jsonschema` 0.52's
+/// compiler (#1062 review, HIGH) -- called from `validate_schema_payload`
+/// BEFORE `compile_schema`, since every schema document must pass that gate
+/// before it can be stored, closing all four `compile_schema` call sites
+/// (`schema_for_type`, `validate_schema_payload`, and `legion document
+/// validate`, which only ever compiles an already-stored, already-guarded
+/// payload) with this one check. Uses an explicit stack throughout --
+/// never recursion, since the guard itself must not repeat the bug it
+/// exists to catch.
+///
+/// (a) Literal JSON object/array nesting depth: a plain deeply nested
+///     schema with no `$ref` at all crashes the compiler exactly the same
+///     way, since the walk that blows the stack is a generic structural
+///     one, not `$ref`-specific.
+/// (b) `$ref` chain length: a schema whose JSON is shallow -- a flat
+///     `definitions`/`$defs` map -- but whose entries alias each other
+///     (`d0` -> `d1` -> ... -> `d499`) crashes the same way, because the
+///     compiler's dereference graph is exactly as deep as the chain even
+///     though the literal JSON nesting is not. A pointer that reappears in
+///     its own chain is refused immediately as a cycle, independent of the
+///     depth cap.
+fn guard_schema_depth(root: &serde_json::Value) -> Result<()> {
+    // (a) literal nesting: a generic structural walk with no JSON Schema
+    // semantics -- every nested object/array value, regardless of which
+    // keyword holds it, contributes one level.
+    let mut stack: Vec<(&serde_json::Value, usize)> = vec![(root, 0)];
+    while let Some((value, depth)) = stack.pop() {
+        if depth > MAX_SCHEMA_DEPTH {
+            return Err(LegionError::WorkSource(format!(
+                "schema nesting depth exceeds {MAX_SCHEMA_DEPTH} -- refused before compiling \
+                 (the validator has no recursion limit; a sufficiently deep schema crashes \
+                 the process)"
+            )));
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                stack.extend(map.values().map(|v| (v, depth + 1)));
+            }
+            serde_json::Value::Array(items) => {
+                stack.extend(items.iter().map(|v| (v, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+
+    // (b) $ref chain length: every "$ref" string found anywhere in the
+    // document (collected with the same iterative discipline) that names a
+    // same-document "#/definitions/<name>" or "#/$defs/<name>" pointer is
+    // followed: if its target is itself just another such $ref, that is
+    // the alias-chain shape that crashes the compiler on a shallow, flat
+    // definitions map, so the walk continues, counting hops and the
+    // pointers already seen in THIS chain.
+    let mut refs: Vec<&str> = Vec::new();
+    let mut walk: Vec<&serde_json::Value> = vec![root];
+    while let Some(value) = walk.pop() {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(r) = map.get("$ref").and_then(|v| v.as_str()) {
+                    refs.push(r);
+                }
+                walk.extend(map.values());
+            }
+            serde_json::Value::Array(items) => {
+                walk.extend(items.iter());
+            }
+            _ => {}
+        }
+    }
+
+    for start in refs {
+        let mut current = start;
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(current) {
+                return Err(LegionError::WorkSource(format!(
+                    "schema \"$ref\" chain starting at \"{start}\" cycles back to \"{current}\" \
+                     -- refused before compiling"
+                )));
+            }
+            if seen.len() > MAX_SCHEMA_DEPTH {
+                return Err(LegionError::WorkSource(format!(
+                    "schema \"$ref\" chain starting at \"{start}\" exceeds {MAX_SCHEMA_DEPTH} \
+                     hops -- refused before compiling (the validator has no recursion limit; \
+                     a sufficiently long chain crashes the process)"
+                )));
+            }
+            let Some(name) = current
+                .strip_prefix("#/definitions/")
+                .or_else(|| current.strip_prefix("#/$defs/"))
+            else {
+                break;
+            };
+            let target = root
+                .get("definitions")
+                .and_then(|d| d.get(name))
+                .or_else(|| root.get("$defs").and_then(|d| d.get(name)));
+            let Some(next_ref) = target.and_then(|t| t.get("$ref")).and_then(|r| r.as_str()) else {
+                break;
+            };
+            current = next_ref;
+        }
+    }
+
+    Ok(())
+}
+
 impl Database {
     /// Resolve the schema governing `doc_type` (#1062): the single hot
     /// (non-archived) document with `doc_type = "schema"` whose payload
@@ -655,6 +777,13 @@ pub fn validate_schema_payload(payload: &str) -> Result<SchemaSummary> {
                  document must declare the doc_type it governs"
             ))
         })?;
+
+    // #1062 review (security, HIGH): refuse a schema shaped to overflow the
+    // compiler's native recursion (a long $ref alias chain, or plain deep
+    // nesting) BEFORE compile_schema ever walks it -- see
+    // guard_schema_depth's doc comment for why neither a bigger thread
+    // stack nor catching a panic closes this.
+    guard_schema_depth(&value)?;
 
     // #1062: compile through the crate so a $ref to a missing definition, a
     // malformed 'type', or any other draft-07/2020-12 violation is refused
@@ -1124,6 +1253,109 @@ mod tests {
         });
         let err = validate_schema_payload(&v.to_string()).unwrap_err();
         assert!(err.to_string().contains("does not compile"), "got: {err}");
+    }
+
+    // -- guard_schema_depth (#1062 review, HIGH: unbounded native recursion
+    // in jsonschema 0.52's compiler crashes the whole process) ------------
+
+    /// A schema whose JSON is shallow (a flat `definitions` map) but whose
+    /// entries alias each other in a 600-hop `$ref` chain is refused,
+    /// naming the hop bound, before it ever reaches `compile_schema`.
+    #[test]
+    fn schema_payload_rejects_long_ref_chain() {
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("d{i}"),
+                serde_json::json!({"$ref": format!("#/definitions/d{}", i + 1)}),
+            );
+        }
+        definitions.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Long Ref Chain",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/d0"}},
+            "definitions": definitions,
+            "x-doc-type": "long-ref-chain"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("hops"),
+            "expected the ref-chain bound named, got: {err}"
+        );
+    }
+
+    /// A plain schema nested well past the guard's depth cap, with no
+    /// `$ref` at all, is refused naming the depth bound -- the same crash,
+    /// a different shape, caught by the guard's other axis.
+    ///
+    /// The nesting is built as a chain of bare single-element arrays
+    /// (`[[[...["leaf"]...]]]`), one level of raw JSON nesting per step,
+    /// rather than 600 levels of `{"type":"object","properties":{...}}`:
+    /// `serde_json::from_str` (which `validate_schema_payload` calls
+    /// before this guard ever runs) enforces its own ~128-level recursion
+    /// limit while PARSING text, independent of this guard, so a payload
+    /// deep enough to double as a `jsonschema` crash case (500+) never
+    /// reaches `guard_schema_depth` as text -- it is refused by the parser
+    /// first, with a different message. 100 levels clears this guard's
+    /// 64-level cap while staying under serde_json's parse-time limit, so
+    /// the assertion below actually exercises `guard_schema_depth`, not
+    /// the parser.
+    #[test]
+    fn schema_payload_rejects_deep_nesting() {
+        const N: usize = 100;
+        let mut inner = serde_json::json!("leaf");
+        for _ in 0..N {
+            inner = serde_json::Value::Array(vec![inner]);
+        }
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Deeply Nested",
+            "type": "object",
+            "properties": {"a": inner},
+            "x-doc-type": "deeply-nested"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("nesting depth"),
+            "expected the nesting-depth bound named, got: {err}"
+        );
+    }
+
+    /// A two-node `$ref` cycle is refused immediately as a cycle, not
+    /// merely tolerated up to the hop cap.
+    #[test]
+    fn schema_payload_rejects_ref_cycle() {
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Cycle",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/a"}},
+            "definitions": {
+                "a": {"$ref": "#/definitions/b"},
+                "b": {"$ref": "#/definitions/a"}
+            },
+            "x-doc-type": "ref-cycle"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("cycles"),
+            "expected the cycle named, got: {err}"
+        );
+    }
+
+    /// The guard must not reject a real, valid landed schema -- every real
+    /// schema is far under both caps.
+    #[test]
+    fn schema_payload_guard_accepts_a_real_landed_schema() {
+        let path = format!(
+            "{}/schemas/requirement.schema.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let payload = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        validate_schema_payload(&payload).expect("a real landed schema must pass the depth guard");
     }
 
     #[test]

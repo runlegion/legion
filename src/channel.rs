@@ -2007,6 +2007,57 @@ mod tests {
         );
     }
 
+    /// #1062 review (security, HIGH): a schema payload shaped to overflow
+    /// `jsonschema`'s compiler (a 600-hop `$ref` alias chain in a flat
+    /// `definitions` map -- the exact shape that crashed the whole daemon
+    /// process before `guard_schema_depth` landed) is refused with 400 at
+    /// the HTTP boundary, and the server is still alive to answer /health
+    /// afterwards -- proving the refusal, not a crash, is what happened.
+    #[tokio::test]
+    async fn api_document_create_refuses_stack_overflow_shaped_schema_and_server_survives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let port = spawn_test_server(data_dir).await;
+
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("d{i}"),
+                serde_json::json!({"$ref": format!("#/definitions/d{}", i + 1)}),
+            );
+        }
+        definitions.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema_payload = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Long Ref Chain",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/d0"}},
+            "definitions": definitions,
+            "x-doc-type": "long-ref-chain",
+        });
+        let create_body = serde_json::json!({
+            "doc_type": "schema",
+            "owner": "legion",
+            "payload": schema_payload,
+        })
+        .to_string();
+
+        let (status, body) = http_req(port, "POST", "/api/documents", Some(&create_body)).await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "expected the depth guard to refuse with 400, got: {status} {body}"
+        );
+
+        // The server is still up: /health still answers, proving this
+        // request did not take the daemon down.
+        let (status, _) = http_req(port, "GET", "/health", None).await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "server must still answer /health after the refused payload: {status}"
+        );
+    }
+
     #[test]
     fn fire_due_schedules_posts_and_advances() {
         let (db, index, _dir) = test_storage();
