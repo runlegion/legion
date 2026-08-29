@@ -351,8 +351,10 @@ impl Database {
 }
 
 /// Extract the searchable text for a document's search-index entry
-/// (#1037): `title` and `description` (falling back to `body` when there
-/// is no `description`) from the parsed payload, plus `doc_type` and
+/// (#1037): `title`, `description`, and `body` (all three, when present --
+/// the app's top-bar search is over documents whose content IS
+/// `payload.body`, the editor's document, so it cannot be dropped in
+/// favor of `description`) from the parsed payload, plus `doc_type` and
 /// `surface` -- the same fields a human would scan when picking a document
 /// out of a list.
 ///
@@ -365,15 +367,9 @@ pub fn document_search_text(doc: &Document) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(&doc.payload) {
-        if let Some(title) = obj.get("title").and_then(|v| v.as_str()) {
-            parts.push(title.to_string());
-        }
-        match obj.get("description").and_then(|v| v.as_str()) {
-            Some(description) => parts.push(description.to_string()),
-            None => {
-                if let Some(body) = obj.get("body").and_then(|v| v.as_str()) {
-                    parts.push(body.to_string());
-                }
+        for field in ["title", "description", "body"] {
+            if let Some(value) = obj.get(field).and_then(|v| v.as_str()) {
+                parts.push(value.to_string());
             }
         }
     }
@@ -384,6 +380,20 @@ pub fn document_search_text(doc: &Document) -> String {
     }
 
     parts.join(" ")
+}
+
+/// Write a document's search-index entry (#1037): derive its searchable
+/// text via [`document_search_text`] and hand it to
+/// `SearchIndex::add_document`, which deletes any prior entry for the same
+/// id before adding the new one. Shared by every `*_indexed` write-path
+/// wrapper below so the derive-then-add step exists in exactly one place.
+fn index_document(index: &SearchIndex, doc: &Document) -> Result<()> {
+    index.add_document(
+        &doc.id,
+        &doc.owner,
+        &document_search_text(doc),
+        &doc.created_at,
+    )
 }
 
 /// Insert a new document and index it for search in one call (#1037).
@@ -400,12 +410,7 @@ pub fn insert_document_indexed(
     payload: &str,
 ) -> Result<Document> {
     let doc = db.insert_document(meta, payload)?;
-    index.add_document(
-        &doc.id,
-        &doc.owner,
-        &document_search_text(&doc),
-        &doc.created_at,
-    )?;
+    index_document(index, &doc)?;
     Ok(doc)
 }
 
@@ -420,12 +425,7 @@ pub fn revise_document_indexed(
     payload: &str,
 ) -> Result<Document> {
     let doc = db.revise_document(id, payload)?;
-    index.add_document(
-        &doc.id,
-        &doc.owner,
-        &document_search_text(&doc),
-        &doc.created_at,
-    )?;
+    index_document(index, &doc)?;
     Ok(doc)
 }
 
@@ -441,12 +441,7 @@ pub fn set_document_status_indexed(
     status: &str,
 ) -> Result<Document> {
     let doc = db.set_document_status(id, status)?;
-    index.add_document(
-        &doc.id,
-        &doc.owner,
-        &document_search_text(&doc),
-        &doc.created_at,
-    )?;
+    index_document(index, &doc)?;
     Ok(doc)
 }
 
@@ -457,12 +452,7 @@ pub fn set_document_status_indexed(
 /// filter hides them), so archiving re-indexes rather than deletes.
 pub fn archive_document_indexed(db: &Database, index: &SearchIndex, id: &str) -> Result<Document> {
     let doc = db.archive_document(id)?;
-    index.add_document(
-        &doc.id,
-        &doc.owner,
-        &document_search_text(&doc),
-        &doc.created_at,
-    )?;
+    index_document(index, &doc)?;
     Ok(doc)
 }
 
@@ -1386,7 +1376,7 @@ mod tests {
     }
 
     #[test]
-    fn document_search_text_falls_back_to_body_without_description() {
+    fn document_search_text_includes_body_without_description() {
         let doc = Document {
             id: "doc-1".into(),
             doc_type: "nfr".into(),
@@ -1402,6 +1392,32 @@ mod tests {
         let text = document_search_text(&doc);
         assert!(text.contains("Latency budget"));
         assert!(text.contains("p99 under 200ms"));
+    }
+
+    /// The app's top-bar search is over documents whose content IS
+    /// `payload.body` (the editor's document), so `description` must not
+    /// suppress `body` -- both are indexed together, alongside `title`.
+    #[test]
+    fn document_search_text_includes_title_description_and_body_together() {
+        let doc = Document {
+            id: "doc-1".into(),
+            doc_type: "spec".into(),
+            surface: None,
+            status: "draft".into(),
+            priority: None,
+            owner: "mail".into(),
+            payload: r#"{"title":"Thread detail","description":"how threads render","body":"the full editor document text"}"#.into(),
+            archived_at: None,
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            updated_at: "2026-01-01T00:00:00+00:00".into(),
+        };
+        let text = document_search_text(&doc);
+        assert!(text.contains("Thread detail"));
+        assert!(text.contains("how threads render"));
+        assert!(
+            text.contains("the full editor document text"),
+            "body must not be dropped when description is present: {text}"
+        );
     }
 
     #[test]
@@ -1421,6 +1437,31 @@ mod tests {
         // Never fails -- a malformed payload just yields less text.
         let text = document_search_text(&doc);
         assert_eq!(text, "persona vault");
+    }
+
+    #[test]
+    fn index_document_writes_derived_text_to_search_index() {
+        let (_db, index, _dir) = crate::testutil::test_storage();
+        let doc = Document {
+            id: "doc-1".into(),
+            doc_type: "requirement".into(),
+            surface: None,
+            status: "draft".into(),
+            priority: None,
+            owner: "mail".into(),
+            payload: r#"{"title":"Thread detail","description":"how threads render"}"#.into(),
+            archived_at: None,
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            updated_at: "2026-01-01T00:00:00+00:00".into(),
+        };
+
+        index_document(&index, &doc).expect("index_document");
+
+        let hits = index
+            .search_documents("mail", "thread render", 5)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "doc-1");
     }
 
     #[test]
