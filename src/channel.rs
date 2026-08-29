@@ -371,6 +371,26 @@ pub async fn api_document_create(
     Ok(Json(doc))
 }
 
+/// Shared preamble for the body-save and revise handlers below: fetch the
+/// document (404 when the id does not resolve) and refuse an archived one
+/// (4xx, not the 500 the blanket LegionError conversion would give it).
+/// Both handlers need this exact pre-check ahead of their mutating call, so
+/// it lives once here instead of twice.
+fn load_editable_document(
+    db: &Database,
+    id: &str,
+) -> Result<crate::documents::Document, ServeError> {
+    let doc = db
+        .get_document(id)?
+        .ok_or_else(|| ServeError::NotFound(format!("document '{id}' not found")))?;
+    if doc.archived_at.is_some() {
+        return Err(ServeError::BadRequest(format!(
+            "document '{id}' is archived and cannot be edited"
+        )));
+    }
+    Ok(doc)
+}
+
 /// Body for PUT /api/documents/{id}/body -- a debounced editor working-copy
 /// save. Merges `body` into the document's payload without touching
 /// `revision`; a revision is cut only by an explicit `/revise` call or a
@@ -383,48 +403,30 @@ pub struct UpdateBodyRequest {
 /// PUT /api/documents/{id}/body -- save the editor's working copy. Does not
 /// bump `revision`, so it is safe to call on every debounce tick while a
 /// user types. 404 for an unknown id; a 4xx (not 500) for an archived
-/// document -- both checked here, ahead of the mutating call, so the
-/// blanket LegionError conversion never turns either into a 500.
+/// document, via `load_editable_document`.
 pub async fn api_document_update_body(
     State(state): State<ChannelState>,
     Path(id): Path<String>,
     Json(req): Json<UpdateBodyRequest>,
 ) -> Result<Json<crate::documents::Document>, ServeError> {
     let db = open_db(&state.data_dir)?;
-    let existing = db
-        .get_document(&id)?
-        .ok_or_else(|| ServeError::NotFound(format!("document '{id}' not found")))?;
-    if existing.archived_at.is_some() {
-        return Err(ServeError::BadRequest(format!(
-            "document '{id}' is archived and cannot be edited"
-        )));
-    }
+    load_editable_document(&db, &id)?;
     Ok(Json(db.update_document_body(&id, &req.body)?))
 }
 
-/// Body for POST /api/documents/{id}/revise -- the full replacement payload,
-/// same contract as `legion document revise`'s --from/stdin input: a whole-
-/// payload replace, not a patch.
-pub type ReviseRequest = serde_json::Value;
-
 /// POST /api/documents/{id}/revise -- a thin HTTP wrapper over
 /// `Database::revise_document`, not a second implementation of revise
-/// semantics. 404 for an unknown id; a 4xx (not 500) for an archived
-/// document, same pre-check pattern as the body-save handler above.
+/// semantics. The body is the full replacement payload as a JSON object,
+/// same contract as `legion document revise`'s --from/stdin input: a
+/// whole-payload replace, not a patch. 404 for an unknown id; a 4xx (not
+/// 500) for an archived document, via `load_editable_document`.
 pub async fn api_document_revise(
     State(state): State<ChannelState>,
     Path(id): Path<String>,
-    Json(payload): Json<ReviseRequest>,
+    Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<crate::documents::Document>, ServeError> {
     let db = open_db(&state.data_dir)?;
-    let existing = db
-        .get_document(&id)?
-        .ok_or_else(|| ServeError::NotFound(format!("document '{id}' not found")))?;
-    if existing.archived_at.is_some() {
-        return Err(ServeError::BadRequest(format!(
-            "document '{id}' is archived and cannot be revised"
-        )));
-    }
+    load_editable_document(&db, &id)?;
     Ok(Json(db.revise_document(&id, &payload.to_string())?))
 }
 
@@ -1071,59 +1073,20 @@ mod tests {
     async fn api_post_returns_id_only_shape() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
-        let _db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let port = spawn_test_server(data_dir).await;
 
-        let (tx, _rx) = new_broadcast();
-        let state = ChannelState {
-            data_dir: data_dir.clone(),
-            tx,
-            started_at: chrono::Utc::now(),
-            role: ServerRole::Daemon,
-        };
-        let app = router(state);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve");
-        });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let response = tokio::task::spawn_blocking(move || {
-            use std::io::{Read, Write};
-            use std::net::TcpStream;
-
-            let body = r#"{"repo":"kelex","text":"hello shape"}"#;
-            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
-            stream
-                .write_all(
-                    format!(
-                        "POST /api/post HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                )
-                .expect("write");
-            let mut buf = Vec::new();
-            stream.read_to_end(&mut buf).expect("read");
-            buf
-        })
-        .await
-        .expect("spawn_blocking");
-
-        let response_str = String::from_utf8_lossy(&response);
+        let (status, body) = http_req(
+            port,
+            "POST",
+            "/api/post",
+            Some(r#"{"repo":"kelex","text":"hello shape"}"#),
+        )
+        .await;
         assert!(
-            response_str.starts_with("HTTP/1.1 200"),
-            "expected 200 OK, got: {}",
-            &response_str[..response_str.len().min(200)]
+            status.starts_with("HTTP/1.1 200"),
+            "expected 200 OK, got: {status}"
         );
-        let json_body = response_str
-            .split("\r\n\r\n")
-            .nth(1)
-            .expect("response body");
-        let parsed: serde_json::Value = serde_json::from_str(json_body.trim()).expect("parse body");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse body");
         let obj = parsed.as_object().expect("object body");
         assert!(obj.contains_key("id"), "body must carry the post id");
         assert_eq!(
@@ -1149,50 +1112,10 @@ mod tests {
         db.insert_document(&meta, "{}").expect("insert");
         drop(db);
 
-        let (tx, _rx) = new_broadcast();
-        let state = ChannelState {
-            data_dir: data_dir.clone(),
-            tx,
-            started_at: chrono::Utc::now(),
-            role: ServerRole::Daemon,
-        };
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        tokio::spawn(async move {
-            axum::serve(listener, router(state)).await.expect("serve");
-        });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Raw HTTP/1.1 request helper -> (status_line, body).
-        async fn req(port: u16, method: &str, path: &str, body: Option<&str>) -> (String, String) {
-            let (method, path) = (method.to_string(), path.to_string());
-            let body = body.map(str::to_string);
-            tokio::task::spawn_blocking(move || {
-                use std::io::{Read, Write};
-                use std::net::TcpStream;
-                let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
-                let payload = body.unwrap_or_default();
-                let head = format!(
-                    "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    payload.len()
-                );
-                stream.write_all(head.as_bytes()).expect("write head");
-                stream.write_all(payload.as_bytes()).expect("write body");
-                let mut buf = Vec::new();
-                stream.read_to_end(&mut buf).expect("read");
-                let text = String::from_utf8_lossy(&buf).to_string();
-                let status = text.lines().next().unwrap_or("").to_string();
-                let body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
-                (status, body)
-            })
-            .await
-            .expect("spawn_blocking")
-        }
+        let port = spawn_test_server(data_dir).await;
 
         // Publish flips draft -> published and echoes the updated row.
-        let (status, body) = req(
+        let (status, body) = http_req(
             port,
             "POST",
             "/api/documents/FR-SERVE-1/status",
@@ -1204,18 +1127,18 @@ mod tests {
         assert_eq!(parsed["status"], "published");
 
         // The flip persisted -- a fresh GET sees published.
-        let (status, body) = req(port, "GET", "/api/documents/FR-SERVE-1", None).await;
+        let (status, body) = http_req(port, "GET", "/api/documents/FR-SERVE-1", None).await;
         assert!(status.starts_with("HTTP/1.1 200"), "view: {status}");
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse view body");
         assert_eq!(parsed["status"], "published");
 
         // Missing id is a 404 on both read and mutate, not a 500.
-        let (view_missing, _) = req(port, "GET", "/api/documents/NOPE", None).await;
+        let (view_missing, _) = http_req(port, "GET", "/api/documents/NOPE", None).await;
         assert!(
             view_missing.starts_with("HTTP/1.1 404"),
             "view-missing: {view_missing}"
         );
-        let (post_missing, _) = req(
+        let (post_missing, _) = http_req(
             port,
             "POST",
             "/api/documents/NOPE/status",
@@ -1251,10 +1174,9 @@ mod tests {
         port
     }
 
-    /// Raw HTTP/1.1 request helper -> (status_line, body). Same wire-level
-    /// approach as `document_endpoints_publish_round_trip`'s local `req`,
-    /// factored out so the new /api/documents create/body/revise tests below
-    /// share one implementation.
+    /// Raw HTTP/1.1 request helper -> (status_line, body). Every test in
+    /// this module that needs real HTTP semantics shares this one
+    /// implementation rather than hand-rolling its own TCP round trip.
     async fn http_req(port: u16, method: &str, path: &str, body: Option<&str>) -> (String, String) {
         let (method, path) = (method.to_string(), path.to_string());
         let body = body.map(str::to_string);
