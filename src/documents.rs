@@ -15,7 +15,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::db::Database;
+use crate::db::{Database, ReflectionMeta};
 use crate::error::{LegionError, Result};
 use crate::search::SearchIndex;
 
@@ -167,7 +167,7 @@ impl Database {
             .ok_or_else(|| LegionError::WorkSource(format!("document '{id}' not found")))?;
         if existing.archived_at.is_some() {
             return Err(LegionError::WorkSource(format!(
-                "document '{id}' is archived and cannot be revised"
+                "document '{id}' is archived and cannot be edited"
             )));
         }
 
@@ -186,6 +186,71 @@ impl Database {
         }
         self.get_document(id)?.ok_or_else(|| {
             LegionError::WorkSource(format!("document '{id}' vanished after revise"))
+        })
+    }
+
+    /// Merge `body` into the document's payload under the top-level `body`
+    /// key (creating the key if absent) and write it back WITHOUT touching
+    /// `revision`. Only `updated_at` and `payload` change.
+    ///
+    /// Backs the editor's debounced working-copy save (#1036): the caller
+    /// can call this on every keystroke pause without cutting a new
+    /// revision -- a revision is cut only by an explicit `revise_document`
+    /// call or a status change. Errors when the document does not exist or
+    /// is archived, mirroring `revise_document`'s own guards.
+    pub fn update_document_body(&self, id: &str, body: &str) -> Result<Document> {
+        let existing = self
+            .get_document(id)?
+            .ok_or_else(|| LegionError::WorkSource(format!("document '{id}' not found")))?;
+        if existing.archived_at.is_some() {
+            return Err(LegionError::WorkSource(format!(
+                "document '{id}' is archived and cannot be edited"
+            )));
+        }
+
+        // Pre-check the stored payload is a JSON object so the `json_set`
+        // write below never raises -- it would otherwise silently no-op on
+        // a non-object root, which would look like a successful save that
+        // actually dropped the caller's body text.
+        let value: serde_json::Value = serde_json::from_str(&existing.payload).map_err(|e| {
+            LegionError::WorkSource(format!("document '{id}' payload is not valid JSON: {e}"))
+        })?;
+        if !value.is_object() {
+            return Err(LegionError::WorkSource(format!(
+                "document '{id}' payload is not a JSON object"
+            )));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        // A single UPDATE ... json_set(payload, '$.body', ?1) (#1036 review,
+        // MED-1) is what closes the read-modify-write window: the previous
+        // implementation fetched `payload`, merged `body` in on the Rust
+        // side, and wrote the merged copy back, so a `revise_document` that
+        // committed between that fetch and this write would have been
+        // silently overwritten by the stale pre-revise snapshot. json_set is
+        // evaluated by SQLite against the row's CURRENT value at UPDATE
+        // time, not a value fetched earlier by this call, so that window no
+        // longer exists. The actual interleaving is not unit-tested here --
+        // that would need two real concurrent connections racing on one
+        // row -- `update_document_body_after_revise_keeps_revised_fields_and_leaves_revision_unchanged`
+        // below only proves the sequential contract: a body save issued
+        // after a revise has already committed still keeps the revise's
+        // fields and still does not bump revision. This also preserves the
+        // payload's existing key order -- the old Value::Object round trip
+        // did not, since serde_json does not enable the preserve_order
+        // feature here.
+        let rows = self.conn.execute(
+            "UPDATE documents SET payload = json_set(payload, '$.body', ?1), updated_at = ?2 \
+             WHERE id = ?3 AND deleted_at IS NULL AND archived_at IS NULL",
+            params![body, &now, id],
+        )?;
+        if rows == 0 {
+            return Err(LegionError::WorkSource(format!(
+                "document '{id}' not found"
+            )));
+        }
+        self.get_document(id)?.ok_or_else(|| {
+            LegionError::WorkSource(format!("document '{id}' vanished after body update"))
         })
     }
 
@@ -429,6 +494,26 @@ pub fn revise_document_indexed(
     Ok(doc)
 }
 
+/// Save the editor's working-copy body and re-index it for search in one
+/// call (#1037, found and fixed while merging #1036/#1038's HTTP editor
+/// endpoints into this branch: `update_document_body` is a brand new write
+/// path that did not exist when the `*_indexed` wrapper set was designed,
+/// and it is the highest-frequency one -- called on every debounced
+/// keystroke pause from the editor). `body` is part of
+/// `document_search_text`'s indexed text (post-simplify), so a body save
+/// that skipped re-indexing would silently diverge the index from the row
+/// on every edit.
+pub fn update_document_body_indexed(
+    db: &Database,
+    index: &SearchIndex,
+    id: &str,
+    body: &str,
+) -> Result<Document> {
+    let doc = db.update_document_body(id, body)?;
+    index_document(index, &doc)?;
+    Ok(doc)
+}
+
 /// Set a document's lifecycle status and re-index it for search in one
 /// call (#1037). The status change does not alter the searchable text,
 /// but re-indexing keeps the index's `created_at`/`repo` fields aligned
@@ -526,20 +611,59 @@ pub fn validate_schema_payload(payload: &str) -> Result<SchemaSummary> {
     Ok(SchemaSummary { title, description })
 }
 
+/// Max characters kept from a schema's `title`/`description` when composing
+/// the pointer reflection text below. `title`/`description` come from the
+/// schema payload's own content, which -- via the HTTP create/revise
+/// endpoints (#1036) -- is now network input rather than only a local
+/// operator's own file, so a cap keeps a hostile payload from flooding the
+/// shared bullpen/recall feed with an oversized entry.
+const MAX_POINTER_FIELD_LEN: usize = 300;
+
+/// Collapse newlines to spaces and cap length so a schema's `title`/
+/// `description` cannot forge extra lines into the pointer reflection's
+/// text or blow past a reasonable recall-feed entry size (#1036 review,
+/// MED-4).
+fn sanitize_pointer_field(s: &str) -> String {
+    s.chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .take(MAX_POINTER_FIELD_LEN)
+        .collect()
+}
+
 /// Text for the schema pointer reflection (domain=schema) that makes a
 /// landed schema document recallable (#526). The document row holds the
 /// canonical payload; the reflection holds searchable prose plus the id.
 pub fn schema_pointer_text(doc_id: &str, summary: &SchemaSummary) -> String {
+    let title = sanitize_pointer_field(&summary.title);
+    let description = sanitize_pointer_field(&summary.description);
     format!(
         "[SCHEMA] {} -- {} Canonical payload: legion document view {} (doc_type=schema).",
-        summary.title,
-        if summary.description.is_empty() {
+        title,
+        if description.is_empty() {
             "no description.".to_string()
         } else {
-            format!("{}.", summary.description.trim_end_matches('.'))
+            format!("{}.", description.trim_end_matches('.'))
         },
         doc_id
     )
+}
+
+/// Write (or refresh) the domain=schema pointer reflection for a landed
+/// schema document (#526): the document row holds the canonical payload,
+/// this reflection holds the searchable prose + id so `legion recall
+/// --domain schema` can find it. Shared (#1036 review, MED-3) by the CLI's
+/// create/revise arms and the HTTP create/revise handlers so the dual-write
+/// shape cannot fork between entry points -- each caller wraps the raw
+/// error in its own remediation message, so this returns it unwrapped.
+pub fn write_schema_pointer(db: &Database, doc: &Document, summary: &SchemaSummary) -> Result<()> {
+    let text = schema_pointer_text(&doc.id, summary);
+    let meta = ReflectionMeta {
+        domain: Some("schema".to_string()),
+        tags: Some("schema,document-pointer".to_string()),
+        parent_id: None,
+    };
+    db.insert_reflection_with_meta(&doc.owner, &text, "self", &meta)?;
+    Ok(())
 }
 
 /// Validate an instance value against a subset of JSON Schema (#526):
@@ -1013,6 +1137,57 @@ mod tests {
         assert!(text.contains("legion document view doc-123"));
     }
 
+    /// A newline in a schema's title/description cannot forge extra lines
+    /// into the pointer text, and an oversized field is truncated rather
+    /// than flooding the recall feed (#1036 review, MED-4).
+    #[test]
+    fn schema_pointer_text_sanitizes_title_and_description() {
+        let s = SchemaSummary {
+            title: "Persona\nline two".into(),
+            description: "x".repeat(MAX_POINTER_FIELD_LEN + 50),
+        };
+        let text = schema_pointer_text("doc-123", &s);
+        assert!(!text.contains('\n'), "newline must not survive: {text}");
+        assert!(text.contains("Persona line two"));
+        assert!(
+            text.len() < MAX_POINTER_FIELD_LEN + 200,
+            "an oversized description must be truncated, got {} chars",
+            text.len()
+        );
+    }
+
+    /// `write_schema_pointer` inserts a domain=schema reflection naming the
+    /// document, the shared shape the CLI create/revise arms and the HTTP
+    /// create/revise handlers all call (#1036 review, MED-3).
+    #[test]
+    fn write_schema_pointer_inserts_domain_schema_reflection() {
+        let db = test_db();
+        let mut m = sample_meta("schema", "vault");
+        m.id = Some("SCHEMA-1");
+        let doc = db.insert_document(&m, "{}").expect("insert");
+        let summary = SchemaSummary {
+            title: "Widget".to_string(),
+            description: "A test schema".to_string(),
+        };
+        write_schema_pointer(&db, &doc, &summary).expect("write pointer");
+
+        let reflections = db
+            .get_reflections_by_domain(
+                "vault",
+                "schema",
+                10,
+                crate::recall::ArchiveMode::Hot,
+                &crate::timerange::TimeRange::default(),
+            )
+            .expect("get reflections by domain");
+        assert!(
+            reflections
+                .iter()
+                .any(|r| r.text.contains("Widget") && r.text.contains("SCHEMA-1")),
+            "expected the pointer reflection naming the document, got: {reflections:?}"
+        );
+    }
+
     // -- instance validation subset (#526) ---------------------------------
 
     #[test]
@@ -1283,6 +1458,105 @@ mod tests {
         assert!(
             err.to_string().contains("archived"),
             "error must say the document is archived: {err}"
+        );
+    }
+
+    // -- update_document_body (#1036) --
+
+    /// `update_document_body` sets the top-level `body` key (creating it
+    /// when absent, overwriting it when present) while leaving every other
+    /// payload field and the `revision` counter untouched -- the editor's
+    /// debounced save must never cut a revision.
+    #[test]
+    fn update_document_body_merges_key_and_leaves_revision_unchanged() {
+        let db = test_db();
+        let doc = db
+            .insert_document(&sample_meta("thesis", "mail"), r#"{"title":"x"}"#)
+            .expect("insert");
+        assert_eq!(db.document_revision(&doc.id).unwrap(), 1);
+
+        let updated = db
+            .update_document_body(&doc.id, "first draft")
+            .expect("update body");
+        let value: serde_json::Value = serde_json::from_str(&updated.payload).unwrap();
+        assert_eq!(value["title"], "x", "unrelated fields survive the merge");
+        assert_eq!(value["body"], "first draft");
+        assert_eq!(
+            db.document_revision(&doc.id).unwrap(),
+            1,
+            "a body save must not bump revision"
+        );
+
+        // A second save overwrites rather than appending.
+        let updated = db
+            .update_document_body(&doc.id, "second draft")
+            .expect("update body again");
+        let value: serde_json::Value = serde_json::from_str(&updated.payload).unwrap();
+        assert_eq!(value["body"], "second draft");
+        assert_eq!(db.document_revision(&doc.id).unwrap(), 1);
+    }
+
+    #[test]
+    fn update_document_body_nonexistent_returns_error() {
+        let db = test_db();
+        let err = db.update_document_body("nope", "text").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    /// An archived document cannot have its working copy saved, mirroring
+    /// `revise_document_refuses_archived_document`.
+    #[test]
+    fn update_document_body_refuses_archived_document() {
+        let db = test_db();
+        let mut m = sample_meta("thesis", "mail");
+        m.id = Some("TH-ARCHIVED");
+        db.insert_document(&m, "{}").unwrap();
+        db.archive_document("TH-ARCHIVED").expect("archive");
+
+        let err = db.update_document_body("TH-ARCHIVED", "text").unwrap_err();
+        assert!(
+            err.to_string().contains("archived"),
+            "error must say the document is archived: {err}"
+        );
+    }
+
+    /// A body save issued after a revise has already committed builds on
+    /// the revised payload, not a stale pre-revise snapshot, and still does
+    /// not bump revision (#1036 review). This is a sequential check with a
+    /// single connection -- it does not exercise the read-modify-write
+    /// interleaving `update_document_body`'s `json_set` UPDATE closes (see
+    /// that function's doc comment); proving the interleaving itself would
+    /// need two real concurrent connections racing on one row, which is not
+    /// set up here.
+    #[test]
+    fn update_document_body_after_revise_keeps_revised_fields_and_leaves_revision_unchanged() {
+        let db = test_db();
+        let mut m = sample_meta("thesis", "mail");
+        m.id = Some("TH-AFTER-REVISE-1");
+        db.insert_document(&m, r#"{"title":"a"}"#).unwrap();
+
+        db.update_document_body("TH-AFTER-REVISE-1", "draft one")
+            .unwrap();
+
+        let revised_payload = serde_json::json!({"title": "b", "extra": "x"}).to_string();
+        db.revise_document("TH-AFTER-REVISE-1", &revised_payload)
+            .unwrap();
+        assert_eq!(db.document_revision("TH-AFTER-REVISE-1").unwrap(), 2);
+
+        let updated = db
+            .update_document_body("TH-AFTER-REVISE-1", "draft two")
+            .expect("update body after revise");
+        let value: serde_json::Value = serde_json::from_str(&updated.payload).unwrap();
+        assert_eq!(
+            value["title"], "b",
+            "revise's fields must survive a later body save"
+        );
+        assert_eq!(value["extra"], "x");
+        assert_eq!(value["body"], "draft two");
+        assert_eq!(
+            db.document_revision("TH-AFTER-REVISE-1").unwrap(),
+            2,
+            "a body save must not bump revision even after an intervening revise"
         );
     }
 

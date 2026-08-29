@@ -6,7 +6,7 @@ use clap::Subcommand;
 
 use crate::cli::util::open_db_and_index;
 use crate::cli::verify::resolve_spec_criteria;
-use crate::{db, documents, error};
+use crate::{documents, error};
 
 #[derive(Subcommand)]
 pub(crate) enum DocumentAction {
@@ -161,24 +161,21 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
             // `legion recall --domain schema` surfaces the schema
             // (#526, option A: documents hold the canonical payload,
             // reflections hold the searchable prose pointer). Repo
-            // scoping follows the owning agent.
+            // scoping follows the owning agent. The write itself is shared
+            // with the revise arm below and the HTTP create/revise handlers
+            // (#1036 review, MED-3) via `documents::write_schema_pointer`;
+            // this arm keeps its own remediation message on failure.
             if let Some(summary) = schema_summary {
-                let text = documents::schema_pointer_text(&doc.id, &summary);
-                let meta = db::ReflectionMeta {
-                    domain: Some("schema".to_string()),
-                    tags: Some("schema,document-pointer".to_string()),
-                    parent_id: None,
-                };
-                database
-                    .insert_reflection_with_meta(&owner, &text, "self", &meta)
-                    .map_err(|e| {
-                        error::LegionError::WorkSource(format!(
-                            "document {} created, but the schema pointer reflection \
-                             failed: {e}. Re-create the pointer with: legion reflect \
-                             --repo {} --text '{}'",
-                            doc.id, owner, text
-                        ))
-                    })?;
+                documents::write_schema_pointer(&database, &doc, &summary).map_err(|e| {
+                    error::LegionError::WorkSource(format!(
+                        "document {} created, but the schema pointer reflection \
+                         failed: {e}. Re-create the pointer with: legion reflect \
+                         --repo {} --text '{}'",
+                        doc.id,
+                        owner,
+                        documents::schema_pointer_text(&doc.id, &summary)
+                    ))
+                })?;
             }
             println!("{}", doc.id);
         }
@@ -302,22 +299,16 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
             // what makes the current pointer the one an agent actually sees
             // first. A stale prior pointer is not purged by this call.
             if let Some(summary) = schema_summary {
-                let text = documents::schema_pointer_text(&doc.id, &summary);
-                let meta = db::ReflectionMeta {
-                    domain: Some("schema".to_string()),
-                    tags: Some("schema,document-pointer".to_string()),
-                    parent_id: None,
-                };
-                database
-                    .insert_reflection_with_meta(&doc.owner, &text, "self", &meta)
-                    .map_err(|e| {
-                        error::LegionError::WorkSource(format!(
-                            "document {} revised, but refreshing the schema pointer \
-                             reflection failed: {e}. Re-create the pointer with: legion \
-                             reflect --repo {} --text '{}'",
-                            doc.id, doc.owner, text
-                        ))
-                    })?;
+                documents::write_schema_pointer(&database, &doc, &summary).map_err(|e| {
+                    error::LegionError::WorkSource(format!(
+                        "document {} revised, but refreshing the schema pointer \
+                         reflection failed: {e}. Re-create the pointer with: legion \
+                         reflect --repo {} --text '{}'",
+                        doc.id,
+                        doc.owner,
+                        documents::schema_pointer_text(&doc.id, &summary)
+                    ))
+                })?;
             }
             println!(
                 "{} revision -> {}",
