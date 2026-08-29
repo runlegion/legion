@@ -19,7 +19,11 @@ export interface UseDocumentsResult {
   /** POST /api/documents/{id}/status -- the general status setter. */
   setDocumentStatus: (id: string, status: string) => Promise<MutationResult>;
   /** POST /api/documents -- creates a new intention (#1036). */
-  createDocument: (docType: string, owner: string) => Promise<MutationResult>;
+  createDocument: (
+    docType: string,
+    owner: string,
+    payload: Record<string, unknown>,
+  ) => Promise<MutationResult>;
 }
 
 /** The one data-access hook over the daemon's /api/documents collection. */
@@ -68,11 +72,15 @@ export function useDocuments(): UseDocumentsResult {
   );
 
   const createDocument = useCallback(
-    async (docType: string, owner: string): Promise<MutationResult> => {
+    async (
+      docType: string,
+      owner: string,
+      payload: Record<string, unknown>,
+    ): Promise<MutationResult> => {
       try {
         const document = await requestJson("/api/documents", DocumentSchema, {
           method: "POST",
-          body: { doc_type: docType, owner, payload: {} },
+          body: { doc_type: docType, owner, payload },
         });
         setDocuments((prev) => [...prev, document]);
         return { ok: true, document };

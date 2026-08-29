@@ -15,6 +15,9 @@ import { SearchBox } from "@/views/search-box";
 /** The repo this app serves. */
 const REPO = "legion";
 
+/** Placeholder title a newly created intention opens with. */
+const NEW_INTENTION_TITLE = "New intention";
+
 function App() {
   const { documents, error, replaceDocument, setDocumentStatus, createDocument } = useDocuments();
   const [selection, setSelection] = useState<Document | null>(null);
@@ -48,7 +51,10 @@ function App() {
   const handleCreateIntention = useCallback(() => {
     setActionFailure(null);
     void (async () => {
-      const result = await createDocument("thesis", REPO);
+      // The tree shows a thesis by its title and falls back to the raw id, so a
+      // new intention is seeded with one rather than opening as a UUID. The
+      // endpoint accepts an empty payload and fills nothing in itself.
+      const result = await createDocument("thesis", REPO, { title: NEW_INTENTION_TITLE });
       if (result.ok) requestSelect(result.document);
       else setActionFailure(result.failure);
     })();
