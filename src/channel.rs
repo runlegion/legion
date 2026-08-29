@@ -3,11 +3,11 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Response, Sse};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use tokio::sync::broadcast;
 
@@ -174,6 +174,14 @@ pub struct FeedQuery {
     pub unread_for: Option<String>,
 }
 
+/// Cap on a document write body (POST/PUT to any /api/documents route).
+/// Axum's crate-wide default is already 2 MB; this scopes an explicit,
+/// documented bound onto just the document routes instead of leaning on
+/// that implicit default (#1036 review, LOW), and raises it slightly to
+/// leave room for a sizable schema payload or a long editor body without
+/// inviting an unbounded request into memory.
+const DOCUMENT_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
 /// Build the axum Router for the channel HTTP server.
 ///
 /// This is a standalone router -- the caller mounts it into the main axum
@@ -183,15 +191,28 @@ pub struct FeedQuery {
 /// serves it bare) answer these paths with the same implementation, so the
 /// wire shapes cannot fork again.
 pub fn router(state: ChannelState) -> Router {
+    // Split out so `DOCUMENT_BODY_LIMIT_BYTES` applies only to these routes
+    // -- `route_layer` scopes to whatever is already in the Router it is
+    // called on, so building the document routes as their own Router
+    // before merging keeps the cap off /api/post and the rest.
+    let document_routes = Router::new()
+        .route(
+            "/api/documents",
+            get(api_documents).post(api_document_create),
+        )
+        .route("/api/documents/{id}", get(api_document))
+        .route("/api/documents/{id}/status", post(api_document_set_status))
+        .route("/api/documents/{id}/body", put(api_document_update_body))
+        .route("/api/documents/{id}/revise", post(api_document_revise))
+        .route_layer(DefaultBodyLimit::max(DOCUMENT_BODY_LIMIT_BYTES));
+
     Router::new()
         .route("/health", get(health_endpoint))
         .route("/sse", get(sse_handler))
         .route("/api/feed", get(api_feed))
         .route("/api/tasks", get(api_tasks))
         .route("/api/post", post(api_post))
-        .route("/api/documents", get(api_documents))
-        .route("/api/documents/{id}", get(api_document))
-        .route("/api/documents/{id}/status", post(api_document_set_status))
+        .merge(document_routes)
         .with_state(state)
 }
 
@@ -265,6 +286,272 @@ pub async fn api_document_set_status(
         return Err(ServeError::NotFound(format!("document '{id}' not found")));
     }
     Ok(Json(db.set_document_status(&id, &body.to)?))
+}
+
+/// Max length for a caller-supplied `owner` or `id` on POST /api/documents.
+/// This is network input (#1036 review, MED-4) -- unlike the CLI's argv, a
+/// local operator typing into their own shell -- so it gets a charset and
+/// length gate before it reaches a SQL bind, a log line, or (for `owner`) a
+/// schema pointer reflection's audience routing. Generous enough for any
+/// real agent/repo name or typed document id (e.g. `FR-EMAIL-003`), small
+/// enough to keep a hostile caller from stuffing an oversized value into an
+/// indexed column.
+const MAX_IDENTIFIER_LEN: usize = 128;
+
+/// Reject `value` unless it is 1..=MAX_IDENTIFIER_LEN characters of
+/// `[A-Za-z0-9._-]`. Shared by the `owner` and (when supplied) `id` checks
+/// on POST /api/documents.
+fn validate_identifier(value: &str, field: &str) -> Result<(), ServeError> {
+    if value.is_empty() || value.chars().count() > MAX_IDENTIFIER_LEN {
+        return Err(ServeError::BadRequest(format!(
+            "{field} must be 1-{MAX_IDENTIFIER_LEN} characters"
+        )));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(ServeError::BadRequest(format!(
+            "{field} must match [A-Za-z0-9._-]"
+        )));
+    }
+    Ok(())
+}
+
+/// Map a `LegionError::WorkSource` -- a caller-visible input problem: bad
+/// JSON shape, a duplicate id, a document already archived, a corrupted
+/// stored payload -- to 400. Every other `LegionError` variant is a
+/// genuine server-side failure and keeps the blanket 500 the
+/// `From<LegionError>` conversion gives it. Shared by every /api/documents
+/// write path (#1036 review, HIGH-2) so the same kind of error reads the
+/// same way regardless of which endpoint raised it.
+fn work_source_as_bad_request(e: LegionError) -> ServeError {
+    match e {
+        LegionError::WorkSource(msg) => ServeError::BadRequest(msg),
+        other => ServeError::from(other),
+    }
+}
+
+/// Body for POST /api/documents. Mirrors `legion document create`'s flags
+/// (`DocumentAction::Create` in src/cli/document.rs) field for field.
+/// `payload` is an inline JSON object here rather than the CLI's
+/// --from/stdin file text, since an HTTP caller already holds its payload
+/// as a parsed value.
+///
+/// `owner` and `id` are network-supplied input here, unlike the CLI's argv
+/// (a local operator typing into their own shell) -- both are gated by
+/// `validate_identifier` before they reach storage (#1036 review, MED-4).
+///
+/// NOTE for client authors: this wraps `payload` under a key alongside the
+/// meta fields (`doc_type`/`owner`/etc), because create has to disambiguate
+/// them within one request body. POST /api/documents/{id}/revise below does
+/// NOT wrap -- its entire request body IS the payload, with no meta fields
+/// riding along (there is nothing to disambiguate: the id is in the URL,
+/// and revise never changes doc_type/owner/surface/etc). Sending
+/// `{"payload": {...}}` to revise is valid JSON and is NOT rejected -- it
+/// gets stored verbatim as a payload whose only field happens to be named
+/// "payload", not unwrapped for you.
+#[derive(serde::Deserialize)]
+pub struct CreateDocumentRequest {
+    pub doc_type: String,
+    pub owner: String,
+    pub surface: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    /// Optional caller-supplied id. Omitted or empty generates a UUIDv7,
+    /// matching `Database::insert_document`.
+    pub id: Option<String>,
+    pub payload: serde_json::Value,
+}
+
+/// POST /api/documents -- create a document over HTTP, e.g. the legion-app
+/// sidebar's Intentions `+` control. Runs the same structural gate and
+/// pointer-reflection dual write as `legion document create`
+/// (`DocumentAction::Create`) so the two entry points stay behaviorally
+/// identical; the CLI handler itself is untouched.
+///
+/// Returns 200 (matching this router's existing document-endpoint
+/// convention -- none of them return 201).
+pub async fn api_document_create(
+    State(state): State<ChannelState>,
+    Json(req): Json<CreateDocumentRequest>,
+) -> Result<Json<crate::documents::Document>, ServeError> {
+    validate_identifier(&req.owner, "owner")?;
+    validate_identifier(&req.doc_type, "doc_type")?;
+    if let Some(id) = req.id.as_deref().filter(|s| !s.is_empty()) {
+        validate_identifier(id, "id")?;
+    }
+    if let Some(surface) = req.surface.as_deref().filter(|s| !s.is_empty()) {
+        validate_identifier(surface, "surface")?;
+    }
+
+    // The CLI's equivalent check is a raw JSON parse of --from/stdin text;
+    // here `Json` has already parsed the body, so the equivalent gate is an
+    // object-type check -- a bare string/array/number payload is refused
+    // rather than silently landing in the table.
+    if !req.payload.is_object() {
+        return Err(ServeError::BadRequest(
+            "payload must be a JSON object".to_string(),
+        ));
+    }
+    let payload_str = req.payload.to_string();
+
+    // Schema documents get the same structural gate `document create`
+    // enforces (#526): a malformed JSON Schema is rejected before insert,
+    // and a valid one is summarized for the pointer reflection below.
+    // `validate_schema_payload` only ever returns `LegionError::WorkSource`,
+    // so its message alone is the right 400 body.
+    let schema_summary = if req.doc_type == "schema" {
+        Some(
+            crate::documents::validate_schema_payload(&payload_str)
+                .map_err(|e| ServeError::BadRequest(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+
+    let db = open_db(&state.data_dir)?;
+    let meta = crate::documents::DocumentMeta {
+        id: req.id.as_deref(),
+        doc_type: &req.doc_type,
+        surface: req.surface.as_deref(),
+        status: req.status.as_deref(),
+        priority: req.priority.as_deref(),
+        owner: &req.owner,
+    };
+    // A duplicate caller-supplied id is a caller error (400), not the
+    // generic 500 the blanket LegionError conversion would give it --
+    // everything else `insert_document` can fail with is a genuine
+    // server-side problem and keeps that blanket 500.
+    let doc = db
+        .insert_document(&meta, &payload_str)
+        .map_err(work_source_as_bad_request)?;
+
+    // Dual-write the pointer reflection (domain=schema), same shared write
+    // as `DocumentAction::Create` and the revise handler below (#1036
+    // review, MED-3) -- the document is already committed by this point, so
+    // a failure here is reported as an internal error rather than rolled
+    // back (matches the CLI's own behavior: the doc exists, the command
+    // reports failure, and the pointer can be re-created by hand).
+    if let Some(summary) = schema_summary {
+        crate::documents::write_schema_pointer(&db, &doc, &summary).map_err(|e| {
+            ServeError::internal(
+                &format!(
+                    "document {} created, but the schema pointer reflection failed",
+                    doc.id
+                ),
+                e,
+            )
+        })?;
+    }
+
+    Ok(Json(doc))
+}
+
+/// Shared preamble for the body-save and revise handlers below: fetch the
+/// document (404 when the id does not resolve) and refuse an archived one
+/// (4xx, not the 500 the blanket LegionError conversion would give it).
+/// Both handlers need this exact pre-check ahead of their mutating call, so
+/// it lives once here instead of twice.
+fn load_editable_document(
+    db: &Database,
+    id: &str,
+) -> Result<crate::documents::Document, ServeError> {
+    let doc = db
+        .get_document(id)?
+        .ok_or_else(|| ServeError::NotFound(format!("document '{id}' not found")))?;
+    if doc.archived_at.is_some() {
+        return Err(ServeError::BadRequest(format!(
+            "document '{id}' is archived and cannot be edited"
+        )));
+    }
+    Ok(doc)
+}
+
+/// Body for PUT /api/documents/{id}/body -- a debounced editor working-copy
+/// save. Merges `body` into the document's payload without touching
+/// `revision`; a revision is cut only by an explicit `/revise` call or a
+/// status change (#1036).
+#[derive(serde::Deserialize)]
+pub struct UpdateBodyRequest {
+    pub body: String,
+}
+
+/// PUT /api/documents/{id}/body -- save the editor's working copy. Does not
+/// bump `revision`, so it is safe to call on every debounce tick while a
+/// user types: `verification.criteria` ids and any `spec_revision` a
+/// verdict cites live in other fields of `payload`, which this call never
+/// touches -- only `payload.body` and `updated_at` change, so a criterion's
+/// staleness check is unaffected by a body save. 404 for an unknown id; a
+/// 4xx (not 500) for an archived document or a malformed stored payload,
+/// via `load_editable_document` and `work_source_as_bad_request`.
+pub async fn api_document_update_body(
+    State(state): State<ChannelState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateBodyRequest>,
+) -> Result<Json<crate::documents::Document>, ServeError> {
+    let db = open_db(&state.data_dir)?;
+    load_editable_document(&db, &id)?;
+    Ok(Json(
+        db.update_document_body(&id, &req.body)
+            .map_err(work_source_as_bad_request)?,
+    ))
+}
+
+/// POST /api/documents/{id}/revise -- a thin HTTP wrapper over
+/// `Database::revise_document`, not a second implementation of revise
+/// semantics. The request body IS the full replacement payload as a JSON
+/// object -- NOT wrapped under a `"payload"` key the way POST
+/// /api/documents wraps it (see that handler's `CreateDocumentRequest`
+/// doc comment) -- same contract as `legion document revise`'s --from/stdin
+/// input: a whole-payload replace, not a patch. Mirrors
+/// `DocumentAction::Revise` (src/cli/document.rs) exactly (#1036 review,
+/// HIGH-1): a schema document gets the same structural gate `create`
+/// enforces, checked against the existing document's doc_type before the
+/// write, and the pointer reflection is refreshed after. 404 for an
+/// unknown id; a 4xx (not 500) for a non-object payload, an archived
+/// document, or an invalid schema payload (#1036 review, HIGH-2).
+pub async fn api_document_revise(
+    State(state): State<ChannelState>,
+    Path(id): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<crate::documents::Document>, ServeError> {
+    if !payload.is_object() {
+        return Err(ServeError::BadRequest(
+            "payload must be a JSON object".to_string(),
+        ));
+    }
+    let payload_str = payload.to_string();
+
+    let db = open_db(&state.data_dir)?;
+    let existing = load_editable_document(&db, &id)?;
+
+    let schema_summary = if existing.doc_type == "schema" {
+        Some(
+            crate::documents::validate_schema_payload(&payload_str)
+                .map_err(|e| ServeError::BadRequest(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+
+    let doc = db
+        .revise_document(&id, &payload_str)
+        .map_err(work_source_as_bad_request)?;
+
+    if let Some(summary) = schema_summary {
+        crate::documents::write_schema_pointer(&db, &doc, &summary).map_err(|e| {
+            ServeError::internal(
+                &format!(
+                    "document {} revised, but refreshing the schema pointer reflection failed",
+                    doc.id
+                ),
+                e,
+            )
+        })?;
+    }
+
+    Ok(Json(doc))
 }
 
 /// Pure builder for the `/health` JSON body. Separated from the axum
@@ -910,59 +1197,20 @@ mod tests {
     async fn api_post_returns_id_only_shape() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
-        let _db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let port = spawn_test_server(data_dir).await;
 
-        let (tx, _rx) = new_broadcast();
-        let state = ChannelState {
-            data_dir: data_dir.clone(),
-            tx,
-            started_at: chrono::Utc::now(),
-            role: ServerRole::Daemon,
-        };
-        let app = router(state);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve");
-        });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let response = tokio::task::spawn_blocking(move || {
-            use std::io::{Read, Write};
-            use std::net::TcpStream;
-
-            let body = r#"{"repo":"kelex","text":"hello shape"}"#;
-            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
-            stream
-                .write_all(
-                    format!(
-                        "POST /api/post HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                )
-                .expect("write");
-            let mut buf = Vec::new();
-            stream.read_to_end(&mut buf).expect("read");
-            buf
-        })
-        .await
-        .expect("spawn_blocking");
-
-        let response_str = String::from_utf8_lossy(&response);
+        let (status, body) = http_req(
+            port,
+            "POST",
+            "/api/post",
+            Some(r#"{"repo":"kelex","text":"hello shape"}"#),
+        )
+        .await;
         assert!(
-            response_str.starts_with("HTTP/1.1 200"),
-            "expected 200 OK, got: {}",
-            &response_str[..response_str.len().min(200)]
+            status.starts_with("HTTP/1.1 200"),
+            "expected 200 OK, got: {status}"
         );
-        let json_body = response_str
-            .split("\r\n\r\n")
-            .nth(1)
-            .expect("response body");
-        let parsed: serde_json::Value = serde_json::from_str(json_body.trim()).expect("parse body");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse body");
         let obj = parsed.as_object().expect("object body");
         assert!(obj.contains_key("id"), "body must carry the post id");
         assert_eq!(
@@ -988,50 +1236,10 @@ mod tests {
         db.insert_document(&meta, "{}").expect("insert");
         drop(db);
 
-        let (tx, _rx) = new_broadcast();
-        let state = ChannelState {
-            data_dir: data_dir.clone(),
-            tx,
-            started_at: chrono::Utc::now(),
-            role: ServerRole::Daemon,
-        };
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        tokio::spawn(async move {
-            axum::serve(listener, router(state)).await.expect("serve");
-        });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Raw HTTP/1.1 request helper -> (status_line, body).
-        async fn req(port: u16, method: &str, path: &str, body: Option<&str>) -> (String, String) {
-            let (method, path) = (method.to_string(), path.to_string());
-            let body = body.map(str::to_string);
-            tokio::task::spawn_blocking(move || {
-                use std::io::{Read, Write};
-                use std::net::TcpStream;
-                let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
-                let payload = body.unwrap_or_default();
-                let head = format!(
-                    "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    payload.len()
-                );
-                stream.write_all(head.as_bytes()).expect("write head");
-                stream.write_all(payload.as_bytes()).expect("write body");
-                let mut buf = Vec::new();
-                stream.read_to_end(&mut buf).expect("read");
-                let text = String::from_utf8_lossy(&buf).to_string();
-                let status = text.lines().next().unwrap_or("").to_string();
-                let body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
-                (status, body)
-            })
-            .await
-            .expect("spawn_blocking")
-        }
+        let port = spawn_test_server(data_dir).await;
 
         // Publish flips draft -> published and echoes the updated row.
-        let (status, body) = req(
+        let (status, body) = http_req(
             port,
             "POST",
             "/api/documents/FR-SERVE-1/status",
@@ -1043,18 +1251,18 @@ mod tests {
         assert_eq!(parsed["status"], "published");
 
         // The flip persisted -- a fresh GET sees published.
-        let (status, body) = req(port, "GET", "/api/documents/FR-SERVE-1", None).await;
+        let (status, body) = http_req(port, "GET", "/api/documents/FR-SERVE-1", None).await;
         assert!(status.starts_with("HTTP/1.1 200"), "view: {status}");
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse view body");
         assert_eq!(parsed["status"], "published");
 
         // Missing id is a 404 on both read and mutate, not a 500.
-        let (view_missing, _) = req(port, "GET", "/api/documents/NOPE", None).await;
+        let (view_missing, _) = http_req(port, "GET", "/api/documents/NOPE", None).await;
         assert!(
             view_missing.starts_with("HTTP/1.1 404"),
             "view-missing: {view_missing}"
         );
-        let (post_missing, _) = req(
+        let (post_missing, _) = http_req(
             port,
             "POST",
             "/api/documents/NOPE/status",
@@ -1064,6 +1272,522 @@ mod tests {
         assert!(
             post_missing.starts_with("HTTP/1.1 404"),
             "post-missing: {post_missing}"
+        );
+    }
+
+    /// Boots `router(state)` on an ephemeral port for tests that need real
+    /// HTTP semantics (status codes, raw body text) rather than calling
+    /// handler functions directly. `data_dir` must already hold a legion.db
+    /// (or be empty -- the server opens/creates it lazily per request).
+    async fn spawn_test_server(data_dir: PathBuf) -> u16 {
+        let (tx, _rx) = new_broadcast();
+        let state = ChannelState {
+            data_dir,
+            tx,
+            started_at: chrono::Utc::now(),
+            role: ServerRole::Daemon,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        // No sleep before returning (#1036 review, LOW): `TcpListener::bind`
+        // already puts the socket into the OS listen state, so a connect
+        // against `port` queues correctly even before the spawned task's
+        // accept loop has run -- the fixed 100ms delay this used to have
+        // was pure latency, not a correctness requirement.
+        tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.expect("serve");
+        });
+        port
+    }
+
+    /// Raw HTTP/1.1 request helper -> (status_line, body). Every test in
+    /// this module that needs real HTTP semantics shares this one
+    /// implementation rather than hand-rolling its own TCP round trip.
+    async fn http_req(port: u16, method: &str, path: &str, body: Option<&str>) -> (String, String) {
+        let (method, path) = (method.to_string(), path.to_string());
+        let body = body.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            use std::net::TcpStream;
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+            let payload = body.unwrap_or_default();
+            let head = format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            stream.write_all(head.as_bytes()).expect("write head");
+            stream.write_all(payload.as_bytes()).expect("write body");
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).expect("read");
+            let text = String::from_utf8_lossy(&buf).to_string();
+            let status = text.lines().next().unwrap_or("").to_string();
+            let body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
+            (status, body)
+        })
+        .await
+        .expect("spawn_blocking")
+    }
+
+    #[tokio::test]
+    async fn api_document_create_round_trip_and_generates_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let port = spawn_test_server(data_dir).await;
+
+        let (status, body) = http_req(
+            port,
+            "POST",
+            "/api/documents",
+            Some(r#"{"doc_type":"thesis","owner":"legion","payload":{"title":"New intention"}}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "create: {status} {body}"
+        );
+        let created: serde_json::Value = serde_json::from_str(&body).expect("parse create body");
+        assert_eq!(created["doc_type"], "thesis");
+        assert_eq!(created["owner"], "legion");
+        let id = created["id"].as_str().expect("id is a string").to_string();
+        // No id was supplied -- a UUIDv7 is generated.
+        assert!(
+            uuid::Uuid::parse_str(&id).is_ok_and(|u| u.get_version_num() == 7),
+            "expected a generated UUIDv7, got {id}"
+        );
+        let payload: serde_json::Value =
+            serde_json::from_str(created["payload"].as_str().expect("payload is a string"))
+                .expect("parse payload");
+        assert_eq!(payload["title"], "New intention");
+
+        // The insert persisted -- a fresh GET sees it.
+        let (status, body) = http_req(port, "GET", &format!("/api/documents/{id}"), None).await;
+        assert!(status.starts_with("HTTP/1.1 200"), "view: {status}");
+        let fetched: serde_json::Value = serde_json::from_str(&body).expect("parse view body");
+        assert_eq!(fetched["id"], id);
+    }
+
+    #[tokio::test]
+    async fn api_document_create_schema_dual_writes_pointer_reflection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let port = spawn_test_server(data_dir.clone()).await;
+
+        let schema_payload = serde_json::json!({
+            "$schema": "https://json-schema.org/draft-07/schema#",
+            "title": "Widget",
+            "description": "A test schema",
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        });
+        let create_body = serde_json::json!({
+            "doc_type": "schema",
+            "owner": "legion",
+            "payload": schema_payload,
+        })
+        .to_string();
+        let (status, body) = http_req(port, "POST", "/api/documents", Some(&create_body)).await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "create: {status} {body}"
+        );
+        let created: serde_json::Value = serde_json::from_str(&body).expect("parse create body");
+        let id = created["id"].as_str().expect("id").to_string();
+
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let reflections = db
+            .get_reflections_by_domain(
+                "legion",
+                "schema",
+                10,
+                crate::recall::ArchiveMode::Hot,
+                &crate::timerange::TimeRange::default(),
+            )
+            .expect("get reflections by domain");
+        assert!(
+            reflections
+                .iter()
+                .any(|r| r.text.contains("Widget") && r.text.contains(&id)),
+            "expected a schema pointer reflection naming the new document, got: {reflections:?}"
+        );
+
+        // An invalid schema payload (missing every required field) is
+        // rejected at create, not written through (#1036 review, MED-2).
+        let (status, _) = http_req(
+            port,
+            "POST",
+            "/api/documents",
+            Some(r#"{"doc_type":"schema","owner":"legion","payload":{}}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "invalid schema payload: {status}"
+        );
+    }
+
+    /// The revise-side mirror of
+    /// `api_document_create_schema_dual_writes_pointer_reflection` (#1036
+    /// review, MED-2, HIGH-1 coverage): a non-object revise payload and an
+    /// invalid schema payload are both rejected with 400 and leave
+    /// `revision` unchanged, and a valid schema revise bumps `revision` and
+    /// refreshes the pointer reflection.
+    #[tokio::test]
+    async fn api_document_revise_schema_refreshes_pointer_and_rejects_invalid_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let port = spawn_test_server(data_dir.clone()).await;
+
+        let schema_payload = serde_json::json!({
+            "$schema": "https://json-schema.org/draft-07/schema#",
+            "title": "Gadget",
+            "description": "A revisable test schema",
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        });
+        let create_body = serde_json::json!({
+            "doc_type": "schema",
+            "owner": "legion",
+            "payload": schema_payload,
+        })
+        .to_string();
+        let (status, body) = http_req(port, "POST", "/api/documents", Some(&create_body)).await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "create: {status} {body}"
+        );
+        let created: serde_json::Value = serde_json::from_str(&body).expect("parse create body");
+        let id = created["id"].as_str().expect("id").to_string();
+
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        assert_eq!(db.document_revision(&id).unwrap(), 1);
+
+        // A non-object revise payload is rejected before it ever reaches
+        // revise_document.
+        let (status, _) = http_req(
+            port,
+            "POST",
+            &format!("/api/documents/{id}/revise"),
+            Some(r#""not an object""#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "non-object revise payload: {status}"
+        );
+        assert_eq!(
+            db.document_revision(&id).unwrap(),
+            1,
+            "the rejected non-object payload must not bump revision"
+        );
+
+        // An invalid schema payload (missing every required field) is
+        // rejected at revise, matching create, and does not bump revision.
+        let (status, _) = http_req(
+            port,
+            "POST",
+            &format!("/api/documents/{id}/revise"),
+            Some("{}"),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "invalid schema revise payload: {status}"
+        );
+        assert_eq!(
+            db.document_revision(&id).unwrap(),
+            1,
+            "an invalid schema revise must not bump revision"
+        );
+
+        // A valid schema revise bumps revision and refreshes the pointer
+        // reflection.
+        let revised_schema_payload = serde_json::json!({
+            "$schema": "https://json-schema.org/draft-07/schema#",
+            "title": "Gadget Mark Two",
+            "description": "A revised test schema",
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        })
+        .to_string();
+        let (status, body) = http_req(
+            port,
+            "POST",
+            &format!("/api/documents/{id}/revise"),
+            Some(&revised_schema_payload),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "valid schema revise: {status} {body}"
+        );
+        assert_eq!(db.document_revision(&id).unwrap(), 2);
+
+        let reflections = db
+            .get_reflections_by_domain(
+                "legion",
+                "schema",
+                10,
+                crate::recall::ArchiveMode::Hot,
+                &crate::timerange::TimeRange::default(),
+            )
+            .expect("get reflections by domain");
+        assert!(
+            reflections
+                .iter()
+                .any(|r| r.text.contains("Gadget Mark Two") && r.text.contains(&id)),
+            "expected the revise to refresh the schema pointer reflection, got: {reflections:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_document_create_rejects_non_object_payload_and_duplicate_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let port = spawn_test_server(data_dir).await;
+
+        let (status, _) = http_req(
+            port,
+            "POST",
+            "/api/documents",
+            Some(r#"{"doc_type":"thesis","owner":"legion","payload":"not an object"}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "non-object payload: {status}"
+        );
+        // Nothing was written through despite the 400 (#1036 review, MED-2).
+        let (status, body) = http_req(port, "GET", "/api/documents", None).await;
+        assert!(status.starts_with("HTTP/1.1 200"), "list: {status}");
+        let listed: serde_json::Value = serde_json::from_str(&body).expect("parse list body");
+        assert_eq!(
+            listed.as_array().expect("array body").len(),
+            0,
+            "the rejected non-object payload must not have landed a row: {body}"
+        );
+
+        let first_create =
+            r#"{"doc_type":"thesis","owner":"legion","id":"TH-DUP","payload":{"title":"first"}}"#;
+        let (status, _) = http_req(port, "POST", "/api/documents", Some(first_create)).await;
+        assert!(status.starts_with("HTTP/1.1 200"), "first create: {status}");
+
+        let duplicate_create =
+            r#"{"doc_type":"thesis","owner":"legion","id":"TH-DUP","payload":{"title":"second"}}"#;
+        let (status, _) = http_req(port, "POST", "/api/documents", Some(duplicate_create)).await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "duplicate id must be a 4xx, not a 500: {status}"
+        );
+
+        // The rejected duplicate must not have overwritten the original
+        // (#1036 review, MED-2).
+        let (status, body) = http_req(port, "GET", "/api/documents/TH-DUP", None).await;
+        assert!(status.starts_with("HTTP/1.1 200"), "view: {status}");
+        let fetched: serde_json::Value = serde_json::from_str(&body).expect("parse view body");
+        let payload: serde_json::Value =
+            serde_json::from_str(fetched["payload"].as_str().expect("payload string"))
+                .expect("parse payload");
+        assert_eq!(
+            payload["title"], "first",
+            "the first create's payload must survive the rejected duplicate"
+        );
+    }
+
+    /// `doc_type` and `surface` get the same charset/length gate as `owner`
+    /// and `id` (#1036 review, LOW): a caller cannot smuggle a character
+    /// outside `[A-Za-z0-9._-]` into either indexed column.
+    #[tokio::test]
+    async fn api_document_create_validates_doc_type_and_surface() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let port = spawn_test_server(data_dir).await;
+
+        let (status, _) = http_req(
+            port,
+            "POST",
+            "/api/documents",
+            Some(r#"{"doc_type":"bad type!","owner":"legion","payload":{}}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "invalid doc_type: {status}"
+        );
+
+        let (status, _) = http_req(
+            port,
+            "POST",
+            "/api/documents",
+            Some(r#"{"doc_type":"thesis","owner":"legion","surface":"bad surface!","payload":{}}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "invalid surface: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_document_update_body_leaves_revision_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let meta = crate::documents::DocumentMeta {
+            id: Some("TH-BODY-1"),
+            doc_type: "thesis",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "legion",
+        };
+        db.insert_document(&meta, r#"{"title":"x"}"#)
+            .expect("insert");
+        assert_eq!(db.document_revision("TH-BODY-1").unwrap(), 1);
+
+        let port = spawn_test_server(data_dir).await;
+        let (status, body) = http_req(
+            port,
+            "PUT",
+            "/api/documents/TH-BODY-1/body",
+            Some(r#"{"body":"draft text"}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "body save: {status} {body}"
+        );
+        let updated: serde_json::Value = serde_json::from_str(&body).expect("parse body");
+        let payload: serde_json::Value =
+            serde_json::from_str(updated["payload"].as_str().expect("payload string"))
+                .expect("parse payload");
+        assert_eq!(payload["body"], "draft text");
+        assert_eq!(payload["title"], "x", "unrelated fields survive");
+        assert_eq!(
+            db.document_revision("TH-BODY-1").unwrap(),
+            1,
+            "a body save must not bump revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_document_revise_bumps_revision_and_replaces_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let meta = crate::documents::DocumentMeta {
+            id: Some("TH-REVISE-1"),
+            doc_type: "thesis",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "legion",
+        };
+        db.insert_document(&meta, r#"{"title":"old"}"#)
+            .expect("insert");
+        assert_eq!(db.document_revision("TH-REVISE-1").unwrap(), 1);
+
+        let port = spawn_test_server(data_dir).await;
+        let (status, body) = http_req(
+            port,
+            "POST",
+            "/api/documents/TH-REVISE-1/revise",
+            Some(r#"{"title":"new"}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "revise: {status} {body}"
+        );
+        let revised: serde_json::Value = serde_json::from_str(&body).expect("parse body");
+        let payload: serde_json::Value =
+            serde_json::from_str(revised["payload"].as_str().expect("payload string"))
+                .expect("parse payload");
+        assert_eq!(
+            payload,
+            serde_json::json!({"title": "new"}),
+            "revise replaces, not merges"
+        );
+        assert_eq!(db.document_revision("TH-REVISE-1").unwrap(), 2);
+
+        // A second revise bumps again, not just once total (#1036 review,
+        // MED-2).
+        let (status, _) = http_req(
+            port,
+            "POST",
+            "/api/documents/TH-REVISE-1/revise",
+            Some(r#"{"title":"newer"}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "second revise: {status}"
+        );
+        assert_eq!(db.document_revision("TH-REVISE-1").unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn api_document_body_and_revise_404_for_unknown_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let port = spawn_test_server(data_dir).await;
+
+        let (status, _) = http_req(
+            port,
+            "PUT",
+            "/api/documents/NOPE/body",
+            Some(r#"{"body":"x"}"#),
+        )
+        .await;
+        assert!(status.starts_with("HTTP/1.1 404"), "body-missing: {status}");
+
+        let (status, _) = http_req(port, "POST", "/api/documents/NOPE/revise", Some("{}")).await;
+        assert!(
+            status.starts_with("HTTP/1.1 404"),
+            "revise-missing: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_document_body_and_revise_refuse_archived_document() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let meta = crate::documents::DocumentMeta {
+            id: Some("TH-ARCHIVED-1"),
+            doc_type: "thesis",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "legion",
+        };
+        db.insert_document(&meta, "{}").expect("insert");
+        db.archive_document("TH-ARCHIVED-1").expect("archive");
+
+        let port = spawn_test_server(data_dir).await;
+        let (status, _) = http_req(
+            port,
+            "PUT",
+            "/api/documents/TH-ARCHIVED-1/body",
+            Some(r#"{"body":"x"}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "archived body-save must be a 4xx, not a 500: {status}"
+        );
+
+        let (status, _) = http_req(
+            port,
+            "POST",
+            "/api/documents/TH-ARCHIVED-1/revise",
+            Some("{}"),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "archived revise must be a 4xx, not a 500: {status}"
         );
     }
 
