@@ -40,31 +40,18 @@ pub(crate) fn seed_type_schema(db: &Database, doc_type: &str) {
     if db.schema_for_type(doc_type).is_ok() {
         return;
     }
-    // Built via `Map::insert` rather than the `json!` macro: the macro's key
-    // position wants a literal, and `DOC_TYPE_KEYWORD` is a `const &str`
-    // shared with the real validator so the two never drift apart.
-    let mut schema_obj = serde_json::Map::new();
-    schema_obj.insert(
-        "$schema".to_string(),
-        serde_json::Value::String("http://json-schema.org/draft-07/schema#".to_string()),
-    );
-    schema_obj.insert(
-        "title".to_string(),
-        serde_json::Value::String(format!("{doc_type} (test stub)")),
-    );
-    schema_obj.insert(
-        "type".to_string(),
-        serde_json::Value::String("object".to_string()),
-    );
-    schema_obj.insert(
-        "properties".to_string(),
-        serde_json::json!({"meta": {"type": "object"}}),
-    );
-    schema_obj.insert(
-        crate::documents::DOC_TYPE_KEYWORD.to_string(),
-        serde_json::Value::String(doc_type.to_string()),
-    );
-    let schema = serde_json::Value::Object(schema_obj).to_string();
+    let mut schema = serde_json::json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": format!("{doc_type} (test stub)"),
+        "type": "object",
+        "properties": {"meta": {"type": "object"}},
+    });
+    // `DOC_TYPE_KEYWORD` is a `const &str` shared with the real validator,
+    // so it is set via index assignment rather than a literal key above --
+    // the `json!` macro's key position wants a literal -- keeping this and
+    // `schema_for_type`'s lookup from ever drifting apart.
+    schema[crate::documents::DOC_TYPE_KEYWORD] = serde_json::json!(doc_type);
+    let schema = schema.to_string();
     let meta = crate::documents::DocumentMeta {
         id: None,
         doc_type: "schema",

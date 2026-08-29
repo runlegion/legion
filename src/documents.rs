@@ -449,6 +449,34 @@ impl std::fmt::Debug for TypeSchema {
     }
 }
 
+/// Compile `value` as a JSON Schema validator (#1062). `what` names the
+/// schema in the error message (e.g. `"schema document '<id>' for type
+/// '<type>'"`, or `"stored schema '<id>'"`) so a compile failure -- a
+/// `$ref` to a missing definition, a malformed `type`, or any other
+/// draft-07/2020-12 violation -- is traceable to its source. Shared by
+/// `schema_for_type`, `validate_schema_payload`, and `legion document
+/// validate` so all three report a compile failure the same way.
+pub fn compile_schema(value: &serde_json::Value, what: &str) -> Result<jsonschema::Validator> {
+    jsonschema::validator_for(value)
+        .map_err(|e| LegionError::WorkSource(format!("{what} does not compile: {e}")))
+}
+
+/// Validate `instance` against `validator`, returning one `<json pointer>:
+/// <message>` line per violation (#1062) -- the pointer is empty for a
+/// violation rooted at the instance itself (e.g. a missing required
+/// top-level property). Shared by `validate_document_payload` and `legion
+/// document validate` so a write refusal and an explicit validate call
+/// report the same violation in the same form.
+pub fn schema_violations(
+    validator: &jsonschema::Validator,
+    instance: &serde_json::Value,
+) -> Vec<String> {
+    validator
+        .iter_errors(instance)
+        .map(|e| format!("{}: {e}", e.instance_path()))
+        .collect()
+}
+
 impl Database {
     /// Resolve the schema governing `doc_type` (#1062): the single hot
     /// (non-archived) document with `doc_type = "schema"` whose payload
@@ -496,12 +524,10 @@ impl Database {
                             only.id
                         ))
                     })?;
-                let validator = jsonschema::validator_for(&schema_value).map_err(|e| {
-                    LegionError::WorkSource(format!(
-                        "schema document '{}' for type '{doc_type}' does not compile: {e}",
-                        only.id
-                    ))
-                })?;
+                let validator = compile_schema(
+                    &schema_value,
+                    &format!("schema document '{}' for type '{doc_type}'", only.id),
+                )?;
                 Ok(TypeSchema {
                     schema_id: only.id.clone(),
                     validator,
@@ -526,12 +552,14 @@ impl Database {
     /// well-formedness is checked by `validate_schema_payload` at the
     /// CLI/channel boundary (draft-07 shape + a jsonschema compile check),
     /// not by resolving a schema that would have to govern the type
-    /// "schema" itself -- that schema cannot exist without circularity, and
-    /// concretely: the one-time `legion document revise` calls that add
-    /// `x-doc-type` to the eleven landed schema rows go through this same
-    /// `revise_document` path with `doc_type = "schema"`. If the generic
-    /// check applied here, that migration -- and every future schema
-    /// landing -- would be impossible.
+    /// "schema" itself -- that schema cannot exist without circularity.
+    /// Concretely: `revise_document` (which this call also gates) is how a
+    /// schema document is ever edited, including landing a future schema;
+    /// if the generic check applied to `doc_type = "schema"` here, no
+    /// schema could ever be revised. (The eleven schema rows this issue
+    /// targets already carry `x-doc-type`, added by hand on 2026-08-29 --
+    /// this exemption is about the bootstrap circularity and every future
+    /// schema landing, not a one-time migration step.)
     pub fn validate_document_payload(
         &self,
         doc_type: &str,
@@ -541,11 +569,7 @@ impl Database {
             return Ok(());
         }
         let type_schema = self.schema_for_type(doc_type)?;
-        let errors: Vec<String> = type_schema
-            .validator
-            .iter_errors(payload)
-            .map(|e| format!("{}: {e}", e.instance_path()))
-            .collect();
+        let errors = schema_violations(&type_schema.validator, payload);
         if errors.is_empty() {
             Ok(())
         } else {
@@ -637,8 +661,7 @@ pub fn validate_schema_payload(payload: &str) -> Result<SchemaSummary> {
     // at create/revise -- not silently accepted and discovered only the
     // first time someone tries to validate an instance (or write a
     // document of the governed type) against it.
-    jsonschema::validator_for(&value)
-        .map_err(|e| LegionError::WorkSource(format!("schema does not compile: {e}")))?;
+    compile_schema(&value, "schema")?;
 
     let description = obj
         .get("description")

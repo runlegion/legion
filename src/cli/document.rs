@@ -371,16 +371,9 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
                 serde_json::from_str(&instance_text).map_err(|e| {
                     error::LegionError::WorkSource(format!("instance is not valid JSON: {e}"))
                 })?;
-            let validator = jsonschema::validator_for(&schema_value).map_err(|e| {
-                error::LegionError::WorkSource(format!(
-                    "stored schema '{}' does not compile: {e}",
-                    doc.id
-                ))
-            })?;
-            let errors: Vec<String> = validator
-                .iter_errors(&instance)
-                .map(|e| format!("{}: {e}", e.instance_path()))
-                .collect();
+            let validator =
+                documents::compile_schema(&schema_value, &format!("stored schema '{}'", doc.id))?;
+            let errors = documents::schema_violations(&validator, &instance);
             if errors.is_empty() {
                 println!("valid against schema {}", doc.id);
             } else {

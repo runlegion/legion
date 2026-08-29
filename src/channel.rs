@@ -149,26 +149,32 @@ impl From<LegionError> for ServeError {
 
 impl IntoResponse for ServeError {
     fn into_response(self) -> Response {
+        // `Display` borrows, so computing it up front leaves `self` free to
+        // move into the match below -- one flat match over every variant,
+        // each yielding its status directly, no nested match and no
+        // `unreachable!` arm to keep in sync with the enum by hand.
+        let message = self.to_string();
         match self {
-            ServeError::UnprocessableEntity {
-                message,
-                violations,
-            } => {
-                let body = serde_json::json!({ "error": message, "violations": violations });
-                (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
-            }
-            other => {
-                let status = match &other {
-                    ServeError::BadRequest(_) => StatusCode::BAD_REQUEST,
-                    ServeError::NotFound(_) => StatusCode::NOT_FOUND,
-                    ServeError::DbOpen | ServeError::IndexOpen | ServeError::Internal(_) => {
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    }
-                    ServeError::UnprocessableEntity { .. } => unreachable!("handled above"),
-                };
-                let body = serde_json::json!({ "error": other.to_string() });
-                (status, Json(body)).into_response()
-            }
+            ServeError::UnprocessableEntity { violations, .. } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": message, "violations": violations })),
+            )
+                .into_response(),
+            ServeError::BadRequest(_) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": message })),
+            )
+                .into_response(),
+            ServeError::NotFound(_) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": message })),
+            )
+                .into_response(),
+            ServeError::DbOpen | ServeError::IndexOpen | ServeError::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": message })),
+            )
+                .into_response(),
         }
     }
 }
@@ -346,15 +352,10 @@ fn validate_identifier(value: &str, field: &str) -> Result<(), ServeError> {
 /// `SchemaViolation` (#1062) maps to 422 with the violation list riding
 /// alongside the message. `WorkSource` -- a caller-visible input problem:
 /// bad JSON shape, a duplicate id, a document already archived, a
-/// corrupted stored payload -- maps to 400. Every other `LegionError`
-/// variant, INCLUDING a missing or ambiguous type schema (also
-/// `WorkSource`, per #1062's Error Handling section, which calls for 500
-/// there as an operator setup fault rather than a caller fault) is a
-/// genuine server-side failure and keeps the blanket 500 the
-/// `From<LegionError>` conversion gives it -- this mapper cannot tell a
-/// missing-schema `WorkSource` apart from a caller-shaped one by variant
-/// alone, so that specific case still surfaces as 400 here, a known
-/// divergence from the issue text rather than an oversight.
+/// corrupted stored payload, or a missing or ambiguous type schema -- maps
+/// to 400. Every other `LegionError` variant is a genuine server-side
+/// failure and keeps the blanket 500 the `From<LegionError>` conversion
+/// gives it.
 fn document_write_error(e: LegionError) -> ServeError {
     if let LegionError::SchemaViolation { errors, .. } = &e {
         return ServeError::UnprocessableEntity {
