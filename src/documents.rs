@@ -477,20 +477,21 @@ pub fn schema_violations(
         .collect()
 }
 
-/// Cap for both the literal JSON nesting depth and the `$ref` chain length
-/// a schema payload may carry before `compile_schema` ever sees it (#1062
-/// review, HIGH). `jsonschema` 0.52's compiler walks a schema with
-/// unbounded native recursion -- no depth or recursion-limit option
+/// Cap for both the literal JSON nesting depth and the total `$ref`
+/// population a schema payload may carry before `compile_schema` ever sees
+/// it (#1062 review, HIGH). `jsonschema` 0.52's compiler walks a schema
+/// with unbounded native recursion -- no depth or recursion-limit option
 /// anywhere in its public `ValidationOptions` -- so a schema with a few
-/// hundred single-hop `$ref` aliases in a flat `definitions` map, or a few
-/// hundred levels of plain object nesting with no `$ref` at all, overflows
-/// the stack. That is a stack-guard-page trap (`SIGABRT`), not a panic --
-/// `catch_unwind` never sees it, so it takes the whole daemon process down
-/// regardless of which thread compiles the schema, and no thread-stack
-/// size closes it: the measured crash floor (~500 hops, ~18 KB) sits far
-/// below the 4 MiB request-body cap, so a bigger stack only raises the bar
-/// the attacker's budget still clears. Every real landed schema is far
-/// under 64 of either.
+/// hundred single-hop `$ref` aliases, however they are nested or wherever
+/// they point, or a few hundred levels of plain object nesting with no
+/// `$ref` at all, overflows the stack. That is a stack-guard-page trap
+/// (`SIGABRT`), not a panic -- `catch_unwind` never sees it, so it takes
+/// the whole daemon process down regardless of which thread compiles the
+/// schema, and no thread-stack size closes it: the measured crash floor
+/// (~500 hops, ~18 KB) sits far below the 4 MiB request-body cap, so a
+/// bigger stack only raises the bar the attacker's budget still clears.
+/// Every real landed schema carries at most three `$ref`s, far under 64 of
+/// either.
 const MAX_SCHEMA_DEPTH: usize = 64;
 
 /// Guard `root` against the two shapes that crash `jsonschema` 0.52's
@@ -507,13 +508,31 @@ const MAX_SCHEMA_DEPTH: usize = 64;
 ///     schema with no `$ref` at all crashes the compiler exactly the same
 ///     way, since the walk that blows the stack is a generic structural
 ///     one, not `$ref`-specific.
-/// (b) `$ref` chain length: a schema whose JSON is shallow -- a flat
-///     `definitions`/`$defs` map -- but whose entries alias each other
-///     (`d0` -> `d1` -> ... -> `d499`) crashes the same way, because the
-///     compiler's dereference graph is exactly as deep as the chain even
-///     though the literal JSON nesting is not. A pointer that reappears in
-///     its own chain is refused immediately as a cycle, independent of the
-///     depth cap.
+/// (b) Total `$ref` population: a schema whose JSON is shallow -- entries
+///     that alias each other into a long dereference chain -- crashes the
+///     same way even though the literal nesting is not deep. A prior
+///     version of this axis tried to FOLLOW a chain (matching only a bare
+///     top-level `{"$ref": "..."}` under a literal `#/definitions/` or
+///     `#/$defs/` prefix) and was bypassed by five independent, trivial
+///     shapes (#1062 review, HIGH, round 2): a `$ref` one level inside
+///     `properties`, inside `items`, inside `allOf`, a `$ref` to a
+///     non-`definitions` location (e.g. `#/properties/pN`), and a `$ref`
+///     using RFC 6901 escapes the lookup never unescaped -- every one of
+///     them dodges the follow-logic's assumptions about where a `$ref`
+///     sits and how its pointer is spelled while still crashing the
+///     compiler. Modeling every keyword the compiler might walk into
+///     (`properties`, `items`, `allOf`/`anyOf`/`oneOf`, `patternProperties`,
+///     ...) plus full JSON-Pointer resolution is a losing race against a
+///     crate the guard does not control. Counting instead of following
+///     sidesteps needing to know any of that: a dereference chain of
+///     length N needs at least N distinct `$ref` nodes somewhere in the
+///     document, however they are nested, wherever they point, however
+///     they are spelled -- so bounding the document's total `$ref` count
+///     bounds every possible chain by construction, not by case coverage.
+///     A same-document `$ref` cycle (e.g. two definitions aliasing each
+///     other) is legal JSON Schema that the crate compiles without
+///     unbounded recursion, so it is not specially refused here -- it is
+///     bounded by the same count, like any other `$ref` structure.
 fn guard_schema_depth(root: &serde_json::Value) -> Result<()> {
     // (a) literal nesting: a generic structural walk with no JSON Schema
     // semantics -- every nested object/array value, regardless of which
@@ -538,20 +557,16 @@ fn guard_schema_depth(root: &serde_json::Value) -> Result<()> {
         }
     }
 
-    // (b) $ref chain length: every "$ref" string found anywhere in the
-    // document (collected with the same iterative discipline) that names a
-    // same-document "#/definitions/<name>" or "#/$defs/<name>" pointer is
-    // followed: if its target is itself just another such $ref, that is
-    // the alias-chain shape that crashes the compiler on a shallow, flat
-    // definitions map, so the walk continues, counting hops and the
-    // pointers already seen in THIS chain.
-    let mut refs: Vec<&str> = Vec::new();
+    // (b) total $ref population: every object anywhere in the document
+    // carrying a "$ref" key counts once, regardless of which keyword holds
+    // it, what the pointer targets, or how the pointer is spelled.
+    let mut ref_count: usize = 0;
     let mut walk: Vec<&serde_json::Value> = vec![root];
     while let Some(value) = walk.pop() {
         match value {
             serde_json::Value::Object(map) => {
-                if let Some(r) = map.get("$ref").and_then(|v| v.as_str()) {
-                    refs.push(r);
+                if map.contains_key("$ref") {
+                    ref_count += 1;
                 }
                 walk.extend(map.values());
             }
@@ -561,39 +576,13 @@ fn guard_schema_depth(root: &serde_json::Value) -> Result<()> {
             _ => {}
         }
     }
-
-    for start in refs {
-        let mut current = start;
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        loop {
-            if !seen.insert(current) {
-                return Err(LegionError::WorkSource(format!(
-                    "schema \"$ref\" chain starting at \"{start}\" cycles back to \"{current}\" \
-                     -- refused before compiling"
-                )));
-            }
-            if seen.len() > MAX_SCHEMA_DEPTH {
-                return Err(LegionError::WorkSource(format!(
-                    "schema \"$ref\" chain starting at \"{start}\" exceeds {MAX_SCHEMA_DEPTH} \
-                     hops -- refused before compiling (the validator has no recursion limit; \
-                     a sufficiently long chain crashes the process)"
-                )));
-            }
-            let Some(name) = current
-                .strip_prefix("#/definitions/")
-                .or_else(|| current.strip_prefix("#/$defs/"))
-            else {
-                break;
-            };
-            let target = root
-                .get("definitions")
-                .and_then(|d| d.get(name))
-                .or_else(|| root.get("$defs").and_then(|d| d.get(name)));
-            let Some(next_ref) = target.and_then(|t| t.get("$ref")).and_then(|r| r.as_str()) else {
-                break;
-            };
-            current = next_ref;
-        }
+    if ref_count > MAX_SCHEMA_DEPTH {
+        return Err(LegionError::WorkSource(format!(
+            "schema contains {ref_count} \"$ref\" occurrences, exceeding {MAX_SCHEMA_DEPTH} -- \
+             refused before compiling (the validator has no recursion limit; a dereference \
+             chain of length N needs at least N \"$ref\" nodes, so bounding the total bounds \
+             every possible chain)"
+        )));
     }
 
     Ok(())
@@ -1260,7 +1249,7 @@ mod tests {
 
     /// A schema whose JSON is shallow (a flat `definitions` map) but whose
     /// entries alias each other in a 600-hop `$ref` chain is refused,
-    /// naming the hop bound, before it ever reaches `compile_schema`.
+    /// naming the count bound, before it ever reaches `compile_schema`.
     #[test]
     fn schema_payload_rejects_long_ref_chain() {
         const N: usize = 600;
@@ -1282,8 +1271,162 @@ mod tests {
         });
         let err = validate_schema_payload(&schema.to_string()).unwrap_err();
         assert!(
-            err.to_string().contains("hops"),
-            "expected the ref-chain bound named, got: {err}"
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 2: a `$ref` chain nested one level inside
+    /// `properties` (`d_i = {"type":"object","properties":{"a":{"$ref":
+    /// ...}}}`) bypassed the prior chain-following axis entirely, because
+    /// the follow-logic only looked for a bare top-level `$ref`. The
+    /// count-based axis does not care where a `$ref` sits, so this is
+    /// refused the same as the bare-alias shape.
+    #[test]
+    fn schema_payload_rejects_ref_chain_nested_in_properties() {
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("d{i}"),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"a": {"$ref": format!("#/definitions/d{}", i + 1)}}
+                }),
+            );
+        }
+        definitions.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Chain In Properties",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/d0"}},
+            "definitions": definitions,
+            "x-doc-type": "ref-chain-in-properties"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 2: the same bypass via `items` instead of
+    /// `properties`.
+    #[test]
+    fn schema_payload_rejects_ref_chain_nested_in_items() {
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("d{i}"),
+                serde_json::json!({
+                    "type": "array",
+                    "items": {"$ref": format!("#/definitions/d{}", i + 1)}
+                }),
+            );
+        }
+        definitions.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Chain In Items",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/d0"}},
+            "definitions": definitions,
+            "x-doc-type": "ref-chain-in-items"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 2: the same bypass via `allOf`.
+    #[test]
+    fn schema_payload_rejects_ref_chain_nested_in_all_of() {
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("d{i}"),
+                serde_json::json!({"allOf": [{"$ref": format!("#/definitions/d{}", i + 1)}]}),
+            );
+        }
+        definitions.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Chain In allOf",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/d0"}},
+            "definitions": definitions,
+            "x-doc-type": "ref-chain-in-all-of"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 2: a `$ref` chain that never touches
+    /// `definitions`/`$defs` at all (`p_i = {"$ref": "#/properties/p_{i+1}"}`,
+    /// living entirely under `properties`) bypassed the prior axis, which
+    /// only recognized a `#/definitions/` or `#/$defs/` prefix. The
+    /// count-based axis does not interpret the pointer at all.
+    #[test]
+    fn schema_payload_rejects_ref_chain_targeting_properties() {
+        const N: usize = 600;
+        let mut properties = serde_json::Map::new();
+        for i in 0..N {
+            properties.insert(
+                format!("p{i}"),
+                serde_json::json!({"$ref": format!("#/properties/p{}", i + 1)}),
+            );
+        }
+        properties.insert(format!("p{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Chain Targeting Properties",
+            "type": "object",
+            "properties": properties,
+            "x-doc-type": "ref-chain-targeting-properties"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 2: a `$ref` chain using RFC 6901
+    /// JSON-Pointer escapes (`~1` for `/`) bypassed the prior axis, whose
+    /// lookup took the pointer segment verbatim instead of unescaping it.
+    /// The count-based axis does not resolve the pointer at all, so the
+    /// escaping is irrelevant to it.
+    #[test]
+    fn schema_payload_rejects_ref_chain_with_json_pointer_escapes() {
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("s/{i}"),
+                serde_json::json!({"$ref": format!("#/definitions/s~1{}", i + 1)}),
+            );
+        }
+        definitions.insert(format!("s/{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Chain With Escapes",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/s~10"}},
+            "definitions": definitions,
+            "x-doc-type": "ref-chain-with-escapes"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
         );
     }
 
@@ -1324,10 +1467,14 @@ mod tests {
         );
     }
 
-    /// A two-node `$ref` cycle is refused immediately as a cycle, not
-    /// merely tolerated up to the hop cap.
+    /// A two-node `$ref` cycle is legal JSON Schema (a normal way to write
+    /// a recursive shape) and `jsonschema` compiles it without unbounded
+    /// recursion (verified empirically: it does not crash), so the guard
+    /// does not specially refuse a cycle -- it is bounded by the same
+    /// $ref-count axis as any other structure, and two is far under the
+    /// cap, so this passes.
     #[test]
-    fn schema_payload_rejects_ref_cycle() {
+    fn schema_payload_accepts_a_ref_cycle_within_the_count_cap() {
         let schema = serde_json::json!({
             "$schema": "http://json-schema.org/draft-07/schema#",
             "title": "Ref Cycle",
@@ -1339,11 +1486,8 @@ mod tests {
             },
             "x-doc-type": "ref-cycle"
         });
-        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
-        assert!(
-            err.to_string().contains("cycles"),
-            "expected the cycle named, got: {err}"
-        );
+        validate_schema_payload(&schema.to_string())
+            .expect("a two-node $ref cycle within the count cap must be accepted");
     }
 
     /// The guard must not reject a real, valid landed schema -- every real
