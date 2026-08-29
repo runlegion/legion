@@ -477,20 +477,21 @@ pub fn schema_violations(
         .collect()
 }
 
-/// Cap for both the literal JSON nesting depth and the total `$ref`
-/// population a schema payload may carry before `compile_schema` ever sees
-/// it (#1062 review, HIGH). `jsonschema` 0.52's compiler walks a schema
-/// with unbounded native recursion -- no depth or recursion-limit option
-/// anywhere in its public `ValidationOptions` -- so a schema with a few
-/// hundred single-hop `$ref` aliases, however they are nested or wherever
-/// they point, or a few hundred levels of plain object nesting with no
-/// `$ref` at all, overflows the stack. That is a stack-guard-page trap
-/// (`SIGABRT`), not a panic -- `catch_unwind` never sees it, so it takes
-/// the whole daemon process down regardless of which thread compiles the
-/// schema, and no thread-stack size closes it: the measured crash floor
-/// (~500 hops, ~18 KB) sits far below the 4 MiB request-body cap, so a
-/// bigger stack only raises the bar the attacker's budget still clears.
-/// Every real landed schema carries at most three `$ref`s, far under 64 of
+/// Cap for both the literal JSON nesting depth and the total population of
+/// reference keywords (`$ref`, `$dynamicRef`, `$recursiveRef`) a schema
+/// payload may carry before `compile_schema` ever sees it (#1062 review,
+/// HIGH). `jsonschema` 0.52's compiler walks a schema with unbounded
+/// native recursion -- no depth or recursion-limit option anywhere in its
+/// public `ValidationOptions` -- so a schema with a few hundred single-hop
+/// reference aliases, however they are nested or wherever they point, or a
+/// few hundred levels of plain object nesting with no reference at all,
+/// overflows the stack. That is a stack-guard-page trap (`SIGABRT`), not a
+/// panic -- `catch_unwind` never sees it, so it takes the whole daemon
+/// process down regardless of which thread compiles the schema, and no
+/// thread-stack size closes it: the measured crash floor (~500 hops, ~18
+/// KB) sits far below the 4 MiB request-body cap, so a bigger stack only
+/// raises the bar the attacker's budget still clears. Every real landed
+/// schema carries at most three reference keywords, far under 64 of
 /// either.
 const MAX_SCHEMA_DEPTH: usize = 64;
 
@@ -508,31 +509,48 @@ const MAX_SCHEMA_DEPTH: usize = 64;
 ///     schema with no `$ref` at all crashes the compiler exactly the same
 ///     way, since the walk that blows the stack is a generic structural
 ///     one, not `$ref`-specific.
-/// (b) Total `$ref` population: a schema whose JSON is shallow -- entries
-///     that alias each other into a long dereference chain -- crashes the
-///     same way even though the literal nesting is not deep. A prior
-///     version of this axis tried to FOLLOW a chain (matching only a bare
-///     top-level `{"$ref": "..."}` under a literal `#/definitions/` or
-///     `#/$defs/` prefix) and was bypassed by five independent, trivial
-///     shapes (#1062 review, HIGH, round 2): a `$ref` one level inside
-///     `properties`, inside `items`, inside `allOf`, a `$ref` to a
-///     non-`definitions` location (e.g. `#/properties/pN`), and a `$ref`
-///     using RFC 6901 escapes the lookup never unescaped -- every one of
-///     them dodges the follow-logic's assumptions about where a `$ref`
-///     sits and how its pointer is spelled while still crashing the
-///     compiler. Modeling every keyword the compiler might walk into
-///     (`properties`, `items`, `allOf`/`anyOf`/`oneOf`, `patternProperties`,
-///     ...) plus full JSON-Pointer resolution is a losing race against a
-///     crate the guard does not control. Counting instead of following
-///     sidesteps needing to know any of that: a dereference chain of
-///     length N needs at least N distinct `$ref` nodes somewhere in the
-///     document, however they are nested, wherever they point, however
-///     they are spelled -- so bounding the document's total `$ref` count
-///     bounds every possible chain by construction, not by case coverage.
-///     A same-document `$ref` cycle (e.g. two definitions aliasing each
-///     other) is legal JSON Schema that the crate compiles without
-///     unbounded recursion, so it is not specially refused here -- it is
-///     bounded by the same count, like any other `$ref` structure.
+/// (b) Total reference-keyword population: a schema whose JSON is shallow
+///     -- entries that alias each other into a long dereference chain --
+///     crashes the same way even though the literal nesting is not deep.
+///     A prior version of this axis tried to FOLLOW a chain (matching
+///     only a bare top-level `{"$ref": "..."}` under a literal
+///     `#/definitions/` or `#/$defs/` prefix) and was bypassed by five
+///     independent, trivial shapes (#1062 review, HIGH, round 2): a `$ref`
+///     one level inside `properties`, inside `items`, inside `allOf`, a
+///     `$ref` to a non-`definitions` location (e.g. `#/properties/pN`),
+///     and a `$ref` using RFC 6901 escapes the lookup never unescaped.
+///     Counting `$ref` occurrences instead of following them closed all
+///     five, but counted only the literal `"$ref"` key -- `jsonschema`
+///     0.52 compiles `$dynamicRef` (2020-12) through the identical
+///     recursive path as `$ref` (`compile_dynamic_ref` forwards straight
+///     into the same `compile_impl`/`compile_with_alias` recursion), so a
+///     600-hop chain built entirely from `$dynamicRef` -- whether pointing
+///     by JSON Pointer or via the spec-canonical `$dynamicAnchor`/
+///     `$dynamicRef` plain-name form -- carries zero literal `$ref` keys
+///     and sailed through uncounted while still crashing the compiler
+///     (#1062 review, HIGH, round 3). This axis now counts an object once
+///     if it carries `$ref`, `$dynamicRef`, OR `$recursiveRef` (the third
+///     JSON Schema reference-family keyword, 2019-09's dynamic-scope
+///     predecessor to `$dynamicRef`) -- checked and confirmed NOT to
+///     reach the same crash (its resolution ignores the pointer text
+///     entirely and resolves via the dynamic-scope stack, so a chain
+///     written into it is never actually walked), but counted anyway
+///     since it costs nothing and removes the need to re-verify that
+///     safety property against every future `jsonschema` release. Modeling
+///     every keyword the compiler might walk into, every reference
+///     keyword's exact resolution semantics, plus full JSON-Pointer
+///     resolution, is a losing race against a crate the guard does not
+///     control. Counting instead of resolving sidesteps needing to know
+///     any of that: a dereference chain of length N needs at least N
+///     distinct reference nodes somewhere in the document, however they
+///     are nested, wherever they point, however they are spelled, and
+///     regardless of which of the three keywords they use -- so bounding
+///     the document's total reference-keyword count bounds every possible
+///     chain by construction, not by case coverage. A same-document `$ref`
+///     cycle (e.g. two definitions aliasing each other) is legal JSON
+///     Schema that the crate compiles without unbounded recursion, so it
+///     is not specially refused here -- it is bounded by the same count,
+///     like any other reference structure.
 fn guard_schema_depth(root: &serde_json::Value) -> Result<()> {
     // (a) literal nesting: a generic structural walk with no JSON Schema
     // semantics -- every nested object/array value, regardless of which
@@ -557,15 +575,19 @@ fn guard_schema_depth(root: &serde_json::Value) -> Result<()> {
         }
     }
 
-    // (b) total $ref population: every object anywhere in the document
-    // carrying a "$ref" key counts once, regardless of which keyword holds
-    // it, what the pointer targets, or how the pointer is spelled.
+    // (b) total reference-keyword population: every object anywhere in the
+    // document carrying $ref, $dynamicRef, or $recursiveRef counts once,
+    // regardless of which keyword holds it, what the pointer targets, or
+    // how the pointer is spelled.
     let mut ref_count: usize = 0;
     let mut walk: Vec<&serde_json::Value> = vec![root];
     while let Some(value) = walk.pop() {
         match value {
             serde_json::Value::Object(map) => {
-                if map.contains_key("$ref") {
+                if map.contains_key("$ref")
+                    || map.contains_key("$dynamicRef")
+                    || map.contains_key("$recursiveRef")
+                {
                     ref_count += 1;
                 }
                 walk.extend(map.values());
@@ -578,10 +600,10 @@ fn guard_schema_depth(root: &serde_json::Value) -> Result<()> {
     }
     if ref_count > MAX_SCHEMA_DEPTH {
         return Err(LegionError::WorkSource(format!(
-            "schema contains {ref_count} \"$ref\" occurrences, exceeding {MAX_SCHEMA_DEPTH} -- \
-             refused before compiling (the validator has no recursion limit; a dereference \
-             chain of length N needs at least N \"$ref\" nodes, so bounding the total bounds \
-             every possible chain)"
+            "schema contains {ref_count} reference-keyword occurrences ($ref, $dynamicRef, \
+             $recursiveRef), exceeding {MAX_SCHEMA_DEPTH} -- refused before compiling (the \
+             validator has no recursion limit; a dereference chain of length N needs at least \
+             N reference nodes, so bounding the total bounds every possible chain)"
         )));
     }
 
@@ -1427,6 +1449,75 @@ mod tests {
         assert!(
             err.to_string().contains("occurrences"),
             "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 3: `$dynamicRef` (2020-12) compiles through
+    /// the identical recursive path as `$ref` in `jsonschema` 0.52, but
+    /// carries no literal `"$ref"` key -- a 600-hop chain built entirely
+    /// from `$dynamicRef` (JSON-Pointer targets into `$defs`) sailed
+    /// through the prior `$ref`-only count uncounted while still crashing
+    /// the compiler. Now counted alongside `$ref`.
+    #[test]
+    fn schema_payload_rejects_dynamic_ref_chain() {
+        const N: usize = 600;
+        let mut defs = serde_json::Map::new();
+        for i in 0..N {
+            defs.insert(
+                format!("d{i}"),
+                serde_json::json!({"$dynamicRef": format!("#/$defs/d{}", i + 1)}),
+            );
+        }
+        defs.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "Dynamic Ref Chain",
+            "type": "object",
+            "properties": {"x": {"$dynamicRef": "#/$defs/d0"}},
+            "$defs": defs,
+            "x-doc-type": "dynamic-ref-chain"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("reference-keyword"),
+            "expected the reference-keyword count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 3: the spec-canonical dynamic-scope form of
+    /// the same bypass -- each node declares its own `$dynamicAnchor` and
+    /// points at the next via a plain-name `$dynamicRef` (no JSON Pointer
+    /// at all) -- reproduced the identical crash and is refused the same
+    /// way.
+    #[test]
+    fn schema_payload_rejects_dynamic_anchor_chain() {
+        const N: usize = 600;
+        let mut defs = serde_json::Map::new();
+        for i in 0..N {
+            defs.insert(
+                format!("d{i}"),
+                serde_json::json!({
+                    "$dynamicAnchor": format!("a{i}"),
+                    "$dynamicRef": format!("#a{}", i + 1)
+                }),
+            );
+        }
+        defs.insert(
+            format!("d{N}"),
+            serde_json::json!({"$dynamicAnchor": format!("a{N}"), "type": "string"}),
+        );
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "Dynamic Anchor Chain",
+            "type": "object",
+            "properties": {"x": {"$dynamicAnchor": "a0", "$dynamicRef": "#a1"}},
+            "$defs": defs,
+            "x-doc-type": "dynamic-anchor-chain"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("reference-keyword"),
+            "expected the reference-keyword count bound named, got: {err}"
         );
     }
 
