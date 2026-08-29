@@ -12,7 +12,7 @@ import type { SidebarSide, SidebarVariant } from "@/components/ui/sidebar.behavi
  * expand/collapse and sheet-slide semantic motion tokens do not exist yet (the
  * token layer is being rebuilt, #1899/#1902), so the from/to states are declared
  * (translate, width) while the timing is left to the future token layer rather
- * than hardcoded. The small `duration-150` interaction acknowledgments on the
+ * than hardcoded. The small `duration-fast` interaction acknowledgments on the
  * buttons are kept (Spec 04 retains hover/press feedback -- cf. sheet's close
  * button), never the layout motion.
  */
@@ -108,7 +108,7 @@ const groupLabelClasses =
 
 const groupActionClasses =
   "absolute right-3 top-3.5 flex aspect-square w-5 items-center justify-center rounded-md p-0 " +
-  "text-sidebar-foreground outline-none ring-sidebar-ring transition-transform duration-150 " +
+  "text-sidebar-foreground outline-none ring-sidebar-ring transition-transform duration-fast " +
   "motion-reduce:transition-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground " +
   "focus-visible:ring-2 after:absolute after:-inset-2 md:after:hidden " +
   "group-data-[collapsible=icon]:hidden";
@@ -121,7 +121,7 @@ const menuItemClasses = "group/menu-item relative";
 
 const menuButtonBaseClasses =
   "peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-md p-2 text-left " +
-  "text-label-medium ts-label-medium outline-none ring-sidebar-ring transition-colors duration-150 " +
+  "text-label-medium ts-label-medium outline-none ring-sidebar-ring transition-colors duration-fast " +
   "motion-reduce:transition-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground " +
   "focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground " +
   "disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none " +
@@ -155,7 +155,7 @@ export function sidebarMenuButtonClasses(
 
 const menuActionClasses =
   "absolute right-1 top-1.5 flex aspect-square w-5 items-center justify-center rounded-md p-0 " +
-  "text-sidebar-foreground outline-none ring-sidebar-ring transition-transform duration-150 " +
+  "text-sidebar-foreground outline-none ring-sidebar-ring transition-transform duration-fast " +
   "motion-reduce:transition-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground " +
   "focus-visible:ring-2 peer-hover/menu-button:text-sidebar-accent-foreground " +
   "after:absolute after:-inset-2 md:after:hidden group-data-[collapsible=icon]:hidden";
@@ -186,7 +186,7 @@ const menuSubItemClasses = "relative";
 
 const menuSubButtonBaseClasses =
   "flex h-7 min-w-0 -translate-x-px items-center gap-2 overflow-hidden rounded-md px-2 " +
-  "text-sidebar-foreground outline-none ring-sidebar-ring transition-colors duration-150 " +
+  "text-sidebar-foreground outline-none ring-sidebar-ring transition-colors duration-fast " +
   "motion-reduce:transition-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground " +
   "focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground " +
   "disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none " +

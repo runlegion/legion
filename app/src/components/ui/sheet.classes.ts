@@ -45,7 +45,7 @@ const closeClasses =
   "absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center " +
   "@md:right-4 @md:top-4 @md:h-8 @md:w-8 " +
   "rounded-sm opacity-70 ring-offset-background cursor-pointer " +
-  "transition-opacity duration-150 motion-reduce:transition-none hover:opacity-100 " +
+  "transition-opacity duration-fast motion-reduce:transition-none hover:opacity-100 " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
 
 const closeIconClasses = "h-5 w-5 @md:h-4 @md:w-4";

@@ -1,5 +1,5 @@
 /**
- * usePresence -- the presence mechanism (#1996).
+ * usePresence -- the presence mechanism (#1996, rewritten #2157).
  *
  * THE CONTRACT, ratified 2026-08-02:
  *   enter = the node arrives with a keyframe animation already attached, and
@@ -14,6 +14,14 @@
  * That node's classes key the enter/exit keyframes off `data-[state=open]` /
  * `data-[state=closed]`.
  *
+ * JS OBSERVES, IT DOES NOT TIME. This hook asks the node what is running --
+ * `getAnimations()` -- and waits on the animations' own `finished` promises. It
+ * does not read a duration out of `getComputedStyle`, does not add a margin to
+ * it, and does not run a `setTimeout` against the result. The browser already
+ * knows exactly when the exit is over; parsing CSS time strings in TypeScript to
+ * guess at the same number was a second, worse clock running alongside the real
+ * one.
+ *
  * WHO WRITES `data-state`. Not this hook, for any caller that composes the
  * `disclosable` slice -- dialog, popover, dropdown-menu all do. `disclosable`
  * already contributes `data-state` to the content part from
@@ -27,24 +35,48 @@
  * `usePresence` on a node with no behavior contract behind it), which is why it
  * remains part of the interface rather than being deleted.
  *
- * THE THREE WAYS THIS WEDGES, and what stops each:
- *   1. The animation is cancelled, or `animationend` never arrives at all (a
- *      transition declared on a property that never changes fires nothing).
- *      -> a timeout fallback, DERIVED from the node's own computed duration and
- *      delay, releases the unmount. Derived, not a constant: a magic 500ms
- *      would pin a closed dialog on screen under a slow intent and truncate a
- *      slower one.
+ * THE THREE WAYS THIS COULD WEDGE, and what stops each:
+ *   1. Nothing is attached -- a transition declared on a property that never
+ *      changes creates no `CSSTransition` at all, so nothing will ever finish.
+ *      -> `getAnimations()` comes back EMPTY, and presence releases in the same
+ *      effect, synchronously. There is no event to miss and no timer to run.
  *   2. Reduced motion. The generated cell utilities zero `animation-duration`
- *      under `prefers-reduced-motion` (mechanism B, #2017) -- the animation is
- *      still ATTACHED and still completes, instantly, and still fires
- *      `animationend`. So the wait IS entered and the normal event path
- *      releases; the exit is simply over in the same frame. An element with no
- *      animation and no transition at all is the separate case, and that one
- *      releases synchronously because nothing will ever fire.
+ *      under `prefers-reduced-motion` (mechanism B, #2017), and a ZERO-DURATION
+ *      animation is never handed back by `getAnimations()` -- it finishes inside
+ *      the same style flush that creates it, which makes it no longer relevant,
+ *      so the list comes back empty and the exit releases in the same tick as
+ *      case 1. Measured, not assumed: `test/presence/presence-race.e2e.ts` pins
+ *      it against the real engines, and the same is true of a bare
+ *      `data-state` flip with no React in the picture at all.
+ *
+ *      That is the correct outcome, and it is why the old event-based code
+ *      needed a special case here and this does not. Under reduced motion the
+ *      exit is over before a frame could paint, so there is nothing to hold the
+ *      node for; the old implementation had to enter its wait anyway because it
+ *      released on `animationend`, and an `animationend` that had already fired
+ *      would have wedged the node until the backstop timer. There is no event to
+ *      miss here, so there is no reason to wait for one.
  *   3. Rapid open -> close -> open. A pending release from the previous close
- *      would land on the node that is now legitimately open. -> the listeners
- *      AND the timer are torn down by the same cleanup, which runs on every
- *      change of `open`.
+ *      would land on the node that is now legitimately open. -> the effect's
+ *      cleanup sets `cancelled`, and a late-settling wait finds it set and does
+ *      nothing.
+ *
+ * The interrupted enter needs no special handling any more. Closing mid-enter
+ * CANCELS the enter animation, and a cancelled animation is not a running one:
+ * `getAnimations()` does not return it. Even if an engine did hand it back, its
+ * `finished` REJECTS on cancellation and `Promise.allSettled` absorbs that
+ * without collapsing the wait -- which is the whole reason `allSettled` is used
+ * here instead of `Promise.all`. The old code needed an animation-name filter to
+ * tell the dying enter's `animationcancel` apart from the exit's `animationend`;
+ * with promises there is no shared event channel to disambiguate.
+ *
+ * NO BACKSTOP TIMER, and none is needed. The one shape that would never settle
+ * is an infinite loop animation on the presence node, and no such cell exists:
+ * every `period-*` row in `docs/spec/matrix/motion.jsonl` belongs to input-otp's
+ * caret, progress, skeleton, or spinner, and not one of those is presence-gated.
+ * If a loop ever lands on an overlay content part, THAT is when a backstop is
+ * warranted -- and it would be an engineering failsafe outside the value system,
+ * never derived from a duration tier or any other token.
  *
  * The score is untouched: presence is a pure DOM-lifecycle concern (when to
  * keep a node), not behavior. The WC and Astro performances share the mechanism
@@ -72,133 +104,6 @@ export interface Presence {
   state: PresenceState;
 }
 
-/**
- * Milliseconds in a CSS time string, or 0 for anything that is not one.
- * '0.2s' -> 200, '200ms' -> 200, '0s' / '' / undefined -> 0.
- */
-function timeMs(value: string): number {
-  const parsed = Number.parseFloat(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-  return value.trim().endsWith("ms") ? parsed : parsed * 1000;
-}
-
-/** The longest duration+delay across a comma-separated CSS time list. */
-function longestRun(durations: string, delays: string): number {
-  const durationParts = durations.split(",");
-  const delayParts = delays.split(",");
-  let longest = 0;
-  for (const [index, duration] of durationParts.entries()) {
-    // CSS repeats the shorter list; an absent delay is 0 either way.
-    const delay = delayParts[index % (delayParts.length || 1)] ?? "";
-    longest = Math.max(longest, timeMs(duration) + timeMs(delay));
-  }
-  return longest;
-}
-
-interface ExitMeasurement {
-  /** How long the exit will run, in ms; 0 means nothing is running. */
-  runMs: number;
-  /**
-   * The exit animation's names -- EVERY name in the computed `animation-name`
-   * list -- or empty when the exit is a transition (or nothing).
-   *
-   * A list, not a single string, because `animation-name` is a comma-separated
-   * CSS list and a node may legitimately run several exit keyframes at once
-   * (`animation-name: scale-out, fade-out`). Each fires its own `animationend`
-   * carrying its own single name, so comparing the event against the raw
-   * computed string would match NONE of them and the exit would only ever be
-   * released by the backstop timer -- a visible extra beat on every close.
-   *
-   * Presence must know these, not just the duration. When a close interrupts a
-   * RUNNING ENTER, the browser cancels the enter animation and fires
-   * `animationcancel` on the same node -- and a handler that releases on any
-   * animation event unmounts the overlay instantly, on the enter's death rather
-   * than the exit's completion. That is a race (it only fires if the enter was
-   * still running), it truncates the exit to nothing, and it was invisible in
-   * jsdom: it took watching a real browser to see it. The names are the filter.
-   */
-  names: string[];
-}
-
-/** The trimmed, non-empty members of a comma-separated CSS list. */
-function cssList(value: string): string[] {
-  return value
-    .split(",")
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
-}
-
-/**
- * The animation name an event carries, or null when it does not carry one --
- * a transitionend, or a bare Event. Null means "unidentified", and an
- * unidentified end is honoured rather than filtered out: the filter exists to
- * reject a DIFFERENT, named animation, not to demand identification.
- */
-function animationNameOf(event: Event): string | null {
-  if (typeof AnimationEvent === "undefined" || !(event instanceof AnimationEvent)) return null;
-  return event.animationName;
-}
-
-/**
- * Measure the exit the node is about to run.
- *
- * A zero `runMs` does NOT mean "nothing will fire". Under reduced motion the
- * cell utilities zero `animation-duration` while leaving the animation attached
- * (mechanism B, #2017), so the exit runs for 0ms and `animationend` arrives
- * anyway. `names` is therefore claimed whenever an animation is ATTACHED, not
- * only when it has a duration -- the pair (runMs 0, names non-empty) is exactly
- * the reduced-motion exit, and it must be waited on rather than released blind.
- * Only (runMs 0, names empty) means nothing is coming.
- */
-function measureExit(element: HTMLElement): ExitMeasurement {
-  if (typeof getComputedStyle !== "function") return { runMs: 0, names: [] };
-  const style = getComputedStyle(element);
-  const animationName = style.animationName || "none";
-  // `none` is also a legal MEMBER of the list ('none, scale-out'), so filter it
-  // out per-member rather than only rejecting the whole string.
-  const names = cssList(animationName).filter((name) => name !== "none");
-  const animated =
-    names.length > 0 ? longestRun(style.animationDuration || "", style.animationDelay || "") : 0;
-  const transitioned =
-    (style.transitionProperty || "none") !== "none"
-      ? longestRun(style.transitionDuration || "", style.transitionDelay || "")
-      : 0;
-  return {
-    runMs: Math.max(animated, transitioned),
-    // Only claim names when the animation is what we are actually waiting on.
-    // `animated > 0` was the old guard and it dropped the reduced-motion exit on
-    // the floor: a zeroed animation-duration made `animated` 0, the names went
-    // empty, and presence released synchronously without ever listening.
-    names: animated >= transitioned && names.length > 0 ? names : [],
-  };
-}
-
-/**
- * Margin on the derived fallback. The timer is a BACKSTOP, not the schedule --
- * it must never beat a healthy animation to the punch, or every exit truncates.
- * One frame of slack plus a small proportional allowance covers compositor
- * jitter without holding a wedged node around for a perceptible extra beat.
- *
- * THESE TWO CONSTANTS ARE AN ENGINEERING FAILSAFE AND SIT OUTSIDE THE VALUE
- * SYSTEM. State it plainly, because #2012 shipped them unclassified and a
- * reviewer was right to call that a defect: every OTHER number in motion is
- * either a perceptual fact or a designer's personality, and those belong in the
- * five namespaces where Studio can retune them. The x1.5 and the +50 are
- * neither. They exist only for the case where `animationend` never arrives -- an
- * animation that is replaced rather than cancelled, or a transition declared on
- * a property that never changes -- and in EVERY healthy exit, including the
- * zero-duration reduced-motion one, the event wins and this timer is cleared
- * before it fires. Nothing here is ever perceived as motion, so there is nothing
- * here to tune. If a user can feel this number, the animation was already broken
- * and the number is what kept the app usable.
- *
- * The consequence of that classification: do not promote these to tokens, do not
- * derive them from a duration tier, and do not let an intent change reach them.
- */
-function fallbackMs(runMs: number): number {
-  return Math.ceil(runMs * 1.5) + 50;
-}
-
 export function usePresence(open: boolean): Presence {
   const [present, setPresent] = React.useState(open);
   const nodeRef = React.useRef<HTMLElement | null>(null);
@@ -211,56 +116,47 @@ export function usePresence(open: boolean): Presence {
 
   React.useEffect(() => {
     if (open) return;
-    // Closing: the re-render already applied data-state=closed, so the exit CSS
-    // is running -- hold present until it ends, then release to unmount.
     const node = nodeRef.current;
     if (!node) {
       setPresent(false);
       return;
     }
-    const { runMs, names: exitNames } = measureExit(node);
-    if (runMs === 0 && exitNames.length === 0) {
-      // Nothing is attached, so nothing will ever fire -- release now rather
-      // than wait on an event that is not coming. NOT the reduced-motion case:
-      // there an animation IS attached at zero duration, it completes in the
-      // same frame, and it fires `animationend` like any other. That path falls
-      // through to the listener below on purpose (#2017) -- releasing it here
-      // would silently take the presence contract off the event and onto
-      // whatever happened to run first.
+    // An environment guard, not a policy one. Test DOMs (happy-dom, jsdom) ship
+    // no Web Animations API at all, and a hook that threw there would take every
+    // consumer's suite down with it. Where there is no animation timeline there
+    // is also nothing to observe, so the honest answer is the same as case 1:
+    // release now. This is a DOM-shim check -- it is not a tunable and it is not
+    // a timing failsafe.
+    if (typeof node.getAnimations !== "function") {
+      setPresent(false);
+      return;
+    }
+    // Read AFTER the data-state=closed commit that already happened this render,
+    // so these are the EXIT animations, not a stale reference to a still-running
+    // enter. `getAnimations()` flushes pending style before it answers, which is
+    // what makes the freshly-applied exit rule visible here.
+    const animations = node.getAnimations();
+    if (animations.length === 0) {
+      // Nothing attached and nothing coming -- case 1 above. Release now rather
+      // than await a promise that will never be created.
       setPresent(false);
       return;
     }
 
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const release = () => {
-      if (timer !== undefined) clearTimeout(timer);
-      timer = undefined;
-      setPresent(false);
+    let cancelled = false;
+    const releaseWhenSettled = async () => {
+      // allSettled, not all: a cancelled or replaced animation REJECTS its
+      // `finished`, and that rejection is an outcome, not a failure. Absorbing
+      // it is the point.
+      await Promise.allSettled(animations.map((animation) => animation.finished));
+      if (!cancelled) setPresent(false);
     };
-    const done = (event: Event) => {
-      if (event.target !== node) return; // ignore descendant animations
-      // ...and ignore the DYING ENTER. Interrupting a running enter cancels it,
-      // which fires animationcancel on this very node; releasing on that ends
-      // the exit before its first frame paints.
-      const fired = animationNameOf(event);
-      if (exitNames.length > 0 && fired !== null && !exitNames.includes(fired)) return;
-      release();
-    };
-    node.addEventListener("animationend", done);
-    node.addEventListener("animationcancel", done);
-    node.addEventListener("transitionend", done);
-    // The backstop. A cancelled animation fires `animationcancel` and is caught
-    // above; an animation that is REPLACED, or a transition on a property that
-    // never actually changes, fires nothing, and only this releases the node.
-    timer = setTimeout(release, fallbackMs(runMs));
+    void releaseWhenSettled();
 
     return () => {
-      // Reopening mid-exit lands here: both the listeners and the pending
-      // backstop die before they can unmount a node that is now open again.
-      if (timer !== undefined) clearTimeout(timer);
-      node.removeEventListener("animationend", done);
-      node.removeEventListener("animationcancel", done);
-      node.removeEventListener("transitionend", done);
+      // Reopening mid-exit lands here: the pending wait still settles, finds
+      // this flag, and leaves the reopened node alone.
+      cancelled = true;
     };
   }, [open]);
 

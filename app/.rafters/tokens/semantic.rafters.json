@@ -1,6 +1,6 @@
 {
   "namespace": "semantic",
-  "generatedAt": "2026-08-29T05:23:06.398Z",
+  "generatedAt": "2026-08-29T08:35:41.655Z",
   "tokens": [
     {
       "name": "neutral",
@@ -27,7 +27,7 @@
       "dependsOn": ["zinc", "neutral--dark"],
       "containerQueryAware": true,
       "description": "Neutral base family for surfaces, text, and borders. Light: zinc-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -49,7 +49,7 @@
       "dependsOn": ["zinc"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of neutral.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "background",
@@ -76,7 +76,7 @@
       "dependsOn": ["neutral", "background--dark"],
       "containerQueryAware": true,
       "description": "Primary page background color. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -98,7 +98,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of background.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "foreground",
@@ -125,7 +125,7 @@
       "dependsOn": ["neutral", "foreground--dark"],
       "containerQueryAware": true,
       "description": "Primary text color. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -147,7 +147,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "card",
@@ -174,7 +174,7 @@
       "dependsOn": ["neutral", "card--dark"],
       "containerQueryAware": true,
       "description": "Card and contained surface background. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -196,7 +196,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of card.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "card-foreground",
@@ -223,7 +223,7 @@
       "dependsOn": ["card", "card-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on card surfaces. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -245,7 +245,7 @@
       "dependsOn": ["card--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of card-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "card-hover",
@@ -272,7 +272,7 @@
       "dependsOn": ["card", "card-hover--dark"],
       "containerQueryAware": true,
       "description": "Card hover state background. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -294,7 +294,7 @@
       "dependsOn": ["card--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of card-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "card-border",
@@ -321,7 +321,7 @@
       "dependsOn": ["card", "card-border--dark"],
       "containerQueryAware": true,
       "description": "Card border color. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -343,7 +343,7 @@
       "dependsOn": ["card--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of card-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "panel",
@@ -370,7 +370,7 @@
       "dependsOn": ["neutral", "panel--dark"],
       "containerQueryAware": true,
       "description": "Persistent elevated chrome -- headers, docks, fixed toolbars. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -392,7 +392,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of panel.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "panel-foreground",
@@ -419,7 +419,7 @@
       "dependsOn": ["panel", "panel-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text and icons on panel surfaces. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -441,7 +441,7 @@
       "dependsOn": ["panel--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of panel-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "panel-hover",
@@ -468,7 +468,7 @@
       "dependsOn": ["panel", "panel-hover--dark"],
       "containerQueryAware": true,
       "description": "Panel surface hover state. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -490,7 +490,7 @@
       "dependsOn": ["panel--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of panel-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "panel-border",
@@ -517,7 +517,7 @@
       "dependsOn": ["panel", "panel-border--dark"],
       "containerQueryAware": true,
       "description": "Borders separating panel from surrounding surfaces. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -539,7 +539,7 @@
       "dependsOn": ["panel--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of panel-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "popover",
@@ -566,7 +566,7 @@
       "dependsOn": ["neutral", "popover--dark"],
       "containerQueryAware": true,
       "description": "Popover and dropdown background. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -588,7 +588,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of popover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "popover-foreground",
@@ -615,7 +615,7 @@
       "dependsOn": ["popover", "popover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text in popovers. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -637,7 +637,7 @@
       "dependsOn": ["popover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of popover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "popover-border",
@@ -664,7 +664,7 @@
       "dependsOn": ["popover", "popover-border--dark"],
       "containerQueryAware": true,
       "description": "Popover border color. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -686,7 +686,7 @@
       "dependsOn": ["popover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of popover-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "surface",
@@ -713,7 +713,7 @@
       "dependsOn": ["neutral", "surface--dark"],
       "containerQueryAware": true,
       "description": "Base chrome surface -- toolbars, app shell, UI frame. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -735,7 +735,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of surface.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "surface-foreground",
@@ -762,7 +762,7 @@
       "dependsOn": ["surface", "surface-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on surface backgrounds. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -784,7 +784,7 @@
       "dependsOn": ["surface--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of surface-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "surface-hover",
@@ -811,7 +811,7 @@
       "dependsOn": ["surface", "surface-hover--dark"],
       "containerQueryAware": true,
       "description": "Surface hover state. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -833,7 +833,7 @@
       "dependsOn": ["surface--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of surface-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "surface-active",
@@ -860,7 +860,7 @@
       "dependsOn": ["surface", "surface-active--dark"],
       "containerQueryAware": true,
       "description": "Surface active/pressed state. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -882,7 +882,7 @@
       "dependsOn": ["surface--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of surface-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "surface-border",
@@ -909,7 +909,7 @@
       "dependsOn": ["surface", "surface-border--dark"],
       "containerQueryAware": true,
       "description": "Surface border color. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -931,7 +931,7 @@
       "dependsOn": ["surface--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of surface-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary",
@@ -960,7 +960,7 @@
       "dependsOn": ["neutral", "primary--dark"],
       "containerQueryAware": true,
       "description": "Primary interactive elements - buttons, links, focus states. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -982,7 +982,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary-foreground",
@@ -1009,7 +1009,7 @@
       "dependsOn": ["primary", "primary-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on primary color backgrounds. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1031,7 +1031,7 @@
       "dependsOn": ["primary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary-hover",
@@ -1058,7 +1058,7 @@
       "dependsOn": ["primary", "primary-hover--dark"],
       "containerQueryAware": true,
       "description": "Primary hover state. Light: neutral-800.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1080,7 +1080,7 @@
       "dependsOn": ["primary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary-hover-foreground",
@@ -1107,7 +1107,7 @@
       "dependsOn": ["primary-hover", "primary-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on primary hover. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1129,7 +1129,7 @@
       "dependsOn": ["primary-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary-active",
@@ -1156,7 +1156,7 @@
       "dependsOn": ["primary", "primary-active--dark"],
       "containerQueryAware": true,
       "description": "Primary active/pressed state. Light: neutral-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1178,7 +1178,7 @@
       "dependsOn": ["primary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary-active-foreground",
@@ -1205,7 +1205,7 @@
       "dependsOn": ["primary-active", "primary-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on primary active. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1227,7 +1227,7 @@
       "dependsOn": ["primary-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary-focus",
@@ -1254,7 +1254,7 @@
       "dependsOn": ["primary", "primary-focus--dark"],
       "containerQueryAware": true,
       "description": "Primary focus state. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1276,7 +1276,7 @@
       "dependsOn": ["primary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary-focus.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary-border",
@@ -1303,7 +1303,7 @@
       "dependsOn": ["primary", "primary-border--dark"],
       "containerQueryAware": true,
       "description": "Primary border color. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1325,7 +1325,7 @@
       "dependsOn": ["primary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary-ring",
@@ -1352,7 +1352,7 @@
       "dependsOn": ["primary", "primary-ring--dark"],
       "containerQueryAware": true,
       "description": "Primary focus ring color. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1374,7 +1374,7 @@
       "dependsOn": ["primary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary-ring.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary-subtle",
@@ -1401,7 +1401,7 @@
       "dependsOn": ["primary", "primary-subtle--dark"],
       "containerQueryAware": true,
       "description": "Subtle primary background for badges/alerts. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1423,7 +1423,7 @@
       "dependsOn": ["primary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary-subtle.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "primary-subtle-foreground",
@@ -1450,7 +1450,7 @@
       "dependsOn": ["primary-subtle", "primary-subtle-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on subtle primary backgrounds. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1472,7 +1472,7 @@
       "dependsOn": ["primary-subtle--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of primary-subtle-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary",
@@ -1501,7 +1501,7 @@
       "dependsOn": ["neutral", "secondary--dark"],
       "containerQueryAware": true,
       "description": "Secondary interactive elements - less prominent actions. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1523,7 +1523,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary-foreground",
@@ -1550,7 +1550,7 @@
       "dependsOn": ["secondary", "secondary-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on secondary color backgrounds. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1572,7 +1572,7 @@
       "dependsOn": ["secondary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary-hover",
@@ -1599,7 +1599,7 @@
       "dependsOn": ["secondary", "secondary-hover--dark"],
       "containerQueryAware": true,
       "description": "Secondary hover state. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1621,7 +1621,7 @@
       "dependsOn": ["secondary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary-hover-foreground",
@@ -1648,7 +1648,7 @@
       "dependsOn": ["secondary-hover", "secondary-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on secondary hover. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1670,7 +1670,7 @@
       "dependsOn": ["secondary-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary-active",
@@ -1697,7 +1697,7 @@
       "dependsOn": ["secondary", "secondary-active--dark"],
       "containerQueryAware": true,
       "description": "Secondary active/pressed state. Light: neutral-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1719,7 +1719,7 @@
       "dependsOn": ["secondary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary-active-foreground",
@@ -1746,7 +1746,7 @@
       "dependsOn": ["secondary-active", "secondary-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on secondary active. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1768,7 +1768,7 @@
       "dependsOn": ["secondary-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary-focus",
@@ -1795,7 +1795,7 @@
       "dependsOn": ["secondary", "secondary-focus--dark"],
       "containerQueryAware": true,
       "description": "Secondary focus state. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1817,7 +1817,7 @@
       "dependsOn": ["secondary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary-focus.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary-border",
@@ -1844,7 +1844,7 @@
       "dependsOn": ["secondary", "secondary-border--dark"],
       "containerQueryAware": true,
       "description": "Secondary border color. Light: neutral-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1866,7 +1866,7 @@
       "dependsOn": ["secondary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary-ring",
@@ -1893,7 +1893,7 @@
       "dependsOn": ["secondary", "secondary-ring--dark"],
       "containerQueryAware": true,
       "description": "Secondary focus ring color. Light: neutral-400.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1915,7 +1915,7 @@
       "dependsOn": ["secondary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary-ring.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary-subtle",
@@ -1942,7 +1942,7 @@
       "dependsOn": ["secondary", "secondary-subtle--dark"],
       "containerQueryAware": true,
       "description": "Subtle secondary background for badges/alerts. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -1964,7 +1964,7 @@
       "dependsOn": ["secondary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary-subtle.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "secondary-subtle-foreground",
@@ -1991,7 +1991,7 @@
       "dependsOn": ["secondary-subtle", "secondary-subtle-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on subtle secondary backgrounds. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2013,7 +2013,7 @@
       "dependsOn": ["secondary-subtle--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of secondary-subtle-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "muted",
@@ -2040,7 +2040,7 @@
       "dependsOn": ["neutral", "muted--dark"],
       "containerQueryAware": true,
       "description": "Muted backgrounds for subtle emphasis. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2062,7 +2062,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of muted.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "muted-foreground",
@@ -2089,7 +2089,7 @@
       "dependsOn": ["muted", "muted-foreground--dark"],
       "containerQueryAware": true,
       "description": "Muted text for secondary information. Light: neutral-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2111,7 +2111,7 @@
       "dependsOn": ["muted--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of muted-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "muted-hover",
@@ -2138,7 +2138,7 @@
       "dependsOn": ["muted", "muted-hover--dark"],
       "containerQueryAware": true,
       "description": "Muted hover state. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2160,7 +2160,7 @@
       "dependsOn": ["muted--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of muted-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "muted-hover-foreground",
@@ -2187,7 +2187,7 @@
       "dependsOn": ["muted-hover", "muted-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on muted hover. Light: neutral-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2209,7 +2209,7 @@
       "dependsOn": ["muted-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of muted-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "muted-active",
@@ -2236,7 +2236,7 @@
       "dependsOn": ["muted", "muted-active--dark"],
       "containerQueryAware": true,
       "description": "Muted active state. Light: neutral-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2258,7 +2258,7 @@
       "dependsOn": ["muted--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of muted-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "muted-border",
@@ -2285,7 +2285,7 @@
       "dependsOn": ["muted", "muted-border--dark"],
       "containerQueryAware": true,
       "description": "Muted border color. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2307,7 +2307,7 @@
       "dependsOn": ["muted--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of muted-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "accent",
@@ -2334,7 +2334,7 @@
       "dependsOn": ["neutral", "accent--dark"],
       "containerQueryAware": true,
       "description": "Accent for hover states and highlights. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2356,7 +2356,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of accent.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "accent-foreground",
@@ -2383,7 +2383,7 @@
       "dependsOn": ["accent", "accent-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on accent backgrounds. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2405,7 +2405,7 @@
       "dependsOn": ["accent--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of accent-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "accent-hover",
@@ -2432,7 +2432,7 @@
       "dependsOn": ["accent", "accent-hover--dark"],
       "containerQueryAware": true,
       "description": "Accent hover state. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2454,7 +2454,7 @@
       "dependsOn": ["accent--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of accent-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "accent-hover-foreground",
@@ -2481,7 +2481,7 @@
       "dependsOn": ["accent-hover", "accent-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on accent hover. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2503,7 +2503,7 @@
       "dependsOn": ["accent-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of accent-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "accent-active",
@@ -2530,7 +2530,7 @@
       "dependsOn": ["accent", "accent-active--dark"],
       "containerQueryAware": true,
       "description": "Accent active state. Light: neutral-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2552,7 +2552,7 @@
       "dependsOn": ["accent--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of accent-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "accent-active-foreground",
@@ -2579,7 +2579,7 @@
       "dependsOn": ["accent-active", "accent-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on accent active. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2601,7 +2601,7 @@
       "dependsOn": ["accent-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of accent-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "accent-border",
@@ -2628,7 +2628,7 @@
       "dependsOn": ["accent", "accent-border--dark"],
       "containerQueryAware": true,
       "description": "Accent border color. Light: neutral-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2650,7 +2650,7 @@
       "dependsOn": ["accent--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of accent-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "accent-ring",
@@ -2677,7 +2677,7 @@
       "dependsOn": ["accent", "accent-ring--dark"],
       "containerQueryAware": true,
       "description": "Accent focus ring color. Light: neutral-400.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2699,7 +2699,7 @@
       "dependsOn": ["accent--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of accent-ring.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "accent-subtle",
@@ -2726,7 +2726,7 @@
       "dependsOn": ["accent", "accent-subtle--dark"],
       "containerQueryAware": true,
       "description": "Subtle accent background for badges/alerts. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2748,7 +2748,7 @@
       "dependsOn": ["accent--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of accent-subtle.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "accent-subtle-foreground",
@@ -2775,7 +2775,7 @@
       "dependsOn": ["accent-subtle", "accent-subtle-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on subtle accent backgrounds. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2797,7 +2797,7 @@
       "dependsOn": ["accent-subtle--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of accent-subtle-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive",
@@ -2826,7 +2826,7 @@
       "dependsOn": ["silver-bold-fire-truck", "destructive--dark"],
       "containerQueryAware": true,
       "description": "Destructive actions - delete, remove, critical warnings. Light: silver-bold-fire-truck-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": true
     },
     {
@@ -2848,7 +2848,7 @@
       "dependsOn": ["silver-bold-fire-truck"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive-foreground",
@@ -2875,7 +2875,7 @@
       "dependsOn": ["destructive", "destructive-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on destructive backgrounds. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2897,7 +2897,7 @@
       "dependsOn": ["destructive--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive-hover",
@@ -2924,7 +2924,7 @@
       "dependsOn": ["destructive", "destructive-hover--dark"],
       "containerQueryAware": true,
       "description": "Destructive hover state. Light: silver-bold-fire-truck-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2946,7 +2946,7 @@
       "dependsOn": ["destructive--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive-hover-foreground",
@@ -2973,7 +2973,7 @@
       "dependsOn": ["destructive-hover", "destructive-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on destructive hover. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -2995,7 +2995,7 @@
       "dependsOn": ["destructive-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive-active",
@@ -3022,7 +3022,7 @@
       "dependsOn": ["destructive", "destructive-active--dark"],
       "containerQueryAware": true,
       "description": "Destructive active/pressed state. Light: silver-bold-fire-truck-800.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3044,7 +3044,7 @@
       "dependsOn": ["destructive--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive-active-foreground",
@@ -3071,7 +3071,7 @@
       "dependsOn": ["destructive-active", "destructive-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on destructive active. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3093,7 +3093,7 @@
       "dependsOn": ["destructive-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive-focus",
@@ -3120,7 +3120,7 @@
       "dependsOn": ["destructive", "destructive-focus--dark"],
       "containerQueryAware": true,
       "description": "Destructive focus state. Light: silver-bold-fire-truck-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3142,7 +3142,7 @@
       "dependsOn": ["destructive--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive-focus.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive-border",
@@ -3169,7 +3169,7 @@
       "dependsOn": ["destructive", "destructive-border--dark"],
       "containerQueryAware": true,
       "description": "Destructive border color. Light: silver-bold-fire-truck-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3191,7 +3191,7 @@
       "dependsOn": ["destructive--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive-ring",
@@ -3218,7 +3218,7 @@
       "dependsOn": ["destructive", "destructive-ring--dark"],
       "containerQueryAware": true,
       "description": "Destructive focus ring color. Light: silver-bold-fire-truck-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3240,7 +3240,7 @@
       "dependsOn": ["destructive--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive-ring.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive-subtle",
@@ -3267,7 +3267,7 @@
       "dependsOn": ["destructive", "destructive-subtle--dark"],
       "containerQueryAware": true,
       "description": "Subtle destructive background for error alerts. Light: silver-bold-fire-truck-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3289,7 +3289,7 @@
       "dependsOn": ["destructive--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive-subtle.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "destructive-subtle-foreground",
@@ -3316,7 +3316,7 @@
       "dependsOn": ["destructive-subtle", "destructive-subtle-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on subtle destructive backgrounds. Light: silver-bold-fire-truck-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3338,7 +3338,7 @@
       "dependsOn": ["destructive-subtle--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of destructive-subtle-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success",
@@ -3367,7 +3367,7 @@
       "dependsOn": ["silver-true-citrine", "success--dark"],
       "containerQueryAware": true,
       "description": "Success states - confirmations, completions, positive feedback. Light: silver-true-citrine-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3389,7 +3389,7 @@
       "dependsOn": ["silver-true-citrine"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success-foreground",
@@ -3416,7 +3416,7 @@
       "dependsOn": ["success", "success-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on success backgrounds. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3438,7 +3438,7 @@
       "dependsOn": ["success--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success-hover",
@@ -3465,7 +3465,7 @@
       "dependsOn": ["success", "success-hover--dark"],
       "containerQueryAware": true,
       "description": "Success hover state. Light: silver-true-citrine-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3487,7 +3487,7 @@
       "dependsOn": ["success--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success-hover-foreground",
@@ -3514,7 +3514,7 @@
       "dependsOn": ["success-hover", "success-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on success hover. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3536,7 +3536,7 @@
       "dependsOn": ["success-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success-active",
@@ -3563,7 +3563,7 @@
       "dependsOn": ["success", "success-active--dark"],
       "containerQueryAware": true,
       "description": "Success active/pressed state. Light: silver-true-citrine-800.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3585,7 +3585,7 @@
       "dependsOn": ["success--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success-active-foreground",
@@ -3612,7 +3612,7 @@
       "dependsOn": ["success-active", "success-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on success active. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3634,7 +3634,7 @@
       "dependsOn": ["success-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success-focus",
@@ -3661,7 +3661,7 @@
       "dependsOn": ["success", "success-focus--dark"],
       "containerQueryAware": true,
       "description": "Success focus state. Light: silver-true-citrine-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3683,7 +3683,7 @@
       "dependsOn": ["success--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success-focus.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success-border",
@@ -3710,7 +3710,7 @@
       "dependsOn": ["success", "success-border--dark"],
       "containerQueryAware": true,
       "description": "Success border color. Light: silver-true-citrine-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3732,7 +3732,7 @@
       "dependsOn": ["success--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success-ring",
@@ -3759,7 +3759,7 @@
       "dependsOn": ["success", "success-ring--dark"],
       "containerQueryAware": true,
       "description": "Success focus ring color. Light: silver-true-citrine-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3781,7 +3781,7 @@
       "dependsOn": ["success--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success-ring.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success-subtle",
@@ -3808,7 +3808,7 @@
       "dependsOn": ["success", "success-subtle--dark"],
       "containerQueryAware": true,
       "description": "Subtle success background for success alerts. Light: silver-true-citrine-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3830,7 +3830,7 @@
       "dependsOn": ["success--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success-subtle.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "success-subtle-foreground",
@@ -3857,7 +3857,7 @@
       "dependsOn": ["success-subtle", "success-subtle-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on subtle success backgrounds. Light: silver-true-citrine-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3879,7 +3879,7 @@
       "dependsOn": ["success-subtle--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of success-subtle-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning",
@@ -3908,7 +3908,7 @@
       "dependsOn": ["silver-true-honey", "warning--dark"],
       "containerQueryAware": true,
       "description": "Warning states - caution, potential issues, important notices. Light: silver-true-honey-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3930,7 +3930,7 @@
       "dependsOn": ["silver-true-honey"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning-foreground",
@@ -3957,7 +3957,7 @@
       "dependsOn": ["warning", "warning-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on warning backgrounds. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -3979,7 +3979,7 @@
       "dependsOn": ["warning--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning-hover",
@@ -4006,7 +4006,7 @@
       "dependsOn": ["warning", "warning-hover--dark"],
       "containerQueryAware": true,
       "description": "Warning hover state. Light: silver-true-honey-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4028,7 +4028,7 @@
       "dependsOn": ["warning--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning-hover-foreground",
@@ -4055,7 +4055,7 @@
       "dependsOn": ["warning-hover", "warning-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on warning hover. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4077,7 +4077,7 @@
       "dependsOn": ["warning-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning-active",
@@ -4104,7 +4104,7 @@
       "dependsOn": ["warning", "warning-active--dark"],
       "containerQueryAware": true,
       "description": "Warning active/pressed state. Light: silver-true-honey-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4126,7 +4126,7 @@
       "dependsOn": ["warning--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning-active-foreground",
@@ -4153,7 +4153,7 @@
       "dependsOn": ["warning-active", "warning-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on warning active. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4175,7 +4175,7 @@
       "dependsOn": ["warning-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning-focus",
@@ -4202,7 +4202,7 @@
       "dependsOn": ["warning", "warning-focus--dark"],
       "containerQueryAware": true,
       "description": "Warning focus state. Light: silver-true-honey-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4224,7 +4224,7 @@
       "dependsOn": ["warning--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning-focus.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning-border",
@@ -4251,7 +4251,7 @@
       "dependsOn": ["warning", "warning-border--dark"],
       "containerQueryAware": true,
       "description": "Warning border color. Light: silver-true-honey-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4273,7 +4273,7 @@
       "dependsOn": ["warning--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning-ring",
@@ -4300,7 +4300,7 @@
       "dependsOn": ["warning", "warning-ring--dark"],
       "containerQueryAware": true,
       "description": "Warning focus ring color. Light: silver-true-honey-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4322,7 +4322,7 @@
       "dependsOn": ["warning--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning-ring.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning-subtle",
@@ -4349,7 +4349,7 @@
       "dependsOn": ["warning", "warning-subtle--dark"],
       "containerQueryAware": true,
       "description": "Subtle warning background for warning alerts. Light: silver-true-honey-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4371,7 +4371,7 @@
       "dependsOn": ["warning--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning-subtle.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "warning-subtle-foreground",
@@ -4398,7 +4398,7 @@
       "dependsOn": ["warning-subtle", "warning-subtle-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on subtle warning backgrounds. Light: silver-true-honey-800.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4420,7 +4420,7 @@
       "dependsOn": ["warning-subtle--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of warning-subtle-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info",
@@ -4449,7 +4449,7 @@
       "dependsOn": ["silver-true-sky", "info--dark"],
       "containerQueryAware": true,
       "description": "Informational states - tips, help, neutral information. Light: silver-true-sky-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4471,7 +4471,7 @@
       "dependsOn": ["silver-true-sky"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info-foreground",
@@ -4498,7 +4498,7 @@
       "dependsOn": ["info", "info-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on info backgrounds. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4520,7 +4520,7 @@
       "dependsOn": ["info--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info-hover",
@@ -4547,7 +4547,7 @@
       "dependsOn": ["info", "info-hover--dark"],
       "containerQueryAware": true,
       "description": "Info hover state. Light: silver-true-sky-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4569,7 +4569,7 @@
       "dependsOn": ["info--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info-hover-foreground",
@@ -4596,7 +4596,7 @@
       "dependsOn": ["info-hover", "info-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on info hover. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4618,7 +4618,7 @@
       "dependsOn": ["info-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info-active",
@@ -4645,7 +4645,7 @@
       "dependsOn": ["info", "info-active--dark"],
       "containerQueryAware": true,
       "description": "Info active/pressed state. Light: silver-true-sky-800.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4667,7 +4667,7 @@
       "dependsOn": ["info--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info-active-foreground",
@@ -4694,7 +4694,7 @@
       "dependsOn": ["info-active", "info-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on info active. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4716,7 +4716,7 @@
       "dependsOn": ["info-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info-focus",
@@ -4743,7 +4743,7 @@
       "dependsOn": ["info", "info-focus--dark"],
       "containerQueryAware": true,
       "description": "Info focus state. Light: silver-true-sky-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4765,7 +4765,7 @@
       "dependsOn": ["info--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info-focus.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info-border",
@@ -4792,7 +4792,7 @@
       "dependsOn": ["info", "info-border--dark"],
       "containerQueryAware": true,
       "description": "Info border color. Light: silver-true-sky-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4814,7 +4814,7 @@
       "dependsOn": ["info--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info-ring",
@@ -4841,7 +4841,7 @@
       "dependsOn": ["info", "info-ring--dark"],
       "containerQueryAware": true,
       "description": "Info focus ring color. Light: silver-true-sky-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4863,7 +4863,7 @@
       "dependsOn": ["info--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info-ring.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info-subtle",
@@ -4890,7 +4890,7 @@
       "dependsOn": ["info", "info-subtle--dark"],
       "containerQueryAware": true,
       "description": "Subtle info background for info alerts. Light: silver-true-sky-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4912,7 +4912,7 @@
       "dependsOn": ["info--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info-subtle.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "info-subtle-foreground",
@@ -4939,7 +4939,7 @@
       "dependsOn": ["info-subtle", "info-subtle-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on subtle info backgrounds. Light: silver-true-sky-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -4961,7 +4961,7 @@
       "dependsOn": ["info-subtle--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of info-subtle-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "alert",
@@ -4990,7 +4990,7 @@
       "dependsOn": ["silver-bold-fire-truck", "alert--dark"],
       "containerQueryAware": true,
       "description": "Critical alert states. Light: silver-bold-fire-truck-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5012,7 +5012,7 @@
       "dependsOn": ["silver-bold-fire-truck"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of alert.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "alert-foreground",
@@ -5039,7 +5039,7 @@
       "dependsOn": ["alert", "alert-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on alert backgrounds. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5061,7 +5061,7 @@
       "dependsOn": ["alert--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of alert-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "alert-hover",
@@ -5088,7 +5088,7 @@
       "dependsOn": ["alert", "alert-hover--dark"],
       "containerQueryAware": true,
       "description": "Alert hover state. Light: silver-bold-fire-truck-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5110,7 +5110,7 @@
       "dependsOn": ["alert--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of alert-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "alert-hover-foreground",
@@ -5137,7 +5137,7 @@
       "dependsOn": ["alert-hover", "alert-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on alert hover. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5159,7 +5159,7 @@
       "dependsOn": ["alert-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of alert-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "alert-active",
@@ -5186,7 +5186,7 @@
       "dependsOn": ["alert", "alert-active--dark"],
       "containerQueryAware": true,
       "description": "Alert active state. Light: silver-bold-fire-truck-800.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5208,7 +5208,7 @@
       "dependsOn": ["alert--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of alert-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "alert-active-foreground",
@@ -5235,7 +5235,7 @@
       "dependsOn": ["alert-active", "alert-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on alert active. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5257,7 +5257,7 @@
       "dependsOn": ["alert-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of alert-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "alert-border",
@@ -5284,7 +5284,7 @@
       "dependsOn": ["alert", "alert-border--dark"],
       "containerQueryAware": true,
       "description": "Alert border color. Light: silver-bold-fire-truck-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5306,7 +5306,7 @@
       "dependsOn": ["alert--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of alert-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "alert-ring",
@@ -5333,7 +5333,7 @@
       "dependsOn": ["alert", "alert-ring--dark"],
       "containerQueryAware": true,
       "description": "Alert focus ring color. Light: silver-bold-fire-truck-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5355,7 +5355,7 @@
       "dependsOn": ["alert--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of alert-ring.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "alert-subtle",
@@ -5382,7 +5382,7 @@
       "dependsOn": ["alert", "alert-subtle--dark"],
       "containerQueryAware": true,
       "description": "Subtle alert background. Light: silver-bold-fire-truck-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5404,7 +5404,7 @@
       "dependsOn": ["alert--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of alert-subtle.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "alert-subtle-foreground",
@@ -5431,7 +5431,7 @@
       "dependsOn": ["alert-subtle", "alert-subtle-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on subtle alert backgrounds. Light: silver-bold-fire-truck-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5453,7 +5453,7 @@
       "dependsOn": ["alert-subtle--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of alert-subtle-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "highlight",
@@ -5480,7 +5480,7 @@
       "dependsOn": ["silver-true-violet", "highlight--dark"],
       "containerQueryAware": true,
       "description": "Highlight for search results, selected text, emphasis. Light: silver-true-violet-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5502,7 +5502,7 @@
       "dependsOn": ["silver-true-violet"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of highlight.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "highlight-foreground",
@@ -5529,7 +5529,7 @@
       "dependsOn": ["highlight", "highlight-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on highlight backgrounds. Light: silver-true-violet-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5551,7 +5551,7 @@
       "dependsOn": ["highlight--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of highlight-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "highlight-hover",
@@ -5578,7 +5578,7 @@
       "dependsOn": ["highlight", "highlight-hover--dark"],
       "containerQueryAware": true,
       "description": "Highlight hover state. Light: silver-true-violet-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5600,7 +5600,7 @@
       "dependsOn": ["highlight--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of highlight-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "highlight-hover-foreground",
@@ -5627,7 +5627,7 @@
       "dependsOn": ["highlight-hover", "highlight-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on highlight hover. Light: silver-true-violet-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5649,7 +5649,7 @@
       "dependsOn": ["highlight-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of highlight-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "highlight-active",
@@ -5676,7 +5676,7 @@
       "dependsOn": ["highlight", "highlight-active--dark"],
       "containerQueryAware": true,
       "description": "Highlight active state. Light: silver-true-violet-400.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5698,7 +5698,7 @@
       "dependsOn": ["highlight--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of highlight-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "highlight-active-foreground",
@@ -5725,7 +5725,7 @@
       "dependsOn": ["highlight-active", "highlight-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on highlight active. Light: silver-true-violet-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5747,7 +5747,7 @@
       "dependsOn": ["highlight-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of highlight-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "border",
@@ -5774,7 +5774,7 @@
       "dependsOn": ["neutral", "border--dark"],
       "containerQueryAware": true,
       "description": "Default border color. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5796,7 +5796,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "border-hover",
@@ -5823,7 +5823,7 @@
       "dependsOn": ["border", "border-hover--dark"],
       "containerQueryAware": true,
       "description": "Border hover state. Light: neutral-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5845,7 +5845,7 @@
       "dependsOn": ["border--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of border-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "border-focus",
@@ -5872,7 +5872,7 @@
       "dependsOn": ["border", "border-focus--dark"],
       "containerQueryAware": true,
       "description": "Border focus state. Light: neutral-400.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5894,7 +5894,7 @@
       "dependsOn": ["border--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of border-focus.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "border-active",
@@ -5921,7 +5921,7 @@
       "dependsOn": ["border", "border-active--dark"],
       "containerQueryAware": true,
       "description": "Border active state. Light: neutral-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5943,7 +5943,7 @@
       "dependsOn": ["border--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of border-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input",
@@ -5970,7 +5970,7 @@
       "dependsOn": ["neutral", "input--dark"],
       "containerQueryAware": true,
       "description": "Input field border color. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -5992,7 +5992,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input-foreground",
@@ -6019,7 +6019,7 @@
       "dependsOn": ["input", "input-foreground--dark"],
       "containerQueryAware": true,
       "description": "Input text color. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6041,7 +6041,7 @@
       "dependsOn": ["input--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input-hover",
@@ -6068,7 +6068,7 @@
       "dependsOn": ["input", "input-hover--dark"],
       "containerQueryAware": true,
       "description": "Input hover state. Light: neutral-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6090,7 +6090,7 @@
       "dependsOn": ["input--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input-focus",
@@ -6117,7 +6117,7 @@
       "dependsOn": ["input", "input-focus--dark"],
       "containerQueryAware": true,
       "description": "Input focus state. Light: neutral-400.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6139,7 +6139,7 @@
       "dependsOn": ["input--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input-focus.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input-disabled",
@@ -6166,7 +6166,7 @@
       "dependsOn": ["input", "input-disabled--dark"],
       "containerQueryAware": true,
       "description": "Disabled input background. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6188,7 +6188,7 @@
       "dependsOn": ["input--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input-disabled.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input-disabled-foreground",
@@ -6215,7 +6215,7 @@
       "dependsOn": ["input-disabled", "input-disabled-foreground--dark"],
       "containerQueryAware": true,
       "description": "Disabled input text color. Light: neutral-400.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6237,7 +6237,7 @@
       "dependsOn": ["input-disabled--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input-disabled-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input-placeholder",
@@ -6264,7 +6264,7 @@
       "dependsOn": ["neutral", "input-placeholder--dark"],
       "containerQueryAware": true,
       "description": "Placeholder text color. Light: neutral-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6286,7 +6286,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input-placeholder.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input-invalid",
@@ -6313,7 +6313,7 @@
       "dependsOn": ["silver-bold-fire-truck", "input-invalid--dark"],
       "containerQueryAware": true,
       "description": "Invalid input border. Light: silver-bold-fire-truck-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6335,7 +6335,7 @@
       "dependsOn": ["silver-bold-fire-truck"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input-invalid.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input-invalid-foreground",
@@ -6362,7 +6362,7 @@
       "dependsOn": ["input-invalid", "input-invalid-foreground--dark"],
       "containerQueryAware": true,
       "description": "Invalid input error text. Light: silver-bold-fire-truck-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6384,7 +6384,7 @@
       "dependsOn": ["input-invalid--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input-invalid-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input-valid",
@@ -6411,7 +6411,7 @@
       "dependsOn": ["silver-true-citrine", "input-valid--dark"],
       "containerQueryAware": true,
       "description": "Valid input border. Light: silver-true-citrine-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6433,7 +6433,7 @@
       "dependsOn": ["silver-true-citrine"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input-valid.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "input-valid-foreground",
@@ -6460,7 +6460,7 @@
       "dependsOn": ["input-valid", "input-valid-foreground--dark"],
       "containerQueryAware": true,
       "description": "Valid input success text. Light: silver-true-citrine-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6482,7 +6482,7 @@
       "dependsOn": ["input-valid--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of input-valid-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "ring",
@@ -6509,7 +6509,7 @@
       "dependsOn": ["neutral", "ring--dark"],
       "containerQueryAware": true,
       "description": "Focus ring color. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6531,7 +6531,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of ring.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "ring-offset",
@@ -6558,7 +6558,7 @@
       "dependsOn": ["neutral", "ring-offset--dark"],
       "containerQueryAware": true,
       "description": "Focus ring offset color. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6580,7 +6580,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of ring-offset.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "ring-primary",
@@ -6607,7 +6607,7 @@
       "dependsOn": ["neutral", "ring-primary--dark"],
       "containerQueryAware": true,
       "description": "Primary focus ring. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6629,7 +6629,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of ring-primary.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "ring-destructive",
@@ -6656,7 +6656,7 @@
       "dependsOn": ["silver-bold-fire-truck", "ring-destructive--dark"],
       "containerQueryAware": true,
       "description": "Destructive focus ring. Light: silver-bold-fire-truck-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6678,7 +6678,7 @@
       "dependsOn": ["silver-bold-fire-truck"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of ring-destructive.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "ring-success",
@@ -6705,7 +6705,7 @@
       "dependsOn": ["silver-true-citrine", "ring-success--dark"],
       "containerQueryAware": true,
       "description": "Success focus ring. Light: silver-true-citrine-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6727,7 +6727,7 @@
       "dependsOn": ["silver-true-citrine"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of ring-success.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "ring-warning",
@@ -6754,7 +6754,7 @@
       "dependsOn": ["silver-true-honey", "ring-warning--dark"],
       "containerQueryAware": true,
       "description": "Warning focus ring. Light: silver-true-honey-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6776,7 +6776,7 @@
       "dependsOn": ["silver-true-honey"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of ring-warning.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "ring-info",
@@ -6803,7 +6803,7 @@
       "dependsOn": ["silver-true-sky", "ring-info--dark"],
       "containerQueryAware": true,
       "description": "Info focus ring. Light: silver-true-sky-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6825,7 +6825,7 @@
       "dependsOn": ["silver-true-sky"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of ring-info.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "link",
@@ -6852,7 +6852,7 @@
       "dependsOn": ["silver-true-sky", "link--dark"],
       "containerQueryAware": true,
       "description": "Link color. Light: silver-true-sky-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6874,7 +6874,7 @@
       "dependsOn": ["silver-true-sky"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of link.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "link-hover",
@@ -6901,7 +6901,7 @@
       "dependsOn": ["link", "link-hover--dark"],
       "containerQueryAware": true,
       "description": "Link hover color. Light: silver-true-sky-800.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6923,7 +6923,7 @@
       "dependsOn": ["link--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of link-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "link-active",
@@ -6950,7 +6950,7 @@
       "dependsOn": ["link", "link-active--dark"],
       "containerQueryAware": true,
       "description": "Link active/pressed color. Light: silver-true-sky-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -6972,7 +6972,7 @@
       "dependsOn": ["link--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of link-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "link-visited",
@@ -6999,7 +6999,7 @@
       "dependsOn": ["silver-true-violet", "link-visited--dark"],
       "containerQueryAware": true,
       "description": "Visited link color. Light: silver-true-violet-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7021,7 +7021,7 @@
       "dependsOn": ["silver-true-violet"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of link-visited.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "link-focus",
@@ -7048,7 +7048,7 @@
       "dependsOn": ["link", "link-focus--dark"],
       "containerQueryAware": true,
       "description": "Link focus color. Light: silver-true-sky-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7070,7 +7070,7 @@
       "dependsOn": ["link--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of link-focus.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "selection",
@@ -7097,7 +7097,7 @@
       "dependsOn": ["silver-true-sky", "selection--dark"],
       "containerQueryAware": true,
       "description": "Text selection background. Light: silver-true-sky-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7119,7 +7119,7 @@
       "dependsOn": ["silver-true-sky"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of selection.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "selection-foreground",
@@ -7146,7 +7146,7 @@
       "dependsOn": ["selection", "selection-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text selection foreground. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7168,7 +7168,7 @@
       "dependsOn": ["selection--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of selection-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar",
@@ -7195,7 +7195,7 @@
       "dependsOn": ["neutral", "sidebar--dark"],
       "containerQueryAware": true,
       "description": "Sidebar background -- almost on the surface. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7217,7 +7217,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-foreground",
@@ -7244,7 +7244,7 @@
       "dependsOn": ["sidebar", "sidebar-foreground--dark"],
       "containerQueryAware": true,
       "description": "Sidebar text color. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7266,7 +7266,7 @@
       "dependsOn": ["sidebar--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-muted",
@@ -7293,7 +7293,7 @@
       "dependsOn": ["neutral", "sidebar-muted--dark"],
       "containerQueryAware": true,
       "description": "Sidebar muted text. Light: neutral-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7315,7 +7315,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-muted.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-primary",
@@ -7342,7 +7342,7 @@
       "dependsOn": ["neutral", "sidebar-primary--dark"],
       "containerQueryAware": true,
       "description": "Sidebar primary accent. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7364,7 +7364,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-primary.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-primary-foreground",
@@ -7391,7 +7391,7 @@
       "dependsOn": ["sidebar-primary", "sidebar-primary-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on sidebar primary. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7413,7 +7413,7 @@
       "dependsOn": ["sidebar-primary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-primary-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-primary-hover",
@@ -7440,7 +7440,7 @@
       "dependsOn": ["sidebar-primary", "sidebar-primary-hover--dark"],
       "containerQueryAware": true,
       "description": "Sidebar primary hover. Light: neutral-800.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7462,7 +7462,7 @@
       "dependsOn": ["sidebar-primary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-primary-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-primary-active",
@@ -7489,7 +7489,7 @@
       "dependsOn": ["sidebar-primary", "sidebar-primary-active--dark"],
       "containerQueryAware": true,
       "description": "Sidebar primary active. Light: neutral-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7511,7 +7511,7 @@
       "dependsOn": ["sidebar-primary--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-primary-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-accent",
@@ -7538,7 +7538,7 @@
       "dependsOn": ["neutral", "sidebar-accent--dark"],
       "containerQueryAware": true,
       "description": "Sidebar hover/accent state. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7560,7 +7560,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-accent.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-accent-foreground",
@@ -7587,7 +7587,7 @@
       "dependsOn": ["sidebar-accent", "sidebar-accent-foreground--dark"],
       "containerQueryAware": true,
       "description": "Text on sidebar accent. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7609,7 +7609,7 @@
       "dependsOn": ["sidebar-accent--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-accent-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-accent-hover",
@@ -7636,7 +7636,7 @@
       "dependsOn": ["sidebar-accent", "sidebar-accent-hover--dark"],
       "containerQueryAware": true,
       "description": "Sidebar accent hover. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7658,7 +7658,7 @@
       "dependsOn": ["sidebar-accent--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-accent-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-accent-active",
@@ -7685,7 +7685,7 @@
       "dependsOn": ["sidebar-accent", "sidebar-accent-active--dark"],
       "containerQueryAware": true,
       "description": "Sidebar accent active. Light: neutral-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7707,7 +7707,7 @@
       "dependsOn": ["sidebar-accent--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-accent-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-item",
@@ -7734,7 +7734,7 @@
       "dependsOn": ["neutral", "sidebar-item--dark"],
       "containerQueryAware": true,
       "description": "Sidebar item background. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7756,7 +7756,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-item.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-item-foreground",
@@ -7783,7 +7783,7 @@
       "dependsOn": ["sidebar-item", "sidebar-item-foreground--dark"],
       "containerQueryAware": true,
       "description": "Sidebar item text. Light: neutral-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7805,7 +7805,7 @@
       "dependsOn": ["sidebar-item--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-item-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-item-hover",
@@ -7832,7 +7832,7 @@
       "dependsOn": ["sidebar-item", "sidebar-item-hover--dark"],
       "containerQueryAware": true,
       "description": "Sidebar item hover. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7854,7 +7854,7 @@
       "dependsOn": ["sidebar-item--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-item-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-item-hover-foreground",
@@ -7881,7 +7881,7 @@
       "dependsOn": ["sidebar-item-hover", "sidebar-item-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Sidebar item hover text. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7903,7 +7903,7 @@
       "dependsOn": ["sidebar-item-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-item-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-item-active",
@@ -7930,7 +7930,7 @@
       "dependsOn": ["sidebar-item", "sidebar-item-active--dark"],
       "containerQueryAware": true,
       "description": "Sidebar item active. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -7952,7 +7952,7 @@
       "dependsOn": ["sidebar-item--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-item-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-item-active-foreground",
@@ -7979,7 +7979,7 @@
       "dependsOn": ["sidebar-item-active", "sidebar-item-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Sidebar item active text. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8001,7 +8001,7 @@
       "dependsOn": ["sidebar-item-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-item-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-item-selected",
@@ -8028,7 +8028,7 @@
       "dependsOn": ["neutral", "sidebar-item-selected--dark"],
       "containerQueryAware": true,
       "description": "Sidebar selected item. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8050,7 +8050,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-item-selected.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-item-selected-foreground",
@@ -8077,7 +8077,7 @@
       "dependsOn": ["sidebar-item-selected", "sidebar-item-selected-foreground--dark"],
       "containerQueryAware": true,
       "description": "Sidebar selected item text. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8099,7 +8099,7 @@
       "dependsOn": ["sidebar-item-selected--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-item-selected-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-border",
@@ -8126,7 +8126,7 @@
       "dependsOn": ["sidebar", "sidebar-border--dark"],
       "containerQueryAware": true,
       "description": "Sidebar border/divider color. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8148,7 +8148,7 @@
       "dependsOn": ["sidebar--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "sidebar-ring",
@@ -8175,7 +8175,7 @@
       "dependsOn": ["sidebar", "sidebar-ring--dark"],
       "containerQueryAware": true,
       "description": "Sidebar focus ring. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8197,7 +8197,7 @@
       "dependsOn": ["sidebar--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of sidebar-ring.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "nav",
@@ -8224,7 +8224,7 @@
       "dependsOn": ["neutral", "nav--dark"],
       "containerQueryAware": true,
       "description": "Navigation background. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8246,7 +8246,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of nav.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "nav-foreground",
@@ -8273,7 +8273,7 @@
       "dependsOn": ["nav", "nav-foreground--dark"],
       "containerQueryAware": true,
       "description": "Navigation text. Light: neutral-700.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8295,7 +8295,7 @@
       "dependsOn": ["nav--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of nav-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "nav-hover",
@@ -8322,7 +8322,7 @@
       "dependsOn": ["nav", "nav-hover--dark"],
       "containerQueryAware": true,
       "description": "Navigation hover. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8344,7 +8344,7 @@
       "dependsOn": ["nav--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of nav-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "nav-hover-foreground",
@@ -8371,7 +8371,7 @@
       "dependsOn": ["nav-hover", "nav-hover-foreground--dark"],
       "containerQueryAware": true,
       "description": "Navigation hover text. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8393,7 +8393,7 @@
       "dependsOn": ["nav-hover--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of nav-hover-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "nav-active",
@@ -8420,7 +8420,7 @@
       "dependsOn": ["nav", "nav-active--dark"],
       "containerQueryAware": true,
       "description": "Navigation active. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8442,7 +8442,7 @@
       "dependsOn": ["nav--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of nav-active.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "nav-active-foreground",
@@ -8469,7 +8469,7 @@
       "dependsOn": ["nav-active", "nav-active-foreground--dark"],
       "containerQueryAware": true,
       "description": "Navigation active text. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8491,7 +8491,7 @@
       "dependsOn": ["nav-active--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of nav-active-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "nav-selected",
@@ -8518,7 +8518,7 @@
       "dependsOn": ["neutral", "nav-selected--dark"],
       "containerQueryAware": true,
       "description": "Navigation selected. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8540,7 +8540,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of nav-selected.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "nav-selected-foreground",
@@ -8567,7 +8567,7 @@
       "dependsOn": ["nav-selected", "nav-selected-foreground--dark"],
       "containerQueryAware": true,
       "description": "Navigation selected text. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8589,7 +8589,7 @@
       "dependsOn": ["nav-selected--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of nav-selected-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "nav-disabled",
@@ -8616,7 +8616,7 @@
       "dependsOn": ["nav", "nav-disabled--dark"],
       "containerQueryAware": true,
       "description": "Navigation disabled. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8638,7 +8638,7 @@
       "dependsOn": ["nav--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of nav-disabled.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "nav-disabled-foreground",
@@ -8665,7 +8665,7 @@
       "dependsOn": ["nav-disabled", "nav-disabled-foreground--dark"],
       "containerQueryAware": true,
       "description": "Navigation disabled text. Light: neutral-400.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8687,7 +8687,7 @@
       "dependsOn": ["nav-disabled--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of nav-disabled-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "table",
@@ -8714,7 +8714,7 @@
       "dependsOn": ["neutral", "table--dark"],
       "containerQueryAware": true,
       "description": "Table background. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8736,7 +8736,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of table.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "table-foreground",
@@ -8763,7 +8763,7 @@
       "dependsOn": ["table", "table-foreground--dark"],
       "containerQueryAware": true,
       "description": "Table text. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8785,7 +8785,7 @@
       "dependsOn": ["table--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of table-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "table-header",
@@ -8812,7 +8812,7 @@
       "dependsOn": ["neutral", "table-header--dark"],
       "containerQueryAware": true,
       "description": "Table header background. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8834,7 +8834,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of table-header.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "table-header-foreground",
@@ -8861,7 +8861,7 @@
       "dependsOn": ["table-header", "table-header-foreground--dark"],
       "containerQueryAware": true,
       "description": "Table header text. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8883,7 +8883,7 @@
       "dependsOn": ["table-header--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of table-header-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "table-row-hover",
@@ -8910,7 +8910,7 @@
       "dependsOn": ["neutral", "table-row-hover--dark"],
       "containerQueryAware": true,
       "description": "Table row hover. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8932,7 +8932,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of table-row-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "table-row-selected",
@@ -8959,7 +8959,7 @@
       "dependsOn": ["neutral", "table-row-selected--dark"],
       "containerQueryAware": true,
       "description": "Table row selected. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -8981,7 +8981,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of table-row-selected.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "table-row-selected-foreground",
@@ -9008,7 +9008,7 @@
       "dependsOn": ["table-row-selected", "table-row-selected-foreground--dark"],
       "containerQueryAware": true,
       "description": "Table row selected text. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9030,7 +9030,7 @@
       "dependsOn": ["table-row-selected--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of table-row-selected-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "table-border",
@@ -9057,7 +9057,7 @@
       "dependsOn": ["table", "table-border--dark"],
       "containerQueryAware": true,
       "description": "Table border. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9079,7 +9079,7 @@
       "dependsOn": ["table--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of table-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "tooltip",
@@ -9106,7 +9106,7 @@
       "dependsOn": ["neutral", "tooltip--dark"],
       "containerQueryAware": true,
       "description": "Tooltip background. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9128,7 +9128,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of tooltip.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "tooltip-foreground",
@@ -9155,7 +9155,7 @@
       "dependsOn": ["tooltip", "tooltip-foreground--dark"],
       "containerQueryAware": true,
       "description": "Tooltip text. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9177,7 +9177,7 @@
       "dependsOn": ["tooltip--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of tooltip-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "overlay",
@@ -9204,7 +9204,7 @@
       "dependsOn": ["neutral", "overlay--dark"],
       "containerQueryAware": true,
       "description": "Overlay background. Light: neutral-950.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9226,7 +9226,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of overlay.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "overlay-foreground",
@@ -9253,7 +9253,7 @@
       "dependsOn": ["overlay", "overlay-foreground--dark"],
       "containerQueryAware": true,
       "description": "Overlay text. Light: neutral-50.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9275,7 +9275,7 @@
       "dependsOn": ["overlay--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of overlay-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "skeleton",
@@ -9302,7 +9302,7 @@
       "dependsOn": ["neutral", "skeleton--dark"],
       "containerQueryAware": true,
       "description": "Skeleton loader background. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9324,7 +9324,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of skeleton.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "skeleton-highlight",
@@ -9351,7 +9351,7 @@
       "dependsOn": ["neutral", "skeleton-highlight--dark"],
       "containerQueryAware": true,
       "description": "Skeleton loader highlight. Light: neutral-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9373,7 +9373,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of skeleton-highlight.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "chart-1",
@@ -9400,7 +9400,7 @@
       "dependsOn": ["silver-true-glacier", "chart-1--dark"],
       "containerQueryAware": true,
       "description": "Primary chart color. Light: silver-true-glacier-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9422,7 +9422,7 @@
       "dependsOn": ["silver-true-glacier"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of chart-1.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "chart-2",
@@ -9449,7 +9449,7 @@
       "dependsOn": ["silver-true-sky", "chart-2--dark"],
       "containerQueryAware": true,
       "description": "Secondary chart color. Light: silver-true-sky-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9471,7 +9471,7 @@
       "dependsOn": ["silver-true-sky"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of chart-2.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "chart-3",
@@ -9498,7 +9498,7 @@
       "dependsOn": ["silver-true-citrine", "chart-3--dark"],
       "containerQueryAware": true,
       "description": "Tertiary chart color. Light: silver-true-citrine-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9520,7 +9520,7 @@
       "dependsOn": ["silver-true-citrine"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of chart-3.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "chart-4",
@@ -9547,7 +9547,7 @@
       "dependsOn": ["silver-true-honey", "chart-4--dark"],
       "containerQueryAware": true,
       "description": "Quaternary chart color. Light: silver-true-honey-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9569,7 +9569,7 @@
       "dependsOn": ["silver-true-honey"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of chart-4.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "chart-5",
@@ -9596,7 +9596,7 @@
       "dependsOn": ["silver-true-violet", "chart-5--dark"],
       "containerQueryAware": true,
       "description": "Quinary chart color. Light: silver-true-violet-500.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9618,7 +9618,7 @@
       "dependsOn": ["silver-true-violet"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of chart-5.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "scrollbar",
@@ -9645,7 +9645,7 @@
       "dependsOn": ["neutral", "scrollbar--dark"],
       "containerQueryAware": true,
       "description": "Scrollbar thumb color. Light: neutral-300.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9667,7 +9667,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of scrollbar.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "scrollbar-hover",
@@ -9694,7 +9694,7 @@
       "dependsOn": ["scrollbar", "scrollbar-hover--dark"],
       "containerQueryAware": true,
       "description": "Scrollbar thumb hover. Light: neutral-400.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9716,7 +9716,7 @@
       "dependsOn": ["scrollbar--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of scrollbar-hover.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "scrollbar-track",
@@ -9743,7 +9743,7 @@
       "dependsOn": ["neutral", "scrollbar-track--dark"],
       "containerQueryAware": true,
       "description": "Scrollbar track background. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9765,7 +9765,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of scrollbar-track.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "code",
@@ -9792,7 +9792,7 @@
       "dependsOn": ["neutral", "code--dark"],
       "containerQueryAware": true,
       "description": "Code block background. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9814,7 +9814,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of code.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "code-foreground",
@@ -9841,7 +9841,7 @@
       "dependsOn": ["code", "code-foreground--dark"],
       "containerQueryAware": true,
       "description": "Code text color. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9863,7 +9863,7 @@
       "dependsOn": ["code--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of code-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "code-border",
@@ -9890,7 +9890,7 @@
       "dependsOn": ["code", "code-border--dark"],
       "containerQueryAware": true,
       "description": "Code block border. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9912,7 +9912,7 @@
       "dependsOn": ["code--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of code-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "badge",
@@ -9939,7 +9939,7 @@
       "dependsOn": ["neutral", "badge--dark"],
       "containerQueryAware": true,
       "description": "Badge background. Light: neutral-100.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -9961,7 +9961,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of badge.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "badge-foreground",
@@ -9988,7 +9988,7 @@
       "dependsOn": ["badge", "badge-foreground--dark"],
       "containerQueryAware": true,
       "description": "Badge text color. Light: neutral-900.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -10010,7 +10010,7 @@
       "dependsOn": ["badge--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of badge-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "badge-border",
@@ -10037,7 +10037,7 @@
       "dependsOn": ["badge", "badge-border--dark"],
       "containerQueryAware": true,
       "description": "Badge border. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -10059,7 +10059,7 @@
       "dependsOn": ["badge--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of badge-border.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "avatar",
@@ -10086,7 +10086,7 @@
       "dependsOn": ["neutral", "avatar--dark"],
       "containerQueryAware": true,
       "description": "Avatar fallback background. Light: neutral-200.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -10108,7 +10108,7 @@
       "dependsOn": ["neutral"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of avatar.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     },
     {
       "name": "avatar-foreground",
@@ -10135,7 +10135,7 @@
       "dependsOn": ["avatar", "avatar-foreground--dark"],
       "containerQueryAware": true,
       "description": "Avatar fallback text/icon color. Light: neutral-600.",
-      "generatedAt": "2026-08-29T05:23:05.904Z",
+      "generatedAt": "2026-08-29T08:35:41.251Z",
       "requiresConfirmation": false
     },
     {
@@ -10157,7 +10157,7 @@
       "dependsOn": ["avatar--dark"],
       "containerQueryAware": true,
       "description": "Dark mode counterpart of avatar-foreground.",
-      "generatedAt": "2026-08-29T05:23:05.904Z"
+      "generatedAt": "2026-08-29T08:35:41.251Z"
     }
   ]
 }

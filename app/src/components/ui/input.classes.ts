@@ -13,7 +13,7 @@ const inputClasses =
   "text-foreground placeholder:text-muted-foreground " +
   "ring-offset-background " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 " +
-  "transition-shadow duration-100 motion-reduce:transition-none " +
+  "transition-shadow duration-micro motion-reduce:transition-none " +
   "disabled:cursor-not-allowed disabled:opacity-50 " +
   "read-only:cursor-default " +
   "aria-invalid:border-destructive aria-invalid:focus-visible:ring-destructive-ring";

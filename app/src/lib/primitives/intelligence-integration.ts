@@ -111,10 +111,13 @@ export function validateDialogAccessibility(config: {
  * system ships. A grep across `packages/` found no callers: only the definition
  * and its two listings in the primitives spec matrix, both removed with it.
  *
- * Its one correct behaviour -- zero duration under prefers-reduced-motion --
- * moves to `motion-tokens.ts`, where it applies to the `duration` and `delay`
- * namespaces and exempts `period`, because a stopped work loop says the work
- * stopped. Callers that want a timing ask the accessor for a named token.
+ * Its one correct behaviour -- zero duration under prefers-reduced-motion -- is
+ * not a runtime accessor's job at all (#2148): it is the token sheet's own,
+ * through the exporter's `REDUCED_MOTION_ZEROED` set
+ * (packages/design-tokens/src/exporters/tailwind.ts), which zeroes the
+ * `duration` and `delay` namespaces inside every emitted utility and exempts
+ * `period`, because a stopped work loop says the work stopped. Callers that
+ * want a timing use the emitted utility; no TypeScript reads a motion token.
  */
 
 /**

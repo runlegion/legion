@@ -1,6 +1,6 @@
 {
   "namespace": "typography-composite",
-  "generatedAt": "2026-08-29T05:23:06.397Z",
+  "generatedAt": "2026-08-29T08:35:41.653Z",
   "tokens": [
     {
       "name": "display-large",
@@ -27,7 +27,7 @@
       "applicableComponents": ["hero"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-heading text-5xl font-bold. Largest display text for hero sections and landing pages",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "display-medium",
@@ -54,7 +54,7 @@
       "applicableComponents": ["h1"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-heading text-4xl font-bold. Primary page heading -- one per page",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "title-large",
@@ -81,7 +81,7 @@
       "applicableComponents": ["h2"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-heading text-3xl font-semibold. Major section heading",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "title-medium",
@@ -126,7 +126,7 @@
       ],
       "generateUtilityClass": true,
       "description": "Typography composite: font-heading text-lg font-semibold. Component and subsection title -- shared by card, dialog, sheet, drawer, empty state",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "title-small",
@@ -156,7 +156,7 @@
       "applicableComponents": ["h4", "alert-title", "accordion-trigger"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-heading text-base font-semibold. Minor heading and alert title",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "body-large",
@@ -183,7 +183,7 @@
       "applicableComponents": ["lead"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-body text-xl font-normal. Lead paragraph and introductory text",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "body-medium",
@@ -213,7 +213,7 @@
       "applicableComponents": ["p", "list-item", "blockquote", "accordion-content"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-body text-base font-normal. Default body text for paragraphs and content",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "body-small",
@@ -265,7 +265,7 @@
       ],
       "generateUtilityClass": true,
       "description": "Typography composite: font-body text-sm font-normal. Secondary text -- descriptions, tooltips, menu items, table cells",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "label-large",
@@ -292,7 +292,7 @@
       "applicableComponents": ["button", "tab-trigger", "nav-trigger", "toggle", "pagination-link"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-body text-base font-medium. Interactive element text -- buttons, tabs, nav triggers, toggles",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "label-medium",
@@ -319,7 +319,7 @@
       "applicableComponents": ["label", "breadcrumb", "button-sm", "sidebar-item"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-body text-sm font-medium. Form labels, breadcrumbs, small buttons, sidebar items",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "label-small",
@@ -346,7 +346,7 @@
       "applicableComponents": ["badge", "sidebar-label", "caption", "command-group-heading"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-body text-xs font-medium. Smallest label text -- badges, sidebar labels, captions",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "code-large",
@@ -373,7 +373,7 @@
       "applicableComponents": ["code-block"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-code text-base font-normal. Code blocks and pre-formatted text",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "code-small",
@@ -400,7 +400,7 @@
       "applicableComponents": ["code-inline", "kbd"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-code text-sm font-normal. Inline code and keyboard key indicators",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     },
     {
       "name": "shortcut",
@@ -427,7 +427,7 @@
       "applicableComponents": ["keyboard-shortcut"],
       "generateUtilityClass": true,
       "description": "Typography composite: font-code text-xs font-normal. Keyboard shortcut indicators in menus",
-      "generatedAt": "2026-08-29T05:23:05.905Z"
+      "generatedAt": "2026-08-29T08:35:41.252Z"
     }
   ]
 }

@@ -75,7 +75,7 @@ const sizeClasses: Record<ButtonSize, string> = {
 const baseClasses =
   "inline-flex items-center justify-center gap-2 rounded-md text-label-large ts-label-large cursor-pointer " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 " +
-  "transition-colors duration-150 motion-reduce:transition-none " +
+  "transition-colors duration-fast motion-reduce:transition-none " +
   "disabled:opacity-50 disabled:cursor-not-allowed " +
   "aria-disabled:opacity-50 aria-disabled:cursor-not-allowed " +
   "aria-busy:cursor-progress";

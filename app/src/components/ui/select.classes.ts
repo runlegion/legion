@@ -18,10 +18,22 @@ export interface SelectClassSet {
 
 // Touch floor at h-11, scaling down via the container query (repo CQ
 // convention) rather than the viewport. Fill, not background.
+//
+// duration-micro, not the trigger's own hover cell: transition-shadow only
+// animates box-shadow (the focus-visible ring below), and motion.jsonl has
+// no select | trigger | focus cell to source that from directly. input,
+// input-group, and textarea carry this identical transition-shadow and are
+// correctly sourced from their own root/focus cells, which are all micro
+// (motion.jsonl:109,111,113) -- select's ring gets the same tier by that
+// analogy. The hover cell (motion.jsonl:103, fast) governs a border-color
+// change that this class does not actually transition (no transition-colors
+// utility is applied here); adding one is a separate, pre-existing gap, not
+// this fix. Adding a dedicated select | trigger | focus cell is matrix
+// hygiene (#2158/#2159), not a literal-to-tier substitution.
 const triggerClasses =
   "group flex h-11 @md:h-9 w-full items-center justify-between gap-2 rounded-md " +
   "border border-input bg-background px-3 py-2 text-body-small ts-body-small shadow-sm ring-offset-background " +
-  "transition-shadow duration-100 motion-reduce:transition-none " +
+  "transition-shadow duration-micro motion-reduce:transition-none " +
   "hover:border-input-hover " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 " +
   "disabled:cursor-not-allowed disabled:opacity-50 " +
@@ -32,7 +44,7 @@ const triggerClasses =
 const valueClasses = "pointer-events-none truncate text-left data-[empty]:text-muted-foreground";
 
 const chevronClasses =
-  "size-4 shrink-0 opacity-50 transition-transform duration-200 motion-reduce:transition-none " +
+  "size-4 shrink-0 opacity-50 transition-transform duration-moderate motion-reduce:transition-none " +
   "group-data-[state=open]:rotate-180";
 
 const contentClasses =
