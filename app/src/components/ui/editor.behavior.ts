@@ -22,8 +22,8 @@
 import { z } from "zod";
 import type { AriaAttrs, KeyInput, PartDecl, PartIds } from "@/lib/contract";
 import { updateAriaAttribute } from "@/lib/primitives/aria-manager";
-import { createClipboard } from "@/lib/primitives/editor/clipboard";
-import { createInputHandler } from "@/lib/primitives/editor/input-events";
+import { createClipboard } from "@/lib/primitives/clipboard";
+import { createInputHandler } from "@/lib/primitives/input-events";
 import type { BaseBlock, InlineContent } from "@/lib/primitives/types";
 import type { EditorHistory, EditorHistoryState } from "@/components/ui/editor-history";
 import { createEditorHistory } from "@/components/ui/editor-history";

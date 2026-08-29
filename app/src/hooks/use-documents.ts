@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
+import { type FetchFailure, failure, requestJson, documentPath } from "@/lib/api";
 import { type Document, DocumentListSchema, DocumentSchema } from "@/lib/documents";
 
-export interface FetchFailure {
-  request: string;
-  message: string;
-}
+export type { FetchFailure } from "@/lib/api";
 
-export type AcceptResult = { ok: true; document: Document } | { ok: false; message: string };
+export type MutationResult =
+  | { ok: true; document: Document }
+  | { ok: false; failure: FetchFailure };
 
 export interface UseDocumentsResult {
   documents: Document[];
@@ -14,15 +14,15 @@ export interface UseDocumentsResult {
   /** Persists until the next successful fetch of /api/documents. */
   error: FetchFailure | null;
   refetch: () => void;
-  acceptDocument: (id: string) => Promise<AcceptResult>;
+  /** Replace one document in the loaded list after it is revised elsewhere. */
+  replaceDocument: (next: Document) => void;
+  /** POST /api/documents/{id}/status -- the general status setter. */
+  setDocumentStatus: (id: string, status: string) => Promise<MutationResult>;
+  /** POST /api/documents -- creates a new intention (#1036). */
+  createDocument: (docType: string, owner: string) => Promise<MutationResult>;
 }
 
-function describeError(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return "unknown error";
-}
-
-/** The one data-access hook over the daemon's /api/documents surface. */
+/** The one data-access hook over the daemon's /api/documents collection. */
 export function useDocuments(): UseDocumentsResult {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
@@ -32,16 +32,10 @@ export function useDocuments(): UseDocumentsResult {
     setLoading(true);
     void (async () => {
       try {
-        const res = await fetch("/api/documents");
-        if (!res.ok) {
-          throw new Error(`request failed with status ${res.status}`);
-        }
-        const json: unknown = await res.json();
-        const parsed = DocumentListSchema.parse(json);
-        setDocuments(parsed);
+        setDocuments(await requestJson("/api/documents", DocumentListSchema));
         setError(null);
       } catch (err) {
-        setError({ request: "GET /api/documents", message: describeError(err) });
+        setError(failure("GET /api/documents", err));
       } finally {
         setLoading(false);
       }
@@ -52,27 +46,50 @@ export function useDocuments(): UseDocumentsResult {
     fetchDocuments();
   }, [fetchDocuments]);
 
-  const acceptDocument = useCallback(async (id: string): Promise<AcceptResult> => {
-    try {
-      const res = await fetch(`/api/documents/${encodeURIComponent(id)}/status`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to: "accepted" }),
-      });
-      if (!res.ok) {
-        return {
-          ok: false,
-          message: `POST /api/documents/${id}/status failed with status ${res.status}`,
-        };
-      }
-      const json: unknown = await res.json();
-      const parsed = DocumentSchema.parse(json);
-      setDocuments((prev) => prev.map((doc) => (doc.id === parsed.id ? parsed : doc)));
-      return { ok: true, document: parsed };
-    } catch (err) {
-      return { ok: false, message: describeError(err) };
-    }
+  const replaceDocument = useCallback((next: Document) => {
+    setDocuments((prev) => prev.map((doc) => (doc.id === next.id ? next : doc)));
   }, []);
 
-  return { documents, loading, error, refetch: fetchDocuments, acceptDocument };
+  const setDocumentStatus = useCallback(
+    async (id: string, status: string): Promise<MutationResult> => {
+      const request = `POST ${documentPath(id, "/status")}`;
+      try {
+        const document = await requestJson(documentPath(id, "/status"), DocumentSchema, {
+          method: "POST",
+          body: { to: status },
+        });
+        replaceDocument(document);
+        return { ok: true, document };
+      } catch (err) {
+        return { ok: false, failure: failure(request, err) };
+      }
+    },
+    [replaceDocument],
+  );
+
+  const createDocument = useCallback(
+    async (docType: string, owner: string): Promise<MutationResult> => {
+      try {
+        const document = await requestJson("/api/documents", DocumentSchema, {
+          method: "POST",
+          body: { doc_type: docType, owner, payload: {} },
+        });
+        setDocuments((prev) => [...prev, document]);
+        return { ok: true, document };
+      } catch (err) {
+        return { ok: false, failure: failure("POST /api/documents", err) };
+      }
+    },
+    [],
+  );
+
+  return {
+    documents,
+    loading,
+    error,
+    refetch: fetchDocuments,
+    replaceDocument,
+    setDocumentStatus,
+    createDocument,
+  };
 }
