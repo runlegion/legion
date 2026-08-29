@@ -366,6 +366,7 @@ mod tests {
         }
 
         let db = Database::open(&path).unwrap();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
 
         // Pre-existing row backfilled to revision 1 by the column DEFAULT.
         assert_eq!(db.document_revision("old-doc").unwrap(), 1);

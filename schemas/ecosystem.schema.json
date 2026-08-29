@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "ecosystem",
   "title": "Ecosystem",
   "description": "Service-design ecosystem map: actors, channels, value exchanges, moments of truth, and failure modes of a service. Part of the definition layer (legion #526).",
   "type": "object",

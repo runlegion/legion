@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "blueprint",
   "title": "Blueprint",
   "description": "Service blueprint: frontstage/backstage of a service across a sequence of steps. Part of the definition layer (legion #526). pain_points/metrics are plain string arrays per the validated instances (the vault doc's Zod wrapper objects were a TOML-era artifact).",
   "type": "object",

@@ -15,8 +15,10 @@ pub(crate) enum DocumentAction {
     /// explicitly to keep the storage layer type-agnostic. Payloads
     /// with doc_type=schema are validated structurally at create (must
     /// be a valid JSON Schema object with $schema, title, type:object,
-    /// and non-empty properties). Other document types are checked
-    /// against a landed schema via `legion document validate --schema <id>`.
+    /// non-empty properties, and an `x-doc-type` keyword; the schema
+    /// itself must compile). Every other document type is validated
+    /// against its doc_type's landed schema before the write (#1062) --
+    /// a doc_type with no landed schema is refused outright.
     Create {
         /// Document type (e.g. "requirement", "nfr", "persona").
         #[arg(long, value_name = "TYPE")]
@@ -97,9 +99,11 @@ pub(crate) enum DocumentAction {
         #[arg(long)]
         to: String,
     },
-    /// Validate a JSON instance against a landed schema document (#526).
-    /// Checks the dependency-free subset: type, required, properties,
-    /// items, enum. Exits non-zero with one error per violation.
+    /// Validate a JSON instance against a landed schema document (#1062).
+    /// Compiles the stored schema through the `jsonschema` crate (draft-07
+    /// and 2020-12, `$ref`/`definitions` honored) and runs the instance
+    /// through it. Exits non-zero with one `<json pointer>: <message>` line
+    /// per violation.
     Validate {
         /// Id of the schema document (doc_type=schema) to validate against.
         #[arg(long)]
@@ -108,6 +112,20 @@ pub(crate) enum DocumentAction {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+}
+
+/// Print each violation line to stderr ahead of the summary `main()` prints
+/// from the error's `Display` (#1062, Error Handling: "CLI prints each
+/// error line to stderr then the summary, exit 1"). A non-`SchemaViolation`
+/// error passes through unchanged -- this only adds the detail lines a
+/// schema refusal carries.
+fn print_schema_violation_lines(err: error::LegionError) -> error::LegionError {
+    if let error::LegionError::SchemaViolation { ref errors, .. } = err {
+        for line in errors {
+            eprintln!("{line}");
+        }
+    }
+    err
 }
 
 pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
@@ -156,7 +174,9 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
                 priority: priority.as_deref(),
                 owner: &owner,
             };
-            let doc = database.insert_document(&meta, &payload)?;
+            let doc = database
+                .insert_document(&meta, &payload)
+                .map_err(print_schema_violation_lines)?;
             // Dual-write a pointer reflection (domain=schema) so
             // `legion recall --domain schema` surfaces the schema
             // (#526, option A: documents hold the canonical payload,
@@ -288,7 +308,9 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
             } else {
                 None
             };
-            let doc = database.revise_document(&id, &payload)?;
+            let doc = database
+                .revise_document(&id, &payload)
+                .map_err(print_schema_violation_lines)?;
             // Write a fresh recall pointer (domain=schema) for the revised
             // payload (#526, MED-4 review fix): Create dual-writes this
             // pointer and Revise previously did not, so `recall --domain
@@ -349,7 +371,16 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
                 serde_json::from_str(&instance_text).map_err(|e| {
                     error::LegionError::WorkSource(format!("instance is not valid JSON: {e}"))
                 })?;
-            let errors = documents::validate_instance(&schema_value, &instance);
+            let validator = jsonschema::validator_for(&schema_value).map_err(|e| {
+                error::LegionError::WorkSource(format!(
+                    "stored schema '{}' does not compile: {e}",
+                    doc.id
+                ))
+            })?;
+            let errors: Vec<String> = validator
+                .iter_errors(&instance)
+                .map(|e| format!("{}: {e}", e.instance_path()))
+                .collect();
             if errors.is_empty() {
                 println!("valid against schema {}", doc.id);
             } else {

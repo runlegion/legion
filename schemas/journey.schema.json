@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "journey",
   "title": "Journey",
   "description": "Service-design journey map: a persona through a scenario over time with an emotional curve. Part of the definition layer (legion #526).",
   "type": "object",

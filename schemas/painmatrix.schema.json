@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "painmatrix",
   "title": "Painmatrix",
   "description": "Pain point matrix: scored, weighted, evidence-linked pain themes ranked for prioritization. Part of the definition layer (legion #526).",
   "type": "object",

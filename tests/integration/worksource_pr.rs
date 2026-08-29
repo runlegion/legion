@@ -1484,6 +1484,14 @@ fn create_requirement_doc(
     status: Option<&str>,
     criteria_texts: &[&str],
 ) {
+    // #1062: a `requirement` write needs a landed schema declaring
+    // `x-doc-type: requirement`. `seed_doc_type_schema` checks nothing
+    // before creating (unlike the crate's own idempotent test helper), so
+    // callers on a fresh data_dir per test are fine, but a data_dir reused
+    // across multiple `create_requirement_doc` calls would try to land a
+    // second schema and hit the "multiple schemas declare this type"
+    // refusal -- there is no such reuse in this file today.
+    seed_doc_type_schema(data_dir, "requirement");
     let criteria: Vec<serde_json::Value> = criteria_texts
         .iter()
         .map(|t| serde_json::json!({"text": t}))
@@ -3757,6 +3765,7 @@ esac
 fn verify_issue_traced_requirement_resolves_spec_criteria_and_proceeds() {
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(data_dir.path(), "requirement");
 
     let doc_payload =
         r#"{"meta":{},"verification":{"criteria":[{"text":"ships the retry path"}]}}"#;
@@ -3872,6 +3881,7 @@ fn verify_issue_traced_requirement_refuses_nonexistent_document() {
 fn verify_issue_traced_requirement_refuses_cancelled_requirement() {
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(data_dir.path(), "requirement");
 
     let doc_payload =
         r#"{"meta":{},"verification":{"criteria":[{"text":"ships the retry path"}]}}"#;
@@ -3959,6 +3969,7 @@ fn issue_create_refuses_trace_to_nonexistent_document() {
 fn issue_create_succeeds_with_valid_trace() {
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(data_dir.path(), "requirement");
 
     let doc_payload = r#"{"meta":{},"verification":{"criteria":[{"text":"ships it"}]}}"#;
     let doc_out = run_with_stdin(

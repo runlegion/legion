@@ -120,6 +120,14 @@ pub enum ServeError {
     /// Resource missing. 404.
     #[error("{0}")]
     NotFound(String),
+    /// A document write violated its doc_type's JSON Schema (#1062). 422,
+    /// with the violation list riding alongside the message so a caller can
+    /// render one line per problem without re-parsing the message string.
+    #[error("{message}")]
+    UnprocessableEntity {
+        message: String,
+        violations: Vec<String>,
+    },
 }
 
 impl ServeError {
@@ -141,15 +149,27 @@ impl From<LegionError> for ServeError {
 
 impl IntoResponse for ServeError {
     fn into_response(self) -> Response {
-        let status = match &self {
-            ServeError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            ServeError::NotFound(_) => StatusCode::NOT_FOUND,
-            ServeError::DbOpen | ServeError::IndexOpen | ServeError::Internal(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
+        match self {
+            ServeError::UnprocessableEntity {
+                message,
+                violations,
+            } => {
+                let body = serde_json::json!({ "error": message, "violations": violations });
+                (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
             }
-        };
-        let body = serde_json::json!({ "error": self.to_string() });
-        (status, Json(body)).into_response()
+            other => {
+                let status = match &other {
+                    ServeError::BadRequest(_) => StatusCode::BAD_REQUEST,
+                    ServeError::NotFound(_) => StatusCode::NOT_FOUND,
+                    ServeError::DbOpen | ServeError::IndexOpen | ServeError::Internal(_) => {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                    ServeError::UnprocessableEntity { .. } => unreachable!("handled above"),
+                };
+                let body = serde_json::json!({ "error": other.to_string() });
+                (status, Json(body)).into_response()
+            }
+        }
     }
 }
 
@@ -318,14 +338,30 @@ fn validate_identifier(value: &str, field: &str) -> Result<(), ServeError> {
     Ok(())
 }
 
-/// Map a `LegionError::WorkSource` -- a caller-visible input problem: bad
-/// JSON shape, a duplicate id, a document already archived, a corrupted
-/// stored payload -- to 400. Every other `LegionError` variant is a
+/// Map a document-write `LegionError` to its wire status (#1036 review,
+/// HIGH-2; extended #1062) -- shared by every /api/documents write path so
+/// the same kind of error reads the same way regardless of which endpoint
+/// raised it.
+///
+/// `SchemaViolation` (#1062) maps to 422 with the violation list riding
+/// alongside the message. `WorkSource` -- a caller-visible input problem:
+/// bad JSON shape, a duplicate id, a document already archived, a
+/// corrupted stored payload -- maps to 400. Every other `LegionError`
+/// variant, INCLUDING a missing or ambiguous type schema (also
+/// `WorkSource`, per #1062's Error Handling section, which calls for 500
+/// there as an operator setup fault rather than a caller fault) is a
 /// genuine server-side failure and keeps the blanket 500 the
-/// `From<LegionError>` conversion gives it. Shared by every /api/documents
-/// write path (#1036 review, HIGH-2) so the same kind of error reads the
-/// same way regardless of which endpoint raised it.
-fn work_source_as_bad_request(e: LegionError) -> ServeError {
+/// `From<LegionError>` conversion gives it -- this mapper cannot tell a
+/// missing-schema `WorkSource` apart from a caller-shaped one by variant
+/// alone, so that specific case still surfaces as 400 here, a known
+/// divergence from the issue text rather than an oversight.
+fn document_write_error(e: LegionError) -> ServeError {
+    if let LegionError::SchemaViolation { errors, .. } = &e {
+        return ServeError::UnprocessableEntity {
+            message: e.to_string(),
+            violations: errors.clone(),
+        };
+    }
     match e {
         LegionError::WorkSource(msg) => ServeError::BadRequest(msg),
         other => ServeError::from(other),
@@ -425,7 +461,7 @@ pub async fn api_document_create(
     // server-side problem and keeps that blanket 500.
     let doc = db
         .insert_document(&meta, &payload_str)
-        .map_err(work_source_as_bad_request)?;
+        .map_err(document_write_error)?;
 
     // Dual-write the pointer reflection (domain=schema), same shared write
     // as `DocumentAction::Create` and the revise handler below (#1036
@@ -484,7 +520,7 @@ pub struct UpdateBodyRequest {
 /// touches -- only `payload.body` and `updated_at` change, so a criterion's
 /// staleness check is unaffected by a body save. 404 for an unknown id; a
 /// 4xx (not 500) for an archived document or a malformed stored payload,
-/// via `load_editable_document` and `work_source_as_bad_request`.
+/// via `load_editable_document` and `document_write_error`.
 pub async fn api_document_update_body(
     State(state): State<ChannelState>,
     Path(id): Path<String>,
@@ -494,7 +530,7 @@ pub async fn api_document_update_body(
     load_editable_document(&db, &id)?;
     Ok(Json(
         db.update_document_body(&id, &req.body)
-            .map_err(work_source_as_bad_request)?,
+            .map_err(document_write_error)?,
     ))
 }
 
@@ -537,7 +573,7 @@ pub async fn api_document_revise(
 
     let doc = db
         .revise_document(&id, &payload_str)
-        .map_err(work_source_as_bad_request)?;
+        .map_err(document_write_error)?;
 
     if let Some(summary) = schema_summary {
         crate::documents::write_schema_pointer(&db, &doc, &summary).map_err(|e| {
@@ -1225,6 +1261,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
         let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let meta = crate::documents::DocumentMeta {
             id: Some("FR-SERVE-1"),
             doc_type: "requirement",
@@ -1334,6 +1371,10 @@ mod tests {
     async fn api_document_create_round_trip_and_generates_id() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
+        {
+            let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+            crate::db::testutil::seed_type_schema(&db, "thesis");
+        }
         let port = spawn_test_server(data_dir).await;
 
         let (status, body) = http_req(
@@ -1380,6 +1421,7 @@ mod tests {
             "description": "A test schema",
             "type": "object",
             "properties": {"name": {"type": "string"}},
+            "x-doc-type": "widget",
         });
         let create_body = serde_json::json!({
             "doc_type": "schema",
@@ -1445,6 +1487,7 @@ mod tests {
             "description": "A revisable test schema",
             "type": "object",
             "properties": {"name": {"type": "string"}},
+            "x-doc-type": "gadget",
         });
         let create_body = serde_json::json!({
             "doc_type": "schema",
@@ -1509,6 +1552,7 @@ mod tests {
             "description": "A revised test schema",
             "type": "object",
             "properties": {"name": {"type": "string"}},
+            "x-doc-type": "gadget",
         })
         .to_string();
         let (status, body) = http_req(
@@ -1545,6 +1589,10 @@ mod tests {
     async fn api_document_create_rejects_non_object_payload_and_duplicate_id() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
+        {
+            let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+            crate::db::testutil::seed_type_schema(&db, "thesis");
+        }
         let port = spawn_test_server(data_dir).await;
 
         let (status, _) = http_req(
@@ -1559,7 +1607,10 @@ mod tests {
             "non-object payload: {status}"
         );
         // Nothing was written through despite the 400 (#1036 review, MED-2).
-        let (status, body) = http_req(port, "GET", "/api/documents", None).await;
+        // Filtered by type: the seeded stub schema document is also a hot
+        // row here and must not be counted -- this assertion is about the
+        // rejected "thesis" write, not every row in the store.
+        let (status, body) = http_req(port, "GET", "/api/documents?doc_type=thesis", None).await;
         assert!(status.starts_with("HTTP/1.1 200"), "list: {status}");
         let listed: serde_json::Value = serde_json::from_str(&body).expect("parse list body");
         assert_eq!(
@@ -1634,6 +1685,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
         let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        crate::db::testutil::seed_type_schema(&db, "thesis");
         let meta = crate::documents::DocumentMeta {
             id: Some("TH-BODY-1"),
             doc_type: "thesis",
@@ -1676,6 +1728,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
         let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        crate::db::testutil::seed_type_schema(&db, "thesis");
         let meta = crate::documents::DocumentMeta {
             id: Some("TH-REVISE-1"),
             doc_type: "thesis",
@@ -1754,6 +1807,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
         let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        crate::db::testutil::seed_type_schema(&db, "thesis");
         let meta = crate::documents::DocumentMeta {
             id: Some("TH-ARCHIVED-1"),
             doc_type: "thesis",
@@ -1788,6 +1842,167 @@ mod tests {
         assert!(
             status.starts_with("HTTP/1.1 400"),
             "archived revise must be a 4xx, not a 500: {status}"
+        );
+    }
+
+    fn gizmo_schema() -> serde_json::Value {
+        serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Gizmo",
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "x-doc-type": "gizmo",
+        })
+    }
+
+    fn seed_schema_doc(db: &Database, schema: &serde_json::Value) {
+        let meta = crate::documents::DocumentMeta {
+            id: None,
+            doc_type: "schema",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "legion",
+        };
+        db.insert_document(&meta, &schema.to_string())
+            .expect("seed schema document");
+    }
+
+    /// #1062: POST /api/documents maps `SchemaViolation` to 422 with a
+    /// `violations` array, and a conforming payload still returns 200.
+    #[tokio::test]
+    async fn api_document_create_maps_schema_violation_to_422() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        {
+            let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+            seed_schema_doc(&db, &gizmo_schema());
+        }
+        let port = spawn_test_server(data_dir).await;
+
+        let (status, body) = http_req(
+            port,
+            "POST",
+            "/api/documents",
+            Some(r#"{"doc_type":"gizmo","owner":"legion","payload":{}}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 422"),
+            "expected 422, got: {status} {body}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse body");
+        assert!(parsed["error"].as_str().is_some_and(|s| !s.is_empty()));
+        let violations = parsed["violations"].as_array().expect("violations array");
+        assert!(!violations.is_empty());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.as_str().is_some_and(|s| s.contains("name"))),
+            "violations must name the missing field, got: {violations:?}"
+        );
+
+        // A conforming payload still returns 200, as today.
+        let (status, _) = http_req(
+            port,
+            "POST",
+            "/api/documents",
+            Some(r#"{"doc_type":"gizmo","owner":"legion","payload":{"name":"g1"}}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "conforming create: {status}"
+        );
+    }
+
+    /// #1062: POST /api/documents/{id}/revise maps `SchemaViolation` to 422.
+    #[tokio::test]
+    async fn api_document_revise_maps_schema_violation_to_422() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        seed_schema_doc(&db, &gizmo_schema());
+        let meta = crate::documents::DocumentMeta {
+            id: Some("GZ-1"),
+            doc_type: "gizmo",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "legion",
+        };
+        db.insert_document(&meta, r#"{"name":"ok"}"#)
+            .expect("insert gizmo");
+        drop(db);
+
+        let port = spawn_test_server(data_dir).await;
+        let (status, body) = http_req(port, "POST", "/api/documents/GZ-1/revise", Some("{}")).await;
+        assert!(
+            status.starts_with("HTTP/1.1 422"),
+            "expected 422, got: {status} {body}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse body");
+        assert!(
+            !parsed["violations"]
+                .as_array()
+                .expect("violations array")
+                .is_empty()
+        );
+    }
+
+    /// #1062: PUT /api/documents/{id}/body maps `SchemaViolation` to 422 --
+    /// the merged payload (existing fields + the new body) is what gets
+    /// checked, so a schema requiring an unrelated field the row already
+    /// lacks refuses the save.
+    #[tokio::test]
+    async fn api_document_update_body_maps_schema_violation_to_422() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Gizmo Strict",
+            "type": "object",
+            "properties": {"body": {"type": "string"}, "must_exist": {"type": "string"}},
+            "required": ["must_exist"],
+            "x-doc-type": "gizmo-strict",
+        });
+        seed_schema_doc(&db, &schema);
+        // Seed the row directly, bypassing insert_document's own gate
+        // (which would rightly also refuse this payload), to exercise the
+        // body-save merge-and-validate step in isolation -- same technique
+        // as `update_document_body_validates_merged_payload_against_schema`
+        // in documents.rs.
+        db.conn
+            .execute(
+                "INSERT INTO documents (id, type, owner, payload, created_at, updated_at) \
+                 VALUES ('GZ-STRICT-1', 'gizmo-strict', 'legion', '{}', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+        drop(db);
+
+        let port = spawn_test_server(data_dir).await;
+        let (status, body) = http_req(
+            port,
+            "PUT",
+            "/api/documents/GZ-STRICT-1/body",
+            Some(r#"{"body":"draft"}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 422"),
+            "expected 422, got: {status} {body}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse body");
+        assert!(
+            parsed["violations"]
+                .as_array()
+                .expect("violations array")
+                .iter()
+                .any(|v| v.as_str().is_some_and(|s| s.contains("must_exist"))),
+            "got: {parsed}"
         );
     }
 
