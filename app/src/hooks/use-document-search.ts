@@ -1,20 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { z } from "zod";
 import { type FetchFailure, failure, requestJson } from "@/lib/api";
 import { type Document, DocumentListSchema } from "@/lib/documents";
 
 /** Keystrokes rest this long before the index is queried. */
 const QUERY_DEBOUNCE_MS = 250;
-
-/**
- * GET /api/search (#1037) may answer with the document array itself or wrap it
- * under a results key; accept either rather than guessing one.
- */
-const SearchResponseSchema = z.union([
-  DocumentListSchema,
-  z.object({ results: DocumentListSchema }).transform((value) => value.results),
-  z.object({ documents: DocumentListSchema }).transform((value) => value.documents),
-]);
 
 export interface UseDocumentSearchResult {
   query: string;
@@ -24,7 +13,14 @@ export interface UseDocumentSearchResult {
   error: FetchFailure | null;
 }
 
-/** Search over the repo's documents in the daemon's index. */
+/**
+ * Search over the repo's documents in the daemon's index. Per the #1037
+ * contract the endpoint answers with a bare array of Document envelopes in
+ * BM25 rank order, scoped to `repo` (which filters on `owner`); `repo` is
+ * required and a blank `q` returns nothing, so a blank query never asks.
+ * The route is registered only in the daemon role -- a `legion serve` process
+ * answers 404 there by design.
+ */
 export function useDocumentSearch(repo: string): UseDocumentSearchResult {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Document[]>([]);
@@ -52,7 +48,7 @@ export function useDocumentSearch(repo: string): UseDocumentSearchResult {
 
       void (async () => {
         try {
-          setResults(await requestJson(path, SearchResponseSchema, { signal: next.signal }));
+          setResults(await requestJson(path, DocumentListSchema, { signal: next.signal }));
           setError(null);
         } catch (err) {
           if (next.signal.aborted) return;

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Container } from "@/components/ui/container";
 import {
@@ -9,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Editor } from "@/components/ui/editor";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,7 +18,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyTitle } from "@/components/ui/empty";
 import type { FetchFailure } from "@/lib/api";
 import type { Document } from "@/lib/documents";
 import { documentTitle, statusesForDocType } from "@/lib/tree";
@@ -125,20 +126,26 @@ export function DocumentPane({
       <AlertRegion failures={[actionFailure, error]} />
 
       {/*
-        The editor slot. The rafters `editor` item does not compile: it and the
-        `document-editor` primitive import editor-history and ops/, which the
-        registry publishes under no item name (rafters #2170). Writing those
-        modules here would be the hand-authored component the rule forbids, so
-        the slot names the gap instead.
+        The rafters block editor. It mounts now that editor-history and ops/ are
+        installed, but its React performance exposes no data binding: EditorProps
+        is only {label|labelledBy, disabled?, readonly?}, and the component calls
+        createEditorHistory() with no seed, ignoring the data-* seed path
+        bindEditor uses for the Web Component and Astro performances. So the
+        document body cannot be loaded into it and edits cannot be read out of
+        it. Seeding it by hand would mean binding the contenteditable myself,
+        which is both the hand-authored component the rafters rule forbids and
+        the editor's own stated never. It renders readonly with the gap named
+        until rafters ships a bound React surface.
       */}
-      <Empty>
-        <EmptyTitle as="h2">{documentTitle(doc)}</EmptyTitle>
-        <EmptyDescription>
-          The block editor is not installed. The rafters editor item imports editor-history and
-          ops/, which the registry ships under no item name (rafters #2170); the body save and
-          revise wiring behind this slot is complete and takes effect as soon as the item does.
-        </EmptyDescription>
-      </Empty>
+      <Alert variant="warning">
+        <AlertTitle>The editor is not bound to this document</AlertTitle>
+        <AlertDescription>
+          The rafters editor item takes no value and emits no change event on its React surface, so
+          it opens empty for every document and shows nothing of this one's body. The debounced body
+          save behind it is complete and takes effect as soon as the item exposes a binding.
+        </AlertDescription>
+      </Alert>
+      <Editor label={documentTitle(doc)} readonly />
 
       <Dialog open={leavePending && hasUnrevisedEdits} modal>
         <DialogContent>

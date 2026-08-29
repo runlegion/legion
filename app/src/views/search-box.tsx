@@ -6,23 +6,20 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import type { Document } from "@/lib/documents";
-import { documentBody, documentTitle } from "@/lib/tree";
+import { documentTitle } from "@/lib/tree";
 import { useDocumentSearch } from "@/hooks/use-document-search";
 import { AlertRegion } from "@/views/alert-region";
 
-/** How much body text feeds the local filter before it is truncated. */
-const HAYSTACK_BODY_LIMIT = 2000;
-
 /**
- * Command filters its own options by substring against each item's `value`.
- * The daemon's index matches body text too, so the value carries the same text
- * the server matched on -- otherwise a body-only hit would arrive and then be
- * hidden by the local filter.
+ * Command filters its own options by substring against each item's `value`, but
+ * the daemon has already ranked and scoped these results, and it matches on
+ * stemmed terms -- a real hit for "rendering" need not contain that substring
+ * anywhere. Re-filtering here would silently drop such hits, so each option's
+ * value leads with the live query to pass the filter unconditionally, and the
+ * document id after it keeps the value unique per option.
  */
-function haystack(doc: Document): string {
-  return [documentTitle(doc), doc.id, doc.doc_type, documentBody(doc).slice(0, HAYSTACK_BODY_LIMIT)]
-    .filter((part) => part.length > 0)
-    .join(" ");
+function unfilteredValue(query: string, doc: Document): string {
+  return `${query} ${doc.id}`;
 }
 
 export interface SearchBoxProps {
@@ -44,7 +41,7 @@ export function SearchBox({ repo, onSelect }: SearchBoxProps) {
           {results.map((doc) => (
             <CommandItem
               key={doc.id}
-              value={haystack(doc)}
+              value={unfilteredValue(query, doc)}
               onSelect={() => {
                 onSelect(doc);
                 // Opening the document ends the search; clearing the query

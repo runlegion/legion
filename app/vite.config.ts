@@ -13,7 +13,9 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": "http://localhost:3131",
+      // The plugin's daemon on 3131. Point LEGION_API at another port to prove
+      // against a daemon built from an unmerged branch.
+      "/api": process.env["LEGION_API"] ?? "http://localhost:3131",
     },
   },
 });

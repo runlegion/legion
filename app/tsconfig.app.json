@@ -26,13 +26,8 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src"],
-  /* Excluded: the rafters `editor` item and the `document-editor` primitive
-     import editor-history and ops/, which the registry publishes under no
-     item name (rafters #2170). Restore these three lines once it ships. */
-  "exclude": [
-    "src/components/ui/editor.tsx",
-    "src/components/ui/editor.behavior.ts",
-    "src/components/ui/editor.classes.ts",
-    "src/lib/primitives/document-editor.ts"
-  ]
+  /* Excluded: the `document-editor` primitive imports editor-history and ops/
+     at a path that exists nowhere (@/components/ui/components/editor/...), a
+     separate registry defect from rafters #2170. Nothing imports it. */
+  "exclude": ["src/lib/primitives/document-editor.ts"]
 }

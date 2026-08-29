@@ -111,7 +111,10 @@ export function useDocumentSave(doc: Document): UseDocumentSaveResult {
         // schema documents an empty body would invalidate -- so an untouched
         // empty working copy must not write the key into them.
         if (working.length > 0 || "body" in base) payload["body"] = working;
-        const next = await requestJson(path, DocumentSchema, { method: "POST", body: { payload } });
+        // The revise endpoint takes the payload as the request body itself,
+        // not wrapped under a "payload" key -- sending it wrapped stores the
+        // wrapper as the payload (verified live against the #1036 daemon).
+        const next = await requestJson(path, DocumentSchema, { method: "POST", body: payload });
         setError(null);
         setHasUnrevisedEdits(false);
         return next;
