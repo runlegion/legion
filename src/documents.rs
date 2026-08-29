@@ -188,6 +188,58 @@ impl Database {
         })
     }
 
+    /// Merge `body` into the document's payload under the top-level `body`
+    /// key (creating the key if absent) and write it back WITHOUT touching
+    /// `revision`. Only `updated_at` and `payload` change.
+    ///
+    /// Backs the editor's debounced working-copy save (#1036): the caller
+    /// can call this on every keystroke pause without cutting a new
+    /// revision -- a revision is cut only by an explicit `revise_document`
+    /// call or a status change. Errors when the document does not exist or
+    /// is archived, mirroring `revise_document`'s own guards.
+    pub fn update_document_body(&self, id: &str, body: &str) -> Result<Document> {
+        let existing = self
+            .get_document(id)?
+            .ok_or_else(|| LegionError::WorkSource(format!("document '{id}' not found")))?;
+        if existing.archived_at.is_some() {
+            return Err(LegionError::WorkSource(format!(
+                "document '{id}' is archived and cannot be edited"
+            )));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&existing.payload).map_err(|e| {
+            LegionError::WorkSource(format!("document '{id}' payload is not valid JSON: {e}"))
+        })?;
+        let mut map = match value {
+            serde_json::Value::Object(m) => m,
+            _ => {
+                return Err(LegionError::WorkSource(format!(
+                    "document '{id}' payload is not a JSON object"
+                )));
+            }
+        };
+        map.insert(
+            "body".to_string(),
+            serde_json::Value::String(body.to_string()),
+        );
+        let new_payload = serde_json::Value::Object(map).to_string();
+
+        let now = Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE documents SET payload = ?1, updated_at = ?2 \
+             WHERE id = ?3 AND deleted_at IS NULL AND archived_at IS NULL",
+            params![&new_payload, &now, id],
+        )?;
+        if rows == 0 {
+            return Err(LegionError::WorkSource(format!(
+                "document '{id}' not found"
+            )));
+        }
+        self.get_document(id)?.ok_or_else(|| {
+            LegionError::WorkSource(format!("document '{id}' vanished after body update"))
+        })
+    }
+
     /// Read a document's current `revision` counter (#882 step 1). A
     /// spec-bound verdict (`verify::SpecAcResult`) names the revision it
     /// was formed against; `cli::verify::handle_verify` reads this to
@@ -1150,6 +1202,65 @@ mod tests {
         db.archive_document("FR-ARCHIVED").expect("archive");
 
         let err = db.revise_document("FR-ARCHIVED", "{}").unwrap_err();
+        assert!(
+            err.to_string().contains("archived"),
+            "error must say the document is archived: {err}"
+        );
+    }
+
+    // -- update_document_body (#1036) --
+
+    /// `update_document_body` sets the top-level `body` key (creating it
+    /// when absent, overwriting it when present) while leaving every other
+    /// payload field and the `revision` counter untouched -- the editor's
+    /// debounced save must never cut a revision.
+    #[test]
+    fn update_document_body_merges_key_and_leaves_revision_unchanged() {
+        let db = test_db();
+        let doc = db
+            .insert_document(&sample_meta("thesis", "mail"), r#"{"title":"x"}"#)
+            .expect("insert");
+        assert_eq!(db.document_revision(&doc.id).unwrap(), 1);
+
+        let updated = db
+            .update_document_body(&doc.id, "first draft")
+            .expect("update body");
+        let value: serde_json::Value = serde_json::from_str(&updated.payload).unwrap();
+        assert_eq!(value["title"], "x", "unrelated fields survive the merge");
+        assert_eq!(value["body"], "first draft");
+        assert_eq!(
+            db.document_revision(&doc.id).unwrap(),
+            1,
+            "a body save must not bump revision"
+        );
+
+        // A second save overwrites rather than appending.
+        let updated = db
+            .update_document_body(&doc.id, "second draft")
+            .expect("update body again");
+        let value: serde_json::Value = serde_json::from_str(&updated.payload).unwrap();
+        assert_eq!(value["body"], "second draft");
+        assert_eq!(db.document_revision(&doc.id).unwrap(), 1);
+    }
+
+    #[test]
+    fn update_document_body_nonexistent_returns_error() {
+        let db = test_db();
+        let err = db.update_document_body("nope", "text").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    /// An archived document cannot have its working copy saved, mirroring
+    /// `revise_document_refuses_archived_document`.
+    #[test]
+    fn update_document_body_refuses_archived_document() {
+        let db = test_db();
+        let mut m = sample_meta("thesis", "mail");
+        m.id = Some("TH-ARCHIVED");
+        db.insert_document(&m, "{}").unwrap();
+        db.archive_document("TH-ARCHIVED").expect("archive");
+
+        let err = db.update_document_body("TH-ARCHIVED", "text").unwrap_err();
         assert!(
             err.to_string().contains("archived"),
             "error must say the document is archived: {err}"
