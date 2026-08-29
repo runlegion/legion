@@ -13,6 +13,7 @@ import {
   type GenericSection,
   humanizeKey,
   parsePayload,
+  sectionFor,
   statusBadgeVariant,
 } from "@/lib/documents";
 
@@ -105,12 +106,6 @@ function DocumentBody({
                 <p>{meta.author}</p>
               </>
             )}
-            {meta.revision && (
-              <>
-                <p>Revision</p>
-                <p>{meta.revision}</p>
-              </>
-            )}
           </Grid>
         </CardContent>
       </Card>
@@ -189,25 +184,34 @@ function DocumentBody({
   );
 }
 
+const HEADING_TAGS = ["h1", "h2", "h3", "h4", "h5", "h6"] as const;
+
+function SectionHeading({ level, children }: { level: number; children: string }) {
+  const Tag = HEADING_TAGS[Math.min(Math.max(level, 1), HEADING_TAGS.length) - 1];
+  return <Tag>{children}</Tag>;
+}
+
 function GenericSectionView({
   section,
   documentId,
+  level = 2,
 }: {
   section: GenericSection;
   documentId: string;
+  level?: number;
 }) {
   switch (section.kind) {
     case "paragraph":
       return (
         <>
-          <h2>{section.label}</h2>
+          <SectionHeading level={level}>{section.label}</SectionHeading>
           <p>{section.value}</p>
         </>
       );
     case "list":
       return (
         <>
-          <h2>{section.label}</h2>
+          <SectionHeading level={level}>{section.label}</SectionHeading>
           <ul>
             {section.value.map((item, index) => (
               <li key={`${documentId}-${section.key}-${index}`}>{item}</li>
@@ -218,16 +222,16 @@ function GenericSectionView({
     case "object-list":
       return (
         <>
-          <h2>{section.label}</h2>
+          <SectionHeading level={level}>{section.label}</SectionHeading>
           <Grid preset="linear">
             {section.value.map((entry, index) => (
               <Card key={`${documentId}-${section.key}-${index}`}>
                 <CardContent>
-                  <Grid preset="linear">
-                    {Object.entries(entry).map(([field, fieldValue]) => (
-                      <FieldPair key={field} field={field} value={fieldValue} />
-                    ))}
-                  </Grid>
+                  <ObjectFields
+                    documentId={`${documentId}-${section.key}-${index}`}
+                    value={entry}
+                    level={level + 1}
+                  />
                 </CardContent>
               </Card>
             ))}
@@ -237,17 +241,67 @@ function GenericSectionView({
     case "object":
       return (
         <>
-          <h2>{section.label}</h2>
-          <Grid preset="linear">
-            {Object.entries(section.value).map(([field, fieldValue]) => (
-              <FieldPair key={field} field={field} value={fieldValue} />
-            ))}
-          </Grid>
+          <SectionHeading level={level}>{section.label}</SectionHeading>
+          <ObjectFields
+            documentId={`${documentId}-${section.key}`}
+            value={section.value}
+            level={level + 1}
+          />
         </>
       );
     default:
       return null;
   }
+}
+
+/**
+ * Renders an object's fields: scalars and string arrays as label/value pairs
+ * inside one Grid, nested objects and arrays of objects as their own
+ * full-width sections below it (one heading level deeper) rather than
+ * stringifying them or squeezing a nested Grid into a single grid cell.
+ */
+function ObjectFields({
+  documentId,
+  value,
+  level,
+}: {
+  documentId: string;
+  value: Record<string, unknown>;
+  level: number;
+}) {
+  const scalarFields: Array<[string, unknown]> = [];
+  const nestedSections: GenericSection[] = [];
+
+  for (const [field, fieldValue] of Object.entries(value)) {
+    const nested = sectionFor(field, fieldValue);
+    if (nested.kind === "object" || nested.kind === "object-list") {
+      nestedSections.push(nested);
+    } else {
+      scalarFields.push([field, fieldValue]);
+    }
+  }
+
+  return (
+    <>
+      {scalarFields.length > 0 && (
+        <Container as="div">
+          <Grid preset="linear">
+            {scalarFields.map(([field, fieldValue]) => (
+              <FieldPair key={field} field={field} value={fieldValue} />
+            ))}
+          </Grid>
+        </Container>
+      )}
+      {nestedSections.map((section) => (
+        <GenericSectionView
+          key={section.key}
+          section={section}
+          documentId={`${documentId}-${section.key}`}
+          level={level}
+        />
+      ))}
+    </>
+  );
 }
 
 function FieldPair({ field, value }: { field: string; value: unknown }) {

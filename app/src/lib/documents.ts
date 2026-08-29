@@ -91,6 +91,11 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Just the title guard, for callers (e.g. tree rows) that don't need the full section split. */
+export function payloadTitle(payload: unknown): string | null {
+  return isRecord(payload) && typeof payload.title === "string" ? payload.title : null;
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
@@ -179,7 +184,7 @@ function capitalize(word: string): string {
   return word.length === 0 ? word : word[0].toUpperCase() + word.slice(1);
 }
 
-function sectionFor(key: string, value: unknown): GenericSection {
+export function sectionFor(key: string, value: unknown): GenericSection {
   const label = humanizeKey(key);
 
   if (typeof value === "string") {
@@ -205,7 +210,11 @@ function sectionFor(key: string, value: unknown): GenericSection {
   };
 }
 
-/** Meta fields drawn from the document envelope and payload.meta, when present. */
+/**
+ * Meta fields drawn from the document envelope and payload.meta, when present.
+ * Does not include a revision field -- neither the API envelope nor payload.meta
+ * carries one today; add it back once the daemon serves it.
+ */
 export interface DocumentMeta {
   id: string;
   kind: string;
@@ -214,7 +223,6 @@ export interface DocumentMeta {
   owner: string;
   date: string | null;
   author: string | null;
-  revision: string | null;
 }
 
 /** The Badge variant used to render a document's status. */
@@ -245,6 +253,5 @@ export function documentMeta(doc: Document, payload: unknown): DocumentMeta {
     owner: doc.owner,
     date: typeof meta.date === "string" ? meta.date : null,
     author: typeof meta.author === "string" ? meta.author : null,
-    revision: typeof meta.revision === "string" ? meta.revision : null,
   };
 }

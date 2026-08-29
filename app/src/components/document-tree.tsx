@@ -17,28 +17,28 @@ import {
 } from "@/components/ui/sidebar";
 import {
   type Document,
-  extractSections,
   KIND_GROUP_LABEL,
   KIND_GROUP_ORDER,
   type KindGroup,
   kindGroupFor,
   parsePayload,
+  payloadTitle,
   STATUS_FILTER_LABEL,
   STATUS_FILTERS,
   statusBadgeVariant,
   type StatusFilter,
 } from "@/lib/documents";
 
-function documentTitle(doc: Document): string {
-  const { promoted } = extractSections(parsePayload(doc.payload));
-  return promoted.title ?? doc.id;
+interface TreeRow {
+  doc: Document;
+  title: string;
 }
 
 interface IntentionNode {
   repo: string;
   intention: string;
   allDocuments: Document[];
-  visibleGroups: Array<{ group: KindGroup; documents: Document[] }>;
+  visibleGroups: Array<{ group: KindGroup; documents: TreeRow[] }>;
 }
 
 interface RepoNode {
@@ -78,7 +78,11 @@ function buildTree(documents: Document[], statusFilter: StatusFilter): RepoNode[
         group,
         documents: filtered
           .filter((d) => kindGroupFor(d.doc_type) === group)
-          .sort((a, b) => a.id.localeCompare(b.id)),
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .map((doc): TreeRow => ({
+            doc,
+            title: payloadTitle(parsePayload(doc.payload)) ?? doc.id,
+          })),
       })).filter((entry) => entry.documents.length > 0);
 
       if (visibleGroups.length === 0) continue;
@@ -226,13 +230,13 @@ export function DocumentTree({
                     <SidebarGroupLabel>{KIND_GROUP_LABEL[group]}</SidebarGroupLabel>
                     <SidebarGroupContent>
                       <SidebarMenu>
-                        {groupDocuments.map((doc) => (
+                        {groupDocuments.map(({ doc, title }) => (
                           <SidebarMenuItem key={doc.id}>
                             <SidebarMenuButton
                               isActive={doc.id === selectedId}
                               onClick={() => onSelect(doc.id)}
                             >
-                              {doc.id} {documentTitle(doc)}
+                              {doc.id} {title}
                             </SidebarMenuButton>
                             <SidebarMenuBadge>
                               <Badge variant={statusBadgeVariant(doc.status)}>{doc.status}</Badge>
