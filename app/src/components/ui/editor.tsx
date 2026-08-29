@@ -38,7 +38,7 @@ import {
   type EditorPart,
 } from "@/components/ui/editor.behavior";
 import { editorClasses } from "@/components/ui/editor.classes";
-import { createEditorHistory } from "@/components/ui/editor-history";
+import { createEditorHistory } from "@/components/ui/editor/editor-history";
 
 export type EditorProps = (
   | { label: string; labelledBy?: undefined }

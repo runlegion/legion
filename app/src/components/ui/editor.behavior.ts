@@ -25,10 +25,10 @@ import { updateAriaAttribute } from "@/lib/primitives/aria-manager";
 import { createClipboard } from "@/lib/primitives/clipboard";
 import { createInputHandler } from "@/lib/primitives/input-events";
 import type { BaseBlock, InlineContent } from "@/lib/primitives/types";
-import type { EditorHistory, EditorHistoryState } from "@/components/ui/editor-history";
-import { createEditorHistory } from "@/components/ui/editor-history";
-import { normalizeRuns, splitRuns, totalTextLength } from "@/components/ui/ops/content";
-import type { EditorOp } from "@/components/ui/ops";
+import type { EditorHistory, EditorHistoryState } from "@/components/ui/editor/editor-history";
+import { createEditorHistory } from "@/components/ui/editor/editor-history";
+import { normalizeRuns, splitRuns, totalTextLength } from "@/components/ui/editor/ops/content";
+import type { EditorOp } from "@/components/ui/editor/ops";
 
 // ---------------------------------------------------------------------------
 // The editor score (FR-EDITOR-005): parts, editorAria, editorKeymap. Root-only
