@@ -35,18 +35,6 @@ export interface DocumentTreeProps {
   onCreateIntention: () => void;
 }
 
-/**
- * A sidebar row is one line tall and clips what overflows rather than
- * ellipsing it, so legion's sentence-long titles are shortened here and the
- * full title moves to the row's tooltip. Shaping the content, not the styling.
- */
-const ROW_LABEL_LIMIT = 30;
-const SUB_ROW_LABEL_LIMIT = 26;
-
-function rowLabel(title: string, limit: number): string {
-  return title.length > limit ? `${title.slice(0, limit - 1).trimEnd()}...` : title;
-}
-
 function SpecRow({
   spec,
   selectedId,
@@ -61,9 +49,8 @@ function SpecRow({
       <SidebarMenuSubButton
         isActive={spec.document.id === selectedId}
         onClick={() => onSelect(spec.document)}
-        title={documentTitle(spec.document)}
       >
-        {rowLabel(documentTitle(spec.document), SUB_ROW_LABEL_LIMIT)}
+        {documentTitle(spec.document)}
       </SidebarMenuSubButton>
       {spec.workSources.length > 0 && (
         <SidebarMenuSub>
@@ -74,7 +61,6 @@ function SpecRow({
                 href={link.url}
                 target="_blank"
                 rel="noreferrer"
-                size="sm"
                 title={link.traceLine}
               >
                 {link.kind === "pr" ? `PR #${link.number}` : `Issue #${link.number}`}
@@ -101,9 +87,8 @@ function ThesisRow({
       <SidebarMenuButton
         isActive={node.document.id === selectedId}
         onClick={() => onSelect(node.document)}
-        title={node.title}
       >
-        {rowLabel(node.title, ROW_LABEL_LIMIT)}
+        {node.title}
       </SidebarMenuButton>
       {node.specs.length > 0 && (
         <SidebarMenuSub>
@@ -133,18 +118,20 @@ export function DocumentTree({ tree, selectedId, onSelect, onCreateIntention }: 
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton size="lg">{tree.repo}</SidebarMenuButton>
+            <SidebarMenuButton>{tree.repo}</SidebarMenuButton>
             <Sheet open={settingsOpen} onOpenChange={setSettingsOpen}>
               <SheetTrigger asChild>
                 <SidebarMenuAction aria-label={`${tree.repo} settings`}>Settings</SidebarMenuAction>
               </SheetTrigger>
+              {/* Sheet intel: "Choose side based on content relationship
+                  (left=nav, right=details)" -- reached from the nav sidebar. */}
               <SheetContent side="left">
                 <SheetHeader>
                   <SheetTitle>{tree.repo} settings</SheetTitle>
                   <SheetDescription>Repo-level settings for {tree.repo}.</SheetDescription>
                 </SheetHeader>
                 <Empty>
-                  <EmptyTitle as="h3">Nothing to set yet</EmptyTitle>
+                  <EmptyTitle>Nothing to set yet</EmptyTitle>
                   <EmptyDescription>
                     The settled design names this panel but not its contents, so it ships empty
                     rather than inventing fields.
@@ -167,9 +154,8 @@ export function DocumentTree({ tree, selectedId, onSelect, onCreateIntention }: 
                     <SidebarMenuButton
                       isActive={doc.id === selectedId}
                       onClick={() => onSelect(doc)}
-                      title={documentTitle(doc)}
                     >
-                      {rowLabel(documentTitle(doc), ROW_LABEL_LIMIT)}
+                      {documentTitle(doc)}
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 ))}

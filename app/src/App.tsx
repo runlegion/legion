@@ -1,7 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { Container } from "@/components/ui/container";
 import { Empty, EmptyDescription, EmptyTitle } from "@/components/ui/empty";
-import { Grid } from "@/components/ui/grid";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import type { FetchFailure } from "@/lib/api";
 import type { Document } from "@/lib/documents";
@@ -70,13 +69,13 @@ function App() {
       />
 
       <SidebarInset>
-        {/* The search box is the whole top bar; the leading cell is the empty
-            space that pins it right. */}
-        <Container as="header" size="full" position="sticky" depth="navigation">
-          <Grid preset="golden">
-            <Container as="div" colSpan={2} />
-            <SearchBox repo={REPO} onSelect={requestSelect} />
-          </Grid>
+        {/* Container intel: "Use header with position=\"sticky\" and
+            depth=\"navigation\" for site headers". The design asks for the
+            search box pinned right, but no rafters part or Container prop
+            places a child at the trailing edge, so it sits where the header
+            puts it and the gap is filed rather than faked with a spacer. */}
+        <Container as="header" position="sticky" depth="navigation">
+          <SearchBox repo={REPO} onSelect={requestSelect} />
         </Container>
 
         <AlertRegion failures={[actionFailure, error]} />
@@ -94,7 +93,7 @@ function App() {
           />
         ) : (
           <Empty>
-            <EmptyTitle as="h2">No document selected</EmptyTitle>
+            <EmptyTitle>No document selected</EmptyTitle>
             <EmptyDescription>
               Pick one from the tree, or search for it in the box above.
             </EmptyDescription>

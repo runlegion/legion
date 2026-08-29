@@ -120,10 +120,14 @@ export function SettingsSheet({ document: doc, onSave, saving }: SettingsSheetPr
   return (
     <Sheet open={open} onOpenChange={handleOpenChange}>
       <SheetTrigger asChild>
-        <Button variant="ghost" aria-label="Document settings">
+        {/* Button intel: "ghost/link/outline are the unlimited low-attention
+            register" -- the sheet's Save is this panel's one main action. */}
+        <Button variant="outline" aria-label="Document settings">
           Settings
         </Button>
       </SheetTrigger>
+      {/* Sheet intel: "Choose side based on content relationship
+          (left=nav, right=details)" -- these are the document's details. */}
       <SheetContent side="right">
         <SheetHeader>
           <SheetTitle>Settings</SheetTitle>
@@ -132,11 +136,11 @@ export function SettingsSheet({ document: doc, onSave, saving }: SettingsSheetPr
 
         {fields.length === 0 ? (
           <Empty>
-            <EmptyTitle as="h3">No other values</EmptyTitle>
+            <EmptyTitle>No other values</EmptyTitle>
             <EmptyDescription>This document's payload holds only a body.</EmptyDescription>
           </Empty>
         ) : (
-          <Container as="section" gap>
+          <Container as="section">
             {fields.map((field) => (
               <Field key={field.key} label={field.key} error={errors[field.key]}>
                 {field.kind === "boolean" ? (
@@ -162,6 +166,7 @@ export function SettingsSheet({ document: doc, onSave, saving }: SettingsSheetPr
         )}
 
         <SheetFooter>
+          {/* Button intel: "Primary: Main user goal, maximum 1 per section". */}
           <Button onClick={handleSave} disabled={saving}>
             {saving ? "Saving..." : "Save"}
           </Button>

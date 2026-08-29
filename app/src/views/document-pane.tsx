@@ -103,10 +103,17 @@ export function DocumentPane({
   };
 
   return (
-    <Container as="section" gap>
-      <Container as="header" columns={2}>
+    <Container as="section">
+      {/* No rafters React toolbar part exists -- `editor-toolbar` is a headless
+          primitive (rendersForTarget: false) supplying button definitions, not
+          a rendered bar -- so the toolbar is a plain Container and the gap is
+          filed. No columns prop: placement is not ours to choose. */}
+      <Container as="header">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
+            {/* Button intel: "ghost/link/outline are the unlimited low-attention
+                  register"; the one high-emphasis action in this view is the
+                  dialog's Revise. */}
             <Button variant="outline">{doc.status}</Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent>
@@ -147,7 +154,7 @@ export function DocumentPane({
       </Alert>
       <Editor label={documentTitle(doc)} readonly />
 
-      <Dialog open={leavePending && hasUnrevisedEdits} modal>
+      <Dialog open={leavePending && hasUnrevisedEdits}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Unrevised edits</DialogTitle>
@@ -156,9 +163,11 @@ export function DocumentPane({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="ghost" onClick={onLeaveCancelled}>
+            {/* Button intel: "Secondary: Alternative paths, supporting actions". */}
+            <Button variant="secondary" onClick={onLeaveCancelled}>
               Keep working
             </Button>
+            {/* Button intel: "Primary: Main user goal, maximum 1 per section". */}
             <Button onClick={handleLeaveWithRevise} disabled={saving}>
               Revise
             </Button>
