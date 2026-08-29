@@ -95,7 +95,7 @@ pub fn reflect_from_text_with_meta(
     }
 
     let reflection = db.insert_reflection_with_meta(repo, trimmed, "self", meta)?;
-    index.add(&reflection.id, repo, trimmed, &reflection.created_at)?;
+    index.add_reflection(&reflection.id, repo, trimmed, &reflection.created_at)?;
 
     Ok(reflection.id)
 }

@@ -47,7 +47,7 @@ pub fn post_from_text_with_meta(
     }
 
     let reflection = db.insert_reflection_with_meta(repo, trimmed, "team", meta)?;
-    index.add(&reflection.id, repo, trimmed, &reflection.created_at)?;
+    index.add_reflection(&reflection.id, repo, trimmed, &reflection.created_at)?;
 
     Ok(reflection.id)
 }

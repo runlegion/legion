@@ -182,8 +182,22 @@ pub struct FeedQuery {
 /// (which merges this router into the dashboard app) and the daemon (which
 /// serves it bare) answer these paths with the same implementation, so the
 /// wire shapes cannot fork again.
+///
+/// `GET /api/search` (#1037, document search) is registered only when
+/// `state.role == ServerRole::Daemon`. `legion serve`'s own app (src/serve.rs)
+/// already owns `/api/search` for BM25 reflection search -- a distinct,
+/// pre-existing, differently-shaped endpoint (required `q`, optional
+/// `repo`, reflection JSON with score/domain/tags). Registering the same
+/// path here unconditionally would make axum panic on a route collision
+/// the moment `legion serve` merges this router in. The legion-app
+/// document search box this endpoint serves talks to the daemon directly
+/// (per #1037's own framing: "a search box over the daemon"), so scoping
+/// registration to `ServerRole::Daemon` satisfies both the literal path
+/// the acceptance criteria name and the actual consumer, without touching
+/// serve.rs's live endpoint.
 pub fn router(state: ChannelState) -> Router {
-    Router::new()
+    let is_daemon = state.role == ServerRole::Daemon;
+    let mut r = Router::new()
         .route("/health", get(health_endpoint))
         .route("/sse", get(sse_handler))
         .route("/api/feed", get(api_feed))
@@ -191,8 +205,11 @@ pub fn router(state: ChannelState) -> Router {
         .route("/api/post", post(api_post))
         .route("/api/documents", get(api_documents))
         .route("/api/documents/{id}", get(api_document))
-        .route("/api/documents/{id}/status", post(api_document_set_status))
-        .with_state(state)
+        .route("/api/documents/{id}/status", post(api_document_set_status));
+    if is_daemon {
+        r = r.route("/api/search", get(api_search));
+    }
+    r.with_state(state)
 }
 
 /// Query parameters for GET /api/documents. All optional; omitting every
@@ -258,13 +275,66 @@ pub async fn api_document_set_status(
     Json(body): Json<SetStatusBody>,
 ) -> Result<Json<crate::documents::Document>, ServeError> {
     let db = open_db(&state.data_dir)?;
+    let index = open_index(&state.data_dir)?;
     // Return 404 for a missing doc, consistent with the GET handler, rather
     // than the 500 the blanket LegionError conversion would give the
     // set_document_status not-found error.
     if db.get_document(&id)?.is_none() {
         return Err(ServeError::NotFound(format!("document '{id}' not found")));
     }
-    Ok(Json(db.set_document_status(&id, &body.to)?))
+    Ok(Json(crate::documents::set_document_status_indexed(
+        &db, &index, &id, &body.to,
+    )?))
+}
+
+/// Query parameters for GET /api/search (#1037). `repo` is required -- the
+/// app always scopes a search to one repo, so an unscoped query is a client
+/// bug worth surfacing loudly rather than silently searching everything.
+/// Both fields are `Option` (rather than a bare `String`) so a missing
+/// `repo` renders through this handler's own 400 body instead of axum's
+/// generic query-rejection response, and an omitted `q` behaves the same
+/// as an explicit empty one.
+#[derive(serde::Deserialize)]
+pub struct SearchQuery {
+    pub q: Option<String>,
+    pub repo: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/search -- BM25 search over documents in `repo` matching `q`
+/// (#1037). Looks up each hit's full Document row (same shape as GET
+/// /api/documents) so the app can open a result without a second round
+/// trip, preserving the BM25 rank order `search_documents` returned. A hit
+/// whose document row no longer exists (e.g. hard-deleted between the
+/// index write and this query -- soft-delete is the norm, but not
+/// guaranteed) is skipped rather than failing the whole request.
+///
+/// `repo` missing or blank is a 400, not a silent all-repo search: the app
+/// always scopes to one repo, so an unscoped query is a client bug worth
+/// surfacing loudly. An empty or whitespace-only `q` returns an empty list,
+/// matching `SearchIndex::search_documents`'s own empty-query behavior.
+pub async fn api_search(
+    State(state): State<ChannelState>,
+    Query(q): Query<SearchQuery>,
+) -> Result<Json<Vec<crate::documents::Document>>, ServeError> {
+    let repo = q.repo.as_deref().unwrap_or("").trim().to_string();
+    if repo.is_empty() {
+        return Err(ServeError::BadRequest("repo is required".to_string()));
+    }
+    let query = q.q.as_deref().unwrap_or("");
+    let limit = q.limit.unwrap_or(20);
+
+    let db = open_db(&state.data_dir)?;
+    let index = open_index(&state.data_dir)?;
+
+    let hits = index.search_documents(&repo, query, limit)?;
+    let mut docs = Vec::with_capacity(hits.len());
+    for hit in hits {
+        if let Some(doc) = db.get_document(&hit.id)? {
+            docs.push(doc);
+        }
+    }
+    Ok(Json(docs))
 }
 
 /// Pure builder for the `/health` JSON body. Separated from the axum
@@ -753,7 +823,7 @@ mod tests {
             .insert_reflection_with_meta("kelex", "hello team", "team", &ReflectionMeta::default())
             .expect("insert");
         index
-            .add(
+            .add_reflection(
                 &reflection.id,
                 "kelex",
                 "hello team",
@@ -1064,6 +1134,190 @@ mod tests {
         assert!(
             post_missing.starts_with("HTTP/1.1 404"),
             "post-missing: {post_missing}"
+        );
+    }
+
+    /// Raw HTTP/1.1 request helper -> (status_line, body). Duplicated from
+    /// `document_endpoints_publish_round_trip` (that helper is nested
+    /// inside a single test function, not reusable across tests).
+    async fn raw_req(port: u16, method: &str, path: &str, body: Option<&str>) -> (String, String) {
+        let (method, path) = (method.to_string(), path.to_string());
+        let body = body.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            use std::net::TcpStream;
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+            let payload = body.unwrap_or_default();
+            let head = format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            stream.write_all(head.as_bytes()).expect("write head");
+            stream.write_all(payload.as_bytes()).expect("write body");
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).expect("read");
+            let text = String::from_utf8_lossy(&buf).to_string();
+            let status = text.lines().next().unwrap_or("").to_string();
+            let body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
+            (status, body)
+        })
+        .await
+        .expect("spawn_blocking")
+    }
+
+    /// Spin up a real channel router on a loopback port backed by
+    /// `data_dir` under the given `role`, matching the scaffolding
+    /// `document_endpoints_publish_round_trip` uses. Returns the bound
+    /// port. `role` matters for #1037: `/api/search` is only registered
+    /// under `ServerRole::Daemon` (see `router`'s doc comment).
+    async fn spawn_test_server(data_dir: std::path::PathBuf, role: ServerRole) -> u16 {
+        let (tx, _rx) = new_broadcast();
+        let state = ChannelState {
+            data_dir,
+            tx,
+            started_at: chrono::Utc::now(),
+            role,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.expect("serve");
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        port
+    }
+
+    #[tokio::test]
+    async fn api_search_not_registered_under_serve_role() {
+        // `legion serve`'s own app owns /api/search for reflection search
+        // (src/serve.rs); this router must not answer it under
+        // ServerRole::Serve, or merging the two routers would panic on a
+        // route collision (the failure this guard exists to prevent).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let port = spawn_test_server(dir.path().to_path_buf(), ServerRole::Serve).await;
+
+        let (status, _) = raw_req(port, "GET", "/api/search?q=mapping&repo=kelex", None).await;
+        assert!(
+            !status.starts_with("HTTP/1.1 200"),
+            "ServerRole::Serve must not answer /api/search: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_search_requires_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let port = spawn_test_server(dir.path().to_path_buf(), ServerRole::Daemon).await;
+
+        let (status, body) = raw_req(port, "GET", "/api/search?q=mapping", None).await;
+        assert!(status.starts_with("HTTP/1.1 400"), "status: {status}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse body");
+        assert!(
+            parsed.get("error").is_some(),
+            "400 body must carry an error message: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_search_returns_ranked_documents_for_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let index = SearchIndex::open(&data_dir.join("index")).expect("open index");
+
+        let weak_meta = crate::documents::DocumentMeta {
+            id: Some("FR-WEAK"),
+            doc_type: "requirement",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "kelex",
+        };
+        crate::documents::insert_document_indexed(
+            &db,
+            &index,
+            &weak_meta,
+            r#"{"title":"unrelated topic","description":"nothing about the query"}"#,
+        )
+        .expect("insert weak");
+
+        let strong_meta = crate::documents::DocumentMeta {
+            id: Some("FR-STRONG"),
+            doc_type: "requirement",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "kelex",
+        };
+        crate::documents::insert_document_indexed(
+            &db,
+            &index,
+            &strong_meta,
+            r#"{"title":"mapping rules","description":"mapping rules for schema mapping"}"#,
+        )
+        .expect("insert strong");
+
+        // A document owned by a different repo must not leak into this repo's results.
+        let other_repo_meta = crate::documents::DocumentMeta {
+            id: Some("FR-OTHER"),
+            doc_type: "requirement",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "rafters",
+        };
+        crate::documents::insert_document_indexed(
+            &db,
+            &index,
+            &other_repo_meta,
+            r#"{"title":"mapping rules","description":"also about mapping"}"#,
+        )
+        .expect("insert other repo");
+
+        drop(db);
+        drop(index);
+
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
+
+        let (status, body) = raw_req(port, "GET", "/api/search?q=mapping&repo=kelex", None).await;
+        assert!(status.starts_with("HTTP/1.1 200"), "status: {status}");
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&body).expect("parse body");
+        assert_eq!(
+            parsed.len(),
+            1,
+            "other-repo document must not appear: {body}"
+        );
+        assert_eq!(parsed[0]["id"], "FR-STRONG");
+    }
+
+    #[tokio::test]
+    async fn api_search_empty_query_returns_empty_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let index = SearchIndex::open(&data_dir.join("index")).expect("open index");
+        let meta = crate::documents::DocumentMeta {
+            id: Some("FR-ANY"),
+            doc_type: "requirement",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "kelex",
+        };
+        crate::documents::insert_document_indexed(&db, &index, &meta, r#"{"title":"anything"}"#)
+            .expect("insert");
+        drop(db);
+        drop(index);
+
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
+
+        let (status, body) = raw_req(port, "GET", "/api/search?q=&repo=kelex", None).await;
+        assert!(status.starts_with("HTTP/1.1 200"), "status: {status}");
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&body).expect("parse body");
+        assert!(
+            parsed.is_empty(),
+            "empty q must return an empty list: {body}"
         );
     }
 

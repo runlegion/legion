@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 
-use crate::cli::util::open_db;
+use crate::cli::util::open_db_and_index;
 use crate::cli::verify::resolve_spec_criteria;
 use crate::{db, documents, error};
 
@@ -123,7 +123,7 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
             }
         }
     }
-    let database = open_db()?;
+    let (database, index) = open_db_and_index()?;
     match action {
         DocumentAction::Create {
             doc_type,
@@ -156,7 +156,7 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
                 priority: priority.as_deref(),
                 owner: &owner,
             };
-            let doc = database.insert_document(&meta, &payload)?;
+            let doc = documents::insert_document_indexed(&database, &index, &meta, &payload)?;
             // Dual-write a pointer reflection (domain=schema) so
             // `legion recall --domain schema` surfaces the schema
             // (#526, option A: documents hold the canonical payload,
@@ -291,7 +291,7 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
             } else {
                 None
             };
-            let doc = database.revise_document(&id, &payload)?;
+            let doc = documents::revise_document_indexed(&database, &index, &id, &payload)?;
             // Write a fresh recall pointer (domain=schema) for the revised
             // payload (#526, MED-4 review fix): Create dual-writes this
             // pointer and Revise previously did not, so `recall --domain
@@ -326,7 +326,7 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
             );
         }
         DocumentAction::Archive { id } => {
-            let doc = database.archive_document(&id)?;
+            let doc = documents::archive_document_indexed(&database, &index, &id)?;
             println!(
                 "archived {} at {}",
                 doc.id,
@@ -334,7 +334,7 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
             );
         }
         DocumentAction::SetStatus { id, to } => {
-            let doc = database.set_document_status(&id, &to)?;
+            let doc = documents::set_document_status_indexed(&database, &index, &id, &to)?;
             println!("{} status -> {}", doc.id, doc.status);
         }
         DocumentAction::Validate { schema, file } => {

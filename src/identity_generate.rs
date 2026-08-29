@@ -461,7 +461,7 @@ fn warn_on_index_add_failure(
     text: &str,
     created_at: &str,
 ) {
-    if let Err(e) = index.add(id, repo, text, created_at) {
+    if let Err(e) = index.add_reflection(id, repo, text, created_at) {
         eprintln!(
             "[legion whoami --generate --apply] WARNING: the identity swap committed but the \
              tantivy index add failed for new row {id}.\n\

@@ -10,6 +10,7 @@ use tantivy::schema::{
 use tantivy::{DateTime, Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 
 use crate::db::Reflection;
+use crate::documents::{self, Document};
 use crate::error::{LegionError, Result};
 use crate::timerange::TimeRange;
 
@@ -20,17 +21,44 @@ const WRITER_RETRIES: u32 = 3;
 /// Base delay between writer acquisition retries (doubles each attempt).
 const WRITER_RETRY_BASE_MS: u64 = 100;
 
+/// Which store an indexed row came from (#1037). Stamped into the `kind`
+/// field on every write and matched by an exact-term clause on every read
+/// so `legion recall`'s reflection search can never surface a document, and
+/// `search_documents` can never surface a reflection -- the two corpora
+/// share one Tantivy index but are otherwise fully partitioned at query
+/// time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedKind {
+    Reflection,
+    Document,
+}
+
+impl IndexedKind {
+    /// Wire value stamped into the `kind` field on write and matched by a
+    /// `TermQuery` on read. A single mapping shared by both sides so they
+    /// cannot drift apart.
+    fn as_str(self) -> &'static str {
+        match self {
+            IndexedKind::Reflection => "reflection",
+            IndexedKind::Document => "document",
+        }
+    }
+}
+
 /// Full-text search index backed by Tantivy with BM25 scoring.
 ///
-/// Indexes reflection text for retrieval by keyword similarity.
-/// Documents can optionally be filtered by repo (exact match) and
-/// are ranked by BM25 score on the text field (tokenized, stemmed).
+/// Indexes reflection and document text for retrieval by keyword
+/// similarity (#1037 added documents; the `kind` field keeps the two
+/// corpora from mixing in results -- see [`IndexedKind`]). Documents can
+/// optionally be filtered by repo (exact match) and are ranked by BM25
+/// score on the text field (tokenized, stemmed).
 pub struct SearchIndex {
     index: Index,
     id_field: Field,
     repo_field: Field,
     text_field: Field,
     created_at_field: Field,
+    kind_field: Field,
 }
 
 /// A single search result with its document ID and BM25 relevance score.
@@ -58,6 +86,9 @@ impl SearchIndex {
     ///   cutoff (the failure mode the `--archives` over-fetch-and-post-
     ///   filter pattern has; deliberately not reused here, see #786 build
     ///   notes).
+    /// - `kind`: STRING -- `"reflection"` or `"document"` (#1037), matched
+    ///   by an exact-term clause on every search so the two corpora never
+    ///   cross in results.
     pub fn open(path: &Path) -> Result<Self> {
         let mut schema_builder = Schema::builder();
 
@@ -75,6 +106,8 @@ impl SearchIndex {
             DateOptions::from(tantivy::schema::INDEXED).set_precision(DateTimePrecision::Seconds);
         let created_at_field = schema_builder.add_date_field("created_at", date_options);
 
+        let kind_field = schema_builder.add_text_field("kind", STRING);
+
         let schema = schema_builder.build();
 
         std::fs::create_dir_all(path).map_err(|e| LegionError::Search(e.to_string()))?;
@@ -82,7 +115,8 @@ impl SearchIndex {
         let index = match Index::open_in_dir(path) {
             Ok(idx) if idx.schema() == schema => idx,
             Ok(_mismatched) => {
-                // #786: the on-disk index predates the `created_at` field.
+                // #786 / #1037: the on-disk index predates a field this
+                // build's schema carries (most recently `kind`).
                 // `Index::open_in_dir` trusts whatever schema is recorded
                 // in the existing meta.json regardless of the schema this
                 // function just built in memory -- opening succeeds, but
@@ -98,7 +132,7 @@ impl SearchIndex {
                 // repopulates from the database, the source of truth, same
                 // recovery path as the corrupted-index branch below.
                 eprintln!(
-                    "[legion] search index schema changed (created_at field added, #786), rebuilding empty -- run `legion reindex` to repopulate"
+                    "[legion] search index schema changed (kind field added, #1037), rebuilding empty -- run `legion reindex` to repopulate"
                 );
                 Self::recreate_index(path, schema.clone())?
             }
@@ -121,6 +155,7 @@ impl SearchIndex {
             repo_field,
             text_field,
             created_at_field,
+            kind_field,
         })
     }
 
@@ -135,28 +170,83 @@ impl SearchIndex {
         Index::create_in_dir(path, schema).map_err(|e| LegionError::Search(e.to_string()))
     }
 
-    /// Add a document to the search index and commit immediately.
+    /// Build the Tantivy document for one row: id (stored for retrieval), a
+    /// repo name (for filtering), the searchable text (for BM25 scoring),
+    /// its `created_at` timestamp (RFC3339), and the `kind` this row was
+    /// written as (#1037). Shared by every write path so the field set
+    /// cannot drift between reflections and documents.
+    fn build_doc(
+        &self,
+        kind: IndexedKind,
+        id: &str,
+        repo: &str,
+        text: &str,
+        created_at: &str,
+    ) -> Result<TantivyDocument> {
+        Ok(doc!(
+            self.id_field => id,
+            self.repo_field => repo,
+            self.text_field => text,
+            self.created_at_field => parse_rfc3339_to_tantivy_date(created_at)?,
+            self.kind_field => kind.as_str(),
+        ))
+    }
+
+    /// Add a reflection to the search index and commit immediately.
     ///
     /// Each document consists of an id (stored for retrieval), a repo name
     /// (for filtering), the reflection text (for BM25 scoring), and its
     /// `created_at` timestamp (RFC3339, matching the `reflections` table --
     /// see [`Self::open`]'s doc comment for why it lives in the index
-    /// rather than being joined in afterward).
+    /// rather than being joined in afterward). Stamped `kind = "reflection"`
+    /// (#1037) so it never surfaces from `search_documents`.
+    ///
+    /// Reflections are append-only: unlike [`Self::add_document`], this
+    /// does not delete a prior entry for the same id first, matching the
+    /// pre-#1037 `add` behavior this method was renamed from.
     ///
     /// Retries up to [`WRITER_RETRIES`] times with exponential backoff when
     /// the writer lock is held by another process (e.g., a concurrent hook).
     /// Commits after each write. The reflection corpus is tiny, so the
     /// per-write commit overhead is negligible.
-    pub fn add(&self, id: &str, repo: &str, text: &str, created_at: &str) -> Result<()> {
+    pub fn add_reflection(&self, id: &str, repo: &str, text: &str, created_at: &str) -> Result<()> {
         let mut writer: IndexWriter = self.acquire_writer()?;
 
         writer
-            .add_document(doc!(
-                self.id_field => id,
-                self.repo_field => repo,
-                self.text_field => text,
-                self.created_at_field => parse_rfc3339_to_tantivy_date(created_at)?,
-            ))
+            .add_document(self.build_doc(IndexedKind::Reflection, id, repo, text, created_at)?)
+            .map_err(|e| LegionError::Search(e.to_string()))?;
+
+        writer
+            .commit()
+            .map_err(|e| LegionError::Search(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Add or replace a document's search-index entry and commit
+    /// immediately (#1037).
+    ///
+    /// `repo` is the caller's choice of scope -- the documents write path
+    /// (`src/documents.rs`) passes the document's `owner` column, matching
+    /// what `GET /api/documents?owner=` already filters on. `text` is the
+    /// searchable text extracted from the document's payload (see
+    /// `documents::document_search_text`).
+    ///
+    /// Re-adding an id replaces the prior entry: this deletes any existing
+    /// document with the same `id` before adding the new one, in the same
+    /// commit. This matters because `revise_document`/`set_document_status`/
+    /// `archive_document` all re-index on every write (same id, new text or
+    /// unchanged text) -- without the delete-first step, four writes to one
+    /// document would leave four ghosts in the index and `search_documents`
+    /// would return the same document four times.
+    pub fn add_document(&self, id: &str, repo: &str, text: &str, created_at: &str) -> Result<()> {
+        let mut writer: IndexWriter = self.acquire_writer()?;
+
+        let term = Term::from_field_text(self.id_field, id);
+        writer.delete_term(term);
+
+        writer
+            .add_document(self.build_doc(IndexedKind::Document, id, repo, text, created_at)?)
             .map_err(|e| LegionError::Search(e.to_string()))?;
 
         writer
@@ -193,19 +283,21 @@ impl SearchIndex {
         ))
     }
 
-    /// Delete a document from the search index by reflection id.
+    /// Delete a document from the search index by id.
     ///
     /// Constructs a term matching the exact `id` field value and removes
     /// every document with that term (there should be at most one, since
-    /// `id` is the primary key in the reflections table). Commits
-    /// immediately so a subsequent recall does not return the deleted
-    /// document.
+    /// `id` is the primary key in the reflections/documents tables).
+    /// Commits immediately so a subsequent search does not return the
+    /// deleted document. Not kind-scoped -- an id is unique across both
+    /// corpora in practice, so this removes whichever row (reflection or
+    /// document) matches.
     ///
     /// No error if the id is not present in the index -- tantivy's
     /// `delete_term` is a no-op when nothing matches. The caller's
-    /// database-layer check is the authoritative "does this reflection
-    /// exist" source; this method's job is to remove any trace from the
-    /// index regardless.
+    /// database-layer check is the authoritative "does this row exist"
+    /// source; this method's job is to remove any trace from the index
+    /// regardless.
     pub fn delete(&self, id: &str) -> Result<()> {
         let mut writer: IndexWriter = self.acquire_writer()?;
         let term = Term::from_field_text(self.id_field, id);
@@ -216,14 +308,19 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// Rebuild the index from a set of reflections in a single commit.
+    /// Rebuild the index from a set of reflections and documents in a
+    /// single commit (#1037).
     ///
-    /// Clears the existing index contents first, then bulk-inserts all
-    /// provided reflections. Used by the `reindex` command to recover
-    /// from index/database desync or corruption -- and, after #786, to
-    /// repopulate `created_at` for every existing reflection when
-    /// `SearchIndex::open` wipes an index that predates that field.
-    pub fn rebuild(&self, reflections: &[Reflection]) -> Result<()> {
+    /// Clears the existing index contents first, then bulk-inserts every
+    /// provided reflection and document. Used by the `reindex` command to
+    /// recover from index/database desync or corruption -- and, after a
+    /// schema change (#786's `created_at`, #1037's `kind`), to repopulate
+    /// the index from scratch when `SearchIndex::open` wipes an index that
+    /// predates the new field. Document search text is derived from each
+    /// document's payload via `documents::document_search_text` -- the same
+    /// extraction the write path uses, so a reindex and a live write agree
+    /// on what a document's searchable text is.
+    pub fn rebuild(&self, reflections: &[Reflection], documents: &[Document]) -> Result<()> {
         let mut writer: IndexWriter = self.acquire_writer()?;
 
         writer
@@ -232,12 +329,26 @@ impl SearchIndex {
 
         for r in reflections {
             writer
-                .add_document(doc!(
-                    self.id_field => r.id.as_str(),
-                    self.repo_field => r.repo.as_str(),
-                    self.text_field => r.text.as_str(),
-                    self.created_at_field => parse_rfc3339_to_tantivy_date(&r.created_at)?,
-                ))
+                .add_document(self.build_doc(
+                    IndexedKind::Reflection,
+                    &r.id,
+                    &r.repo,
+                    &r.text,
+                    &r.created_at,
+                )?)
+                .map_err(|e| LegionError::Search(e.to_string()))?;
+        }
+
+        for d in documents {
+            let text = documents::document_search_text(d);
+            writer
+                .add_document(self.build_doc(
+                    IndexedKind::Document,
+                    &d.id,
+                    &d.owner,
+                    &text,
+                    &d.created_at,
+                )?)
                 .map_err(|e| LegionError::Search(e.to_string()))?;
         }
 
@@ -252,8 +363,9 @@ impl SearchIndex {
     ///
     /// Combines an exact-match filter on `repo`, an optional `created_at`
     /// range predicate (`range`; `TimeRange::default()` is unbounded, the
-    /// whole-store case -- see `timerange` module docs, #786), and a
-    /// BM25-scored query on the `text` field. Returns up to `limit`
+    /// whole-store case -- see `timerange` module docs, #786), a `kind =
+    /// "reflection"` filter (#1037, so a document can never surface here),
+    /// and a BM25-scored query on the `text` field. Returns up to `limit`
     /// results ordered by descending relevance score.
     ///
     /// Returns an empty vec if the query string is empty or whitespace-only.
@@ -264,16 +376,16 @@ impl SearchIndex {
         limit: usize,
         range: &TimeRange,
     ) -> Result<Vec<SearchResult>> {
-        self.execute_query(query, Some(repo), limit, range)
+        self.execute_query(query, Some(repo), limit, range, IndexedKind::Reflection)
     }
 
     /// Search for reflections matching a query across ALL repositories.
     ///
     /// Unlike `search`, this method does not filter by repo. It runs a
-    /// BM25-scored query on the `text` field across every indexed document,
-    /// composed with the same optional `created_at` range predicate as
-    /// `search` (#786). Returns up to `limit` results ordered by
-    /// descending relevance score.
+    /// BM25-scored query on the `text` field across every indexed
+    /// reflection (kind = "reflection", #1037), composed with the same
+    /// optional `created_at` range predicate as `search` (#786). Returns up
+    /// to `limit` results ordered by descending relevance score.
     ///
     /// Returns an empty vec if the query string is empty or whitespace-only.
     pub fn search_all(
@@ -282,7 +394,32 @@ impl SearchIndex {
         limit: usize,
         range: &TimeRange,
     ) -> Result<Vec<SearchResult>> {
-        self.execute_query(query, None, limit, range)
+        self.execute_query(query, None, limit, range, IndexedKind::Reflection)
+    }
+
+    /// Search for documents matching a query within a specific repo
+    /// (#1037). `repo` is the document's `owner` column (see
+    /// [`Self::add_document`]).
+    ///
+    /// Filtered to `kind = "document"` so a reflection can never surface
+    /// here, mirroring how `search`/`search_all` exclude documents. No date
+    /// range predicate -- unlike reflections, documents are not `--since`/
+    /// `--until` filterable through this path (out of scope, #1037).
+    ///
+    /// Returns an empty vec if the query string is empty or whitespace-only.
+    pub fn search_documents(
+        &self,
+        repo: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        self.execute_query(
+            query,
+            Some(repo),
+            limit,
+            &TimeRange::default(),
+            IndexedKind::Document,
+        )
     }
 
     /// Shared search implementation. When `repo` is Some, results are
@@ -291,13 +428,16 @@ impl SearchIndex {
     /// `BooleanQuery` as the repo filter -- applied at the index level,
     /// before `TopDocs` collection, so an unbounded fetch never has to
     /// silently drop date-valid documents that ranked below a limit-sized
-    /// cutoff (#786).
+    /// cutoff (#786). `kind` restricts results to that row type (#1037) --
+    /// always applied, since every caller (`search`, `search_all`,
+    /// `search_documents`) wants exactly one corpus, never a mix of both.
     fn execute_query(
         &self,
         query: &str,
         repo: Option<&str>,
         limit: usize,
         range: &TimeRange,
+        kind: IndexedKind,
     ) -> Result<Vec<SearchResult>> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
@@ -318,7 +458,13 @@ impl SearchIndex {
             .parse_query(trimmed)
             .map_err(|e| LegionError::Search(e.to_string()))?;
 
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, text_query)];
+        let kind_term = Term::from_field_text(self.kind_field, kind.as_str());
+        let kind_query = TermQuery::new(kind_term, IndexRecordOption::Basic);
+
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+            (Occur::Must, text_query),
+            (Occur::Must, Box::new(kind_query)),
+        ];
 
         if let Some(repo_name) = repo {
             let repo_term = Term::from_field_text(self.repo_field, repo_name);
@@ -330,11 +476,7 @@ impl SearchIndex {
             clauses.push((Occur::Must, range_query));
         }
 
-        let final_query: Box<dyn Query> = if clauses.len() == 1 {
-            clauses.pop().expect("just checked len == 1").1
-        } else {
-            Box::new(BooleanQuery::new(clauses))
-        };
+        let final_query: Box<dyn Query> = Box::new(BooleanQuery::new(clauses));
 
         let top_docs = searcher
             .search(&*final_query, &TopDocs::with_limit(limit))
@@ -396,9 +538,10 @@ impl SearchIndex {
 
 /// Parse an RFC3339 timestamp (the `created_at` shape stored throughout
 /// this crate, e.g. `chrono::Utc::now().to_rfc3339()`) into a Tantivy
-/// `DateTime`. Shared by document indexing (`add`/`rebuild`) and range
-/// query construction (`date_range_query`) so both sides of the `created_at`
-/// comparison go through the same conversion and cannot drift.
+/// `DateTime`. Shared by document indexing (`add_reflection`/`add_document`/
+/// `rebuild`) and range query construction (`date_range_query`) so both
+/// sides of the `created_at` comparison go through the same conversion and
+/// cannot drift.
 fn parse_rfc3339_to_tantivy_date(input: &str) -> Result<DateTime> {
     let parsed = chrono::DateTime::parse_from_rfc3339(input)
         .map_err(|e| LegionError::Search(format!("invalid created_at timestamp '{input}': {e}")))?;
@@ -429,21 +572,21 @@ mod tests {
     #[test]
     fn add_and_search() {
         let (idx, _dir) = test_index();
-        idx.add(
+        idx.add_reflection(
             "id-1",
             "kelex",
             "mapping rules are fragile when adding new Zod types",
             T,
         )
         .unwrap();
-        idx.add(
+        idx.add_reflection(
             "id-2",
             "kelex",
             "discriminated unions inside arrays are where complexity hides",
             T,
         )
         .unwrap();
-        idx.add("id-3", "kelex", "the CLI flag parser is straightforward", T)
+        idx.add_reflection("id-3", "kelex", "the CLI flag parser is straightforward", T)
             .unwrap();
         let results = idx
             .search("kelex", "Zod type mapping", 5, &TimeRange::default())
@@ -455,9 +598,9 @@ mod tests {
     #[test]
     fn search_filters_by_repo() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "kelex", "schema introspection is complex", T)
+        idx.add_reflection("id-1", "kelex", "schema introspection is complex", T)
             .unwrap();
-        idx.add("id-2", "rafters", "schema tokens need attention", T)
+        idx.add_reflection("id-2", "rafters", "schema tokens need attention", T)
             .unwrap();
         let results = idx
             .search("kelex", "schema", 5, &TimeRange::default())
@@ -470,7 +613,7 @@ mod tests {
     fn search_respects_limit() {
         let (idx, _dir) = test_index();
         for i in 0..10 {
-            idx.add(
+            idx.add_reflection(
                 &format!("id-{i}"),
                 "test",
                 &format!("reflection about testing {i}"),
@@ -487,7 +630,8 @@ mod tests {
     #[test]
     fn search_empty_query_returns_empty() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "kelex", "some reflection", T).unwrap();
+        idx.add_reflection("id-1", "kelex", "some reflection", T)
+            .unwrap();
         let results = idx.search("kelex", "", 5, &TimeRange::default()).unwrap();
         assert!(results.is_empty());
     }
@@ -495,7 +639,7 @@ mod tests {
     #[test]
     fn stemming_matches_variants() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "test", "nested arrays in the codegen templates", T)
+        idx.add_reflection("id-1", "test", "nested arrays in the codegen templates", T)
             .unwrap();
         let results = idx
             .search("test", "nesting array codegen", 5, &TimeRange::default())
@@ -507,11 +651,11 @@ mod tests {
     #[test]
     fn search_all_returns_results_from_multiple_repos() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "kelex", "schema introspection is complex", T)
+        idx.add_reflection("id-1", "kelex", "schema introspection is complex", T)
             .unwrap();
-        idx.add("id-2", "rafters", "schema tokens need attention", T)
+        idx.add_reflection("id-2", "rafters", "schema tokens need attention", T)
             .unwrap();
-        idx.add("id-3", "platform", "schema validation with Zod", T)
+        idx.add_reflection("id-3", "platform", "schema validation with Zod", T)
             .unwrap();
         let results = idx.search_all("schema", 10, &TimeRange::default()).unwrap();
         assert_eq!(results.len(), 3);
@@ -524,14 +668,14 @@ mod tests {
     #[test]
     fn search_all_ranks_by_relevance() {
         let (idx, _dir) = test_index();
-        idx.add(
+        idx.add_reflection(
             "id-weak",
             "kelex",
             "the CLI flag parser is straightforward",
             T,
         )
         .unwrap();
-        idx.add(
+        idx.add_reflection(
             "id-strong",
             "rafters",
             "mapping rules are fragile when adding new Zod types for mapping",
@@ -552,7 +696,8 @@ mod tests {
     #[test]
     fn search_all_empty_query_returns_empty() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "kelex", "some reflection", T).unwrap();
+        idx.add_reflection("id-1", "kelex", "some reflection", T)
+            .unwrap();
         let results = idx.search_all("", 5, &TimeRange::default()).unwrap();
         assert!(results.is_empty());
         let results = idx.search_all("   ", 5, &TimeRange::default()).unwrap();
@@ -579,17 +724,40 @@ mod tests {
         }
     }
 
+    /// Build a `Document` row for rebuild/kind-filter tests. `payload` is
+    /// raw JSON; callers pass a shape `documents::document_search_text` can
+    /// extract `title`/`description` from when the test cares about
+    /// content, or `"{}"` when it does not.
+    fn test_document(id: &str, owner: &str, payload: &str) -> Document {
+        test_document_at(id, owner, payload, T)
+    }
+
+    fn test_document_at(id: &str, owner: &str, payload: &str, created_at: &str) -> Document {
+        Document {
+            id: id.into(),
+            doc_type: "requirement".into(),
+            surface: None,
+            status: "draft".into(),
+            priority: None,
+            owner: owner.into(),
+            payload: payload.into(),
+            archived_at: None,
+            created_at: created_at.into(),
+            updated_at: created_at.into(),
+        }
+    }
+
     #[test]
     fn delete_removes_document_from_index() {
         let (idx, _dir) = test_index();
-        idx.add(
+        idx.add_reflection(
             "id-keep",
             "kelex",
             "keep this reflection about mapping rules",
             T,
         )
         .unwrap();
-        idx.add(
+        idx.add_reflection(
             "id-gone",
             "kelex",
             "doomed reflection about mapping rules that should vanish",
@@ -616,7 +784,8 @@ mod tests {
     #[test]
     fn delete_nonexistent_id_is_noop() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "kelex", "reflection one", T).unwrap();
+        idx.add_reflection("id-1", "kelex", "reflection one", T)
+            .unwrap();
         // Deleting a term that never existed should not error.
         idx.delete("id-does-not-exist").unwrap();
         // Existing document still retrievable.
@@ -630,14 +799,14 @@ mod tests {
     #[test]
     fn rebuild_replaces_index_contents() {
         let (idx, _dir) = test_index();
-        idx.add("id-old", "test", "old reflection that should be gone", T)
+        idx.add_reflection("id-old", "test", "old reflection that should be gone", T)
             .unwrap();
 
         let reflections = vec![
             test_reflection("id-1", "kelex", "new reflection one"),
             test_reflection("id-2", "rafters", "new reflection two"),
         ];
-        idx.rebuild(&reflections).unwrap();
+        idx.rebuild(&reflections, &[]).unwrap();
 
         // Old document should be gone
         let old = idx
@@ -655,14 +824,41 @@ mod tests {
     #[test]
     fn rebuild_empty_clears_index() {
         let (idx, _dir) = test_index();
-        idx.add("id-1", "test", "something searchable", T).unwrap();
+        idx.add_reflection("id-1", "test", "something searchable", T)
+            .unwrap();
 
-        idx.rebuild(&[]).unwrap();
+        idx.rebuild(&[], &[]).unwrap();
 
         let results = idx
             .search_all("searchable", 10, &TimeRange::default())
             .unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn rebuild_populates_both_kinds() {
+        let (idx, _dir) = test_index();
+        let reflections = vec![test_reflection(
+            "id-r1",
+            "kelex",
+            "a reflection about mapping",
+        )];
+        let documents = vec![test_document(
+            "id-d1",
+            "kelex",
+            r#"{"title":"Mapping spec","description":"rules for schema mapping"}"#,
+        )];
+        idx.rebuild(&reflections, &documents).unwrap();
+
+        let reflection_hits = idx
+            .search("kelex", "mapping", 10, &TimeRange::default())
+            .unwrap();
+        assert_eq!(reflection_hits.len(), 1);
+        assert_eq!(reflection_hits[0].id, "id-r1");
+
+        let document_hits = idx.search_documents("kelex", "mapping", 10).unwrap();
+        assert_eq!(document_hits.len(), 1);
+        assert_eq!(document_hits[0].id, "id-d1");
     }
 
     #[test]
@@ -679,7 +875,8 @@ mod tests {
 
         // Should recover by recreating
         let idx = SearchIndex::open(path).expect("recovery open");
-        idx.add("id-1", "test", "works after recovery", T).unwrap();
+        idx.add_reflection("id-1", "test", "works after recovery", T)
+            .unwrap();
         let results = idx
             .search("test", "recovery", 5, &TimeRange::default())
             .unwrap();
@@ -690,7 +887,7 @@ mod tests {
     fn search_all_respects_limit() {
         let (idx, _dir) = test_index();
         for i in 0..10 {
-            idx.add(
+            idx.add_reflection(
                 &format!("id-{i}"),
                 &format!("repo-{}", i % 3),
                 &format!("reflection about testing {i}"),
@@ -707,21 +904,21 @@ mod tests {
     #[test]
     fn search_filters_by_date_range() {
         let (idx, _dir) = test_index();
-        idx.add(
+        idx.add_reflection(
             "id-old",
             "kelex",
             "mapping rules apply",
             "2026-01-01T00:00:00+00:00",
         )
         .unwrap();
-        idx.add(
+        idx.add_reflection(
             "id-mid",
             "kelex",
             "mapping rules apply",
             "2026-06-15T00:00:00+00:00",
         )
         .unwrap();
-        idx.add(
+        idx.add_reflection(
             "id-new",
             "kelex",
             "mapping rules apply",
@@ -738,14 +935,14 @@ mod tests {
     #[test]
     fn search_all_filters_by_date_range() {
         let (idx, _dir) = test_index();
-        idx.add(
+        idx.add_reflection(
             "id-old",
             "kelex",
             "reflection text here",
             "2026-01-01T00:00:00+00:00",
         )
         .unwrap();
-        idx.add(
+        idx.add_reflection(
             "id-new",
             "rafters",
             "reflection text here",
@@ -776,9 +973,9 @@ mod tests {
             .unwrap()
             .to_rfc3339();
 
-        idx.add("id-in", "kelex", "some reflection text", &inside)
+        idx.add_reflection("id-in", "kelex", "some reflection text", &inside)
             .unwrap();
-        idx.add(
+        idx.add_reflection(
             "id-out",
             "kelex",
             "some reflection text",
@@ -794,14 +991,14 @@ mod tests {
     #[test]
     fn unbounded_range_returns_everything() {
         let (idx, _dir) = test_index();
-        idx.add(
+        idx.add_reflection(
             "id-1",
             "kelex",
             "reflection alpha",
             "2020-01-01T00:00:00+00:00",
         )
         .unwrap();
-        idx.add(
+        idx.add_reflection(
             "id-2",
             "kelex",
             "reflection beta",
@@ -845,14 +1042,14 @@ mod tests {
             writer.commit().expect("commit old index");
         }
 
-        // Opening with the new (4-field) schema must not panic or return
-        // an error -- it detects the mismatch and rebuilds empty.
+        // Opening with the new schema must not panic or return an error --
+        // it detects the mismatch and rebuilds empty.
         let idx = SearchIndex::open(path).expect("open after schema change");
 
         // Writes must succeed post-rebuild (this is the failure this test
         // guards: pre-fix, add() after a mismatched open corrupted the
         // commit).
-        idx.add("id-1", "kelex", "a fresh reflection", T)
+        idx.add_reflection("id-1", "kelex", "a fresh reflection", T)
             .expect("add after schema rebuild must not fail");
         let results = idx
             .search("kelex", "fresh reflection", 5, &TimeRange::default())
@@ -872,5 +1069,144 @@ mod tests {
             )
             .unwrap();
         assert!(old.is_empty());
+    }
+
+    #[test]
+    fn kind_field_schema_mismatch_rebuilds_empty_instead_of_corrupting_writes() {
+        // Simulate an index built before #1037 (id/repo/text/created_at,
+        // no kind field) -- the exact 4-field schema this module built
+        // prior to this change, written directly with tantivy, bypassing
+        // SearchIndex::open entirely.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        {
+            let mut sb = Schema::builder();
+            let id_field = sb.add_text_field("id", STRING | STORED);
+            let repo_field = sb.add_text_field("repo", STRING);
+            let text_options = TextOptions::default().set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("en_stem")
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+            );
+            let text_field = sb.add_text_field("text", text_options);
+            let date_options = DateOptions::from(tantivy::schema::INDEXED)
+                .set_precision(DateTimePrecision::Seconds);
+            let created_at_field = sb.add_date_field("created_at", date_options);
+            let old_schema = sb.build();
+            let old_index = Index::create_in_dir(path, old_schema).expect("create old index");
+            let mut writer: IndexWriter = old_index.writer(15_000_000).expect("writer");
+            writer
+                .add_document(doc!(
+                    id_field => "pre-1037",
+                    repo_field => "kelex",
+                    text_field => "a reflection from before the kind field",
+                    created_at_field => parse_rfc3339_to_tantivy_date(T).expect("date"),
+                ))
+                .expect("add old-shape doc");
+            writer.commit().expect("commit old index");
+        }
+
+        // Opening with the new (5-field) schema must not panic or return
+        // an error -- it detects the mismatch and rebuilds empty.
+        let idx = SearchIndex::open(path).expect("open after schema change");
+
+        // Writes must succeed post-rebuild.
+        idx.add_reflection("id-1", "kelex", "a fresh reflection", T)
+            .expect("add after schema rebuild must not fail");
+        let results = idx
+            .search("kelex", "fresh reflection", 5, &TimeRange::default())
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "id-1");
+
+        // The pre-1037 document did not survive the rebuild.
+        let old = idx
+            .search("kelex", "before the kind field", 5, &TimeRange::default())
+            .unwrap();
+        assert!(old.is_empty());
+    }
+
+    // -- #1037: documents in the search index -----------------------------
+
+    #[test]
+    fn add_document_and_search_documents_finds_it() {
+        let (idx, _dir) = test_index();
+        idx.add_document("doc-1", "kelex", "mapping rules for the schema field", T)
+            .unwrap();
+        let results = idx.search_documents("kelex", "schema mapping", 5).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].id, "doc-1");
+    }
+
+    #[test]
+    fn search_documents_filters_by_repo() {
+        let (idx, _dir) = test_index();
+        idx.add_document("doc-1", "kelex", "schema introspection is complex", T)
+            .unwrap();
+        idx.add_document("doc-2", "rafters", "schema tokens need attention", T)
+            .unwrap();
+        let results = idx.search_documents("kelex", "schema", 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "doc-1");
+    }
+
+    #[test]
+    fn search_documents_empty_query_returns_empty() {
+        let (idx, _dir) = test_index();
+        idx.add_document("doc-1", "kelex", "some document", T)
+            .unwrap();
+        let results = idx.search_documents("kelex", "", 5).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn add_document_replaces_prior_entry_for_same_id() {
+        let (idx, _dir) = test_index();
+        idx.add_document("doc-1", "kelex", "draft of the mapping spec", T)
+            .unwrap();
+        idx.add_document("doc-1", "kelex", "published mapping spec, revised text", T)
+            .unwrap();
+
+        let hits = idx.search_documents("kelex", "mapping", 10).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "re-adding an id must replace the prior entry, not duplicate it"
+        );
+        assert_eq!(hits[0].id, "doc-1");
+    }
+
+    #[test]
+    fn kind_filter_excludes_documents_from_reflection_search() {
+        let (idx, _dir) = test_index();
+        idx.add_reflection("refl-1", "kelex", "mapping rules for schema fields", T)
+            .unwrap();
+        idx.add_document("doc-1", "kelex", "mapping rules for schema fields", T)
+            .unwrap();
+
+        let results = idx
+            .search("kelex", "mapping rules", 10, &TimeRange::default())
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "refl-1");
+
+        let results_all = idx
+            .search_all("mapping rules", 10, &TimeRange::default())
+            .unwrap();
+        assert_eq!(results_all.len(), 1);
+        assert_eq!(results_all[0].id, "refl-1");
+    }
+
+    #[test]
+    fn kind_filter_excludes_reflections_from_document_search() {
+        let (idx, _dir) = test_index();
+        idx.add_reflection("refl-1", "kelex", "mapping rules for schema fields", T)
+            .unwrap();
+        idx.add_document("doc-1", "kelex", "mapping rules for schema fields", T)
+            .unwrap();
+
+        let results = idx.search_documents("kelex", "mapping rules", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "doc-1");
     }
 }

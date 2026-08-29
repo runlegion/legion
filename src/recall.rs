@@ -1126,7 +1126,7 @@ mod tests {
 
         // Add directly to index without DB entry to simulate desync
         index
-            .add(
+            .add_reflection(
                 "orphan-id",
                 "kelex",
                 "orphan reflection text",
@@ -1152,6 +1152,57 @@ mod tests {
         for r in &result.reflections {
             assert_ne!(r.id, "orphan-id");
         }
+    }
+
+    /// #1037 acceptance criterion: `legion recall --repo <repo>` returns
+    /// zero document rows even when a document and a reflection are both
+    /// indexed for the same repo with overlapping text. `SearchIndex::search`
+    /// filters to kind=Reflection (proven in search.rs), but this test
+    /// closes the criterion at the level it is actually stated: through
+    /// `recall_bm25`, the function `legion recall` calls.
+    #[test]
+    fn recall_bm25_never_surfaces_a_document() {
+        let (db, index, _dir) = test_storage();
+
+        reflect_from_text(&db, &index, "kelex", "mapping rules for schema fields")
+            .expect("reflect");
+
+        let meta = crate::documents::DocumentMeta {
+            id: Some("FR-RECALL-1"),
+            doc_type: "requirement",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "kelex",
+        };
+        crate::documents::insert_document_indexed(
+            &db,
+            &index,
+            &meta,
+            r#"{"title":"mapping rules for schema fields"}"#,
+        )
+        .expect("insert document");
+
+        let result = recall_bm25(
+            &db,
+            &index,
+            "kelex",
+            "mapping rules",
+            10,
+            ArchiveMode::Hot,
+            &no_range(),
+        )
+        .expect("recall");
+
+        assert_eq!(
+            result.reflections.len(),
+            1,
+            "expected exactly the reflection"
+        );
+        assert_ne!(
+            result.reflections[0].id, "FR-RECALL-1",
+            "a document must never surface from legion recall"
+        );
     }
 
     #[test]

@@ -3588,9 +3588,18 @@ pub(crate) fn handle_reindex() -> error::Result<()> {
     let (database, index) = open_db_and_index()?;
 
     let reflections = database.get_all_for_reindex()?;
-    let count = reflections.len();
-    index.rebuild(&reflections)?;
-    info!("[legion] reindexed {} reflections", count);
+    // #1037: the search index also carries documents. `rebuild` wipes the
+    // whole index and repopulates both in one commit -- a reindex that
+    // only refetched reflections would leave every document unsearchable
+    // after the #1037 `kind`-field schema-mismatch wipe.
+    let documents = database.get_all_documents_for_reindex()?;
+    let reflection_count = reflections.len();
+    let document_count = documents.len();
+    index.rebuild(&reflections, &documents)?;
+    info!(
+        "[legion] reindexed {} reflections, {} documents",
+        reflection_count, document_count
+    );
     Ok(())
 }
 
@@ -3634,10 +3643,14 @@ pub(crate) fn handle_rename(from: String, to: String) -> error::Result<()> {
         counts.schedules
     );
 
-    // Reindex since repo name is in the search index
+    // Reindex since repo name is in the search index. `rename_repo` does
+    // not touch the `documents` table (a repo rename does not rename
+    // document ownership), but `rebuild` repopulates both corpora from the
+    // database in one commit (#1037), so documents are fetched here too.
     let reflections = database.get_all_for_reindex()?;
+    let documents = database.get_all_documents_for_reindex()?;
     let reindex_count = reflections.len();
-    index.rebuild(&reflections)?;
+    index.rebuild(&reflections, &documents)?;
     eprintln!("[legion] reindexed {} reflections", reindex_count);
 
     // Update watch.toml
