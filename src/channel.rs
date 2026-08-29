@@ -341,6 +341,16 @@ fn work_source_as_bad_request(e: LegionError) -> ServeError {
 /// `owner` and `id` are network-supplied input here, unlike the CLI's argv
 /// (a local operator typing into their own shell) -- both are gated by
 /// `validate_identifier` before they reach storage (#1036 review, MED-4).
+///
+/// NOTE for client authors: this wraps `payload` under a key alongside the
+/// meta fields (`doc_type`/`owner`/etc), because create has to disambiguate
+/// them within one request body. POST /api/documents/{id}/revise below does
+/// NOT wrap -- its entire request body IS the payload, with no meta fields
+/// riding along (there is nothing to disambiguate: the id is in the URL,
+/// and revise never changes doc_type/owner/surface/etc). Sending
+/// `{"payload": {...}}` to revise is valid JSON and is NOT rejected -- it
+/// gets stored verbatim as a payload whose only field happens to be named
+/// "payload", not unwrapped for you.
 #[derive(serde::Deserialize)]
 pub struct CreateDocumentRequest {
     pub doc_type: String,
@@ -490,15 +500,17 @@ pub async fn api_document_update_body(
 
 /// POST /api/documents/{id}/revise -- a thin HTTP wrapper over
 /// `Database::revise_document`, not a second implementation of revise
-/// semantics. The body is the full replacement payload as a JSON object,
-/// same contract as `legion document revise`'s --from/stdin input: a
-/// whole-payload replace, not a patch. Mirrors `DocumentAction::Revise`
-/// (src/cli/document.rs) exactly (#1036 review, HIGH-1): a schema document
-/// gets the same structural gate `create` enforces, checked against the
-/// existing document's doc_type before the write, and the pointer
-/// reflection is refreshed after. 404 for an unknown id; a 4xx (not 500)
-/// for a non-object payload, an archived document, or an invalid schema
-/// payload (#1036 review, HIGH-2).
+/// semantics. The request body IS the full replacement payload as a JSON
+/// object -- NOT wrapped under a `"payload"` key the way POST
+/// /api/documents wraps it (see that handler's `CreateDocumentRequest`
+/// doc comment) -- same contract as `legion document revise`'s --from/stdin
+/// input: a whole-payload replace, not a patch. Mirrors
+/// `DocumentAction::Revise` (src/cli/document.rs) exactly (#1036 review,
+/// HIGH-1): a schema document gets the same structural gate `create`
+/// enforces, checked against the existing document's doc_type before the
+/// write, and the pointer reflection is refreshed after. 404 for an
+/// unknown id; a 4xx (not 500) for a non-object payload, an archived
+/// document, or an invalid schema payload (#1036 review, HIGH-2).
 pub async fn api_document_revise(
     State(state): State<ChannelState>,
     Path(id): Path<String>,
