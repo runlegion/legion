@@ -103,11 +103,14 @@ export function useDocumentSave(doc: Document): UseDocumentSaveResult {
       const path = documentPath(doc.id, "/revise");
       setSaving(true);
       try {
-        const payload = {
-          ...(payloadObject(doc) ?? {}),
-          ...(settingsPatch ?? {}),
-          body: store.get(),
-        };
+        const base = payloadObject(doc) ?? {};
+        const working = store.get();
+        const payload: Record<string, unknown> = { ...base, ...(settingsPatch ?? {}) };
+        // Only editing creates the body key. A status change revises documents
+        // that never had one -- 187 of the 224 current documents, including the
+        // schema documents an empty body would invalidate -- so an untouched
+        // empty working copy must not write the key into them.
+        if (working.length > 0 || "body" in base) payload["body"] = working;
         const next = await requestJson(path, DocumentSchema, { method: "POST", body: { payload } });
         setError(null);
         setHasUnrevisedEdits(false);

@@ -42,7 +42,17 @@ export function SearchBox({ repo, onSelect }: SearchBoxProps) {
         <CommandList>
           <CommandEmpty>{loading ? "Searching..." : "No documents match."}</CommandEmpty>
           {results.map((doc) => (
-            <CommandItem key={doc.id} value={haystack(doc)} onSelect={() => onSelect(doc)}>
+            <CommandItem
+              key={doc.id}
+              value={haystack(doc)}
+              onSelect={() => {
+                onSelect(doc);
+                // Opening the document ends the search; clearing the query
+                // empties the result list rather than leaving it over the work
+                // area.
+                setQuery("");
+              }}
+            >
               {documentTitle(doc)}
             </CommandItem>
           ))}
