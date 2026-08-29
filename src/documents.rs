@@ -461,13 +461,40 @@ fn index_document(index: &SearchIndex, doc: &Document) -> Result<()> {
     )
 }
 
+/// Best-effort re-index for a document row already committed to the
+/// database by one of the `*_indexed` wrappers below, warning (not
+/// failing) on error. The DB write is the source of truth and has already
+/// landed by the time this runs -- an index straggler (e.g. a writer-lock
+/// timeout, `search.rs`'s `acquire_writer`) must not turn an already-
+/// durable write into an HTTP 500, and for `insert_document_indexed`/
+/// `revise_document_indexed` in particular, propagating the error here
+/// would also skip the caller's schema-pointer dual-write that runs after
+/// a successful return. `legion reindex` is the recovery path. Mirrors
+/// `identity_generate.rs`'s `warn_on_index_add_failure` / `cli/issue.rs`'s
+/// equivalent for the identical "primary write durable, side-effect can
+/// fail" situation.
+fn warn_on_index_write_failure(index: &SearchIndex, doc: &Document) {
+    if let Err(e) = index_document(index, doc) {
+        eprintln!(
+            "[legion documents] WARNING: document '{}' was written to the database but the \
+             search index update failed.\n\
+             It will not surface in search results until the index is rebuilt. Run `legion \
+             reindex` to reconcile.\n\
+             Underlying error: {e}",
+            doc.id
+        );
+    }
+}
+
 /// Insert a new document and index it for search in one call (#1037).
 ///
 /// Composes `Database::insert_document` with `SearchIndex::add_document`
 /// the same way `reflect_from_text_with_meta` composes reflection insert
 /// with reflection indexing: the DB write is the source of truth, the
 /// index write follows it. `repo` in the index is the document's `owner`
-/// column (`SearchIndex::add_document`'s doc comment).
+/// column (`SearchIndex::add_document`'s doc comment). The index write is
+/// best-effort -- see [`warn_on_index_write_failure`] -- so this always
+/// returns the inserted row once the DB write succeeds.
 pub fn insert_document_indexed(
     db: &Database,
     index: &SearchIndex,
@@ -475,14 +502,15 @@ pub fn insert_document_indexed(
     payload: &str,
 ) -> Result<Document> {
     let doc = db.insert_document(meta, payload)?;
-    index_document(index, &doc)?;
+    warn_on_index_write_failure(index, &doc);
     Ok(doc)
 }
 
 /// Revise a document's payload and re-index it for search in one call
 /// (#1037). `SearchIndex::add_document` deletes the prior entry for this
 /// id before adding the new one, so a revise never leaves a stale-text
-/// ghost or a duplicate hit behind.
+/// ghost or a duplicate hit behind. The index write is best-effort -- see
+/// [`warn_on_index_write_failure`].
 pub fn revise_document_indexed(
     db: &Database,
     index: &SearchIndex,
@@ -490,7 +518,7 @@ pub fn revise_document_indexed(
     payload: &str,
 ) -> Result<Document> {
     let doc = db.revise_document(id, payload)?;
-    index_document(index, &doc)?;
+    warn_on_index_write_failure(index, &doc);
     Ok(doc)
 }
 
@@ -499,6 +527,7 @@ pub fn revise_document_indexed(
 /// so a body save that skipped re-indexing would silently diverge the
 /// index from the row on every edit -- and this is the highest-frequency
 /// document write path, called on every debounced editor keystroke pause.
+/// The index write is best-effort -- see [`warn_on_index_write_failure`].
 pub fn update_document_body_indexed(
     db: &Database,
     index: &SearchIndex,
@@ -506,7 +535,7 @@ pub fn update_document_body_indexed(
     body: &str,
 ) -> Result<Document> {
     let doc = db.update_document_body(id, body)?;
-    index_document(index, &doc)?;
+    warn_on_index_write_failure(index, &doc);
     Ok(doc)
 }
 
@@ -514,7 +543,8 @@ pub fn update_document_body_indexed(
 /// call (#1037). The status change does not alter the searchable text,
 /// but re-indexing keeps the index's `created_at`/`repo` fields aligned
 /// with the row and (via the delete-first semantics of `add_document`)
-/// guards against ever accumulating more than one index entry per id.
+/// guards against ever accumulating more than one index entry per id. The
+/// index write is best-effort -- see [`warn_on_index_write_failure`].
 pub fn set_document_status_indexed(
     db: &Database,
     index: &SearchIndex,
@@ -522,7 +552,7 @@ pub fn set_document_status_indexed(
     status: &str,
 ) -> Result<Document> {
     let doc = db.set_document_status(id, status)?;
-    index_document(index, &doc)?;
+    warn_on_index_write_failure(index, &doc);
     Ok(doc)
 }
 
@@ -530,10 +560,11 @@ pub fn set_document_status_indexed(
 ///
 /// Archived documents stay searchable (`get_document`/`GET
 /// /api/documents/{id}` still serve them; only `list_documents`'s default
-/// filter hides them), so archiving re-indexes rather than deletes.
+/// filter hides them), so archiving re-indexes rather than deletes. The
+/// index write is best-effort -- see [`warn_on_index_write_failure`].
 pub fn archive_document_indexed(db: &Database, index: &SearchIndex, id: &str) -> Result<Document> {
     let doc = db.archive_document(id)?;
-    index_document(index, &doc)?;
+    warn_on_index_write_failure(index, &doc);
     Ok(doc)
 }
 
@@ -1784,6 +1815,13 @@ mod tests {
         assert_eq!(hits[0].id, "FR-REVISE-1");
     }
 
+    /// Status is not part of `document_search_text`'s indexed text, so this
+    /// cannot observe content freshness -- it proves the narrower thing the
+    /// name says: `add_document`'s delete-then-add semantics mean a
+    /// re-index on every write (status change included) never leaves a
+    /// second index entry behind for the same id. `revise_document_indexed_
+    /// reindexes_without_duplicating` above is the test that proves content
+    /// freshness (LOW 13, PR #1039 review).
     #[test]
     fn set_document_status_indexed_does_not_duplicate_index_entry() {
         let (db, index, _dir) = crate::testutil::test_storage();
@@ -1803,6 +1841,39 @@ mod tests {
             "a status change must re-index, not add a second entry"
         );
         assert_eq!(hits[0].id, "FR-STATUS-1");
+    }
+
+    /// MED 1 (PR #1039 review): a post-commit index-write failure must warn
+    /// and return `Ok(doc)`, not fail the whole call -- the DB write is
+    /// already durable by the time the index leg runs. Corrupts
+    /// `created_at` directly via SQL (bypassing `set_document_status`,
+    /// which never touches that column) so `SearchIndex::add_document`'s
+    /// `build_doc` -> `parse_rfc3339_to_tantivy_date` fails deterministically,
+    /// without relying on filesystem/lock tricks that would be
+    /// platform-dependent against a real Tantivy index.
+    #[test]
+    fn set_document_status_indexed_warns_and_returns_ok_when_index_write_fails() {
+        let (db, index, _dir) = crate::testutil::test_storage();
+        let mut meta = sample_meta("requirement", "mail");
+        meta.id = Some("FR-WARN-1");
+        insert_document_indexed(&db, &index, &meta, r#"{"title":"Warn target"}"#).expect("insert");
+
+        db.conn
+            .execute(
+                "UPDATE documents SET created_at = ?1 WHERE id = ?2",
+                params!["not-a-timestamp", "FR-WARN-1"],
+            )
+            .expect("corrupt created_at");
+
+        let doc = set_document_status_indexed(&db, &index, "FR-WARN-1", "published")
+            .expect("an index-write failure must not fail the DB write");
+        assert_eq!(doc.status, "published");
+
+        let refetched = db
+            .get_document("FR-WARN-1")
+            .expect("get")
+            .expect("row must exist -- the DB write committed regardless of the index failure");
+        assert_eq!(refetched.status, "published");
     }
 
     #[test]

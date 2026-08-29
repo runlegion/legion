@@ -132,7 +132,7 @@ impl SearchIndex {
                 // repopulates from the database, the source of truth, same
                 // recovery path as the corrupted-index branch below.
                 eprintln!(
-                    "[legion] search index schema changed (kind field added, #1037), rebuilding empty -- run `legion reindex` to repopulate"
+                    "[legion] search index schema changed, rebuilding empty -- run `legion reindex` to repopulate"
                 );
                 Self::recreate_index(path, schema.clone())?
             }
@@ -319,43 +319,68 @@ impl SearchIndex {
     /// document's payload via `documents::document_search_text` -- the same
     /// extraction the write path uses, so a reindex and a live write agree
     /// on what a document's searchable text is.
-    pub fn rebuild(&self, reflections: &[Reflection], documents: &[Document]) -> Result<()> {
+    ///
+    /// A single row that fails to build (e.g. a `created_at` that does not
+    /// parse as RFC3339) is skipped with a warning rather than aborting the
+    /// whole rebuild -- this is the mandatory recovery path after a schema
+    /// mismatch wipes the index, so one bad row must not block recovery of
+    /// every other reflection and document. Returns the number of rows
+    /// skipped; the caller (`legion reindex`) reports it to the operator.
+    pub fn rebuild(&self, reflections: &[Reflection], documents: &[Document]) -> Result<usize> {
         let mut writer: IndexWriter = self.acquire_writer()?;
 
         writer
             .delete_all_documents()
             .map_err(|e| LegionError::Search(e.to_string()))?;
 
+        let mut skipped: usize = 0;
+
         for r in reflections {
-            writer
-                .add_document(self.build_doc(
-                    IndexedKind::Reflection,
-                    &r.id,
-                    &r.repo,
-                    &r.text,
-                    &r.created_at,
-                )?)
-                .map_err(|e| LegionError::Search(e.to_string()))?;
+            match self.build_doc(
+                IndexedKind::Reflection,
+                &r.id,
+                &r.repo,
+                &r.text,
+                &r.created_at,
+            ) {
+                Ok(built) => {
+                    writer
+                        .add_document(built)
+                        .map_err(|e| LegionError::Search(e.to_string()))?;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[legion reindex] WARNING: skipping reflection '{}' -- {e}",
+                        r.id
+                    );
+                    skipped += 1;
+                }
+            }
         }
 
         for d in documents {
             let text = documents::document_search_text(d);
-            writer
-                .add_document(self.build_doc(
-                    IndexedKind::Document,
-                    &d.id,
-                    &d.owner,
-                    &text,
-                    &d.created_at,
-                )?)
-                .map_err(|e| LegionError::Search(e.to_string()))?;
+            match self.build_doc(IndexedKind::Document, &d.id, &d.owner, &text, &d.created_at) {
+                Ok(built) => {
+                    writer
+                        .add_document(built)
+                        .map_err(|e| LegionError::Search(e.to_string()))?;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[legion reindex] WARNING: skipping document '{}' -- {e}",
+                        d.id
+                    );
+                    skipped += 1;
+                }
+            }
         }
 
         writer
             .commit()
             .map_err(|e| LegionError::Search(e.to_string()))?;
 
-        Ok(())
+        Ok(skipped)
     }
 
     /// Search for reflections matching a query within a specific repo.
@@ -443,11 +468,12 @@ impl SearchIndex {
             return Ok(Vec::new());
         }
         // `TopDocs::with_limit(0)` panics (tantivy 0.22.1) rather than
-        // returning an empty collector -- a caller-supplied `limit=0` (the
-        // /api/search `limit` query param is unclamped input) must not
-        // reach it. Every caller (`search`, `search_all`,
-        // `search_documents`) routes through this one method, so the
-        // guard lives here rather than at each call site.
+        // returning an empty collector -- a caller-supplied `limit=0` must
+        // not reach it. `/api/search`'s `limit` query param is capped at 50
+        // (channel.rs) but not floored at 1, so 0 can still arrive here.
+        // Every caller (`search`, `search_all`, `search_documents`) routes
+        // through this one method, so the guard lives here rather than at
+        // each call site.
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -636,8 +662,9 @@ mod tests {
     }
 
     /// `TopDocs::with_limit(0)` panics (tantivy 0.22.1); a `limit=0` caller
-    /// (e.g. GET /api/search's unclamped `limit` query param) must get an
-    /// empty result, not a crash.
+    /// must get an empty result, not a crash. `/api/search`'s `limit` query
+    /// param is capped at 50 but not floored at 1, so this is reachable in
+    /// production, not just a defensive test.
     #[test]
     fn search_limit_zero_returns_empty_without_panicking() {
         let (idx, _dir) = test_index();
@@ -877,6 +904,44 @@ mod tests {
         let document_hits = idx.search_documents("kelex", "mapping", 10).unwrap();
         assert_eq!(document_hits.len(), 1);
         assert_eq!(document_hits[0].id, "id-d1");
+    }
+
+    /// A single bad row (unparseable `created_at`) must not abort recovery
+    /// of every other row in EITHER corpus -- this is the mandatory
+    /// recovery path after a schema-mismatch wipe (MED 2, PR #1039 review).
+    #[test]
+    fn rebuild_skips_bad_rows_and_reports_the_count() {
+        let (idx, _dir) = test_index();
+
+        let reflections = vec![
+            test_reflection("id-r-good", "kelex", "a good reflection about mapping"),
+            test_reflection_at("id-r-bad", "kelex", "a bad reflection", "not-a-timestamp"),
+        ];
+        let documents = vec![
+            test_document(
+                "id-d-good",
+                "kelex",
+                r#"{"title":"Mapping spec","description":"rules for schema mapping"}"#,
+            ),
+            {
+                let mut bad = test_document("id-d-bad", "kelex", r#"{"title":"Bad doc"}"#);
+                bad.created_at = "also-not-a-timestamp".into();
+                bad
+            },
+        ];
+
+        let skipped = idx.rebuild(&reflections, &documents).unwrap();
+        assert_eq!(skipped, 2, "one bad reflection and one bad document");
+
+        let reflection_hits = idx
+            .search("kelex", "mapping", 10, &TimeRange::default())
+            .unwrap();
+        assert_eq!(reflection_hits.len(), 1);
+        assert_eq!(reflection_hits[0].id, "id-r-good");
+
+        let document_hits = idx.search_documents("kelex", "mapping", 10).unwrap();
+        assert_eq!(document_hits.len(), 1);
+        assert_eq!(document_hits[0].id, "id-d-good");
     }
 
     #[test]
