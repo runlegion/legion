@@ -114,7 +114,7 @@ export function DocumentTree({ tree, selectedId, onSelect, onCreateIntention }: 
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
-    <Sidebar side="left">
+    <Sidebar>
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
@@ -123,9 +123,7 @@ export function DocumentTree({ tree, selectedId, onSelect, onCreateIntention }: 
               <SheetTrigger asChild>
                 <SidebarMenuAction aria-label={`${tree.repo} settings`}>Settings</SidebarMenuAction>
               </SheetTrigger>
-              {/* Sheet intel: "Choose side based on content relationship
-                  (left=nav, right=details)" -- reached from the nav sidebar. */}
-              <SheetContent side="left">
+              <SheetContent>
                 <SheetHeader>
                   <SheetTitle>{tree.repo} settings</SheetTitle>
                   <SheetDescription>Repo-level settings for {tree.repo}.</SheetDescription>

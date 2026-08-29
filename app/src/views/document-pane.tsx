@@ -104,17 +104,13 @@ export function DocumentPane({
 
   return (
     <Container as="section">
-      {/* No rafters React toolbar part exists -- `editor-toolbar` is a headless
-          primitive (rendersForTarget: false) supplying button definitions, not
-          a rendered bar -- so the toolbar is a plain Container and the gap is
-          filed. No columns prop: placement is not ours to choose. */}
+      {/* No rafters React toolbar part exists -- `editor-toolbar` is headless
+          (rendersForTarget: false), supplying button definitions rather than a
+          rendered bar (rafters #2204). A plain Container at its defaults. */}
       <Container as="header">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            {/* Button intel: "ghost/link/outline are the unlimited low-attention
-                  register"; the one high-emphasis action in this view is the
-                  dialog's Revise. */}
-            <Button variant="outline">{doc.status}</Button>
+            <Button>{doc.status}</Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent>
             {statuses.map((status) => (
@@ -144,7 +140,7 @@ export function DocumentPane({
         the editor's own stated never. It renders readonly with the gap named
         until rafters ships a bound React surface.
       */}
-      <Alert variant="warning">
+      <Alert>
         <AlertTitle>The editor is not bound to this document</AlertTitle>
         <AlertDescription>
           The rafters editor item takes no value and emits no change event on its React surface, so
@@ -163,11 +159,7 @@ export function DocumentPane({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            {/* Button intel: "Secondary: Alternative paths, supporting actions". */}
-            <Button variant="secondary" onClick={onLeaveCancelled}>
-              Keep working
-            </Button>
-            {/* Button intel: "Primary: Main user goal, maximum 1 per section". */}
+            <Button onClick={onLeaveCancelled}>Keep working</Button>
             <Button onClick={handleLeaveWithRevise} disabled={saving}>
               Revise
             </Button>

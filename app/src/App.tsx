@@ -69,12 +69,11 @@ function App() {
       />
 
       <SidebarInset>
-        {/* Container intel: "Use header with position=\"sticky\" and
-            depth=\"navigation\" for site headers". The design asks for the
-            search box pinned right, but no rafters part or Container prop
-            places a child at the trailing edge, so it sits where the header
-            puts it and the gap is filed rather than faked with a spacer. */}
-        <Container as="header" position="sticky" depth="navigation">
+        {/* Every part renders at its defaults. `as` stays: it selects the
+            semantic element and its landmark, not an appearance. The search box
+            is not pinned right -- no rafters part places a child at a trailing
+            edge (rafters #2203). */}
+        <Container as="header">
           <SearchBox repo={REPO} onSelect={requestSelect} />
         </Container>
 
