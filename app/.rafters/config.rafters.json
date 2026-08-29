@@ -1,0 +1,69 @@
+{
+  "framework": "vite",
+  "componentTarget": "react",
+  "componentsPath": "src/components/ui",
+  "primitivesPath": "src/lib/primitives",
+  "compositesPath": "src/composites",
+  "rulesPath": "src/lib/rules",
+  "cssPath": "src/index.css",
+  "exports": {
+    "tailwind": true,
+    "typescript": false,
+    "dtcg": false,
+    "compiled": false,
+    "documentation": false
+  },
+  "intent": "efficient",
+  "fonts": {
+    "path": null,
+    "imports": []
+  },
+  "installed": {
+    "components": [
+      "avatar",
+      "badge",
+      "button",
+      "card",
+      "container",
+      "editor",
+      "grid",
+      "input",
+      "navigation-menu",
+      "select",
+      "separator",
+      "sheet",
+      "sidebar"
+    ],
+    "primitives": [
+      "aria-manager",
+      "classy",
+      "clipboard",
+      "fill-resolver",
+      "focus-trap",
+      "form-value",
+      "hover-delay",
+      "input-events",
+      "intelligence-integration",
+      "memory",
+      "motion-tokens",
+      "outside-click",
+      "rafters-element",
+      "roving-focus",
+      "slot",
+      "sr-announcer",
+      "typeahead",
+      "types"
+    ],
+    "composites": [],
+    "rules": [],
+    "substrate": [
+      "compose",
+      "contract",
+      "disclosable",
+      "key-input",
+      "pressable",
+      "use-memory",
+      "use-presence"
+    ]
+  }
+}

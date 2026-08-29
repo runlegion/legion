@@ -5,6 +5,9 @@
     "lib": ["ES2023", "DOM"],
     "module": "esnext",
     "types": ["vite/client"],
+    "paths": {
+      "@/*": ["./src/*"]
+    },
     "allowArbitraryExtensions": true,
     "skipLibCheck": true,
 
@@ -22,5 +25,10 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": [
+    "src/components/ui/editor.tsx",
+    "src/components/ui/editor.behavior.ts",
+    "src/components/ui/editor.classes.ts"
+  ]
 }
