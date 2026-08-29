@@ -367,8 +367,12 @@ pub async fn api_document_create(
     Json(req): Json<CreateDocumentRequest>,
 ) -> Result<Json<crate::documents::Document>, ServeError> {
     validate_identifier(&req.owner, "owner")?;
+    validate_identifier(&req.doc_type, "doc_type")?;
     if let Some(id) = req.id.as_deref().filter(|s| !s.is_empty()) {
         validate_identifier(id, "id")?;
+    }
+    if let Some(surface) = req.surface.as_deref().filter(|s| !s.is_empty()) {
+        validate_identifier(surface, "surface")?;
     }
 
     // The CLI's equivalent check is a raw JSON parse of --from/stdin text;
@@ -1411,6 +1415,120 @@ mod tests {
         );
     }
 
+    /// The revise-side mirror of
+    /// `api_document_create_schema_dual_writes_pointer_reflection` (#1036
+    /// review, MED-2, HIGH-1 coverage): a non-object revise payload and an
+    /// invalid schema payload are both rejected with 400 and leave
+    /// `revision` unchanged, and a valid schema revise bumps `revision` and
+    /// refreshes the pointer reflection.
+    #[tokio::test]
+    async fn api_document_revise_schema_refreshes_pointer_and_rejects_invalid_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let port = spawn_test_server(data_dir.clone()).await;
+
+        let schema_payload = serde_json::json!({
+            "$schema": "https://json-schema.org/draft-07/schema#",
+            "title": "Gadget",
+            "description": "A revisable test schema",
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        });
+        let create_body = serde_json::json!({
+            "doc_type": "schema",
+            "owner": "legion",
+            "payload": schema_payload,
+        })
+        .to_string();
+        let (status, body) = http_req(port, "POST", "/api/documents", Some(&create_body)).await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "create: {status} {body}"
+        );
+        let created: serde_json::Value = serde_json::from_str(&body).expect("parse create body");
+        let id = created["id"].as_str().expect("id").to_string();
+
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        assert_eq!(db.document_revision(&id).unwrap(), 1);
+
+        // A non-object revise payload is rejected before it ever reaches
+        // revise_document.
+        let (status, _) = http_req(
+            port,
+            "POST",
+            &format!("/api/documents/{id}/revise"),
+            Some(r#""not an object""#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "non-object revise payload: {status}"
+        );
+        assert_eq!(
+            db.document_revision(&id).unwrap(),
+            1,
+            "the rejected non-object payload must not bump revision"
+        );
+
+        // An invalid schema payload (missing every required field) is
+        // rejected at revise, matching create, and does not bump revision.
+        let (status, _) = http_req(
+            port,
+            "POST",
+            &format!("/api/documents/{id}/revise"),
+            Some("{}"),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "invalid schema revise payload: {status}"
+        );
+        assert_eq!(
+            db.document_revision(&id).unwrap(),
+            1,
+            "an invalid schema revise must not bump revision"
+        );
+
+        // A valid schema revise bumps revision and refreshes the pointer
+        // reflection.
+        let revised_schema_payload = serde_json::json!({
+            "$schema": "https://json-schema.org/draft-07/schema#",
+            "title": "Gadget Mark Two",
+            "description": "A revised test schema",
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        })
+        .to_string();
+        let (status, body) = http_req(
+            port,
+            "POST",
+            &format!("/api/documents/{id}/revise"),
+            Some(&revised_schema_payload),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "valid schema revise: {status} {body}"
+        );
+        assert_eq!(db.document_revision(&id).unwrap(), 2);
+
+        let reflections = db
+            .get_reflections_by_domain(
+                "legion",
+                "schema",
+                10,
+                crate::recall::ArchiveMode::Hot,
+                &crate::timerange::TimeRange::default(),
+            )
+            .expect("get reflections by domain");
+        assert!(
+            reflections
+                .iter()
+                .any(|r| r.text.contains("Gadget Mark Two") && r.text.contains(&id)),
+            "expected the revise to refresh the schema pointer reflection, got: {reflections:?}"
+        );
+    }
+
     #[tokio::test]
     async fn api_document_create_rejects_non_object_payload_and_duplicate_id() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1462,6 +1580,40 @@ mod tests {
         assert_eq!(
             payload["title"], "first",
             "the first create's payload must survive the rejected duplicate"
+        );
+    }
+
+    /// `doc_type` and `surface` get the same charset/length gate as `owner`
+    /// and `id` (#1036 review, LOW): a caller cannot smuggle a character
+    /// outside `[A-Za-z0-9._-]` into either indexed column.
+    #[tokio::test]
+    async fn api_document_create_validates_doc_type_and_surface() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let port = spawn_test_server(data_dir).await;
+
+        let (status, _) = http_req(
+            port,
+            "POST",
+            "/api/documents",
+            Some(r#"{"doc_type":"bad type!","owner":"legion","payload":{}}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "invalid doc_type: {status}"
+        );
+
+        let (status, _) = http_req(
+            port,
+            "POST",
+            "/api/documents",
+            Some(r#"{"doc_type":"thesis","owner":"legion","surface":"bad surface!","payload":{}}"#),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "invalid surface: {status}"
         );
     }
 

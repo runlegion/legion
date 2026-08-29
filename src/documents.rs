@@ -222,16 +222,22 @@ impl Database {
 
         let now = Utc::now().to_rfc3339();
         // A single UPDATE ... json_set(payload, '$.body', ?1) (#1036 review,
-        // MED-1) so a `revise_document` landing between the pre-check above
-        // and this write is never lost: the previous read-modify-write
-        // fetched `payload`, merged `body` in on the Rust side, and wrote
-        // the merged copy back, which would silently overwrite a
-        // concurrent revise's changes with the stale pre-revise snapshot.
-        // json_set is evaluated by SQLite against the row's CURRENT value
-        // at UPDATE time, not a value fetched earlier by this call. It also
-        // preserves the payload's existing key order -- the old
-        // Value::Object round trip did not, since serde_json does not
-        // enable the preserve_order feature here.
+        // MED-1) is what closes the read-modify-write window: the previous
+        // implementation fetched `payload`, merged `body` in on the Rust
+        // side, and wrote the merged copy back, so a `revise_document` that
+        // committed between that fetch and this write would have been
+        // silently overwritten by the stale pre-revise snapshot. json_set is
+        // evaluated by SQLite against the row's CURRENT value at UPDATE
+        // time, not a value fetched earlier by this call, so that window no
+        // longer exists. The actual interleaving is not unit-tested here --
+        // that would need two real concurrent connections racing on one
+        // row -- `update_document_body_after_revise_keeps_revised_fields_and_leaves_revision_unchanged`
+        // below only proves the sequential contract: a body save issued
+        // after a revise has already committed still keeps the revise's
+        // fields and still does not bump revision. This also preserves the
+        // payload's existing key order -- the old Value::Object round trip
+        // did not, since serde_json does not enable the preserve_order
+        // feature here.
         let rows = self.conn.execute(
             "UPDATE documents SET payload = json_set(payload, '$.body', ?1), updated_at = ?2 \
              WHERE id = ?3 AND deleted_at IS NULL AND archived_at IS NULL",
@@ -1364,28 +1370,31 @@ mod tests {
         );
     }
 
-    /// A body save issued after a revise must build on the REVISED payload,
-    /// not a stale pre-revise snapshot (#1036 review, MED-1): the previous
-    /// read-modify-write implementation fetched the payload, merged `body`
-    /// in on the Rust side, and wrote the merge back, which would have lost
-    /// a revise's changes if that revise landed between the read and the
-    /// write. The single-statement `json_set` UPDATE reads and writes the
-    /// row's current value atomically, so this holds regardless of timing.
+    /// A body save issued after a revise has already committed builds on
+    /// the revised payload, not a stale pre-revise snapshot, and still does
+    /// not bump revision (#1036 review). This is a sequential check with a
+    /// single connection -- it does not exercise the read-modify-write
+    /// interleaving `update_document_body`'s `json_set` UPDATE closes (see
+    /// that function's doc comment); proving the interleaving itself would
+    /// need two real concurrent connections racing on one row, which is not
+    /// set up here.
     #[test]
-    fn update_document_body_after_revise_keeps_revised_fields() {
+    fn update_document_body_after_revise_keeps_revised_fields_and_leaves_revision_unchanged() {
         let db = test_db();
         let mut m = sample_meta("thesis", "mail");
-        m.id = Some("TH-RACE-1");
+        m.id = Some("TH-AFTER-REVISE-1");
         db.insert_document(&m, r#"{"title":"a"}"#).unwrap();
 
-        db.update_document_body("TH-RACE-1", "draft one").unwrap();
+        db.update_document_body("TH-AFTER-REVISE-1", "draft one")
+            .unwrap();
 
         let revised_payload = serde_json::json!({"title": "b", "extra": "x"}).to_string();
-        db.revise_document("TH-RACE-1", &revised_payload).unwrap();
-        assert_eq!(db.document_revision("TH-RACE-1").unwrap(), 2);
+        db.revise_document("TH-AFTER-REVISE-1", &revised_payload)
+            .unwrap();
+        assert_eq!(db.document_revision("TH-AFTER-REVISE-1").unwrap(), 2);
 
         let updated = db
-            .update_document_body("TH-RACE-1", "draft two")
+            .update_document_body("TH-AFTER-REVISE-1", "draft two")
             .expect("update body after revise");
         let value: serde_json::Value = serde_json::from_str(&updated.payload).unwrap();
         assert_eq!(
@@ -1395,7 +1404,7 @@ mod tests {
         assert_eq!(value["extra"], "x");
         assert_eq!(value["body"], "draft two");
         assert_eq!(
-            db.document_revision("TH-RACE-1").unwrap(),
+            db.document_revision("TH-AFTER-REVISE-1").unwrap(),
             2,
             "a body save must not bump revision even after an intervening revise"
         );
