@@ -128,6 +128,42 @@ pub fn warm_schema(data_dir: &Path) {
     run_ok(legion_cmd(data_dir).args(["post", "--repo", "warmup-repo", "--text", "schema warmup"]));
 }
 
+/// Land a permissive, always-passing JSON Schema document declaring
+/// `x-doc-type: <doc_type>` via the real CLI path (#1062), so an
+/// integration test whose actual subject is something other than schema
+/// conformance can create a document of `doc_type` without needing to
+/// match a real production schema's required fields. Distinct from
+/// `warm_schema` above, which drives SQLite's own column migrations, not
+/// JSON Schema.
+pub fn seed_doc_type_schema(data_dir: &Path, doc_type: &str) {
+    let schema = serde_json::json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": format!("{doc_type} (integration test stub)"),
+        "type": "object",
+        "properties": {"meta": {"type": "object"}},
+        "x-doc-type": doc_type,
+    })
+    .to_string();
+    let out = run_with_stdin(
+        legion_cmd(data_dir).args([
+            "document",
+            "create",
+            "--doc-type",
+            "schema",
+            "--owner",
+            "legion",
+            "--surface",
+            "definition-layer",
+        ]),
+        schema.as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "seed_doc_type_schema({doc_type}) failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Assert `s` is a well-formed UUID of version 7 (legion's ID format).
 /// Tolerates surrounding whitespace so raw stdout can be passed directly.
 pub fn assert_uuid_format(s: &str) {

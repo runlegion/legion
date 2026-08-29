@@ -93,6 +93,12 @@ impl Database {
         let status = meta.status.unwrap_or("draft");
         let payload = normalize_payload_criteria(&id, payload)?;
 
+        // #1062: refuse a payload that does not conform to its doc_type's
+        // landed schema (or has no schema at all) before any SQL runs.
+        let payload_value: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|e| LegionError::WorkSource(format!("payload is not valid JSON: {e}")))?;
+        self.validate_document_payload(meta.doc_type, &payload_value)?;
+
         self.conn.execute(
             "INSERT INTO documents (id, type, surface, status, priority, owner, payload, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
@@ -174,6 +180,13 @@ impl Database {
         let now = Utc::now().to_rfc3339();
         let normalized_payload = normalize_payload_criteria(id, payload)?;
 
+        // #1062: validate against the EXISTING row's doc_type -- revise
+        // never changes doc_type, so the schema that governed the document
+        // before still governs the replacement payload.
+        let payload_value: serde_json::Value = serde_json::from_str(&normalized_payload)
+            .map_err(|e| LegionError::WorkSource(format!("payload is not valid JSON: {e}")))?;
+        self.validate_document_payload(&existing.doc_type, &payload_value)?;
+
         let rows = self.conn.execute(
             "UPDATE documents SET payload = ?1, revision = revision + 1, updated_at = ?2 \
              WHERE id = ?3 AND deleted_at IS NULL AND archived_at IS NULL",
@@ -212,14 +225,30 @@ impl Database {
         // write below never raises -- it would otherwise silently no-op on
         // a non-object root, which would look like a successful save that
         // actually dropped the caller's body text.
-        let value: serde_json::Value = serde_json::from_str(&existing.payload).map_err(|e| {
-            LegionError::WorkSource(format!("document '{id}' payload is not valid JSON: {e}"))
-        })?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(&existing.payload).map_err(|e| {
+                LegionError::WorkSource(format!("document '{id}' payload is not valid JSON: {e}"))
+            })?;
         if !value.is_object() {
             return Err(LegionError::WorkSource(format!(
                 "document '{id}' payload is not a JSON object"
             )));
         }
+
+        // #1062: validate the MERGED payload (existing fields + the new
+        // body) against the doc_type's schema before writing. This merge
+        // exists only to check conformance -- it is never written back;
+        // the UPDATE below still evaluates `json_set` against the row's
+        // CURRENT value at UPDATE time (#1036 review, MED-1), not this
+        // snapshot, so the read-modify-write window that guard closed
+        // stays closed.
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "body".to_string(),
+                serde_json::Value::String(body.to_string()),
+            );
+        }
+        self.validate_document_payload(&existing.doc_type, &value)?;
 
         let now = Utc::now().to_rfc3339();
         // A single UPDATE ... json_set(payload, '$.body', ?1) (#1036 review,
@@ -568,6 +597,300 @@ pub fn archive_document_indexed(db: &Database, index: &SearchIndex, id: &str) ->
     Ok(doc)
 }
 
+/// Extension keyword on a schema document's payload that declares the
+/// `doc_type` it governs (#1062). JSON Schema permits arbitrary "x-"
+/// extension keywords and the `jsonschema` crate ignores them when
+/// validating instances, so a schema document is self-describing without a
+/// dedicated column -- the schema stays portable as a plain file under
+/// `schemas/`.
+pub const DOC_TYPE_KEYWORD: &str = "x-doc-type";
+
+/// A compiled validator plus the id of the schema document it came from.
+/// `schema_id` rides along so a violation names the schema that produced
+/// it, keeping the schema document the canonical, citable source of truth
+/// for the type.
+///
+/// Manual `Debug`: `jsonschema::Validator` does not derive it, and tests
+/// only need `schema_id` on `unwrap_err`/assertion failure, not the
+/// compiled validator's internals.
+pub struct TypeSchema {
+    pub schema_id: String,
+    pub validator: jsonschema::Validator,
+}
+
+impl std::fmt::Debug for TypeSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypeSchema")
+            .field("schema_id", &self.schema_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Compile `value` as a JSON Schema validator (#1062). `what` names the
+/// schema in the error message (e.g. `"schema document '<id>' for type
+/// '<type>'"`, or `"stored schema '<id>'"`) so a compile failure -- a
+/// `$ref` to a missing definition, a malformed `type`, or any other
+/// draft-07/2020-12 violation -- is traceable to its source. Shared by
+/// `schema_for_type`, `validate_schema_payload`, and `legion document
+/// validate` so all three report a compile failure the same way.
+pub fn compile_schema(value: &serde_json::Value, what: &str) -> Result<jsonschema::Validator> {
+    jsonschema::validator_for(value)
+        .map_err(|e| LegionError::WorkSource(format!("{what} does not compile: {e}")))
+}
+
+/// Validate `instance` against `validator`, returning one `<json pointer>:
+/// <message>` line per violation (#1062) -- the pointer is empty for a
+/// violation rooted at the instance itself (e.g. a missing required
+/// top-level property). Shared by `validate_document_payload` and `legion
+/// document validate` so a write refusal and an explicit validate call
+/// report the same violation in the same form.
+pub fn schema_violations(
+    validator: &jsonschema::Validator,
+    instance: &serde_json::Value,
+) -> Vec<String> {
+    validator
+        .iter_errors(instance)
+        .map(|e| format!("{}: {e}", e.instance_path()))
+        .collect()
+}
+
+/// Cap for both the literal JSON nesting depth and the total population of
+/// reference keywords (`$ref`, `$dynamicRef`, `$recursiveRef`) a schema
+/// payload may carry before `compile_schema` ever sees it (#1062 review,
+/// HIGH). `jsonschema` 0.52's compiler walks a schema with unbounded
+/// native recursion -- no depth or recursion-limit option anywhere in its
+/// public `ValidationOptions` -- so a schema with a few hundred single-hop
+/// reference aliases, however they are nested or wherever they point, or a
+/// few hundred levels of plain object nesting with no reference at all,
+/// overflows the stack. That is a stack-guard-page trap (`SIGABRT`), not a
+/// panic -- `catch_unwind` never sees it, so it takes the whole daemon
+/// process down regardless of which thread compiles the schema, and no
+/// thread-stack size closes it: the measured crash floor (~500 hops, ~18
+/// KB) sits far below the 4 MiB request-body cap, so a bigger stack only
+/// raises the bar the attacker's budget still clears. Every real landed
+/// schema carries at most three reference keywords, far under 64 of
+/// either.
+const MAX_SCHEMA_DEPTH: usize = 64;
+
+/// Guard `root` against the two shapes that crash `jsonschema` 0.52's
+/// compiler (#1062 review, HIGH) -- called from `validate_schema_payload`
+/// BEFORE `compile_schema`, since every schema document must pass that gate
+/// before it can be stored, closing all four `compile_schema` call sites
+/// (`schema_for_type`, `validate_schema_payload`, and `legion document
+/// validate`, which only ever compiles an already-stored, already-guarded
+/// payload) with this one check. Uses an explicit stack throughout --
+/// never recursion, since the guard itself must not repeat the bug it
+/// exists to catch.
+///
+/// (a) Literal JSON object/array nesting depth: a plain deeply nested
+///     schema with no `$ref` at all crashes the compiler exactly the same
+///     way, since the walk that blows the stack is a generic structural
+///     one, not `$ref`-specific.
+/// (b) Total reference-keyword population: a schema whose JSON is shallow
+///     -- entries that alias each other into a long dereference chain --
+///     crashes the same way even though the literal nesting is not deep.
+///     A prior version of this axis tried to FOLLOW a chain (matching
+///     only a bare top-level `{"$ref": "..."}` under a literal
+///     `#/definitions/` or `#/$defs/` prefix) and was bypassed by five
+///     independent, trivial shapes (#1062 review, HIGH, round 2): a `$ref`
+///     one level inside `properties`, inside `items`, inside `allOf`, a
+///     `$ref` to a non-`definitions` location (e.g. `#/properties/pN`),
+///     and a `$ref` using RFC 6901 escapes the lookup never unescaped.
+///     Counting `$ref` occurrences instead of following them closed all
+///     five, but counted only the literal `"$ref"` key -- `jsonschema`
+///     0.52 compiles `$dynamicRef` (2020-12) through the identical
+///     recursive path as `$ref` (`compile_dynamic_ref` forwards straight
+///     into the same `compile_impl`/`compile_with_alias` recursion), so a
+///     600-hop chain built entirely from `$dynamicRef` -- whether pointing
+///     by JSON Pointer or via the spec-canonical `$dynamicAnchor`/
+///     `$dynamicRef` plain-name form -- carries zero literal `$ref` keys
+///     and sailed through uncounted while still crashing the compiler
+///     (#1062 review, HIGH, round 3). This axis now counts an object once
+///     if it carries `$ref`, `$dynamicRef`, OR `$recursiveRef` (the third
+///     JSON Schema reference-family keyword, 2019-09's dynamic-scope
+///     predecessor to `$dynamicRef`) -- checked and confirmed NOT to
+///     reach the same crash (its resolution ignores the pointer text
+///     entirely and resolves via the dynamic-scope stack, so a chain
+///     written into it is never actually walked), but counted anyway
+///     since it costs nothing and removes the need to re-verify that
+///     safety property against every future `jsonschema` release. Modeling
+///     every keyword the compiler might walk into, every reference
+///     keyword's exact resolution semantics, plus full JSON-Pointer
+///     resolution, is a losing race against a crate the guard does not
+///     control. Counting instead of resolving sidesteps needing to know
+///     any of that: a dereference chain of length N needs at least N
+///     distinct reference nodes somewhere in the document, however they
+///     are nested, wherever they point, however they are spelled, and
+///     regardless of which of the three keywords they use -- so bounding
+///     the document's total reference-keyword count bounds every possible
+///     chain by construction, not by case coverage. A same-document `$ref`
+///     cycle (e.g. two definitions aliasing each other) is legal JSON
+///     Schema that the crate compiles without unbounded recursion, so it
+///     is not specially refused here -- it is bounded by the same count,
+///     like any other reference structure.
+fn guard_schema_depth(root: &serde_json::Value) -> Result<()> {
+    // (a) literal nesting: a generic structural walk with no JSON Schema
+    // semantics -- every nested object/array value, regardless of which
+    // keyword holds it, contributes one level.
+    let mut stack: Vec<(&serde_json::Value, usize)> = vec![(root, 0)];
+    while let Some((value, depth)) = stack.pop() {
+        if depth > MAX_SCHEMA_DEPTH {
+            return Err(LegionError::WorkSource(format!(
+                "schema nesting depth exceeds {MAX_SCHEMA_DEPTH} -- refused before compiling \
+                 (the validator has no recursion limit; a sufficiently deep schema crashes \
+                 the process)"
+            )));
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                stack.extend(map.values().map(|v| (v, depth + 1)));
+            }
+            serde_json::Value::Array(items) => {
+                stack.extend(items.iter().map(|v| (v, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+
+    // (b) total reference-keyword population: every object anywhere in the
+    // document carrying $ref, $dynamicRef, or $recursiveRef counts once,
+    // regardless of which keyword holds it, what the pointer targets, or
+    // how the pointer is spelled.
+    let mut ref_count: usize = 0;
+    let mut walk: Vec<&serde_json::Value> = vec![root];
+    while let Some(value) = walk.pop() {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.contains_key("$ref")
+                    || map.contains_key("$dynamicRef")
+                    || map.contains_key("$recursiveRef")
+                {
+                    ref_count += 1;
+                }
+                walk.extend(map.values());
+            }
+            serde_json::Value::Array(items) => {
+                walk.extend(items.iter());
+            }
+            _ => {}
+        }
+    }
+    if ref_count > MAX_SCHEMA_DEPTH {
+        return Err(LegionError::WorkSource(format!(
+            "schema contains {ref_count} reference-keyword occurrences ($ref, $dynamicRef, \
+             $recursiveRef), exceeding {MAX_SCHEMA_DEPTH} -- refused before compiling (the \
+             validator has no recursion limit; a dereference chain of length N needs at least \
+             N reference nodes, so bounding the total bounds every possible chain)"
+        )));
+    }
+
+    Ok(())
+}
+
+impl Database {
+    /// Resolve the schema governing `doc_type` (#1062): the single hot
+    /// (non-archived) document with `doc_type = "schema"` whose payload
+    /// carries `"x-doc-type": <doc_type>`. Status does not participate in
+    /// resolution -- a schema row still marked `draft` governs its type the
+    /// same as one marked `adopted` (Sean's ruling, reflection 01a04e9f: no
+    /// warn-and-allow, no fallback schema).
+    ///
+    /// Zero matches is refused, naming the type and what to do about it.
+    /// Two or more matches is refused, naming every candidate id -- picking
+    /// one silently would make which schema governs a type depend on row
+    /// order, which is not a decision this call makes on the caller's
+    /// behalf.
+    pub fn schema_for_type(&self, doc_type: &str) -> Result<TypeSchema> {
+        let schema_docs = self.list_documents(&DocumentFilter {
+            doc_type: Some("schema"),
+            ..Default::default()
+        })?;
+        let matches: Vec<&Document> = schema_docs
+            .iter()
+            .filter(|doc| {
+                serde_json::from_str::<serde_json::Value>(&doc.payload)
+                    .ok()
+                    .and_then(|v| {
+                        v.get(DOC_TYPE_KEYWORD)
+                            .and_then(|k| k.as_str())
+                            .map(str::to_string)
+                    })
+                    .as_deref()
+                    == Some(doc_type)
+            })
+            .collect();
+
+        match matches.as_slice() {
+            [] => Err(LegionError::WorkSource(format!(
+                "no schema document declares \"{DOC_TYPE_KEYWORD}\": \"{doc_type}\" -- a schema \
+                 document with that keyword must exist before a '{doc_type}' document can be \
+                 written (every --doc-type needs a landed schema, no warn-and-allow, no fallback)"
+            ))),
+            [only] => {
+                let schema_value: serde_json::Value =
+                    serde_json::from_str(&only.payload).map_err(|e| {
+                        LegionError::WorkSource(format!(
+                            "schema document '{}' for type '{doc_type}' is not valid JSON: {e}",
+                            only.id
+                        ))
+                    })?;
+                let validator = compile_schema(
+                    &schema_value,
+                    &format!("schema document '{}' for type '{doc_type}'", only.id),
+                )?;
+                Ok(TypeSchema {
+                    schema_id: only.id.clone(),
+                    validator,
+                })
+            }
+            many => {
+                let ids: Vec<&str> = many.iter().map(|d| d.id.as_str()).collect();
+                Err(LegionError::WorkSource(format!(
+                    "multiple schema documents declare \"{DOC_TYPE_KEYWORD}\": \"{doc_type}\": {} \
+                     -- exactly one must govern a type",
+                    ids.join(", ")
+                )))
+            }
+        }
+    }
+
+    /// Validate `payload` against the resolved schema for `doc_type`,
+    /// called by `insert_document`, `revise_document`, and
+    /// `update_document_body` before any SQL runs (#1062).
+    ///
+    /// Exempt: `doc_type == "schema"`. A schema document's own structural
+    /// well-formedness is checked by `validate_schema_payload` at the
+    /// CLI/channel boundary (draft-07 shape + a jsonschema compile check),
+    /// not by resolving a schema that would have to govern the type
+    /// "schema" itself -- that schema cannot exist without circularity.
+    /// Concretely: `revise_document` (which this call also gates) is how a
+    /// schema document is ever edited, including landing a future schema;
+    /// if the generic check applied to `doc_type = "schema"` here, no
+    /// schema could ever be revised. (The eleven schema rows this issue
+    /// targets already carry `x-doc-type`, added by hand on 2026-08-29 --
+    /// this exemption is about the bootstrap circularity and every future
+    /// schema landing, not a one-time migration step.)
+    pub fn validate_document_payload(
+        &self,
+        doc_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<()> {
+        if doc_type == "schema" {
+            return Ok(());
+        }
+        let type_schema = self.schema_for_type(doc_type)?;
+        let errors = schema_violations(&type_schema.validator, payload);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(LegionError::SchemaViolation {
+                schema_id: type_schema.schema_id,
+                errors,
+            })
+        }
+    }
+}
+
 /// Summary extracted from a validated schema payload, used to compose
 /// the recall pointer reflection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -630,6 +953,33 @@ pub fn validate_schema_payload(payload: &str) -> Result<SchemaSummary> {
             }
         }
     }
+    // #1062: the schema must declare the doc_type it governs -- without it
+    // `schema_for_type` has nothing to resolve against, and the schema
+    // would land as an orphan no write path can ever reach.
+    obj.get(DOC_TYPE_KEYWORD)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            LegionError::WorkSource(format!(
+                "schema payload missing required string field '{DOC_TYPE_KEYWORD}' -- a schema \
+                 document must declare the doc_type it governs"
+            ))
+        })?;
+
+    // #1062 review (security, HIGH): refuse a schema shaped to overflow the
+    // compiler's native recursion (a long $ref alias chain, or plain deep
+    // nesting) BEFORE compile_schema ever walks it -- see
+    // guard_schema_depth's doc comment for why neither a bigger thread
+    // stack nor catching a panic closes this.
+    guard_schema_depth(&value)?;
+
+    // #1062: compile through the crate so a $ref to a missing definition, a
+    // malformed 'type', or any other draft-07/2020-12 violation is refused
+    // at create/revise -- not silently accepted and discovered only the
+    // first time someone tries to validate an instance (or write a
+    // document of the governed type) against it.
+    compile_schema(&value, "schema")?;
+
     let description = obj
         .get("description")
         .and_then(|v| v.as_str())
@@ -691,115 +1041,6 @@ pub fn write_schema_pointer(db: &Database, doc: &Document, summary: &SchemaSumma
     };
     db.insert_reflection_with_meta(&doc.owner, &text, "self", &meta)?;
     Ok(())
-}
-
-/// Validate an instance value against a subset of JSON Schema (#526):
-/// `type`, `required`, `properties`, `items`, and `enum`. Returns one
-/// human-readable error per violation, prefixed with a JSON-pointer-ish
-/// path. An empty vec means the instance conforms to the checked subset.
-///
-/// Deliberately NOT a full validator (no $ref, no oneOf/allOf, no
-/// format/pattern): the schemas legion lands are plain structural shapes,
-/// and a dependency-free subset that rejects real mistakes beats a fake
-/// pass-through. Unknown keywords are ignored, matching validator custom.
-pub fn validate_instance(schema: &serde_json::Value, instance: &serde_json::Value) -> Vec<String> {
-    let mut errors = Vec::new();
-    check_value(schema, instance, "$", &mut errors);
-    errors
-}
-
-fn type_name(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(n) => {
-            if n.is_i64() || n.is_u64() {
-                "integer"
-            } else {
-                "number"
-            }
-        }
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
-}
-
-fn type_matches(expected: &str, v: &serde_json::Value) -> bool {
-    match expected {
-        // Every integer is a number; an integer-valued float is an integer.
-        "number" => matches!(v, serde_json::Value::Number(_)),
-        "integer" => match v {
-            serde_json::Value::Number(n) => {
-                n.is_i64() || n.is_u64() || n.as_f64().is_some_and(|f| f.fract() == 0.0)
-            }
-            _ => false,
-        },
-        other => other == type_name(v),
-    }
-}
-
-fn check_value(
-    schema: &serde_json::Value,
-    instance: &serde_json::Value,
-    path: &str,
-    errors: &mut Vec<String>,
-) {
-    let Some(schema_obj) = schema.as_object() else {
-        return; // non-object schema node: nothing in the subset to check
-    };
-
-    // `type` may be a single name or an array of alternatives
-    // (e.g. ["string", "null"] for nullable fields).
-    if let Some(ty) = schema_obj.get("type") {
-        let alternatives: Vec<&str> = match ty {
-            serde_json::Value::String(expected) => vec![expected.as_str()],
-            serde_json::Value::Array(alts) => alts.iter().filter_map(|t| t.as_str()).collect(),
-            _ => Vec::new(), // malformed type node: nothing in the subset to check
-        };
-        if !alternatives.is_empty() && !alternatives.iter().any(|e| type_matches(e, instance)) {
-            errors.push(format!(
-                "{path}: expected {}, got {}",
-                alternatives.join(" or "),
-                type_name(instance)
-            ));
-            return; // child checks would only cascade noise
-        }
-    }
-
-    if let Some(allowed) = schema_obj.get("enum").and_then(|e| e.as_array())
-        && !allowed.contains(instance)
-    {
-        errors.push(format!(
-            "{path}: value {instance} not in enum {}",
-            serde_json::Value::Array(allowed.clone())
-        ));
-    }
-
-    if let Some(obj) = instance.as_object() {
-        if let Some(required) = schema_obj.get("required").and_then(|r| r.as_array()) {
-            for name in required.iter().filter_map(|n| n.as_str()) {
-                if !obj.contains_key(name) {
-                    errors.push(format!("{path}: missing required property '{name}'"));
-                }
-            }
-        }
-        if let Some(props) = schema_obj.get("properties").and_then(|p| p.as_object()) {
-            for (name, child_schema) in props {
-                if let Some(child) = obj.get(name) {
-                    check_value(child_schema, child, &format!("{path}.{name}"), errors);
-                }
-            }
-        }
-    }
-
-    if let Some(arr) = instance.as_array()
-        && let Some(items) = schema_obj.get("items")
-    {
-        for (i, child) in arr.iter().enumerate() {
-            check_value(items, child, &format!("{path}[{i}]"), errors);
-        }
-    }
 }
 
 /// Assign a UUIDv7 `id` to any `verification.criteria` entry that lacks one
@@ -918,6 +1159,7 @@ mod tests {
     #[test]
     fn insert_and_get_document_round_trips() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let meta = DocumentMeta {
             id: Some("FR-EMAIL-003"),
             doc_type: "requirement",
@@ -945,6 +1187,7 @@ mod tests {
     #[test]
     fn insert_without_id_generates_uuidv7() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "persona");
         let inserted = db
             .insert_document(&sample_meta("persona", "vault"), "{}")
             .expect("insert");
@@ -956,6 +1199,7 @@ mod tests {
     #[test]
     fn insert_with_duplicate_id_errors() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut meta = sample_meta("requirement", "mail");
         meta.id = Some("FR-TEST-001");
         db.insert_document(&meta, "{}").expect("first");
@@ -975,6 +1219,8 @@ mod tests {
     #[test]
     fn list_documents_filters_by_type() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
+        crate::db::testutil::seed_type_schema(&db, "persona");
         db.insert_document(&sample_meta("requirement", "mail"), "{}")
             .unwrap();
         db.insert_document(&sample_meta("persona", "vault"), "{}")
@@ -994,6 +1240,7 @@ mod tests {
     #[test]
     fn list_documents_filters_by_surface_owner_status() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut a = sample_meta("requirement", "mail");
         a.surface = Some("email");
         a.status = Some("specified");
@@ -1019,6 +1266,7 @@ mod tests {
     #[test]
     fn list_documents_excludes_archived_by_default() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut m = sample_meta("requirement", "mail");
         m.id = Some("FR-A");
         db.insert_document(&m, "{}").unwrap();
@@ -1027,12 +1275,21 @@ mod tests {
 
         db.archive_document("FR-A").expect("archive");
 
-        let hot = db.list_documents(&DocumentFilter::default()).expect("list");
+        // Filtered by type: the seeded stub schema (its own doc_type =
+        // "schema") is also a hot row on this db and must not be counted
+        // here -- this test is about archived-vs-hot, not about every row.
+        let hot = db
+            .list_documents(&DocumentFilter {
+                doc_type: Some("requirement"),
+                ..Default::default()
+            })
+            .expect("list");
         assert_eq!(hot.len(), 1);
         assert_eq!(hot[0].id, "FR-B");
 
         let cold = db
             .list_documents(&DocumentFilter {
+                doc_type: Some("requirement"),
                 archived: Some(true),
                 ..Default::default()
             })
@@ -1044,6 +1301,7 @@ mod tests {
     #[test]
     fn archive_document_is_idempotent() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut m = sample_meta("requirement", "mail");
         m.id = Some("FR-IDEM");
         db.insert_document(&m, "{}").unwrap();
@@ -1068,6 +1326,7 @@ mod tests {
     #[test]
     fn set_document_status_flips_the_flag() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut m = sample_meta("requirement", "mail");
         m.id = Some("FR-PUB");
         m.status = Some("draft");
@@ -1107,7 +1366,8 @@ mod tests {
                 "meta": {"type": "object"},
                 "identity": {"type": "object"}
             },
-            "required": ["meta", "identity"]
+            "required": ["meta", "identity"],
+            "x-doc-type": "persona"
         })
         .to_string()
     }
@@ -1151,6 +1411,363 @@ mod tests {
         let mut v: serde_json::Value = serde_json::from_str(&minimal_schema()).unwrap();
         v["type"] = serde_json::json!("array");
         assert!(validate_schema_payload(&v.to_string()).is_err());
+    }
+
+    /// #1062: an otherwise-valid schema missing `x-doc-type` is refused,
+    /// naming the keyword -- `schema_for_type` has nothing to resolve
+    /// against a schema that never declares which type it governs.
+    #[test]
+    fn schema_payload_rejects_missing_doc_type_keyword() {
+        let mut v: serde_json::Value = serde_json::from_str(&minimal_schema()).unwrap();
+        v.as_object_mut().unwrap().remove(DOC_TYPE_KEYWORD);
+        let err = validate_schema_payload(&v.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains(DOC_TYPE_KEYWORD),
+            "expected error naming '{DOC_TYPE_KEYWORD}', got: {err}"
+        );
+    }
+
+    /// #1062: a `$ref` to a missing definition does not compile through the
+    /// `jsonschema` crate, and the crate's own compile error rides in the
+    /// refusal message.
+    #[test]
+    fn schema_payload_rejects_uncompilable_ref() {
+        let v = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Broken Ref",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/missing"}},
+            "x-doc-type": "broken-ref"
+        });
+        let err = validate_schema_payload(&v.to_string()).unwrap_err();
+        assert!(err.to_string().contains("does not compile"), "got: {err}");
+    }
+
+    // -- guard_schema_depth (#1062 review, HIGH: unbounded native recursion
+    // in jsonschema 0.52's compiler crashes the whole process) ------------
+
+    /// A schema whose JSON is shallow (a flat `definitions` map) but whose
+    /// entries alias each other in a 600-hop `$ref` chain is refused,
+    /// naming the count bound, before it ever reaches `compile_schema`.
+    #[test]
+    fn schema_payload_rejects_long_ref_chain() {
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("d{i}"),
+                serde_json::json!({"$ref": format!("#/definitions/d{}", i + 1)}),
+            );
+        }
+        definitions.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Long Ref Chain",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/d0"}},
+            "definitions": definitions,
+            "x-doc-type": "long-ref-chain"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 2: a `$ref` chain nested one level inside
+    /// `properties` (`d_i = {"type":"object","properties":{"a":{"$ref":
+    /// ...}}}`) bypassed the prior chain-following axis entirely, because
+    /// the follow-logic only looked for a bare top-level `$ref`. The
+    /// count-based axis does not care where a `$ref` sits, so this is
+    /// refused the same as the bare-alias shape.
+    #[test]
+    fn schema_payload_rejects_ref_chain_nested_in_properties() {
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("d{i}"),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"a": {"$ref": format!("#/definitions/d{}", i + 1)}}
+                }),
+            );
+        }
+        definitions.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Chain In Properties",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/d0"}},
+            "definitions": definitions,
+            "x-doc-type": "ref-chain-in-properties"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 2: the same bypass via `items` instead of
+    /// `properties`.
+    #[test]
+    fn schema_payload_rejects_ref_chain_nested_in_items() {
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("d{i}"),
+                serde_json::json!({
+                    "type": "array",
+                    "items": {"$ref": format!("#/definitions/d{}", i + 1)}
+                }),
+            );
+        }
+        definitions.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Chain In Items",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/d0"}},
+            "definitions": definitions,
+            "x-doc-type": "ref-chain-in-items"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 2: the same bypass via `allOf`.
+    #[test]
+    fn schema_payload_rejects_ref_chain_nested_in_all_of() {
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("d{i}"),
+                serde_json::json!({"allOf": [{"$ref": format!("#/definitions/d{}", i + 1)}]}),
+            );
+        }
+        definitions.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Chain In allOf",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/d0"}},
+            "definitions": definitions,
+            "x-doc-type": "ref-chain-in-all-of"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 2: a `$ref` chain that never touches
+    /// `definitions`/`$defs` at all (`p_i = {"$ref": "#/properties/p_{i+1}"}`,
+    /// living entirely under `properties`) bypassed the prior axis, which
+    /// only recognized a `#/definitions/` or `#/$defs/` prefix. The
+    /// count-based axis does not interpret the pointer at all.
+    #[test]
+    fn schema_payload_rejects_ref_chain_targeting_properties() {
+        const N: usize = 600;
+        let mut properties = serde_json::Map::new();
+        for i in 0..N {
+            properties.insert(
+                format!("p{i}"),
+                serde_json::json!({"$ref": format!("#/properties/p{}", i + 1)}),
+            );
+        }
+        properties.insert(format!("p{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Chain Targeting Properties",
+            "type": "object",
+            "properties": properties,
+            "x-doc-type": "ref-chain-targeting-properties"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 2: a `$ref` chain using RFC 6901
+    /// JSON-Pointer escapes (`~1` for `/`) bypassed the prior axis, whose
+    /// lookup took the pointer segment verbatim instead of unescaping it.
+    /// The count-based axis does not resolve the pointer at all, so the
+    /// escaping is irrelevant to it.
+    #[test]
+    fn schema_payload_rejects_ref_chain_with_json_pointer_escapes() {
+        const N: usize = 600;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..N {
+            definitions.insert(
+                format!("s/{i}"),
+                serde_json::json!({"$ref": format!("#/definitions/s~1{}", i + 1)}),
+            );
+        }
+        definitions.insert(format!("s/{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Chain With Escapes",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/s~10"}},
+            "definitions": definitions,
+            "x-doc-type": "ref-chain-with-escapes"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("occurrences"),
+            "expected the $ref-count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 3: `$dynamicRef` (2020-12) compiles through
+    /// the identical recursive path as `$ref` in `jsonschema` 0.52, but
+    /// carries no literal `"$ref"` key -- a 600-hop chain built entirely
+    /// from `$dynamicRef` (JSON-Pointer targets into `$defs`) sailed
+    /// through the prior `$ref`-only count uncounted while still crashing
+    /// the compiler. Now counted alongside `$ref`.
+    #[test]
+    fn schema_payload_rejects_dynamic_ref_chain() {
+        const N: usize = 600;
+        let mut defs = serde_json::Map::new();
+        for i in 0..N {
+            defs.insert(
+                format!("d{i}"),
+                serde_json::json!({"$dynamicRef": format!("#/$defs/d{}", i + 1)}),
+            );
+        }
+        defs.insert(format!("d{N}"), serde_json::json!({"type": "string"}));
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "Dynamic Ref Chain",
+            "type": "object",
+            "properties": {"x": {"$dynamicRef": "#/$defs/d0"}},
+            "$defs": defs,
+            "x-doc-type": "dynamic-ref-chain"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("reference-keyword"),
+            "expected the reference-keyword count bound named, got: {err}"
+        );
+    }
+
+    /// #1062 review, HIGH round 3: the spec-canonical dynamic-scope form of
+    /// the same bypass -- each node declares its own `$dynamicAnchor` and
+    /// points at the next via a plain-name `$dynamicRef` (no JSON Pointer
+    /// at all) -- reproduced the identical crash and is refused the same
+    /// way.
+    #[test]
+    fn schema_payload_rejects_dynamic_anchor_chain() {
+        const N: usize = 600;
+        let mut defs = serde_json::Map::new();
+        for i in 0..N {
+            defs.insert(
+                format!("d{i}"),
+                serde_json::json!({
+                    "$dynamicAnchor": format!("a{i}"),
+                    "$dynamicRef": format!("#a{}", i + 1)
+                }),
+            );
+        }
+        defs.insert(
+            format!("d{N}"),
+            serde_json::json!({"$dynamicAnchor": format!("a{N}"), "type": "string"}),
+        );
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "Dynamic Anchor Chain",
+            "type": "object",
+            "properties": {"x": {"$dynamicAnchor": "a0", "$dynamicRef": "#a1"}},
+            "$defs": defs,
+            "x-doc-type": "dynamic-anchor-chain"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("reference-keyword"),
+            "expected the reference-keyword count bound named, got: {err}"
+        );
+    }
+
+    /// A plain schema nested well past the guard's depth cap, with no
+    /// `$ref` at all, is refused naming the depth bound -- the same crash,
+    /// a different shape, caught by the guard's other axis.
+    ///
+    /// The nesting is built as a chain of bare single-element arrays
+    /// (`[[[...["leaf"]...]]]`), one level of raw JSON nesting per step,
+    /// rather than 600 levels of `{"type":"object","properties":{...}}`:
+    /// `serde_json::from_str` (which `validate_schema_payload` calls
+    /// before this guard ever runs) enforces its own ~128-level recursion
+    /// limit while PARSING text, independent of this guard, so a payload
+    /// deep enough to double as a `jsonschema` crash case (500+) never
+    /// reaches `guard_schema_depth` as text -- it is refused by the parser
+    /// first, with a different message. 100 levels clears this guard's
+    /// 64-level cap while staying under serde_json's parse-time limit, so
+    /// the assertion below actually exercises `guard_schema_depth`, not
+    /// the parser.
+    #[test]
+    fn schema_payload_rejects_deep_nesting() {
+        const N: usize = 100;
+        let mut inner = serde_json::json!("leaf");
+        for _ in 0..N {
+            inner = serde_json::Value::Array(vec![inner]);
+        }
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Deeply Nested",
+            "type": "object",
+            "properties": {"a": inner},
+            "x-doc-type": "deeply-nested"
+        });
+        let err = validate_schema_payload(&schema.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("nesting depth"),
+            "expected the nesting-depth bound named, got: {err}"
+        );
+    }
+
+    /// A two-node `$ref` cycle is legal JSON Schema (a normal way to write
+    /// a recursive shape) and `jsonschema` compiles it without unbounded
+    /// recursion (verified empirically: it does not crash), so the guard
+    /// does not specially refuse a cycle -- it is bounded by the same
+    /// $ref-count axis as any other structure, and two is far under the
+    /// cap, so this passes.
+    #[test]
+    fn schema_payload_accepts_a_ref_cycle_within_the_count_cap() {
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Ref Cycle",
+            "type": "object",
+            "properties": {"x": {"$ref": "#/definitions/a"}},
+            "definitions": {
+                "a": {"$ref": "#/definitions/b"},
+                "b": {"$ref": "#/definitions/a"}
+            },
+            "x-doc-type": "ref-cycle"
+        });
+        validate_schema_payload(&schema.to_string())
+            .expect("a two-node $ref cycle within the count cap must be accepted");
+    }
+
+    /// The guard must not reject a real, valid landed schema -- every real
+    /// schema is far under both caps.
+    #[test]
+    fn schema_payload_guard_accepts_a_real_landed_schema() {
+        let path = format!(
+            "{}/schemas/requirement.schema.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let payload = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        validate_schema_payload(&payload).expect("a real landed schema must pass the depth guard");
     }
 
     #[test]
@@ -1215,104 +1832,283 @@ mod tests {
         );
     }
 
-    // -- instance validation subset (#526) ---------------------------------
+    // -- schema_for_type / validate_document_payload (#1062) ---------------
 
-    #[test]
-    fn instance_valid_passes() {
-        let schema: serde_json::Value = serde_json::from_str(&minimal_schema()).unwrap();
-        let inst = serde_json::json!({"meta": {}, "identity": {}});
-        assert!(validate_instance(&schema, &inst).is_empty());
+    /// Insert a landed schema document, with `schema` as its full payload
+    /// (already carrying `$schema`, `title`, `type`, `properties`, and its
+    /// own `x-doc-type`) -- direct `insert_document` under `doc_type =
+    /// "schema"`, which is exempt from the generic per-type check, so this
+    /// seeds a schema without going through the CLI/channel
+    /// `validate_schema_payload` gate.
+    fn land_schema(db: &Database, schema: serde_json::Value) -> String {
+        let meta = sample_meta("schema", "legion");
+        let doc = db
+            .insert_document(&meta, &schema.to_string())
+            .expect("insert schema document");
+        doc.id
+    }
+
+    fn object_schema(extra_properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+        let mut schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Test Type",
+            "type": "object",
+            "properties": extra_properties,
+        });
+        if !required.is_empty() {
+            schema["required"] = serde_json::json!(required);
+        }
+        schema
     }
 
     #[test]
-    fn instance_missing_required_and_wrong_type_reported_with_paths() {
+    fn schema_for_type_resolves_the_hot_schema_declaring_x_doc_type() {
+        let db = test_db();
+        let mut schema = object_schema(serde_json::json!({"name": {"type": "string"}}), &[]);
+        schema["x-doc-type"] = serde_json::json!("widget");
+        let schema_id = land_schema(&db, schema);
+
+        let resolved = db.schema_for_type("widget").expect("resolves");
+        assert_eq!(resolved.schema_id, schema_id);
+    }
+
+    #[test]
+    fn schema_for_type_refuses_when_no_schema_declares_the_type() {
+        let db = test_db();
+        let err = db.schema_for_type("nonexistent-type").unwrap_err();
+        assert!(
+            err.to_string().contains("nonexistent-type"),
+            "error must name the type, got: {err}"
+        );
+    }
+
+    /// Two hot schema rows declaring the same `x-doc-type` is refused,
+    /// naming both candidate ids -- status does not break the tie.
+    #[test]
+    fn schema_for_type_refuses_when_two_schemas_declare_the_same_type() {
+        let db = test_db();
+        let mut first = object_schema(serde_json::json!({"name": {"type": "string"}}), &[]);
+        first["x-doc-type"] = serde_json::json!("persona");
+        first["title"] = serde_json::json!("Persona A");
+        let mut second = object_schema(serde_json::json!({"name": {"type": "string"}}), &[]);
+        second["x-doc-type"] = serde_json::json!("persona");
+        second["title"] = serde_json::json!("Persona B");
+        let id_a = land_schema(&db, first);
+        let id_b = land_schema(&db, second);
+
+        let err = db.schema_for_type("persona").unwrap_err();
+        assert!(err.to_string().contains(&id_a), "got: {err}");
+        assert!(err.to_string().contains(&id_b), "got: {err}");
+    }
+
+    /// `doc_type == "schema"` is exempt from the generic per-type check
+    /// (bootstrap: no schema could govern the type "schema" itself without
+    /// circularity) -- `insert_document` with `doc_type = "schema"` and an
+    /// arbitrary payload succeeds even on an empty database with no landed
+    /// schema at all.
+    #[test]
+    fn validate_document_payload_exempts_schema_doc_type() {
+        let db = test_db();
+        assert!(
+            db.validate_document_payload("schema", &serde_json::json!({"anything": true}))
+                .is_ok()
+        );
+        let meta = sample_meta("schema", "legion");
+        assert!(db.insert_document(&meta, r#"{"anything":true}"#).is_ok());
+    }
+
+    /// Behavior bullet 1: creating a `requirement` whose payload lacks
+    /// `traces_to` is refused, naming `traces_to`, and nothing is written.
+    #[test]
+    fn insert_document_refuses_payload_violating_schema_and_writes_nothing() {
+        let db = test_db();
+        let mut schema = object_schema(
+            serde_json::json!({"traces_to": {"type": "string"}}),
+            &["traces_to"],
+        );
+        schema["x-doc-type"] = serde_json::json!("requirement");
+        land_schema(&db, schema);
+
+        let mut meta = sample_meta("requirement", "mail");
+        meta.id = Some("FR-NO-TRACE");
+        let err = db.insert_document(&meta, r#"{"title":"x"}"#).unwrap_err();
+        // `LegionError::SchemaViolation`'s Display is a count-only summary
+        // ("N error(s)") -- the per-violation pointer/message lines live in
+        // the `errors` field, which the CLI prints separately (Error
+        // Handling: "CLI prints each error line to stderr then the
+        // summary").
+        let LegionError::SchemaViolation { errors, .. } = &err else {
+            panic!("expected SchemaViolation, got: {err:?}");
+        };
+        assert!(
+            errors.iter().any(|e| e.contains("traces_to")),
+            "got: {errors:?}"
+        );
+        assert!(db.get_document("FR-NO-TRACE").unwrap().is_none());
+    }
+
+    /// Behavior bullet 2: revising a valid requirement with a
+    /// `verification.acceptance` that is not an array is refused, naming
+    /// the offending pointer, and the revision counter is unchanged.
+    #[test]
+    fn revise_document_refuses_violating_payload_and_leaves_revision_unchanged() {
+        let db = test_db();
+        let mut schema = object_schema(
+            serde_json::json!({
+                "verification": {
+                    "type": "object",
+                    "properties": {"acceptance": {"type": "array"}}
+                }
+            }),
+            &[],
+        );
+        schema["x-doc-type"] = serde_json::json!("requirement");
+        land_schema(&db, schema);
+
+        let mut meta = sample_meta("requirement", "mail");
+        meta.id = Some("FR-REVISE-BAD");
+        db.insert_document(&meta, "{}").expect("insert");
+
+        let bad = serde_json::json!({"verification": {"acceptance": "not an array"}}).to_string();
+        let err = db.revise_document("FR-REVISE-BAD", &bad).unwrap_err();
+        let LegionError::SchemaViolation { errors, .. } = &err else {
+            panic!("expected SchemaViolation, got: {err:?}");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("/verification/acceptance")),
+            "got: {errors:?}"
+        );
+        assert_eq!(db.document_revision("FR-REVISE-BAD").unwrap(), 1);
+    }
+
+    /// Behavior bullet 3: a body save that keeps the merged payload
+    /// conforming is accepted; one that would make it violate the schema
+    /// (here, `body` must be a string) is refused, and the write does not
+    /// land.
+    #[test]
+    fn update_document_body_validates_merged_payload_against_schema() {
+        let db = test_db();
+        let mut schema = object_schema(serde_json::json!({"body": {"type": "string"}}), &[]);
+        schema["x-doc-type"] = serde_json::json!("thesis");
+        land_schema(&db, schema);
+
+        let mut meta = sample_meta("thesis", "legion");
+        meta.id = Some("TH-BODY-SCHEMA");
+        db.insert_document(&meta, "{}").expect("insert");
+
+        // A conforming save succeeds.
+        db.update_document_body("TH-BODY-SCHEMA", "draft text")
+            .expect("conforming body save");
+
+        // update_document_body's `body` argument is always a Rust `&str`,
+        // so a type violation must come from elsewhere in the merged
+        // payload -- swap the schema for one that requires an unrelated
+        // field to prove a merged-payload violation still refuses the
+        // write and does not touch the stored payload.
+        let mut strict_schema = object_schema(
+            serde_json::json!({"body": {"type": "string"}, "must_exist": {"type": "string"}}),
+            &["must_exist"],
+        );
+        strict_schema["x-doc-type"] = serde_json::json!("thesis-strict");
+        land_schema(&db, strict_schema);
+        // Seed the row directly (bypassing insert_document's own gate, which
+        // would rightly also refuse this) to exercise update_document_body's
+        // merge-and-validate step in isolation.
+        db.conn
+            .execute(
+                "INSERT INTO documents (id, type, owner, payload, created_at, updated_at) \
+                 VALUES ('TH-BODY-STRICT', 'thesis-strict', 'legion', '{}', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+        let err = db
+            .update_document_body("TH-BODY-STRICT", "draft text")
+            .unwrap_err();
+        let LegionError::SchemaViolation { errors, .. } = &err else {
+            panic!("expected SchemaViolation, got: {err:?}");
+        };
+        assert!(
+            errors.iter().any(|e| e.contains("must_exist")),
+            "got: {errors:?}"
+        );
+        let after = db.get_document("TH-BODY-STRICT").unwrap().unwrap();
+        assert_eq!(after.payload, "{}", "a refused body save must not land");
+    }
+
+    /// Behavior bullet 7: `$ref`/`definitions` are honored -- an instance
+    /// violating a `$ref`'d definition is refused, naming the pointer into
+    /// the array element.
+    #[test]
+    fn validate_document_payload_honors_ref_and_definitions() {
+        let db = test_db();
         let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "System Foundations",
             "type": "object",
             "properties": {
-                "meta": {"type": "object"},
-                "needs": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "priority": {"type": "string", "enum": ["SHALL", "SHOULD", "MAY"]}
-                        },
-                        "required": ["priority"]
-                    }
+                "nodes": {"type": "array", "items": {"$ref": "#/definitions/node"}}
+            },
+            "definitions": {
+                "node": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {"id": {"type": "string"}}
                 }
             },
-            "required": ["meta", "needs"]
+            "x-doc-type": "system-foundations"
         });
-        let inst = serde_json::json!({
-            "needs": [
-                {"priority": "SHALL"},
-                {"priority": "MUST"},
-                {}
-            ]
-        });
-        let errors = validate_instance(&schema, &inst);
+        land_schema(&db, schema);
+
+        let payload = serde_json::json!({"nodes": [{}]});
+        let err = db
+            .validate_document_payload("system-foundations", &payload)
+            .unwrap_err();
+        let LegionError::SchemaViolation { errors, .. } = &err else {
+            panic!("expected SchemaViolation, got: {err:?}");
+        };
         assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("missing required property 'meta'")),
-            "{errors:?}"
-        );
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("$.needs[1].priority") && e.contains("enum")),
-            "{errors:?}"
-        );
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("$.needs[2]") && e.contains("'priority'")),
-            "{errors:?}"
+            errors.iter().any(|e| e.contains("/nodes/0")),
+            "got: {errors:?}"
         );
     }
 
+    /// Behavior bullet 9: validation runs on write only. A row that was
+    /// already non-conforming before its schema landed (inserted with raw
+    /// SQL, bypassing `insert_document`) is still returned unchanged by
+    /// `get_document` and `list_documents`.
     #[test]
-    fn instance_type_mismatch_stops_child_cascade() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {"steps": {"type": "array", "items": {"type": "object"}}},
-            "required": ["steps"]
-        });
-        let inst = serde_json::json!({"steps": "not-an-array"});
-        let errors = validate_instance(&schema, &inst);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("$.steps") && errors[0].contains("expected array"));
-    }
+    fn list_and_get_document_return_non_conforming_existing_rows_unchanged() {
+        let db = test_db();
+        let mut schema = object_schema(
+            serde_json::json!({"traces_to": {"type": "string"}}),
+            &["traces_to"],
+        );
+        schema["x-doc-type"] = serde_json::json!("requirement");
+        land_schema(&db, schema);
 
-    #[test]
-    fn instance_nullable_type_array() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {"persona": {"type": ["string", "null"]}}
-        });
-        assert!(validate_instance(&schema, &serde_json::json!({"persona": "maya"})).is_empty());
-        assert!(validate_instance(&schema, &serde_json::json!({"persona": null})).is_empty());
-        let errors = validate_instance(&schema, &serde_json::json!({"persona": 7}));
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("$.persona"));
-    }
+        db.conn
+            .execute(
+                "INSERT INTO documents (id, type, owner, payload, created_at, updated_at) \
+                 VALUES ('FR-PREEXISTING', 'requirement', 'legion', '{}', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
 
-    #[test]
-    fn instance_integer_and_number_semantics() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "score": {"type": "number"},
-                "phase": {"type": "integer"}
-            }
-        });
-        // integer satisfies number; float fails integer
-        let ok = serde_json::json!({"score": 3, "phase": 2});
-        assert!(validate_instance(&schema, &ok).is_empty());
-        let bad = serde_json::json!({"score": 3.5, "phase": 2.5});
-        let errors = validate_instance(&schema, &bad);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("$.phase"));
+        let fetched = db
+            .get_document("FR-PREEXISTING")
+            .expect("get")
+            .expect("row returned despite not conforming");
+        assert_eq!(fetched.payload, "{}");
+
+        let listed = db
+            .list_documents(&DocumentFilter {
+                doc_type: Some("requirement"),
+                ..Default::default()
+            })
+            .expect("list");
+        assert!(listed.iter().any(|d| d.id == "FR-PREEXISTING"));
     }
 
     // -- criteria identity + revision (#882 step 1) -------------------------
@@ -1322,6 +2118,7 @@ mod tests {
     #[test]
     fn new_document_starts_at_revision_one() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let doc = db
             .insert_document(&sample_meta("requirement", "mail"), "{}")
             .expect("insert");
@@ -1339,6 +2136,7 @@ mod tests {
     #[test]
     fn insert_document_assigns_ids_to_criteria_missing_one() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let payload = serde_json::json!({
             "verification": {
                 "criteria": [
@@ -1369,6 +2167,7 @@ mod tests {
     #[test]
     fn insert_document_preserves_caller_supplied_criterion_id() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let payload = serde_json::json!({
             "verification": {"criteria": [{"id": "crit-fixed", "text": "does the thing"}]}
         })
@@ -1385,6 +2184,7 @@ mod tests {
     #[test]
     fn insert_document_without_criteria_is_untouched() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let payload = r#"{"meta":{"id":"FR-X"},"title":"Thread detail"}"#;
         let doc = db
             .insert_document(&sample_meta("requirement", "mail"), payload)
@@ -1420,6 +2220,7 @@ mod tests {
     #[test]
     fn revise_document_bumps_revision_and_preserves_echoed_ids() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let initial = serde_json::json!({
             "verification": {"criteria": [{"text": "first criterion"}]}
         })
@@ -1476,6 +2277,7 @@ mod tests {
     #[test]
     fn revise_document_refuses_archived_document() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut m = sample_meta("requirement", "mail");
         m.id = Some("FR-ARCHIVED");
         db.insert_document(&m, "{}").unwrap();
@@ -1497,6 +2299,7 @@ mod tests {
     #[test]
     fn update_document_body_merges_key_and_leaves_revision_unchanged() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "thesis");
         let doc = db
             .insert_document(&sample_meta("thesis", "mail"), r#"{"title":"x"}"#)
             .expect("insert");
@@ -1535,6 +2338,7 @@ mod tests {
     #[test]
     fn update_document_body_refuses_archived_document() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "thesis");
         let mut m = sample_meta("thesis", "mail");
         m.id = Some("TH-ARCHIVED");
         db.insert_document(&m, "{}").unwrap();
@@ -1558,6 +2362,7 @@ mod tests {
     #[test]
     fn update_document_body_after_revise_keeps_revised_fields_and_leaves_revision_unchanged() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "thesis");
         let mut m = sample_meta("thesis", "mail");
         m.id = Some("TH-AFTER-REVISE-1");
         db.insert_document(&m, r#"{"title":"a"}"#).unwrap();
@@ -1624,6 +2429,7 @@ mod tests {
     #[test]
     fn revise_document_recovers_a_document_with_a_preexisting_malformed_entry() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut m = sample_meta("requirement", "mail");
         m.id = Some("FR-LEGACY-BAD");
         db.insert_document(&m, r#"{"meta":{}}"#).unwrap();
@@ -1768,6 +2574,7 @@ mod tests {
     #[test]
     fn insert_document_indexed_writes_to_search_index() {
         let (db, index, _dir) = crate::testutil::test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let meta = sample_meta("requirement", "mail");
         let payload = r#"{"title":"Thread detail","description":"how threads render"}"#;
         let doc = insert_document_indexed(&db, &index, &meta, payload).expect("insert");
@@ -1782,6 +2589,7 @@ mod tests {
     #[test]
     fn revise_document_indexed_reindexes_without_duplicating() {
         let (db, index, _dir) = crate::testutil::test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut meta = sample_meta("requirement", "mail");
         meta.id = Some("FR-REVISE-1");
         // Deliberately disjoint vocabulary between the two revisions (no
@@ -1825,6 +2633,7 @@ mod tests {
     #[test]
     fn set_document_status_indexed_does_not_duplicate_index_entry() {
         let (db, index, _dir) = crate::testutil::test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut meta = sample_meta("requirement", "mail");
         meta.id = Some("FR-STATUS-1");
         insert_document_indexed(&db, &index, &meta, r#"{"title":"Status target"}"#)
@@ -1854,6 +2663,7 @@ mod tests {
     #[test]
     fn set_document_status_indexed_warns_and_returns_ok_when_index_write_fails() {
         let (db, index, _dir) = crate::testutil::test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut meta = sample_meta("requirement", "mail");
         meta.id = Some("FR-WARN-1");
         insert_document_indexed(&db, &index, &meta, r#"{"title":"Warn target"}"#).expect("insert");
@@ -1879,6 +2689,7 @@ mod tests {
     #[test]
     fn archive_document_indexed_stays_searchable() {
         let (db, index, _dir) = crate::testutil::test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut meta = sample_meta("requirement", "mail");
         meta.id = Some("FR-ARCHIVE-1");
         insert_document_indexed(&db, &index, &meta, r#"{"title":"Archived target"}"#)
@@ -1897,6 +2708,7 @@ mod tests {
     #[test]
     fn get_all_documents_for_reindex_includes_archived_and_hot() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let mut hot_meta = sample_meta("requirement", "mail");
         hot_meta.id = Some("FR-HOT-1");
         db.insert_document(&hot_meta, "{}").unwrap();

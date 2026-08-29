@@ -318,6 +318,21 @@ pub enum LegionError {
     /// the error alone.
     #[error("cannot defer: '{input}' resolved to {wake_at}, which is not in the future")]
     DeferWakeAtInPast { input: String, wake_at: String },
+
+    /// A document payload failed JSON Schema validation for its `doc_type`
+    /// (#1062). Distinct from `WorkSource` so the daemon can answer 422 with
+    /// the violation list instead of the blanket 500 an opaque failure would
+    /// get -- `channel.rs`'s per-endpoint error mapper matches on this
+    /// variant before falling back to the `WorkSource`/blanket rules.
+    #[error("document payload violates schema {schema_id}: {} error(s)", .errors.len())]
+    SchemaViolation {
+        schema_id: String,
+        /// One line per violation: "<json pointer>: <message>", e.g.
+        /// "/verification/acceptance: expected array, got string". The
+        /// pointer is empty for a violation rooted at the payload itself
+        /// (e.g. a missing required top-level property).
+        errors: Vec<String>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;

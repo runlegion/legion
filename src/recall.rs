@@ -1163,6 +1163,7 @@ mod tests {
     #[test]
     fn recall_bm25_never_surfaces_a_document() {
         let (db, index, _dir) = test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
 
         reflect_from_text(&db, &index, "kelex", "mapping rules for schema fields")
             .expect("reflect");

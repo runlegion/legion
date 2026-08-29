@@ -8,6 +8,7 @@ fn document_create_view_list_archive_roundtrip() {
     // round-trips through insert -> view -> list -> archive, with
     // archived rows excluded from default list and included with --archived.
     let dir = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(dir.path(), "requirement");
 
     // Create a typed-id requirement document with full meta + JSON payload.
     let payload = r#"{"meta":{"id":"FR-TEST-001","type":"requirement"},"title":"Integration test target","description":"Round-trip through the documents table CLI."}"#;
@@ -67,14 +68,28 @@ fn document_create_view_list_archive_roundtrip() {
     // Archive the row.
     run_ok(legion_cmd(dir.path()).args(["document", "archive", "FR-TEST-001"]));
 
-    // Default list excludes archived.
-    let list_hot = run_ok(legion_cmd(dir.path()).args(["document", "list", "--json"]));
+    // Default list excludes archived. Filtered by type: the schema stub
+    // this test seeded up front is also a hot row and must not be counted
+    // here -- this assertion is about the requirement, not every row.
+    let list_hot = run_ok(legion_cmd(dir.path()).args([
+        "document",
+        "list",
+        "--doc-type",
+        "requirement",
+        "--json",
+    ]));
     let hot_docs: serde_json::Value = serde_json::from_str(list_hot.trim()).unwrap();
     assert!(hot_docs.as_array().unwrap().is_empty());
 
     // --archived returns the archived row.
-    let list_cold =
-        run_ok(legion_cmd(dir.path()).args(["document", "list", "--archived", "--json"]));
+    let list_cold = run_ok(legion_cmd(dir.path()).args([
+        "document",
+        "list",
+        "--doc-type",
+        "requirement",
+        "--archived",
+        "--json",
+    ]));
     let cold_docs: serde_json::Value = serde_json::from_str(list_cold.trim()).unwrap();
     let cold_arr = cold_docs.as_array().unwrap();
     assert_eq!(cold_arr.len(), 1);
@@ -108,6 +123,81 @@ fn document_create_rejects_malformed_payload() {
     );
 }
 
+/// #1062: a `doc_type` with no landed schema is refused outright at
+/// create -- no warn-and-allow, no fallback schema.
+#[test]
+fn document_create_refuses_unschematized_doc_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_with_stdin(
+        legion_cmd(dir.path()).args([
+            "document",
+            "create",
+            "--doc-type",
+            "scratch",
+            "--owner",
+            "mail",
+        ]),
+        b"{}",
+    );
+    assert!(
+        !out.status.success(),
+        "a doc_type with no landed schema must be refused"
+    );
+    assert_eq!(out.status.code(), Some(1), "must exit 1");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("scratch"),
+        "error must name the type, got: {stderr}"
+    );
+}
+
+/// #1062: a schema violation at `document create` prints one line per
+/// violation to stderr, then the count-only summary -- the CLI-visible half
+/// of Error Handling's "CLI prints each error line to stderr then the
+/// summary, exit 1."
+#[test]
+fn document_create_prints_violation_lines_then_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema = serde_json::json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "Requirement Stub",
+        "type": "object",
+        "properties": {"traces_to": {"type": "string"}},
+        "required": ["traces_to"],
+        "x-doc-type": "requirement",
+    })
+    .to_string();
+    let seed = create_schema_document(dir.path(), &schema);
+    assert!(
+        seed.status.success(),
+        "seed schema failed: {}",
+        String::from_utf8_lossy(&seed.stderr)
+    );
+
+    let out = run_with_stdin(
+        legion_cmd(dir.path()).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "mail",
+        ]),
+        b"{}",
+    );
+    assert!(!out.status.success(), "violating payload must be refused");
+    assert_eq!(out.status.code(), Some(1), "must exit 1");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("traces_to"),
+        "per-violation line must name the missing field, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("error(s)"),
+        "the count-only summary must follow the violation lines, got: {stderr}"
+    );
+}
+
 /// #945 review: a malformed `verification.criteria` entry must be SAID on
 /// `document view`, not silently indistinguishable from a document with no
 /// criteria -- the view stays best-effort (metadata and payload still
@@ -116,6 +206,7 @@ fn document_create_rejects_malformed_payload() {
 #[test]
 fn document_view_says_criteria_status_unavailable_on_malformed_entry() {
     let dir = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(dir.path(), "requirement");
 
     // An entry with an id but no text: insert-time normalization only
     // assigns MISSING ids, so this survives creation and trips
@@ -163,6 +254,7 @@ fn document_view_says_criteria_status_unavailable_on_malformed_entry() {
 #[test]
 fn document_view_reports_criteria_served_by_a_clean_verdict() {
     let dir = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(dir.path(), "requirement");
 
     let payload = r#"{"meta":{},"verification":{"criteria":[{"text":"first thing"},{"text":"second thing"}]}}"#;
     run_with_stdin(
@@ -417,19 +509,56 @@ fn document_validate_rejects_broken_instance_with_paths() {
         "broken instance must fail validation"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // #1062: the crate reports a root-level required-property violation
+    // with an empty pointer, so the property name shows up in the message
+    // text rather than as a path segment.
     assert!(
-        stderr.contains("missing required property 'identity'"),
+        stderr.contains("identity") && stderr.to_lowercase().contains("required"),
         "must report the missing block, got: {stderr}"
     );
     assert!(
-        stderr.contains("$.needs[0].priority"),
+        stderr.contains("/needs/0/priority"),
         "must report the enum violation with its path, got: {stderr}"
     );
+}
+
+/// #1062: the six tracked `schemas/*.json` files each declare `x-doc-type`
+/// matching their landed type, and each lands cleanly through `document
+/// create --doc-type schema` (structural gate + jsonschema compile check).
+#[test]
+fn schema_files_declare_x_doc_type_matching_their_landed_type() {
+    let expected: &[(&str, &str)] = &[
+        ("blueprint.schema.json", "blueprint"),
+        ("ecosystem.schema.json", "ecosystem"),
+        ("journey.schema.json", "journey"),
+        ("painmatrix.schema.json", "painmatrix"),
+        ("persona.schema.json", "persona"),
+        ("requirement.schema.json", "requirement"),
+    ];
+    for (file, doc_type) in expected {
+        let path = format!("{}/schemas/{file}", env!("CARGO_MANIFEST_DIR"));
+        let payload = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let value: serde_json::Value = serde_json::from_str(&payload)
+            .unwrap_or_else(|e| panic!("{file} is not valid JSON: {e}"));
+        assert_eq!(
+            value["x-doc-type"], *doc_type,
+            "{file} must declare x-doc-type: {doc_type}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = create_schema_document(dir.path(), &payload);
+        assert!(
+            out.status.success(),
+            "{file} must land cleanly: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]
 fn document_validate_refuses_non_schema_document() {
     let dir = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(dir.path(), "note");
     // Land a plain (non-schema) document.
     let out = run_with_stdin(
         legion_cmd(dir.path()).args([
