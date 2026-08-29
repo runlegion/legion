@@ -2055,6 +2055,118 @@
     animation-duration: 0s;
   }
 }
+@utility animate-dialog-overlay-open {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-normal);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-dialog-overlay-close {
+  animation-name: fade-out;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-alert-dialog-content-open {
+  animation-name: scale-in;
+  animation-duration: var(--rafters-duration-normal);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-alert-dialog-content-close {
+  animation-name: scale-out;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-alert-dialog-overlay-open {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-normal);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-alert-dialog-overlay-close {
+  animation-name: fade-out;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-sheet-content-open {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-normal);
+  animation-timing-function: var(--rafters-ease-spring-smooth);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-sheet-content-close {
+  animation-name: fade-out;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-sheet-overlay-open {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-normal);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-sheet-overlay-close {
+  animation-name: fade-out;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-drawer-overlay-open {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-normal);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-drawer-overlay-close {
+  animation-name: fade-out;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-sidebar-overlay-mobile-open {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-normal);
+  animation-timing-function: var(--rafters-ease-spring-smooth);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-sidebar-overlay-mobile-close {
+  animation-name: fade-out;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
 @utility animate-popover-content-open {
   animation-name: scale-in;
   animation-duration: var(--rafters-duration-moderate);
@@ -2086,6 +2198,210 @@
   @media (prefers-reduced-motion: reduce) {
     animation-duration: 0s;
   }
+}
+@utility animate-context-menu-content-open {
+  animation-name: scale-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-context-menu-content-close {
+  animation-name: scale-out;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-select-content-open {
+  animation-name: scale-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-select-content-close {
+  animation-name: scale-out;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-combobox-content-open {
+  animation-name: scale-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-combobox-content-close {
+  animation-name: scale-out;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-command-content-open {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-command-content-close {
+  animation-name: fade-out;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-tooltip-content-open {
+  animation-name: scale-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-tooltip-content-close {
+  animation-name: scale-out;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-hover-card-content-open {
+  animation-name: scale-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-hover-card-content-close {
+  animation-name: scale-out;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-navigation-menu-panel-open {
+  animation-name: scale-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-navigation-menu-panel-close {
+  animation-name: scale-out;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-calendar-grid-month-change {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-standard);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-tabs-panel-active-change {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-standard);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-avatar-image-load {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-image-img-load {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-embed-frame-load {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-moderate);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-alert-root-appear {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-normal);
+  animation-timing-function: var(--rafters-ease-enter);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-scroll-area-scrollbar-show {
+  animation-name: fade-in;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-standard);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-scroll-area-scrollbar-hide {
+  animation-name: fade-out;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-standard);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-skeleton-root-waiting {
+  animation-name: pulse;
+  animation-duration: var(--rafters-period-shimmer);
+  animation-iteration-count: infinite;
+}
+@utility animate-skeleton-root-content-ready {
+  animation-name: fade-out;
+  animation-duration: var(--rafters-duration-fast);
+  animation-timing-function: var(--rafters-ease-exit);
+  @media (prefers-reduced-motion: reduce) {
+    animation-duration: 0s;
+  }
+}
+@utility animate-spinner-root-busy {
+  animation-name: spin;
+  animation-duration: var(--rafters-period-spin);
+  animation-iteration-count: infinite;
+}
+@utility animate-progress-root-indeterminate {
+  animation-name: pulse;
+  animation-duration: var(--rafters-period-shimmer);
+  animation-iteration-count: infinite;
+}
+@utility animate-input-otp-caret-idle {
+  animation-name: caret-blink;
+  animation-duration: var(--rafters-period-blink);
+  animation-iteration-count: infinite;
 }
 
 @layer base {

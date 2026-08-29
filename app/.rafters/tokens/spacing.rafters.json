@@ -1,6 +1,6 @@
 {
   "namespace": "spacing",
-  "generatedAt": "2026-08-27T04:49:05.842Z",
+  "generatedAt": "2026-08-29T05:23:06.396Z",
   "tokens": [
     {
       "name": "spacing-base",
@@ -23,7 +23,7 @@
       "progressionSystem": "minor-third",
       "containerQueryAware": true,
       "description": "Base spacing unit (0.25rem / 4px at 16px root). Multiply by scale values for actual spacing.",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-0",
@@ -40,7 +40,7 @@
       "mathRelationship": "4 * 0",
       "containerQueryAware": true,
       "description": "Spacing at scale 0 = 0rem (4px × 0)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-1",
@@ -57,7 +57,7 @@
       "mathRelationship": "4 * 1",
       "containerQueryAware": true,
       "description": "Spacing at scale 1 = 0.25rem (4px × 1)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-2",
@@ -74,7 +74,7 @@
       "mathRelationship": "4 * 2",
       "containerQueryAware": true,
       "description": "Spacing at scale 2 = 0.5rem (4px × 2)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-3",
@@ -91,7 +91,7 @@
       "mathRelationship": "4 * 3",
       "containerQueryAware": true,
       "description": "Spacing at scale 3 = 0.75rem (4px × 3)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-4",
@@ -108,7 +108,7 @@
       "mathRelationship": "4 * 4",
       "containerQueryAware": true,
       "description": "Spacing at scale 4 = 1rem (4px × 4)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-5",
@@ -125,7 +125,7 @@
       "mathRelationship": "4 * 5",
       "containerQueryAware": true,
       "description": "Spacing at scale 5 = 1.25rem (4px × 5)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-6",
@@ -142,7 +142,7 @@
       "mathRelationship": "4 * 6",
       "containerQueryAware": true,
       "description": "Spacing at scale 6 = 1.5rem (4px × 6)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-7",
@@ -159,7 +159,7 @@
       "mathRelationship": "4 * 7",
       "containerQueryAware": true,
       "description": "Spacing at scale 7 = 1.75rem (4px × 7)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-9",
@@ -176,7 +176,7 @@
       "mathRelationship": "4 * 9",
       "containerQueryAware": true,
       "description": "Spacing at scale 9 = 2.25rem (4px × 9)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-11",
@@ -193,7 +193,7 @@
       "mathRelationship": "4 * 11",
       "containerQueryAware": true,
       "description": "Spacing at scale 11 = 2.75rem (4px × 11)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-13",
@@ -210,7 +210,7 @@
       "mathRelationship": "4 * 13",
       "containerQueryAware": true,
       "description": "Spacing at scale 13 = 3.25rem (4px × 13)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-15",
@@ -227,7 +227,7 @@
       "mathRelationship": "4 * 15",
       "containerQueryAware": true,
       "description": "Spacing at scale 15 = 3.75rem (4px × 15)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-18",
@@ -244,7 +244,7 @@
       "mathRelationship": "4 * 18",
       "containerQueryAware": true,
       "description": "Spacing at scale 18 = 4.5rem (4px × 18)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-22",
@@ -261,7 +261,7 @@
       "mathRelationship": "4 * 22",
       "containerQueryAware": true,
       "description": "Spacing at scale 22 = 5.5rem (4px × 22)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-27",
@@ -278,7 +278,7 @@
       "mathRelationship": "4 * 27",
       "containerQueryAware": true,
       "description": "Spacing at scale 27 = 6.75rem (4px × 27)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-32",
@@ -295,7 +295,7 @@
       "mathRelationship": "4 * 32",
       "containerQueryAware": true,
       "description": "Spacing at scale 32 = 8rem (4px × 32)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-38",
@@ -312,7 +312,7 @@
       "mathRelationship": "4 * 38",
       "containerQueryAware": true,
       "description": "Spacing at scale 38 = 9.5rem (4px × 38)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-46",
@@ -329,7 +329,7 @@
       "mathRelationship": "4 * 46",
       "containerQueryAware": true,
       "description": "Spacing at scale 46 = 11.5rem (4px × 46)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-55",
@@ -346,7 +346,7 @@
       "mathRelationship": "4 * 55",
       "containerQueryAware": true,
       "description": "Spacing at scale 55 = 13.75rem (4px × 55)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-66",
@@ -363,7 +363,7 @@
       "mathRelationship": "4 * 66",
       "containerQueryAware": true,
       "description": "Spacing at scale 66 = 16.5rem (4px × 66)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-79",
@@ -380,7 +380,7 @@
       "mathRelationship": "4 * 79",
       "containerQueryAware": true,
       "description": "Spacing at scale 79 = 19.75rem (4px × 79)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-95",
@@ -397,7 +397,7 @@
       "mathRelationship": "4 * 95",
       "containerQueryAware": true,
       "description": "Spacing at scale 95 = 23.75rem (4px × 95)",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     },
     {
       "name": "spacing-progression",
@@ -415,7 +415,7 @@
       "userOverride": null,
       "containerQueryAware": false,
       "description": "Spacing is 4px x minor-third (1.2)^n from position 0, rounded to whole pixels: 21 rungs, 4px to 380px.",
-      "generatedAt": "2026-08-27T04:49:05.432Z"
+      "generatedAt": "2026-08-29T05:23:05.904Z"
     }
   ]
 }
