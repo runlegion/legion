@@ -202,8 +202,7 @@ impl SearchIndex {
     /// (#1037) so it never surfaces from `search_documents`.
     ///
     /// Reflections are append-only: unlike [`Self::add_document`], this
-    /// does not delete a prior entry for the same id first, matching the
-    /// pre-#1037 `add` behavior this method was renamed from.
+    /// does not delete a prior entry for the same id first.
     ///
     /// Retries up to [`WRITER_RETRIES`] times with exponential backoff when
     /// the writer lock is held by another process (e.g., a concurrent hook).
@@ -443,6 +442,15 @@ impl SearchIndex {
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
+        // `TopDocs::with_limit(0)` panics (tantivy 0.22.1) rather than
+        // returning an empty collector -- a caller-supplied `limit=0` (the
+        // /api/search `limit` query param is unclamped input) must not
+        // reach it. Every caller (`search`, `search_all`,
+        // `search_documents`) routes through this one method, so the
+        // guard lives here rather than at each call site.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
 
         let reader = self
             .index
@@ -627,6 +635,20 @@ mod tests {
         assert_eq!(results.len(), 3);
     }
 
+    /// `TopDocs::with_limit(0)` panics (tantivy 0.22.1); a `limit=0` caller
+    /// (e.g. GET /api/search's unclamped `limit` query param) must get an
+    /// empty result, not a crash.
+    #[test]
+    fn search_limit_zero_returns_empty_without_panicking() {
+        let (idx, _dir) = test_index();
+        idx.add_reflection("id-1", "test", "reflection about testing", T)
+            .unwrap();
+        let results = idx
+            .search("test", "testing", 0, &TimeRange::default())
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
     #[test]
     fn search_empty_query_returns_empty() {
         let (idx, _dir) = test_index();
@@ -729,10 +751,6 @@ mod tests {
     /// extract `title`/`description` from when the test cares about
     /// content, or `"{}"` when it does not.
     fn test_document(id: &str, owner: &str, payload: &str) -> Document {
-        test_document_at(id, owner, payload, T)
-    }
-
-    fn test_document_at(id: &str, owner: &str, payload: &str, created_at: &str) -> Document {
         Document {
             id: id.into(),
             doc_type: "requirement".into(),
@@ -742,8 +760,8 @@ mod tests {
             owner: owner.into(),
             payload: payload.into(),
             archived_at: None,
-            created_at: created_at.into(),
-            updated_at: created_at.into(),
+            created_at: T.into(),
+            updated_at: T.into(),
         }
     }
 

@@ -346,7 +346,10 @@ pub async fn api_search(
         return Err(ServeError::BadRequest("repo is required".to_string()));
     }
     let query = q.q.as_deref().unwrap_or("");
-    let limit = q.limit.unwrap_or(20);
+    // Capped the same way serve.rs's sibling reflection-search handler
+    // caps its own `limit` (src/serve.rs `api_search`): unbounded
+    // caller-supplied input has no business setting the actual fetch size.
+    let limit = q.limit.unwrap_or(20).min(50);
 
     let db = open_db(&state.data_dir)?;
     let index = open_index(&state.data_dir)?;
@@ -1424,7 +1427,7 @@ mod tests {
 
         let (status, _) = http_req(port, "GET", "/api/search?q=mapping&repo=kelex", None).await;
         assert!(
-            !status.starts_with("HTTP/1.1 200"),
+            status.starts_with("HTTP/1.1 404"),
             "ServerRole::Serve must not answer /api/search: {status}"
         );
     }
@@ -1545,6 +1548,44 @@ mod tests {
         );
     }
 
+    /// `TopDocs::with_limit(0)` panics in tantivy 0.22.1 (top_score_collector.rs
+    /// 192-194); `?limit=0` is caller-supplied input that must not reach it.
+    #[tokio::test]
+    async fn api_search_limit_zero_returns_empty_list_not_500() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        let index = SearchIndex::open(&data_dir.join("index")).expect("open index");
+        let meta = crate::documents::DocumentMeta {
+            id: Some("FR-ANY"),
+            doc_type: "requirement",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "kelex",
+        };
+        crate::documents::insert_document_indexed(&db, &index, &meta, r#"{"title":"anything"}"#)
+            .expect("insert");
+        drop(db);
+        drop(index);
+
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
+
+        let (status, body) = http_req(
+            port,
+            "GET",
+            "/api/search?q=anything&repo=kelex&limit=0",
+            None,
+        )
+        .await;
+        assert!(status.starts_with("HTTP/1.1 200"), "status: {status}");
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&body).expect("parse body");
+        assert!(
+            parsed.is_empty(),
+            "limit=0 must return an empty list: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn api_document_create_round_trip_and_generates_id() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1583,11 +1624,8 @@ mod tests {
         assert_eq!(fetched["id"], id);
     }
 
-    /// #1037 found-during-merge fix: `api_document_create` is a write path
-    /// that did not exist when the `*_indexed` wrapper set was designed
-    /// (#1036/#1038 landed after #1037's initial build). A document
-    /// created over HTTP must be findable via GET /api/search, same as one
-    /// created via the CLI.
+    /// A document created over HTTP must be findable via GET /api/search
+    /// (#1037), same as one created via the CLI.
     #[tokio::test]
     async fn api_document_create_indexes_for_search() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1928,14 +1966,10 @@ mod tests {
         );
     }
 
-    /// #1037 found-during-merge fix: `api_document_update_body` is the
-    /// highest-frequency document write path (called on every debounced
-    /// editor keystroke pause) and did not exist when the `*_indexed`
-    /// wrapper set was designed. `body` is part of the document's indexed
-    /// text (post-simplify), so a body save must re-index. The query term
-    /// exists ONLY in the newly saved body -- a hit proves the save
-    /// re-indexed, not that a stale entry from before the save happened to
-    /// survive.
+    /// `body` is part of the document's indexed text (#1037), so a body
+    /// save must re-index. The query term exists ONLY in the newly saved
+    /// body -- a hit proves the save re-indexed, not that a stale entry
+    /// from before the save happened to survive.
     #[tokio::test]
     async fn api_document_update_body_indexes_body_text_for_search() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2032,9 +2066,8 @@ mod tests {
         assert_eq!(db.document_revision("TH-REVISE-1").unwrap(), 3);
     }
 
-    /// #1037 found-during-merge fix: `api_document_revise` bypassed the
-    /// search index entirely before this fix. Proves both directions: the
-    /// pre-revise text stops matching (no stale ghost) and the revised
+    /// A revise over HTTP must re-index (#1037): proves both directions,
+    /// the pre-revise text stops matching (no stale ghost) and the revised
     /// text matches exactly once (no duplicate entry) -- the same
     /// delete-then-add guarantee `add_document_replaces_prior_entry_for_same_id`
     /// (src/search.rs) proves at the SearchIndex level, closed here at the

@@ -495,14 +495,10 @@ pub fn revise_document_indexed(
 }
 
 /// Save the editor's working-copy body and re-index it for search in one
-/// call (#1037, found and fixed while merging #1036/#1038's HTTP editor
-/// endpoints into this branch: `update_document_body` is a brand new write
-/// path that did not exist when the `*_indexed` wrapper set was designed,
-/// and it is the highest-frequency one -- called on every debounced
-/// keystroke pause from the editor). `body` is part of
-/// `document_search_text`'s indexed text (post-simplify), so a body save
-/// that skipped re-indexing would silently diverge the index from the row
-/// on every edit.
+/// call (#1037). `body` is part of `document_search_text`'s indexed text,
+/// so a body save that skipped re-indexing would silently diverge the
+/// index from the row on every edit -- and this is the highest-frequency
+/// document write path, called on every debounced editor keystroke pause.
 pub fn update_document_body_indexed(
     db: &Database,
     index: &SearchIndex,
