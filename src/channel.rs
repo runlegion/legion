@@ -404,6 +404,11 @@ pub async fn api_search(
             "q must be at most {MAX_SEARCH_QUERY_LEN} characters"
         )));
     }
+    if search_query_nesting(&query) > MAX_SEARCH_QUERY_NESTING {
+        return Err(ServeError::BadRequest(format!(
+            "q nests parentheses deeper than {MAX_SEARCH_QUERY_NESTING}"
+        )));
+    }
     // Capped the same way serve.rs's sibling reflection-search handler
     // caps its own `limit` (src/serve.rs `api_search`): unbounded
     // caller-supplied input has no business setting the actual fetch size.
@@ -446,6 +451,33 @@ const MAX_IDENTIFIER_LEN: usize = 128;
 /// search phrase, small enough to keep a hostile caller from stuffing an
 /// oversized string into the parser.
 const MAX_SEARCH_QUERY_LEN: usize = 512;
+
+/// Max parenthesis nesting depth for the `q` param on GET /api/search
+/// (#1037). Tantivy's query parser backtracks on unbalanced or deeply
+/// nested groups, and the cost grows exponentially with depth: a query of
+/// 200 `(` characters, well under `MAX_SEARCH_QUERY_LEN`, never returns.
+/// The length cap bounds bytes, not parser work, so nesting is bounded
+/// separately before the parser sees the string. Real searches nest a
+/// group or two at most.
+const MAX_SEARCH_QUERY_NESTING: usize = 8;
+
+/// Deepest `(`-nesting reached anywhere in `query`, counting unbalanced
+/// opens as depth (a run of unclosed `(` is exactly the pathological case).
+fn search_query_nesting(query: &str) -> usize {
+    let mut depth: usize = 0;
+    let mut deepest: usize = 0;
+    for ch in query.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
 
 /// Reject `value` unless it is 1..=MAX_IDENTIFIER_LEN characters of
 /// `[A-Za-z0-9._-]`. Shared by the `owner` and (when supplied) `id` checks
@@ -1729,8 +1761,27 @@ mod tests {
         let path = format!("/api/search?q={nested}&repo=kelex");
         let (status, body) = http_req(port, "GET", &path, None).await;
         assert!(
-            status.starts_with("HTTP/1.1 200") || status.starts_with("HTTP/1.1 400"),
-            "deeply nested query must not crash the server: {status} {body}"
+            status.starts_with("HTTP/1.1 400"),
+            "deeply nested query must be refused before the parser sees it: {status} {body}"
+        );
+        assert!(
+            body.contains("nests parentheses"),
+            "refusal must name the nesting bound: {body}"
+        );
+    }
+
+    /// The nesting helper counts the deepest `(` run, treating unclosed
+    /// opens as depth (the shape that stalls Tantivy's parser), and does
+    /// not go negative on stray `)`.
+    #[test]
+    fn search_query_nesting_counts_deepest_open_run() {
+        assert_eq!(search_query_nesting("plain words"), 0);
+        assert_eq!(search_query_nesting("(a AND b)"), 1);
+        assert_eq!(search_query_nesting("((a) OR (b (c)))"), 3);
+        assert_eq!(search_query_nesting(")))"), 0);
+        assert_eq!(search_query_nesting(&"(".repeat(200)), 200);
+        assert!(
+            search_query_nesting(&"(".repeat(MAX_SEARCH_QUERY_NESTING)) <= MAX_SEARCH_QUERY_NESTING
         );
     }
 
