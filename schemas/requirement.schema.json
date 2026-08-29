@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "requirement",
   "title": "Requirement",
   "description": "AI-first requirement: the WHAT derived from service-design artifacts (the WHY). JSON shape per the 2026-05 format reset (no user-story layer; provenance via traces_to; NFRs/constraints are separate doc types referenced by id, per the IEEE 830 load-bearing-separation finding). Part of the definition layer (legion #526).",
   "type": "object",

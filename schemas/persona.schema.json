@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "persona",
   "title": "Persona",
   "description": "Service-design persona: behaviors, mental models, and relationship to the service. Not demographics. Part of the definition layer (legion #526); shape validated against real instances in vault-2026.",
   "type": "object",

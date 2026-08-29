@@ -10,6 +10,27 @@ rusqlite = { version = "0.34", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# JSON Schema validation for `legion document` writes (#1062). Draft-07 and
+# 2020-12, $ref/definitions, structured per-instance errors with a JSON
+# pointer per violation -- replaces the hand-rolled five-keyword subset
+# validator that silently skipped $ref/definitions.
+#
+# Default features disabled: the crate's `resolve-http`/`resolve-file`
+# defaults make a schema's `$ref`/`$schema` a live network fetch (blocking,
+# via reqwest) or an arbitrary local-file read whenever the crate does not
+# already recognize the URI. `POST /api/documents` accepts a caller-supplied
+# schema over HTTP -- leaving either on turns compiling that payload into an
+# SSRF/file-disclosure primitive, and the blocking fetch also panics when
+# triggered from inside axum's async handler ("cannot drop a runtime in a
+# context where blocking is not allowed"), discovered when a test schema's
+# `$schema` used an unrecognized URI variant. This issue's scope is $ref to
+# same-document `definitions` only (no external schema loading), which
+# needs neither feature -- an external $ref now fails compilation cleanly
+# instead of fetching or panicking. `idna` stays on for internationalized
+# domain names in $id/$ref URIs; dropping resolve-http also drops the whole
+# reqwest/rustls dependency chain.
+jsonschema = { version = "0.52", default-features = false, features = ["idna"] }
 uuid = { version = "1", features = ["v7"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"

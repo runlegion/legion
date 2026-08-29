@@ -920,6 +920,7 @@ mod tests {
     use crate::documents::DocumentMeta;
 
     fn seed_requirement(db: &db::Database, id: &str, status: Option<&str>) -> Vec<String> {
+        crate::db::testutil::seed_type_schema(db, "requirement");
         let meta = DocumentMeta {
             id: Some(id),
             doc_type: "requirement",

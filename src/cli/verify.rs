@@ -1613,6 +1613,7 @@ mod tests {
     #[test]
     fn resolve_spec_criteria_reads_ids_and_texts() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let meta = DocumentMeta {
             id: Some("doc-spec-crit"),
             doc_type: "requirement",
@@ -1637,6 +1638,7 @@ mod tests {
     #[test]
     fn resolve_spec_criteria_none_for_legacy_acceptance_shape() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let meta = DocumentMeta {
             id: Some("doc-legacy"),
             doc_type: "requirement",
@@ -1667,6 +1669,7 @@ mod tests {
     #[test]
     fn resolve_spec_criteria_refuses_entry_missing_text() {
         let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
         let meta = DocumentMeta {
             id: Some("doc-spec-malformed"),
             doc_type: "requirement",
