@@ -1,5 +1,110 @@
 # Legion Changelog
 
+## 0.37.0
+
+The documents release. The legion-app document view (#1032) needed three things from the
+daemon that only the CLI could do: create a document, save an editor's working copy without
+spinning the revision counter, and cut a revision on demand -- and once documents were
+writable over HTTP from a browser, two long-tolerated gaps stopped being tolerable: any
+payload was accepted for any type, and no search could find a document at all. This release
+ships the three as one arc. The daemon gains create, body-save, and revise endpoints that
+are thin HTTP faces over the paths `legion document create` and `revise` already use; every
+write to the documents table -- CLI or daemon -- is then validated against the JSON Schema
+for its `doc_type` at the store layer, with a type that has no schema refused outright; and
+documents join the reflection search index under a `kind` partition, served to the app by
+`GET /api/search`. Minor release on the added-surface rule: three new HTTP endpoints, one
+new `Database` write method, and a rebuilt `legion reindex`. No wire-format change and no
+SQLite migration. Two behavior changes to know before upgrade: a document write whose
+payload violates its type's schema -- or whose type has no schema document carrying
+`x-doc-type` -- is now refused on every path, with no warn-and-allow (reads are untouched,
+and the store's existing rows were brought into conformance by hand before this shipped);
+and the search index's on-disk schema changed, so the first open after upgrade wipes the
+index and starts empty -- BM25 recall returns nothing until `legion reindex`, which now
+rebuilds reflections and documents together, runs once.
+
+### Added
+
+- **Daemon endpoints for the editor -- create, body save, and revise** (PR #1038, #1036).
+  The daemon's document API stopped at list, get, and set-status; `Database::insert_document`
+  and `revise_document` were reachable only through the CLI, and nothing could save a working
+  copy at all. Three endpoints in `src/channel.rs` close that. `POST /api/documents` mirrors
+  `legion document create` field for field -- the same `DocumentMeta`, the same UUIDv7 when
+  `id` is omitted, the same structural gate and pointer-reflection dual write for
+  `doc_type=schema` -- and refuses a non-object payload or a duplicate id with a 400, not a
+  500. `PUT /api/documents/{id}/body` is the debounced working-copy save: a new
+  `Database::update_document_body` merges the text under the payload's top-level `body` key
+  through a single `json_set` UPDATE that reads the row at write time -- a revise landing
+  between two body saves is kept, proven by a test -- and never touches `revision`, so a user
+  typing does not spin the counter. A revision is cut only by the explicit
+  `POST /api/documents/{id}/revise`, a thin wrapper over `Database::revise_document` that
+  replaces the whole payload and increments by exactly one. Both editing endpoints share one
+  `load_editable_document` preamble: 404 for an unknown id, 400 for an archived one. The
+  review moved the schema-pointer write into one shared `documents::write_schema_pointer`
+  called by the CLI create and revise arms and both HTTP handlers, so the two faces cannot
+  diverge -- #1036's byte-identity criterion on the CLI was amended to behavior-identity for
+  exactly this change. `owner` and a caller-supplied `id` are constrained to `[A-Za-z0-9._-]`
+  and 128 characters, since they are network input here and argv at the CLI; request bodies
+  cap at 4 MiB. Authentication is still nothing at all -- what a LAN peer can do with these
+  endpoints is #1034.
+
+- **Every document write is validated against its type's JSON Schema** (PR #1063, #1062).
+  `legion document create` and `revise` accepted any payload for any type: on 2026-08-29 the
+  type column held 25 distinct values, 14 with no schema, and the only instance validator was
+  a hand-rolled five-keyword subset, reachable only through the optional `validate` verb,
+  that silently skipped the `$ref`s the SystemFoundations schema uses three times. Validation
+  now lives in `Database::insert_document`, `revise_document`, and `update_document_body` --
+  the one layer the CLI and the daemon's three write endpoints share -- and runs the
+  `jsonschema` crate (draft-07 and 2020-12, `$ref` and `definitions` honored); the
+  hand-rolled subset is deleted. A schema document declares the type it governs with a
+  top-level `x-doc-type` keyword, so a schema is self-describing and portable as a file; a
+  type with no schema row, or with two claiming it, is refused on every path with no
+  warn-and-allow, per the ruling in reflection 01a04e9f. A violation returns the new
+  `LegionError::SchemaViolation` with one `<pointer>: <message>` line per problem: the CLI
+  prints the lines and a count and exits 1, the daemon answers 422 with the list in a
+  `violations` array. The body-save endpoint validates the merged payload before its
+  `json_set` runs. Two hardening choices came out of the security review rather than the
+  spec. The crate ships with `default-features = false` because its defaults resolve a
+  remote `$ref` over HTTP and `file://` from disk -- a caller-supplied schema on
+  `POST /api/documents` would be an SSRF and file-disclosure primitive, and the blocking
+  fetch panics inside an axum handler; an external `$ref` now fails at compile time instead.
+  And the compiler has no recursion limit: the review reproduced a process-killing stack
+  overflow from an 18 KB schema of about 500 chained refs, a first guard that followed
+  chains was bypassed five ways in re-review, and the landed bound holds by construction --
+  count every reference keyword (`$ref`, `$dynamicRef`, `$recursiveRef`) anywhere in the
+  document and refuse past 64, alongside a literal nesting cap at the same depth, since a
+  dereference chain of length N needs at least N reference nodes wherever they sit or
+  however they are spelled. A live-socket test proves a 600-hop chain gets a 400 and
+  `/health` still answers. Validation runs on write only: `view`, `list`, and every read
+  endpoint return existing rows unchanged whether or not they conform.
+
+- **Documents join the search index; the daemon serves `GET /api/search`** (PR #1039,
+  #1037). The Tantivy index behind `legion recall` indexed reflections only, so the app's
+  top-bar search had nothing to query. The index schema gains a `kind` field --
+  `"reflection"` or `"document"`, exact-term, stamped by a single `build_doc` helper on
+  every write and added as a mandatory clause on every read -- so the two corpora share one
+  index and one BM25 ranking but never mix in results: recall passes the reflection kind
+  unconditionally, and a document with text identical to a reflection's never appears in
+  `legion recall`, tested at exactly that level. Every document write path re-indexes after
+  its DB write through `*_indexed` wrappers -- CLI create, revise, set-status, and archive,
+  and the four HTTP handlers including #1036's body save, since `body` is part of the
+  searchable text alongside title, description, type, and surface. Archiving re-indexes
+  rather than deletes, because `GET /api/documents/{id}` still serves archived rows.
+  `GET /api/search?q=&repo=` runs the document-scoped query and returns full `Document` rows
+  in rank order so the app opens a result without a second round trip; `repo` is required
+  (400 when absent -- an unscoped query is a client bug worth a loud answer), `limit`
+  defaults to 20 and caps at 50, and the route registers only on the daemon, since `legion
+  serve` already owns `/api/search` for reflection search. The operator step, stated
+  deliberately: `kind` is a breaking index-schema change, so the first open after upgrade
+  wipes the on-disk index and starts empty, printing `search index schema changed,
+  rebuilding empty -- run legion reindex to repopulate`. BM25 recall returns nothing until
+  `legion reindex` -- which now loads reflections and documents, rebuilds both in one
+  commit, and reports both counts -- runs once; `--latest` and `--domain` read the database
+  and never notice. The review hardened the query edge: an index write that fails after a
+  durable DB write warns instead of failing the request, every DB-plus-Tantivy handler runs
+  under `spawn_blocking`, `q` caps at 512 characters, and parenthesis nesting is bounded at
+  8, because 200 unbalanced `(` characters -- comfortably under the length cap -- send
+  Tantivy's query parser into exponential backtracking that never returns.
+
 ## 0.36.0
 
 The idle-mail release. Since #963 retired the MCP push, the hook drain has been the only
