@@ -216,11 +216,28 @@ const DOCUMENT_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 /// (which merges this router into the dashboard app) and the daemon (which
 /// serves it bare) answer these paths with the same implementation, so the
 /// wire shapes cannot fork again.
+///
+/// `GET /api/search` (#1037, document search) is registered only when
+/// `state.role == ServerRole::Daemon`. `legion serve`'s own app (src/serve.rs)
+/// already owns `/api/search` for BM25 reflection search -- a distinct,
+/// pre-existing, differently-shaped endpoint (required `q`, optional
+/// `repo`, reflection JSON with score/domain/tags). Registering the same
+/// path here unconditionally would make axum panic on a route collision
+/// the moment `legion serve` merges this router in. The legion-app
+/// document search box this endpoint serves talks to the daemon directly
+/// (per #1037's own framing: "a search box over the daemon"), so scoping
+/// registration to `ServerRole::Daemon` satisfies both the literal path
+/// the acceptance criteria name and the actual consumer, without touching
+/// serve.rs's live endpoint.
 pub fn router(state: ChannelState) -> Router {
+    let is_daemon = state.role == ServerRole::Daemon;
+
     // Split out so `DOCUMENT_BODY_LIMIT_BYTES` applies only to these routes
     // -- `route_layer` scopes to whatever is already in the Router it is
     // called on, so building the document routes as their own Router
-    // before merging keeps the cap off /api/post and the rest.
+    // before merging keeps the cap off /api/post and the rest. `/api/search`
+    // (#1037) deliberately stays out of this sub-router: it's a GET with no
+    // body, and keeping it out keeps the cap's scope honest.
     let document_routes = Router::new()
         .route(
             "/api/documents",
@@ -232,14 +249,17 @@ pub fn router(state: ChannelState) -> Router {
         .route("/api/documents/{id}/revise", post(api_document_revise))
         .route_layer(DefaultBodyLimit::max(DOCUMENT_BODY_LIMIT_BYTES));
 
-    Router::new()
+    let mut r = Router::new()
         .route("/health", get(health_endpoint))
         .route("/sse", get(sse_handler))
         .route("/api/feed", get(api_feed))
         .route("/api/tasks", get(api_tasks))
         .route("/api/post", post(api_post))
-        .merge(document_routes)
-        .with_state(state)
+        .merge(document_routes);
+    if is_daemon {
+        r = r.route("/api/search", get(api_search));
+    }
+    r.with_state(state)
 }
 
 /// Query parameters for GET /api/documents. All optional; omitting every
@@ -304,14 +324,114 @@ pub async fn api_document_set_status(
     Path(id): Path<String>,
     Json(body): Json<SetStatusBody>,
 ) -> Result<Json<crate::documents::Document>, ServeError> {
-    let db = open_db(&state.data_dir)?;
-    // Return 404 for a missing doc, consistent with the GET handler, rather
-    // than the 500 the blanket LegionError conversion would give the
-    // set_document_status not-found error.
-    if db.get_document(&id)?.is_none() {
-        return Err(ServeError::NotFound(format!("document '{id}' not found")));
+    let data_dir = state.data_dir.clone();
+    // DB + index work runs in spawn_blocking (MED 3, PR #1039 review): this
+    // synchronously commits to Tantivy (retrying on writer-lock contention,
+    // `search.rs`'s `acquire_writer`, up to ~700ms) and must not tie up a
+    // tokio worker thread.
+    tokio::task::spawn_blocking(
+        move || -> Result<Json<crate::documents::Document>, ServeError> {
+            let db = open_db(&data_dir)?;
+            // Return 404 for a missing doc, consistent with the GET handler,
+            // rather than the 500 the blanket LegionError conversion would
+            // give the set_document_status not-found error. Checked before
+            // opening the index (LOW 8, PR #1039 review) so a 404 never
+            // pays for opening it.
+            if db.get_document(&id)?.is_none() {
+                return Err(ServeError::NotFound(format!("document '{id}' not found")));
+            }
+            let index = open_index(&data_dir)?;
+            Ok(Json(crate::documents::set_document_status_indexed(
+                &db, &index, &id, &body.to,
+            )?))
+        },
+    )
+    .await
+    .map_err(|e| ServeError::internal("blocking task panicked", e))?
+}
+
+/// Query parameters for GET /api/search (#1037). `repo` is required -- the
+/// app always scopes a search to one repo, so an unscoped query is a client
+/// bug worth surfacing loudly rather than silently searching everything.
+/// Both fields are `Option` (rather than a bare `String`) so a missing
+/// `repo` renders through this handler's own 400 body instead of axum's
+/// generic query-rejection response, and an omitted `q` behaves the same
+/// as an explicit empty one.
+#[derive(serde::Deserialize)]
+pub struct SearchQuery {
+    pub q: Option<String>,
+    pub repo: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/search -- BM25 search over documents in `repo` matching `q`
+/// (#1037). Looks up each hit's full Document row (same shape as GET
+/// /api/documents) so the app can open a result without a second round
+/// trip, preserving the BM25 rank order `search_documents` returned. A hit
+/// whose document row no longer exists (e.g. hard-deleted between the
+/// index write and this query -- soft-delete is the norm, but not
+/// guaranteed) is skipped rather than failing the whole request.
+///
+/// `repo` missing or blank is a 400, not a silent all-repo search: the app
+/// always scopes to one repo, so an unscoped query is a client bug worth
+/// surfacing loudly. Once non-blank, `repo` is gated by the same
+/// `validate_identifier` charset/length check the POST /api/documents
+/// routes apply to every string field (LOW 11, PR #1039 review) -- it is
+/// the document `owner` column, an identifier by the same contract. `q`
+/// over `MAX_SEARCH_QUERY_LEN` is a 400 (MED 4). An empty or
+/// whitespace-only `q` returns an empty list, matching
+/// `SearchIndex::search_documents`'s own empty-query behavior.
+///
+/// The DB lookup and Tantivy query both run in `spawn_blocking` (MED 3,
+/// PR #1039 review): `SearchIndex::search_documents` can block on Tantivy's
+/// writer-lock retry (`search.rs`'s `acquire_writer`, up to ~700ms under
+/// contention) even though this is a read path, because opening the index
+/// touches the same lock machinery -- that must not tie up a tokio worker
+/// thread on legion's highest-traffic search path.
+pub async fn api_search(
+    State(state): State<ChannelState>,
+    Query(q): Query<SearchQuery>,
+) -> Result<Json<Vec<crate::documents::Document>>, ServeError> {
+    let repo = q.repo.as_deref().unwrap_or("").trim().to_string();
+    if repo.is_empty() {
+        return Err(ServeError::BadRequest("repo is required".to_string()));
     }
-    Ok(Json(db.set_document_status(&id, &body.to)?))
+    validate_identifier(&repo, "repo")?;
+
+    let query = q.q.as_deref().unwrap_or("").to_string();
+    if query.chars().count() > MAX_SEARCH_QUERY_LEN {
+        return Err(ServeError::BadRequest(format!(
+            "q must be at most {MAX_SEARCH_QUERY_LEN} characters"
+        )));
+    }
+    if search_query_nesting(&query) > MAX_SEARCH_QUERY_NESTING {
+        return Err(ServeError::BadRequest(format!(
+            "q nests parentheses deeper than {MAX_SEARCH_QUERY_NESTING}"
+        )));
+    }
+    // Capped the same way serve.rs's sibling reflection-search handler
+    // caps its own `limit` (src/serve.rs `api_search`): unbounded
+    // caller-supplied input has no business setting the actual fetch size.
+    let limit = q.limit.unwrap_or(20).min(50);
+
+    let data_dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(
+        move || -> Result<Json<Vec<crate::documents::Document>>, ServeError> {
+            let db = open_db(&data_dir)?;
+            let index = open_index(&data_dir)?;
+
+            let hits = index.search_documents(&repo, &query, limit)?;
+            let mut docs = Vec::with_capacity(hits.len());
+            for hit in hits {
+                if let Some(doc) = db.get_document(&hit.id)? {
+                    docs.push(doc);
+                }
+            }
+            Ok(Json(docs))
+        },
+    )
+    .await
+    .map_err(|e| ServeError::internal("blocking task panicked", e))?
 }
 
 /// Max length for a caller-supplied `owner` or `id` on POST /api/documents.
@@ -323,6 +443,41 @@ pub async fn api_document_set_status(
 /// enough to keep a hostile caller from stuffing an oversized value into an
 /// indexed column.
 const MAX_IDENTIFIER_LEN: usize = 128;
+
+/// Max length for the `q` param on GET /api/search (#1037). Caller input
+/// reaches Tantivy's `QueryParser` un-sanitized; without a bound here, a
+/// pathological caller-supplied query has unbounded cost before this code
+/// gets a say (MED 4, PR #1039 review). Generous enough for any real
+/// search phrase, small enough to keep a hostile caller from stuffing an
+/// oversized string into the parser.
+const MAX_SEARCH_QUERY_LEN: usize = 512;
+
+/// Max parenthesis nesting depth for the `q` param on GET /api/search
+/// (#1037). Tantivy's query parser backtracks on unbalanced or deeply
+/// nested groups, and the cost grows exponentially with depth: a query of
+/// 200 `(` characters, well under `MAX_SEARCH_QUERY_LEN`, never returns.
+/// The length cap bounds bytes, not parser work, so nesting is bounded
+/// separately before the parser sees the string. Real searches nest a
+/// group or two at most.
+const MAX_SEARCH_QUERY_NESTING: usize = 8;
+
+/// Deepest `(`-nesting reached anywhere in `query`, counting unbalanced
+/// opens as depth (a run of unclosed `(` is exactly the pathological case).
+fn search_query_nesting(query: &str) -> usize {
+    let mut depth: usize = 0;
+    let mut deepest: usize = 0;
+    for ch in query.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
 
 /// Reject `value` unless it is 1..=MAX_IDENTIFIER_LEN characters of
 /// `[A-Za-z0-9._-]`. Shared by the `owner` and (when supplied) `id` checks
@@ -447,42 +602,62 @@ pub async fn api_document_create(
         None
     };
 
-    let db = open_db(&state.data_dir)?;
-    let meta = crate::documents::DocumentMeta {
-        id: req.id.as_deref(),
-        doc_type: &req.doc_type,
-        surface: req.surface.as_deref(),
-        status: req.status.as_deref(),
-        priority: req.priority.as_deref(),
-        owner: &req.owner,
-    };
-    // A duplicate caller-supplied id is a caller error (400), not the
-    // generic 500 the blanket LegionError conversion would give it --
-    // everything else `insert_document` can fail with is a genuine
-    // server-side problem and keeps that blanket 500.
-    let doc = db
-        .insert_document(&meta, &payload_str)
-        .map_err(document_write_error)?;
+    let data_dir = state.data_dir.clone();
+    // DB + index work runs in spawn_blocking (MED 3, PR #1039 review): this
+    // synchronously commits to Tantivy (retrying on writer-lock contention,
+    // `search.rs`'s `acquire_writer`, up to ~700ms) and must not tie up a
+    // tokio worker thread. `req` and `schema_summary` move in whole so
+    // `meta` is built from `req`'s fields inside the closure rather than
+    // borrowing across the move.
+    tokio::task::spawn_blocking(
+        move || -> Result<Json<crate::documents::Document>, ServeError> {
+            let db = open_db(&data_dir)?;
+            let index = open_index(&data_dir)?;
+            let meta = crate::documents::DocumentMeta {
+                id: req.id.as_deref(),
+                doc_type: &req.doc_type,
+                surface: req.surface.as_deref(),
+                status: req.status.as_deref(),
+                priority: req.priority.as_deref(),
+                owner: &req.owner,
+            };
+            // A duplicate caller-supplied id is a caller error (400), not
+            // the generic 500 the blanket LegionError conversion would
+            // give it -- everything else `insert_document` can fail with
+            // is a genuine server-side problem and keeps that blanket
+            // 500. Indexed (#1037) via `insert_document_indexed` so a
+            // document created over HTTP is findable through GET
+            // /api/search, same as one created via the CLI. A schema
+            // violation (#1062) maps to 422 with its violation list via
+            // `document_write_error`.
+            let doc = crate::documents::insert_document_indexed(&db, &index, &meta, &payload_str)
+                .map_err(document_write_error)?;
 
-    // Dual-write the pointer reflection (domain=schema), same shared write
-    // as `DocumentAction::Create` and the revise handler below (#1036
-    // review, MED-3) -- the document is already committed by this point, so
-    // a failure here is reported as an internal error rather than rolled
-    // back (matches the CLI's own behavior: the doc exists, the command
-    // reports failure, and the pointer can be re-created by hand).
-    if let Some(summary) = schema_summary {
-        crate::documents::write_schema_pointer(&db, &doc, &summary).map_err(|e| {
-            ServeError::internal(
-                &format!(
-                    "document {} created, but the schema pointer reflection failed",
-                    doc.id
-                ),
-                e,
-            )
-        })?;
-    }
+            // Dual-write the pointer reflection (domain=schema), same
+            // shared write as `DocumentAction::Create` and the revise
+            // handler below (#1036 review, MED-3) -- the document is
+            // already committed by this point, so a failure here is
+            // reported as an internal error rather than rolled back
+            // (matches the CLI's own behavior: the doc exists, the
+            // command reports failure, and the pointer can be re-created
+            // by hand).
+            if let Some(summary) = schema_summary {
+                crate::documents::write_schema_pointer(&db, &doc, &summary).map_err(|e| {
+                    ServeError::internal(
+                        &format!(
+                            "document {} created, but the schema pointer reflection failed",
+                            doc.id
+                        ),
+                        e,
+                    )
+                })?;
+            }
 
-    Ok(Json(doc))
+            Ok(Json(doc))
+        },
+    )
+    .await
+    .map_err(|e| ServeError::internal("blocking task panicked", e))?
 }
 
 /// Shared preamble for the body-save and revise handlers below: fetch the
@@ -527,12 +702,33 @@ pub async fn api_document_update_body(
     Path(id): Path<String>,
     Json(req): Json<UpdateBodyRequest>,
 ) -> Result<Json<crate::documents::Document>, ServeError> {
-    let db = open_db(&state.data_dir)?;
-    load_editable_document(&db, &id)?;
-    Ok(Json(
-        db.update_document_body(&id, &req.body)
-            .map_err(document_write_error)?,
-    ))
+    let data_dir = state.data_dir.clone();
+    // DB + index work runs in spawn_blocking (MED 3, PR #1039 review): this
+    // synchronously commits to Tantivy (retrying on writer-lock contention,
+    // `search.rs`'s `acquire_writer`, up to ~700ms) and must not tie up a
+    // tokio worker thread -- this is the highest-frequency document write
+    // path, called on every debounced editor keystroke pause.
+    tokio::task::spawn_blocking(
+        move || -> Result<Json<crate::documents::Document>, ServeError> {
+            let db = open_db(&data_dir)?;
+            load_editable_document(&db, &id)?;
+            // Index opened only after the existence/archived check above
+            // (same ordering as `api_document_set_status`/
+            // `api_document_revise`, LOW 8).
+            let index = open_index(&data_dir)?;
+            // Indexed (#1037) via `update_document_body_indexed`: `body` is
+            // part of the document's searchable text, so a debounced
+            // editor save must re-index or the index goes stale on every
+            // keystroke pause. A schema violation (#1062) on the merged
+            // payload maps to 422 via `document_write_error`.
+            Ok(Json(
+                crate::documents::update_document_body_indexed(&db, &index, &id, &req.body)
+                    .map_err(document_write_error)?,
+            ))
+        },
+    )
+    .await
+    .map_err(|e| ServeError::internal("blocking task panicked", e))?
 }
 
 /// POST /api/documents/{id}/revise -- a thin HTTP wrapper over
@@ -560,35 +756,52 @@ pub async fn api_document_revise(
     }
     let payload_str = payload.to_string();
 
-    let db = open_db(&state.data_dir)?;
-    let existing = load_editable_document(&db, &id)?;
+    let data_dir = state.data_dir.clone();
+    // DB + index work runs in spawn_blocking (MED 3, PR #1039 review): this
+    // synchronously commits to Tantivy (retrying on writer-lock contention,
+    // `search.rs`'s `acquire_writer`, up to ~700ms) and must not tie up a
+    // tokio worker thread.
+    tokio::task::spawn_blocking(
+        move || -> Result<Json<crate::documents::Document>, ServeError> {
+            let db = open_db(&data_dir)?;
+            let existing = load_editable_document(&db, &id)?;
+            // Index opened only after the existence/archived check above
+            // (LOW 8, PR #1039 review).
+            let index = open_index(&data_dir)?;
 
-    let schema_summary = if existing.doc_type == "schema" {
-        Some(
-            crate::documents::validate_schema_payload(&payload_str)
-                .map_err(|e| ServeError::BadRequest(e.to_string()))?,
-        )
-    } else {
-        None
-    };
+            let schema_summary = if existing.doc_type == "schema" {
+                Some(
+                    crate::documents::validate_schema_payload(&payload_str)
+                        .map_err(|e| ServeError::BadRequest(e.to_string()))?,
+                )
+            } else {
+                None
+            };
 
-    let doc = db
-        .revise_document(&id, &payload_str)
-        .map_err(document_write_error)?;
+            // Indexed (#1037) via `revise_document_indexed` so a revise
+            // over HTTP re-indexes the same as the CLI's `legion document
+            // revise`. A schema violation (#1062) maps to 422 via
+            // `document_write_error`.
+            let doc = crate::documents::revise_document_indexed(&db, &index, &id, &payload_str)
+                .map_err(document_write_error)?;
 
-    if let Some(summary) = schema_summary {
-        crate::documents::write_schema_pointer(&db, &doc, &summary).map_err(|e| {
-            ServeError::internal(
-                &format!(
-                    "document {} revised, but refreshing the schema pointer reflection failed",
-                    doc.id
-                ),
-                e,
-            )
-        })?;
-    }
+            if let Some(summary) = schema_summary {
+                crate::documents::write_schema_pointer(&db, &doc, &summary).map_err(|e| {
+                    ServeError::internal(
+                        &format!(
+                            "document {} revised, but refreshing the schema pointer reflection failed",
+                            doc.id
+                        ),
+                        e,
+                    )
+                })?;
+            }
 
-    Ok(Json(doc))
+            Ok(Json(doc))
+        },
+    )
+    .await
+    .map_err(|e| ServeError::internal("blocking task panicked", e))?
 }
 
 /// Pure builder for the `/health` JSON body. Separated from the axum
@@ -1068,6 +1281,20 @@ mod tests {
         }
     }
 
+    /// Minimal `DocumentMeta` for the `/api/search` tests below -- every one
+    /// of them only varies `id` and `owner`, mirroring `documents.rs`'s own
+    /// `sample_meta` test helper (LOW 7, PR #1039 review).
+    fn sample_search_meta<'a>(id: &'a str, owner: &'a str) -> crate::documents::DocumentMeta<'a> {
+        crate::documents::DocumentMeta {
+            id: Some(id),
+            doc_type: "requirement",
+            surface: None,
+            status: None,
+            priority: None,
+            owner,
+        }
+    }
+
     #[test]
     fn feed_endpoint_matches_legacy_shape() {
         let (db, index, _dir) = test_storage();
@@ -1077,7 +1304,7 @@ mod tests {
             .insert_reflection_with_meta("kelex", "hello team", "team", &ReflectionMeta::default())
             .expect("insert");
         index
-            .add(
+            .add_reflection(
                 &reflection.id,
                 "kelex",
                 "hello team",
@@ -1234,7 +1461,7 @@ mod tests {
     async fn api_post_returns_id_only_shape() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
 
         let (status, body) = http_req(
             port,
@@ -1274,7 +1501,7 @@ mod tests {
         db.insert_document(&meta, "{}").expect("insert");
         drop(db);
 
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
 
         // Publish flips draft -> published and echoes the updated row.
         let (status, body) = http_req(
@@ -1317,13 +1544,15 @@ mod tests {
     /// HTTP semantics (status codes, raw body text) rather than calling
     /// handler functions directly. `data_dir` must already hold a legion.db
     /// (or be empty -- the server opens/creates it lazily per request).
-    async fn spawn_test_server(data_dir: PathBuf) -> u16 {
+    /// `role` matters for #1037: `/api/search` is only registered under
+    /// `ServerRole::Daemon` (see `router`'s doc comment).
+    async fn spawn_test_server(data_dir: PathBuf, role: ServerRole) -> u16 {
         let (tx, _rx) = new_broadcast();
         let state = ChannelState {
             data_dir,
             tx,
             started_at: chrono::Utc::now(),
-            role: ServerRole::Daemon,
+            role,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1368,6 +1597,206 @@ mod tests {
         .expect("spawn_blocking")
     }
 
+    /// Shared preamble for the `/api/search` empty-query and limit=0 tests
+    /// below (LOW 7, PR #1039 review): a daemon-role server with one
+    /// document already indexed under `repo`. Returns the `TempDir` handle
+    /// alongside the port -- it must outlive the running server, so the
+    /// caller has to hold it for the life of the test, not just this
+    /// function.
+    async fn spawn_daemon_with_one_document(repo: &str) -> (u16, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        crate::db::testutil::seed_type_schema(&db, "requirement");
+        let index = SearchIndex::open(&data_dir.join("index")).expect("open index");
+        let meta = sample_search_meta("FR-ANY", repo);
+        crate::documents::insert_document_indexed(&db, &index, &meta, r#"{"title":"anything"}"#)
+            .expect("insert");
+        drop(db);
+        drop(index);
+
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
+        (port, dir)
+    }
+
+    #[tokio::test]
+    async fn api_search_not_registered_under_serve_role() {
+        // `legion serve`'s own app owns /api/search for reflection search
+        // (src/serve.rs); this router must not answer it under
+        // ServerRole::Serve, or merging the two routers would panic on a
+        // route collision (the failure this guard exists to prevent).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let port = spawn_test_server(dir.path().to_path_buf(), ServerRole::Serve).await;
+
+        let (status, _) = http_req(port, "GET", "/api/search?q=mapping&repo=kelex", None).await;
+        assert!(
+            status.starts_with("HTTP/1.1 404"),
+            "ServerRole::Serve must not answer /api/search: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_search_requires_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let port = spawn_test_server(dir.path().to_path_buf(), ServerRole::Daemon).await;
+
+        let (status, body) = http_req(port, "GET", "/api/search?q=mapping", None).await;
+        assert!(status.starts_with("HTTP/1.1 400"), "status: {status}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("parse body");
+        assert!(
+            parsed.get("error").is_some(),
+            "400 body must carry an error message: {body}"
+        );
+    }
+
+    /// Proves BM25 ranking, not just repo-scoping (MED 5, PR #1039 review):
+    /// the weak fixture shares the query term with the strong one (once,
+    /// vs. three times) so both must be excluded-from-nothing and instead
+    /// actually ranked against each other -- a fixture with NO shared term
+    /// can only prove exclusion, since there is only ever one possible hit.
+    #[tokio::test]
+    async fn api_search_returns_ranked_documents_for_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        crate::db::testutil::seed_type_schema(&db, "requirement");
+        let index = SearchIndex::open(&data_dir.join("index")).expect("open index");
+
+        let weak_meta = sample_search_meta("FR-WEAK", "kelex");
+        crate::documents::insert_document_indexed(
+            &db,
+            &index,
+            &weak_meta,
+            r#"{"title":"unrelated topic","description":"one passing mention of mapping, nothing more"}"#,
+        )
+        .expect("insert weak");
+
+        let strong_meta = sample_search_meta("FR-STRONG", "kelex");
+        crate::documents::insert_document_indexed(
+            &db,
+            &index,
+            &strong_meta,
+            r#"{"title":"mapping rules","description":"mapping rules for schema mapping"}"#,
+        )
+        .expect("insert strong");
+
+        // A document owned by a different repo must not leak into this repo's results.
+        let other_repo_meta = sample_search_meta("FR-OTHER", "rafters");
+        crate::documents::insert_document_indexed(
+            &db,
+            &index,
+            &other_repo_meta,
+            r#"{"title":"mapping rules","description":"also about mapping"}"#,
+        )
+        .expect("insert other repo");
+
+        drop(db);
+        drop(index);
+
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
+
+        let (status, body) = http_req(port, "GET", "/api/search?q=mapping&repo=kelex", None).await;
+        assert!(status.starts_with("HTTP/1.1 200"), "status: {status}");
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&body).expect("parse body");
+        assert_eq!(
+            parsed.len(),
+            2,
+            "both repo-scoped documents share the query term and must both rank \
+             (the other-repo document must still not appear): {body}"
+        );
+        assert_eq!(
+            parsed[0]["id"], "FR-STRONG",
+            "the stronger match must rank first: {body}"
+        );
+        assert_eq!(
+            parsed[1]["id"], "FR-WEAK",
+            "the weaker match must rank second: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_search_empty_query_returns_empty_list() {
+        let (port, _dir) = spawn_daemon_with_one_document("kelex").await;
+
+        let (status, body) = http_req(port, "GET", "/api/search?q=&repo=kelex", None).await;
+        assert!(status.starts_with("HTTP/1.1 200"), "status: {status}");
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&body).expect("parse body");
+        assert!(
+            parsed.is_empty(),
+            "empty q must return an empty list: {body}"
+        );
+    }
+
+    /// `TopDocs::with_limit(0)` panics in tantivy 0.22.1 (top_score_collector.rs
+    /// 192-194); `?limit=0` is caller-supplied input that must not reach it.
+    #[tokio::test]
+    async fn api_search_limit_zero_returns_empty_list_not_500() {
+        let (port, _dir) = spawn_daemon_with_one_document("kelex").await;
+
+        let (status, body) = http_req(
+            port,
+            "GET",
+            "/api/search?q=anything&repo=kelex&limit=0",
+            None,
+        )
+        .await;
+        assert!(status.starts_with("HTTP/1.1 200"), "status: {status}");
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&body).expect("parse body");
+        assert!(
+            parsed.is_empty(),
+            "limit=0 must return an empty list: {body}"
+        );
+    }
+
+    /// A deeply nested query, well under `MAX_SEARCH_QUERY_LEN`, must not
+    /// panic the query parser (MED 4, PR #1039 review) -- the length cap
+    /// alone does not rule out a stack overflow from parser recursion on a
+    /// short-but-pathological query, so this exercises the actual parse
+    /// path rather than trusting the cap to cover it.
+    #[tokio::test]
+    async fn api_search_deeply_nested_query_does_not_panic() {
+        let (port, _dir) = spawn_daemon_with_one_document("kelex").await;
+
+        let nested = "(".repeat(200);
+        let path = format!("/api/search?q={nested}&repo=kelex");
+        let (status, body) = http_req(port, "GET", &path, None).await;
+        assert!(
+            status.starts_with("HTTP/1.1 400"),
+            "deeply nested query must be refused before the parser sees it: {status} {body}"
+        );
+        assert!(
+            body.contains("nests parentheses"),
+            "refusal must name the nesting bound: {body}"
+        );
+    }
+
+    /// The nesting helper counts the deepest `(` run, treating unclosed
+    /// opens as depth (the shape that stalls Tantivy's parser), and does
+    /// not go negative on stray `)`.
+    #[test]
+    fn search_query_nesting_counts_deepest_open_run() {
+        assert_eq!(search_query_nesting("plain words"), 0);
+        assert_eq!(search_query_nesting("(a AND b)"), 1);
+        assert_eq!(search_query_nesting("((a) OR (b (c)))"), 3);
+        assert_eq!(search_query_nesting(")))"), 0);
+        assert_eq!(search_query_nesting(&"(".repeat(200)), 200);
+        assert!(
+            search_query_nesting(&"(".repeat(MAX_SEARCH_QUERY_NESTING)) <= MAX_SEARCH_QUERY_NESTING
+        );
+    }
+
+    /// `q` over `MAX_SEARCH_QUERY_LEN` is a 400, not a pass-through to the
+    /// query parser (MED 4, PR #1039 review).
+    #[tokio::test]
+    async fn api_search_query_over_length_cap_is_400() {
+        let (port, _dir) = spawn_daemon_with_one_document("kelex").await;
+
+        let long_query = "a".repeat(MAX_SEARCH_QUERY_LEN + 1);
+        let path = format!("/api/search?q={long_query}&repo=kelex");
+        let (status, _) = http_req(port, "GET", &path, None).await;
+        assert!(status.starts_with("HTTP/1.1 400"), "status: {status}");
+    }
+
     #[tokio::test]
     async fn api_document_create_round_trip_and_generates_id() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1376,7 +1805,7 @@ mod tests {
             let db = Database::open(&data_dir.join("legion.db")).expect("open db");
             crate::db::testutil::seed_type_schema(&db, "thesis");
         }
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
 
         let (status, body) = http_req(
             port,
@@ -1410,11 +1839,56 @@ mod tests {
         assert_eq!(fetched["id"], id);
     }
 
+    /// A document created over HTTP must be findable via GET /api/search
+    /// (#1037), same as one created via the CLI.
+    #[tokio::test]
+    async fn api_document_create_indexes_for_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        {
+            let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+            crate::db::testutil::seed_type_schema(&db, "thesis");
+        }
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
+
+        let (status, body) = http_req(
+            port,
+            "POST",
+            "/api/documents",
+            Some(
+                r#"{"doc_type":"thesis","owner":"legion","payload":{"title":"uniqueCreateSearchTerm"}}"#,
+            ),
+        )
+        .await;
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "create: {status} {body}"
+        );
+        let created: serde_json::Value = serde_json::from_str(&body).expect("parse create body");
+        let id = created["id"].as_str().expect("id").to_string();
+
+        let (status, body) = http_req(
+            port,
+            "GET",
+            "/api/search?q=uniqueCreateSearchTerm&repo=legion",
+            None,
+        )
+        .await;
+        assert!(status.starts_with("HTTP/1.1 200"), "search: {status}");
+        let hits: Vec<serde_json::Value> = serde_json::from_str(&body).expect("parse search body");
+        assert_eq!(
+            hits.len(),
+            1,
+            "created document must be findable via /api/search, exactly once: {body}"
+        );
+        assert_eq!(hits[0]["id"], id);
+    }
+
     #[tokio::test]
     async fn api_document_create_schema_dual_writes_pointer_reflection() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
-        let port = spawn_test_server(data_dir.clone()).await;
+        let port = spawn_test_server(data_dir.clone(), ServerRole::Daemon).await;
 
         let schema_payload = serde_json::json!({
             "$schema": "https://json-schema.org/draft-07/schema#",
@@ -1480,7 +1954,7 @@ mod tests {
     async fn api_document_revise_schema_refreshes_pointer_and_rejects_invalid_payload() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
-        let port = spawn_test_server(data_dir.clone()).await;
+        let port = spawn_test_server(data_dir.clone(), ServerRole::Daemon).await;
 
         let schema_payload = serde_json::json!({
             "$schema": "https://json-schema.org/draft-07/schema#",
@@ -1594,7 +2068,7 @@ mod tests {
             let db = Database::open(&data_dir.join("legion.db")).expect("open db");
             crate::db::testutil::seed_type_schema(&db, "thesis");
         }
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
 
         let (status, _) = http_req(
             port,
@@ -1654,7 +2128,7 @@ mod tests {
     async fn api_document_create_validates_doc_type_and_surface() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
 
         let (status, _) = http_req(
             port,
@@ -1699,7 +2173,7 @@ mod tests {
             .expect("insert");
         assert_eq!(db.document_revision("TH-BODY-1").unwrap(), 1);
 
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
         let (status, body) = http_req(
             port,
             "PUT",
@@ -1724,6 +2198,51 @@ mod tests {
         );
     }
 
+    /// `body` is part of the document's indexed text (#1037), so a body
+    /// save must re-index. The query term exists ONLY in the newly saved
+    /// body -- a hit proves the save re-indexed, not that a stale entry
+    /// from before the save happened to survive.
+    #[tokio::test]
+    async fn api_document_update_body_indexes_body_text_for_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        crate::db::testutil::seed_type_schema(&db, "thesis");
+        let meta = crate::documents::DocumentMeta {
+            id: Some("TH-BODYSEARCH-1"),
+            doc_type: "thesis",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "legion",
+        };
+        db.insert_document(&meta, r#"{"title":"bodySearchHolder"}"#)
+            .expect("insert");
+        drop(db);
+
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
+        let (status, _) = http_req(
+            port,
+            "PUT",
+            "/api/documents/TH-BODYSEARCH-1/body",
+            Some(r#"{"body":"exclusiveBodyOnlyTerm appears nowhere else"}"#),
+        )
+        .await;
+        assert!(status.starts_with("HTTP/1.1 200"), "body save: {status}");
+
+        let (status, body) = http_req(
+            port,
+            "GET",
+            "/api/search?q=exclusiveBodyOnlyTerm&repo=legion",
+            None,
+        )
+        .await;
+        assert!(status.starts_with("HTTP/1.1 200"), "search: {status}");
+        let hits: Vec<serde_json::Value> = serde_json::from_str(&body).expect("parse search body");
+        assert_eq!(hits.len(), 1, "body save must index body text: {body}");
+        assert_eq!(hits[0]["id"], "TH-BODYSEARCH-1");
+    }
+
     #[tokio::test]
     async fn api_document_revise_bumps_revision_and_replaces_payload() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1742,7 +2261,7 @@ mod tests {
             .expect("insert");
         assert_eq!(db.document_revision("TH-REVISE-1").unwrap(), 1);
 
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
         let (status, body) = http_req(
             port,
             "POST",
@@ -1781,11 +2300,88 @@ mod tests {
         assert_eq!(db.document_revision("TH-REVISE-1").unwrap(), 3);
     }
 
+    /// A revise over HTTP must re-index (#1037): proves both directions,
+    /// the pre-revise text stops matching (no stale ghost) and the revised
+    /// text matches exactly once (no duplicate entry) -- the same
+    /// delete-then-add guarantee `add_document_replaces_prior_entry_for_same_id`
+    /// (src/search.rs) proves at the SearchIndex level, closed here at the
+    /// HTTP handler level. Seeded via `insert_document_indexed`, not the
+    /// bare `Database::insert_document` (MED 6, PR #1039 review) -- the
+    /// bare DB method never touches the search index, so the pre-revise
+    /// text has to actually be IN the index before the revise call for the
+    /// "stale text is gone" assertion below to prove anything.
+    #[tokio::test]
+    async fn api_document_revise_reindexes_for_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let db = Database::open(&data_dir.join("legion.db")).expect("open db");
+        crate::db::testutil::seed_type_schema(&db, "thesis");
+        let index = SearchIndex::open(&data_dir.join("index")).expect("open index");
+        let meta = crate::documents::DocumentMeta {
+            id: Some("TH-REINDEX-1"),
+            doc_type: "thesis",
+            surface: None,
+            status: None,
+            priority: None,
+            owner: "legion",
+        };
+        crate::documents::insert_document_indexed(
+            &db,
+            &index,
+            &meta,
+            r#"{"title":"originalReviseTerm"}"#,
+        )
+        .expect("insert");
+        drop(db);
+        drop(index);
+
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
+        let (status, _) = http_req(
+            port,
+            "POST",
+            "/api/documents/TH-REINDEX-1/revise",
+            Some(r#"{"title":"revisedSearchTerm"}"#),
+        )
+        .await;
+        assert!(status.starts_with("HTTP/1.1 200"), "revise: {status}");
+
+        // Stale pre-revise text must not still match.
+        let (status, body) = http_req(
+            port,
+            "GET",
+            "/api/search?q=originalReviseTerm&repo=legion",
+            None,
+        )
+        .await;
+        assert!(status.starts_with("HTTP/1.1 200"), "stale search: {status}");
+        let stale: Vec<serde_json::Value> = serde_json::from_str(&body).expect("parse body");
+        assert!(
+            stale.is_empty(),
+            "stale pre-revise text must not match: {body}"
+        );
+
+        let (status, body) = http_req(
+            port,
+            "GET",
+            "/api/search?q=revisedSearchTerm&repo=legion",
+            None,
+        )
+        .await;
+        assert!(status.starts_with("HTTP/1.1 200"), "search: {status}");
+        let hits: Vec<serde_json::Value> = serde_json::from_str(&body).expect("parse search body");
+        assert_eq!(
+            hits.len(),
+            1,
+            "revise must re-index without duplicating: {body}"
+        );
+        assert_eq!(hits[0]["id"], "TH-REINDEX-1");
+    }
+
     #[tokio::test]
     async fn api_document_body_and_revise_404_for_unknown_id() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
 
         let (status, _) = http_req(
             port,
@@ -1820,7 +2416,7 @@ mod tests {
         db.insert_document(&meta, "{}").expect("insert");
         db.archive_document("TH-ARCHIVED-1").expect("archive");
 
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
         let (status, _) = http_req(
             port,
             "PUT",
@@ -1880,7 +2476,7 @@ mod tests {
             let db = Database::open(&data_dir.join("legion.db")).expect("open db");
             seed_schema_doc(&db, &gizmo_schema());
         }
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
 
         let (status, body) = http_req(
             port,
@@ -1937,7 +2533,7 @@ mod tests {
             .expect("insert gizmo");
         drop(db);
 
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
         let (status, body) = http_req(port, "POST", "/api/documents/GZ-1/revise", Some("{}")).await;
         assert!(
             status.starts_with("HTTP/1.1 422"),
@@ -1984,7 +2580,7 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
         let (status, body) = http_req(
             port,
             "PUT",
@@ -2017,7 +2613,7 @@ mod tests {
     async fn api_document_create_refuses_stack_overflow_shaped_schema_and_server_survives() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().to_path_buf();
-        let port = spawn_test_server(data_dir).await;
+        let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
 
         const N: usize = 600;
         let mut definitions = serde_json::Map::new();

@@ -355,7 +355,7 @@ pub(crate) fn handle_done(
         "team",
         &db::ReflectionMeta::default(),
     )?;
-    if let Err(e) = index.add(
+    if let Err(e) = index.add_reflection(
         &reflection.id,
         &reflection.repo,
         &announcement,
@@ -376,7 +376,7 @@ pub(crate) fn handle_done(
             "team",
             &db::ReflectionMeta::default(),
         )?;
-        if let Err(e) = index.add(
+        if let Err(e) = index.add_reflection(
             &notify_ref.id,
             &notify_ref.repo,
             &notify_text,

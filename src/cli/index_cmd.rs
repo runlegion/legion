@@ -7,7 +7,7 @@ use clap::Subcommand;
 
 use crate::cli::datadir::data_dir;
 use crate::cli::util::{open_db, open_db_and_index};
-use crate::{css, db, error, etc, graph, inventory, scip, sym, telemetry, watch};
+use crate::{css, db, error, etc, graph, inventory, scip, search, sym, telemetry, watch};
 
 #[derive(Subcommand)]
 pub(crate) enum SymAction {
@@ -3584,13 +3584,45 @@ pub(crate) fn handle_sym(action: SymAction) -> error::Result<()> {
     Ok(())
 }
 
+/// Fetch every reflection and document from the database and rebuild the
+/// search index from them in one commit. `handle_reindex` and
+/// `handle_rename` both need this identical fetch-then-rebuild sequence
+/// (#1037: the search index carries documents alongside reflections, so a
+/// reindex that only refetched reflections would leave every document
+/// unsearchable after a schema-mismatch wipe). Returns
+/// `(reflection_count, document_count, skipped_count)` -- `skipped_count`
+/// is `SearchIndex::rebuild`'s count of rows it could not index (e.g. a
+/// non-RFC3339 `created_at`) and skipped with a warning rather than
+/// aborting the whole rebuild -- so each caller can report the numbers in
+/// its own message shape.
+fn rebuild_index_from_db(
+    database: &db::Database,
+    index: &search::SearchIndex,
+) -> error::Result<(usize, usize, usize)> {
+    let reflections = database.get_all_for_reindex()?;
+    let documents = database.get_all_documents_for_reindex()?;
+    let reflection_count = reflections.len();
+    let document_count = documents.len();
+    let skipped_count = index.rebuild(&reflections, &documents)?;
+    Ok((reflection_count, document_count, skipped_count))
+}
+
 pub(crate) fn handle_reindex() -> error::Result<()> {
     let (database, index) = open_db_and_index()?;
 
-    let reflections = database.get_all_for_reindex()?;
-    let count = reflections.len();
-    index.rebuild(&reflections)?;
-    info!("[legion] reindexed {} reflections", count);
+    let (reflection_count, document_count, skipped_count) =
+        rebuild_index_from_db(&database, &index)?;
+    if skipped_count > 0 {
+        info!(
+            "[legion] reindexed {} reflections, {} documents ({} rows skipped -- see warnings above)",
+            reflection_count, document_count, skipped_count
+        );
+    } else {
+        info!(
+            "[legion] reindexed {} reflections, {} documents",
+            reflection_count, document_count
+        );
+    }
     Ok(())
 }
 
@@ -3634,11 +3666,20 @@ pub(crate) fn handle_rename(from: String, to: String) -> error::Result<()> {
         counts.schedules
     );
 
-    // Reindex since repo name is in the search index
-    let reflections = database.get_all_for_reindex()?;
-    let reindex_count = reflections.len();
-    index.rebuild(&reflections)?;
-    eprintln!("[legion] reindexed {} reflections", reindex_count);
+    // Reindex since repo name is in the search index. `rename_repo` does
+    // not touch the `documents` table (a repo rename does not rename
+    // document ownership), but `rebuild_index_from_db` repopulates both
+    // corpora from the database in one commit (#1037), so documents are
+    // fetched too.
+    let (reindex_count, _document_count, skipped_count) = rebuild_index_from_db(&database, &index)?;
+    if skipped_count > 0 {
+        eprintln!(
+            "[legion] reindexed {} reflections ({} rows skipped -- see warnings above)",
+            reindex_count, skipped_count
+        );
+    } else {
+        eprintln!("[legion] reindexed {} reflections", reindex_count);
+    }
 
     // Update watch.toml
     let watch_path = data_dir()?.join("watch.toml");

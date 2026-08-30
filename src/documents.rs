@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::db::{Database, ReflectionMeta};
 use crate::error::{LegionError, Result};
+use crate::search::SearchIndex;
 
 /// A document row. The `payload` field is the raw validated JSON; the
 /// indexed columns are hoisted from `payload.meta` at insert time so
@@ -418,6 +419,182 @@ impl Database {
             LegionError::WorkSource(format!("document '{id}' vanished after set-status"))
         })
     }
+
+    /// Retrieve every document for reindexing (#1037), archived included.
+    ///
+    /// Mirrors `get_all_for_reindex` for reflections: only soft-deleted
+    /// rows (`deleted_at`) are excluded. `list_documents`'s `archived`
+    /// filter can only select hot-only or archived-only, never both --
+    /// using it here would silently drop archived documents from a
+    /// rebuilt index even though they must stay searchable (the write path
+    /// re-indexes an archived document on `archive_document_indexed`, so
+    /// this method and that write path must agree on what "every document"
+    /// means).
+    pub fn get_all_documents_for_reindex(&self) -> Result<Vec<Document>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, type, surface, status, priority, owner, payload, archived_at, created_at, updated_at \
+             FROM documents WHERE deleted_at IS NULL",
+        )?;
+        let rows = stmt.query_map([], map_document_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+}
+
+/// Extract the searchable text for a document's search-index entry
+/// (#1037): `title`, `description`, and `body` (all three, when present --
+/// the app's top-bar search is over documents whose content IS
+/// `payload.body`, the editor's document, so it cannot be dropped in
+/// favor of `description`) from the parsed payload, plus `doc_type` and
+/// `surface` -- the same fields a human would scan when picking a document
+/// out of a list.
+///
+/// Infallible: a payload that is not valid JSON, or not a JSON object,
+/// contributes no text beyond `doc_type`/`surface` rather than failing --
+/// this runs after the document's DB write has already committed, so a
+/// malformed payload must never turn a successful write into a failed
+/// index update.
+pub fn document_search_text(doc: &Document) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(&doc.payload) {
+        for field in ["title", "description", "body"] {
+            if let Some(value) = obj.get(field).and_then(|v| v.as_str()) {
+                parts.push(value.to_string());
+            }
+        }
+    }
+
+    parts.push(doc.doc_type.clone());
+    if let Some(surface) = &doc.surface {
+        parts.push(surface.clone());
+    }
+
+    parts.join(" ")
+}
+
+/// Write a document's search-index entry (#1037): derive its searchable
+/// text via [`document_search_text`] and hand it to
+/// `SearchIndex::add_document`, which deletes any prior entry for the same
+/// id before adding the new one. Shared by every `*_indexed` write-path
+/// wrapper below so the derive-then-add step exists in exactly one place.
+fn index_document(index: &SearchIndex, doc: &Document) -> Result<()> {
+    index.add_document(
+        &doc.id,
+        &doc.owner,
+        &document_search_text(doc),
+        &doc.created_at,
+    )
+}
+
+/// Best-effort re-index for a document row already committed to the
+/// database by one of the `*_indexed` wrappers below, warning (not
+/// failing) on error. The DB write is the source of truth and has already
+/// landed by the time this runs -- an index straggler (e.g. a writer-lock
+/// timeout, `search.rs`'s `acquire_writer`) must not turn an already-
+/// durable write into an HTTP 500, and for `insert_document_indexed`/
+/// `revise_document_indexed` in particular, propagating the error here
+/// would also skip the caller's schema-pointer dual-write that runs after
+/// a successful return. `legion reindex` is the recovery path. Mirrors
+/// `identity_generate.rs`'s `warn_on_index_add_failure` / `cli/issue.rs`'s
+/// equivalent for the identical "primary write durable, side-effect can
+/// fail" situation.
+fn warn_on_index_write_failure(index: &SearchIndex, doc: &Document) {
+    if let Err(e) = index_document(index, doc) {
+        eprintln!(
+            "[legion documents] WARNING: document '{}' was written to the database but the \
+             search index update failed.\n\
+             It will not surface in search results until the index is rebuilt. Run `legion \
+             reindex` to reconcile.\n\
+             Underlying error: {e}",
+            doc.id
+        );
+    }
+}
+
+/// Insert a new document and index it for search in one call (#1037).
+///
+/// Composes `Database::insert_document` with `SearchIndex::add_document`
+/// the same way `reflect_from_text_with_meta` composes reflection insert
+/// with reflection indexing: the DB write is the source of truth, the
+/// index write follows it. `repo` in the index is the document's `owner`
+/// column (`SearchIndex::add_document`'s doc comment). The index write is
+/// best-effort -- see [`warn_on_index_write_failure`] -- so this always
+/// returns the inserted row once the DB write succeeds.
+pub fn insert_document_indexed(
+    db: &Database,
+    index: &SearchIndex,
+    meta: &DocumentMeta<'_>,
+    payload: &str,
+) -> Result<Document> {
+    let doc = db.insert_document(meta, payload)?;
+    warn_on_index_write_failure(index, &doc);
+    Ok(doc)
+}
+
+/// Revise a document's payload and re-index it for search in one call
+/// (#1037). `SearchIndex::add_document` deletes the prior entry for this
+/// id before adding the new one, so a revise never leaves a stale-text
+/// ghost or a duplicate hit behind. The index write is best-effort -- see
+/// [`warn_on_index_write_failure`].
+pub fn revise_document_indexed(
+    db: &Database,
+    index: &SearchIndex,
+    id: &str,
+    payload: &str,
+) -> Result<Document> {
+    let doc = db.revise_document(id, payload)?;
+    warn_on_index_write_failure(index, &doc);
+    Ok(doc)
+}
+
+/// Save the editor's working-copy body and re-index it for search in one
+/// call (#1037). `body` is part of `document_search_text`'s indexed text,
+/// so a body save that skipped re-indexing would silently diverge the
+/// index from the row on every edit -- and this is the highest-frequency
+/// document write path, called on every debounced editor keystroke pause.
+/// The index write is best-effort -- see [`warn_on_index_write_failure`].
+pub fn update_document_body_indexed(
+    db: &Database,
+    index: &SearchIndex,
+    id: &str,
+    body: &str,
+) -> Result<Document> {
+    let doc = db.update_document_body(id, body)?;
+    warn_on_index_write_failure(index, &doc);
+    Ok(doc)
+}
+
+/// Set a document's lifecycle status and re-index it for search in one
+/// call (#1037). The status change does not alter the searchable text,
+/// but re-indexing keeps the index's `created_at`/`repo` fields aligned
+/// with the row and (via the delete-first semantics of `add_document`)
+/// guards against ever accumulating more than one index entry per id. The
+/// index write is best-effort -- see [`warn_on_index_write_failure`].
+pub fn set_document_status_indexed(
+    db: &Database,
+    index: &SearchIndex,
+    id: &str,
+    status: &str,
+) -> Result<Document> {
+    let doc = db.set_document_status(id, status)?;
+    warn_on_index_write_failure(index, &doc);
+    Ok(doc)
+}
+
+/// Archive a document and re-index it for search in one call (#1037).
+///
+/// Archived documents stay searchable (`get_document`/`GET
+/// /api/documents/{id}` still serve them; only `list_documents`'s default
+/// filter hides them), so archiving re-indexes rather than deletes. The
+/// index write is best-effort -- see [`warn_on_index_write_failure`].
+pub fn archive_document_indexed(db: &Database, index: &SearchIndex, id: &str) -> Result<Document> {
+    let doc = db.archive_document(id)?;
+    warn_on_index_write_failure(index, &doc);
+    Ok(doc)
 }
 
 /// Extension keyword on a schema document's payload that declares the
@@ -2280,5 +2457,273 @@ mod tests {
                      document previously carried a malformed entry",
         );
         assert!(revised.payload.contains("fixed criterion"));
+    }
+
+    // -- #1037: documents in the search index ------------------------------
+
+    #[test]
+    fn document_search_text_uses_title_and_description() {
+        let doc = Document {
+            id: "doc-1".into(),
+            doc_type: "requirement".into(),
+            surface: Some("email".into()),
+            status: "draft".into(),
+            priority: None,
+            owner: "mail".into(),
+            payload: r#"{"title":"Thread detail","description":"how threads render"}"#.into(),
+            archived_at: None,
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            updated_at: "2026-01-01T00:00:00+00:00".into(),
+        };
+        let text = document_search_text(&doc);
+        assert!(text.contains("Thread detail"));
+        assert!(text.contains("how threads render"));
+        assert!(text.contains("requirement"));
+        assert!(text.contains("email"));
+    }
+
+    #[test]
+    fn document_search_text_includes_body_without_description() {
+        let doc = Document {
+            id: "doc-1".into(),
+            doc_type: "nfr".into(),
+            surface: None,
+            status: "draft".into(),
+            priority: None,
+            owner: "mail".into(),
+            payload: r#"{"title":"Latency budget","body":"p99 under 200ms"}"#.into(),
+            archived_at: None,
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            updated_at: "2026-01-01T00:00:00+00:00".into(),
+        };
+        let text = document_search_text(&doc);
+        assert!(text.contains("Latency budget"));
+        assert!(text.contains("p99 under 200ms"));
+    }
+
+    /// The app's top-bar search is over documents whose content IS
+    /// `payload.body` (the editor's document), so `description` must not
+    /// suppress `body` -- both are indexed together, alongside `title`.
+    #[test]
+    fn document_search_text_includes_title_description_and_body_together() {
+        let doc = Document {
+            id: "doc-1".into(),
+            doc_type: "spec".into(),
+            surface: None,
+            status: "draft".into(),
+            priority: None,
+            owner: "mail".into(),
+            payload: r#"{"title":"Thread detail","description":"how threads render","body":"the full editor document text"}"#.into(),
+            archived_at: None,
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            updated_at: "2026-01-01T00:00:00+00:00".into(),
+        };
+        let text = document_search_text(&doc);
+        assert!(text.contains("Thread detail"));
+        assert!(text.contains("how threads render"));
+        assert!(
+            text.contains("the full editor document text"),
+            "body must not be dropped when description is present: {text}"
+        );
+    }
+
+    #[test]
+    fn document_search_text_handles_malformed_payload_without_failing() {
+        let doc = Document {
+            id: "doc-1".into(),
+            doc_type: "persona".into(),
+            surface: Some("vault".into()),
+            status: "draft".into(),
+            priority: None,
+            owner: "vault".into(),
+            payload: "not json at all".into(),
+            archived_at: None,
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            updated_at: "2026-01-01T00:00:00+00:00".into(),
+        };
+        // Never fails -- a malformed payload just yields less text.
+        let text = document_search_text(&doc);
+        assert_eq!(text, "persona vault");
+    }
+
+    #[test]
+    fn index_document_writes_derived_text_to_search_index() {
+        let (_db, index, _dir) = crate::testutil::test_storage();
+        let doc = Document {
+            id: "doc-1".into(),
+            doc_type: "requirement".into(),
+            surface: None,
+            status: "draft".into(),
+            priority: None,
+            owner: "mail".into(),
+            payload: r#"{"title":"Thread detail","description":"how threads render"}"#.into(),
+            archived_at: None,
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            updated_at: "2026-01-01T00:00:00+00:00".into(),
+        };
+
+        index_document(&index, &doc).expect("index_document");
+
+        let hits = index
+            .search_documents("mail", "thread render", 5)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "doc-1");
+    }
+
+    #[test]
+    fn insert_document_indexed_writes_to_search_index() {
+        let (db, index, _dir) = crate::testutil::test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
+        let meta = sample_meta("requirement", "mail");
+        let payload = r#"{"title":"Thread detail","description":"how threads render"}"#;
+        let doc = insert_document_indexed(&db, &index, &meta, payload).expect("insert");
+
+        let hits = index
+            .search_documents("mail", "thread render", 5)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, doc.id);
+    }
+
+    #[test]
+    fn revise_document_indexed_reindexes_without_duplicating() {
+        let (db, index, _dir) = crate::testutil::test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
+        let mut meta = sample_meta("requirement", "mail");
+        meta.id = Some("FR-REVISE-1");
+        // Deliberately disjoint vocabulary between the two revisions (no
+        // shared words, including the `doc_type`/`surface` terms
+        // `document_search_text` appends -- both revisions carry
+        // "requirement") so a hit on the stale query can only come from a
+        // ghost entry, never from Tantivy's default OR-combined query
+        // parser matching a shared token.
+        insert_document_indexed(&db, &index, &meta, r#"{"title":"exclusiveDraftAlpha"}"#)
+            .expect("insert");
+
+        revise_document_indexed(
+            &db,
+            &index,
+            "FR-REVISE-1",
+            r#"{"title":"distinctFinalBeta"}"#,
+        )
+        .expect("revise");
+
+        // Old title text is gone -- the revised entry replaced it, not
+        // just accumulated alongside it.
+        let stale = index
+            .search_documents("mail", "exclusiveDraftAlpha", 5)
+            .expect("search stale");
+        assert!(stale.is_empty(), "stale pre-revision text must not match");
+
+        let hits = index
+            .search_documents("mail", "distinctFinalBeta", 5)
+            .expect("search fresh");
+        assert_eq!(hits.len(), 1, "revise must not duplicate the index entry");
+        assert_eq!(hits[0].id, "FR-REVISE-1");
+    }
+
+    /// Status is not part of `document_search_text`'s indexed text, so this
+    /// cannot observe content freshness -- it proves the narrower thing the
+    /// name says: `add_document`'s delete-then-add semantics mean a
+    /// re-index on every write (status change included) never leaves a
+    /// second index entry behind for the same id. `revise_document_indexed_
+    /// reindexes_without_duplicating` above is the test that proves content
+    /// freshness (LOW 13, PR #1039 review).
+    #[test]
+    fn set_document_status_indexed_does_not_duplicate_index_entry() {
+        let (db, index, _dir) = crate::testutil::test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
+        let mut meta = sample_meta("requirement", "mail");
+        meta.id = Some("FR-STATUS-1");
+        insert_document_indexed(&db, &index, &meta, r#"{"title":"Status target"}"#)
+            .expect("insert");
+
+        set_document_status_indexed(&db, &index, "FR-STATUS-1", "published").expect("set status");
+
+        let hits = index
+            .search_documents("mail", "Status target", 5)
+            .expect("search");
+        assert_eq!(
+            hits.len(),
+            1,
+            "a status change must re-index, not add a second entry"
+        );
+        assert_eq!(hits[0].id, "FR-STATUS-1");
+    }
+
+    /// MED 1 (PR #1039 review): a post-commit index-write failure must warn
+    /// and return `Ok(doc)`, not fail the whole call -- the DB write is
+    /// already durable by the time the index leg runs. Corrupts
+    /// `created_at` directly via SQL (bypassing `set_document_status`,
+    /// which never touches that column) so `SearchIndex::add_document`'s
+    /// `build_doc` -> `parse_rfc3339_to_tantivy_date` fails deterministically,
+    /// without relying on filesystem/lock tricks that would be
+    /// platform-dependent against a real Tantivy index.
+    #[test]
+    fn set_document_status_indexed_warns_and_returns_ok_when_index_write_fails() {
+        let (db, index, _dir) = crate::testutil::test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
+        let mut meta = sample_meta("requirement", "mail");
+        meta.id = Some("FR-WARN-1");
+        insert_document_indexed(&db, &index, &meta, r#"{"title":"Warn target"}"#).expect("insert");
+
+        db.conn
+            .execute(
+                "UPDATE documents SET created_at = ?1 WHERE id = ?2",
+                params!["not-a-timestamp", "FR-WARN-1"],
+            )
+            .expect("corrupt created_at");
+
+        let doc = set_document_status_indexed(&db, &index, "FR-WARN-1", "published")
+            .expect("an index-write failure must not fail the DB write");
+        assert_eq!(doc.status, "published");
+
+        let refetched = db
+            .get_document("FR-WARN-1")
+            .expect("get")
+            .expect("row must exist -- the DB write committed regardless of the index failure");
+        assert_eq!(refetched.status, "published");
+    }
+
+    #[test]
+    fn archive_document_indexed_stays_searchable() {
+        let (db, index, _dir) = crate::testutil::test_storage();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
+        let mut meta = sample_meta("requirement", "mail");
+        meta.id = Some("FR-ARCHIVE-1");
+        insert_document_indexed(&db, &index, &meta, r#"{"title":"Archived target"}"#)
+            .expect("insert");
+
+        let archived = archive_document_indexed(&db, &index, "FR-ARCHIVE-1").expect("archive");
+        assert!(archived.archived_at.is_some());
+
+        let hits = index
+            .search_documents("mail", "Archived target", 5)
+            .expect("search");
+        assert_eq!(hits.len(), 1, "an archived document must remain searchable");
+        assert_eq!(hits[0].id, "FR-ARCHIVE-1");
+    }
+
+    #[test]
+    fn get_all_documents_for_reindex_includes_archived_and_hot() {
+        let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
+        let mut hot_meta = sample_meta("requirement", "mail");
+        hot_meta.id = Some("FR-HOT-1");
+        db.insert_document(&hot_meta, "{}").unwrap();
+
+        let mut archived_meta = sample_meta("requirement", "mail");
+        archived_meta.id = Some("FR-ARCHIVED-1");
+        db.insert_document(&archived_meta, "{}").unwrap();
+        db.archive_document("FR-ARCHIVED-1").unwrap();
+
+        let all = db.get_all_documents_for_reindex().unwrap();
+        let ids: Vec<&str> = all.iter().map(|d| d.id.as_str()).collect();
+        assert!(ids.contains(&"FR-HOT-1"));
+        assert!(
+            ids.contains(&"FR-ARCHIVED-1"),
+            "reindex must not silently drop archived documents"
+        );
     }
 }
