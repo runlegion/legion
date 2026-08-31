@@ -1,5 +1,52 @@
 # Legion Changelog
 
+## 0.37.1
+
+The service-design release. The service-design pipeline -- hypothesize services, prove or
+kill the pains underneath them against real discourse, and only then draw the artifacts --
+was settled in reflections and proven by hand, but nothing in the plugin carried it, so
+only a session with this machine's memory could run it. This release ships the pipeline as
+seven skills, so any node can conduct a repo's service design end to end, and ships them
+already proven: every skill ran live before merge, and the friction those runs surfaced is
+folded into the shipped text. Patch release: seven additive SKILL.md files within the
+plugin's existing skills surface, no binary code change, no wire-format change, no schema
+migration -- cut on its own rather than riding the next feature arc so nodes get the
+skills now.
+
+### Added
+
+- **Seven service-design writer skills in the plugin** (PR #1069, #1068).
+  `sd-service-design` is the conductor, written as instructions the invoking agent
+  follows: it orders the steps -- `sd-thesis-review` (thesis in, research agenda out),
+  `sd-pain-listen` (agenda in, one schema-valid painmatrix out), `sd-ecosystem-imagine`
+  (thesis plus painmatrix in, one ecosystem document out) -- gates each step on the
+  previous document validating, and spells the writer dependency chain: a persona before
+  its journey, that journey before its blueprint, with only separate persona chains
+  running in parallel. It refuses out-of-order execution and any artifact for a repo with
+  no thesis, and a step that cannot finish parks instead of guessing -- a draft document
+  with the blocked items named inside it, an anchor reflection at the exact resume point,
+  a defer to wake on. Each writer resolves its schema from the live store by `x-doc-type`
+  at run time and validates before create, and its stated meta contract matches the live
+  schemas -- `status`, `date`, and `author` required; status enum `draft`/`review`/`done`
+  -- because the first test run caught all three writers understating exactly that.
+  `sd-pain-listen` carries what the discovery run proved: the real eavesdrop sequence
+  (init, hand-edit the config's sources, crawl by lens name), the two-pass cadence -- a
+  fresh corpus supports only an orientation pass, which re-arms the defer; the
+  authoritative scoring runs on the park wake and clears it -- and three park states
+  (missing corpus, crawl in flight, blocked on source depth, the last escalated as a
+  source-mix decision rather than crawled harder). The conventions the test documents
+  established are stated in the governing skills rather than left to a future writer's
+  judgment: composed quotes marked as composed, planned machinery marked PLANNED, a
+  phase's `emotional_end` as the step score, and `legion://document/<id>` for
+  store-internal evidence links. The proof ran before the merge: three cold agents landed
+  schema-valid persona, journey, and blueprint documents on the forger surface on their
+  first validation attempts, and the courses discovery run parked a painmatrix against a
+  genuinely missing corpus and resumed it once the crawl landed. The T6 controlled emotion-word
+  list and T7 register dispatch remain open operator decisions -- the skills ship with
+  words-from-evidence and the register held in-document -- and reconciling the painmatrix
+  `meta.threshold` description with pain-listen's disconfirm-bar reading is deliberately
+  left for a schema issue.
+
 ## 0.37.0
 
 The documents release. The legion-app document view (#1032) needed three things from the
