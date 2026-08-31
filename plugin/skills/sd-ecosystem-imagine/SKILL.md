@@ -1,11 +1,11 @@
 ---
 name: sd-ecosystem-imagine
 description: |
-  The imagination step of service design: five light perspective passes over the thesis and
-  proven pains -- actor-walk, boundary-walk, second-order, value-lifecycle,
+  The imagination step of service design: five light perspective passes over the intent and
+  supported insights -- actor-walk, boundary-walk, second-order, value-lifecycle,
   evidence-adversarial -- unioned and weighted by cross-lens convergence, landing one
   schema-valid Ecosystem document plus a register of flagged unknowns. The one step that
-  earns multi-pass cost. Invoke after sd-pain-listen lands the painmatrix.
+  earns multi-pass cost. Invoke after sd-discover lands the Discovery.
 version: 0.1.0
 user-invocable: true
 allowed-tools: Bash, Read
@@ -21,8 +21,8 @@ five find together.
 
 ## Inputs
 
-The thesis document and the landed Painmatrix, by id. Nothing else: the lenses ground in
-proven pains and thesis facts, and flag everything they cannot ground.
+The intent document and the landed Discovery, by id. Nothing else: the lenses ground in
+supported insights and intent facts, and flag everything they cannot ground.
 
 ## The five passes
 
@@ -34,13 +34,13 @@ polices its own confabulation; the structure that matters is the seat).
    enter, hand off, get stuck, leave.
 2. **boundary-walk** -- walk the service's edges: what crosses in and out, what happens at
    each crossing, who owns each side.
-3. **second-order** -- for every fix the thesis proposes, where does the problem move; who
+3. **second-order** -- for every fix the intent proposes, where does the problem move; who
    inherits it.
 4. **value-lifecycle** -- where value and money enter, accrue, and leak, over the life of
    the relationship, not the session.
-5. **evidence-adversarial** -- attack the map with the painmatrix: which claimed
-   exchanges have no proven pain underneath, which proven pains have no exchange serving
-   them.
+5. **evidence-adversarial** -- attack the map with the Discovery: which claimed
+   exchanges have no supported insight underneath, which supported insights have no
+   exchange serving them.
 
 ## Union, weight, land
 
@@ -66,12 +66,12 @@ legion document validate --schema <schema-id> --file ecosystem.json
 legion document create --doc-type ecosystem --owner <agent> --surface <surface> --from ecosystem.json
 ```
 
-(`--surface` is the service surface -- the same surface the thesis carries. The ecosystem
+(`--surface` is the service surface -- the same surface the intent carries. The ecosystem
 schema's meta also requires `status`, `date`, and `author` alongside `title` and
 `core_service`; status enum draft/review/done, `author` = the invoking agent.)
 
 - **The register:** everything flagged-not-grounded, split in two: unknowns the world can
-  answer (candidate crawls or queries -- feed them back toward pain-listen) and questions
+  answer (candidate crawls or queries -- feed them back toward sd-discover) and questions
   only the operator can answer. Where the register routes automatically (T7) is
   unconverged design -- until that converges, write the register into the ecosystem
   document's failure-mode notes and report it to whoever invoked you. Dispatch nothing.
@@ -80,5 +80,5 @@ schema's meta also requires `status`, `date`, and `author` alongside `title` and
 
 - Running the lens passes with edge-answers or examples baked into the prompt.
 - Promoting a single-lens edge to core, or dropping it for being single-lens.
-- Grounding an exchange on a killed pain, or on evidence not in the painmatrix.
+- Grounding an exchange on a contradicted claim, or on evidence not in the Discovery.
 - Dispatching the register anywhere.
