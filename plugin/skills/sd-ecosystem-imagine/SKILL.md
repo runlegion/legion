@@ -68,10 +68,10 @@ schema's meta also requires `status`, `date`, and `author` alongside `title` and
 `core_service`; status enum draft/review/done, `author` = the invoking agent.)
 
 - **The register:** everything flagged-not-grounded, split in two: unknowns the world can
-  answer (candidate crawls or queries -- feed them back toward pain-listen) and decisions
-  only the operator can make. Where the register goes automatically (T7) is an open
-  operator decision -- until ruled, write the register into the ecosystem document's
-  failure-mode notes and report it to whoever invoked you. Dispatch nothing.
+  answer (candidate crawls or queries -- feed them back toward pain-listen) and questions
+  only the operator can answer. Where the register routes automatically (T7) is
+  unconverged design -- until that converges, write the register into the ecosystem
+  document's failure-mode notes and report it to whoever invoked you. Dispatch nothing.
 
 ## Refuses
 

@@ -74,6 +74,26 @@ For each pain with evidence available:
 - **Emergent pains:** discourse that keeps returning to a pain the thesis never named is a
   finding, not noise. Add it as a theme, marked emergent, with the same evidence bar.
 
+## The inverse pass (required)
+
+After first scoring and before landing, attack your own proven themes. An all-proven
+matrix is unfalsified, not confirmed: probes written by a theme's author score their own
+topic on-topic, so the 0.40 rule never faced real risk (the first live audit found nine
+of nine proven and called it a smell -- the inverse pass then materially bounded three of
+them). For each PROVEN theme:
+
+- Write probes engineered to find the counter case -- the defense, the alternative frame,
+  the population for whom the pain does not bite -- and run them against the corpus.
+- Re-read the evidence already gathered combatively: what would a skeptic quote from the
+  same rows?
+- Record what you find as evidence rows whose `source` field carries a `(COUNTER)` tag,
+  in the same theme, alongside the supporting rows. A bounded theme keeps its proof and
+  gains its limits; a theme the counter-probes gut gets re-scored honestly, kill
+  included.
+
+The pass is not optional and not a formality: a matrix landed with zero counter-evidence
+across every proven theme should read as suspicious to its own author.
+
 ## Land the document
 
 The Painmatrix schema requires `meta` (with `title`, `threshold`, `status`, `date`, and
@@ -97,6 +117,8 @@ would erase the finding.
 ## Refuses
 
 - Treating an empty query result as disconfirmation.
+- Landing a matrix whose proven themes never faced a counter-probe -- the inverse pass is
+  a step, not a suggestion.
 - Softening a sub-0.40 kill, or omitting a killed pain from the document.
 - Carrying evidence anywhere except this painmatrix -- downstream artifacts cite themes,
   they do not re-argue evidence.

@@ -28,8 +28,8 @@ craft rules below bind every step; the step skills carry the mechanics.
 - **Emotions are data.** The schemas carry affect as valence numbers (-3 to 3 on journey
   phases and blueprint steps) plus plain emotion words; both come from what the evidence
   shows, and the number never carries more precision than the evidence supports. The word
-  vocabulary is unconstrained (the taxonomy is open operator decision T6); never invent
-  one.
+  vocabulary is unconstrained -- no taxonomy has converged (T6 is an open design question,
+  awaiting critique and evidence); never invent one.
 - **No vaporware.** Nothing is described as existing unless the thesis's
   `current_state.real` says it exists. Planned things are named as planned.
 - **A killed pain stays killed.** Killed means disconfirmed by evidence: on-topic
@@ -89,12 +89,29 @@ On wake: recall the anchor (`legion recall --repo <repo> --domain checkpoint --l
 re-check the thing you were waiting on, and continue from the named items. The draft
 document is the state; nothing lives only in a dead session's context.
 
+## When the thesis revises after artifacts land
+
+The root input is a living document; a revision after downstream artifacts exist
+propagates by what actually changed, not by re-running the pipeline:
+
+- **Painmatrix**: untouched by direction or proposal deltas -- only a changed PAIN CLAIM
+  reopens listening. Nothing proven or killed moves because the plans did.
+- **Ecosystem**: revises. This is the register loop closing: entries the flagged-unknowns
+  register carried that the revision answers get recorded as resolved, and the value
+  exchanges those answers ground get adjusted.
+- **Blueprints**: relabel `PLANNED` to real only for what the revision marks settled AND
+  actually shipping. Newly proposed items stay planned or absent -- no vaporware enters
+  through a thesis bump.
+- **Personas and journeys**: move only if a pain theme moved. Their traces are themes,
+  not thesis prose.
+
 ## What this skill refuses
 
 - Running steps out of order, or starting a step whose input document does not validate.
 - Producing any artifact for a repo with no thesis.
-- Dispatching the ecosystem register anywhere (T7 is an open operator decision): the
-  register lives in the ecosystem document and in your report to whoever invoked you.
+- Dispatching the ecosystem register anywhere (where the register routes is unconverged
+  design, T7): the register lives in the ecosystem document and in your report to whoever
+  invoked you.
 
 ## Instrumentation
 
