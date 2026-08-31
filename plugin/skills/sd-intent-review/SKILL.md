@@ -2,7 +2,7 @@
 name: sd-intent-review
 description: |
   The first service-design step: read a repo's intent document and produce a research
-  agenda -- candidate services to test and claims to test -- with every item tracing to a
+  agenda -- candidate services to test and claims to test -- with every item tracing to an
   intent field. Outputs hypotheses to validate against real discourse, never designed
   services. Invoke at the start of a repo's service design, before any artifact exists.
 version: 0.1.0
@@ -22,7 +22,7 @@ service design, and it happens only after the claims are tested.
 
 1. Read the intent in full: `legion document view <intent-id> --json`. The fields that
    feed the agenda: `what_it_is` (the reason to exist), `direction.becoming` and its
-   proposals, `current_state.cut_or_broken` (each entry's `why` is a pain claim),
+   proposals, `current_state.cut_or_broken` (each entry's `why` is a claim),
    `current_state.known_gaps` where present, `open_questions` (unresolved ones ARE agenda
    items), and `evidence` (existing lenses and crawl topics constrain where proof can come
    from).
@@ -41,7 +41,7 @@ service design, and it happens only after the claims are tested.
    is a contradiction). Every entry names the intent field it came from. When the only lens is the
    intent's `crawl_topic` (`needs_crawl` true), label that lens-to-be CRAWL and define the
    mapping once at the top of the agenda so downstream steps can match on it. An
-   unresolved open_question lands as a pain when it doubts a need, as a service test when
+   unresolved open_question lands as a claim when it doubts a need, as a service test when
    it doubts a mechanism -- and may split into one of each.
 
 4. Report the agenda to the caller as structured text (services_to_test and

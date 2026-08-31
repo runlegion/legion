@@ -24,7 +24,7 @@ through eavesdrop's CLI (the closed query surface; its usage guide lives in eave
 memory -- `legion consult --context "querying eavesdrop agent CLI guide"` if you need it).
 
 **No evidence is not a verdict.** A query returning nothing for every target means the
-corpus is missing or thin, not that the pain is disconfirmed. The distinction is the whole
+corpus is missing or thin, not that the claim is disconfirmed. The distinction is the whole
 point of this section. On a missing or thin corpus:
 
 1. Start the crawl. The real sequence is three steps, not one: `eavesdrop init <lens>`
@@ -59,7 +59,7 @@ For each claim with evidence available:
 
 - Query the corpus for the claim's target; read what people actually say, not what the
   intent hoped they would say.
-- **The 0.40 disconfirm rule:** an on-topic relevance score under 0.40 for a
+- **The 0.40 disconfirm rule:** an on-topic relevance score under 0.40 for an
   intent-asserted claim is CONTRADICTED. State it so, in the Discovery, with the score --
   never soften a contradiction into "weak support."
 - Score surviving claims into insights on the schema's five axes -- frequency, intensity,
@@ -68,10 +68,10 @@ For each claim with evidence available:
   and `meta.threshold` carries the disconfirm bar (0.40). Each insight carries its
   `status` verdict -- supported, bounded, contradicted, blocked, or saturated-unevidenced
   -- with `emergent` as orthogonal provenance -- and its `workaround`:
-  what people do about this pain today, which is half the evidence the pain is real.
-  Quantify the pain's `evidence.cost` only when the evidence supports a number; never
+  what people do about this claim today, which is half the evidence the friction is
+  real. Quantify the `evidence.cost` only when the evidence supports a number; never
   invent one. Evidence citations are
-  structural, not prose: each theme's `evidence.eavesdrop` array carries
+  structural, not prose: each insight's `evidence.eavesdrop` array carries
   `{source, url, score, text}` rows with the speakers' own words in `text`.
 - **Emergent insights:** discourse that keeps returning to something the intent never
   claimed is a finding, not noise. Add it as an insight, `emergent: true`, with the same
@@ -95,8 +95,8 @@ them). For each SUPPORTED insight:
 - Record what you find as evidence rows carrying `counter: true`,
   in the same insight, alongside the supporting rows. A bounded insight keeps its proof and
   gains its limits: `status` moves to `bounded`, the bound is written into the insight's
-  `description` (one sentence naming where the claim does not hold), the `(COUNTER)` rows
-  carry its evidence, and any axis the bound invalidates -- usually frequency or fit --
+  `description` (one sentence naming where the claim does not hold), the counter-tagged
+  rows (`counter: true`) carry its evidence, and any axis the bound invalidates -- usually frequency or fit --
   gets re-scored. An insight the counter-probes gut gets re-scored wholesale, contradiction
   (`status: "contradicted"`) included; an insight that survives untouched is `supported`.
 

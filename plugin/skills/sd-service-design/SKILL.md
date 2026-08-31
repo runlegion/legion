@@ -103,7 +103,7 @@ propagates by what actually changed, not by re-running the pipeline:
 - **Blueprints**: relabel `PLANNED` to real only for what the revision marks settled AND
   actually shipping. Newly proposed items stay planned or absent -- no vaporware enters
   through an intent bump.
-- **Personas and journeys**: move only if a pain theme moved. Their traces are themes,
+- **Personas and journeys**: move only if an insight moved. Their traces are insights,
   not intent prose.
 
 ## What this skill refuses
