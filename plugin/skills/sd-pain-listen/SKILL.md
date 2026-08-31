@@ -76,7 +76,8 @@ For each pain with evidence available:
 
 ## Land the document
 
-The Painmatrix schema requires `meta` (with `title` and `threshold`), the five-axis
+The Painmatrix schema requires `meta` (with `title`, `threshold`, `status`, `date`, and
+`author` -- status enum draft/review/done, `author` the invoking agent), the five-axis
 `weights`, and `themes` (each with `id`, `label`, `description`, `personas`, `scores`, and
 structured `evidence`); resolve the current schema by its keyword rather than assuming:
 `legion document list --doc-type schema --json` and take the row whose payload carries

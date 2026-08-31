@@ -49,9 +49,10 @@ polices its own confabulation; the structure that matters is the seat).
   step. An edge found by one lens is the diversity payoff; keep it, marked single-lens.
 - Build the Ecosystem payload from the union. The schema requires `meta` (with `title`
   and `core_service`), `actors` tiered as `primary`/`secondary`/`tertiary` (primary
-  required; each actor's `persona` field is null until a persona document is authored for
-  it -- the conductor revises it in after that persona lands, never this step and never
-  the persona writer), `channels` (`name`, `type`, `purpose`),
+  required; each PRIMARY actor's `persona` field is null until a persona document is
+  authored for it -- the conductor revises it in after that persona lands, never this step
+  and never the persona writer; secondary and tertiary actors carry no persona field),
+  `channels` (`name`, `type`, `purpose`),
   `value_exchanges` (`from`, `to`, `gives`, `gets`), and `moments_of_truth` (`number`,
   `title`, `actor`, `success`, `failure`), with `failure_modes` (`failure`, `impact`,
   `recovery`) in the shape; resolve the current schema by `"x-doc-type": "ecosystem"`
