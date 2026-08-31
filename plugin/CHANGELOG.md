@@ -1,5 +1,69 @@
 # Legion Changelog
 
+## 0.37.2
+
+The service-design revision release. 0.37.1 shipped the pipeline as seven skills; this
+release revises them from first cut to the discipline's settled state -- the required inverse
+pass, the agreed artifact formats, and the vocabulary the field actually uses -- and cuts the
+three revisions together so a node runs the whole evolution at once rather than a version
+behind it. Two skills are renamed to match the settled nouns: sd-thesis-review becomes
+sd-intent-review, and sd-pain-listen becomes sd-discover, so a saved invocation of either old
+name stops resolving on upgrade. Patch release: skill text only within the plugin's existing
+skills surface, no binary code change, no wire-format change, no schema migration -- the
+store-side schema revisions rode separately, as documents in the daemon that are already live,
+and this release ships the skill text that speaks to them. Cut on its own rather than riding
+the next feature arc so the service-design skills' full evolution reaches nodes now.
+
+### Changed
+
+- **The inverse pass, intent-revision propagation, and the consensus register** (PR #1075,
+  #1074). The first live runs earned three findings, folded back into the skill text.
+  sd-discover gains a required inverse pass, placed between scoring and landing: for every
+  supported insight, probes engineered to find the counter case, a combative re-read of the
+  gathered evidence, and the counter-evidence recorded in the schema's `counter` field -- a
+  bounded insight keeps its support and gains its limits, a gutted one is re-scored, a kill
+  included. The rationale rides in the text: author-written probes score their own topic
+  on-topic, so a discovery in which every insight is supported is unfalsified, not confirmed,
+  and the Refuses list gains the bullet that enforces it -- landing a discovery whose
+  supported insights never faced a counter-probe is refused. The conductor gains the
+  propagation rule for an intent that revises after artifacts land: discovery untouched by
+  direction or proposal deltas, since only a changed claim reopens listening; the ecosystem
+  revises to close its register loop; blueprints relabel PLANNED to real only for items now
+  settled and shipping; personas and journeys move only if an insight moved. And the ruling
+  register leaves the set: an unconverged design question -- the emotion-word taxonomy,
+  register routing -- now reads as awaiting critique and evidence, not a verdict.
+
+- **The writers deliver the discipline's agreed formats** (PR #1077, #1076). An audit against
+  the field's own authorities -- the primer, the NN/g research, Shostack's control-artifact
+  originals, the vault exemplars -- found the definition-layer schemas had drifted from the
+  artifacts they formalize, and the writer skills are brought back into agreement with the
+  revised schemas. The persona speaks the tradition: goals in the actor's terms, leave
+  conditions as importance without absolutes, negative space, relationship stages, plural
+  quotes under the composed-line rule -- and no normative absolutes, which derive at the spec
+  boundary, never in the persona. The journey and blueprint gain their canonical fields --
+  Shostack's per-step execution times and her fail points, where the service can break, kept
+  distinct from a friction, where the customer hurts -- and the ecosystem restores entry_point
+  and need on primary actors, users on channels, and why_disproportionate on moments of truth.
+  The discovery instrument itself gets the demeanor of the artifacts it sits beside: an
+  insight's outcome becomes a structural field instead of a note buried in a description, the
+  workaround joins each insight as half the evidence the pain is real, cost is quantified only
+  where evidence supports it, and the threshold caveat is dropped because the schema now states
+  the disconfirm bar correctly.
+
+- **The seven skills speak the settled vocabulary** (PR #1080, #1079). The design tradition's
+  words now run end to end, with nothing left from the startup register. The intent states
+  claims; discovery returns insights, each carrying a verdict -- supported, bounded,
+  contradicted, blocked, or saturated-unevidenced -- with emergent as an orthogonal provenance
+  rather than a sixth verdict; journeys and blueprints carry frictions and opportunities.
+  Counter-evidence uses the schema's counter field, and the (COUNTER) source-tag convention is
+  retired at every site. The conductor names the two renamed steps and distinguishes the
+  terminal fates a verdict implies -- contradicted stays contradicted, blocked means the corpus
+  cannot reach the claim, and saturated-unevidenced means listening converged on silence,
+  itself claim-disproving -- while supported and bounded are the buildable ones. sd-thesis-review
+  is renamed sd-intent-review and sd-pain-listen is renamed sd-discover, each skill's frontmatter
+  matching its new directory; a sweep for the retired words -- thesis, painmatrix, pain_theme,
+  pains_to_prove -- finds them only where a field is named as deprecated.
+
 ## 0.37.1
 
 The service-design release. The service-design pipeline -- hypothesize services, prove or
