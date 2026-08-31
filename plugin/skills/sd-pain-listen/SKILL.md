@@ -27,16 +27,32 @@ memory -- `legion consult --context "querying eavesdrop agent CLI guide"` if you
 corpus is missing or thin, not that the pain is disconfirmed. The distinction is the whole
 point of this section. On a missing or thin corpus:
 
-1. Start the crawl: `eavesdrop crawl <topic>` for the lens the targets name. Crawls take
-   hours (per-IP rate limits; the bulk backbone lags around seven hours). Reddit needs no
-   credentials -- do not go looking for any.
-2. Give the crawl an owner: `legion signal` to the eavesdrop agent naming the topic and
-   why, so its completion (or failure) comes back as a wake.
-3. Park per the sd-service-design protocol: land the Painmatrix as a `draft` with the
-   provable themes scored and the blocked ones named
-   (`blocked: crawl <topic> in flight`), store the anchor reflection, and arm
+1. Start the crawl. The real sequence is three steps, not one: `eavesdrop init <lens>`
+   creates the named config; write the agenda's named targets into it by hand
+   (`~/Library/Application Support/eavesdrop/<lens>.toml` -- subreddits, feed URLs); then
+   `eavesdrop crawl <lens>` crawls the named config. `eavesdrop discover` is a dead end
+   here: Reddit discovery wants REDDIT_CLIENT_ID and crawling itself needs no credentials
+   (Arctic Shift) -- do not go looking for any.
+2. Give the crawl an owner: `legion signal` to the eavesdrop agent naming the lens and
+   why, so its completion (or failure) comes back as a wake. Ask it to keep the lens warm
+   (`eavesdrop daemon <lens> -i 6h`) -- discovery at real depth takes about a day of
+   accumulation, not one pass.
+3. Park per the protocol in the sd-service-design skill: land the Painmatrix as a `draft`
+   with the provable themes scored and the blocked ones named
+   (`blocked: crawl <lens> in flight`), store the anchor reflection, and arm
    `legion defer --work-item sd-<repo>-pain-listen --repo <repo> --until 1d` alongside the
-   signal.
+   signal. The schema has no blocked status field: a blocked theme carries explicit
+   placeholder zero scores labeled UNSCORED in its description, with the park state and
+   its resume query in `evidence.gaps` and `evidence.next_probe`.
+
+**The two-pass cadence.** The first crawl slice supports an ORIENTATION pass only: run the
+probes, score what genuinely can be scored, record per-theme what came back, and RE-ARM the
+defer -- never clear it. The authoritative scoring pass runs on the wake, over the corpus a
+day of re-crawl has built. Only the authoritative pass clears the defer
+(`legion undefer --work-item <id>` -- it takes no `--repo`). A completed crawl whose slice
+turns out unusable (spam-dominated, off-topic) is a third park state, distinct from
+missing-corpus: name it `blocked on source depth`, keep the themes blocked, and escalate
+the source-mix decision to the operator -- more crawl time will not fix the wrong net.
 
 ## Score what the corpus can answer
 
@@ -50,7 +66,9 @@ For each pain with evidence available:
 - Score surviving pains into themes on the schema's five axes -- frequency, intensity,
   friction, urgency, fit -- each 0 to 5, plus the weighted composite; the document's
   top-level `weights` object carries the axis weights (0 to 1) used for that composite,
-  and `meta.threshold` carries the disconfirm bar (0.40). Evidence citations are
+  and `meta.threshold` carries the disconfirm bar (0.40) -- the schema's own description
+  of that field says composite validation bar; this skill's reading wins until the schema
+  is reconciled. Evidence citations are
   structural, not prose: each theme's `evidence.eavesdrop` array carries
   `{source, url, score, text}` rows with the speakers' own words in `text`.
 - **Emergent pains:** discourse that keeps returning to a pain the thesis never named is a
@@ -66,12 +84,14 @@ structured `evidence`); resolve the current schema by its keyword rather than as
 
 ```
 legion document validate --schema <schema-id> --file painmatrix.json
-legion document create --doc-type painmatrix --owner <agent> --surface <repo> --from painmatrix.json
+legion document create --doc-type painmatrix --owner <agent> --surface <surface> --from painmatrix.json
 ```
 
-The store refuses a schema violation on every path, so a refusal here means the payload is
-wrong, not that the gate is optional. Killed pains appear in the document as killed themes
-with their disconfirming score -- deleting them would erase the finding.
+`--surface` is the service surface -- the same surface the thesis document carries (the
+product name, not a git repo). The store refuses a schema violation on every path, so a
+refusal here means the payload is wrong, not that the gate is optional. Killed pains
+appear in the document as killed themes with their disconfirming score -- deleting them
+would erase the finding.
 
 ## Refuses
 

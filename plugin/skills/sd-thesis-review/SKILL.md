@@ -31,18 +31,25 @@ service design, and it happens only after the pains are proven.
    `{name, actor, goal, test}` where `test` states what real discourse would confirm the
    need exists. Lightweight hypotheses only -- no `system_response`, no real/planned
    status, no merging or splitting of services. If two candidate services blur together,
-   list both; pain-listen's evidence will sort them.
+   list both; pain-listen's evidence will sort them. A service with two actors names the
+   primary in `actor` and the second inside `goal`.
 
 3. Derive **pains_to_prove**: for each pain the thesis asserts or implies, one entry
    `{pain, who, evidence_target, disconfirm_criterion}` where `evidence_target` names the
    lens (or lens-to-be) and the query that would surface it, and `disconfirm_criterion`
    states what result kills it (the standing rule downstream: an on-topic score under 0.40
-   is a kill). Every entry names the thesis field it came from.
+   is a kill). Every entry names the thesis field it came from. When the only lens is the
+   thesis's `crawl_topic` (`needs_crawl` true), label that lens-to-be CRAWL and define the
+   mapping once at the top of the agenda so downstream steps can match on it. An
+   unresolved open_question lands as a pain when it doubts a need, as a service test when
+   it doubts a mechanism -- and may split into one of each.
 
 4. Report the agenda to the caller as structured text (services_to_test and
-   pains_to_prove, each item with its thesis trace). This step writes no document; the
-   agenda is working state. If the session must stop here, park per the sd-service-design
-   protocol with the agenda in the anchor text.
+   pains_to_prove, each item with its thesis trace). This step writes no legion document;
+   the agenda is working state, and handing it to the next step as a scratch FILE is fine
+   -- a file is not a document, and the prohibition is on store writes, not on writing the
+   agenda down. If the session must stop here, park per the protocol in the
+   sd-service-design skill (Park and resume) with the agenda in the anchor text.
 
 ## Refuses
 

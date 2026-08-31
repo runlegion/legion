@@ -32,8 +32,11 @@ craft rules below bind every step; the step skills carry the mechanics.
   one.
 - **No vaporware.** Nothing is described as existing unless the thesis's
   `current_state.real` says it exists. Planned things are named as planned.
-- **A killed pain stays killed.** When pain-listen disconfirms a pain, downstream artifacts
-  must not smuggle it back in as a frustration or a journey low point.
+- **A killed pain stays killed.** Killed means disconfirmed by evidence: on-topic
+  discourse scored under the painmatrix's `meta.threshold` disconfirm bar. Downstream
+  artifacts must not smuggle a killed pain back in as a frustration or a journey low
+  point. A blocked or UNSCORED theme is neither proven nor killed, and no artifact may
+  build on it.
 
 ## The pipeline
 
@@ -47,7 +50,9 @@ stops here: the thesis comes first, and writing one is not this pipeline's job).
    prove). No documents written; the agenda is this session's working state and is stored
    in the park anchor if you stop.
 2. **`sd-pain-listen`** -- agenda in, one schema-valid Painmatrix document out. This is the
-   step that talks to the world (eavesdrop) and the step most likely to park.
+   step that talks to the world (eavesdrop) and the step most likely to park. Expect it to
+   take about a day: a fresh corpus supports only an orientation pass, and the
+   authoritative scoring runs on the park wake after the crawl has accumulated.
 3. **`sd-ecosystem-imagine`** -- thesis + painmatrix in, one Ecosystem document out, plus a
    register of flagged unknowns.
 4. **The writers, in dependency order per chain**: `sd-write-persona` first (its actor

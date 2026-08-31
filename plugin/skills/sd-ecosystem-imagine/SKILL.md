@@ -50,7 +50,8 @@ polices its own confabulation; the structure that matters is the seat).
 - Build the Ecosystem payload from the union. The schema requires `meta` (with `title`
   and `core_service`), `actors` tiered as `primary`/`secondary`/`tertiary` (primary
   required; each actor's `persona` field is null until a persona document is authored for
-  it, and gets revised in later), `channels` (`name`, `type`, `purpose`),
+  it -- the conductor revises it in after that persona lands, never this step and never
+  the persona writer), `channels` (`name`, `type`, `purpose`),
   `value_exchanges` (`from`, `to`, `gives`, `gets`), and `moments_of_truth` (`number`,
   `title`, `actor`, `success`, `failure`), with `failure_modes` (`failure`, `impact`,
   `recovery`) in the shape; resolve the current schema by `"x-doc-type": "ecosystem"`
@@ -58,8 +59,12 @@ polices its own confabulation; the structure that matters is the seat).
 
 ```
 legion document validate --schema <schema-id> --file ecosystem.json
-legion document create --doc-type ecosystem --owner <agent> --surface <repo> --from ecosystem.json
+legion document create --doc-type ecosystem --owner <agent> --surface <surface> --from ecosystem.json
 ```
+
+(`--surface` is the service surface -- the same surface the thesis carries. The ecosystem
+schema's meta also requires `status`, `date`, and `author` alongside `title` and
+`core_service`; status enum draft/review/done, `author` = the invoking agent.)
 
 - **The register:** everything flagged-not-grounded, split in two: unknowns the world can
   answer (candidate crawls or queries -- feed them back toward pain-listen) and decisions
