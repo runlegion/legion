@@ -37,8 +37,9 @@ rule is structural: emotions are data.
      phase's `rows.emotions` carries plain emotion words -- frustrated, relieved, wary,
      confident -- taken from what the evidence shows this actor expressing. Place the
      numbers from the evidence's direction and strength; do not manufacture precision the
-     evidence lacks (0 is a legitimate value). The word vocabulary is unconstrained (the
-     taxonomy is open operator decision T6); never invent one beyond the evidence.
+     evidence lacks (0 is a legitimate value). The word vocabulary is unconstrained -- no
+     taxonomy has converged (T6, open design question); never invent one beyond the
+     evidence.
    - Every low point in the curve traces to a painmatrix theme. A killed pain (on-topic
      evidence under the painmatrix's `meta.threshold`) must not reappear as a dip -- that
      is the whole point of having killed it. A blocked or UNSCORED theme cannot anchor a

@@ -74,6 +74,31 @@ For each pain with evidence available:
 - **Emergent pains:** discourse that keeps returning to a pain the thesis never named is a
   finding, not noise. Add it as a theme, marked emergent, with the same evidence bar.
 
+## The inverse pass (required)
+
+The pass runs once, at the AUTHORITATIVE scoring pass, after first scoring and before
+the final land. An orientation draft parks without it -- its proven themes are
+provisional until the wake, and the counter-probes would be spent against a slice.
+At the authoritative pass, attack your own proven themes. An all-proven
+matrix is unfalsified, not confirmed: probes written by a theme's author score their own
+topic on-topic, so the 0.40 rule never faced real risk (the first live audit found nine
+of nine proven and called it a smell -- the inverse pass then materially bounded three of
+them). For each PROVEN theme:
+
+- Write probes engineered to find the counter case -- the defense, the alternative frame,
+  the population for whom the pain does not bite -- and run them against the corpus.
+- Re-read the evidence already gathered combatively: what would a skeptic quote from the
+  same rows?
+- Record what you find as evidence rows whose `source` field carries a `(COUNTER)` tag,
+  in the same theme, alongside the supporting rows. A bounded theme keeps its proof and
+  gains its limits: the bound is written into the theme's `description` (one sentence
+  naming where the pain does not bite), the `(COUNTER)` rows carry its evidence, and any
+  axis the bound invalidates -- usually frequency or fit -- gets re-scored. A theme the
+  counter-probes gut gets re-scored wholesale, kill included.
+
+The pass is not optional and not a formality: a matrix landed with zero counter-evidence
+across every proven theme should read as suspicious to its own author.
+
 ## Land the document
 
 The Painmatrix schema requires `meta` (with `title`, `threshold`, `status`, `date`, and
@@ -97,6 +122,9 @@ would erase the finding.
 ## Refuses
 
 - Treating an empty query result as disconfirmation.
+- Landing a FINAL matrix whose proven themes never faced a counter-probe -- the inverse
+  pass is a step, not a suggestion. (An orientation draft parks without it; its proven
+  themes are provisional.)
 - Softening a sub-0.40 kill, or omitting a killed pain from the document.
 - Carrying evidence anywhere except this painmatrix -- downstream artifacts cite themes,
   they do not re-argue evidence.
