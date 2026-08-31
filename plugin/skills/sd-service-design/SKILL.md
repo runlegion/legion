@@ -32,11 +32,12 @@ craft rules below bind every step; the step skills carry the mechanics.
   awaiting critique and evidence); never invent one.
 - **No vaporware.** Nothing is described as existing unless the thesis's
   `current_state.real` says it exists. Planned things are named as planned.
-- **A killed pain stays killed.** Killed means disconfirmed by evidence: on-topic
-  discourse scored under the painmatrix's `meta.threshold` disconfirm bar. Downstream
-  artifacts must not smuggle a killed pain back in as a frustration or a journey low
-  point. A blocked or UNSCORED theme is neither proven nor killed, and no artifact may
-  build on it.
+- **A killed pain stays killed.** The painmatrix carries each theme's `status`: killed
+  means disconfirmed by evidence (on-topic discourse under the `meta.threshold`
+  disconfirm bar), and downstream artifacts must not smuggle a killed theme back in as a
+  frustration or a journey low point. A `blocked` theme is neither proven nor killed,
+  and no artifact may build on it; `proven` and `bounded` themes are buildable, a
+  bounded one only within its recorded limits.
 
 ## The pipeline
 

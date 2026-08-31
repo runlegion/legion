@@ -41,9 +41,8 @@ point of this section. On a missing or thin corpus:
    with the provable themes scored and the blocked ones named
    (`blocked: crawl <lens> in flight`), store the anchor reflection, and arm
    `legion defer --work-item sd-<repo>-pain-listen --repo <repo> --until 1d` alongside the
-   signal. The schema has no blocked status field: a blocked theme carries explicit
-   placeholder zero scores labeled UNSCORED in its description, with the park state and
-   its resume query in `evidence.gaps` and `evidence.next_probe`.
+   signal. A blocked theme carries `status: "blocked"` with placeholder zero scores, and
+   the park state and its resume query in `evidence.gaps` and `evidence.next_probe`.
 
 **The two-pass cadence.** The first crawl slice supports an ORIENTATION pass only: run the
 probes, score what genuinely can be scored, record per-theme what came back, and RE-ARM the
@@ -66,9 +65,11 @@ For each pain with evidence available:
 - Score surviving pains into themes on the schema's five axes -- frequency, intensity,
   friction, urgency, fit -- each 0 to 5, plus the weighted composite; the document's
   top-level `weights` object carries the axis weights (0 to 1) used for that composite,
-  and `meta.threshold` carries the disconfirm bar (0.40) -- the schema's own description
-  of that field says composite validation bar; this skill's reading wins until the schema
-  is reconciled. Evidence citations are
+  and `meta.threshold` carries the disconfirm bar (0.40). Each theme carries its
+  `status` -- proven, bounded, killed, blocked, or emergent -- and its `workaround`:
+  what people do about this pain today, which is half the evidence the pain is real.
+  Quantify the pain's `evidence.cost` only when the evidence supports a number; never
+  invent one. Evidence citations are
   structural, not prose: each theme's `evidence.eavesdrop` array carries
   `{source, url, score, text}` rows with the speakers' own words in `text`.
 - **Emergent pains:** discourse that keeps returning to a pain the thesis never named is a
@@ -91,10 +92,11 @@ them). For each PROVEN theme:
   same rows?
 - Record what you find as evidence rows whose `source` field carries a `(COUNTER)` tag,
   in the same theme, alongside the supporting rows. A bounded theme keeps its proof and
-  gains its limits: the bound is written into the theme's `description` (one sentence
-  naming where the pain does not bite), the `(COUNTER)` rows carry its evidence, and any
-  axis the bound invalidates -- usually frequency or fit -- gets re-scored. A theme the
-  counter-probes gut gets re-scored wholesale, kill included.
+  gains its limits: `status` moves to `bounded`, the bound is written into the theme's
+  `description` (one sentence naming where the pain does not bite), the `(COUNTER)` rows
+  carry its evidence, and any axis the bound invalidates -- usually frequency or fit --
+  gets re-scored. A theme the counter-probes gut gets re-scored wholesale, kill
+  (`status: "killed"`) included; a theme that survives untouched is `proven`.
 
 The pass is not optional and not a formality: a matrix landed with zero counter-evidence
 across every proven theme should read as suspicious to its own author.

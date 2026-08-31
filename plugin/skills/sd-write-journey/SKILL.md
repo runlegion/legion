@@ -26,9 +26,11 @@ rule is structural: emotions are data.
    the contract. Today: `meta` requires `title`, `persona`, `scenario`, `goal`, `status`,
    `date`, and `author` (status enum draft/review/done; `author` is the invoking agent's
    identity, the same value as `--owner`; `meta.persona` carries the persona DOCUMENT's
-   id -- the UUID, not a slug or bare title); each phase requires `number`, `title`,
-   `emotional_start`, `emotional_end`, and `rows` with `actions`, `thoughts`, `emotions`,
-   `touchpoints` (plus optional `pain_points` and `opportunities`).
+   id -- the UUID, not a slug or bare title; optional `meta.expectations` carries what
+   the persona expects going in, beside the goal, per the NN/g scenario block); each
+   phase requires `number`, `title`, `emotional_start`, `emotional_end`, and `rows` with
+   `actions`, `thoughts`, `emotions`, `touchpoints` (plus optional `pain_points`,
+   `opportunities`, and `ownership` -- who owns acting on the phase's opportunities).
 3. Fill with traced content:
    - Actions and touchpoints come from the ecosystem's channels; a phase cannot touch a
      channel the ecosystem does not have.
@@ -42,8 +44,8 @@ rule is structural: emotions are data.
      evidence.
    - Every low point in the curve traces to a painmatrix theme. A killed pain (on-topic
      evidence under the painmatrix's `meta.threshold`) must not reappear as a dip -- that
-     is the whole point of having killed it. A blocked or UNSCORED theme cannot anchor a
-     dip either.
+     is the whole point of having killed it. A blocked theme (check its `status` field)
+     cannot anchor a dip either.
    - High points trace to value exchanges the ecosystem grounds; no delight the service
      cannot deliver today unless the phase is explicitly marked as the planned future and
      the thesis's direction supports it. The mark is a convention, since the schema has no

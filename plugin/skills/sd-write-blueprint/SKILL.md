@@ -32,7 +32,12 @@ planned are labeled planned, and nothing else appears at all.
    `backstage`, `support`; `pain_points` and `metrics` ride as string arrays, and
    `evidence_links` carries structured citations. An `evidence_links` entry for a
    store-internal source uses `legion://document/<id>` as its url; a repo issue uses its
-   issue URL.
+   issue URL. Two optional step fields come from the discipline's origin: `time` (the
+   step's execution time or duration -- Shostack's 1984 blueprints carried per-step times
+   and tolerances; hers was a control artifact, and time is what made it one) and
+   `fail_points` (her F marks: where the SERVICE can break at this step). Fail points are
+   not pain points -- a fail point is process risk, a pain point is customer hurt; the
+   false-positive that destroys trust is a fail point even on a step the customer enjoys.
 3. Fill with traced content:
    - Frontstage per step mirrors the journey phase -- same touchpoints, same channel --
      and the step's `emotional_score` and `emotional_label` agree with that phase's
