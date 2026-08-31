@@ -26,9 +26,11 @@ rule is structural: emotions are data.
    the contract. Today: `meta` requires `title`, `persona`, `scenario`, `goal`, `status`,
    `date`, and `author` (status enum draft/review/done; `author` is the invoking agent's
    identity, the same value as `--owner`; `meta.persona` carries the persona DOCUMENT's
-   id -- the UUID, not a slug or bare title); each phase requires `number`, `title`,
-   `emotional_start`, `emotional_end`, and `rows` with `actions`, `thoughts`, `emotions`,
-   `touchpoints` (plus optional `pain_points` and `opportunities`).
+   id -- the UUID, not a slug or bare title; optional `meta.expectations` carries what
+   the persona expects going in, beside the goal, per the NN/g scenario block); each
+   phase requires `number`, `title`, `emotional_start`, `emotional_end`, and `rows` with
+   `actions`, `thoughts`, `emotions`, `touchpoints` (plus optional `pain_points`,
+   `opportunities`, and `ownership` -- who owns acting on the phase's opportunities).
 3. Fill with traced content:
    - Actions and touchpoints come from the ecosystem's channels; a phase cannot touch a
      channel the ecosystem does not have.
