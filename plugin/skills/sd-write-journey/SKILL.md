@@ -44,8 +44,8 @@ rule is structural: emotions are data.
      evidence.
    - Every low point in the curve traces to a painmatrix theme. A killed pain (on-topic
      evidence under the painmatrix's `meta.threshold`) must not reappear as a dip -- that
-     is the whole point of having killed it. A blocked or UNSCORED theme cannot anchor a
-     dip either.
+     is the whole point of having killed it. A blocked theme (check its `status` field)
+     cannot anchor a dip either.
    - High points trace to value exchanges the ecosystem grounds; no delight the service
      cannot deliver today unless the phase is explicitly marked as the planned future and
      the thesis's direction supports it. The mark is a convention, since the schema has no
