@@ -21,7 +21,11 @@ planned are labeled planned, and nothing else appears at all.
 
 1. Read the inputs by id: the journey this blueprint backs, the Ecosystem, the intent.
    The blueprint's steps follow the journey's phases; backstage content comes from the
-   intent's `current_state.real` (what exists) and `direction` (what is planned).
+   intent's `current_state.real` (what exists) and `direction` (what is planned). The
+   fourth input is not a document: the ecosystem report the conductor hands forward,
+   carrying the register with each entry's prediction id and route, which this writer
+   witnesses from (Instrumentation below). When no report reaches you, write the
+   blueprint anyway, leave the register edges unwitnessed, and say so in your report.
 2. Draft against the live schema: resolve by `"x-doc-type": "blueprint"` from
    `legion document list --doc-type schema --json`; its `required` and `properties` are
    the contract. Today: `meta` requires `title`, `persona`, `trigger`, `scope`,
@@ -96,12 +100,11 @@ legion uncertainty emit --surface legion.sd --feature-key sd.write-blueprint \
   --payload '{"journey":"<journey-id>","steps":<n>,"planned":<n>,"frictions_supported":<n>}'
 ```
 
-Pass `--session-id` from `CLAUDE_CODE_SESSION_ID` and omit `--model`: the engine resolves
-the model from the session's live sample, a row with neither lands in the `unknown`
-cohort where no regression can be seen, and a guessed model mislabels the row into a
-real cohort. Emit exits 0 whatever it recorded, so check the fingerprint against the id
-the create printed, not the exit code. Do not revise the blueprint to hold the
-prediction id; the report carries it.
+The emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
+non-blocking emission, never self-witnessing -- are held once in the sd-service-design
+skill (Instrumentation, "Emit mechanics") and bind here. What is this writer's alone:
+the check is the fingerprint against the id the create printed, and the report carries
+the prediction id.
 
 **Who witnesses, and when.** The **crit** (the acceptance step that moves the blueprint
 past `draft`) witnesses it, confirming the id by rebuilding
@@ -122,10 +125,8 @@ ecosystem's `failure_modes`), and witness: an entry that landed as a step's fail
 friction, or backstage seam is `shipped` at 1.0; an entry this journey and blueprint
 could not carry, which you report as dropped, is `abandoned` at 0.0. An entry that
 touches no step of this actor's chain is left for another chain or the crit; say which
-in the report.
-
-Emission is non-blocking: a failed emit logs and exits 0, and the run continues. A
-blueprint landed with no prediction has skipped a step; say so in the report.
+in the report. With no ecosystem report in hand (step 1), every edge is left, and the
+report says so rather than guessing at ids.
 
 ## Refuses
 

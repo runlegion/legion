@@ -163,18 +163,19 @@ legion uncertainty emit --surface legion.sd --feature-key sd.discover.insight \
   --payload '{"insight":"<insight-id>","verdict":"<status>","rows":<n>,"scores":"<lo>-<hi>"}'
 ```
 
-Pass `--session-id` from `CLAUDE_CODE_SESSION_ID` and omit `--model`: the engine resolves
-the model from the session's live sample, a row with neither lands in the `unknown`
-cohort where no regression can be seen, and a guessed model mislabels the row into a
-real cohort. Emit exits 0 whatever it recorded, so check each fingerprint against the
-insight ids in the landed payload, not the exit code. Do not revise the Discovery to
-hold prediction ids; the report and the park anchor carry them.
+The emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
+non-blocking emission, never self-witnessing -- are held once in the sd-service-design
+skill (Instrumentation, "Emit mechanics") and bind here. What is this step's alone: the
+check is each fingerprint against the insight ids in the landed payload, and the report
+and the park anchor carry the ids.
 
 **Who witnesses a verdict.** A later listening pass over discourse the lens accrued after
 the verdict landed -- the warm lens keeps crawling, and a month on the corpus is a
 different corpus. Whoever reopens the claim runs it (the conductor when an intent claim
-changes, or a scheduled re-listen), never the pass that emitted. It re-runs the insight's
-probes and counter-probes, confirms the id by rebuilding
+changes, or a scheduled re-listen), never the pass that emitted. It finds the earlier
+Discovery with `legion document list --doc-type discovery --surface <surface> --json`,
+taking the prior revision, and its prediction ids from that run's report or park anchor.
+It re-runs the insight's probes and counter-probes, confirms the id by rebuilding
 `<discovery-id>:insight:<insight-id>`, and witnesses `shipped` at 1.0 when the verdict
 stands, `scoped-down` at 0.5 when supported became bounded or a bound moved, `abandoned`
 at 0.0 when it flipped. When no pass comes before the orphan window closes, the operator
@@ -197,9 +198,8 @@ entry scored, take the entry's `prediction` id from the agenda, confirm it by re
   estimator that silence is contradiction, the confusion the no-evidence rule exists to
   prevent.
 
-Emission is non-blocking: a failed emit logs and exits 0, and the pass continues. A
-Discovery landed at the authoritative pass with no prediction ids, or with the agenda's
-claims left unwitnessed for no stated reason, has skipped a step; say so in the report.
+A Discovery landed at the authoritative pass with the agenda's claims left unwitnessed
+for no stated reason has skipped a step; say so in the report.
 
 ## Refuses
 
@@ -211,6 +211,7 @@ claims left unwitnessed for no stated reason, has skipped a step; say so in the 
 - Carrying evidence anywhere except this Discovery -- downstream artifacts cite insights,
   they do not re-argue evidence.
 - Waiting synchronously on a crawl: a crawl in flight is a park, never a blocked session.
-- Emitting verdict predictions from an orientation draft, or witnessing its own insight
-  predictions: a re-listen run by the pass that emitted is the rubber stamp the engine
-  exists to catch. The intent review's claims are the only predictions this pass scores.
+- Emitting verdict predictions from an orientation draft, or witnessing insight
+  predictions the same pass emitted: that is the rubber stamp the engine exists to catch.
+  The emitting pass scores only the intent review's claims; a later re-listen scores the
+  earlier Discovery's verdicts, never its own.

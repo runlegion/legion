@@ -90,13 +90,11 @@ legion uncertainty emit --surface legion.sd --feature-key sd.intent-review.claim
   --payload '{"intent":"<intent-id>","key":"<key>","from":"<intent field>","lens":"<lens>"}'
 ```
 
-Pass `--session-id` from the `CLAUDE_CODE_SESSION_ID` environment variable and omit
-`--model`: the engine resolves the model from the session's live statusline sample, and
-a row with neither lands in the `unknown` cohort, where a regression across releases is
-invisible. A guessed `--model` is worse, because it files the row under a real cohort it
-does not belong to. Emit exits 0 whatever it recorded, so check each fingerprint against
-the agenda entry it names, not the exit code. No document lands here, so the agenda file
-and the report carry the ids.
+The emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
+non-blocking emission, never self-witnessing -- are held once in the sd-service-design
+skill (Instrumentation, "Emit mechanics") and bind here. What is this step's alone: the
+check is each fingerprint against the agenda entry it names, and since no document
+lands, the agenda file and the report carry the ids.
 
 **Who witnesses, and when.** sd-discover, at its authoritative scoring pass, when it
 lands a verdict on the claim. It reads the entry's `prediction` id from the agenda,
@@ -109,9 +107,6 @@ never tested. A `saturated-unevidenced` insight also leaves it unwitnessed: sile
 argues against the claim without being discourse under the bar, and scoring it 0.0 would
 teach the estimator that silence is contradiction, the confusion the no-evidence rule
 exists to prevent. The discover report names each claim left unwitnessed and why.
-
-Emission is non-blocking: a failed emit logs and exits 0, and the review continues. An
-agenda handed on with no prediction ids has skipped a step; say so in the report.
 
 ## Refuses
 

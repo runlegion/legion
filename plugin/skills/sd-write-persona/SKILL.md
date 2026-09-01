@@ -98,12 +98,11 @@ legion uncertainty emit --surface legion.sd --feature-key sd.write-persona \
   --payload '{"supported":<n>,"bounded":<n>,"intent":<n>,"quote":"verbatim|composed|none"}'
 ```
 
-Pass `--session-id` from `CLAUDE_CODE_SESSION_ID` and omit `--model`: the engine resolves
-the model from the session's live sample, a row with neither lands in the `unknown`
-cohort where no regression can be seen, and a guessed model mislabels the row into a
-real cohort. Emit exits 0 whatever it recorded, so check the fingerprint against the id
-the create printed, not the exit code. Do not revise the persona to hold the prediction
-id; the report carries it.
+The emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
+non-blocking emission, never self-witnessing -- are held once in the sd-service-design
+skill (Instrumentation, "Emit mechanics") and bind here. What is this writer's alone:
+the check is the fingerprint against the id the create printed, and the report carries
+the prediction id.
 
 **Who witnesses, and when.** The **crit** (the acceptance step that moves the persona
 past `draft`) witnesses it, confirming the id by rebuilding
@@ -114,9 +113,6 @@ is the fraction of the persona's statements (behaviors, goals, frustrations,
 added, `scoped-down` when the crit cut statements, `escalated` when it sent the persona
 back. Until the crit exists as a skill, the operator who moves the document past `draft`
 witnesses it by hand with the same rule.
-
-Emission is non-blocking: a failed emit logs and exits 0, and the run continues. A
-persona landed with no prediction has skipped a step; say so in the report.
 
 ## Refuses
 

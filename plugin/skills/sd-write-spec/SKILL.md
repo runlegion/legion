@@ -207,22 +207,12 @@ are not predictions, so they get no emission. Two things are predictions.
     --payload '{"research":"<research-doc-id>","informs":["FR-..."],"evidence":"<one line>"}'
   ```
 
-Omit `--model` and pass `--session-id` from the `CLAUDE_CODE_SESSION_ID` environment
-variable: the engine resolves the model from that session's live statusline sample, and
-with neither flag the row lands in the `unknown` model cohort, where no regression across
-releases can ever be seen. A guessed `--model` is worse: it mislabels the row into a real
-cohort. If the variable is unset in your shell, emit anyway and say so in the report; the
-rows will sit in `unknown`. `<mode>` is the literal `intent-only` or `service-design`.
-Emit exits 0 even when it recorded something you did not mean (a wrong research id in the
-fingerprint still returns a valid-looking id), and the engine has no read-back command, so
-the only check is the command line you ran against the create output; do it before you
-report. The default orphan window is 30 days, and neither a crit nor a research toy
-reliably happens inside it, so both emits set `--orphan-ttl-days 180`; a prediction that
-still orphans after that is a finding about the pipeline, not an error in the emit. Record
-each emitted prediction id in the report next to the document it is about, with the
-surface string, since the crit rebuilds the set fingerprint from intent id and surface. Do
-not revise a landed document to hold the id; the report and the fingerprint are how the
-witness finds it.
+The emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
+non-blocking emission, never self-witnessing -- are held once in the sd-service-design
+skill (Instrumentation, "Emit mechanics") and bind here. What is this writer's alone:
+`<mode>` is the literal `intent-only` or `service-design`, and the report records each
+prediction id with the surface string, since the crit rebuilds the set fingerprint from
+intent id and surface.
 
 **Who witnesses, and when.** A prediction nobody witnesses is an orphan and is excluded from
 calibration, so the witness event is named here, not left to be discovered:
@@ -238,9 +228,6 @@ calibration, so the witness event is named here, not left to be discovered:
   --outcome-correctness 1.0` if the hypothesis held, `0.0` if refuted, and the held/refuted
   fraction of its claims when mixed. The document's `provenance.verification` counts are
   the source of that number.
-
-Emission is non-blocking by design: a failed emit logs and exits 0, and the run continues.
-A run that lands documents and emits nothing has skipped a step; say so in the report.
 
 ## Refuses
 

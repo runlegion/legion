@@ -107,13 +107,13 @@ legion uncertainty emit --surface legion.sd --feature-key sd.ecosystem-imagine.e
 
 `<n>` is the entry's 1-based position in the landed document's `failure_modes`, where the
 register lives. The schema gives register entries no id, so the position is the id: emit
-after create, from the landed order, and never reorder `failure_modes` afterwards. Pass
-`--session-id` from `CLAUDE_CODE_SESSION_ID` and omit `--model`: the engine resolves the
-model from the session's live sample, a row with neither lands in the `unknown` cohort
-where no regression can be seen, and a guessed model mislabels the row into a real
-cohort. Emit exits 0 whatever it recorded, so check each fingerprint against the landed
-`failure_modes` order, not the exit code. Do not revise the ecosystem to hold prediction
-ids; the report carries them, beside the register.
+after create, from the landed order, and never reorder `failure_modes` afterwards. The
+emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
+non-blocking emission, never self-witnessing -- are held once in the sd-service-design
+skill (Instrumentation, "Emit mechanics") and bind here. What is this step's alone: the
+check is each fingerprint against the landed `failure_modes` order, and the report
+carries the ids beside the register, with each entry's route, for the conductor to hand
+to the blueprint writers.
 
 **Who witnesses, and when.** An edge materializes or does not at a named point
 downstream, and each point has an owner:
@@ -132,9 +132,6 @@ downstream, and each point has an owner:
 
 Every witness confirms the id by rebuilding `<ecosystem-id>:edge:<n>` from the report's
 register. An entry nobody reaches orphans, the right fate for an unknown nobody looked at.
-
-Emission is non-blocking: a failed emit logs and exits 0, and the step continues. An
-ecosystem landed with a register and no prediction ids has skipped a step; say so.
 
 ## Refuses
 
