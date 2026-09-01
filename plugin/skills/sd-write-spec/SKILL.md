@@ -83,8 +83,8 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   corpus with reproductions, a probe script that found real defects) IS invariant 1's "proven
   toy or experiment" and earns a SHALL; a `real` entry that merely describes the present
   system earns nothing. A `known_gap` is a pain the requirement addresses, not a
-  requirement itself; it may ground an NFR's `traces_to` when an actor's stake says the
-  gap must be closed.
+  requirement itself; it may ground an NFR's `traces_to` alongside the actor's stake that
+  says the gap must be closed, never alone.
 - `boundaries` -- an entry whose `note` states a rule the scope must hold to ("must never
   depend on X", "the dependency runs one way") is a settled constraint and earns a SHALL,
   folded into an FR since no constraint doc-type exists. An entry that only assigns
@@ -134,8 +134,11 @@ for them in intent-only mode):
   comes from the proposal's own text and the intent's cited evidence: each criterion names
   one observable, and where the intent cites a defect issue with a reproduction, the
   pre-fix reproduction is a criterion (the harness must catch it).
-- **NFRs** from moments of truth and non-functional concerns. In intent-only mode, NFRs
-  come from `actors` stakes, `known_gaps`, and the source notes in `meta.sources` (a cited
+- **NFRs** from moments of truth and non-functional concerns. A `known_gap` is evidence of
+  the pain, not an earner: cite it beside the stake that earns the NFR, and where no stake
+  says the gap must be closed, escalate it rather than writing a SHALL on the gap alone.
+  In intent-only mode, NFRs come from `actors` stakes and the source notes in
+  `meta.sources` (a cited
   reflection is read through its note there; there is no command to view a reflection as a
   document).
 - **Priority derived at the spec boundary and shown in `traces_to`.** Personas carry
