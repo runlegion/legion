@@ -70,7 +70,8 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   corpus with reproductions, a probe script that found real defects) IS invariant 1's
   "proven toy or experiment" and earns a SHALL; a `real` entry that merely describes the
   present system earns nothing. A `known_gap` is a pain the requirement addresses, not a
-  requirement itself.
+  requirement itself; it may ground an NFR's `traces_to` alongside the actor's stake that
+  says the gap must be closed, never alone.
 - `boundaries` -- an entry whose `note` states a rule the scope must hold to ("must never
   depend on X", "the dependency runs one way") is a settled constraint and earns a SHALL,
   folded into an FR since no constraint doc-type exists. An entry that only assigns
@@ -99,7 +100,10 @@ for them in intent-only mode):
   what `verification.acceptance` checks. (In intent-only mode with a `claims` array, the
   claim's `right_if` is the acceptance instead.)
 - **NFRs** from moments of truth and non-functional concerns. In intent-only mode, NFRs
-  come from `actors` stakes, `known_gaps`, and reflections the intent cites instead.
+  come from `actors` stakes and reflections the intent cites instead. A `known_gap` is
+  evidence of the pain, not an earner: cite it beside the stake that earns the NFR, and
+  where no stake says the gap must be closed, escalate it rather than writing a SHALL on
+  the gap alone.
 - **Priority derived at the spec boundary and shown in `traces_to`** -- designers do not
   speak in absolutes, so the artifacts carry none; this skill assigns them and shows its
   work: a persona's `would_leave_if` backed by a supported insight -> **SHALL**; a `goal`
