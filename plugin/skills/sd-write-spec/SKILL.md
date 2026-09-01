@@ -60,9 +60,9 @@ resolve the ambiguity.
 
 A missing artifact and a gap inside an artifact are different failures. A missing or
 schema-invalid artifact PARKS the run; step 1 says what parking means. A gap inside a
-landed artifact is invariant 2: land the set, name the gap, escalate. A weak artifact (a Discovery whose insights
-are all `blocked`) is landed, not missing; the run proceeds and the verdicts decide what
-earns what.
+landed artifact is invariant 2: land the set, name the gap, escalate. A weak artifact
+(a Discovery whose insights are all `blocked`) is landed, not missing; the run proceeds
+and the verdicts decide what earns what.
 
 There is no story layer. A requirement traces DIRECTLY to its source in the intent and the
 ecosystem (decided 2026-06; reconfirmed) -- the intent's claims and the ecosystem's moments
@@ -92,8 +92,8 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   that capability is out of this scope, and a requirement that would cross the line is the
   boundary violation to name and escalate rather than spec.
 - `open_questions` -- an unresolved one, or any unresolved contradiction, is escalated,
-  not resolved (invariant 2). A resolved one whose `resolution` records an operator ruling ranks
-  as `settled`: the outcome it names earns a SHALL. A field elsewhere in the intent that
+  not resolved (invariant 2). A resolved one whose `resolution` records an operator
+  ruling earns a SHALL for the outcome it names. A field elsewhere in the intent that
   still contradicts that resolution (a settled proposal that assumes cancelled machinery)
   is an UNCLEAR, not a fact; name it and escalate it to the intent's owner.
 - When a resolved decision names machinery as required WHILE a `needs_pressure_test`
@@ -117,9 +117,9 @@ for them in intent-only mode):
   blueprint step is a supporting token, never the earner: the earner is the moment of
   truth or settled proposal the step serves, and a step with neither behind it is
   escalated, not specced. From the ecosystem's `moments_of_truth`: a moment of truth's
-  `success` text earns a SHALL; its `failure` text is what the `errors` object guards against and earns
-  nothing on its own. A persona's own `moment_of_truth` supports a citation; only the
-  ecosystem's earn.
+  `success` text earns a SHALL; its `failure` text is what the `errors` object guards
+  against and earns nothing on its own. A persona's own `moment_of_truth` supports a
+  citation; only the ecosystem's earn.
 - **Error-handling requirements** from blueprint `steps[].fail_points` (where the service
   breaks) and the ecosystem's `failure_modes` -- what must happen when it does. These
   populate the requirement's `errors` object. A step's `frictions` (customer hurt; the
@@ -164,9 +164,9 @@ derivation: `<token>[; <token>...] -- <PRIORITY> because <rule>`. Tokens are
 something invariant 1 lists may lead: `intent.<json-path>` for a settled proposal, a
 ruling, a boundary rule, an actor's stake, or a proven experiment; `discovery.<insight-id>`
 for a supported or bounded insight; `moment_of_truth.<n>`. `blueprint.step.<n>`,
-`journey.phase.<n>`, and `persona.<slug>.needs[<i>]` are supporting tokens only. `meta.priority` holds
-the value; `traces_to` shows how it was derived. That is one source, shown twice, not two
-sources.
+`journey.phase.<n>`, and `persona.<slug>.needs[<i>]` are supporting tokens only.
+`meta.priority` holds the value; `traces_to` shows how it was derived. That is one
+source, shown twice, not two sources.
 
 Every NFR needs `category` (a closed enum:
 performance/scalability/reliability/availability/security/privacy/observability/maintainability/compatibility/usability/compliance
