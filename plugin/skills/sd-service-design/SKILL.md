@@ -116,7 +116,22 @@ propagates by what actually changed, not by re-running the pipeline:
 
 ## Instrumentation
 
-Before each step, emit one prediction; after it, the outcome is witnessed by whether the
-step's document landed without a schema refusal:
-`legion uncertainty emit --surface legion.sd --feature-key sd.<step> --input-fingerprint <repo>-<step> --claimed-confidence 0.7 --payload '{"repo":"<repo>","step":"<step>"}'`.
-This is one line per step, not a framework; skip nothing.
+The judgment predictions live in the step skills, each under its own Instrumentation:
+a claim's support, a verdict holding, an edge materializing, a document surviving the
+crit, each with its named witness. The conductor's own emission is only the
+step-completion claim -- that the step lands its output through the gate on this
+invocation, without parking -- and its confidence is read from the step's inputs, never
+a constant: sd-discover on a fresh corpus with `needs_crawl` true sits near 0.3, since it
+parks by design; a writer whose inputs validate and whose insights are supported sits
+near 0.9; an ecosystem pass over a Discovery with blocked insights sits near 0.6. Before
+each step, one line:
+
+```
+legion uncertainty emit --surface legion.sd --feature-key sd.<step> \
+  --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 --input-fingerprint <repo>-<step> \
+  --claimed-confidence <p> --payload '{"repo":"<repo>","step":"<step>"}'
+```
+
+After the step, witness it by the gate, which is mechanical and so the conductor may run
+it: landed is `shipped` at 1.0, parked as a draft is `scoped-down` at 0.5, refused or
+stopped is `escalated` at 0.0. Skip nothing.

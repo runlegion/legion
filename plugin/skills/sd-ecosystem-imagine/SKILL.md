@@ -74,7 +74,67 @@ schema's meta also requires `status`, `date`, and `author` alongside `title` and
   answer (candidate crawls or queries -- feed them back toward sd-discover) and questions
   only the operator can answer. Where the register routes automatically (T7) is
   unconverged design -- until that converges, write the register into the ecosystem
-  document's failure-mode notes and report it to whoever invoked you. Dispatch nothing.
+  document's `failure_modes` entries, in the order you will report them, and report it
+  to whoever invoked you. Dispatch nothing.
+- **Emit the predictions** (Instrumentation below), once the create returns an id: one
+  per register entry, staking whether it materializes. Then report to whoever invoked
+  you: the ecosystem id, the register, and beside each entry its prediction id and the
+  claimed confidence.
+
+## Instrumentation
+
+Convergence is already this step's confidence weighting; the engine turns that heuristic
+into a measurement. The union, the dedup, and the actor tiers are derivations and get no
+emission. The register does: one prediction per flagged edge or unknown, that it
+materializes -- that downstream work confirms it as a real edge of the service rather
+than dropping it as one lens's invention. Grounded edges are not predictions here: the
+Discovery already carries their evidence, and the crit scores the document as a whole.
+
+Claimed confidence starts from the lens count, and the mapping is fixed so the estimator
+can see the heuristic tested: one lens 0.3, two lenses 0.5, three or more 0.7. Then move
+by evidence, one step at most, to a cap of 0.85: up when a supported or bounded insight
+touches the edge's actor or channel without grounding the edge itself; down when the
+evidence-adversarial lens flagged the edge as having no insight under it, or when its
+only ground is a `needs_pressure_test` proposal. Put the lens count and names in the
+payload; the mapping is worthless if the count is not on the row.
+
+```
+legion uncertainty emit --surface legion.sd --feature-key sd.ecosystem-imagine.edge \
+  --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 \
+  --input-fingerprint <ecosystem-id>:edge:<n> --claimed-confidence <p> \
+  --payload '{"edge":<n>,"lenses":["actor-walk","second-order"],"route":"world|operator"}'
+```
+
+`<n>` is the entry's 1-based position in the landed document's `failure_modes`, where the
+register lives. The schema gives register entries no id, so the position is the id: emit
+after create, from the landed order, and never reorder `failure_modes` afterwards. Pass
+`--session-id` from `CLAUDE_CODE_SESSION_ID` and omit `--model`: the engine resolves the
+model from the session's live sample, a row with neither lands in the `unknown` cohort
+where no regression can be seen, and a guessed model mislabels the row into a real
+cohort. Emit exits 0 whatever it recorded, so check each fingerprint against the landed
+`failure_modes` order, not the exit code. Do not revise the ecosystem to hold prediction
+ids; the report carries them, beside the register.
+
+**Who witnesses, and when.** An edge materializes or does not at a named point
+downstream, and each point has an owner:
+
+- The **crit** on the ecosystem, once it exists as a skill, witnesses every register
+  entry it rules on: kept as a real edge is `shipped` at 1.0, cut is `abandoned` at 0.0.
+- Until then, **sd-write-blueprint** witnesses entries routed to the world, because the
+  blueprint is where an edge meets machinery: an entry that lands as a step's fail point,
+  friction, or backstage seam materialized (`shipped`, 1.0); an entry the actor's journey
+  and blueprint could not carry, reported dropped, did not (`abandoned`, 0.0). An entry
+  a later listening pass answers first is witnessed by that pass under sd-discover's
+  verdict rule, since by then it is a claim.
+- The **conductor** witnesses entries routed to the operator, at the ecosystem revision
+  that records them resolved (sd-service-design, "When the intent revises"): answered as
+  real is `shipped` at 1.0, answered as not a thing is `abandoned` at 0.0.
+
+Every witness confirms the id by rebuilding `<ecosystem-id>:edge:<n>` from the report's
+register. An entry nobody reaches orphans, the right fate for an unknown nobody looked at.
+
+Emission is non-blocking: a failed emit logs and exits 0, and the step continues. An
+ecosystem landed with a register and no prediction ids has skipped a step; say so.
 
 ## Refuses
 
@@ -82,3 +142,5 @@ schema's meta also requires `status`, `date`, and `author` alongside `title` and
 - Promoting a single-lens edge to core, or dropping it for being single-lens.
 - Grounding an exchange on a contradicted claim, or on evidence not in the Discovery.
 - Dispatching the register anywhere.
+- Witnessing its own edge predictions. The lenses stake them; the crit, the blueprint
+  writer, and the conductor score them.

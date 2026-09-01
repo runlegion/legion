@@ -69,8 +69,54 @@ legion document create --doc-type persona --owner <agent> --surface <surface> --
    `--surface` is the service surface -- the same surface the intent carries (the product
    name, not a git repo).
 
-5. Report the document id to the caller (or the conductor). One persona per invocation;
-   run the skill again for the next actor.
+5. **Emit the prediction** (see Instrumentation below), after the create returns the
+   persona's id, so the fingerprint names a real document.
+
+6. Report the document id and the prediction id with its claimed confidence to the
+   caller (or the conductor). One persona per invocation; run the skill again for the
+   next actor.
+
+## Instrumentation
+
+The writer's one judgment is whether this compression of evidence stands as written.
+Which insights are usable follows from their `status` by rule and is not a prediction;
+the persona as a whole is. One prediction per document, under this skill's name, that
+the crit accepts it without striking a statement as untraced or adding one the evidence
+earned. Stake it from the traces you actually laid. Anchors: every frustration and
+`would_leave_if` entry on a supported insight, with a verbatim quote from the evidence,
+sits near 0.8; a mix of supported and bounded insights, or a `(composed)` quote, sits
+near 0.6; a persona carried mostly by the intent's `actors[].stakes` because the actor's
+insights are blocked, or an actor with no verbatim voice anywhere, starts near 0.4.
+From the anchor, weigh the weakest statement rather than the count: one `would_leave_if`
+entry resting on an intent stake alone is where the crit strikes first, and it lowers
+the number more than three bounded frustrations do. Put the trace counts in the payload.
+
+```
+legion uncertainty emit --surface legion.sd --feature-key sd.write-persona \
+  --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 \
+  --input-fingerprint <ecosystem-id>:persona:<persona-id> --claimed-confidence <p> \
+  --payload '{"supported":<n>,"bounded":<n>,"intent":<n>,"quote":"verbatim|composed|none"}'
+```
+
+Pass `--session-id` from `CLAUDE_CODE_SESSION_ID` and omit `--model`: the engine resolves
+the model from the session's live sample, a row with neither lands in the `unknown`
+cohort where no regression can be seen, and a guessed model mislabels the row into a
+real cohort. Emit exits 0 whatever it recorded, so check the fingerprint against the id
+the create printed, not the exit code. Do not revise the persona to hold the prediction
+id; the report carries it.
+
+**Who witnesses, and when.** The **crit** (the acceptance step that moves the persona
+past `draft`) witnesses it, confirming the id by rebuilding
+`<ecosystem-id>:persona:<persona-id>` -- the pair is in the report, and in the
+ecosystem's `actors.primary[].persona` once the conductor fills it. `outcome_correctness`
+is the fraction of the persona's statements (behaviors, goals, frustrations,
+`would_leave_if`) accepted as written; the label is `shipped` when nothing was struck or
+added, `scoped-down` when the crit cut statements, `escalated` when it sent the persona
+back. Until the crit exists as a skill, the operator who moves the document past `draft`
+witnesses it by hand with the same rule.
+
+Emission is non-blocking: a failed emit logs and exits 0, and the run continues. A
+persona landed with no prediction has skipped a step; say so in the report.
 
 ## Refuses
 
@@ -83,3 +129,5 @@ legion document create --doc-type persona --owner <agent> --surface <surface> --
 - Describing the actor using a feature the intent's `current_state.real` does not carry
   (no vaporware in the persona's world either).
 - Writing more than one persona in a single pass -- compression suffers when batched.
+- Witnessing its own prediction. The writer stakes it; the crit scores it. A
+  self-witnessed persona is the rubber stamp the engine exists to catch.

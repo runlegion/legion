@@ -150,8 +150,97 @@ as an open question instead).
    legion document create --doc-type research --owner <agent> --surface <surface> --from <file>
    ```
 
-6. **Report** the set: the FR and NFR ids, the RESEARCH documents spun off, and every gap
-   escalated with who was signalled. One scope's spec per invocation.
+6. **Emit the predictions** (see Instrumentation below): one for the set, one per RESEARCH
+   document. Emit after the documents land, so every prediction names a real id.
+7. **Report** the set: the FR and NFR ids, the RESEARCH documents spun off, every gap
+   escalated with who was signalled, and every prediction id emitted with its claimed
+   confidence. One scope's spec per invocation.
+
+## Instrumentation
+
+The writer makes judgment calls the pipeline should score, and the uncertainty engine is
+how a judgment becomes a track record instead of a belief. Instrument the judgments, not
+the mechanics: priority and RESEARCH routing follow from the inputs' `status` fields and
+are not predictions, so they get no emission. Two things are predictions.
+
+- **The set covers the intent.** One prediction, under this skill's name, that the crit
+  will accept the set without adding a requirement the inputs earned or rejecting one as
+  unearned. Stake it from what you actually saw. Anchors: an intent with `claims` and a
+  Discovery whose insights are `supported`, with nothing escalated, sits near 0.8; a
+  claims-less intent specced from settled proposals alone sits near 0.6; a set whose
+  Discovery insights are all `blocked`, or that leans on rulings and actor stakes rather
+  than settled proposals, starts near 0.4. Two anchor conditions do not compound; pick the
+  lowest that applies and let the escalations do the rest. Weigh the escalations rather
+  than counting them. A gap named inside a requirement (FQ-4 bounding a trait registry) is
+  a place the crit may reject that requirement, and lowers the number. A requirement you
+  declined to write because its only ground was blocked or open is the add-risk: if a
+  reader could argue the inputs earned it, the crit may add it, and that lowers the number
+  too. Only an open question whose ground could earn nothing under any reading leaves it
+  untouched. For the payload count, an escalation is one distinct gap named in a
+  requirement's description or `errors`, or in the report; the same gap in two
+  requirements counts once. Do not default to one number -- a writer that always says 0.8
+  gives the estimator nothing to learn from.
+
+  ```
+  legion uncertainty emit --surface legion.sd --feature-key sd.write-spec \
+    --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 \
+    --input-fingerprint <intent-id>:spec:<surface> --claimed-confidence <p> \
+    --payload '{"intent":"<intent-id>","surface":"<surface>","mode":"<mode>","fr":<n>,"nfr":<n>,"research":<n>,"escalations":<n>}'
+  ```
+
+- **Each RESEARCH hypothesis holds.** One prediction per RESEARCH document: the probability
+  the toy, once built, confirms the hypothesis. This is the only place the writer stakes a
+  claim about the world rather than about its own artifact, and it is where the spread is
+  real. Derive it from the inputs' evidence for the mechanism: a `current_state.real` entry
+  that says the mechanism is proven in miniature, with cited issues, earns roughly 0.7 to
+  0.8; a proposal argued from first principles with no experiment behind it sits near 0.5;
+  a `known_gap` or open question that names it unproven at this shape pulls it toward 0.3.
+  A settled sibling proposal that supports the outcome but not the mechanism is weak
+  evidence: it may move the number a little, never into the next band. A narrative
+  instance in a journey (one probe that worked once) is not an experiment; it may nudge
+  within a band, never across one. Name the evidence you used in the payload.
+
+  ```
+  legion uncertainty emit --surface legion.sd --feature-key sd.research-hypothesis \
+    --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 \
+    --input-fingerprint <research-doc-id> --claimed-confidence <p> \
+    --payload '{"research":"<research-doc-id>","informs":["FR-..."],"evidence":"<one line>"}'
+  ```
+
+Omit `--model` and pass `--session-id` from the `CLAUDE_CODE_SESSION_ID` environment
+variable: the engine resolves the model from that session's live statusline sample, and
+with neither flag the row lands in the `unknown` model cohort, where no regression across
+releases can ever be seen. A guessed `--model` is worse: it mislabels the row into a real
+cohort. If the variable is unset in your shell, emit anyway and say so in the report; the
+rows will sit in `unknown`. `<mode>` is the literal `thesis-only` or `service-design`.
+Emit exits 0 even when it recorded something you did not mean (a wrong research id in the
+fingerprint still returns a valid-looking id), and the engine has no read-back command, so
+the only check is the command line you ran against the create output; do it before you
+report. The default orphan window is 30 days, and neither a crit nor a research toy
+reliably happens inside it, so both emits set `--orphan-ttl-days 180`; a prediction that
+still orphans after that is a finding about the pipeline, not an error in the emit. Record
+each emitted prediction id in the report next to the document it is about, with the
+surface string, since the crit rebuilds the set fingerprint from intent id and surface. Do
+not revise a landed document to hold the id; the report and the fingerprint are how the
+witness finds it.
+
+**Who witnesses, and when.** A prediction nobody witnesses is an orphan and is excluded from
+calibration, so the witness event is named here, not left to be discovered:
+
+- The set prediction is witnessed by the **crit** (the acceptance step that moves documents
+  past `draft`), which finds it by rebuilding the same fingerprint string,
+  `<intent-id>:spec:<surface>`: `outcome_correctness` is the fraction of the set accepted as written, with
+  label `shipped` when nothing was added or rejected, `scoped-down` when the crit cut
+  requirements, and `escalated` when it sent the set back. Until the crit exists as a skill,
+  the operator who accepts the set witnesses it by hand with the same rule.
+- Each RESEARCH prediction is witnessed when its document's status lands `done`, found by
+  the fingerprint, which is the research document's own id: whoever records the finding runs `legion uncertainty witness <id> --outcome-label shipped
+  --outcome-correctness 1.0` if the hypothesis held, `0.0` if refuted, and the held/refuted
+  fraction of its claims when mixed. The document's `provenance.verification` counts are
+  the source of that number.
+
+Emission is non-blocking by design: a failed emit logs and exits 0, and the run continues.
+A run that lands documents and emits nothing has skipped a step; say so in the report.
 
 ## Refuses
 
@@ -167,3 +256,5 @@ as an open question instead).
   an FR.
 - Resolving an input contradiction in-body. It escalates.
 - Any status beyond `draft`. Acceptance is the crit, a separate step.
+- Witnessing its own predictions. The writer stakes them; the crit and the research finding
+  score them. A self-witnessed prediction is the rubber stamp the engine exists to catch.
