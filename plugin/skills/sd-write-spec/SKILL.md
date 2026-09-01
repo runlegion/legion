@@ -66,7 +66,11 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   not mandatory); if it reads as a "maybe" or is genuinely undecided, escalate it and spec
   nothing on it. Only `settled` grounds a SHALL.
 - `current_state` -- `real` vs planned governs tense (a SHALL for what must exist), never
-  priority; a `known_gap` is a pain the requirement addresses, not a requirement itself.
+  priority. A `real` entry that records a proven experiment with cited sources (an audit
+  corpus with reproductions, a probe script that found real defects) IS invariant 1's
+  "proven toy or experiment" and earns a SHALL; a `real` entry that merely describes the
+  present system earns nothing. A `known_gap` is a pain the requirement addresses, not a
+  requirement itself.
 - `boundaries` -- an entry whose `note` states a rule the scope must hold to ("must never
   depend on X", "the dependency runs one way") is a settled constraint and earns a SHALL,
   folded into an FR since no constraint doc-type exists. An entry that only assigns
@@ -83,7 +87,10 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
 **Service-design mode adds** (these fields exist only when the artifacts do -- do not look
 for them in intent-only mode):
 
-- **FRs** from blueprint `backstage`/`support` mechanisms -- what the system must do.
+- **FRs** from blueprint `backstage`/`support` mechanisms -- these say what the system must
+  do, so they are where a requirement is found, never what makes it true. A blueprint step
+  is a supporting citation, never the earner: the earner is the moment of truth or settled
+  proposal the step serves, and a step with neither behind it is escalated, not specced.
 - **Error-handling requirements** from blueprint `fail_points` (where the service breaks)
   and the ecosystem's `failure_modes` -- what must happen when it does. These populate the
   requirement's `errors` object.
