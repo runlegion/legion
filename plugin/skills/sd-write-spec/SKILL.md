@@ -38,7 +38,7 @@ resolve the ambiguity.
 
 ## Input modes
 
-- **Thesis-only** (system work -- legion-cmd is the case): the intent alone. An intent may
+- **Intent-only** (system work -- legion-cmd is the case): the intent alone. An intent may
   or may not carry a `claims` array. When it does, each claim's `right_if` becomes
   acceptance criteria. When it does NOT (a migrated or older intent), derive from what the
   intent actually has: `direction.proposals`, `current_state`, `actors`, `boundaries`,
@@ -72,7 +72,7 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   unproven mechanism a SHALL.
 
 **Service-design mode adds** (these fields exist only when the artifacts do -- do not look
-for them in thesis-only mode):
+for them in intent-only mode):
 
 - **FRs** from blueprint `backstage`/`support` mechanisms -- what the system must do.
 - **Error-handling requirements** from blueprint `fail_points` (where the service breaks)
@@ -80,15 +80,15 @@ for them in thesis-only mode):
   requirement's `errors` object.
 - **Acceptance criteria** for a service-design FR come from the blueprint step or the
   moment of truth it serves -- the step's success condition, or the MOT's `success`, is
-  what `verification.acceptance` checks. (In thesis-only mode with a `claims` array, the
+  what `verification.acceptance` checks. (In intent-only mode with a `claims` array, the
   claim's `right_if` is the acceptance instead.)
-- **NFRs** from moments of truth and non-functional concerns. In thesis-only mode, NFRs
+- **NFRs** from moments of truth and non-functional concerns. In intent-only mode, NFRs
   come from `actors` stakes, `known_gaps`, and reflections the intent cites instead.
 - **Priority derived at the spec boundary and shown in `traces_to`** -- designers do not
   speak in absolutes, so the artifacts carry none; this skill assigns them and shows its
   work: a persona's `would_leave_if` backed by a supported insight -> **SHALL**; a `goal`
   the service serves -> **SHOULD**; a delighter-shaped opportunity -> **MAY**. In
-  thesis-only mode, priority derives from the same shape one layer up: a settled
+  intent-only mode, priority derives from the same shape one layer up: a settled
   outcome or an actor's core stake -> SHALL, a served goal -> SHOULD, a nice-to-have -> MAY.
 
 Every NFR needs `category` (a closed enum:
