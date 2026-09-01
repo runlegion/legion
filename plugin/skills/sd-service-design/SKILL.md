@@ -135,9 +135,13 @@ legion uncertainty emit --surface legion.sd --feature-key sd.<step> \
   --claimed-confidence <p> --payload '{"repo":"<repo>","step":"<step>"}'
 ```
 
-After the step, witness it by the gate, which is mechanical and so the conductor may run
-it: landed is `shipped` at 1.0, parked as a draft is `scoped-down` at 0.5, refused or
-stopped is `escalated` at 0.0. Skip nothing.
+How it resolves: by the gate, which is a store-readable fact rather than a judgment --
+the step's document landed, parked as a draft, or was refused. The conductor does NOT
+witness it. Staking a number and then scoring it is the rubber stamp the engine exists to
+catch, and the confidence here is a judgment (read from the step's inputs) even though
+the outcome is not. The step-completion claim is the natural first case for
+store-resolved witnessing (#1091); until that lands it sits unwitnessed like every other
+prediction in this pipeline, which is honest. Skip the emission for no step.
 
 ### What the conductor carries and witnesses
 
@@ -185,7 +189,7 @@ skills cross-reference this block instead of restating it, as they do the park p
 - Emission is non-blocking by design: a failed emit logs and exits 0, and the run
   continues. A step that lands its output and emits nothing has skipped a step; say so
   in the report.
-- Never witness your own prediction. The emitter stakes it; the named witness scores it.
-  A self-witnessed prediction is the rubber stamp the engine exists to catch. The one
-  exception is the conductor's step-completion claim, whose witness is the gate, a
-  mechanical fact rather than a judgment.
+- Never witness your own prediction, without exception. The emitter stakes it; the named
+  witness scores it. A self-witnessed prediction is the rubber stamp the engine exists to
+  catch, and a mechanical-looking outcome does not earn a carve-out while the confidence
+  staked against it is still a judgment.
