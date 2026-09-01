@@ -21,7 +21,7 @@ and its whole worth is that a rule-follower can execute it without a hole to fal
 the spec is complete or it is escalated; it is never left ambiguous for someone who cannot
 resolve the ambiguity.
 
-## Two laws (bind every requirement)
+## Two invariants (bind every requirement)
 
 - **Every SHALL names what earned it.** A requirement's `traces_to` cites the source that
   makes it true: a proven toy or experiment, a supported insight (by id), a settled
@@ -73,7 +73,7 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   ownership is scoping, not a requirement: when it hands a capability to another owner,
   that capability is out of this scope, and a requirement that would cross the line is the
   boundary violation to name and escalate rather than spec.
-- `open_questions` / any unresolved contradiction -- escalated, not resolved (law 2).
+- `open_questions` / any unresolved contradiction -- escalated, not resolved (invariant 2).
 - When a resolved decision names machinery as required WHILE a `needs_pressure_test`
   proposal proposes the same machinery, split it: the settled WHAT (the outcome, the
   behavior) becomes a SHALL; the unproven HOW (the specific mechanism) routes to RESEARCH,
