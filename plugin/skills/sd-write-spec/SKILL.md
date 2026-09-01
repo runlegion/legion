@@ -57,7 +57,11 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
 **Both modes:**
 
 - `direction.proposals` -- a settled proposal (`status: settled`, no `needs_pressure_test`)
-  becomes a SHALL; a `needs_pressure_test` proposal routes to RESEARCH, never a SHALL.
+  becomes a SHALL; a `needs_pressure_test` proposal routes to RESEARCH, never a SHALL. A
+  proposal that is `proposed` but NOT pressure-test-flagged has not earned a SHALL either:
+  if the intent clearly commits to it as direction, it becomes a **SHOULD** (recommended,
+  not mandatory); if it reads as a "maybe" or is genuinely undecided, escalate it and spec
+  nothing on it. Only `settled` grounds a SHALL.
 - `current_state` -- `real` vs planned governs tense (a SHALL for what must exist), never
   priority; a `known_gap` is a pain the requirement addresses, not a requirement itself.
 - `open_questions` / any unresolved contradiction -- escalated, not resolved (law 2).
@@ -74,6 +78,10 @@ for them in thesis-only mode):
 - **Error-handling requirements** from blueprint `fail_points` (where the service breaks)
   and the ecosystem's `failure_modes` -- what must happen when it does. These populate the
   requirement's `errors` object.
+- **Acceptance criteria** for a service-design FR come from the blueprint step or the
+  moment of truth it serves -- the step's success condition, or the MOT's `success`, is
+  what `verification.acceptance` checks. (In thesis-only mode with a `claims` array, the
+  claim's `right_if` is the acceptance instead.)
 - **NFRs** from moments of truth and non-functional concerns. In thesis-only mode, NFRs
   come from `actors` stakes, `known_gaps`, and reflections the intent cites instead.
 - **Priority derived at the spec boundary and shown in `traces_to`** -- designers do not
@@ -121,15 +129,25 @@ as an open question instead).
    named in the requirement and signalled up, not silently resolved.
 5. **Validate one of EACH doc-type before batch-creating** -- an FR, an NFR, and a RESEARCH
    sample (three different meta shapes). The store refuses a schema violation on every path;
-   catching it on one document is cheaper than on the whole set. NFR `priority` lives in the
-   payload's `meta.priority`, NOT the `--priority` flag (that flag is requirement-only):
+   catching it on one document is cheaper than on the whole set. Three id/priority rules the
+   schemas do not spell out:
+   - A **requirement** carries priority in `meta.priority` AND you pass `--priority <same>`
+     on create -- the flag populates the queryable storage column, which stays null if you
+     only set the payload; keep them equal (this is a projection kept in sync, not a second
+     source of truth).
+   - An **NFR** carries priority only in `meta.priority`; the `--priority` flag is
+     requirement-only, so the NFR's storage column stays null. That is a store limitation,
+     not yours to work around -- do not omit `meta.priority`.
+   - A **RESEARCH** doc has no typed id and no `meta.id`/`surface`/`owner`/`priority` -- it
+     takes a UUID, so create it WITHOUT `--id` (unlike FR/NFR, which require it).
 
    ```
    legion document validate --schema <requirement-schema-id> --file fr-sample.json
    legion document validate --schema <nfr-schema-id> --file nfr-sample.json
    legion document validate --schema <research-schema-id> --file research-sample.json
-   legion document create --doc-type requirement --id FR-<SURFACE>-001 --owner <agent> --surface <surface> --from <file>
+   legion document create --doc-type requirement --id FR-<SURFACE>-001 --priority SHALL --owner <agent> --surface <surface> --from <file>
    legion document create --doc-type nfr --id NFR-<SURFACE>-001 --owner <agent> --surface <surface> --from <file>
+   legion document create --doc-type research --owner <agent> --surface <surface> --from <file>
    ```
 
 6. **Report** the set: the FR and NFR ids, the RESEARCH documents spun off, and every gap
