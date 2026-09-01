@@ -200,11 +200,19 @@ are not predictions, so they get no emission. Two things are predictions.
   instance in a journey (one probe that worked once) is not an experiment; it may nudge
   within a band, never across one. Name the evidence you used in the payload.
 
+  This payload carries the one free-prose field in the pipeline, so build it in a file
+  rather than inline: an apostrophe in your evidence line ends the shell's single quote,
+  and because emit exits 0 with no read-back it would write a mangled row rather than
+  fail in front of you.
+
   ```
+  cat > research-pred.json <<'JSON'
+  {"research":"<research-doc-id>","informs":["FR-..."],"evidence":"<one line>"}
+  JSON
   legion uncertainty emit --surface legion.sd --feature-key sd.research-hypothesis \
     --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 \
     --input-fingerprint <research-doc-id> --claimed-confidence <p> \
-    --payload '{"research":"<research-doc-id>","informs":["FR-..."],"evidence":"<one line>"}'
+    --payload "$(cat research-pred.json)"
   ```
 
 The emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
@@ -218,13 +226,16 @@ intent id and surface.
 calibration, so the witness event is named here, not left to be discovered:
 
 - The set prediction is witnessed by the **crit** (the acceptance step that moves documents
-  past `draft`), which finds it by rebuilding the same fingerprint string,
-  `<intent-id>:spec:<surface>`: `outcome_correctness` is the fraction of the set accepted as written, with
+  past `draft`), which reads the id from this run's report and confirms it by rebuilding
+  the fingerprint `<intent-id>:spec:<surface>` -- witness takes the id, never the
+  fingerprint, and no lookup by fingerprint exists. `outcome_correctness` is the
+  fraction of the set accepted as written, with
   label `shipped` when nothing was added or rejected, `scoped-down` when the crit cut
   requirements, and `escalated` when it sent the set back. Until the crit exists as a skill,
   the operator who accepts the set witnesses it by hand with the same rule.
-- Each RESEARCH prediction is witnessed when its document's status lands `done`, found by
-  the fingerprint, which is the research document's own id: whoever records the finding runs `legion uncertainty witness <id> --outcome-label shipped
+- Each RESEARCH prediction is witnessed when its document's status lands `done`. Its id is
+  in this run's report, and the fingerprint that confirms it is the research document's own
+  id. Whoever records the finding runs `legion uncertainty witness <id> --outcome-label shipped
   --outcome-correctness 1.0` if the hypothesis held, `0.0` if refuted, and the held/refuted
   fraction of its claims when mixed. The document's `provenance.verification` counts are
   the source of that number.
