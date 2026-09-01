@@ -25,7 +25,7 @@ resolve the ambiguity.
 
 - **Every SHALL names what earned it.** A requirement's `traces_to` cites the source that
   makes it true: a proven toy or experiment, a supported insight (by id), a settled
-  intent proposal, an ecosystem moment of truth. A candidate SHALL whose only ground is
+  intent proposal, a settled boundary rule, an ecosystem moment of truth. A candidate SHALL whose only ground is
   "the current system does this" is the let-go-of-the-past fault in spec clothing -- it is
   how the legion-cmd spec drifted into a rebuild of the guards it existed to replace.
   Unproven ground (an intent proposal with `needs_pressure_test`, or anything grounded only
