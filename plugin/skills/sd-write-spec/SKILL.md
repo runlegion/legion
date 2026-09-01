@@ -38,10 +38,11 @@ resolve the ambiguity.
 
 ## Input modes
 
-- **Thesis-only** (system work -- legion-cmd is the case): the intent alone. Requirements
-  derive from the intent's `claims` (each claim's `right_if` becomes acceptance criteria),
-  `direction.proposals` (settled ones become SHALLs, `needs_pressure_test` ones route to
-  RESEARCH), and `current_state` (real vs planned governs tense, never priority).
+- **Thesis-only** (system work -- legion-cmd is the case): the intent alone. An intent may
+  or may not carry a `claims` array. When it does, each claim's `right_if` becomes
+  acceptance criteria. When it does NOT (a migrated or older intent), derive from what the
+  intent actually has: `direction.proposals`, `current_state`, `actors`, `boundaries`,
+  `open_questions`. Do not assume the claims-bearing shape -- read the intent's own fields.
 - **Service-design** (product work): the intent plus the landed ecosystem, personas,
   journeys, blueprints, and Discovery. Read every input by id first
   (`legion document view <id> --json`); the requirement set is derived from all of them,
@@ -53,21 +54,41 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
 
 ## The mapping
 
-- **FRs** from blueprint `backstage`/`support` mechanisms and the intent's claims -- what
-  the system must do.
+**Both modes:**
+
+- `direction.proposals` -- a settled proposal (`status: settled`, no `needs_pressure_test`)
+  becomes a SHALL; a `needs_pressure_test` proposal routes to RESEARCH, never a SHALL.
+- `current_state` -- `real` vs planned governs tense (a SHALL for what must exist), never
+  priority; a `known_gap` is a pain the requirement addresses, not a requirement itself.
+- `open_questions` / any unresolved contradiction -- escalated, not resolved (law 2).
+- When a resolved decision names machinery as required WHILE a `needs_pressure_test`
+  proposal proposes the same machinery, split it: the settled WHAT (the outcome, the
+  behavior) becomes a SHALL; the unproven HOW (the specific mechanism) routes to RESEARCH,
+  and the FR notes the dependency. A resolved ruling on the outcome does not make the
+  unproven mechanism a SHALL.
+
+**Service-design mode adds** (these fields exist only when the artifacts do -- do not look
+for them in thesis-only mode):
+
+- **FRs** from blueprint `backstage`/`support` mechanisms -- what the system must do.
 - **Error-handling requirements** from blueprint `fail_points` (where the service breaks)
   and the ecosystem's `failure_modes` -- what must happen when it does. These populate the
   requirement's `errors` object.
-- **NFRs** from moments of truth and non-functional concerns -- performance, security,
-  reliability, and kin. Each NFR needs `category` (a closed enum:
-  performance/scalability/reliability/availability/security/privacy/observability/maintainability/compatibility/usability/compliance
-  -- use `scalability` for locality, `maintainability` for policy-as-data), `metric`,
-  `target`, and `measurement`; an NFR without a measurement is an aspiration, not an NFR.
-- **Priority is derived at the spec boundary and shown in `traces_to`** -- designers do not
-  speak in absolutes, so the source artifacts carry none; this skill assigns them and shows
-  its work: a persona's `would_leave_if` backed by a supported insight -> **SHALL**; a
-  `goal` the service serves -> **SHOULD**; a delighter-shaped opportunity -> **MAY**. The
-  `traces_to` string states the derivation, so a reviewer can attack it.
+- **NFRs** from moments of truth and non-functional concerns. In thesis-only mode, NFRs
+  come from `actors` stakes, `known_gaps`, and reflections the intent cites instead.
+- **Priority derived at the spec boundary and shown in `traces_to`** -- designers do not
+  speak in absolutes, so the artifacts carry none; this skill assigns them and shows its
+  work: a persona's `would_leave_if` backed by a supported insight -> **SHALL**; a `goal`
+  the service serves -> **SHOULD**; a delighter-shaped opportunity -> **MAY**. In
+  thesis-only mode, priority derives from the same shape one layer up: a settled
+  outcome or an actor's core stake -> SHALL, a served goal -> SHOULD, a nice-to-have -> MAY.
+
+Every NFR needs `category` (a closed enum:
+performance/scalability/reliability/availability/security/privacy/observability/maintainability/compatibility/usability/compliance
+-- use `scalability` for locality, `maintainability` for policy-as-data), `metric`,
+`target`, and `measurement`; an NFR without a real measurement is an aspiration, not an NFR
+-- decline to invent a performance target with no way to measure it (escalate the threshold
+as an open question instead).
 
 ## Procedure
 
@@ -82,22 +103,33 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
    `verification`. `meta.priority` is the single source of a requirement's priority --
    never restate it elsewhere. Status lands `draft`.
 3. **Derive the whole set for the scope in one pass**, numbered `FR-<SURFACE>-NNN` /
-   `NFR-<SURFACE>-NNN`. Set `depends_on` between requirements, `nfr_refs` from an FR to the
-   NFRs that bound it, and `constraint_refs` where a constraint governs -- the cross-links
-   only cohere if the set is written together, which is why this is one invocation, not one
-   per requirement.
+   `NFR-<SURFACE>-NNN`. The typed id IS the id: the store requires the storage id to equal
+   `meta.id`, so you MUST pass `--id <typed-id>` on create (see step 5) -- omit it and every
+   document gets a random UUID, breaking the numbering and every `depends_on`/`nfr_refs`.
+   Set `depends_on` between requirements and `nfr_refs` from an FR to the NFRs that bound
+   it -- these cohere only when the set is written together, which is why it is one
+   invocation. `constraint_refs` points at a `constraint` doc-type that does NOT exist in
+   this store: do not try to land constraints; fold a constraint-like rule into an FR and
+   say why (a technology-choice SHALL, for instance).
 4. **Route unproven ground to RESEARCH, escalate UNCLEAR.** A claim the inputs cannot
-   ground becomes a RESEARCH document (its own doc-type) that the requirement cites, not a
-   SHALL. A contradiction between inputs is named in the requirement and signalled up, not
-   silently resolved.
-5. **Validate one FR and one NFR before batch-creating.** The store refuses a schema
-   violation on every path; catching it on one document is cheaper than on the whole set:
+   ground becomes a RESEARCH document (its own doc-type -- resolve its schema by
+   `x-doc-type: research`; its meta is a DIFFERENT shape from a requirement's, so template
+   it off the research schema, not off an FR). The requirement cannot cite it through a
+   field -- there is no `research_refs` and `traces_to` is one string that names the SHALL's
+   earner. Carry the link the other way: name the dependency in the FR's `description`, and
+   set the research doc's `links[].to` back to the FR. A contradiction between inputs is
+   named in the requirement and signalled up, not silently resolved.
+5. **Validate one of EACH doc-type before batch-creating** -- an FR, an NFR, and a RESEARCH
+   sample (three different meta shapes). The store refuses a schema violation on every path;
+   catching it on one document is cheaper than on the whole set. NFR `priority` lives in the
+   payload's `meta.priority`, NOT the `--priority` flag (that flag is requirement-only):
 
    ```
    legion document validate --schema <requirement-schema-id> --file fr-sample.json
    legion document validate --schema <nfr-schema-id> --file nfr-sample.json
-   legion document create --doc-type requirement --owner <agent> --surface <surface> --from <file>
-   legion document create --doc-type nfr --owner <agent> --surface <surface> --from <file>
+   legion document validate --schema <research-schema-id> --file research-sample.json
+   legion document create --doc-type requirement --id FR-<SURFACE>-001 --owner <agent> --surface <surface> --from <file>
+   legion document create --doc-type nfr --id NFR-<SURFACE>-001 --owner <agent> --surface <surface> --from <file>
    ```
 
 6. **Report** the set: the FR and NFR ids, the RESEARCH documents spun off, and every gap
@@ -113,5 +145,7 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   issue-writer's job, downstream.
 - A SHALL grounded only in "the current system does this," or any requirement with no
   `traces_to` source -- unproven ground routes to RESEARCH.
+- Landing a `constraint` document -- the doc-type does not exist here; a constraint becomes
+  an FR.
 - Resolving an input contradiction in-body. It escalates.
 - Any status beyond `draft`. Acceptance is the crit, a separate step.
