@@ -114,9 +114,11 @@ for them in intent-only mode):
   its `next_probe` folds into the RESEARCH document for the mechanism it would test.
 - **FRs** from blueprint `steps[].layers` (`backstage`, `support`) -- these say what the
   system must do, so they are where a requirement is found, never what makes it true. A
-  blueprint step is a supporting token, never the earner: the earner is the moment of
-  truth or settled proposal the step serves, and a step with neither behind it is
-  escalated, not specced. From the ecosystem's `moments_of_truth`: a moment of truth's
+  blueprint step is a supporting token, never the earner: the earner is the supported
+  insight, moment of truth, or settled proposal the step serves. A step with none of
+  those behind it earns no SHALL; it takes a SHOULD from the journey goal it serves, per
+  the priority rule below, and where it serves no goal either it is escalated. From the
+  ecosystem's `moments_of_truth`: a moment of truth's
   `success` text earns a SHALL; its `failure` text is what the `errors` object guards
   against and earns nothing on its own. A persona's own `moment_of_truth` supports a
   citation; only the ecosystem's earn.
@@ -165,8 +167,9 @@ derivation: `<token>[; <token>...] -- <PRIORITY> because <rule>`. Tokens are
 `blueprint.step.<n>`, `journey.phase.<n>`, `persona.<slug>.needs[<i>]`, and
 `boundary.<owner>`. The first token is the earner; the rest support. Only a token naming
 something invariant 1 lists may lead: `intent.<json-path>` for a settled proposal, a
-ruling, a boundary rule, an actor's stake, or a proven experiment; `discovery.<insight-id>`
-for a supported or bounded insight; `moment_of_truth.<n>`. `blueprint.step.<n>`,
+ruling, an actor's stake, or a proven experiment; `boundary.<owner>` for a settled
+boundary rule; `discovery.<insight-id>` for a supported or bounded insight;
+`moment_of_truth.<n>`. `blueprint.step.<n>`,
 `journey.phase.<n>`, and `persona.<slug>.needs[<i>]` are supporting tokens only.
 `meta.priority` holds the value; `traces_to` shows how it was derived. That is one
 source, shown twice, not two sources.
