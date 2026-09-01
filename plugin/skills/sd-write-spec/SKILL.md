@@ -64,6 +64,12 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   nothing on it. Only `settled` grounds a SHALL.
 - `current_state` -- `real` vs planned governs tense (a SHALL for what must exist), never
   priority; a `known_gap` is a pain the requirement addresses, not a requirement itself.
+- `boundaries` -- an entry whose `note` states a rule the scope must hold to ("must never
+  depend on X", "the dependency runs one way") is a settled constraint and earns a SHALL,
+  folded into an FR since no constraint doc-type exists. An entry that only assigns
+  ownership is scoping, not a requirement: when it hands a capability to another owner,
+  that capability is out of this scope, and a requirement that would cross the line is the
+  boundary violation to name and escalate rather than spec.
 - `open_questions` / any unresolved contradiction -- escalated, not resolved (law 2).
 - When a resolved decision names machinery as required WHILE a `needs_pressure_test`
   proposal proposes the same machinery, split it: the settled WHAT (the outcome, the
@@ -111,9 +117,12 @@ as an open question instead).
    `verification`. `meta.priority` is the single source of a requirement's priority --
    never restate it elsewhere. Status lands `draft`.
 3. **Derive the whole set for the scope in one pass**, numbered `FR-<SURFACE>-NNN` /
-   `NFR-<SURFACE>-NNN`. The typed id IS the id: the store requires the storage id to equal
-   `meta.id`, so you MUST pass `--id <typed-id>` on create (see step 5) -- omit it and every
-   document gets a random UUID, breaking the numbering and every `depends_on`/`nfr_refs`.
+   `NFR-<SURFACE>-NNN`. The typed id IS the id, so you MUST pass `--id <typed-id>` on
+   create (see step 5) -- omit it and every document gets a random UUID, breaking the
+   numbering and every `depends_on`/`nfr_refs`. The store does not check the two against
+   each other: it takes the storage id from the flag and never reads `meta.id`, so a
+   mismatched pair lands silently. The storage id is a projection of `meta.id` kept in
+   sync by you, not a second source of truth.
    Set `depends_on` between requirements and `nfr_refs` from an FR to the NFRs that bound
    it -- these cohere only when the set is written together, which is why it is one
    invocation. `constraint_refs` points at a `constraint` doc-type that does NOT exist in
