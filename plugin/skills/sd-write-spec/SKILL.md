@@ -41,7 +41,7 @@ resolve the ambiguity.
 
 ## Input modes
 
-- **Thesis-only** (system work -- legion-cmd is the case): the intent alone. An intent may
+- **Intent-only** (system work -- legion-cmd is the case): the intent alone. An intent may
   or may not carry a `claims` array. When it does, each claim's `right_if` becomes
   acceptance criteria. When it does NOT (a migrated or older intent), derive from what the
   intent actually has: `direction.proposals`, `current_state`, `actors`, `boundaries`,
@@ -56,9 +56,8 @@ resolve the ambiguity.
   the specific source it came from.
 
 A missing artifact and a gap inside an artifact are different failures. A missing or
-schema-invalid artifact PARKS the run (step 1): nothing lands, the report names the
-missing input and its unblock, and the owner is signalled. A gap inside a landed artifact
-is law 2: land the set, name the gap, escalate. A weak artifact (a Discovery whose insights
+schema-invalid artifact PARKS the run; step 1 says what parking means. A gap inside a
+landed artifact is law 2: land the set, name the gap, escalate. A weak artifact (a Discovery whose insights
 are all `blocked`) is landed, not missing; the run proceeds and the verdicts decide what
 earns what.
 
@@ -95,7 +94,7 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   unproven mechanism a SHALL.
 
 **Service-design mode adds** (these fields exist only when the artifacts do -- do not look
-for them in thesis-only mode):
+for them in intent-only mode):
 
 - **Discovery insights, by `status`** (the schema's verdict field). `supported` earns a
   SHALL for the need it evidences. `bounded` earns a SHALL whose scope is the bound the
@@ -109,18 +108,21 @@ for them in thesis-only mode):
   earns a SHALL; its `failure` text is what the `errors` object guards against and earns
   nothing on its own. A persona's own `moment_of_truth` supports a citation; only the
   ecosystem's earn.
-- **Error-handling requirements** from blueprint `steps[].pain_points` (where the service
+- **Error-handling requirements** from blueprint `steps[].fail_points` (where the service
   breaks) and the ecosystem's `failure_modes` -- what must happen when it does. These
-  populate the requirement's `errors` object. A failure mode whose `recovery` is undecided
-  is an UNCLEAR carried in `errors`, not a rule.
+  populate the requirement's `errors` object. A step's `frictions` (customer hurt; the
+  field that superseded `pain_points`, which older blueprints still carry) are what the
+  requirement must relieve, not where it breaks. A blueprint carrying none of these leaves
+  `errors` to the ecosystem's `failure_modes` alone. A failure mode whose `recovery` is
+  undecided is an UNCLEAR carried in `errors`, not a rule.
 - **Acceptance criteria** for a service-design FR come from the blueprint step or the
   moment of truth it serves -- the step's success condition, or the MOT's `success`, is
-  what `verification.acceptance` checks. In thesis-only mode with a `claims` array, the
-  claim's `right_if` is the acceptance. In thesis-only mode WITHOUT claims, acceptance
+  what `verification.acceptance` checks. In intent-only mode with a `claims` array, the
+  claim's `right_if` is the acceptance. In intent-only mode WITHOUT claims, acceptance
   comes from the proposal's own text and the intent's cited evidence: each criterion names
   one observable, and where the intent cites a defect issue with a reproduction, the
   pre-fix reproduction is a criterion (the harness must catch it).
-- **NFRs** from moments of truth and non-functional concerns. In thesis-only mode, NFRs
+- **NFRs** from moments of truth and non-functional concerns. In intent-only mode, NFRs
   come from `actors` stakes, `known_gaps`, and the source notes in `meta.sources` (a cited
   reflection is read through its note there; there is no command to view a reflection as a
   document).
@@ -131,7 +133,7 @@ for them in thesis-only mode):
   persona's word. What earns what: a supported insight or a moment of truth's success ->
   **SHALL**; the journey's `meta.goal`, served by a step with no insight behind it ->
   **SHOULD**; a journey row's `opportunities` entry or a persona need the inputs mark as a
-  delighter -> **MAY**. In thesis-only mode, priority derives from the same shape one layer
+  delighter -> **MAY**. In intent-only mode, priority derives from the same shape one layer
   up: a settled outcome, a ruling, or an actor's core stake -> SHALL, a served goal ->
   SHOULD, a nice-to-have or an uncommitted consumer -> MAY.
 - **A pre-existing spec on a sibling surface** is not an input and is not superseded by
