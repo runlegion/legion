@@ -21,7 +21,7 @@ and its whole worth is that a rule-follower can execute it without a hole to fal
 the spec is complete or it is escalated; it is never left ambiguous for someone who cannot
 resolve the ambiguity.
 
-## Two laws (bind every requirement)
+## Two invariants (bind every requirement)
 
 - **Every SHALL names what earned it.** A requirement's `traces_to` cites the source that
   makes it true: a proven toy or experiment, a supported or bounded insight (by id), a
@@ -60,7 +60,7 @@ resolve the ambiguity.
 
 A missing artifact and a gap inside an artifact are different failures. A missing or
 schema-invalid artifact PARKS the run; step 1 says what parking means. A gap inside a
-landed artifact is law 2: land the set, name the gap, escalate. A weak artifact (a Discovery whose insights
+landed artifact is invariant 2: land the set, name the gap, escalate. A weak artifact (a Discovery whose insights
 are all `blocked`) is landed, not missing; the run proceeds and the verdicts decide what
 earns what.
 
@@ -80,7 +80,7 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   nothing on it. Only `settled` grounds a SHALL.
 - `current_state` -- `real` vs planned governs tense (a SHALL for what must exist), never
   priority. A `real` entry that records a proven experiment with cited sources (an audit
-  corpus with reproductions, a probe script that found real defects) IS law 1's "proven
+  corpus with reproductions, a probe script that found real defects) IS invariant 1's "proven
   toy or experiment" and earns a SHALL; a `real` entry that merely describes the present
   system earns nothing. A `known_gap` is a pain the requirement addresses, not a
   requirement itself; it may ground an NFR's `traces_to` when an actor's stake says the
@@ -92,7 +92,7 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   that capability is out of this scope, and a requirement that would cross the line is the
   boundary violation to name and escalate rather than spec.
 - `open_questions` -- an unresolved one, or any unresolved contradiction, is escalated,
-  not resolved (law 2). A resolved one whose `resolution` records an operator ruling ranks
+  not resolved (invariant 2). A resolved one whose `resolution` records an operator ruling ranks
   as `settled`: the outcome it names earns a SHALL. A field elsewhere in the intent that
   still contradicts that resolution (a settled proposal that assumes cancelled machinery)
   is an UNCLEAR, not a fact; name it and escalate it to the intent's owner.
