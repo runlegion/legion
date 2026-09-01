@@ -212,7 +212,7 @@ variable: the engine resolves the model from that session's live statusline samp
 with neither flag the row lands in the `unknown` model cohort, where no regression across
 releases can ever be seen. A guessed `--model` is worse: it mislabels the row into a real
 cohort. If the variable is unset in your shell, emit anyway and say so in the report; the
-rows will sit in `unknown`. `<mode>` is the literal `thesis-only` or `service-design`.
+rows will sit in `unknown`. `<mode>` is the literal `intent-only` or `service-design`.
 Emit exits 0 even when it recorded something you did not mean (a wrong research id in the
 fingerprint still returns a valid-looking id), and the engine has no read-back command, so
 the only check is the command line you ran against the create output; do it before you
