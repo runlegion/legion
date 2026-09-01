@@ -25,7 +25,7 @@ resolve the ambiguity.
 
 - **Every SHALL names what earned it.** A requirement's `traces_to` cites the source that
   makes it true: a proven toy or experiment, a supported insight (by id), a settled
-  intent proposal, an ecosystem moment of truth. A candidate SHALL whose only ground is
+  intent proposal, a settled boundary rule, an ecosystem moment of truth. A candidate SHALL whose only ground is
   "the current system does this" is the let-go-of-the-past fault in spec clothing -- it is
   how the legion-cmd spec drifted into a rebuild of the guards it existed to replace.
   Unproven ground (an intent proposal with `needs_pressure_test`, or anything grounded only
@@ -82,6 +82,12 @@ of truth carry what a user-story layer would have, so `traces_to` points straigh
   system earns nothing. A `known_gap` is a pain the requirement addresses, not a
   requirement itself; it may ground an NFR's `traces_to` when an actor's stake says the
   gap must be closed.
+- `boundaries` -- an entry whose `note` states a rule the scope must hold to ("must never
+  depend on X", "the dependency runs one way") is a settled constraint and earns a SHALL,
+  folded into an FR since no constraint doc-type exists. An entry that only assigns
+  ownership is scoping, not a requirement: when it hands a capability to another owner,
+  that capability is out of this scope, and a requirement that would cross the line is the
+  boundary violation to name and escalate rather than spec.
 - `open_questions` -- an unresolved one, or any unresolved contradiction, is escalated,
   not resolved (law 2). A resolved one whose `resolution` records an operator ruling ranks
   as `settled`: the outcome it names earns a SHALL. A field elsewhere in the intent that
@@ -180,9 +186,12 @@ no number in the inputs is.
    Status lands `draft`. The `list` output's `payload` is a JSON string; parse it a second
    time to reach `x-doc-type`.
 3. **Derive the whole set for the scope in one pass**, numbered `FR-<SURFACE>-NNN` /
-   `NFR-<SURFACE>-NNN`. The typed id IS the id: the store requires the storage id to equal
-   `meta.id`, so you MUST pass `--id <typed-id>` on create (see step 5) -- omit it and every
-   document gets a random UUID, breaking the numbering and every `depends_on`/`nfr_refs`.
+   `NFR-<SURFACE>-NNN`. The typed id IS the id, so you MUST pass `--id <typed-id>` on
+   create (see step 5) -- omit it and every document gets a random UUID, breaking the
+   numbering and every `depends_on`/`nfr_refs`. The store does not check the two against
+   each other: it takes the storage id from the flag and never reads `meta.id`, so a
+   mismatched pair lands silently. The storage id is a projection of `meta.id` kept in
+   sync by you, not a second source of truth.
    Set `depends_on` between requirements and `nfr_refs` from an FR to the NFRs that bound
    it -- these cohere only when the set is written together, which is why it is one
    invocation. `constraint_refs` points at a `constraint` doc-type that does NOT exist in
