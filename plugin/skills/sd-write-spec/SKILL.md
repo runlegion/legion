@@ -112,9 +112,12 @@ for them in intent-only mode):
   `saturated-unevidenced` are unproven ground: they earn nothing and kill nothing, a
   requirement with another earner stands, the insight may be cited in a description, and
   its `next_probe` folds into the RESEARCH document for the mechanism it would test.
-- **FRs** from blueprint `steps[].layers` (`backstage`, `support`) -- what the system must
-  do -- and from the ecosystem's `moments_of_truth`: a moment of truth's `success` text
-  earns a SHALL; its `failure` text is what the `errors` object guards against and earns
+- **FRs** from blueprint `steps[].layers` (`backstage`, `support`) -- these say what the
+  system must do, so they are where a requirement is found, never what makes it true. A
+  blueprint step is a supporting token, never the earner: the earner is the moment of
+  truth or settled proposal the step serves, and a step with neither behind it is
+  escalated, not specced. From the ecosystem's `moments_of_truth`: a moment of truth's
+  `success` text earns a SHALL; its `failure` text is what the `errors` object guards against and earns
   nothing on its own. A persona's own `moment_of_truth` supports a citation; only the
   ecosystem's earn.
 - **Error-handling requirements** from blueprint `steps[].fail_points` (where the service
@@ -157,7 +160,11 @@ derivation: `<token>[; <token>...] -- <PRIORITY> because <rule>`. Tokens are
 `intent.<json-path>` (e.g. `intent.direction.proposals[3]`,
 `intent.open_questions.FQ-1.resolution`), `discovery.<insight-id>`, `moment_of_truth.<n>`,
 `blueprint.step.<n>`, `journey.phase.<n>`, `persona.<slug>.needs[<i>]`, and
-`boundary.<owner>`. The first token is the earner; the rest support. `meta.priority` holds
+`boundary.<owner>`. The first token is the earner; the rest support. Only a token naming
+something invariant 1 lists may lead: `intent.<json-path>` for a settled proposal, a
+ruling, a boundary rule, an actor's stake, or a proven experiment; `discovery.<insight-id>`
+for a supported or bounded insight; `moment_of_truth.<n>`. `blueprint.step.<n>`,
+`journey.phase.<n>`, and `persona.<slug>.needs[<i>]` are supporting tokens only. `meta.priority` holds
 the value; `traces_to` shows how it was derived. That is one source, shown twice, not two
 sources.
 
