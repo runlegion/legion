@@ -1,5 +1,164 @@
 # Legion Changelog
 
+## 0.37.3
+
+The spec-writer release. The service-design pipeline ran from intent to blueprint and then
+stopped: seven skills produced design artifacts and nothing turned them into the requirement
+set the executor and the issue-writer consume, so the Deliver edge was hand work or no work.
+This release ships `sd-write-spec`, the eighth and last of the sd skills, which turns an
+intent -- and, where one has landed, a full service design -- into a scope's FR and NFR
+documents in one pass, bound by two invariants: every SHALL names what earned it, and an
+UNCLEAR is escalated rather than resolved in the body. Alongside it ships the instrumentation
+that replaces the pipeline's constant confidence with a staked judgment: all eight sd skills
+now emit predictions read off their own inputs, in place of an orchestrator that emitted one
+constant 0.70 per step and witnessed itself. Patch release: skill text only within the
+plugin's existing skills surface -- nine Markdown files, one of them an agent definition -- no
+binary code change, no wire-format change, no schema migration.
+
+Two things this release deliberately does not carry. Outcome scoring is the first: Sean ruled
+on 2026-09-01 that the prediction engine must compute correctness from what the store records
+rather than have the agent that produced the outcome choose the number, following the
+gate-trust precedent that put correctness derivation in code. The witness paragraphs shipped
+here still tell an agent to read a document's status and pick 1.0, 0.5, or 0.0; they are an
+interim measure, #1091 tracks the store-resolved mechanism that replaces them, and every
+prediction emitted meanwhile orphans at its 180-day window unless someone witnesses it by
+hand. The second follows from the first: issue #1085's calibration criterion was formally
+amended and ratified during the release, because the observable it named -- spread visible in
+`legion uncertainty calibration --surface legion.sd` -- needs that same unbuilt witnessing.
+Calibration rolls only witnessed predictions, and nothing witnesses these, so the command
+still returns the pre-branch cohort of one row at claimed 0.70, verified twice including after
+a forced `calibrate-now`. What surfaced it was verify returning uncertain on PR #1090 rather
+than pass; the amendment and its reasoning are recorded on the issue.
+
+### Added
+
+- **`sd-write-spec`, the Deliver edge in one skill** (PR #1088, #1086). Two input modes, each
+  reading every input by id. Intent-only takes the intent alone and does not assume the
+  claims-bearing shape: where a `claims` array exists each claim's `right_if` becomes the
+  acceptance criteria, and where it does not the set derives from `direction.proposals`,
+  `current_state`, `actors`, `boundaries`, and `open_questions` instead. Service-design mode
+  adds the landed ecosystem, personas, journeys, blueprints, and Discovery, with the mapping
+  section fenced by mode so an intent-only run never goes looking for a blueprint step.
+  Invariant 1 makes every SHALL's `traces_to` name what earned it, from an exhaustive list of
+  seven grounds -- a proven toy or experiment, a supported or bounded insight by id, a settled
+  intent proposal, an operator ruling on a resolved open question, a settled boundary rule, an
+  actor's core stake, an ecosystem moment of truth -- and routes unproven ground to a RESEARCH
+  document rather than a SHALL: a proposal still carrying `needs_pressure_test`, or a candidate
+  whose only ground is that the current system behaves this way, which is the fault that let
+  the legion-cmd spec drift into a rebuild of the guards it existed to replace. Where a settled
+  decision needs machinery a pressure test is still proving, the outcome becomes the SHALL and
+  the mechanism becomes RESEARCH, with the FR naming the dependency. Invariant 2 sends
+  contradictions and gaps up instead of deciding them: land the set as far as it goes, name the
+  gap inside the affected requirement, signal whoever owns the answer. The whole set is derived
+  in one invocation, because `depends_on` and `nfr_refs` cohere only when the requirements are
+  written together, and every document is created with its typed storage id -- the store takes
+  that id from the `--id` flag and never reads `meta.id`, so the two are a projection the
+  writer keeps in sync rather than a pairing the store checks. One FR, one NFR, and one
+  RESEARCH document validate against their schemas before the set is created. The skill refuses
+  to mint `system-foundations` nodes, to write issues, to land a `constraint` document (the
+  doc-type does not exist in this store, so such a rule folds into an FR with its reasoning
+  stated), and to land any status past `draft`. It was proven before it shipped: four runs on
+  2026-09-01 -- forger intent-only at 8 FR, 3 NFR, 3 RESEARCH; veneer service-design at
+  17/4/1; forger intent-only again on the fixed skill at 12/4/3; forger service-design at
+  14/3/3 -- 65 FR and NFR documents plus 10 RESEARCH, every set schema-valid on the first
+  create with no validate-and-retry loop. Both invariants held under real inputs: the forger
+  intent's three `needs_pressure_test` proposals split into outcome and mechanism, and veneer's
+  FQ-1 shrinker contradiction was escalated rather than decided.
+
+- **What those runs put back into the skill before it shipped** (PR #1089, #1087). Two of the
+  runs hit places where the text made the writer guess or contradicted what the store accepts,
+  and the fixes ride in the same release, so a node gets the corrected skill rather than the
+  first cut. Discovery insights get a verdict for all five statuses instead of `supported`
+  alone: `bounded` earns a SHALL scoped to the bound it states, `contradicted` cancels a
+  candidate whose only ground it was, and `blocked` and `saturated-unevidenced` earn nothing
+  and kill nothing, their `next_probe` folding into the RESEARCH document for the mechanism it
+  would test. The priority rule is rewritten onto fields the artifacts actually carry, and a
+  persona-stated SHALL becomes a claim to check against the insight or moment of truth behind
+  it rather than an earner on its own word. A documented `traces_to` grammar replaces the shape
+  each run invented for itself: a closed token vocabulary, a rule for which tokens may lead and
+  which only support, and one source shown twice, with `meta.priority` holding the value and
+  `traces_to` showing the derivation. Intent-only mode without a `claims` array gains its
+  acceptance rule, drawn from the proposal's own text and the intent's cited evidence, where a
+  cited defect's pre-fix reproduction becomes a criterion the harness must catch. A
+  `current_state.real` entry recording a proven experiment with cited sources earns a SHALL
+  while one that merely describes the present system earns nothing; a resolved `open_questions`
+  entry earns on its ruling, and a field elsewhere that still contradicts that ruling is an
+  UNCLEAR rather than a fact. A missing or schema-invalid input parks the run and signals its
+  owner, with the existence check moved ahead of the read, since there is nothing to read 60KB
+  of inputs for when one of them is absent; a gap inside a landed artifact escalates in-body
+  instead. RESEARCH documents take typed storage ids, the research schema's shape hints, and a
+  required `links[].relationship`, and create order is fixed at NFRs, then the FRs that
+  reference them, then the RESEARCH documents that link back, because the store validates
+  neither reference existence nor `depends_on` cycles. Invariant 2 names the actual command,
+  `legion signal --repo <repo> --to <owner> --verb question`, one signal per owner and each
+  listed in the report, after both runs escalated gaps and sent none -- an owner who is not
+  woken never answers. And a pre-existing spec on a sibling surface is read and its overlaps
+  reported, 12 of 14 FRs overlapping the existing `FR-FORGER-*` set in one run, with the
+  decision to retire the old set left to the crit rather than taken by the writer. The branch
+  froze at ten fix rounds rather than taking an eleventh: #1093 tracks nine findings deferred
+  out of these PRs, mostly earner rules the `traces_to` grammar depends on plus wording
+  tightenings, together with the second-pass audit that produced two of them -- it re-read
+  those 65 requirement documents against the skill's final text and found 59 still conformant,
+  six that would now be written differently. #1092 tracks a separate drift the same review rounds
+  turned up: the priority rule and all 23 stored personas still carry the persona schema's
+  superseded `needs[].priority`, and only three personas carry rev 4's `would_leave_if` at all.
+
+### Changed
+
+- **Every sd skill stakes a real prediction, and none scores its own** (PR #1090, #1085). The
+  pipeline emitted one constant confidence of 0.70 per step from the orchestrator, witnessed by
+  a schema refusal that in practice never fires, so the `legion.sd` cohort measured nothing: 12
+  rows, every claimed confidence 0.70, every one scored 1.00, and the model `unknown` because
+  no session id was ever passed. Each of the eight skills now carries an Instrumentation
+  section that stakes the judgment claim its step already makes -- the intent review's
+  per-claim support, a Discovery verdict holding, an ecosystem edge materializing, and a
+  persona, journey, blueprint, or spec set surviving the crit -- and says which of its outputs
+  are mechanical derivations that get no emission at all: an agenda derivation, an axis score,
+  the ecosystem's union and dedup and actor tiers, the spec writer's priority and RESEARCH
+  routing that follow from status by rule. Three confidence anchors per skill tie the number to
+  conditions the agent reads off its own inputs, so two runs with different inputs land
+  different numbers, and the emit step sits after the create returns an id so the fingerprint
+  names a real document. The mechanics every emit shares are stated once in the orchestrator
+  and cross-referenced by the other seven: the session id from `CLAUDE_CODE_SESSION_ID` and no
+  `--model`, because the engine resolves the model from the session's live sample and a guessed
+  one mislabels the row into a real cohort; a 180-day orphan window, because neither a crit nor
+  a re-listen reliably happens inside the 30-day default; and the exit-0 rule, that emit returns
+  a valid-looking id whatever it recorded and the engine has no read-back, so the only check is
+  the command line against the create output. That last one is also why the research emit builds
+  its payload in a file through a quoted heredoc: the evidence field is free prose, and an
+  apostrophe inside inline single-quoted JSON would end the shell quote and write a mangled row
+  without failing. The orchestrator's constant is gone -- its step-completion confidence is read
+  from the step's own inputs, with worked anchors (sd-discover on a fresh corpus needing a crawl
+  sits near 0.3 because it parks by design, a writer whose inputs validate and whose insights
+  are supported near 0.9). Every section names the witness event and the fingerprint that
+  witness rebuilds, the fingerprints chaining the pipeline's document ids, and no skill
+  witnesses its own prediction, without exception: the conductor's carve-out for its own
+  step-completion claim was removed after verify returned uncertain on it, on the ground that a
+  mechanical-looking outcome does not excuse scoring the judgment staked against it. sd-discover
+  carries the witnessing duty for the intent review's per-claim predictions at its authoritative
+  pass -- `supported` witnesses shipped at 1.0, `bounded` witnesses scoped-down at 1.0 because
+  support within limits is still support, `contradicted` witnesses abandoned at 0.0 -- and
+  leaves `blocked` and `saturated-unevidenced` unwitnessed with the reason named in the report,
+  since scoring silence at 0.0 would teach the estimator that silence is contradiction. Because
+  several witnesses depend on ids no document carries, the conductor now states its carry
+  duties: the agenda's prediction ids travel to sd-discover, the ecosystem report's register
+  travels to every blueprint writer in its chains, and a dropped report orphans them. What is
+  observed so far is the emit half. The two forger spec runs put eight predictions on
+  `legion.sd` at claimed confidences from 0.25 to 0.70; four were emitted before the session-id
+  rule was written and sit in the `unknown` cohort, and whether the other four resolved a model
+  cannot be confirmed from the CLI, because `legion uncertainty` has no per-row read-back
+  (#902) and calibration will not show an unwitnessed row. Only sd-write-spec's section has run
+  live; the other seven were written to the same contract, and the first full pipeline run is
+  their test.
+
+- **`legion-verify` ends its turn with one line of verdict counts** (PR #1089, #1087). The
+  agent delivered its full report through `SendMessage` and then stopped, leaving that report
+  as the turn's final output. The harness re-delivers a spawned agent's final output a second
+  time as a truncated idle notice, so an orchestrator received the report once whole and once
+  cut off. The delivery paragraph now has the agent end with a single line naming its verdict
+  counts, and states the mechanism so a later editor does not strike the line as noise.
+  `sd-write-spec`'s report step carries the same rule, for the same reason.
+
 ## 0.37.2
 
 The service-design revision release. 0.37.1 shipped the pipeline as seven skills; this
