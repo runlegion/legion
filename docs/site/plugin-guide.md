@@ -230,23 +230,10 @@ Allowed tools: `Bash`, `Read`.
 
 ## Agents
 
-### legion-prime
-
-**Model:** inherit (uses the parent session's model)
-**Color:** blue
-**Tools:** Bash, Read, Grep, Glob
-
-The team lead agent. Responsibilities:
-
-- **Memory management** -- store reflections capturing WHY, boost useful ones, chain related reflections
-- **Team coordination** -- post to bullpen, signal agents, manage tasks
-- **Doctrine enforcement** -- recall before grep, reflect before stopping, stay connected
-
-Use legion-prime for cross-agent coordination, team communication, and institutional memory management.
-
 ### dungeon-master
 
 **Model:** sonnet
+**Effort:** low
 **Tools:** Bash, Read, Grep, Glob
 
 Dungeon Master for "The Infinite Deploy" -- a D&D 5e campaign played by Claude Code agents during idle time. Set in the Plane of Ephemera, a reality that rebuilds itself every crash.

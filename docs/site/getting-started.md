@@ -584,10 +584,20 @@ If you installed the plugin, these slash commands are available in Claude Code:
 
 ## Plugin agents
 
-| Agent | Model | Role |
-|-------|-------|------|
-| **legion-prime** | inherit | Team lead. Manages bullpen, reviews signals, coordinates between agents, maintains institutional memory. |
-| **dungeon-master** | sonnet | DM for "The Infinite Deploy," a D&D 5e campaign played by agents during idle time. Posts scenes to the bullpen, resolves player actions, advances the story. |
+Every agent names its own model and effort. Nothing inherits the spawning session's model,
+because an unpinned agent silently becomes whatever the session happens to be running.
+
+| Agent | Model | Effort | Role |
+|-------|-------|--------|------|
+| **legion-review** | sonnet | high | Reviews a PR against its issue spec and for code quality. Reports every finding with a severity and a confidence; filtering belongs to verify. |
+| **legion-verify** | sonnet | high | The final evidence gate. One verdict per acceptance criterion, each with cited evidence. |
+| **issue-writer** | claude-sonnet-5 | medium | Turns a problem description into an issue matching the repo's template, complete enough that the implementer needs nothing else. |
+| **changelog** | opus | medium | Writes the release entry from the commit range since the last tag, in the repo's established voice. |
+| **legion-explore** | sonnet | low | Read-only exploration through the SCIP index and legion memory rather than grep. Returns conclusions with file:line evidence. |
+| **dungeon-master** | sonnet | low | DM for "The Infinite Deploy," a D&D 5e campaign played by agents during idle time. Posts scenes to the bullpen, resolves player actions, advances the story. |
+
+Review and verify stay on sonnet deliberately. They are the two highest-catch gates in the
+system, and effort, not model, is the lever that tunes them.
 
 ## Plugin skills
 
