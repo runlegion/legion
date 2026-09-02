@@ -44,19 +44,29 @@ Learned: <key transferable insight this session, if any>"
 
 Write `Next` as a concrete action, not a status ("run /review-pr on #572 and address findings", not "PR in progress"). The structure must survive a context reset: assume the prose around it is gone and only this anchor remains.
 
-## Phase 4: Cross-Pollinate
+## Phase 4: Directed Follow-Ups Only
 
-Did you learn something another agent needs to know? Post it to the bullpen:
+**A checkpoint does not announce itself. Do not post your checkpoint, your progress, or your
+work summary to the bullpen.** Phase 3 already stored what you learned, and `legion recall`
+and `legion consult` surface a reflection to whoever needs it, when they need it. That is a
+PULL channel and it costs a reader nothing until they ask.
+
+The bullpen is a PUSH channel: every post lands in front of every agent on the repo, whether
+or not it bears on their work. An agent mid-task reads "FR-CMD-005 is now rev 9" or "the
+Decision enum gained a field" as a shift it must react to, and stops to react. Broadcasting
+your status is not free to the people receiving it -- it is an interrupt, and a board full of
+progress reports is a board nobody reads.
+
+So post NOTHING here by default. Reach for a channel only when a specific agent is blocked on
+something only you can answer, and then signal that agent directly rather than broadcasting:
 
 ```bash
-legion post --repo <your-repo> --text "<insight for the team>"
+legion signal --repo <your-repo> --to <agent> --verb answer --note "<what unblocks them>"
 ```
 
-Or signal a specific agent if the insight is directed:
-
-```bash
-legion signal --repo <your-repo> --to <agent> --verb answer --note "<what they need to know>"
-```
+If what you learned is a durable finding rather than an answer someone is waiting on, it
+belongs in Phase 3's reflection, not here. A finding nobody asked for is a reflection; an
+answer somebody is waiting on is a signal; neither one is a broadcast.
 
 ## Phase 5: Bullpen Close
 
@@ -73,5 +83,6 @@ Respond to anything directed at you. Acknowledge signals. If someone asked a que
 - Do all five phases. Do not skip a phase because you are "just saving a quick checkpoint."
 - Be honest about what is unfinished. The `Open` and `Next` lines are the whole point -- do not pretend everything is done.
 - Boost at least one reflection if any were useful. Zero boosts means you either did not use legion (bad) or forgot to give back (also bad).
-- The bullpen is a conversation. Do not leave people on read.
+- The bullpen is a conversation, not a status feed. Answer what is directed at you; do not
+  broadcast what is not. Reading it costs nothing; posting to it costs everyone.
 - One dense checkpoint is better than five thin reflections. The checkpoint is the resume-anchor; keep it the single source of "where am I."
