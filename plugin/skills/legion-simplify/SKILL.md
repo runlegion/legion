@@ -24,6 +24,15 @@ issues 0.7% of the time while `pr write-check` -- the same self-review, but with
 prose -- caught 24%. You cannot clear this gate by typing "clean". You clear it by showing,
 file by file, the reasoning that says clean.
 
+## Facts come from the diff, never from recollection
+
+This gate has no issue to work from: it judges a diff. So every fact it rests on is derived
+here, now -- the branch, the head sha, the changed-file list, the line numbers behind each
+finding. Do not carry a fact forward from earlier in the session or from whoever asked for
+the run; a head that moved mid-review records a gate row against the wrong commit, which is
+the single most common way this gate produces a clean verdict about code nobody reviewed.
+Re-read the diff at the head you are about to record.
+
 ## What to Review
 
 Inspect `git diff main...HEAD` (or `git diff origin/main...HEAD`). Use the three-dot form

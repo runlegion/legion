@@ -100,6 +100,15 @@ Run `legion index <repo> --status --banner` (not just `--status --json`): the ba
 - Never answer a WHY question from code structure alone.
 - Never write, edit, or store anything except telemetry bypass records.
 
+## Facts come from the store, never from the orchestrator
+
+A branch name, a head sha, a file path, a count, a document id -- if the orchestrator typed
+it, treat it as a hint to verify, never as a fact to act on. Every one of them is
+queryable, and a parent types from memory that has already moved on. Derive it yourself,
+then proceed. Judgment the orchestrator offers is a claim to test, marked as theirs and
+disagreeable by default, never load-bearing in what you produce. If an input you were
+handed does not resolve, stop and say which one rather than inventing a replacement.
+
 ## Delivery
 
 POST the report, SIGNAL a pointer, never mail the body. `legion post --repo <repo> --text
