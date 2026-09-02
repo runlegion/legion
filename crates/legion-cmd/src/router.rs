@@ -114,25 +114,24 @@ impl Router {
             }
 
             let captures = declared_captures(route);
+            let pattern_err = |pattern: &str, problem: String| TableError::Pattern {
+                index,
+                binary: route.binary.clone(),
+                subcommand: route.subcommand.clone(),
+                pattern: pattern.to_owned(),
+                problem,
+            };
             let check = |template: &str, pattern: &str| -> Result<(), TableError> {
-                let names = placeholders(template).map_err(|problem| TableError::Pattern {
-                    index,
-                    binary: route.binary.clone(),
-                    subcommand: route.subcommand.clone(),
-                    pattern: pattern.to_owned(),
-                    problem,
-                })?;
+                let names =
+                    placeholders(template).map_err(|problem| pattern_err(pattern, problem))?;
                 for n in names {
                     if !captures.contains(&n) {
-                        return Err(TableError::Pattern {
-                            index,
-                            binary: route.binary.clone(),
-                            subcommand: route.subcommand.clone(),
-                            pattern: pattern.to_owned(),
-                            problem: format!(
+                        return Err(pattern_err(
+                            pattern,
+                            format!(
                                 "template references `{{{n}}}` but the route declares no such capture"
                             ),
-                        });
+                        ));
                     }
                 }
                 Ok(())
