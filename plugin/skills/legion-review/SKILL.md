@@ -43,6 +43,16 @@ without guessing.
    For a small PR (docs-only, or under ~100 changed lines), one combined agent covering all
    dimensions is acceptable -- say so in the report.
 
+   **Delegation discipline.** Spawn count is the cost of this stage, not the depth of any
+   one agent, so keep it deliberate. Use one agent where one will do and fan out only when
+   the dimensions are genuinely independent work on a diff large enough to need them. Do
+   not spawn an agent for something you can finish in a handful of tool calls yourself,
+   and never spawn one to check your own reading -- the refuter below checks the
+   DIMENSIONS' findings, which is a different agent's work, and that is the only
+   self-checking shape this skill sanctions. A subagent inherits the model of whoever
+   spawns it unless its definition pins one, so a fan-out multiplies whatever model this
+   skill is running on.
+
 3. **Adversarial verification.** For every HIGH and MED finding the dimensions return, spawn
    one refuter agent (subagent_type `legion:legion-review`) prompted to REFUTE the finding: read
    the cited code and argue it is wrong, mitigated elsewhere, or out of the PR's scope.
@@ -106,9 +116,11 @@ without guessing.
 ## Findings discipline
 
 Inherited from the legion-review agent definition and non-negotiable: every finding cites
-file:line; claims the diff does not implement are HIGH; LOW findings are reported only when
-zero HIGH/MED exist; no style arguments beyond the repo's own CLAUDE.md and lint gates;
-no code is written or fixed by this skill -- the fix loop belongs to the implementer.
+file:line; claims the diff does not implement are HIGH; report every finding you have,
+including the low-severity and the uncertain ones, with a severity and a confidence
+attached, because filtering is verify's stage and it cannot weigh what you dropped; no
+style arguments beyond the repo's own CLAUDE.md and lint gates; no code is written or
+fixed by this skill -- the fix loop belongs to the implementer.
 
 ## Relationship to the other gates
 

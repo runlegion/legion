@@ -22,6 +22,7 @@ description: |
   </example>
 
 model: sonnet
+effort: high
 color: green
 tools: ["Bash", "Read"]
 ---

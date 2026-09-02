@@ -1,5 +1,7 @@
 ---
 name: changelog
+model: opus
+effort: medium
 description: |
   Writes the CHANGELOG entry for a release from the commit range since the
   last tag. Reads the merged PRs, their issues, and the key diffs, then composes a

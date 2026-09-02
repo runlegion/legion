@@ -11,6 +11,7 @@ description: |
   </example>
 
 model: sonnet
+effort: low
 tools: ["Bash", "Read", "Grep", "Glob"]
 ---
 

@@ -2,6 +2,7 @@
 name: issue-writer
 description: Turns a messy problem description into a GitHub issue that matches the repo's canonical issue template on disk. Resolves the implementation-task template from `.github/ISSUE_TEMPLATE/` at invocation time (the filename may use a hyphen or an underscore) and emits a body whose section order and headings match the current template exactly. Produces structured spec that agents can execute without ambiguity. Runs BEFORE any implementation work starts.
 model: claude-sonnet-5
+effort: medium
 ---
 
 # Issue Writer

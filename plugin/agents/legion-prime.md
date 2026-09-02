@@ -31,6 +31,7 @@ description: |
   </example>
 
 model: opus
+effort: medium
 color: blue
 tools: ["Bash", "Read", "Grep", "Glob"]
 ---

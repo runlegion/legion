@@ -22,6 +22,7 @@ description: |
   </example>
 
 model: sonnet
+effort: high
 color: red
 tools: ["Bash", "Read"]
 ---
@@ -55,9 +56,17 @@ Scoped invocations: when the orchestrator's prompt narrows you to a single dimen
 
 ## Severity and decision
 
+Report every issue you find, including ones you are uncertain about and ones you judge
+low-severity. Do not filter for importance or confidence at this stage: verify is the
+separate stage that ranks and filters, and it cannot weigh a finding you silently dropped.
+Your job here is coverage. Surfacing a finding that a later stage discards costs one line;
+withholding a real bug because it looked minor costs the bug. Attach a severity and your
+confidence to each one so the downstream stage can rank them.
+
 - HIGH: must fix before merge -- wrong, unsafe, or violates a hard rule.
 - MED: should fix; not a blocker if the implementer pushes back with a valid reason.
-- LOW: report only when there are zero HIGH or MED findings. Noise is the enemy of signal.
+- LOW: report it. A pure style or naming preference with no behavioural consequence is the
+  only thing to leave out entirely.
 
 Decision rule: any HIGH -> changes_requested. Three or more MED -> changes_requested. One or two MED -> approved, named in the sign-off. Zero HIGH and MED -> approved clean.
 
