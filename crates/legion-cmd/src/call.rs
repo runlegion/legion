@@ -31,6 +31,8 @@ pub enum ToolCall {
     },
     Read {
         file_path: String,
+        /// The caller's line bound, when one was given (FR-CMD-005 / #1056).
+        limit: Option<u64>,
     },
     Grep {
         pattern: String,
@@ -165,6 +167,15 @@ fn field(input: Option<&serde_json::Value>, key: &str) -> String {
         .to_owned()
 }
 
+/// Read an unsigned-integer field out of `tool_input`.
+///
+/// `None` covers both "the caller passed no limit" and "the value was not a
+/// number", and those are the same thing to a rule module: no bound was
+/// stated. A malformed limit must not read as a bound of zero.
+fn field_u64(input: Option<&serde_json::Value>, key: &str) -> Option<u64> {
+    input.and_then(|v| v.get(key)).and_then(|v| v.as_u64())
+}
+
 /// Read a string-array field out of `tool_input`, defaulting to empty.
 fn field_list(input: Option<&serde_json::Value>, key: &str) -> Vec<String> {
     input
@@ -232,6 +243,7 @@ impl ToolCall {
             },
             "Read" => ToolCall::Read {
                 file_path: field(input, "file_path"),
+                limit: field_u64(input, "limit"),
             },
             "Grep" => ToolCall::Grep {
                 pattern: field(input, "pattern"),
@@ -311,8 +323,27 @@ mod tests {
         assert_eq!(
             parse("Read", json!({"file_path": "a.rs"})),
             ToolCall::Read {
-                file_path: "a.rs".into()
+                file_path: "a.rs".into(),
+                limit: None
             }
+        );
+        assert_eq!(
+            parse("Read", json!({"file_path": "a.rs", "limit": 200})),
+            ToolCall::Read {
+                file_path: "a.rs".into(),
+                limit: Some(200)
+            }
+        );
+        assert_eq!(
+            parse(
+                "Read",
+                json!({"file_path": "a.rs", "limit": "not a number"})
+            ),
+            ToolCall::Read {
+                file_path: "a.rs".into(),
+                limit: None
+            },
+            "a malformed limit must read as no bound, never as zero"
         );
         assert_eq!(
             parse("Grep", json!({"pattern": "fn ", "path": "src"})),

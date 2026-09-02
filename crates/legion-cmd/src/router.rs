@@ -212,6 +212,7 @@ mod tests {
     fn read() -> ToolCall {
         ToolCall::Read {
             file_path: "src/lib.rs".into(),
+            limit: None,
         }
     }
 

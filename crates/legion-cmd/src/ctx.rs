@@ -47,4 +47,12 @@ pub struct Ctx {
     pub allow_list: Vec<String>,
     pub rulings: Vec<Ruling>,
     pub recall: Vec<RecallHit>,
+    /// Line count of the file this call reads, when the caller resolved one.
+    ///
+    /// The router does no I/O (FR-CMD-001), so a module that decides on file
+    /// size cannot stat the file itself -- the caller counts and hands the
+    /// number over, the same arrangement as `rulings` and `recall`. `None`
+    /// means "not resolved", which is not the same as zero and must not be
+    /// read as a small file.
+    pub file_lines: Option<u64>,
 }
