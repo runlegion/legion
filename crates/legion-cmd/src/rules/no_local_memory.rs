@@ -166,6 +166,7 @@ mod tests {
             decide(
                 &ToolCall::Read {
                     file_path: MEMORY_PATH.into(),
+                    limit: None,
                 },
                 &Ctx::default()
             ),
