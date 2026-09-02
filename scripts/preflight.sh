@@ -2,10 +2,14 @@
 # preflight.sh: the quality bar that must pass before a release (or any push
 # the developer wants gated). Reusable unit shared by scripts/release.sh.
 #
-#   1. cargo fmt -- --check          (formatting is committed-clean)
-#   2. cargo clippy --all-targets -D warnings  (CI parity -- bare clippy misses
-#                                               test/example/bench code)
-#   3. cargo test                    (the suite is green)
+#   1. cargo fmt --all -- --check    (formatting is committed-clean)
+#   2. cargo clippy --workspace --all-targets -D warnings  (CI parity -- bare
+#                                    clippy misses test/example/bench code, and
+#                                    without --workspace it misses every member
+#                                    crate entirely)
+#   3. cargo test --workspace        (the suite is green -- --workspace is NOT
+#                                    optional: a root-package workspace runs ZERO
+#                                    member tests without it, silently and green)
 #   4. scripts/test-*.sh             (the shell suites, IN A DISPOSABLE SANDBOX)
 #   5. legion index <repo>           (SCIP index regenerated so sym queries
 #                                     answer against current code)
@@ -455,14 +459,14 @@ main() {
   #     it found -- a symptom handler for this issue's own class, installed after
   #     #723/#740, not a channel of its own.
   # Leaving them on the real checkout is a decision, not an oversight.
-  step "cargo fmt -- --check"
-  cargo fmt -- --check || fail "formatting (run: cargo fmt)"
+  step "cargo fmt --all -- --check"
+  cargo fmt --all -- --check || fail "formatting (run: cargo fmt --all)"
 
-  step "cargo clippy --all-targets -- -D warnings"
-  cargo clippy --all-targets -- -D warnings || fail "clippy"
+  step "cargo clippy --workspace --all-targets -- -D warnings"
+  cargo clippy --workspace --all-targets -- -D warnings || fail "clippy"
 
-  step "cargo test"
-  cargo test || fail "tests"
+  step "cargo test --workspace"
+  cargo test --workspace || fail "tests"
 
   step "shell-script tests (disposable sandbox)"
   for t in "${PREFLIGHT_REQUIRED_SUITES[@]}"; do
