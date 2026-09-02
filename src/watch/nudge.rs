@@ -607,7 +607,7 @@ mod tests {
     /// fixture-driven test below so each one only supplies its JSON body
     /// and assertions.
     ///
-    /// Run through `sh <path>` (program `sh`, script path as a plain
+    /// Run through `/bin/sh <path>` (program `/bin/sh`, script path as a plain
     /// argument) rather than exec'd directly -- see `run_agents_json`'s doc
     /// for why (#1109): a sibling test's forked child can transiently hold
     /// this file's write fd open regardless of when WE close it, and Linux
@@ -615,13 +615,26 @@ mod tests {
     /// stable system binary, never open for writing by this process, so
     /// invoking it with the script as a data argument cannot hit that
     /// check at all -- no chmod, no closed-write-handle dance required.
+    ///
+    /// ABSOLUTE PATH, NOT A BARE `sh`, and this is load-bearing rather
+    /// than style. A bare name is resolved through `$PATH` at spawn time,
+    /// and `src/scip.rs`'s tests replace the process-global `PATH` with
+    /// directories holding no shell (six `env::set_var("PATH", ...)`
+    /// sites, guarded by that module's own `PATH_TEST_LOCK`). Those tests
+    /// live in this same test binary, cargo runs unit tests across threads
+    /// in one process, and this fixture takes no such lock -- so a bare
+    /// `sh` spawned inside one of those windows resolves to nothing,
+    /// `run_agents_json` fails open to an empty vec, and the assertion
+    /// below reports `left: 0` exactly as the ETXTBSY bug did. Trading a
+    /// Linux-only fd race for a cross-platform PATH race would have been
+    /// no fix at all. Do not shorten this back to `sh`.
     #[cfg(unix)]
     fn sessions_from_fake_agents(json: &str) -> Vec<LiveSession> {
         use std::io::Write;
         let mut script = tempfile::NamedTempFile::new().expect("tempfile");
         writeln!(script, "cat <<'EOF'\n{json}\nEOF").expect("write script");
         let path_str = script.path().to_string_lossy().into_owned();
-        run_agents_json("sh", &[&path_str])
+        run_agents_json("/bin/sh", &[&path_str])
     }
 
     #[cfg(unix)]
