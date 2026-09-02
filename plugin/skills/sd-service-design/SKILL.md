@@ -42,8 +42,9 @@ craft rules below bind every step; the step skills carry the mechanics.
 ## The pipeline
 
 Run the steps in order. Each step's output is a document in the legion store; carry
-document IDS forward between steps, never re-derived prose. The repo's intent document is
-the root input -- find it with
+document IDS forward between steps, never re-derived prose, and with them the prediction
+ids each step reports (Instrumentation, "What the conductor carries and witnesses"). The
+repo's intent document is the root input -- find it with
 `legion document list --doc-type intent --json` and match the repo (a repo with no intent
 stops here: the intent comes first, and writing one is not this pipeline's job).
 
@@ -96,10 +97,12 @@ The root input is a living document; a revision after downstream artifacts exist
 propagates by what actually changed, not by re-running the pipeline:
 
 - **Discovery**: untouched by direction or proposal deltas -- only a changed CLAIM
-  reopens listening. No verdict moves because the plans did.
+  reopens listening. No verdict moves because the plans did. The re-listen you dispatch
+  witnesses the earlier verdict predictions it re-scores (Instrumentation below).
 - **Ecosystem**: revises. This is the register loop closing: entries the flagged-unknowns
   register carried that the revision answers get recorded as resolved, and the value
-  exchanges those answers ground get adjusted.
+  exchanges those answers ground get adjusted. Each resolved entry's prediction is
+  witnessed here, by you (Instrumentation below).
 - **Blueprints**: relabel `PLANNED` to real only for what the revision marks settled AND
   actually shipping. Newly proposed items stay planned or absent -- no vaporware enters
   through an intent bump.
@@ -116,7 +119,77 @@ propagates by what actually changed, not by re-running the pipeline:
 
 ## Instrumentation
 
-Before each step, emit one prediction; after it, the outcome is witnessed by whether the
-step's document landed without a schema refusal:
-`legion uncertainty emit --surface legion.sd --feature-key sd.<step> --input-fingerprint <repo>-<step> --claimed-confidence 0.7 --payload '{"repo":"<repo>","step":"<step>"}'`.
-This is one line per step, not a framework; skip nothing.
+The judgment predictions live in the step skills, each under its own Instrumentation:
+a claim's support, a verdict holding, an edge materializing, a document surviving the
+crit, each with its named witness. The conductor's own emission is only the
+step-completion claim -- that the step lands its output through the gate on this
+invocation, without parking -- and its confidence is read from the step's inputs, never
+a constant: sd-discover on a fresh corpus with `needs_crawl` true sits near 0.3, since it
+parks by design; a writer whose inputs validate and whose insights are supported sits
+near 0.9; an ecosystem pass over a Discovery with blocked insights sits near 0.6. Before
+each step, one line:
+
+```
+legion uncertainty emit --surface legion.sd --feature-key sd.<step> \
+  --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 --input-fingerprint <repo>-<step> \
+  --claimed-confidence <p> --payload '{"repo":"<repo>","step":"<step>"}'
+```
+
+How it resolves: by the gate, which is a store-readable fact rather than a judgment --
+the step's document landed, parked as a draft, or was refused. The conductor does NOT
+witness it. Staking a number and then scoring it is the rubber stamp the engine exists to
+catch, and the confidence here is a judgment (read from the step's inputs) even though
+the outcome is not. The step-completion claim is the natural first case for
+store-resolved witnessing (#1091); until that lands it sits unwitnessed like every other
+prediction in this pipeline, which is honest. Skip the emission for no step.
+
+### What the conductor carries and witnesses
+
+The step skills name the conductor in three places. Each rule lives in the step skill
+that defines it; the conductor's job is to carry and to run, never to re-derive.
+
+- **Carry prediction ids forward.** The agenda's per-claim `key` and `prediction` ids
+  travel to sd-discover with the agenda (sd-intent-review, Instrumentation). The
+  ecosystem report's register, with each entry's prediction id and route, travels to
+  every sd-write-blueprint invocation in that ecosystem's chains (sd-ecosystem-imagine,
+  "Who witnesses"): the blueprint writer witnesses world-routed edges from it, no
+  document carries it, and a report you drop orphans those predictions. A park anchor
+  carries both when a session stops.
+- **Witness operator-routed register edges** at the ecosystem revision that records them
+  resolved (the section above): answered as real is `shipped` at 1.0, answered as not a
+  thing is `abandoned` at 0.0 (sd-ecosystem-imagine, "Who witnesses").
+- **Witness insight verdicts when a claim reopens.** A changed claim reopens listening;
+  the re-listen pass you dispatch witnesses the earlier Discovery's verdict predictions
+  for the insights it re-scores, under sd-discover's rule ("Who witnesses a verdict"),
+  and is never the pass that emitted them.
+
+### Emit mechanics
+
+These rules bind every emit in the pipeline, the conductor's and each step's. The step
+skills cross-reference this block instead of restating it, as they do the park protocol.
+
+- Omit `--model` and pass `--session-id` from the `CLAUDE_CODE_SESSION_ID` environment
+  variable: the engine resolves the model from that session's live statusline sample,
+  and with neither flag the row lands in the `unknown` model cohort, where no regression
+  across releases can ever be seen. A guessed `--model` is worse: it mislabels the row
+  into a real cohort. If the variable is unset in your shell, emit anyway and say so in
+  the report; the rows will sit in `unknown`.
+- Emit exits 0 even when it recorded something you did not mean (a wrong id in the
+  fingerprint still returns a valid-looking id), and the engine has no read-back
+  command: `witness` takes only the id emit printed. The only check is the command line
+  you ran against the create output; do it before you report.
+- The default orphan window is 30 days, and neither a crit, a research toy, nor a
+  re-listen reliably happens inside it, so every emit in this pipeline sets
+  `--orphan-ttl-days 180`. A prediction that still orphans after that is a finding about
+  the pipeline, not an error in the emit.
+- Record each prediction id in the report next to the thing it is about, with whatever
+  the fingerprint was built from, so the witness can rebuild the string to confirm the
+  id. Do not revise a landed document to hold the id; the report, the park anchor, and
+  the fingerprint are how the witness finds it.
+- Emission is non-blocking by design: a failed emit logs and exits 0, and the run
+  continues. A step that lands its output and emits nothing has skipped a step; say so
+  in the report.
+- Never witness your own prediction, without exception. The emitter stakes it; the named
+  witness scores it. A self-witnessed prediction is the rubber stamp the engine exists to
+  catch, and a mechanical-looking outcome does not earn a carve-out while the confidence
+  staked against it is still a judgment.

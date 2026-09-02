@@ -21,7 +21,11 @@ planned are labeled planned, and nothing else appears at all.
 
 1. Read the inputs by id: the journey this blueprint backs, the Ecosystem, the intent.
    The blueprint's steps follow the journey's phases; backstage content comes from the
-   intent's `current_state.real` (what exists) and `direction` (what is planned).
+   intent's `current_state.real` (what exists) and `direction` (what is planned). The
+   fourth input is not a document: the ecosystem report the conductor hands forward,
+   carrying the register with each entry's prediction id and route, which this writer
+   witnesses from (Instrumentation below). When no report reaches you, write the
+   blueprint anyway, leave the register edges unwitnessed, and say so in your report.
 2. Draft against the live schema: resolve by `"x-doc-type": "blueprint"` from
    `legion document list --doc-type schema --json`; its `required` and `properties` are
    the contract. Today: `meta` requires `title`, `persona`, `trigger`, `scope`,
@@ -66,7 +70,63 @@ legion document create --doc-type blueprint --owner <agent> --surface <surface> 
 
    `--surface` is the service surface -- the same surface the intent carries.
 
-5. Report the document id. One blueprint per invocation.
+5. **Emit the prediction, then witness the ecosystem's edges** (see Instrumentation
+   below), after the create returns the blueprint's id, so the fingerprint names a real
+   document.
+
+6. Report the document id, the prediction id with its claimed confidence, and each
+   register edge witnessed or left, with why. One blueprint per invocation.
+
+## Instrumentation
+
+The writer's one judgment is whether the backstage stands as drawn. Tense follows from
+`current_state.real` and `direction` by rule and is not a prediction; the blueprint as a
+whole is. One prediction per document, under this skill's name, that the crit accepts it
+without striking a mechanism as vaporware, a step as phaseless, or a friction as
+untraced. Stake it from the traces you laid. Anchors: every step behind a journey phase,
+every backstage mechanism named from `current_state.real`, every friction on a supported
+insight, and no `PLANNED:` layer, sits near 0.8; some planned steps grounded in settled
+proposals, or frictions on bounded insights, sits near 0.6; a blueprint that is mostly
+planned machinery from `proposed` direction, with fail points inferred rather than cited
+and no measurable metric, starts near 0.4. From the anchor, weigh the weakest step rather
+than the count: one backstage mechanism whose real name you had to infer is where the
+crit strikes first. Put the step and trace counts in the payload, and the journey id,
+since the blueprint's meta carries only the persona.
+
+```
+legion uncertainty emit --surface legion.sd --feature-key sd.write-blueprint \
+  --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 \
+  --input-fingerprint <journey-id>:blueprint:<blueprint-id> --claimed-confidence <p> \
+  --payload '{"journey":"<journey-id>","steps":<n>,"planned":<n>,"frictions_supported":<n>}'
+```
+
+The emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
+non-blocking emission, never self-witnessing -- are held once in the sd-service-design
+skill (Instrumentation, "Emit mechanics") and bind here. What is this writer's alone:
+the check is the fingerprint against the id the create printed, and the report carries
+the prediction id.
+
+**Who witnesses, and when.** The **crit** (the acceptance step that moves the blueprint
+past `draft`) witnesses it, confirming the id by rebuilding
+`<journey-id>:blueprint:<blueprint-id>`. The blueprint's meta has no journey field, so
+the pair lives in the report and the payload alone; the crit reads it there.
+`outcome_correctness` is the fraction of steps accepted as written, backstage and
+frictions included; the label is `shipped` when nothing was struck or relabeled,
+`scoped-down` when the crit cut steps or moved a mechanism to planned, `escalated` when
+it sent the blueprint back. Until the crit exists as a skill, the operator who moves the
+document past `draft` witnesses it by hand with the same rule.
+
+**Witnessing the ecosystem's edges.** Until a crit exists, this writer is the named
+witness for sd-ecosystem-imagine's register predictions on edges routed to the world,
+because the blueprint is where a flagged edge meets machinery. For each register entry
+the ecosystem report lists against this actor, take its prediction id from that report,
+confirm it by rebuilding `<ecosystem-id>:edge:<n>` (`n` is the entry's position in the
+ecosystem's `failure_modes`), and witness: an entry that landed as a step's fail point,
+friction, or backstage seam is `shipped` at 1.0; an entry this journey and blueprint
+could not carry, which you report as dropped, is `abandoned` at 0.0. An entry that
+touches no step of this actor's chain is left for another chain or the crit; say which
+in the report. With no ecosystem report in hand (step 1), every edge is left, and the
+report says so rather than guessing at ids.
 
 ## Refuses
 
@@ -74,3 +134,5 @@ legion document create --doc-type blueprint --owner <agent> --surface <surface> 
   and grounded in `direction`.
 - A step with no journey phase behind it, or a friction with no Discovery insight.
 - Metrics invented for completeness -- a step with nothing measurable says so.
+- Witnessing its own prediction. The writer stakes it; the crit scores it. The register
+  edges it witnesses are the ecosystem's predictions, never its own.
