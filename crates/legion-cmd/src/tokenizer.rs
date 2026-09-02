@@ -1224,6 +1224,19 @@ mod tests {
                 "gh pr view 1 <<'EOF'\nbody\nEOF",
             ),
             ("trailing newline sequencing", "true\ngh pr view 1"),
+            // The command WORD itself quoted, not just its arguments. Every
+            // other quoting case above quotes an argument; `"gh"` and `'gh'`
+            // still execute gh, so a scanner that only unquotes arguments
+            // would miss the binary entirely.
+            ("double-quoted command word", "\"gh\" pr view 1"),
+            ("single-quoted command word", "'gh' pr view 1"),
+            // Absolute path behind a wrapper -- each is covered alone above,
+            // their composition is the evasion.
+            (
+                "wrapper then absolute path",
+                "timeout 5 /usr/bin/gh pr view 1",
+            ),
+            ("pipe then wrapper", "wc -l | timeout 5 gh pr list"),
         ];
         assert!(cases.len() >= 27, "evasion table must cover >= 27 cases");
 
