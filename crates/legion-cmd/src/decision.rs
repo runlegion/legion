@@ -13,10 +13,29 @@ pub enum Decision {
     /// Run it as typed.
     Allow,
     /// Run this instead, and say why.
+    ///
+    /// Two forms share this one arm (FR-CMD-005 rev 8), distinguished by
+    /// `substitutes`. A BASH rewrite (`substitutes: None`) is the whole
+    /// replacement invocation: `command` is a shell command string, and
+    /// `carry` holds any byte payloads lifted out of it so the rewrite stays
+    /// lossless. A NON-BASH rewrite (`substitutes: Some(field)`) is a field
+    /// substitution on the tool's own input: `command` holds the new value
+    /// for the named field, `carry` is unused (empty), and every other field
+    /// on the tool input passes through untouched -- the module never had a
+    /// whole command to reconstruct, only one field to replace. Rev 8's own
+    /// example is `no-harness-explore`: it substitutes `subagent_type` on an
+    /// `Agent`/`Task` call and leaves `prompt`/`description` alone, which
+    /// the old Bash-only shape (`command` as a shell string) had no way to
+    /// express -- hence this field, rather than a sixth `Decision` variant
+    /// (the enum stays five-way).
     Rewrite {
         command: String,
         reason: String,
         carry: Vec<Carry>,
+        /// The tool_input field `command` replaces, for a non-Bash rewrite.
+        /// `None` for a Bash rewrite, where `command` is the whole
+        /// replacement invocation rather than one field's new value.
+        substitutes: Option<String>,
     },
     /// No managed equivalent exists: run it, track it, credit nothing.
     Proxy(String),
@@ -181,11 +200,23 @@ mod tests {
                 command: "legion issue list".into(),
                 reason: "work-source actions go through legion".into(),
                 carry: vec![],
+                substitutes: None,
             },
             Decision::Ask("needs an operator".into()),
         ] {
             assert_eq!(Routed::from_route(d, Some("nope".into())).note, None);
         }
+    }
+
+    #[test]
+    fn a_non_bash_field_substitution_rewrite_also_drops_the_note() {
+        let d = Decision::Rewrite {
+            command: "legion:legion-explore".into(),
+            reason: "legion rewrote this spawn to legion:legion-explore".into(),
+            carry: vec![],
+            substitutes: Some("subagent_type".into()),
+        };
+        assert_eq!(Routed::from_route(d, Some("nope".into())).note, None);
     }
 
     #[test]
