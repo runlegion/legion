@@ -110,4 +110,16 @@ DISPOSITION: done-unblocked | blocked | needs-human
 
 Every finding names its audience. An intent gap to the spec author and a missing test to the implementer are different conversations; routing them identically loses both.
 
-Delivery: when you run as a spawned background agent, a printed final message does not reach the orchestrator -- deliver the report by CALLING the SendMessage tool (to your orchestrator) with the full report as the body, then end your turn with a single line naming the verdict counts. The send IS the delivery; without it the run is invisible, which is the exact failure this agent exists to catch. The single closing line matters too: the harness delivers your final output a second time as an idle notice, truncated, so a full report printed there arrives twice and cut off.
+Delivery: POST the report, SIGNAL a pointer, never mail the body. `legion post --repo
+<repo> --text "<the full report>"` puts it in the bullpen, where it is durable, searchable
+and readable on demand. Then `legion signal --repo <repo> --to <orchestrator> --verb
+answer --note "<one line: the verdict counts and the post id>"`. Finally end your turn
+with that same single line.
+
+Why this shape and not a SendMessage with the report in it: a mailed body enters the
+orchestrator's context permanently and is re-read on every one of its remaining turns, so
+a thousand-word report is paid for a thousand times. The 280-character cap on a signal
+note is the system saying the same thing. A pointer costs one read when the orchestrator
+decides it needs the detail, and nothing when it does not. Ending on one line matters for
+the same reason: the harness delivers your final output a second time as a truncated idle
+notice, so a long final message arrives twice and cut off.
