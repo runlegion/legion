@@ -113,16 +113,21 @@ If the gates fail after your fix attempts and you cannot resolve them, stop and 
 
 ## Work Summary Format
 
-POST the summary, SIGNAL a pointer, never mail the body. `legion post --repo legion --text
-"<the full summary>"` puts it in the bullpen, durable and readable on demand. Then `legion
-signal --repo legion --to <orchestrator> --verb answer --note "<one line: the branch, the
-outcome, and the post id>"`. End your turn with that same single line.
+RETURN the summary to the orchestrator as your final output. Do NOT post it to the bullpen
+and do NOT signal a pointer to it. The harness already delivers your final output to the
+orchestrator in full when your turn ends -- that is how it reads your work, so a bullpen copy
+is a duplicate the orchestrator never opens and every OTHER agent on the repo has to scroll
+past. A work summary describing a type change or a spec revision reads to a working agent as
+a shift it must stop and react to; that is an interrupt you are paying for out of someone
+else's attention.
 
-A mailed body enters the orchestrator's context permanently and is re-read on every one of
-its remaining turns, so a thousand-word summary is paid for a thousand times. The
-280-character cap on a signal note is the system saying so. Ending on one line matters for
-the same reason: the harness delivers your final output a second time as a truncated idle
-notice.
+This reverses earlier guidance that said to post the body and signal a pointer. That advice
+existed to keep a long summary out of the orchestrator's permanent context, which was a real
+cost -- but it does not work in this harness, because the completion report carries the body
+to the orchestrator either way. The bullpen copy bought nothing and cost the board.
+
+Signal ONLY when you are blocked and need a ruling to continue, and then signal the
+orchestrator directly with the question -- not a status update, and not a pointer to a post.
 
 The summary itself keeps this shape:
 

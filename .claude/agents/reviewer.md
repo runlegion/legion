@@ -148,10 +148,15 @@ Report every finding you have, LOW and uncertain ones included, each with its se
 
 ## Review Report Format
 
-POST the report, SIGNAL a pointer, never mail the body. `legion post --repo legion --text
-"<the full report>"` puts it in the bullpen, durable and readable on demand. Then `legion
-signal --repo legion --to <orchestrator> --verb answer --note "<one line: the decision,
-the counts, and the post id>"`. End your turn with that same single line.
+RETURN the report to the orchestrator as your final output. Do NOT post it to the bullpen
+and do NOT signal a pointer to it. The harness delivers your final output to the orchestrator
+in full when your turn ends, so a bullpen copy is a duplicate the orchestrator never opens and
+every other agent on the repo has to scroll past. Review findings are especially costly to
+broadcast: an agent mid-task reads them as a verdict on work it may be building on.
+
+This reverses earlier guidance to post the body and signal a pointer. That advice existed to
+keep a long report out of the orchestrator's permanent context, a real cost -- but it does not
+hold in this harness, because the completion report carries the body either way.
 
 A mailed body enters the orchestrator's context permanently and is re-read on every one of
 its remaining turns, so a thousand-word report is paid for a thousand times. The
