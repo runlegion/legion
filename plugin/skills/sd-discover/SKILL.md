@@ -124,6 +124,83 @@ refusal here means the payload is wrong, not that the gate is optional. Contradi
 appear in the document as contradicted insights with their disconfirming score --
 deleting them would erase the finding.
 
+**Then emit and witness** (Instrumentation below), once the create returns an id: one
+prediction per insight that carries a verdict, at the authoritative pass only, and a
+witness on each intent-review claim prediction this pass scored. Report the Discovery
+id, every prediction id beside its insight with the claimed confidence, and each claim
+prediction witnessed or left unwitnessed, with why.
+
+## Instrumentation
+
+Two duties here: stake this step's judgments, and score the intent review's. The second
+is the crux of the whole pipe -- a prediction nobody witnesses is an orphan, excluded
+from calibration, and the review's track record never forms.
+
+**Each verdict holds.** The judgment in a Discovery is the verdict, not the score: the
+axis scores follow from the evidence rows by the weights, but calling a claim supported,
+bounded, or contradicted is a call a later listening pass can overturn. One prediction
+per insight with a verdict, emitted at the authoritative pass only -- an orientation
+draft's verdicts are provisional by definition, and staking a number you already plan to
+replace is noise. Blocked and saturated-unevidenced insights carry no verdict to hold and
+get no emission.
+
+The confidence comes from spread this step already has, not a fresh feeling: the count
+of on-topic evidence rows, how far their scores sit from the 0.40 bar, and what the
+counter-probes returned. Anchors: a supported insight on five or more rows scoring above
+0.6, whose counter-probes found nothing on-topic, sits near 0.8; supported on two or
+three rows near the bar, or bounded with rows on both sides, sits near 0.6; a verdict
+resting on one row, in either direction, starts near 0.4. A contradiction follows the
+same shape from below the bar: several on-topic rows well under 0.40 earn 0.8, one row
+just under it earns 0.4. An emergent insight caps at 0.6 until a later pass sees it
+again: its probes were written after the discourse was read, the opposite of a
+disconfirmable test. Put the row count and the score range in the payload; they are what
+the number rests on.
+
+```
+legion uncertainty emit --surface legion.sd --feature-key sd.discover.insight \
+  --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 \
+  --input-fingerprint <discovery-id>:insight:<insight-id> --claimed-confidence <p> \
+  --payload '{"insight":"<insight-id>","verdict":"<status>","rows":<n>,"scores":"<lo>-<hi>"}'
+```
+
+The emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
+non-blocking emission, never self-witnessing -- are held once in the sd-service-design
+skill (Instrumentation, "Emit mechanics") and bind here. What is this step's alone: the
+check is each fingerprint against the insight ids in the landed payload, and the report
+and the park anchor carry the ids.
+
+**Who witnesses a verdict.** A later listening pass over discourse the lens accrued after
+the verdict landed -- the warm lens keeps crawling, and a month on the corpus is a
+different corpus. Whoever reopens the claim runs it (the conductor when an intent claim
+changes, or a scheduled re-listen), never the pass that emitted. It finds the earlier
+Discovery with `legion document list --doc-type discovery --surface <surface> --json`,
+taking the prior revision, and its prediction ids from that run's report or park anchor.
+It re-runs the insight's probes and counter-probes, confirms the id by rebuilding
+`<discovery-id>:insight:<insight-id>`, and witnesses `shipped` at 1.0 when the verdict
+stands, `scoped-down` at 0.5 when supported became bounded or a bound moved, `abandoned`
+at 0.0 when it flipped. When no pass comes before the orphan window closes, the operator
+may witness by direct judgment against the same rule, or let it orphan; an orphan is the
+right fate for a verdict nobody re-checked.
+
+**Witnessing the intent review's claims.** This pass is the named witness for
+sd-intent-review's per-claim predictions. At the authoritative pass, for each agenda
+entry scored, take the entry's `prediction` id from the agenda, confirm it by rebuilding
+`<intent-id>:claim:<key>` from the entry's `key`, and witness by the verdict:
+
+- `supported`: `--outcome-label shipped --outcome-correctness 1.0`.
+- `bounded`: `scoped-down` at 1.0; the review predicted support, and support within
+  limits is support.
+- `contradicted`: `abandoned` at 0.0.
+- `blocked`: leave it. No verdict was reached, the wake may still reach one, and if the
+  corpus never does the orphan sweep retires a prediction that was never tested.
+- `saturated-unevidenced`: leave it, and say why in the report. Silence argues against
+  the claim without being discourse under the bar; scoring it 0.0 would teach the
+  estimator that silence is contradiction, the confusion the no-evidence rule exists to
+  prevent.
+
+A Discovery landed at the authoritative pass with the agenda's claims left unwitnessed
+for no stated reason has skipped a step; say so in the report.
+
 ## Refuses
 
 - Treating an empty query result as disconfirmation.
@@ -134,3 +211,7 @@ deleting them would erase the finding.
 - Carrying evidence anywhere except this Discovery -- downstream artifacts cite insights,
   they do not re-argue evidence.
 - Waiting synchronously on a crawl: a crawl in flight is a park, never a blocked session.
+- Emitting verdict predictions from an orientation draft, or witnessing insight
+  predictions the same pass emitted: that is the rubber stamp the engine exists to catch.
+  The emitting pass scores only the intent review's claims; a later re-listen scores the
+  earlier Discovery's verdicts, never its own.

@@ -61,7 +61,49 @@ legion document create --doc-type journey --owner <agent> --surface <surface> --
 
    `--surface` is the service surface -- the same surface the intent carries.
 
-5. Report the document id. One journey per invocation.
+5. **Emit the prediction** (see Instrumentation below), after the create returns the
+   journey's id, so the fingerprint names a real document.
+
+6. Report the document id and the prediction id with its claimed confidence. One journey
+   per invocation.
+
+## Instrumentation
+
+The writer's one judgment is whether this curve stands as drawn. Which insights can
+anchor a dip follows from their `status` by rule and is not a prediction; the journey as
+a whole is. One prediction per document, under this skill's name, that the crit accepts
+it without striking a phase's affect as invented or a dip as untraced. Stake it from the
+traces you laid. Anchors: every dip on a supported insight, every high on a value
+exchange the ecosystem grounds, valence placed from evidence that shows both direction
+and strength, and no `(planned future)` phase, sits near 0.8; dips on bounded insights,
+or valence placed from direction alone with 0 where strength is unknown, sits near 0.6;
+a greenfield journey where every phase carries the planned mark, or one whose low points
+lean on intent stakes because the persona's insights are blocked, starts near 0.4. From
+the anchor, weigh the weakest phase rather than the count: one dip whose insight is
+bounded exactly where this persona sits is where the crit strikes first. Put the phase
+and trace counts in the payload.
+
+```
+legion uncertainty emit --surface legion.sd --feature-key sd.write-journey \
+  --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 \
+  --input-fingerprint <persona-id>:journey:<journey-id> --claimed-confidence <p> \
+  --payload '{"phases":<n>,"dips_supported":<n>,"dips_bounded":<n>,"planned":<n>}'
+```
+
+The emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
+non-blocking emission, never self-witnessing -- are held once in the sd-service-design
+skill (Instrumentation, "Emit mechanics") and bind here. What is this writer's alone:
+the check is the fingerprint against the id the create printed, and the report carries
+the prediction id.
+
+**Who witnesses, and when.** The **crit** (the acceptance step that moves the journey
+past `draft`) witnesses it, confirming the id by rebuilding
+`<persona-id>:journey:<journey-id>` -- the pair is in the report and in the journey's own
+`meta.persona`. `outcome_correctness` is the fraction of phases accepted as written,
+affect and traces included; the label is `shipped` when nothing was struck or redrawn,
+`scoped-down` when the crit cut phases or flattened a dip, `escalated` when it sent the
+journey back. Until the crit exists as a skill, the operator who moves the document past
+`draft` witnesses it by hand with the same rule.
 
 ## Refuses
 
@@ -70,3 +112,5 @@ legion document create --doc-type journey --owner <agent> --surface <surface> --
 - A dip with no Discovery insight, or any reappearance of a contradicted claim.
 - Phases touching channels the ecosystem does not carry.
 - A scenario for a persona document that does not exist yet.
+- Witnessing its own prediction. The writer stakes it; the crit scores it. A
+  self-witnessed journey is the rubber stamp the engine exists to catch.

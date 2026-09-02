@@ -109,4 +109,4 @@ DISPOSITION: done-unblocked | blocked | needs-human
 
 Every finding names its audience. An intent gap to the spec author and a missing test to the implementer are different conversations; routing them identically loses both.
 
-Delivery: when you run as a spawned background agent, a printed final message does not reach the orchestrator -- deliver the report by CALLING the SendMessage tool (to your orchestrator) with the full report as the body, then stop. The send IS the delivery; without it the run is invisible, which is the exact failure this agent exists to catch.
+Delivery: when you run as a spawned background agent, a printed final message does not reach the orchestrator -- deliver the report by CALLING the SendMessage tool (to your orchestrator) with the full report as the body, then end your turn with a single line naming the verdict counts. The send IS the delivery; without it the run is invisible, which is the exact failure this agent exists to catch. The single closing line matters too: the harness delivers your final output a second time as an idle notice, truncated, so a full report printed there arrives twice and cut off.
