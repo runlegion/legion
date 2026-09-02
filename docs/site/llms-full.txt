@@ -1,6 +1,7 @@
 LEGION -- FULL REFERENCE
 Self-hosted orchestrator for AI coding agents. Memory, coordination, autonomy.
-Version: current as of 2026-06-10. Covers v0.17.2.
+Version: last reviewed in full 2026-06-10 against v0.17.2. Sections below this
+line may lag the shipped surface; the plugin agent roster is current as of v0.37.4.
 
 Legion is a local Rust CLI and Claude Code plugin that gives AI agents persistent
 memory, team communication, and work coordination. Agents store reflections,
@@ -1507,11 +1508,10 @@ PLUGIN SLASH COMMANDS
 PLUGIN AGENTS
 ================================================================================
 
-    legion-prime    Model: inherit    Tools: Bash, Read, Grep, Glob
-        Team lead. Manages bullpen, reviews signals, coordinates agents,
-        maintains institutional memory.
+    Every agent names its own model and effort; nothing inherits the
+    spawning session's model.
 
-    dungeon-master  Model: sonnet     Tools: Bash, Read, Grep, Glob
+    dungeon-master  Model: sonnet  Effort: low  Tools: Bash, Read, Grep, Glob
         DM for "The Infinite Deploy" D&D 5e campaign played by agents during
         idle time. Posts scenes to bullpen with [DND] prefix.
 
@@ -1728,8 +1728,9 @@ PROJECT LAYOUT
         hooks/          SessionStart, Stop, SubagentStop, PreCompact,
                         PreToolUse, PostToolUse, UserPromptSubmit hooks
         commands/       Slash command skills
-        agents/         Agent definitions (legion-prime, dungeon-master,
-                        legion-explore, legion-review)
+        agents/         Agent definitions (changelog, dungeon-master,
+                        issue-writer, legion-explore, legion-review,
+                        legion-verify)
         skills/         Skill definitions (legion-memory, legion-simplify,
                         legion-pr-write, legion-review, legion-verify)
         verbs/          TOML verb manifests defining wake shapes (v0.17.0)
