@@ -1,5 +1,109 @@
 # Legion Changelog
 
+## 0.37.4
+
+The agent-definition release. Every agent legion ships now names its own model and effort,
+reports by posting to the bullpen and signalling a one-line pointer rather than mailing a
+report body, reports its findings for coverage instead of filtering them by severity, and
+works from its issue rather than from whatever the orchestrator typed at it. `legion-prime` is
+deleted. Patch release: thirteen files, all Markdown -- six plugin agent definitions, two
+plugin skills, two repo-level agent definitions, two docs pages, and one deletion -- with no
+binary code change, no wire-format change, and no schema migration.
+
+The measurement behind it is worth stating plainly, because the diagnosis that seemed obvious
+was wrong. One session ran 1,190 turns against 555.9M cache-read tokens at $996.56. Cache read
+is turns times context, so a 467K average context was re-read on every one of those turns, and
+the dominant term was the orchestrator's own context rather than subagent fan-out. The cause
+was a dispatch instruction: every agent was told to report via SendMessage, which puts the
+whole body into the orchestrator's context permanently, where it is re-read on every remaining
+turn. Twenty-plus agents, most reporting three and four times as re-runs moved branch heads,
+each report a thousand words. A thousand-word report is paid for roughly a thousand times. The
+infrastructure already had the right shape -- durable content in a post, a short pointer in a
+signal, read on demand -- and the 280-character cap on a signal note was the system stating the
+rule while the dispatch instruction overrode it.
+
+Two things this release deliberately does not carry. The shared blocks are duplicated rather
+than deduplicated: the delivery rule is verbatim in seven definitions and the brief contract in
+four, and nothing checks that a future edit reaches every copy. The `skills:` frontmatter key
+would preload one shared source, but an unresolved reference removes the rule silently with no
+error, and the two definitions under `.claude/agents/` cannot depend on the plugin being
+installed at all. A silently absent rule is the failure this release exists to prevent, so the
+duplication stands as a recorded and dispositioned finding rather than a hidden one. The second
+is the brief assembly itself: this release fixes what an agent does with what it is handed, not
+how the brief is built. Deriving each brief from the store at dispatch time -- branch, head,
+gate rows, issue criteria, all queryable -- with wide context as a named, reason-required route
+rather than the default, is designed and unscoped.
+
+### Changed
+
+- **Every agent definition pins its model and its effort** (PR #1099, #1098). A subagent
+  inherits the spawning session's model unless its own definition pins one, so an unpinned
+  agent silently becomes whatever the session happens to be running; the harness
+  `general-purpose` agent has no definition file at all and can only be pinned at the call
+  site. Eight definitions now carry both keys: `changelog` opus/medium, which was the one
+  genuinely unpinned agent, `dungeon-master` sonnet/low, `issue-writer` claude-sonnet-5/medium,
+  `legion-explore` sonnet/low, `legion-review` sonnet/high, `legion-verify` sonnet/high,
+  `reviewer` claude-sonnet-5/high, and `rust` claude-sonnet-5/medium. `reviewer` previously
+  pinned `claude-opus-4-8`, a superseded generation and an override of the standing rule that
+  reviewers run on sonnet. Review and verify stay on sonnet deliberately and the reasoning now
+  lives in the docs rather than only in a commit message: they are the two highest-catch gates
+  in the system, verify at 51.6% lifetime and review at 31.0%, and effort rather than model is
+  the lever that tunes them. Auditing these pins requires parsing the frontmatter fence, not
+  reading a prefix: the `model:` key sits below description blocks that run past 2,000
+  characters in several of these files, so a truncated read reports a pinned agent as unpinned.
+
+- **Agents deliver a pointer, not a body** (PR #1099, #1098). Seven definitions now say the
+  same thing: post the report to the bullpen with `legion post`, signal a one-line pointer
+  carrying the outcome and the post id with `legion signal`, and end the turn on that same
+  line. The closing line is part of the rule rather than decoration, because the harness
+  re-delivers an agent's final output as a truncated idle notice -- so a long final message
+  arrived twice, once in full through mail and once cut off, both of them permanently in the
+  orchestrator's context. `dungeon-master` is excluded on purpose: it already posts scenes as
+  its normal output and has no orchestrator to report to.
+
+- **Review reports for coverage, not for signal** (PR #1099, #1098). The instruction to report
+  LOW findings only when zero HIGH or MED exist is reversed in all three places that carried
+  it -- the `legion-review` agent, the skill that makes it operational, and the repo-level
+  `reviewer`. Every finding is now reported with a severity and a confidence attached. The
+  reason is a prompt effect rather than a preference: a review prompt saying be conservative or
+  report only high-severity issues is followed literally, so the model investigates just as
+  deeply, finds the bugs, and then withholds what it judges below the bar. Recall falls while
+  precision rises and it reads as a capability regression. Filtering belongs to the stage that
+  ranks, and verify cannot weigh a finding that was never reported. The decision rule still
+  keys on HIGH and MED counts, so approve-versus-changes_requested is unaffected.
+
+- **The issue is the whole brief** (PR #1099, #1098). The issue-writer exists so that the agent
+  doing the work needs nothing but the issue, and the evidence that this was not being used is
+  precise: briefs grew long exactly where there was no issue. Agents handed an issue number
+  read it themselves and ran clean; hand-briefed agents absorbed stale facts from the
+  orchestrator's prose and had to be corrected repeatedly in a single session. The contract
+  splits by kind rather than by source. Facts from the parent are refused -- a branch name, a
+  head sha, a file path, a count is a hint to verify and never a fact to act on, because a
+  parent types from memory that has already moved. Judgment from the parent is accepted as a
+  claim to test, marked as theirs, disagreeable by default and never load-bearing. And an
+  underspecified issue halts the agent, which names what is missing rather than reaching for
+  the parent's framing to fill the gap -- the failure that mode prevents is the issue saying one
+  thing, the brief saying another, and the work silently splitting the difference. The four
+  issue-keyed definitions carry the whole contract; `changelog`, `issue-writer` and
+  `legion-explore` carry the facts half alone, since none of them works from an issue and
+  `issue-writer` produces one. `legion-simplify` carries its own wording, because it judges a
+  diff and has no parent to refuse: its facts are derived at the head it is about to record,
+  which is the failure that produces a clean gate row about code nobody reviewed.
+
+- **Delegation discipline on the review fan-out** (PR #1099, #1098). Spawn count is the cost of
+  the review stage, not the depth of any one agent. One agent where one will do, no agent for
+  work finishable in a handful of tool calls, and never one spawned to check your own reading.
+  The adversarial refuter stays, because it checks another agent's findings rather than its own.
+
+### Removed
+
+- **`legion-prime`** (PR #1099, #1098). Doctrine already held that prime work is done directly,
+  and a definition that exists is one that gets spawned by accident -- this one was pinned to
+  the most expensive model in the set. Deleting it makes the rule unbreakable rather than
+  advisory. Neither plugin manifest names an individual agent, so nothing dangles; both
+  in-repo docs pages that advertised it are updated. The runlegion.dev site still names it and
+  that fix belongs to the site's own repo.
+
 ## 0.37.3
 
 The spec-writer release. The service-design pipeline ran from intent to blueprint and then
