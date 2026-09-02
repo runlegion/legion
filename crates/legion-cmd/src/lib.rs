@@ -36,6 +36,7 @@ pub mod call;
 pub mod ctx;
 pub mod decision;
 pub mod router;
+pub mod rules;
 pub mod table;
 
 pub use call::{ParseError, Tool, ToolCall};
