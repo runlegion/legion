@@ -49,9 +49,14 @@ pub struct Matched {
 
 /// What the call was about, for the record and for pre-load (FR-CMD-014).
 ///
-/// `paths` is `String`, not `PathBuf`: these round-trip through JSON into the
-/// command record, and a non-UTF-8 path must survive that rather than being
-/// lossily replaced or silently dropped.
+/// `paths` is `String`, not `PathBuf`, and the tradeoff is worth stating
+/// exactly rather than loosely. `PathBuf`'s `Serialize` FAILS on a non-UTF-8
+/// path, which would abort the whole command-record write over one odd path.
+/// `String` keeps the record writable. What it does NOT do is preserve the
+/// original bytes: a `String` cannot hold invalid UTF-8 at all, so a non-UTF-8
+/// path is lossily replaced at the boundary before it ever reaches this field.
+/// The record therefore stays honest about the call happening and lossy about
+/// that one path -- deliberately chosen over losing the record entirely.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Targets {
     pub paths: Vec<String>,
@@ -199,13 +204,26 @@ mod tests {
     }
 
     #[test]
-    fn targets_paths_are_strings_so_a_non_utf8_path_survives_the_record() {
+    fn a_non_utf8_path_is_lossily_replaced_but_the_record_still_serializes() {
+        // Genuinely invalid UTF-8, not ASCII dressed up as a lossy conversion:
+        // 0xff and 0xfe are not valid in any UTF-8 sequence.
+        let raw = [0x2f, 0x74, 0x6d, 0x70, 0x2f, 0xff, 0xfe];
+        let lossy = String::from_utf8_lossy(&raw).into_owned();
+        assert!(
+            lossy.contains('\u{fffd}'),
+            "the fixture must actually exercise replacement, got {lossy:?}"
+        );
+        assert!(
+            String::from_utf8(raw.to_vec()).is_err(),
+            "the fixture bytes must really be invalid UTF-8"
+        );
+
         let t = Targets {
-            paths: vec![String::from_utf8_lossy(&[0x66, 0x6f, 0x6f]).into_owned()],
+            paths: vec![lossy],
             ..Targets::default()
         };
         let json = serde_json::to_string(&t).expect("targets serialize");
         let back: Targets = serde_json::from_str(&json).expect("targets deserialize");
-        assert_eq!(t, back);
+        assert_eq!(t, back, "the replaced form round-trips unchanged");
     }
 }

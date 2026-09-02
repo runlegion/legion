@@ -59,7 +59,16 @@ impl<'de> Deserialize<'de> for DefaultOutcome {
 }
 
 /// The two policy defaults every table must state.
+///
+/// `deny_unknown_fields` is load-bearing, not tidiness. A TOML table consumes
+/// every bare key until the next header, so a top-level list written below
+/// `[defaults]` silently becomes a field of THIS struct; without this
+/// attribute serde discards it and the real list falls back to its default,
+/// leaving a policy file that appears to declare rows nobody enforces. That
+/// exact mistake shipped in this crate's own table and is why the attribute
+/// is here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Defaults {
     /// No route matched the call.
     pub no_match: DefaultOutcome,
@@ -153,7 +162,12 @@ pub struct ArgPattern {
 }
 
 /// One routed subcommand.
+///
+/// `deny_unknown_fields` for the same reason as `RouteTable`. NOT applied to
+/// `ArgPattern`, which uses `#[serde(flatten)]` -- serde does not support the
+/// two together.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Route {
     pub binary: String,
     /// Space-joined words, so `pr create` is one route rather than a tree.
@@ -176,7 +190,11 @@ pub struct Route {
 }
 
 /// The whole policy.
+///
+/// `deny_unknown_fields`: a misspelled section is a load failure, not a
+/// silently-empty list. Same reasoning as `Defaults`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RouteTable {
     #[serde(default)]
     pub managed_binaries: Vec<String>,
@@ -246,9 +264,14 @@ recall_miss = \"allow\"
     }
 
     #[test]
-    fn the_embedded_toml_names_every_section_explicitly() {
-        // Presence in the STRUCT is satisfied by serde defaults; the issue
-        // asks for presence in the TOML, so the file itself is checked.
+    fn the_embedded_toml_declares_every_section_at_the_top_level() {
+        // Parsed, not substring-matched. A substring check passes on a section
+        // that is present in the text but nested under the wrong header, which
+        // is exactly the defect this test exists to catch: `routes` written
+        // below `[defaults]` reads as `defaults.routes`, gets discarded, and
+        // the real list silently falls back to its serde default.
+        let raw: toml::Table =
+            toml::from_str(EMBEDDED_TABLE_TOML).expect("embedded table is valid TOML");
         for section in [
             "managed_binaries",
             "interpreters",
@@ -260,10 +283,38 @@ recall_miss = \"allow\"
             "routes",
         ] {
             assert!(
-                EMBEDDED_TABLE_TOML.contains(section),
-                "embedded table is missing section `{section}`"
+                raw.contains_key(section),
+                "embedded table has no TOP-LEVEL section `{section}` -- if the key exists in \
+                 the file, it is nested under a preceding [header] and is being discarded"
             );
         }
+        let defaults = raw["defaults"].as_table().expect("[defaults] is a table");
+        assert_eq!(
+            defaults.len(),
+            2,
+            "[defaults] must hold exactly no_match and recall_miss; a third key here is a \
+             top-level list that slid under the header: {defaults:?}"
+        );
+    }
+
+    #[test]
+    fn a_top_level_list_nested_under_defaults_is_now_a_load_failure() {
+        // The regression guard. This is the exact shape that shipped and
+        // parsed silently: `routes` after the [defaults] header. It must now
+        // fail loudly rather than be discarded.
+        let bad = "[defaults]\nno_match = \"allow\"\nrecall_miss = \"allow\"\nroutes = []\n";
+        let err = RouteTable::from_toml(bad).expect_err("a misplaced list must not parse");
+        assert!(
+            err.to_string().contains("routes"),
+            "the error must name the misplaced key: {err}"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_top_level_section_is_a_load_failure() {
+        let bad = "route = []\n[defaults]\nno_match = \"allow\"\nrecall_miss = \"allow\"\n";
+        let err = RouteTable::from_toml(bad).expect_err("a misspelled section must not parse");
+        assert!(err.to_string().contains("route"), "{err}");
     }
 
     #[test]
@@ -353,6 +404,74 @@ recall_miss = \"allow\"
             .expect("parse");
         assert_eq!(t.defaults.no_match, DefaultOutcome::Deny);
         assert_eq!(t.defaults.recall_miss, DefaultOutcome::Deny);
+    }
+
+    #[test]
+    fn every_arg_kind_and_flag_policy_variant_round_trips_through_toml() {
+        // ArgKind is internally tagged AND flattened into ArgPattern, a serde
+        // combination with known sharp edges. Only `Digits` was covered before,
+        // so a wrong tag spelling on any other variant (`TextCarry` ->
+        // `text_carry`, `NoExtraPositionals` -> `no_extra_positionals`) would
+        // not have surfaced until slice 3 populated the table for real.
+        let kinds = vec![
+            ArgKind::Digits {
+                capture: "n".into(),
+            },
+            ArgKind::Flags {
+                policy: FlagPolicy::None,
+            },
+            ArgKind::Flags {
+                policy: FlagPolicy::ClusterSplit,
+            },
+            ArgKind::Flags {
+                policy: FlagPolicy::Blocklist {
+                    flags: vec!["--force".into()],
+                },
+            },
+            ArgKind::Ext {
+                from: ".md".into(),
+                to: ".html".into(),
+            },
+            ArgKind::Conflict {
+                flags: vec!["-a".into(), "-b".into()],
+            },
+            ArgKind::Path,
+            ArgKind::TextCarry {
+                flag: "--message".into(),
+                placeholder: "TEXT0".into(),
+            },
+            ArgKind::Append {
+                args: vec!["--json".into()],
+            },
+            ArgKind::Scope {
+                reason: "too broad".into(),
+            },
+            ArgKind::NoExtraPositionals,
+        ];
+        for kind in kinds {
+            let mut t = RouteTable::from_toml(MINIMAL).expect("minimal parses");
+            t.routes.push(Route {
+                binary: "gh".into(),
+                subcommand: "issue view".into(),
+                global_options: vec![],
+                positional_captures: vec!["n".into()],
+                equivalent: "legion issue view".into(),
+                reason: "work-source actions go through legion".into(),
+                guidance: String::new(),
+                flags: vec![],
+                note: None,
+                patterns: vec![ArgPattern {
+                    name: "p".into(),
+                    kind: kind.clone(),
+                    outcome: ArgOutcome::Rewrite,
+                    equivalent_override: None,
+                }],
+            });
+            let out = t.to_toml().expect("serialize");
+            let back = RouteTable::from_toml(&out)
+                .unwrap_or_else(|e| panic!("reparse failed for {kind:?}: {e}"));
+            assert_eq!(t, back, "round-trip changed the value for {kind:?}");
+        }
     }
 
     #[test]

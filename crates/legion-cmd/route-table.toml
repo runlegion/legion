@@ -32,6 +32,16 @@ group_help = []
 # point: an unexplained bypass is indistinguishable from an evasion.
 escape_vocabulary = []
 
+# One entry per routed subcommand. Empty in slice 1.
+#
+# THIS MUST STAY ABOVE THE [defaults] HEADER. A TOML table consumes every bare
+# key until the next header, so `routes` written below `[defaults]` parses as
+# `defaults.routes` -- a key `Defaults` does not have. That is not a loud
+# failure: the misplaced list is discarded and top-level `routes` quietly falls
+# back to its serde default, so the table reports zero routes forever while the
+# file appears to declare them. Slice 3 appends real rows here.
+routes = []
+
 # What happens when nothing matches. EXACTLY TWO VALUES EACH -- `allow` or
 # `deny` (NFR-CMD-005 rev 6). There is deliberately no `drop`/`skip`/`ignore`:
 # a silently swallowed command leaves the agent unable to tell success from a
@@ -42,6 +52,3 @@ escape_vocabulary = []
 no_match = "allow"
 # A recall-backed rule that finds nothing has not found a reason to refuse.
 recall_miss = "allow"
-
-# One entry per routed subcommand. Empty in slice 1.
-routes = []

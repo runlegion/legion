@@ -19,28 +19,44 @@ pub struct Router {
     table: RouteTable,
 }
 
-/// Every `{placeholder}` in `s`, or an error on an unbalanced brace.
+/// Every `{placeholder}` in `s`, or an error on any unbalanced brace.
 ///
-/// Hand-scanned rather than regex: the whole crate is meant to have no regex
-/// engine until a pattern kind actually needs one, and a brace scan is not
-/// worth a dependency.
+/// Symmetric on purpose: a stray `}` is a load failure exactly as a stray `{`
+/// is. The alternative is accepting it as a literal, which means the template
+/// a human wrote and the template this crate renders differ silently -- and
+/// "never a silent non-match" is the whole contract this validation exists to
+/// keep.
+///
+/// Hand-scanned rather than regex: nothing in the crate needs a regex engine
+/// yet, and a brace scan is not worth the dependency. Byte indices are safe
+/// here because `{` and `}` are single-byte in UTF-8, so every boundary this
+/// slices on is a valid char boundary regardless of multibyte content.
 fn placeholders(s: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
-    let mut rest = s;
-    while let Some(open) = rest.find('{') {
-        let after = &rest[open + 1..];
-        let close = after
-            .find('}')
-            .ok_or_else(|| format!("unbalanced '{{' in template `{s}`"))?;
-        let name = &after[..close];
-        if name.is_empty() {
-            return Err(format!("empty placeholder `{{}}` in template `{s}`"));
+    let mut open: Option<usize> = None;
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' => {
+                if open.is_some() {
+                    return Err(format!("nested '{{' in template `{s}`"));
+                }
+                open = Some(i);
+            }
+            '}' => match open.take() {
+                None => return Err(format!("unmatched '}}' in template `{s}`")),
+                Some(start) => {
+                    let name = &s[start + 1..i];
+                    if name.is_empty() {
+                        return Err(format!("empty placeholder `{{}}` in template `{s}`"));
+                    }
+                    out.push(name.to_owned());
+                }
+            },
+            _ => {}
         }
-        if name.contains('{') {
-            return Err(format!("nested '{{' in template `{s}`"));
-        }
-        out.push(name.to_owned());
-        rest = &after[close + 1..];
+    }
+    if open.is_some() {
+        return Err(format!("unbalanced '{{' in template `{s}`"));
     }
     Ok(out)
 }
@@ -178,7 +194,7 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decision::Decision;
+    use crate::decision::{Decision, Routed};
     use crate::table::{ArgOutcome, ArgPattern, FlagSpec};
 
     fn table_with(no_match: &str) -> RouteTable {
@@ -305,6 +321,70 @@ mod tests {
             .push(route_named("gh", "pr list", "legion pr list {repo"));
         let err = Router::new(t).expect_err("must refuse");
         assert!(err.to_string().contains("unbalanced"), "{err}");
+    }
+
+    #[test]
+    fn a_note_carrying_route_in_a_real_table_reaches_routed_note() {
+        // The issue asks for a test that "constructs a table with one
+        // note-carrying route and proves the note reaches Routed.note".
+        // Slice 1's `route` has no matching logic, so the note cannot travel
+        // the full path yet -- but the table, the Route, and the carrier are
+        // all real here rather than a bare string handed to a helper, which is
+        // as close to the literal requirement as slice 1 admits. The remaining
+        // half (route -> match -> Routed) lands with the tokenizer in slice 2.
+        let mut t = table_with("allow");
+        let mut r = route_named("gh", "issue list", "legion issue list");
+        r.note = Some("legion issue list carries the audit row".into());
+        t.routes.push(r);
+        let router = Router::new(t).expect("compile");
+
+        let matched = router
+            .table()
+            .routes
+            .iter()
+            .find(|r| r.binary == "gh" && r.subcommand == "issue list")
+            .expect("the note-carrying route survives compilation");
+
+        let routed = Routed::from_route(Decision::Allow, matched.note.clone());
+        assert_eq!(
+            routed.note.as_deref(),
+            Some("legion issue list carries the audit row"),
+            "the route's note must reach Routed.note alongside Allow"
+        );
+
+        // And the same route's note must NOT survive a non-Allow decision.
+        let denied = Routed::from_route(Decision::Deny("nope".into()), matched.note.clone());
+        assert_eq!(denied.note, None);
+    }
+
+    #[test]
+    fn a_stray_closing_brace_is_a_load_failure_not_a_silent_literal() {
+        let mut t = table_with("allow");
+        t.routes
+            .push(route_named("gh", "pr list", "legion pr list repo}"));
+        let err = Router::new(t).expect_err("must refuse");
+        assert!(err.to_string().contains("unmatched"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_placeholder_is_a_load_failure() {
+        let mut t = table_with("allow");
+        t.routes
+            .push(route_named("gh", "pr list", "legion pr list {}"));
+        let err = Router::new(t).expect_err("must refuse");
+        assert!(err.to_string().contains("empty placeholder"), "{err}");
+    }
+
+    #[test]
+    fn a_multibyte_template_does_not_panic_and_resolves_normally() {
+        let mut t = table_with("allow");
+        let mut r = route_named("gh", "issue view", "legion issue view — café {n}");
+        r.positional_captures.push("n".into());
+        t.routes.push(r);
+        assert!(
+            Router::new(t).is_ok(),
+            "multibyte content must not break the scan"
+        );
     }
 
     #[test]
