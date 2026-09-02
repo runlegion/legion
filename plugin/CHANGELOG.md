@@ -117,8 +117,10 @@ than pass; the amendment and its reasoning are recorded on the issue.
   the ecosystem's union and dedup and actor tiers, the spec writer's priority and RESEARCH
   routing that follow from status by rule. Three confidence anchors per skill tie the number to
   conditions the agent reads off its own inputs, so two runs with different inputs land
-  different numbers, and the emit step sits after the create returns an id so the fingerprint
-  names a real document. The mechanics every emit shares are stated once in the orchestrator
+  different numbers, and each writer's emit sits after its create returns an id so the
+  fingerprint names a real document -- the conductor and the intent reviewer are the two
+  exceptions, fingerprinting the step and the intent's own claim because neither creates
+  anything to name. The mechanics every emit shares are stated once in the orchestrator
   and cross-referenced by the other seven: the session id from `CLAUDE_CODE_SESSION_ID` and no
   `--model`, because the engine resolves the model from the session's live sample and a guessed
   one mislabels the row into a real cohort; a 180-day orphan window, because neither a crit nor
