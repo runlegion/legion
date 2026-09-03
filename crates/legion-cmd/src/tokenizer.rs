@@ -43,15 +43,26 @@
 //!   the real command. Because of this, [`analyze`]'s managed-binary
 //!   DETECTION does not rely on command-position resolution alone: it
 //!   falls back to scanning every word in the stage for a managed
-//!   binary's basename when position resolution does not land on one.
+//!   binary's basename when position resolution does not land on one --
+//!   but ONLY when `resolve_binary_position` reports that a named wrapper
+//!   was actually consumed on the way there. A plain env-assignment
+//!   prefix (`X=1 gh ...`) does not count: it is skipped by the same
+//!   loop, but it establishes nothing about whether the following word is
+//!   a command a wrapper is handing off to versus a literal argument
+//!   (`echo gh`, `grep gh file.txt`, `test x = gh` all resolve directly
+//!   with no wrapper ever consumed, so the fallback never scans them and
+//!   `gh` sitting in argument position is correctly not a match).
 //!   `resolve_binary_position` stays the sole authority for the `$VAR`
 //!   and opaque-interpreter checks and for what `splice` rewrites --
 //!   those genuinely need the real command position, and the fallback
 //!   never substitutes for it there. `matched` therefore means "a
-//!   managed binary is named somewhere in this stage," not "in command
-//!   position" -- broader than before, and deliberately so (NFR-CMD-002
-//!   favors a detection that fires too often over one a wrapper argument
-//!   can walk past).
+//!   managed binary is named somewhere in this stage after a wrapper was
+//!   seen and its argument did not resolve," not "in command position" --
+//!   broader than before, and deliberately so (NFR-CMD-002 favors a
+//!   detection that fires too often over one a wrapper argument can walk
+//!   past) while still requiring the wrapper precondition so an
+//!   unrelated command's own argument naming a managed binary does not
+//!   trip it.
 //! - The interpreter `-c` flag is recognized by name; `-e` (node) is not,
 //!   to stay literal to FR-CMD-004's named trigger. A bare inline-script
 //!   argument with no flag at all (`awk 'program' file`) is not recognized
@@ -193,13 +204,20 @@ struct WordScan {
     saw_single: bool,
     saw_double: bool,
     live: bool,
-    subst_range: Option<Range<usize>>,
+    /// Every top-level substitution range found in the word, in the order
+    /// they close. A word can concatenate more than one
+    /// (`$(true)$(gh pr merge 1)` is a single word carrying two), so this
+    /// is a `Vec`, not the single slot an earlier version of this scan used
+    /// -- that version silently dropped every substitution after the
+    /// first.
+    subst_ranges: Vec<Range<usize>>,
 }
 
 fn classify_word(scan: &WordScan, start: usize) -> TokenKind {
     if !scan.saw_single
         && !scan.saw_double
-        && let Some(r) = &scan.subst_range
+        && scan.subst_ranges.len() == 1
+        && let Some(r) = scan.subst_ranges.first()
         && r.start == start
         && r.end == scan.end
     {
@@ -225,7 +243,7 @@ fn scan_word(src: &str, start: usize) -> Result<WordScan, ScanError> {
     let mut live = false;
     let mut subst_stack: Vec<u8> = Vec::new();
     let mut inner_quote: Option<u8> = None;
-    let mut subst_range: Option<Range<usize>> = None;
+    let mut subst_ranges: Vec<Range<usize>> = Vec::new();
     let mut cur_subst_start: Option<usize> = None;
     let mut quote: Option<u8> = None;
 
@@ -299,9 +317,9 @@ fn scan_word(src: &str, start: usize) -> Result<WordScan, ScanError> {
                 i += 1;
                 if subst_stack.is_empty()
                     && let Some(s0) = cur_subst_start
-                    && subst_range.is_none()
                 {
-                    subst_range = Some(s0..i);
+                    subst_ranges.push(s0..i);
+                    cur_subst_start = None;
                 }
                 continue;
             }
@@ -404,7 +422,7 @@ fn scan_word(src: &str, start: usize) -> Result<WordScan, ScanError> {
         saw_single,
         saw_double,
         live,
-        subst_range,
+        subst_ranges,
     })
 }
 
@@ -942,15 +960,25 @@ fn is_skippable(src: &str, tok: &Token) -> bool {
 /// seeing through bare/`env` assignments and options-before-command
 /// wrappers, chained.
 ///
-/// Returns `(index into stage tokens, basename, is a bare substitution)`.
-/// `basename` is empty when the resolved token is a substitution -- the
-/// caller resolves that case separately.
+/// Returns `(index into stage tokens, basename, is a bare substitution, a
+/// named wrapper was consumed)`. `basename` is empty when the resolved
+/// token is a substitution -- the caller resolves that case separately.
+///
+/// The fourth field is `true` only when the loop actually matched a token
+/// against a name in `wrappers` and skipped past it -- never for a plain
+/// env-assignment prefix (`X=1 gh ...`) skipped by `is_skippable` alone. An
+/// assignment prefix says nothing about whether the word that follows it is
+/// being wrapped or merely passed as a literal argument to whatever command
+/// the assignment precedes (`X=1 echo gh` does not run `gh`, the same as
+/// `echo gh`), so it must not license the word-fallback scan in `analyze`
+/// the way an actual wrapper token does.
 fn resolve_binary_position(
     src: &str,
     stage_tokens: &[Token],
     wrappers: &[Wrapper],
-) -> Option<(usize, String, bool)> {
+) -> Option<(usize, String, bool, bool)> {
     let mut idx = 0;
+    let mut wrapper_consumed = false;
     loop {
         while idx < stage_tokens.len() && is_skippable(src, &stage_tokens[idx]) {
             idx += 1;
@@ -960,7 +988,7 @@ fn resolve_binary_position(
         }
         let tok = &stage_tokens[idx];
         if matches!(tok.kind, TokenKind::Subst { .. }) {
-            return Some((idx, String::new(), true));
+            return Some((idx, String::new(), true, wrapper_consumed));
         }
         let literal = literal_command_text(token_text(src, tok));
         let base = basename(&literal).to_owned();
@@ -968,10 +996,11 @@ fn resolve_binary_position(
             .iter()
             .any(|w| w.name == base && w.options_before_command)
         {
+            wrapper_consumed = true;
             idx += 1;
             continue;
         }
-        return Some((idx, base, false));
+        return Some((idx, base, false, wrapper_consumed));
     }
 }
 
@@ -995,24 +1024,32 @@ fn substitution_inner_text(src: &str, tok: &Token) -> Option<String> {
     inner_of_substitution_str(token_text(src, tok))
 }
 
-/// Find the substitution embedded in a `Word` token that carries one
-/// (`live == true`) but is not itself a bare [`TokenKind::Subst`] -- a
-/// quoted substitution (`"$(gh pr view 1)"`) or one concatenated with other
-/// text (`pre$(gh pr view 1)`). [`classify_word`] only emits `Subst` when
-/// the substitution IS the whole unquoted word, so both of these reach
-/// `analyze` as `Word { live: true, .. }` and their inner text is otherwise
-/// never scanned.
+/// Find every substitution embedded in a `Word` token that carries one or
+/// more (`live == true`) but is not itself a bare [`TokenKind::Subst`] -- a
+/// quoted substitution (`"$(gh pr view 1)"`), one concatenated with other
+/// text (`pre$(gh pr view 1)`), or more than one concatenated in the same
+/// word (`$(true)$(gh pr merge 1)`). [`classify_word`] only emits `Subst`
+/// when the word is exactly one unquoted substitution and nothing else, so
+/// all of these reach `analyze` as `Word { live: true, .. }` and their inner
+/// text is otherwise never scanned. A word can carry more than one such
+/// substitution, and every one of them is recoverable -- not just the
+/// first.
 ///
 /// Re-scanning the word's own text as its own mini-source is safe: a word
 /// token always starts at a quote/escape-free boundary (the same state
-/// `scan_word` starts in for any word), so the `subst_range` this second
-/// pass locates lines up with the same bytes the original scan found --
+/// `scan_word` starts in for any word), so the `subst_ranges` this second
+/// pass locates line up with the same bytes the original scan found --
 /// just word-relative instead of command-relative, which is exactly what
 /// slicing `text` needs.
-fn live_word_substitution_inner(text: &str) -> Option<String> {
-    let scanned = scan_word(text, 0).ok()?;
-    let range = scanned.subst_range?;
-    inner_of_substitution_str(&text[range])
+fn live_word_substitution_inners(text: &str) -> Vec<String> {
+    let Ok(scanned) = scan_word(text, 0) else {
+        return Vec::new();
+    };
+    scanned
+        .subst_ranges
+        .iter()
+        .filter_map(|range| inner_of_substitution_str(&text[range.clone()]))
+        .collect()
 }
 
 fn stage_is_opaque_interpreter(src: &str, stage: &Stage) -> bool {
@@ -1118,45 +1155,48 @@ pub fn analyze(
         // `Word { live: true, .. }` rather than `Subst`, so their inner
         // text is pulled out separately below instead of being skipped.
         for tok in &stage.tokens {
-            let inner = match &tok.kind {
-                TokenKind::Subst { .. } => substitution_inner_text(command, tok),
-                TokenKind::Word { live: true, .. } => {
-                    live_word_substitution_inner(token_text(command, tok))
+            let inners: Vec<String> = match &tok.kind {
+                TokenKind::Subst { .. } => {
+                    substitution_inner_text(command, tok).into_iter().collect()
                 }
-                _ => None,
+                TokenKind::Word { live: true, .. } => {
+                    live_word_substitution_inners(token_text(command, tok))
+                }
+                _ => Vec::new(),
             };
-            let Some(inner) = inner else {
-                continue;
-            };
-            let Ok(inner_tokens) = scan(&inner) else {
-                continue;
-            };
-            let inner_stages = build_stages(&inner_tokens);
-            let Some(first) = inner_stages.first() else {
-                continue;
-            };
-            let Some((_, ibase, _)) = resolve_binary_position(&inner, &first.tokens, wrappers)
-            else {
-                continue;
-            };
-            if managed.iter().any(|m| m == &ibase) {
-                matched = Some(Matched {
-                    binary: ibase,
-                    stage_span: i..i + 1,
-                });
-                decision = Decision::Proxy(
-                    ProxyReason::CoverageUnknown {
-                        note: "managed binary found inside a command substitution; not \
-                               spliceable"
-                            .into(),
-                    }
-                    .render(),
-                );
-                break 'stages;
+            for inner in inners {
+                let Ok(inner_tokens) = scan(&inner) else {
+                    continue;
+                };
+                let inner_stages = build_stages(&inner_tokens);
+                let Some(first) = inner_stages.first() else {
+                    continue;
+                };
+                let Some((_, ibase, _, _)) =
+                    resolve_binary_position(&inner, &first.tokens, wrappers)
+                else {
+                    continue;
+                };
+                if managed.iter().any(|m| m == &ibase) {
+                    matched = Some(Matched {
+                        binary: ibase,
+                        stage_span: i..i + 1,
+                    });
+                    decision = Decision::Proxy(
+                        ProxyReason::CoverageUnknown {
+                            note: "managed binary found inside a command substitution; not \
+                                   spliceable"
+                                .into(),
+                        }
+                        .render(),
+                    );
+                    break 'stages;
+                }
             }
         }
 
-        let Some((idx, base, is_subst)) = resolve_binary_position(command, &stage.tokens, wrappers)
+        let Some((idx, base, is_subst, wrapper_consumed)) =
+            resolve_binary_position(command, &stage.tokens, wrappers)
         else {
             continue;
         };
@@ -1195,7 +1235,7 @@ pub fn analyze(
                     binary: base,
                     stage_span: i..i + 1,
                 });
-            } else {
+            } else if wrapper_consumed {
                 // `resolve_binary_position` landed on a word that is not
                 // the real command -- a wrapper argument its skip-loop
                 // does not recognize (`sudo -u nobody gh ...`, `sudo
@@ -1203,6 +1243,15 @@ pub fn analyze(
                 // every word in the stage for a managed binary's
                 // basename; see the module doc's note on what `matched`
                 // means once this fallback fires.
+                //
+                // Gated on `wrapper_consumed`: this fallback only fires
+                // when a named wrapper was actually seen and skipped past.
+                // Without that precondition, `echo gh`, `grep gh
+                // file.txt`, and `test x = gh` would all trip it -- `gh`
+                // is a plain argument there, not a command any wrapper
+                // ever handed off to. A wrapper's own unrecognized
+                // argument is the only reason command-position resolution
+                // is allowed to have missed the real command word.
                 for word_tok in &stage.tokens {
                     if !matches!(word_tok.kind, TokenKind::Word { .. }) {
                         continue;
@@ -1422,6 +1471,13 @@ mod tests {
             "\\sudo -u nobody gh pr merge 1",
             // A mid-word escape, not just a leading one.
             "g\\h pr view 1",
+            // Two substitutions concatenated in one word (#1113 finding 1):
+            // `scan_word` must recover BOTH, not just the first. `$(true)`
+            // resolves to nothing managed; `$(gh pr merge 1)` is the real
+            // bypass and sits second.
+            "echo $(true)$(gh pr merge 1)",
+            // Same shape, backtick form.
+            "echo `true``gh pr merge 1`",
         ];
 
         for cmd in cases {
@@ -1454,6 +1510,58 @@ mod tests {
                 analysis.decision
             );
         }
+    }
+
+    #[test]
+    fn word_fallback_never_fires_without_a_wrapper_actually_consumed() {
+        // #1113 finding 2: the Loop-B word-fallback scan must require that
+        // a NAMED WRAPPER was actually consumed before command-position
+        // resolution stopped -- not merely that resolution landed on a
+        // non-managed base. Without that precondition, `gh` sitting as a
+        // plain argument to an ordinary command trips the fallback and
+        // reports a match that never runs `gh` at all.
+        let false_positives: &[&str] = &["echo gh", "grep gh file.txt", "test x = gh"];
+        for cmd in false_positives {
+            let analysis = analyze(&bash(cmd), &managed_gh(), &[], &all_wrappers())
+                .unwrap_or_else(|| panic!("{cmd}: must analyze"));
+            assert_eq!(
+                analysis.matched, None,
+                "{cmd}: `gh` is a plain argument here, no wrapper was ever consumed, so this \
+                 must not match -- got matched={:?} decision={:?}",
+                analysis.matched, analysis.decision
+            );
+        }
+
+        // Controls that correctly stay clear for an unrelated reason (the
+        // basename of the resolved word is never `gh` at all) -- these must
+        // keep working exactly as before this fix.
+        let unrelated_clear: &[&str] =
+            &["./scripts/gh-helper.sh", "git commit -m \"fix gh parsing\""];
+        for cmd in unrelated_clear {
+            let analysis = analyze(&bash(cmd), &managed_gh(), &[], &all_wrappers())
+                .unwrap_or_else(|| panic!("{cmd}: must analyze"));
+            assert_eq!(
+                analysis.matched, None,
+                "{cmd}: must stay clear, got matched={:?} decision={:?}",
+                analysis.matched, analysis.decision
+            );
+        }
+
+        // The control that must KEEP being caught: a real wrapper (`sudo`)
+        // IS consumed here before resolution stops on `anything`, so the
+        // fallback must still fire and find `gh`.
+        let sudo_analysis = analyze(
+            &bash("sudo anything gh pr merge 1"),
+            &managed_gh(),
+            &[],
+            &all_wrappers(),
+        )
+        .expect("analyzes");
+        assert_eq!(
+            sudo_analysis.matched.map(|m| m.binary),
+            Some("gh".into()),
+            "a wrapper (`sudo`) was consumed here, so the fallback must still catch `gh`"
+        );
     }
 
     #[test]
