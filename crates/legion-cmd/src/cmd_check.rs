@@ -17,27 +17,67 @@ use crate::ctx::Ctx;
 use crate::decision::{Decision, Routed, Targets};
 use crate::router::Router;
 
-/// Every `--tool` name `cmd-check` accepts, in the order named on refusal.
+/// The `--tool` name `cmd-check` accepts for `tool`, or `None` for
+/// `Tool::Other` -- never an accepted `--tool` value, since an unrecognized
+/// name is a CLI mistake, not the harness's forward-compatible catch-all.
 ///
-/// Deliberately the CLOSED set from FR-CMD-001's `Tool` enum, not
-/// `Tool::Other`: an unrecognized `--tool` value is a CLI mistake, not a
-/// harness sending a tool this crate has not been taught yet, so it gets a
-/// refusal naming what IS accepted rather than silently falling through to
-/// `Other`.
-const ACCEPTED_TOOL_NAMES: &[&str] = &[
-    "Bash",
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "Read",
-    "Grep",
-    "Glob",
-    "Agent",
-    "Task",
-    "WebFetch",
-    "WebSearch",
-    "AskUserQuestion",
+/// EXHAUSTIVE over `Tool`'s variants, deliberately with no `_` arm: this is
+/// the actual accept/refuse decision `parse_tool_name` runs (not a lookup
+/// against a name list maintained separately from the enum), so a `Tool`
+/// variant added without a case here is a compile error, not a silently
+/// stale accepted-names list that refuses a tool the router understands.
+/// Same shape #1126 used to close three defects of exactly this kind (a
+/// `!=` status filter, a match guard, and an error string, each compiling
+/// fine while wrong) -- make the compiler carry the closed set instead of a
+/// reviewer.
+fn accepted_name(tool: &Tool) -> Option<&'static str> {
+    match tool {
+        Tool::Bash => Some("Bash"),
+        Tool::Edit => Some("Edit"),
+        Tool::Write => Some("Write"),
+        Tool::MultiEdit => Some("MultiEdit"),
+        Tool::Read => Some("Read"),
+        Tool::Grep => Some("Grep"),
+        Tool::Glob => Some("Glob"),
+        Tool::Agent => Some("Agent"),
+        Tool::Task => Some("Task"),
+        Tool::WebFetch => Some("WebFetch"),
+        Tool::WebSearch => Some("WebSearch"),
+        Tool::AskUserQuestion => Some("AskUserQuestion"),
+        Tool::Other(_) => None,
+    }
+}
+
+/// One instance of every accepted `Tool` variant, for rendering the
+/// refusal message's name list only -- `accepted_name` above, not this
+/// array, is what governs whether a given `--tool` is accepted. If this
+/// array ever fell behind a new variant, the worst case is a refusal
+/// message that omits a name it should list; `accepted_name`'s exhaustive
+/// match still cannot mis-accept or mis-refuse, because adding the variant
+/// to `Tool` without extending that match does not compile.
+const ALL_NAMED_TOOLS: &[Tool] = &[
+    Tool::Bash,
+    Tool::Edit,
+    Tool::Write,
+    Tool::MultiEdit,
+    Tool::Read,
+    Tool::Grep,
+    Tool::Glob,
+    Tool::Agent,
+    Tool::Task,
+    Tool::WebFetch,
+    Tool::WebSearch,
+    Tool::AskUserQuestion,
 ];
+
+/// The accepted `--tool` names, comma-joined, for the refusal message.
+fn accepted_tool_names_joined() -> String {
+    ALL_NAMED_TOOLS
+        .iter()
+        .filter_map(accepted_name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// A `cmd-check` invocation this module could not resolve to a `ToolCall`.
 #[derive(Debug, thiserror::Error)]
@@ -98,13 +138,19 @@ impl From<Routed> for CmdCheckOutput {
 }
 
 /// Parse `--tool` against the closed set, refusing anything else by name.
+///
+/// `Tool::from` is the harness-side parser (permissive: an unrecognized
+/// string becomes `Tool::Other`), so acceptance here is decided by
+/// `accepted_name` on the RESULT, not by checking the raw string against a
+/// separately-maintained list -- see `accepted_name`'s doc comment.
 fn parse_tool_name(name: &str) -> Result<Tool, CmdCheckError> {
-    if ACCEPTED_TOOL_NAMES.contains(&name) {
-        Ok(Tool::from(name.to_owned()))
+    let tool = Tool::from(name.to_owned());
+    if accepted_name(&tool).is_some() {
+        Ok(tool)
     } else {
         Err(CmdCheckError::UnknownTool {
             tool: name.to_owned(),
-            accepted: ACCEPTED_TOOL_NAMES.join(", "),
+            accepted: accepted_tool_names_joined(),
         })
     }
 }
@@ -213,6 +259,30 @@ mod tests {
 
     fn router() -> Router {
         Router::new(RouteTable::embedded().expect("embedded table parses")).expect("compile")
+    }
+
+    /// `ALL_NAMED_TOOLS` (used only for the refusal message's name list)
+    /// and `accepted_name` (the actual accept/refuse decision) must stay in
+    /// lockstep: every entry in the array must be something `accepted_name`
+    /// actually accepts. This does NOT substitute for `accepted_name`'s own
+    /// exhaustive match closing the "new variant silently unaccepted" defect
+    /// -- that is enforced by the compiler (verified directly: temporarily
+    /// adding a 13th `Tool` variant fails `cargo build -p legion-cmd` with
+    /// "non-exhaustive patterns" pointing at this function, before this test
+    /// or any other ever runs). This test instead pins the array/function
+    /// pairing so the refusal message cannot quietly drop a name.
+    #[test]
+    fn all_named_tools_are_every_one_accepted_by_accepted_name() {
+        let accepted_count = ALL_NAMED_TOOLS
+            .iter()
+            .filter(|t| accepted_name(t).is_some())
+            .count();
+        assert_eq!(
+            accepted_count,
+            ALL_NAMED_TOOLS.len(),
+            "an entry in ALL_NAMED_TOOLS that accepted_name does not accept would silently \
+             vanish from the refusal message's name list"
+        );
     }
 
     #[test]
