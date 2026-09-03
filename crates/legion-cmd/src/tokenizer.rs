@@ -968,26 +968,46 @@ fn is_skippable(src: &str, tok: &Token) -> bool {
 /// wrappers, chained.
 ///
 /// Returns `(index into stage tokens, basename, is a bare substitution, a
-/// named wrapper was consumed)`. `basename` is empty when the resolved
-/// token is a substitution -- the caller resolves that case separately.
+/// named wrapper was consumed, an assignment prefix was skipped)`.
+/// `basename` is empty when the resolved token is a substitution -- the
+/// caller resolves that case separately.
 ///
-/// The fourth field is `true` only when the loop actually matched a token
-/// against a name in `wrappers` and skipped past it -- never for a plain
-/// env-assignment prefix (`X=1 gh ...`) skipped by `is_skippable` alone. An
-/// assignment prefix says nothing about whether the word that follows it is
-/// being wrapped or merely passed as a literal argument to whatever command
-/// the assignment precedes (`X=1 echo gh` does not run `gh`, the same as
-/// `echo gh`), so it must not license the word-fallback scan in `analyze`
-/// the way an actual wrapper token does.
+/// The two trailing bools are DELIBERATELY SEPARATE, for two different
+/// consumers with two different needs (#1117, gate 01a06641-252f):
+///
+/// - The fourth field, `wrapper_consumed`, is `true` only when the loop
+///   matched a token against a name in `wrappers` and skipped past it --
+///   never for a plain env-assignment prefix (`X=1 gh ...`) skipped by
+///   `is_skippable` alone. `analyze` gates its word-fallback scan on this
+///   field alone: an assignment prefix says nothing about whether the word
+///   that follows it is being wrapped or merely passed as a literal
+///   argument to whatever command the assignment precedes (`X=1 echo gh`
+///   does not run `gh`, the same as `echo gh`), so broadening this field to
+///   include assignments would make that scan misfire on exactly that case.
+/// - The fifth field, `assignment_consumed`, is `true` whenever an
+///   `is_assignment` token was skipped anywhere in the front skip-loop,
+///   independent of whether a named wrapper was also involved. This is for
+///   a caller that already has a resolved, direct match on a managed binary
+///   in hand (no fallback-scan ambiguity to worry about) and needs to know
+///   whether an assignment sitting in front of it would be silently dropped
+///   by a rewrite -- `X=1 gh pr view 1` resolves `gh` directly, with no
+///   wrapper token at all, and a caller that only checked `wrapper_consumed`
+///   would rewrite it, dropping `X=1` unremarked.
 fn resolve_binary_position(
     src: &str,
     stage_tokens: &[Token],
     wrappers: &[Wrapper],
-) -> Option<(usize, String, bool, bool)> {
+) -> Option<(usize, String, bool, bool, bool)> {
     let mut idx = 0;
     let mut wrapper_consumed = false;
+    let mut assignment_consumed = false;
     loop {
         while idx < stage_tokens.len() && is_skippable(src, &stage_tokens[idx]) {
+            if matches!(stage_tokens[idx].kind, TokenKind::Word { .. })
+                && is_assignment(&literal_command_text(token_text(src, &stage_tokens[idx])))
+            {
+                assignment_consumed = true;
+            }
             idx += 1;
         }
         if idx >= stage_tokens.len() {
@@ -995,7 +1015,13 @@ fn resolve_binary_position(
         }
         let tok = &stage_tokens[idx];
         if matches!(tok.kind, TokenKind::Subst { .. }) {
-            return Some((idx, String::new(), true, wrapper_consumed));
+            return Some((
+                idx,
+                String::new(),
+                true,
+                wrapper_consumed,
+                assignment_consumed,
+            ));
         }
         let literal = literal_command_text(token_text(src, tok));
         let base = basename(&literal).to_owned();
@@ -1007,7 +1033,7 @@ fn resolve_binary_position(
             idx += 1;
             continue;
         }
-        return Some((idx, base, false, wrapper_consumed));
+        return Some((idx, base, false, wrapper_consumed, assignment_consumed));
     }
 }
 
@@ -1179,7 +1205,7 @@ pub fn analyze(
                 let Some(first) = inner_stages.first() else {
                     continue;
                 };
-                let Some((_, ibase, _, inner_wrapper_consumed)) =
+                let Some((_, ibase, _, inner_wrapper_consumed, inner_assignment_consumed)) =
                     resolve_binary_position(&inner, &first.tokens, wrappers)
                 else {
                     continue;
@@ -1188,7 +1214,7 @@ pub fn analyze(
                     matched = Some(Matched {
                         binary: ibase,
                         stage_span: i..i + 1,
-                        wrapper_consumed: inner_wrapper_consumed,
+                        wrapper_consumed: inner_wrapper_consumed || inner_assignment_consumed,
                     });
                     decision = Decision::Proxy(
                         ProxyReason::CoverageUnknown {
@@ -1203,7 +1229,7 @@ pub fn analyze(
             }
         }
 
-        let Some((idx, base, is_subst, wrapper_consumed)) =
+        let Some((idx, base, is_subst, wrapper_consumed, assignment_consumed)) =
             resolve_binary_position(command, &stage.tokens, wrappers)
         else {
             continue;
@@ -1239,10 +1265,18 @@ pub fn analyze(
 
         if matched.is_none() {
             if managed.iter().any(|m| m == &base) {
+                // `Matched.wrapper_consumed` folds in `assignment_consumed`
+                // too (#1117, gate 01a06641-252f): this is a DIRECT match on
+                // the managed binary itself, with no fallback-scan ambiguity
+                // to protect (that gate stays keyed on the narrower,
+                // named-wrapper-only `wrapper_consumed` below), so a bare
+                // `X=1 gh pr view 1` -- no named wrapper at all -- must
+                // still refuse to rewrite: `X=1` would otherwise vanish from
+                // the translated command with no sign anything was dropped.
                 matched = Some(Matched {
                     binary: base,
                     stage_span: i..i + 1,
-                    wrapper_consumed,
+                    wrapper_consumed: wrapper_consumed || assignment_consumed,
                 });
             } else if wrapper_consumed {
                 // `resolve_binary_position` landed on a word that is not

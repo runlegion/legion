@@ -323,6 +323,25 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_assignment_prefix_with_no_named_wrapper_still_denies_a_rewrite_eligible_verb() {
+        // Gate 01a06641-252f: `X=1 gh pr merge 1` (no Rewrite pattern on
+        // `pr merge` at all) denied regardless, which masked that a bare
+        // `VAR=val` prefix with NO named wrapper does not set
+        // `wrapper_consumed` on its own. The intersection that actually
+        // proves the fix is a bare assignment on a REWRITE-ELIGIBLE verb:
+        // without it, `X=1` silently vanishes and the evasion is laundered
+        // into a legitimate-looking `legion pr view` command -- worse than
+        // an Allow, since an Allow at least leaves an auditable `gh` call.
+        let r = router();
+        let routed = r.route(&bash("X=1 gh pr view 1"), &ctx());
+        assert!(
+            matches!(routed.decision, Decision::Deny(_)),
+            "expected deny for \"X=1 gh pr view 1\", got {:?}",
+            routed.decision
+        );
+    }
+
+    #[test]
     fn the_wrapper_deny_names_the_wrapper_not_a_fabricated_translation() {
         let r = router();
         let routed = r.route(&bash("env X=1 gh pr view 1"), &ctx());
