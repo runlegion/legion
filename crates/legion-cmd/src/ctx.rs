@@ -55,4 +55,17 @@ pub struct Ctx {
     /// means "not resolved", which is not the same as zero and must not be
     /// read as a small file.
     pub file_lines: Option<u64>,
+    /// Whether a Grep/Glob call's symbol candidate resolves to a `legion sym
+    /// def` hit local to `Ctx.repo`.
+    ///
+    /// MINIMAL PLACEHOLDER (#1051), same shape as `file_lines`: the router
+    /// does no I/O, so `pre_grep` cannot run `legion sym def` itself -- the
+    /// caller probes it and folds the result down to this one bit before
+    /// handing `Ctx` over. `false` covers "no hit", "hit exists only in
+    /// other repos" (the #458 relevance gate a cluster-wide hit must not
+    /// trip), and "not yet resolved" alike; only a caller-confirmed LOCAL
+    /// hit sets this `true`. The full hit payload (for embedding the actual
+    /// `legion sym def` JSON in a deny reason) is a real gap this field does
+    /// not close -- see `pre_grep`'s module docs.
+    pub sym_local_hit: bool,
 }
