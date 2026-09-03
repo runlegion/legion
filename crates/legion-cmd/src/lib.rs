@@ -38,6 +38,7 @@ pub mod decision;
 pub mod router;
 pub mod rules;
 pub mod table;
+pub mod tokenizer;
 
 pub use call::{ParseError, Tool, ToolCall};
 pub use ctx::{Ctx, RecallHit, Ruling};
@@ -46,6 +47,10 @@ pub use router::Router;
 pub use table::{
     ArgKind, ArgOutcome, ArgPattern, DefaultOutcome, Defaults, Escape, FlagPolicy, FlagSpec,
     GroupHelp, Route, RouteTable, TableError, Wrapper,
+};
+pub use tokenizer::{
+    Analysis, Operator, ProxyReason, Quoting, ScanError, Stage, Token, TokenKind, analyze,
+    build_stages, scan, splice,
 };
 
 #[cfg(test)]
