@@ -105,9 +105,9 @@ pub enum FindingStatus {
     /// Deliberately distinct from RESOLVED (nothing was fixed) and
     /// DISPOSITIONED (nobody judged it not worth fixing) -- collapsing it
     /// into either would misrepresent what actually happened. Set only by
-    /// `Database::void_findings_by_gate`, mirroring how RESOLVED is set only
-    /// by `reconcile_pending_findings` -- a status a human never asserts
-    /// directly on a single finding.
+    /// `Database::void_findings_by_gate_tx`, mirroring how RESOLVED is set
+    /// only by `reconcile_pending_findings` -- a status a human never
+    /// asserts directly on a single finding.
     Voided,
 }
 

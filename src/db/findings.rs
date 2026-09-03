@@ -74,7 +74,7 @@ pub struct QualityGateFinding {
     /// Required alongside a DISPOSITIONED status -- a disposition with no
     /// reason is not an audit trail (mirrors `quality_gates.void_reason`).
     /// Also carries the gate row's void reason when status is VOIDED (#1126,
-    /// `void_findings_by_gate`) -- reusing this column rather than adding a
+    /// `void_findings_by_gate_tx`) -- reusing this column rather than adding a
     /// new one, since both cases are "why this finding stopped being
     /// PENDING, stated explicitly".
     pub disposition_reason: Option<String>,
