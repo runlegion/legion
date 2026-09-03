@@ -12,35 +12,405 @@
 # subcommands its routes name and Allows the rest -- means every call Allows.
 
 # Binaries legion manages an equivalent for.
-managed_binaries = []
+managed_binaries = ["gh"]
 
 # Interpreters whose argument is opaque code (bash, python, node). A call
 # through one of these is routed as opaque rather than parsed.
 interpreters = []
 
 # Binaries with no sanctioned use at all, gated whole rather than per-subcommand.
-fully_gated_binaries = []
+#
+# `gh` has no bare pass-through (no-gh.sh, #1044): every subcommand either
+# rewrites, denies by name, or -- for a shape no route lists -- denies
+# pointing at the nearest group's help rather than Allowing silently.
+fully_gated_binaries = ["gh"]
 
 # Commands that wrap another command. Named so the tokenizer (slice 2) can see
 # through `env X=1 gh ...` to the binary that actually runs.
 wrappers = []
 
-# Where a binary's subcommand group documents itself, for guidance text.
-group_help = []
-
 # Sanctioned escape hatches (FR-CMD-012). A reason-required escape is the
 # point: an unexplained bypass is indistinguishable from an evasion.
+#
+# THIS MUST STAY ABOVE THE FIRST `[[group_help]]` ENTRY -- the same
+# bare-key-under-a-preceding-array-of-tables footgun `routes` below warns
+# about: a bare key written after `[[group_help]]` parses as a field of the
+# last `group_help` entry, not as a new top-level key, and is silently
+# discarded.
 escape_vocabulary = []
 
-# One entry per routed subcommand. Empty in slice 1.
+# Where a binary's subcommand group documents itself, for guidance text --
+# used by an unmatched subcommand under a known group (#1044).
+[[group_help]]
+binary = "gh"
+group = "pr"
+help_command = "legion pr --help"
+
+[[group_help]]
+binary = "gh"
+group = "issue"
+help_command = "legion issue --help"
+
+[[group_help]]
+binary = "gh"
+group = "run"
+help_command = "legion pr --help"
+
+# One entry per routed subcommand.
 #
 # THIS MUST STAY ABOVE THE [defaults] HEADER. A TOML table consumes every bare
 # key until the next header, so `routes` written below `[defaults]` parses as
 # `defaults.routes` -- a key `Defaults` does not have. That is not a loud
 # failure: the misplaced list is discarded and top-level `routes` quietly falls
 # back to its serde default, so the table reports zero routes forever while the
-# file appears to declare them. Slice 3 appends real rows here.
-routes = []
+# file appears to declare them.
+#
+# =========================================================================
+# gh -- reproduces plugin/hooks/no-gh.sh's deny-or-rewrite set (#1044, the
+# first of slice 3's thirteen module ports). `{repo}` binds from Ctx.repo at
+# decide time (NFR-CMD-005); it is not a route-declared capture. `{n}` binds
+# from the positional PR/issue number or its `--number` flag form.
+# =========================================================================
+
+[[routes]]
+binary = "gh"
+subcommand = "pr view"
+positional_captures = ["n"]
+equivalent = "legion pr view --repo {repo} --number {n}"
+reason = "`gh pr view` with no PR number given -- legion has no branch-inferred default"
+guidance = "legion pr view --repo {repo} --number <n>"
+
+[[routes.flags]]
+name = "number"
+aliases = ["--number"]
+takes_value = true
+capture = "n"
+
+[[routes.flags]]
+name = "comments"
+aliases = ["-c", "--comments"]
+
+[[routes.flags]]
+name = "jq"
+aliases = ["-q", "--jq"]
+takes_value = true
+
+[[routes.flags]]
+name = "json"
+aliases = ["--json"]
+takes_value = true
+
+[[routes.flags]]
+name = "template"
+aliases = ["-t", "--template"]
+takes_value = true
+
+[[routes.flags]]
+name = "web"
+aliases = ["-w", "--web"]
+
+[[routes.flags]]
+name = "repo"
+aliases = ["-R", "--repo"]
+takes_value = true
+
+[[routes.patterns]]
+name = "blocking-flag"
+kind = "flags"
+policy = { policy = "blocklist", flags = ["comments", "jq", "json", "template", "web", "repo"] }
+outcome = "deny"
+
+[[routes.patterns]]
+name = "number"
+kind = "digits"
+capture = "n"
+outcome = "rewrite"
+
+[[routes]]
+binary = "gh"
+subcommand = "pr checks"
+positional_captures = ["n"]
+equivalent = "legion pr checks --repo {repo} --number {n}"
+reason = "`gh pr checks` with no PR number given"
+guidance = "legion pr checks --repo {repo} --number <n>"
+
+[[routes.flags]]
+name = "number"
+aliases = ["--number"]
+takes_value = true
+capture = "n"
+
+[[routes.flags]]
+name = "jq"
+aliases = ["-q", "--jq"]
+takes_value = true
+
+[[routes.flags]]
+name = "json"
+aliases = ["--json"]
+takes_value = true
+
+[[routes.flags]]
+name = "template"
+aliases = ["-t", "--template"]
+takes_value = true
+
+[[routes.flags]]
+name = "web"
+aliases = ["-w", "--web"]
+
+[[routes.flags]]
+name = "repo"
+aliases = ["-R", "--repo"]
+takes_value = true
+
+[[routes.flags]]
+name = "watch"
+aliases = ["--watch"]
+
+[[routes.flags]]
+name = "fail_fast"
+aliases = ["--fail-fast"]
+
+[[routes.flags]]
+name = "interval"
+aliases = ["-i", "--interval"]
+takes_value = true
+
+[[routes.flags]]
+name = "required"
+aliases = ["--required"]
+
+[[routes.patterns]]
+name = "blocking-flag"
+kind = "flags"
+policy = { policy = "blocklist", flags = ["jq", "json", "template", "web", "repo", "watch", "fail_fast", "interval", "required"] }
+outcome = "deny"
+
+[[routes.patterns]]
+name = "number"
+kind = "digits"
+capture = "n"
+outcome = "rewrite"
+
+[[routes]]
+binary = "gh"
+subcommand = "pr list"
+positional_captures = []
+equivalent = "legion pr list --repo {repo}"
+reason = "unrecognized `gh pr list` shape"
+guidance = "legion pr list --repo {repo}"
+
+[[routes.patterns]]
+name = "any-flag"
+kind = "flags"
+policy = { policy = "none" }
+outcome = "deny"
+
+[[routes.patterns]]
+name = "clean"
+kind = "no_extra_positionals"
+outcome = "rewrite"
+
+[[routes]]
+binary = "gh"
+subcommand = "issue view"
+positional_captures = ["n"]
+equivalent = "legion issue view --repo {repo} --number {n}"
+reason = "`gh issue view` with no issue number given"
+guidance = "legion issue view --repo {repo} --number <n>"
+
+[[routes.flags]]
+name = "number"
+aliases = ["--number"]
+takes_value = true
+capture = "n"
+
+[[routes.flags]]
+name = "comments"
+aliases = ["-c", "--comments"]
+
+[[routes.flags]]
+name = "jq"
+aliases = ["-q", "--jq"]
+takes_value = true
+
+[[routes.flags]]
+name = "json"
+aliases = ["--json"]
+takes_value = true
+
+[[routes.flags]]
+name = "template"
+aliases = ["-t", "--template"]
+takes_value = true
+
+[[routes.flags]]
+name = "web"
+aliases = ["-w", "--web"]
+
+[[routes.flags]]
+name = "repo"
+aliases = ["-R", "--repo"]
+takes_value = true
+
+[[routes.patterns]]
+name = "blocking-flag"
+kind = "flags"
+policy = { policy = "blocklist", flags = ["comments", "jq", "json", "template", "web", "repo"] }
+outcome = "deny"
+
+[[routes.patterns]]
+name = "number"
+kind = "digits"
+capture = "n"
+outcome = "rewrite"
+
+[[routes]]
+binary = "gh"
+subcommand = "issue list"
+positional_captures = []
+equivalent = "legion issue list --repo {repo}"
+reason = "unrecognized `gh issue list` shape"
+guidance = "legion issue list --repo {repo}"
+
+[[routes.patterns]]
+name = "any-flag"
+kind = "flags"
+policy = { policy = "none" }
+outcome = "deny"
+
+[[routes.patterns]]
+name = "clean"
+kind = "no_extra_positionals"
+outcome = "rewrite"
+
+# `pr diff` is never a rewrite: legion pr view renders a PR's metadata and
+# body, never diff content. No patterns at all -- always the route's own
+# fallback deny below, on purpose, not merely unclassified.
+[[routes]]
+binary = "gh"
+subcommand = "pr diff"
+positional_captures = ["n"]
+equivalent = "legion pr view --repo {repo} --number {n}"
+reason = "`legion pr view` renders a PR's metadata and body -- never the diff content, so mapping `gh pr diff` to it would silently hand back something other than what was asked for"
+guidance = "No legion command renders a PR's diff."
+
+# --- Deny-only verbs: no lossless rewrite exists; each names its own
+# `equivalent` in the fallback deny message. ---
+
+[[routes]]
+binary = "gh"
+subcommand = "pr merge"
+positional_captures = ["n"]
+equivalent = "legion pr merge --repo {repo} --number {n}"
+reason = "no lossless rewrite for `gh pr merge`"
+guidance = "legion pr merge --repo {repo} --number <n>"
+
+[[routes]]
+binary = "gh"
+subcommand = "pr close"
+positional_captures = ["n"]
+equivalent = "legion pr close --repo {repo} --number {n}"
+reason = "no lossless rewrite for `gh pr close`"
+guidance = "legion pr close --repo {repo} --number <n>"
+
+[[routes]]
+binary = "gh"
+subcommand = "pr edit"
+positional_captures = ["n"]
+equivalent = "legion pr edit --repo {repo} --number {n} --title '...'"
+reason = "no lossless rewrite for `gh pr edit` -- free-text arguments do not round-trip"
+guidance = "legion pr edit --repo {repo} --number <n> --title '...'"
+
+[[routes]]
+binary = "gh"
+subcommand = "pr review"
+positional_captures = ["n"]
+equivalent = "legion pr review --repo {repo} --number {n} --approve"
+reason = "no lossless rewrite for `gh pr review`"
+guidance = "legion pr review --repo {repo} --number <n> --approve"
+
+[[routes]]
+binary = "gh"
+subcommand = "pr comment"
+positional_captures = ["n"]
+equivalent = "legion comment --repo {repo} --number {n} --body '...'"
+reason = "no lossless rewrite for `gh pr comment` -- free-text body does not round-trip"
+guidance = "legion comment --repo {repo} --number <n> --body '...'"
+
+[[routes]]
+binary = "gh"
+subcommand = "pr comments"
+positional_captures = ["n"]
+equivalent = "legion pr comments --repo {repo} --number {n}"
+reason = "no lossless rewrite for `gh pr comments`"
+guidance = "legion pr comments --repo {repo} --number <n>"
+
+[[routes]]
+binary = "gh"
+subcommand = "issue create"
+positional_captures = []
+equivalent = "legion issue create --repo {repo} --title '...' --body '...'"
+reason = "no lossless rewrite for `gh issue create` -- free-text title/body do not round-trip"
+guidance = "legion issue create --repo {repo} --title '...' --body '...'"
+
+[[routes]]
+binary = "gh"
+subcommand = "issue close"
+positional_captures = ["n"]
+equivalent = "legion issue close --repo {repo} --number {n}"
+reason = "no lossless rewrite for `gh issue close`"
+guidance = "legion issue close --repo {repo} --number <n>"
+
+[[routes]]
+binary = "gh"
+subcommand = "issue reopen"
+positional_captures = ["n"]
+equivalent = "legion issue reopen --repo {repo} --number {n}"
+reason = "no lossless rewrite for `gh issue reopen`"
+guidance = "legion issue reopen --repo {repo} --number <n>"
+
+[[routes]]
+binary = "gh"
+subcommand = "issue edit"
+positional_captures = ["n"]
+equivalent = "legion issue edit --repo {repo} --number {n} --title '...'"
+reason = "no lossless rewrite for `gh issue edit` -- free-text arguments do not round-trip"
+guidance = "legion issue edit --repo {repo} --number <n> --title '...'"
+
+[[routes]]
+binary = "gh"
+subcommand = "issue comment"
+positional_captures = ["n"]
+equivalent = "legion comment --repo {repo} --number {n} --body '...'"
+reason = "no lossless rewrite for `gh issue comment` -- free-text body does not round-trip"
+guidance = "legion comment --repo {repo} --number <n> --body '...'"
+
+# CI status lives on the PR in legion's model, not on the run.
+[[routes]]
+binary = "gh"
+subcommand = "run list"
+positional_captures = []
+equivalent = "legion pr checks --repo {repo}"
+reason = "CI status lives on the PR in legion's model, not on the run"
+guidance = "legion pr checks --repo {repo}"
+
+[[routes]]
+binary = "gh"
+subcommand = "run view"
+positional_captures = ["n"]
+equivalent = "legion pr checks --repo {repo} --number {n}"
+reason = "CI status lives on the PR in legion's model, not on the run"
+guidance = "legion pr checks --repo {repo} --number <n>"
+
+[[routes]]
+binary = "gh"
+subcommand = "run watch"
+positional_captures = ["n"]
+equivalent = "legion pr checks --repo {repo} --number {n}"
+reason = "CI status lives on the PR in legion's model, not on the run"
+guidance = "legion pr checks --repo {repo} --number <n>"
 
 # What happens when nothing matches. EXACTLY TWO VALUES EACH -- `allow` or
 # `deny` (NFR-CMD-005 rev 6). There is deliberately no `drop`/`skip`/`ignore`:

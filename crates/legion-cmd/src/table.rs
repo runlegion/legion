@@ -250,15 +250,19 @@ recall_miss = \"allow\"
 ";
 
     #[test]
-    fn the_embedded_table_parses_with_every_section_present_and_empty() {
+    fn the_embedded_table_parses_with_every_section_present() {
+        // Slice 1 shipped every section empty. Slice 3 (#1044, the first of
+        // thirteen module ports) populates `managed_binaries`,
+        // `fully_gated_binaries`, `group_help`, and `routes` with the `gh`
+        // section -- sections this module's issue does not touch stay empty.
         let t = RouteTable::embedded().expect("embedded table must parse");
-        assert!(t.managed_binaries.is_empty());
+        assert!(!t.managed_binaries.is_empty());
         assert!(t.interpreters.is_empty());
         assert!(t.wrappers.is_empty());
-        assert!(t.fully_gated_binaries.is_empty());
-        assert!(t.group_help.is_empty());
+        assert!(!t.fully_gated_binaries.is_empty());
+        assert!(!t.group_help.is_empty());
         assert!(t.escape_vocabulary.is_empty());
-        assert!(t.routes.is_empty());
+        assert!(!t.routes.is_empty());
         assert_eq!(t.defaults.no_match, DefaultOutcome::Allow);
         assert_eq!(t.defaults.recall_miss, DefaultOutcome::Allow);
     }

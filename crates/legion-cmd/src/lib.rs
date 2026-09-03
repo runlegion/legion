@@ -59,9 +59,13 @@ mod tests {
 
     #[test]
     fn the_crate_composes_end_to_end_from_a_harness_payload() {
+        // `ls` names no managed binary, so this exercises the parse-and-route
+        // wiring without depending on any route the embedded table carries
+        // (slice 3 populates `gh`, and later slices populate the rest --
+        // this test's job is the wiring, not any one module's policy).
         let payload = serde_json::json!({
             "tool_name": "Bash",
-            "tool_input": { "command": "gh issue list" }
+            "tool_input": { "command": "ls -la" }
         });
         let call = ToolCall::from_hook_json(&payload).expect("parse");
         assert_eq!(call.tool(), Tool::Bash);
@@ -69,5 +73,33 @@ mod tests {
         let router = Router::new(RouteTable::embedded().expect("table")).expect("compile");
         let routed = router.route(&call, &Ctx::default());
         assert_eq!(routed.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn the_embedded_gh_section_rewrites_end_to_end_from_a_harness_payload() {
+        // The scaffold proof (#1044): a real harness payload, through the
+        // real embedded table, produces a real rewritten command string --
+        // not just a unit test constructing a `RouteTable` by hand.
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "gh issue list" }
+        });
+        let call = ToolCall::from_hook_json(&payload).expect("parse");
+
+        let router = Router::new(RouteTable::embedded().expect("table")).expect("compile");
+        let ctx = Ctx {
+            repo: Some("legion-test".into()),
+            ..Ctx::default()
+        };
+        let routed = router.route(&call, &ctx);
+        assert_eq!(
+            routed.decision,
+            Decision::Rewrite {
+                command: "legion issue list --repo legion-test".into(),
+                reason: "routed through legion for the audit trail -- legion issue list --repo legion-test"
+                    .into(),
+                carry: vec![],
+            }
+        );
     }
 }

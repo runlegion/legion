@@ -859,7 +859,11 @@ fn token_text<'a>(src: &'a str, tok: &Token) -> &'a str {
 /// recognizes the managed binary. Walking the whole word's quote/escape
 /// state, the way this function now does, unescapes it to `gh` regardless
 /// of where in the word the escape sits.
-fn literal_command_text(raw: &str) -> String {
+/// `pub(crate)`: the evaluator (`router.rs`, slice 3) parses a matched
+/// stage's word tokens into flags/positionals/captures and needs the same
+/// quote/escape stripping the tokenizer uses for its own name matching, so
+/// a quoted argument (`gh pr view "42"`) still resolves.
+pub(crate) fn literal_command_text(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let mut out = String::with_capacity(raw.len());
     let mut i = 0usize;
@@ -916,7 +920,10 @@ fn literal_command_text(raw: &str) -> String {
     out
 }
 
-fn basename(word: &str) -> &str {
+/// `pub(crate)`: the evaluator (`router.rs`, slice 3) needs the same
+/// basename resolution the tokenizer already uses for managed-binary
+/// detection, so a matched stage's route lookup does not reimplement it.
+pub(crate) fn basename(word: &str) -> &str {
     match word.rfind('/') {
         Some(idx) if idx + 1 < word.len() => &word[idx + 1..],
         _ => word,
