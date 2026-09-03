@@ -261,16 +261,22 @@ mod tests {
         Router::new(RouteTable::embedded().expect("embedded table parses")).expect("compile")
     }
 
-    /// `ALL_NAMED_TOOLS` (used only for the refusal message's name list)
-    /// and `accepted_name` (the actual accept/refuse decision) must stay in
-    /// lockstep: every entry in the array must be something `accepted_name`
-    /// actually accepts. This does NOT substitute for `accepted_name`'s own
-    /// exhaustive match closing the "new variant silently unaccepted" defect
-    /// -- that is enforced by the compiler (verified directly: temporarily
-    /// adding a 13th `Tool` variant fails `cargo build -p legion-cmd` with
-    /// "non-exhaustive patterns" pointing at this function, before this test
-    /// or any other ever runs). This test instead pins the array/function
-    /// pairing so the refusal message cannot quietly drop a name.
+    /// Checks only that every entry ALREADY in `ALL_NAMED_TOOLS` is
+    /// something `accepted_name` accepts -- one-directional. It does NOT
+    /// check the reverse: a 13th `Tool` variant that never gets added to
+    /// `ALL_NAMED_TOOLS` leaves this test passing unchanged, and the
+    /// refusal message would quietly omit that name. Completeness of the
+    /// array is NOT enforced, by this test or anything else.
+    ///
+    /// That gap does not matter for correctness, because `ALL_NAMED_TOOLS`
+    /// does not decide accept/refuse -- `accepted_name` does, via its own
+    /// exhaustive match with no wildcard arm, which IS compiler-forced
+    /// (verified directly: temporarily adding a 13th `Tool` variant fails
+    /// `cargo build -p legion-cmd` with "non-exhaustive patterns" pointing
+    /// at that function, before this test or any other ever runs). So the
+    /// worst case of `ALL_NAMED_TOOLS` falling behind is a refusal message
+    /// that omits a name it should list -- never a tool wrongly accepted or
+    /// wrongly refused.
     #[test]
     fn all_named_tools_are_every_one_accepted_by_accepted_name() {
         let accepted_count = ALL_NAMED_TOOLS
