@@ -73,6 +73,10 @@ pub struct QualityGateFinding {
     pub status: FindingStatus,
     /// Required alongside a DISPOSITIONED status -- a disposition with no
     /// reason is not an audit trail (mirrors `quality_gates.void_reason`).
+    /// Also carries the gate row's void reason when status is VOIDED (#1126,
+    /// `void_findings_by_gate`) -- reusing this column rather than adding a
+    /// new one, since both cases are "why this finding stopped being
+    /// PENDING, stated explicitly".
     pub disposition_reason: Option<String>,
     /// The commit that resolved this finding, set only when `status` is
     /// RESOLVED (see `crate::finding_gate::reconcile_pending_findings`).
@@ -363,6 +367,37 @@ impl Database {
         }
         self.get_finding_by_id(id)?
             .ok_or_else(|| LegionError::FindingNotFound(id.to_owned()))
+    }
+
+    /// Void every PENDING finding raised by `gate_id`'s run (#1126): the gate
+    /// row itself was declared not-evidence (e.g. recorded from a worktree
+    /// parked on the wrong branch/HEAD), so the findings it raised were never
+    /// weighed on their merits and must stop counting toward the PENDING set
+    /// `evaluate_refusal`/`list_pending_findings` read. Only PENDING findings
+    /// are touched -- a finding already RESOLVED (genuinely fixed) or
+    /// DISPOSITIONED (genuinely judged) already has a truthful terminal
+    /// status of its own, and overwriting it with VOIDED would erase that
+    /// history rather than add to it.
+    ///
+    /// Returns the number of findings voided. Zero is not an error -- a gate
+    /// row with no findings, or one whose findings already left PENDING
+    /// before the void, is a legitimate no-op (#1126 error-handling
+    /// requirement).
+    pub fn void_findings_by_gate(&self, gate_id: &str, reason: &str) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.conn.execute(
+            "UPDATE quality_gate_findings \
+             SET status = ?1, disposition_reason = ?2, updated_at = ?3 \
+             WHERE gate_id = ?4 AND status = ?5",
+            rusqlite::params![
+                FindingStatus::Voided.as_str(),
+                reason,
+                &now,
+                gate_id,
+                FindingStatus::Pending.as_str(),
+            ],
+        )?;
+        Ok(affected)
     }
 
     /// Batch-acknowledge every PENDING LOW-severity finding for a
@@ -759,6 +794,124 @@ mod tests {
     /// `list_findings` orders newest first (matches `list_quality_gates`'s
     /// own newest-first convention) -- the audit surface (#773 AC4) reads
     /// top-down as "most recent first", not insertion order.
+    // --- void_findings_by_gate (#1126) ---
+
+    #[test]
+    fn void_findings_by_gate_marks_pending_findings_voided_with_reason() {
+        let db = test_db();
+        let a = db
+            .insert_finding(&input("gate-1", "src/a.rs", FindingSeverity::High))
+            .unwrap();
+        let b = db
+            .insert_finding(&input("gate-1", "src/b.rs", FindingSeverity::Low))
+            .unwrap();
+
+        let count = db
+            .void_findings_by_gate("gate-1", "recorded against the wrong branch")
+            .unwrap();
+        assert_eq!(count, 2);
+
+        for id in [&a.id, &b.id] {
+            let refetched = db.get_finding_by_id(id).unwrap().unwrap();
+            assert_eq!(refetched.status, FindingStatus::Voided);
+            assert_eq!(
+                refetched.disposition_reason.as_deref(),
+                Some("recorded against the wrong branch")
+            );
+        }
+    }
+
+    #[test]
+    fn void_findings_by_gate_no_findings_is_a_no_op_not_an_error() {
+        let db = test_db();
+        let count = db.void_findings_by_gate("no-such-gate", "reason").unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// A voided finding must stop counting toward the pending set that
+    /// refuses a `clean` verdict (#1126's core requirement).
+    #[test]
+    fn voided_finding_excluded_from_pending_list() {
+        let db = test_db();
+        db.insert_finding(&input("gate-1", "src/a.rs", FindingSeverity::High))
+            .unwrap();
+
+        db.void_findings_by_gate("gate-1", "wrong branch").unwrap();
+
+        let pending = db
+            .list_pending_findings("feat/x", "legion-simplify")
+            .unwrap();
+        assert!(pending.is_empty());
+    }
+
+    /// Voiding one gate's run must not touch findings from a DIFFERENT,
+    /// un-voided run -- a fix that stops findings blocking in general would
+    /// be worse than the bug (#1126).
+    #[test]
+    fn void_findings_by_gate_does_not_touch_other_gates_findings() {
+        let db = test_db();
+        db.insert_finding(&input("gate-voided", "src/a.rs", FindingSeverity::High))
+            .unwrap();
+        let other = db
+            .insert_finding(&input("gate-live", "src/b.rs", FindingSeverity::High))
+            .unwrap();
+
+        db.void_findings_by_gate("gate-voided", "wrong branch")
+            .unwrap();
+
+        let refetched_other = db.get_finding_by_id(&other.id).unwrap().unwrap();
+        assert_eq!(
+            refetched_other.status,
+            FindingStatus::Pending,
+            "a finding from a different, un-voided gate run must still block"
+        );
+
+        let pending = db
+            .list_pending_findings("feat/x", "legion-simplify")
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, other.id);
+    }
+
+    /// A finding already RESOLVED or DISPOSITIONED before its gate was voided
+    /// keeps its own truthful terminal status -- voiding must not overwrite
+    /// genuine history with VOIDED.
+    #[test]
+    fn void_findings_by_gate_does_not_overwrite_resolved_or_dispositioned() {
+        let db = test_db();
+        let resolved = db
+            .insert_finding(&input("gate-1", "src/resolved.rs", FindingSeverity::High))
+            .unwrap();
+        db.mark_finding_resolved(&resolved.id, "commit-fix")
+            .unwrap();
+        let dispositioned = db
+            .insert_finding(&input("gate-1", "src/waived.rs", FindingSeverity::Med))
+            .unwrap();
+        db.dispose_finding(&dispositioned.id, "won't fix").unwrap();
+        let pending = db
+            .insert_finding(&input("gate-1", "src/pending.rs", FindingSeverity::Low))
+            .unwrap();
+
+        let count = db.void_findings_by_gate("gate-1", "wrong branch").unwrap();
+        assert_eq!(count, 1, "only the still-PENDING finding is voided");
+
+        assert_eq!(
+            db.get_finding_by_id(&resolved.id).unwrap().unwrap().status,
+            FindingStatus::Resolved
+        );
+        assert_eq!(
+            db.get_finding_by_id(&dispositioned.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            FindingStatus::Dispositioned
+        );
+        assert_eq!(
+            db.get_finding_by_id(&pending.id).unwrap().unwrap().status,
+            FindingStatus::Voided
+        );
+    }
+
     #[test]
     fn list_findings_newest_first() {
         let db = test_db();

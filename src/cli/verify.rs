@@ -205,9 +205,9 @@ pub(crate) enum QualityGateAction {
     },
 
     /// List findings for the audit surface (#773 AC4): which findings were
-    /// fixed (RESOLVED), waived (DISPOSITIONED), or are still PENDING, over
-    /// time. Filterable by branch, skill, and status; unfiltered lists
-    /// everything, newest first.
+    /// fixed (RESOLVED), waived (DISPOSITIONED), voided along with their run
+    /// (VOIDED, #1126), or are still PENDING, over time. Filterable by
+    /// branch, skill, and status; unfiltered lists everything, newest first.
     FindingList {
         #[arg(long)]
         branch: Option<String>,
@@ -215,7 +215,7 @@ pub(crate) enum QualityGateAction {
         #[arg(long)]
         skill: Option<String>,
 
-        #[arg(long, value_parser = ["pending", "resolved", "dispositioned"])]
+        #[arg(long, value_parser = ["pending", "resolved", "dispositioned", "voided"])]
         status: Option<String>,
 
         /// Emit JSON array instead of a human table.
@@ -621,6 +621,11 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             let database = open_db()?;
             let full_id = resolve_gate_id(&database, &id)?;
             let row = database.void_quality_gate(&full_id, &reason, superseded_by.as_deref())?;
+            // #1126: a voided run's findings are not evidence either -- carry
+            // the void forward so they stop blocking a later clean gate on a
+            // branch they were never about. Run after the gate row itself is
+            // confirmed voided, using the reason already validated above.
+            let voided_findings = database.void_findings_by_gate(&full_id, &reason)?;
             println!(
                 "[legion] voided gate {} (skill '{}', commit {}): {}",
                 row.id, row.skill, row.commit_hash, reason
@@ -628,6 +633,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             if let Some(sup) = &row.superseded_by {
                 println!("  superseded by: {sup}");
             }
+            println!("  voided {voided_findings} finding(s) from this run");
         }
     }
     Ok(())
@@ -841,10 +847,13 @@ fn persist_raw_findings(
     //     -- checking PENDING alone would resurrect a fresh PENDING row the
     //     moment the reviewer honestly re-lists the same MED they already
     //     agreed not to fix, silently undoing the disposition and re-blocking
-    //     clean on a decision that was already made. RESOLVED is
+    //     clean on a decision that was already made. RESOLVED and VOIDED are
     //     deliberately excluded: a finding that recurs identically after
-    //     being fix-resolved is a regression worth a fresh PENDING row, not
-    //     something to suppress.
+    //     being fix-resolved is a regression worth a fresh PENDING row, and
+    //     a finding that recurs after its run was voided (#1126) was never
+    //     evidence in the first place -- a genuine new run reporting the same
+    //     shape must get its own PENDING row, not be silently swallowed as a
+    //     duplicate of a run that was declared not-evidence.
     // A query failure degrades to "no known duplicates" rather than blocking
     // the insert below on this best-effort dedup check -- but unlike every
     // other degrade-and-continue path in this function, that failure is now
@@ -872,7 +881,7 @@ fn persist_raw_findings(
             Vec::new()
         })
         .into_iter()
-        .filter(|f| f.status != FindingStatus::Resolved)
+        .filter(|f| !matches!(f.status, FindingStatus::Resolved | FindingStatus::Voided))
         .collect();
     let mut seen_this_call: std::collections::HashSet<(String, FindingSeverity, String)> =
         std::collections::HashSet::new();

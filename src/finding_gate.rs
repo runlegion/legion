@@ -99,6 +99,16 @@ pub enum FindingStatus {
     /// An explicit reason was recorded for not fixing it (`dispose_finding`
     /// / `batch_ack_low_findings`).
     Dispositioned,
+    /// The gate run that raised this finding was voided (#1126) -- the run
+    /// itself was declared not-evidence (e.g. recorded against the wrong
+    /// branch/commit), so nobody ever weighed the finding on its merits.
+    /// Deliberately distinct from RESOLVED (nothing was fixed) and
+    /// DISPOSITIONED (nobody judged it not worth fixing) -- collapsing it
+    /// into either would misrepresent what actually happened. Set only by
+    /// `Database::void_findings_by_gate`, mirroring how RESOLVED is set only
+    /// by `reconcile_pending_findings` -- a status a human never asserts
+    /// directly on a single finding.
+    Voided,
 }
 
 impl FindingStatus {
@@ -107,6 +117,7 @@ impl FindingStatus {
             Self::Pending => "pending",
             Self::Resolved => "resolved",
             Self::Dispositioned => "dispositioned",
+            Self::Voided => "voided",
         }
     }
 }
@@ -125,6 +136,7 @@ impl FromStr for FindingStatus {
             "pending" => Ok(Self::Pending),
             "resolved" => Ok(Self::Resolved),
             "dispositioned" => Ok(Self::Dispositioned),
+            "voided" => Ok(Self::Voided),
             other => Err(LegionError::InvalidFindingStatus(other.to_string())),
         }
     }
@@ -394,6 +406,7 @@ mod tests {
             ("pending", FindingStatus::Pending),
             ("resolved", FindingStatus::Resolved),
             ("dispositioned", FindingStatus::Dispositioned),
+            ("voided", FindingStatus::Voided),
         ] {
             let parsed: FindingStatus = s.parse().unwrap();
             assert_eq!(parsed, expected);
