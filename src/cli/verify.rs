@@ -620,12 +620,14 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
         } => {
             let database = open_db()?;
             let full_id = resolve_gate_id(&database, &id)?;
-            let row = database.void_quality_gate(&full_id, &reason, superseded_by.as_deref())?;
-            // #1126: a voided run's findings are not evidence either -- carry
-            // the void forward so they stop blocking a later clean gate on a
-            // branch they were never about. Run after the gate row itself is
-            // confirmed voided, using the reason already validated above.
-            let voided_findings = database.void_findings_by_gate(&full_id, &reason)?;
+            // #1126: `void_quality_gate` voids the gate row AND cascades to
+            // this run's still-PENDING findings inside one transaction --
+            // they are not evidence either, so they stop blocking a later
+            // clean gate on a branch they were never about, and a failure
+            // partway through cannot leave the gate voided with its findings
+            // still PENDING.
+            let (row, voided_findings) =
+                database.void_quality_gate(&full_id, &reason, superseded_by.as_deref())?;
             println!(
                 "[legion] voided gate {} (skill '{}', commit {}): {}",
                 row.id, row.skill, row.commit_hash, reason
@@ -1593,7 +1595,7 @@ mod tests {
         assert_eq!(resolve_gate_id(&db, &unique).unwrap(), a.id);
 
         // And the resolved id is what void consumes.
-        let voided = db
+        let (voided, _findings_voided) = db
             .void_quality_gate(
                 &resolve_gate_id(&db, &unique).unwrap(),
                 "false verdict",

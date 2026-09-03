@@ -383,9 +383,26 @@ impl Database {
     /// row with no findings, or one whose findings already left PENDING
     /// before the void, is a legitimate no-op (#1126 error-handling
     /// requirement).
-    pub fn void_findings_by_gate(&self, gate_id: &str, reason: &str) -> Result<usize> {
+    ///
+    /// Takes the CALLER's already-open transaction rather than opening its
+    /// own (#1126 review MED, mirroring `wake::set_wake_attempt_work_item_tx`'s
+    /// precedent for the same shape). This is the ONLY entry point -- there
+    /// is deliberately no standalone `&self`-taking wrapper that opens its
+    /// own transaction, because every real caller needs this cascade
+    /// committed together with the `quality_gates` row void it follows:
+    /// `Database::void_quality_gate` opens one transaction, does the
+    /// gate-row UPDATE, then calls this with that same transaction before
+    /// committing. A failure partway through (e.g. SQLite BUSY from a
+    /// concurrent writer -- the watch daemon holds the same database file --
+    /// is genuinely reachable here) rolls back both writes instead of
+    /// leaving the gate row voided with its findings still PENDING.
+    pub(crate) fn void_findings_by_gate_tx(
+        tx: &rusqlite::Transaction,
+        gate_id: &str,
+        reason: &str,
+    ) -> Result<usize> {
         let now = Utc::now().to_rfc3339();
-        let affected = self.conn.execute(
+        let affected = tx.execute(
             "UPDATE quality_gate_findings \
              SET status = ?1, disposition_reason = ?2, updated_at = ?3 \
              WHERE gate_id = ?4 AND status = ?5",
@@ -791,10 +808,19 @@ mod tests {
         assert!(rows.is_empty());
     }
 
-    /// `list_findings` orders newest first (matches `list_quality_gates`'s
-    /// own newest-first convention) -- the audit surface (#773 AC4) reads
-    /// top-down as "most recent first", not insertion order.
-    // --- void_findings_by_gate (#1126) ---
+    // --- void_findings_by_gate_tx (#1126) ---
+
+    /// Test-only convenience: `void_findings_by_gate_tx` takes the caller's
+    /// already-open transaction (by design -- see its doc comment, #1126
+    /// review MED), so every test here opens one, calls it, and commits,
+    /// standing in for what `Database::void_quality_gate` does in
+    /// production.
+    fn void_via_tx(db: &Database, gate_id: &str, reason: &str) -> usize {
+        let tx = db.conn.unchecked_transaction().unwrap();
+        let affected = Database::void_findings_by_gate_tx(&tx, gate_id, reason).unwrap();
+        tx.commit().unwrap();
+        affected
+    }
 
     #[test]
     fn void_findings_by_gate_marks_pending_findings_voided_with_reason() {
@@ -806,9 +832,7 @@ mod tests {
             .insert_finding(&input("gate-1", "src/b.rs", FindingSeverity::Low))
             .unwrap();
 
-        let count = db
-            .void_findings_by_gate("gate-1", "recorded against the wrong branch")
-            .unwrap();
+        let count = void_via_tx(&db, "gate-1", "recorded against the wrong branch");
         assert_eq!(count, 2);
 
         for id in [&a.id, &b.id] {
@@ -824,7 +848,7 @@ mod tests {
     #[test]
     fn void_findings_by_gate_no_findings_is_a_no_op_not_an_error() {
         let db = test_db();
-        let count = db.void_findings_by_gate("no-such-gate", "reason").unwrap();
+        let count = void_via_tx(&db, "no-such-gate", "reason");
         assert_eq!(count, 0);
     }
 
@@ -836,7 +860,7 @@ mod tests {
         db.insert_finding(&input("gate-1", "src/a.rs", FindingSeverity::High))
             .unwrap();
 
-        db.void_findings_by_gate("gate-1", "wrong branch").unwrap();
+        void_via_tx(&db, "gate-1", "wrong branch");
 
         let pending = db
             .list_pending_findings("feat/x", "legion-simplify")
@@ -856,8 +880,7 @@ mod tests {
             .insert_finding(&input("gate-live", "src/b.rs", FindingSeverity::High))
             .unwrap();
 
-        db.void_findings_by_gate("gate-voided", "wrong branch")
-            .unwrap();
+        void_via_tx(&db, "gate-voided", "wrong branch");
 
         let refetched_other = db.get_finding_by_id(&other.id).unwrap().unwrap();
         assert_eq!(
@@ -892,7 +915,7 @@ mod tests {
             .insert_finding(&input("gate-1", "src/pending.rs", FindingSeverity::Low))
             .unwrap();
 
-        let count = db.void_findings_by_gate("gate-1", "wrong branch").unwrap();
+        let count = void_via_tx(&db, "gate-1", "wrong branch");
         assert_eq!(count, 1, "only the still-PENDING finding is voided");
 
         assert_eq!(
@@ -912,6 +935,9 @@ mod tests {
         );
     }
 
+    /// `list_findings` orders newest first (matches `list_quality_gates`'s
+    /// own newest-first convention) -- the audit surface (#773 AC4) reads
+    /// top-down as "most recent first", not insertion order.
     #[test]
     fn list_findings_newest_first() {
         let db = test_db();
