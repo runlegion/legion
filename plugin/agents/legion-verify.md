@@ -104,7 +104,7 @@ legion verify --repo <repo> --issue <n> --verdicts-file <path>
 # shape: [{"criterion": "...", "verdict": "pass|fail|uncertain", "evidence": "..."}, ...]
 ```
 
-When a criterion came from an id-carrying requirement, name the criterion id inside the evidence string so the verdict stays traceable after the requirement is revised. (Card-bound work still uses `--card` and the SpecAcResult shape; issue-traced id-carrying verdicts land with the trace work -- until then the id-in-evidence convention is the bridge. Do not claim plumbing that does not exist.)
+When a criterion came from an id-carrying requirement, name the criterion id inside the evidence string so the verdict stays traceable after the requirement is revised. (Issue-traced id-carrying verdicts land with the trace work; until then the id-in-evidence convention is the bridge. Do not claim plumbing that does not exist.)
 
 ## Report format (your final message)
 
@@ -133,10 +133,7 @@ and readable on demand. Then `legion signal --repo <repo> --to <orchestrator> --
 answer --note "<one line: the verdict counts and the post id>"`. Finally end your turn
 with that same single line.
 
-Why this shape and not a SendMessage with the report in it: a mailed body enters the
-orchestrator's context permanently and is re-read on every one of its remaining turns, so
-a thousand-word report is paid for a thousand times. The 280-character cap on a signal
-note is the system saying the same thing. A pointer costs one read when the orchestrator
-decides it needs the detail, and nothing when it does not. Ending on one line matters for
-the same reason: the harness delivers your final output a second time as a truncated idle
-notice, so a long final message arrives twice and cut off.
+Why this shape and not a SendMessage with the report in it: a mailed body is re-read on
+every remaining orchestrator turn, so a long report is paid for many times over; a pointer
+costs one read only when the detail is needed, and nothing otherwise. End on one line --
+the harness re-delivers your final output as a truncated idle notice.

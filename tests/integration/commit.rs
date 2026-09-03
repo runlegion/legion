@@ -211,24 +211,6 @@ fn commit_refuses_unknown_type() {
     assert!(stderr.contains("unknown type 'wip'"), "got: {stderr}");
 }
 
-/// A message with no `Co-Authored-By` trailer is refused by name.
-#[cfg(unix)]
-#[test]
-fn commit_refuses_missing_coauthor_trailer() {
-    let _guard = RealRepoConfigGuard::new();
-    let repo = setup_repo_with_staged_change();
-    let data_dir = tempfile::tempdir().unwrap();
-    let before = head_sha(repo.path());
-
-    let stderr = refuse_message(
-        repo.path(),
-        data_dir.path(),
-        "feat(#854): add a thing\n\nBody with no trailer.\n",
-    );
-    assert!(stderr.contains("Co-Authored-By"), "got: {stderr}");
-    assert_eq!(before, head_sha(repo.path()), "a refusal must not commit");
-}
-
 /// An emoji anywhere in the message is refused, naming the codepoint.
 #[cfg(unix)]
 #[test]
@@ -630,7 +612,7 @@ fn commit_writes_a_failure_audit_row_when_it_refuses() {
     refuse_message(
         repo.path(),
         data_dir.path(),
-        "feat(#854): add a thing\n\nBody with no trailer.\n",
+        "feat: unscoped subject is refused\n\nBody.\n",
     );
 
     let audit_out =

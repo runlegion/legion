@@ -228,9 +228,7 @@ if [ "$SUBCOMMAND" != "commit" ]; then
 
 Translating it would silently drop everything else in it, or misread part of one command as belonging to another. Run the commit and the rest of your pipeline as separate steps:
 
-    legion commit --repo ${REPO} --message '<type>(<scope>): <summary>
-
-Co-Authored-By: <name> <email>'
+    legion commit --repo ${REPO} --message '<type>(<scope>): <summary>'
 
 Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
   fi
@@ -346,9 +344,7 @@ if [ -n "$DENY_FLAG" ]; then
 This cannot be translated to \`legion commit\`, the audited commit verb (#854): it preflights the signer, refuses message-convention violations by name, and writes an audit row for every attempt (agent, branch, pre/post SHA, gate state). Rewriting the command for you would silently drop the flag and run something you did not ask for.
 
 If you meant a plain commit of the staged index:
-    legion commit --repo ${REPO_ARG} --message '<type>(<scope>): <summary>
-
-Co-Authored-By: <name> <email>'
+    legion commit --repo ${REPO_ARG} --message '<type>(<scope>): <summary>'
 or with the message in a file:
     legion commit --repo ${REPO_ARG} --message-file <path>"
   exit 0
@@ -358,9 +354,7 @@ if [ -z "$MSG_TOKEN_IDX" ] && [ -z "$FILE_TOKEN_IDX" ]; then
   emit_deny "Refusing bare \`git commit\` -- it opens an editor, and \`legion commit\` needs an explicit message up front.
 
 Run:
-    legion commit --repo ${REPO_ARG} --message '<type>(<scope>): <summary>
-
-Co-Authored-By: <name> <email>'
+    legion commit --repo ${REPO_ARG} --message '<type>(<scope>): <summary>'
 or with the message in a file:
     legion commit --repo ${REPO_ARG} --message-file <path>"
   exit 0
@@ -489,9 +483,7 @@ if [ -n "$EXTRACT_ERROR" ]; then
   emit_deny "Refusing \`git commit\` -- could not read the ${FLAG_NAME} value unambiguously (${EXTRACT_ERROR}).
 
 This translator only handles a single quoted or bare-word value with nothing after it -- not multiple -m flags, not trailing pathspecs, not unterminated quotes. Re-run with the message quoted once, or write it to a file and pass it directly:
-    legion commit --repo ${REPO_ARG} --message '<type>(<scope>): <summary>
-
-Co-Authored-By: <name> <email>'
+    legion commit --repo ${REPO_ARG} --message '<type>(<scope>): <summary>'
 or:
     legion commit --repo ${REPO_ARG} --message-file <path>"
   exit 0
@@ -526,7 +518,7 @@ fi
 
 emit_rewrite "$REWRITTEN" "Translated your \`git commit\` to \`legion commit\`.
 
-This is the audited commit path (#854): it preflights the configured signer before touching anything (a locked or absent signer fails once, by name), refuses message-convention violations by name (subject shape, the Co-Authored-By trailer, no emoji), and writes an audit row for every attempt -- refusals included -- carrying the resolved checkout, pre/post HEAD, and gate state.${CAPTURE_NOTE}
+This is the audited commit path (#854): it preflights the configured signer before touching anything (a locked or absent signer fails once, by name), refuses message-convention violations by name (subject shape, a blank line before any body, no emoji), and writes an audit row for every attempt -- refusals included -- carrying the resolved checkout, pre/post HEAD, and gate state.${CAPTURE_NOTE}
 
 A raw \`git commit\` writes none of that, so reach for \`legion commit\` directly next time rather than relying on this translation." \
   "routed through legion commit for the audit trail (#856)"
