@@ -1,5 +1,58 @@
 # Legion Changelog
 
+## 0.37.5
+
+The prompt-and-gate cleanup release. Two loose ends left by the 0.37.4 agent work are
+tied off in one change: the pipeline agent definitions are retuned to the discover/deliver
+model policy and swept of retired card-era vocabulary, and `legion commit` stops requiring
+a Co-Authored-By trailer on every message. The observable shift is that a subject-only
+commit message now validates -- attribution is the author's to add rather than the gate's
+to demand -- while the subject-shape and no-emoji rules that make legion commits legible
+still hold. Patch release: one PR of eleven files -- seven Markdown agent, hook, and
+template definitions, the `no-git-commit.sh` hook, `src/cli/commit.rs`, its command help in
+`src/cli/mod.rs`, and its integration test -- relaxing a validation rule within the
+existing commit surface, with no new command, no wire-format change, and no schema
+migration.
+
+### Changed
+
+- **Pipeline agents follow the discover/deliver model policy** (PR #1136, #1135).
+  `issue-writer` moves from `claude-sonnet-5`/medium to opus at high effort, because the
+  last mile of discovery -- turning a problem into a crisp, acceptance-tested issue -- is
+  judgment, and judgment is opus work; the `rust`, `legion-review`, and `legion-verify`
+  agents keep their models unchanged, since review and verify are the deliberate
+  sonnet-with-effort exception and remain the highest-catch gates in the system. The stale
+  duplicate reviewer is retired: `.claude/agents/reviewer.md` is deleted outright, leaving
+  `legion-review` as the sole review agent rather than two definitions that could drift
+  apart. Card-era terminology is swept across `rust`, `issue-writer`, and `legion-verify` --
+  kanban card, card, scope summary, `--card`, `SpecAcResult`, and FILES IN PLAY all
+  rewritten to the issue-based reality that #931 established when it removed the kanban
+  card, so the prompts no longer point agents at a concept that no longer exists. The
+  implementation-task issue template gains a Verify step in its Dev Workflow and Verify and
+  witness checkboxes in Done When, with the `issue-writer` Done-When enumeration updated to
+  match, making the verify gate visible and required rather than assumed. The repeated
+  Delivery-block rationale is deduplicated to a single line across four agents.
+
+- **`legion commit` no longer requires a Co-Authored-By trailer** (PR #1136, #1135). Since
+  #854 the commit gate refused any message whose last non-blank line was not a
+  Co-Authored-By trailer, which forced awkward trailer reordering and rejected legitimate
+  subject-only commits. `validate_message` in `src/cli/commit.rs` drops that last-line
+  check: a body is now optional, and when a body is present it still must follow the subject
+  with a blank line, so the message shape stays disciplined without mandating an author the
+  committer may not want to name. The dead `is_coauthor_trailer` helper and `COAUTHOR_KEY`
+  constant are removed along with their own unit tests; the two unit tests that asserted the
+  trailer refusal now assert acceptance -- a body without a trailer and a subject-only
+  message both validate -- while the integration test that refused a missing trailer is
+  deleted and the audit-on-refusal test re-fixtured to an unscoped subject so its coverage
+  survives without leaning on the removed rule. The command help in `src/cli/mod.rs` and the
+  module docs are rewritten to describe the blank-line-before-body rule in place of the
+  trailer rule. Two downstream surfaces that still advertised the removed
+  guarantee are corrected in the same PR: `plugin/hooks/no-git-commit.sh`, whose
+  git-commit-to-legion-commit rewrite no longer tells the agent legion refuses a message
+  without the trailer, and the `plugin/hooks/README.md` security-audit table, whose row
+  listing the trailer among the guarantees a script-shaped commit escapes is dropped, since
+  a check that no longer runs cannot be escaped.
+
 ## 0.37.4
 
 The agent-definition release. Every agent legion ships now names its own model and effort,
