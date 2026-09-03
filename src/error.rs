@@ -333,6 +333,19 @@ pub enum LegionError {
         /// (e.g. a missing required top-level property).
         errors: Vec<String>,
     },
+
+    /// `legion cmd-check`'s embedded route table failed to load (#1042).
+    /// Should never fire in practice -- the embedded TOML is covered by
+    /// legion-cmd's own tests -- but `Router::new`/`RouteTable::embedded`
+    /// both return `Result`, so this closes the path without an `unwrap`.
+    #[error("legion-cmd router error: {0}")]
+    CmdCheckRouter(#[from] legion_cmd::TableError),
+
+    /// `legion cmd-check` could not resolve `--tool`/`<input>` to a
+    /// `ToolCall` (#1042): an unrecognized `--tool` name, or `<input>` that
+    /// does not parse as the JSON a non-Bash tool's input requires.
+    #[error("cmd-check error: {0}")]
+    CmdCheck(#[from] legion_cmd::CmdCheckError),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
