@@ -1,5 +1,226 @@
 # Legion Changelog
 
+## 0.38.0
+
+The release that closes a live bypass of the shell guards and carves legion's first workspace
+crate. A wrapper prefix -- `env`, `sudo`, `timeout`, `nice`, `xargs`, `command`, `exec`, `time`,
+or a bare `VAR=val` assignment -- walked straight past the `gh`, `git commit` and `git push`
+guards, which had been enforcing in production with that hole open. #1120 closes it, and that is
+the headline. Minor rather than patch because the same batch carves `legion-cmd`, legion's first
+extracted workspace crate, with new public types, the first two of a nine-slice build, and the
+first two of thirteen ported rule modules. New surface, not maintenance.
+
+The bypass is worth stating mechanically, because the shape recurs. Each of the three hooks
+classified on the basename of the command's first whitespace-separated token, and a wrapper
+prefix is not a shell metacharacter, so `legion_hook_compound` -- the predicate #886 added to
+catch `echo hi && gh pr merge 1` -- never saw one. `env X=1 gh pr merge 1` merged a PR with no
+row in `legion audit`. `env X=1 git commit -m x` skipped the signer preflight, the message
+validation and the trailer requirement that `legion commit` exists to impose. `env X=1 git push
+origin main` walked around the perimeter that exists because fixture commits reached origin/main
+and `core.bare=true` was set on the live checkout twice. #886 closed the metacharacter half of a sentence that `no-gh.sh` still carries in a
+comment and left the wrapper half open. This is not an attacker story: it is an agent typing a
+prefix, possibly by accident, and getting an unaudited merge. Every row was reproduced against
+the live hooks before the fix and re-run after, with the plain and compound controls in the same
+table on purpose -- those did fire, so this was a hole in the guards rather than a broken
+harness.
+
+`legion-cmd` is not in production, and nothing in this release makes it so. The crate compiles
+into the binary as a path dependency of the root package, and it decides nothing: no file under
+`plugin/hooks/` is touched, `Router::route` still falls through to `table.defaults.no_match` for
+every call because `routes` ships empty, and the table's `interpreters` list ships empty too, so
+the opaque-interpreter branch cannot fire outside tests. The single adapter that replaces every
+PreToolUse guard at once is slice 9. Until it lands, the shell scripts are what actually
+enforces -- which is precisely why #1120 could not wait for the crate to replace them.
+
+Two things this release deliberately does not carry. The guard perimeter is closed on the
+wrapper class and still open on two named holes, both recorded on #1117 rather than fixed
+alongside it. `no-local-memory.sh` matches `.claude/projects/.../memory/` case-sensitively, so
+`.Claude/Projects/x/Memory/` -- the same directory on macOS APFS and Windows NTFS -- is allowed;
+it is a different guard shape, a path-substring match rather than first-token binary parsing, and
+folding it in would have desynced the script from the port that must reproduce its deny set
+exactly. And the hooks still `source ... 2>/dev/null || exit 0`, so they fail open when the
+prelude is missing and "no output" is indistinguishable from "the guard did not run" -- which
+cost a false reproduction during this very fix, where every command including the controls
+appeared to pass because `CLAUDE_PLUGIN_ROOT` was unset. The second is a third review round on
+the tokenizer, which the base rate argues for and which was not run. Two rounds each found a
+HIGH the previous one missed, in 1,941 lines of parsing whose whole job is resisting evasion.
+Everything anyone has thought to probe is now clean, but that was equally true after round one,
+so landing it is a judgment that further findings are acceptable as follow-ups rather than a
+claim that none exist.
+
+### Fixed
+
+- **A wrapper prefix no longer walks past the `gh`, commit and push guards** (PR #1120, #1117).
+  The fix is one shared predicate in `plugin/hooks/lib/prelude.sh`, not three copies, because
+  three copies of a security predicate drift -- which is how this class survived #886 closing its
+  other half in one place. `legion_hook_wrapper_marker` recognizes the wrapper shape in a
+  command's first token, and `legion_hook_wrapped_call` then scans the remaining tokens for the
+  guarded binary by basename; `legion_hook_strip_escape` and `legion_hook_first_bin` normalize
+  `\gh`, the ordinary skip-the-alias-lookup escape, which bypassed all three hooks for the same
+  reason and now denies inside a compound chain too. A wrapped invocation denies and is never
+  rewritten, which is the case a naive fix gets wrong: `env X=1 gh pr view 1` names a
+  rewrite-eligible verb, and translating it to `legion pr view` would silently drop the
+  environment assignment. The wrapper cannot be reconstructed after translation, so the only
+  honest answer is to refuse and name the wrapper class. The new check sits after the compound
+  check and before the position-dependent basename test, so a compound command still denies by
+  #886's path and neither can reach the rewrite branch. `test-no-gh.sh` 160/160,
+  `test-no-git-commit.sh` 92/92, `test-no-git-push.sh` 97/97, and `test-lib.sh` 110/110 including
+  direct unit tests on the four new predicates. The remaining ten guards do not use the
+  first-token pattern and are untouched.
+
+- **A PR's superseded CI runs are cancelled; queue and main runs never are** (PR #1116, #1115).
+  `.github/workflows/ci.yml` carried no `concurrency` block, so every push to a PR started a
+  fresh seven-job matrix while the previous one kept building to completion. The group is
+  `${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}`
+  and `cancel-in-progress` is `${{ github.event_name == 'pull_request' }}`, and both halves of
+  that scoping are load-bearing rather than cautious. A cancelled check is read by the merge
+  queue as a failure, so cancelling a `merge_group` run does not save a run -- it ejects the PR
+  from the queue. The push-on-main run is the only check that says main itself is green at a
+  commit, which is the gap #921 was filed about, and no PR run duplicates it. The `run_id` half
+  of the key closes a hole that `cancel-in-progress: false` does not, and review found it:
+  GitHub cancels a pending run when a newer one queues into the same group, independently of that
+  flag, and `github.ref` for a push to main is the static `refs/heads/main`. Three consecutive
+  merges would have dropped the middle one's run and left that commit with no main-green signal.
+  The measured exposure was roughly 42 minutes between consecutive main merges against a
+  ten-minute cycle, a 4x margin, so it was not imminent -- but the PR's first body claimed the
+  main run always executes, and that was not unconditionally true. The non-cancellation of a
+  `merge_group` run is argued from GitHub's documented semantics rather than demonstrated, since
+  demonstrating it means enqueuing a PR to watch a run not be cancelled; if the argument is
+  wrong, the symptom is an ejected PR rather than anything silent.
+
+- **Agent worktrees are excluded from the workspace** (PR #1112, #1111). Adding `[workspace]` to
+  the root `Cargo.toml` captured every agent isolation worktree under `.claude/worktrees/`, because
+  cargo resolves a workspace by walking up from whatever manifest it is invoked on: each worktree
+  found the root manifest, saw a package that is not a member, and refused. One line of `exclude`
+  closes it. The sharp edge is that it fires hardest on worktrees checked out at commits that
+  predate the workspace entirely, which is the common case for a fix branched off `main` -- those
+  manifests have no `[workspace]` of their own, so nothing inside the worktree explains the error,
+  and the workaround an agent reaches for is hand-editing `Cargo.toml`. Verified by running
+  `cargo metadata --no-deps` inside a worktree that had needed exactly that hand-edit minutes
+  earlier. No test asserts it: there is no natural place to assert "cargo resolves inside a
+  worktree" from within the cargo suite it is about, so this is checked rather than guarded, and
+  the explanatory comment in the manifest is what stands in for the test.
+
+- **The `watch::nudge` test fixture runs its script through `sh`, not `exec`** (PR #1110, #1109).
+  The fixture wrote a `#!/bin/sh` script and executed it, which on Linux can fail with `ETXTBSY`
+  when any sibling test forks at the wrong moment; it took down the whole CI matrix on PR #1108
+  and cancelled the macOS and Windows legs with it. The counter-intuitive part is that the
+  obvious fix was already present: the code cited #682/#685 and called `into_temp_path()` to close
+  the write handle before exec. That is correct and still insufficient, because `fork()` copies a
+  process's whole descriptor table regardless of `O_CLOEXEC` -- CLOEXEC acts at exec, not at fork
+  -- so a sibling test's child transiently holds a duplicate of our write fd no matter when we
+  close ours. Closing your own descriptor cannot help when the offending duplicate belongs to
+  someone else's child. `list_live_sessions` keeps its signature and delegates to a private
+  `run_agents_json(program, args)`; production passes the real binary, the fixture passes
+  `("/bin/sh", [path])`, and the script is written non-executable and handed over as data.
+  `/bin/sh` is absolute rather than PATH-resolved on purpose: `src/scip.rs` holds six
+  `env::set_var("PATH", ..)` sites in the same test binary, several replacing PATH with a
+  directory containing no shell, and a bare `sh` landing in one of those windows would fail open
+  into the exact `left: 0` signature this fix removes. The claim is structural rather than
+  statistical -- this machine is macOS, where `execve` does not raise ETXTBSY for a shebang
+  script, so no local run can reproduce the original failure. The fixture categorically no longer
+  execs a file it wrote. `src/scip.rs`'s PATH shims are the same exposure class and are left open
+  for their own card.
+
+- **The racy live-lease assertion is split out of the TTL-expiry test** (PR #1122, #811).
+  `persona_lease_acquire_succeeds_after_ttl_expires_without_release` asserted both directions of
+  the lease contract across a wall-clock boundary: it acquired a lease with a 100ms TTL and then,
+  on the next statement, asserted a second acquire was blocked. On a loaded runner more than 100ms
+  elapses between those two statements, the lease is legitimately expired, the second acquire
+  correctly succeeds, and the test fails having found nothing wrong. It ejected PR #1119 from the
+  merge queue and had ejected #1112 earlier the same evening; the failing run took 128.92s against
+  about 34s locally. The two directions cannot share a TTL because they fail differently under
+  load -- expired-then-reacquirable only needs the sleep to exceed the TTL, so slowness can only
+  help it, while live-then-blocked needs its assertion to run before expiry, so slowness can only
+  hurt it. Split, the live assertion holds an hour-long lease and the expiry test sleeps 300ms
+  against a 50ms TTL; neither asserts an upper bound on how long anything takes. This is a third
+  option the issue did not name: #811 asked for an injected clock or a justified margin, and a
+  margin is a bet on how slow a runner can get, where this year's 4x machine is next year's 10x.
+  Every other test in `src/db/wake.rs` was audited; ten touch a sleep or a short duration and only
+  this one had the dangerous shape, which is the audit's finding rather than an omission. The
+  lease tests then ran 50 times across six concurrent worker processes at `--test-threads=8` with
+  zero failures. No clock abstraction was introduced, and it remains the better long-term shape.
+
+### Added
+
+- **`legion-cmd`, legion's first extracted workspace crate** (PR #1108, #1058). Slice 1 of nine:
+  the `ToolCall` / `Tool` / `Ctx` / `Decision` / `Routed` / `Targets` type shapes, the embedded
+  `RouteTable` loaded via `include_str!` with all eight sections named explicitly, and the
+  workspace and CI wiring that make the crate's tests actually run. `Decision` has exactly five
+  arms and a sixth advisory variant is refused by design -- the advisory case is `Allow` plus
+  `Routed.note`. The load-bearing part is not the types but the measurement: a root-package
+  workspace runs zero member tests under bare `cargo test`, silently and green. Both directions
+  were proven here with a temporary `assert!(false)` in the member crate -- bare `cargo test` at
+  the repo root reported 395 passed and exited 0 while the member's failing test never ran, and
+  the same tree under `cargo test --workspace` caught it red. `scripts/preflight.sh` and
+  `.github/workflows/ci.yml` were fixed so every `check`, `clippy` and `test` invocation carries
+  `--workspace`, the demonstration was re-run against both, and the placeholder was deleted. The
+  no-match outcome is read from the table rather than hardcoded, because which way an unlisted
+  command goes is an operator policy choice and not a property of the router; a test flips
+  `defaults.no_match` to `Deny` in the table alone and proves the outcome flips with no code
+  change. Release machinery was checked rather than assumed: the root `Cargo.toml` still carries
+  exactly one `version =` line, which is what `scripts/release.sh`'s exact-line awk matches, and
+  no `[workspace.package]` version was added. One acceptance criterion is openly unmet and was
+  not argued around -- the issue asks that pattern compilation be proven against a deliberately
+  bad regex or glob fixture, and no type in slice 1's table carries a regex or a glob, so there is
+  nothing that could be deliberately bad. Four further places where the issue contradicts itself
+  were implemented per its Behavior section and flagged rather than resolved in the PR body.
+
+- **A hand-written Bash tokenizer and the opaque-interpreter route** (PR #1113, #1048). Slice 2:
+  a scanner, pipeline-stage grouping, binary resolution that sees through env-prefixes and
+  wrappers, opaque-interpreter routing, and byte-preserving splice. This is what will let the
+  router answer about a command hidden behind a pipe, an `env X=1` prefix, a `timeout 5` wrapper,
+  an absolute path, or a `$(...)` substitution -- the structural gap that makes the shell guards
+  unprovable, since a guard matching on the leading token cannot see any of those. No new
+  dependency: no `shell-words`, and no regex engine anywhere in the crate. Two review rounds each
+  found a HIGH the other missed, both reproduced against `analyze()` before being accepted. Round
+  one found four silent-Allow bypasses on input that parses cleanly and runs `gh` -- a
+  backslash-escaped command word, a wrapper argument swallowing the real binary, and a managed
+  binary inside a quoted or concatenated substitution -- and the fix for them found three more of
+  the same class. Round two found that the fix had reopened the class and added a new cost: only
+  the first substitution in a word was recoverable, so `echo $(true)$(gh pr merge 1)` ran `gh` and
+  reported no match, and the new word-fallback had no precondition that a wrapper was ever
+  consumed, so `echo gh` and `grep gh file.txt` matched as false positives. The acceptance
+  criterion asked for at least 27 evasion cases and the implementer's summary reported 29; the
+  table held 26. Counted directly rather than trusted, and the four cases added to reach 30 close
+  classes the existing set missed rather than padding it. Known gaps are in the module's doc
+  comment: the wrapper skip is a heuristic because `Wrapper` carries no flag-arity table, and
+  `node -e` and bare-inline-script forms are not recognized as opaque-interpreter triggers.
+
+- **`no-local-memory`, the first of thirteen slice-3 rule modules** (PR #1114, #1049). Ported
+  from `plugin/hooks/no-local-memory.sh`: it blocks `Write`/`Edit`/`MultiEdit` on a path inside
+  the Claude Code auto-memory directory, because anything written there is invisible to every
+  other session, agent and repo, and dead the moment the session ends. It also establishes
+  `crates/legion-cmd/src/rules/`, the tree the other twelve non-Bash modules land in. Posture is
+  the thing a port gets wrong most easily, and it was checked against the script rather than
+  inferred: `no-local-memory.sh` calls `emit_deny` unconditionally on a match and documents
+  "Bypass: none", so the module denies too. A nudge must not become a block and a real block must
+  not be softened into a note. Every other `ToolCall` variant returns `Allow` through a wildcard
+  arm, which is the stronger form here -- a future variant falls through to `Allow` with no code
+  change, so it is structurally impossible for a new one to land in a `Deny` arm. Two properties
+  inherited from the script are deliberately not fixed in the port: the case-sensitive match
+  described above, and `.claude/projects/../y/memory/z` denying although `..` resolution puts the
+  target outside `projects/`, which is a false deny and fails safe. Fixing either in the port
+  alone would make it disagree with the guard it is replacing.
+
+- **`pre-read-sym`, the second** (PR #1119, #1056). Ported from `plugin/hooks/pre-read-sym.sh`:
+  it denies an unbounded `Read` of an indexed source file at or above 500 lines and names the
+  bounded alternatives. The two `None` cases are the ones that would silently turn a block into a
+  pass, and both are handled explicitly with a test named for the trap it guards. `limit: None`
+  means no bound was stated, so it skips both carveouts and falls through to the size check, and
+  an unbounded read cannot pass as a small one. `Ctx.file_lines: None` means the caller could not
+  resolve a line count, so it allows as the spec's unresolvable-file case rather than letting a
+  defaulted zero satisfy `lines < THRESHOLD`. The two carveout branches look mergeable and are
+  deliberately separate, because a clippy `collapsible_if` autofix silently deleted the
+  `limit == 200` boundary as its own case during development -- a lint that changes behavior while
+  satisfying the lint is worth two branches, and the boundary is now pinned by a test. The deny
+  reason does not name `legion sym read <symbol>` as the issue asks, because that verb is #1022
+  and has not shipped; the reason ports what the live script emits today, since naming a verb
+  nobody can run is a worse failure than the divergence. One limit is stated rather than papered
+  over: `unresolved_file_passes_through` cannot discriminate, since a regression to
+  `file_lines.unwrap_or(0)` would also allow, and the property is guaranteed by construction
+  rather than by that test.
+
 ## 0.37.4
 
 The agent-definition release. Every agent legion ships now names its own model and effort,
