@@ -272,21 +272,29 @@ impl Router {
         let Some(stage) = stages.get(stage_index) else {
             return Decision::Allow;
         };
-        let is_sole_or_last = stages.len() == 1 || stage_index == stages.len() - 1;
 
         // A fully-gated binary has no sanctioned bare use at all (NFR-CMD-005:
-        // "an unmatched subcommand still denies"). The same posture applies
-        // when its stage sits somewhere a rewrite cannot safely be spliced
-        // (a pipe or `&&`/`;` chain with this stage neither sole nor last):
-        // `tokenizer::splice` would otherwise degrade to `Proxy` -- "run it,
-        // credit nothing" -- which for a binary with no sanctioned direct use
-        // is not an honest answer. Deny, naming nothing invented.
-        if !is_sole_or_last && self.table.fully_gated_binaries.contains(&matched.binary) {
+        // "an unmatched subcommand still denies"), so it never degrades to
+        // `Proxy` -- "run it, credit nothing" -- the way a splice onto a
+        // non-sole/non-last pipeline stage otherwise would. The same posture
+        // applies to anything this stage is composed with that a rewrite
+        // cannot safely see past: a pipe/`&&`/`;`/newline boundary (a second
+        // stage), a redirect or heredoc attached to THIS stage (carried
+        // across a splice untouched, which is a different guarantee than
+        // never emitting one here), or a command substitution / backtick
+        // sitting among this stage's own words -- `gh pr view 42 $(id)`
+        // parses cleanly as a `Digits` capture of `42` with the substitution
+        // simply not a `Word` token, and rewriting would silently drop it
+        // rather than deny it. Deny, naming nothing invented.
+        if self.table.fully_gated_binaries.contains(&matched.binary)
+            && (stages.len() > 1 || stage_has_opaque_content(stage))
+        {
             return Decision::Deny(format!(
                 "`{}` is composed with something else in this command (a pipe, redirect, `&&`, \
                  `;`, or `$(...)`) -- legion's rewrite replaces one whole pipeline stage, and \
-                 this one is neither the only nor the last, so translating it here would change \
-                 what the pipeline feeds downstream. Run it as its own step.",
+                 translating a stage composed like this would either change what the pipeline \
+                 feeds downstream or silently drop part of what was typed. Run it as its own \
+                 step.",
                 matched.binary
             ));
         }
@@ -326,6 +334,22 @@ impl Router {
 /// The literal text of one token, quote- and escape-stripped.
 fn word_text(command: &str, tok: &Token) -> String {
     tokenizer::literal_command_text(&command[tok.span.clone()])
+}
+
+/// Whether this stage carries anything a rewrite cannot safely translate
+/// through: a redirect, a heredoc, or a command substitution / backtick
+/// among its own words (a bare `Subst` token, or a `Word` marked `live`
+/// because a substitution sits inside it). None of these are stage
+/// BOUNDARIES -- `build_stages` keeps them on this one stage -- so
+/// `stages.len() > 1` alone would miss every one of them.
+fn stage_has_opaque_content(stage: &Stage) -> bool {
+    !stage.redirects.is_empty()
+        || !stage.heredocs.is_empty()
+        || stage.tokens.iter().any(|t| match &t.kind {
+            TokenKind::Subst { .. } => true,
+            TokenKind::Word { live, .. } => *live,
+            _ => false,
+        })
 }
 
 /// The stage's word tokens after the one naming `binary`, or `None` when no

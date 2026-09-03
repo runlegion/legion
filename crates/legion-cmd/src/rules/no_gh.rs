@@ -245,6 +245,46 @@ mod tests {
         assert!(matches!(routed.decision, Decision::Deny(_)));
     }
 
+    // --- compound commands never rewrite: updatedInput replaces the WHOLE
+    // command string, so a rewrite of one stage would silently drop or
+    // misplace everything else in the chain (#886/#862). -------------------
+
+    #[test]
+    fn compound_commands_never_rewrite_even_a_rewrite_eligible_verb() {
+        let r = router();
+        for cmd in [
+            "gh pr view 42 | jq .title",
+            "gh pr view 42 > out.txt",
+            "gh pr view 42 && echo done",
+            "echo hi && gh pr view 42",
+            "echo hi && gh pr merge 123",
+        ] {
+            let routed = r.route(&bash(cmd), &ctx());
+            assert!(
+                matches!(routed.decision, Decision::Deny(_)),
+                "case {cmd:?}: expected deny, got {:?}",
+                routed.decision
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_substitution_among_ghs_own_words_denies_rather_than_dropping_it() {
+        // `$(id)` is not a stage boundary -- `gh pr view 42 $(id)` is one
+        // stage, and its `Digits` capture ("42") would otherwise be
+        // satisfied while the substitution is silently ignored. Denying is
+        // the honest answer; rewriting would drop part of what was typed.
+        let r = router();
+        for cmd in ["gh pr view 42 $(id)", "gh pr list `id`"] {
+            let routed = r.route(&bash(cmd), &ctx());
+            assert!(
+                matches!(routed.decision, Decision::Deny(_)),
+                "case {cmd:?}: expected deny, got {:?}",
+                routed.decision
+            );
+        }
+    }
+
     // --- commands that merely mention gh, or another binary entirely --------
 
     #[test]
