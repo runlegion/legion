@@ -33,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 pub mod call;
+pub mod cmd_check;
 pub mod ctx;
 pub mod decision;
 pub mod router;
@@ -41,6 +42,7 @@ pub mod table;
 pub mod tokenizer;
 
 pub use call::{ParseError, Tool, ToolCall};
+pub use cmd_check::{CmdCheckError, CmdCheckOutput, cmd_check, format_plain};
 pub use ctx::{Ctx, RecallHit, Ruling};
 pub use decision::{Carry, Decision, Matched, Routed, Targets};
 pub use router::Router;

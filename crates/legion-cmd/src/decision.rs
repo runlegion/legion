@@ -8,7 +8,15 @@ use serde::{Deserialize, Serialize};
 /// arm: the advisory case is `Allow` plus `Routed::note`, because an advisory
 /// that can block is not advisory, and an arm that sometimes blocks is the
 /// thing the note field exists to prevent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` (FR-CMD-008): `cmd-check --json` embeds this
+/// enum verbatim in `CmdCheckOutput`, and a test parses that output back --
+/// so this type needs both directions, not just the crate-internal `Debug`
+/// comparisons slices 1-3 used it for. Default (externally tagged) serde
+/// representation: a unit variant like `Allow` serializes as the JSON string
+/// `"Allow"`; a variant carrying data serializes as `{"Deny": "reason"}` /
+/// `{"Rewrite": {"command": ..., "reason": ..., "carry": [...]}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Decision {
     /// Run it as typed.
     Allow,
@@ -30,7 +38,10 @@ pub enum Decision {
 ///
 /// Lossless-is-a-property-of-the-argument: a rewrite that would mangle a
 /// literal carries it around the transformation instead of through it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` for the same reason as `Decision`: it nests
+/// inside `Decision::Rewrite`, which `cmd-check --json` embeds whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Carry {
     pub placeholder: String,
     pub bytes: Vec<u8>,
