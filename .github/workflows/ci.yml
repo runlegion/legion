@@ -11,6 +11,24 @@ on:
   # every queued PR stalls with no checks reporting. See #814.
   merge_group:
 
+# Cancel a PR's in-flight run when a new commit supersedes it. Without this
+# every push starts a fresh seven-job run and the previous one keeps burning to
+# completion even though its result can no longer matter -- iterating on a PR
+# ran the full matrix once per push, in parallel, all of it wasted but the last.
+#
+# cancel-in-progress IS SCOPED TO pull_request ON PURPOSE. Cancelling a
+# `merge_group` run does not just waste the run: the queue reads the cancelled
+# check as a failure and EJECTS the PR from the queue. And cancelling a
+# push-on-main run would drop the only signal that main itself is green at that
+# commit (#921 -- a green PR check is not a green main), which is exactly the
+# check nobody else runs. Both must be allowed to finish.
+#
+# The group keys on ref, so two queued PRs never cancel each other -- each
+# merge_group entry has its own ref -- and a PR only ever cancels itself.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
