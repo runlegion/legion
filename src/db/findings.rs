@@ -312,11 +312,17 @@ impl Database {
 
     /// Mark a PENDING finding DISPOSITIONED with an explicit reason (#773 --
     /// "silent drop is refused"). Errors when the finding does not exist, or
-    /// when it is not currently PENDING (a RESOLVED finding needs no
-    /// disposition; re-dispositioning an already-DISPOSITIONED one should go
-    /// through the same explicit id-scoped call, which this still permits --
-    /// only a RESOLVED finding is refused, since silently overriding proof of
-    /// a fix with a waiver would be the exact hole this table closes).
+    /// when it is already in a terminal state -- RESOLVED (a later commit
+    /// demonstrably fixed it) or VOIDED (its gate run was declared
+    /// not-evidence, #1126) -- since re-dispositioning either would
+    /// overwrite `disposition_reason` with a fabricated "someone judged this
+    /// and waived it" story, clobbering the proof of what actually happened.
+    /// Re-dispositioning an already-DISPOSITIONED finding is still permitted
+    /// through this same explicit id-scoped call -- only the two terminal
+    /// states are refused, each with its own error
+    /// (`LegionError::FindingAlreadyResolved` /
+    /// `LegionError::FindingAlreadyVoided`) so the message names which one
+    /// actually blocked the call rather than collapsing both into one lie.
     ///
     /// `id` is matched EXACTLY. Prefix acceptance is a CLI-layer convenience
     /// (`crate::cli::verify::resolve_finding_id`) deliberately kept out of
@@ -327,8 +333,14 @@ impl Database {
         let existing = self
             .get_finding_by_id(id)?
             .ok_or_else(|| LegionError::FindingNotFound(id.to_owned()))?;
-        if existing.status == FindingStatus::Resolved {
-            return Err(LegionError::FindingAlreadyResolved(id.to_owned()));
+        match existing.status {
+            FindingStatus::Resolved => {
+                return Err(LegionError::FindingAlreadyResolved(id.to_owned()));
+            }
+            FindingStatus::Voided => {
+                return Err(LegionError::FindingAlreadyVoided(id.to_owned()));
+            }
+            FindingStatus::Pending | FindingStatus::Dispositioned => {}
         }
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
@@ -667,6 +679,44 @@ mod tests {
         db.mark_finding_resolved(&row.id, "commit-b").unwrap();
         let err = db.dispose_finding(&row.id, "reason").unwrap_err();
         assert!(err.to_string().contains(&row.id));
+    }
+
+    /// #1126 review MED1: dispositioning a VOIDED finding must be refused,
+    /// not silently overwrite `disposition_reason` -- which was holding the
+    /// void reason -- with a fabricated waiver story. Distinct from
+    /// `dispose_finding_refuses_an_already_resolved_row`: a voided finding
+    /// must error with a message naming VOIDED specifically (not "already
+    /// resolved", which would itself be a false claim about what happened
+    /// to this finding).
+    #[test]
+    fn dispose_finding_refuses_a_voided_row() {
+        let db = test_db();
+        let row = db
+            .insert_finding(&input("gate-1", "src/foo.rs", FindingSeverity::Med))
+            .unwrap();
+        void_via_tx(&db, "gate-1", "recorded against the wrong branch");
+        let before = db.get_finding_by_id(&row.id).unwrap().unwrap();
+        assert_eq!(before.status, FindingStatus::Voided);
+
+        let err = db
+            .dispose_finding(&row.id, "won't fix: intentional")
+            .unwrap_err();
+        assert!(err.to_string().contains(&row.id));
+        assert!(
+            err.to_string().contains("VOIDED"),
+            "expected the error to name VOIDED specifically, got: {err}"
+        );
+
+        // Not just an error return -- the row itself must be untouched: the
+        // void reason must survive, not be clobbered by the attempted
+        // disposition reason.
+        let after = db.get_finding_by_id(&row.id).unwrap().unwrap();
+        assert_eq!(after.status, FindingStatus::Voided);
+        assert_eq!(
+            after.disposition_reason.as_deref(),
+            Some("recorded against the wrong branch"),
+            "the void reason must survive a refused disposition attempt"
+        );
     }
 
     #[test]
