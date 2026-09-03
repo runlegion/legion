@@ -2754,6 +2754,181 @@ fn quality_gate_void_missing_id_exits_nonzero() {
     );
 }
 
+// --- quality-gate void cascades to findings tests (#1126) ---
+
+/// Core #1126 regression: voiding a gate row voids the PENDING findings it
+/// raised, so a later `--result clean` call is accepted where it was
+/// previously refused -- but a finding from a DIFFERENT, un-voided run on the
+/// same branch+skill keeps blocking. Both halves matter: a fix that merely
+/// stops findings blocking in general (rather than only the voided run's own
+/// findings) would be worse than the bug.
+#[test]
+fn quality_gate_void_cascades_to_its_own_findings_but_not_other_runs() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Run A: misattributed gate (the one about to be voided), one HIGH finding.
+    let run_a_details =
+        r#"{"findings":[{"file":"a.rs","line":1,"severity":"HIGH","summary":"run A finding"}]}"#;
+    let gate_a_id = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "issues",
+        "--findings-count",
+        "1",
+        "--details-json",
+        run_a_details,
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&gate_a_id);
+
+    // Run B: a legitimate, separate run on the same branch+skill, its own
+    // HIGH finding. This one is never voided.
+    let run_b_details =
+        r#"{"findings":[{"file":"b.rs","line":1,"severity":"HIGH","summary":"run B finding"}]}"#;
+    let gate_b_id = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "issues",
+        "--findings-count",
+        "1",
+        "--details-json",
+        run_b_details,
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&gate_b_id);
+
+    // BEFORE: a clean gate is refused -- both findings are pending.
+    let (_stdout, stderr_before) = run_fail(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+    ]));
+    assert!(
+        stderr_before.contains("a.rs") && stderr_before.contains("b.rs"),
+        "expected both pending findings to block clean before any void, got: {stderr_before}"
+    );
+
+    // Void run A for misattribution.
+    let void_stdout = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "void",
+        "--id",
+        &gate_a_id,
+        "--reason",
+        "recorded against the wrong branch/HEAD",
+    ]));
+    assert!(
+        void_stdout.contains("voided 1 finding"),
+        "expected the void output to name the blast radius, got: {void_stdout}"
+    );
+
+    // The voided finding is readable, VOIDED, and carries the void reason --
+    // distinguishable from both resolved and dispositioned.
+    let findings_json = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "finding-list",
+        "--skill",
+        "legion-review",
+        "--status",
+        "voided",
+        "--json",
+    ]));
+    let voided_findings: Vec<serde_json::Value> =
+        serde_json::from_str(&findings_json).expect("expected a JSON array");
+    assert_eq!(voided_findings.len(), 1, "expected only run A's finding");
+    assert_eq!(voided_findings[0]["file"].as_str().unwrap(), "a.rs");
+    assert_eq!(voided_findings[0]["status"].as_str().unwrap(), "voided");
+    assert_eq!(
+        voided_findings[0]["disposition_reason"].as_str().unwrap(),
+        "recorded against the wrong branch/HEAD"
+    );
+
+    // SECOND HALF: run B's finding is untouched and still blocks clean.
+    let (_stdout, stderr_after_void_a) = run_fail(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+    ]));
+    assert!(
+        stderr_after_void_a.contains("b.rs"),
+        "expected run B's finding to still block clean after only run A was voided, got: \
+         {stderr_after_void_a}"
+    );
+    assert!(
+        !stderr_after_void_a.contains("a.rs"),
+        "run A's voided finding must not still be reported as blocking, got: \
+         {stderr_after_void_a}"
+    );
+
+    // Now void run B too.
+    run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "void",
+        "--id",
+        &gate_b_id,
+        "--reason",
+        "recorded against the wrong branch/HEAD",
+    ]));
+
+    // AFTER: with both misattributed runs voided, clean is accepted.
+    let clean_id = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&clean_id);
+}
+
+/// `legion quality-gate void` on a row with no findings is a no-op, not an
+/// error, and reports zero.
+#[test]
+fn quality_gate_void_with_no_findings_reports_zero_and_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+    ]))
+    .trim()
+    .to_string();
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "void",
+        "--id",
+        &id,
+        "--reason",
+        "manufactured clean",
+    ]));
+    assert!(
+        stdout.contains("voided 0 finding"),
+        "expected the void output to report zero findings, got: {stdout}"
+    );
+}
+
 /// `legion quality-gate list --json` emits a JSON array with all fields including details.
 #[test]
 fn quality_gate_list_json_emits_array_with_details() {

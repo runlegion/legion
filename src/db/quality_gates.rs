@@ -263,26 +263,49 @@ impl Database {
     ///
     /// Errors with `LegionError::QualityGateNotFound` when `id` does not
     /// match any row -- voiding a typo'd id must fail loudly, not silently
-    /// no-op. `id` is matched EXACTLY; prefix acceptance lives in the CLI
-    /// arm (`crate::cli::verify::resolve_gate_id`), for the same reason as
+    /// no-op, and NEVER voids findings for an id that does not exist (the
+    /// gate-row UPDATE below runs, and is checked for `affected == 0`,
+    /// before the findings cascade is even attempted). `id` is matched
+    /// EXACTLY; prefix acceptance lives in the CLI arm
+    /// (`crate::cli::verify::resolve_gate_id`), for the same reason as
     /// `dispose_finding` (#840).
+    ///
+    /// #1126 review MED: the gate-row void and the cascade to this run's
+    /// PENDING findings (`findings::Database::void_findings_by_gate_tx`) run
+    /// inside ONE transaction, committed together. Without this, a failure
+    /// between the two writes (SQLite BUSY from a concurrent writer -- the
+    /// watch daemon holds the same database file -- is genuinely reachable
+    /// here) would leave the gate row voided with its findings still
+    /// PENDING: the exact half-done state #1126 exists to eliminate, reached
+    /// by a different route. Returns the voided row plus the number of
+    /// findings the cascade voided, so the caller (the CLI `void` arm) can
+    /// report the blast radius without a second, non-atomic query.
     pub fn void_quality_gate(
         &self,
         id: &str,
         reason: &str,
         superseded_by: Option<&str>,
-    ) -> Result<QualityGateRow> {
+    ) -> Result<(QualityGateRow, usize)> {
         let now = Utc::now().to_rfc3339();
-        let affected = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let affected = tx.execute(
             "UPDATE quality_gates SET voided_at = ?1, void_reason = ?2, superseded_by = ?3 \
              WHERE id = ?4",
             rusqlite::params![&now, reason, superseded_by, id],
         )?;
         if affected == 0 {
+            // `tx` drops here without a commit, which rolls back -- moot
+            // since nothing was written, but keeps the "never void findings
+            // for an id that does not exist" guarantee structural rather
+            // than relying on this early return alone.
             return Err(LegionError::QualityGateNotFound(id.to_owned()));
         }
-        self.get_quality_gate_by_id(id)?
-            .ok_or_else(|| LegionError::QualityGateNotFound(id.to_owned()))
+        let findings_voided = Database::void_findings_by_gate_tx(&tx, id, reason)?;
+        tx.commit()?;
+        let row = self
+            .get_quality_gate_by_id(id)?
+            .ok_or_else(|| LegionError::QualityGateNotFound(id.to_owned()))?;
+        Ok((row, findings_voided))
     }
 
     /// Shared row-mapping closure for the 13-column `SELECT ... FROM
@@ -1288,7 +1311,7 @@ mod tests {
             })
             .unwrap();
 
-        let voided = db
+        let (voided, findings_voided) = db
             .void_quality_gate(
                 &row.id,
                 "manufactured clean, no articulation ever ran",
@@ -1302,6 +1325,10 @@ mod tests {
             Some("manufactured clean, no articulation ever ran")
         );
         assert!(voided.superseded_by.is_none());
+        assert_eq!(
+            findings_voided, 0,
+            "this gate row has no findings to cascade to"
+        );
     }
 
     #[test]
@@ -1332,7 +1359,7 @@ mod tests {
             })
             .unwrap();
 
-        let voided = db
+        let (voided, _findings_voided) = db
             .void_quality_gate(&old.id, "superseded by a validated re-run", Some(&new.id))
             .unwrap();
         assert_eq!(voided.superseded_by.as_deref(), Some(new.id.as_str()));
@@ -1345,6 +1372,102 @@ mod tests {
             .void_quality_gate("no-such-id", "reason", None)
             .unwrap_err();
         assert!(err.to_string().contains("no-such-id"));
+    }
+
+    /// #1126 review MED: a missing gate id must fail loudly AND must never
+    /// void findings -- there is no real gate row for "no-such-id", but if a
+    /// finding's `gate_id` column happened to equal that same string (data
+    /// corruption, or a caller reusing a stale id), the missing-gate error
+    /// must still leave it untouched rather than voiding it as a side
+    /// effect of matching on the string alone.
+    #[test]
+    fn void_quality_gate_missing_id_does_not_touch_findings_sharing_that_gate_id() {
+        let db = test_db();
+        let orphan_finding = db
+            .insert_finding(&crate::db::findings::NewFindingInput {
+                gate_id: "no-such-id",
+                branch: "feat/x",
+                skill: "legion-simplify",
+                origin_commit: "commit-a",
+                file: "src/foo.rs",
+                line: Some(1),
+                severity: crate::finding_gate::FindingSeverity::High,
+                summary: "orphaned finding",
+            })
+            .unwrap();
+
+        let err = db
+            .void_quality_gate("no-such-id", "reason", None)
+            .unwrap_err();
+        assert!(err.to_string().contains("no-such-id"));
+
+        let refetched = db.get_finding_by_id(&orphan_finding.id).unwrap().unwrap();
+        assert_eq!(
+            refetched.status,
+            crate::finding_gate::FindingStatus::Pending,
+            "a missing gate id must never cascade a void to any finding"
+        );
+    }
+
+    /// #1126 review MED: the gate-row void and the findings cascade must
+    /// commit or roll back TOGETHER. This forces a real failure of the
+    /// SECOND write (the `quality_gate_findings` UPDATE, by dropping that
+    /// table out from under the transaction) and asserts the FIRST write
+    /// (the `quality_gates` row) was rolled back too -- if the two writes
+    /// were still two separate transactions (the pre-fix shape), the gate
+    /// row would come back voided even though this call returned `Err`.
+    ///
+    /// This does not reproduce the SQLite-BUSY scenario named in the review
+    /// (a concurrent writer holding the lock) -- provoking that deterministically
+    /// in a single-process test would need a second real connection racing
+    /// this one under a timing window, which is not reliable test machinery.
+    /// Forcing the second statement to fail via a missing table exercises the
+    /// same rollback path (an `Err` from `tx.execute` partway through the
+    /// transaction) without needing that machinery, and is what actually
+    /// proves atomicity: SQLite's transaction guarantee does not care why the
+    /// second statement failed, only that it did.
+    #[test]
+    fn void_quality_gate_rolls_back_gate_void_when_findings_cascade_fails() {
+        let db = test_db();
+        let row = db
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "hash-atomic",
+                skill: "legion-simplify",
+                result: GateResult::Clean,
+                findings_count: 0,
+                details: None,
+                provenance: GateProvenance::Asserted,
+                base: None,
+            })
+            .unwrap();
+
+        // Break the second write: the findings cascade UPDATEs
+        // quality_gate_findings, so dropping it makes that statement fail
+        // with a real SQLite error, mid-transaction.
+        db.conn
+            .execute_batch("DROP TABLE quality_gate_findings;")
+            .unwrap();
+
+        let err = db
+            .void_quality_gate(&row.id, "reason", None)
+            .expect_err("the findings-cascade failure must surface as an error");
+        assert!(
+            err.to_string()
+                .to_lowercase()
+                .contains("quality_gate_findings")
+                || err.to_string().to_lowercase().contains("no such table"),
+            "expected the underlying table error to surface, got: {err}"
+        );
+
+        // The gate-row UPDATE ran first, inside the same transaction -- if
+        // it were not rolled back alongside the failed second write, this
+        // row would read back voided despite the call having returned Err.
+        let refetched = db.get_quality_gate_by_id(&row.id).unwrap().unwrap();
+        assert!(
+            refetched.voided_at.is_none(),
+            "the gate-row void must roll back when the findings cascade fails, got: {refetched:?}"
+        );
     }
 
     #[test]

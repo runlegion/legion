@@ -210,7 +210,10 @@ pub enum LegionError {
     #[error("invalid finding severity: '{0}' (expected 'high', 'med', or 'low')")]
     InvalidFindingSeverity(String),
 
-    #[error("invalid finding status: '{0}' (expected 'pending', 'resolved', or 'dispositioned')")]
+    #[error(
+        "invalid finding status: '{0}' (expected 'pending', 'resolved', 'dispositioned', or \
+         'voided')"
+    )]
     InvalidFindingStatus(String),
 
     #[error(
@@ -256,6 +259,21 @@ pub enum LegionError {
          file) -- a resolved finding needs no disposition"
     )]
     FindingAlreadyResolved(String),
+
+    /// #1126 review MED1: `dispose_finding`'s terminal-status guard refused
+    /// only RESOLVED, so an operator could disposition a VOIDED finding and
+    /// clobber `disposition_reason` -- which was holding the void reason --
+    /// with a fabricated "someone judged this and waived it" story. A
+    /// distinct variant from `FindingAlreadyResolved` rather than reusing it
+    /// or a shared/generic terminal-status error, because "already
+    /// RESOLVED" on a voided finding would itself be a small lie: the two
+    /// terminal states are voided for different reasons and the message
+    /// must name which one actually blocked the call.
+    #[error(
+        "finding {0} is already VOIDED (the gate run that raised it was declared not-evidence) \
+         -- a voided finding needs no disposition"
+    )]
+    FindingAlreadyVoided(String),
 
     #[error("branch '{branch}' not found in any worktree checkout (searched: {searched})")]
     PushBranchNotFound { branch: String, searched: String },
@@ -452,11 +470,21 @@ mod tests {
         assert!(err.to_string().contains("high"));
     }
 
+    /// Pins the full enumerated set in the message, not just one member --
+    /// the prior wording silently dropped "voided" after `FindingStatus`
+    /// grew that variant (#1126 review MED2) and a weaker assertion here
+    /// (checking only "pending") did not catch it across two review passes.
     #[test]
     fn invalid_finding_status_display() {
         let err = LegionError::InvalidFindingStatus("waived".to_string());
-        assert!(err.to_string().contains("waived"));
-        assert!(err.to_string().contains("pending"));
+        let msg = err.to_string();
+        assert!(msg.contains("waived"));
+        for status in ["pending", "resolved", "dispositioned", "voided"] {
+            assert!(
+                msg.contains(status),
+                "expected the error to name every valid status, missing '{status}': {msg}"
+            );
+        }
     }
 
     #[test]
@@ -470,6 +498,13 @@ mod tests {
         let err = LegionError::FindingAlreadyResolved("finding-2".to_string());
         assert!(err.to_string().contains("finding-2"));
         assert!(err.to_string().contains("RESOLVED"));
+    }
+
+    #[test]
+    fn finding_already_voided_display() {
+        let err = LegionError::FindingAlreadyVoided("finding-3".to_string());
+        assert!(err.to_string().contains("finding-3"));
+        assert!(err.to_string().contains("VOIDED"));
     }
 
     #[test]
