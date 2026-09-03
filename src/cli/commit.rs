@@ -16,7 +16,7 @@
 //!    which is git's own `sign_buffer` path; `git commit --dry-run` does
 //!    not exercise the signer at all.
 //! 2. **Message conventions, refused by name.** Subject shape, the
-//!    `Co-Authored-By` trailer, and the no-emoji rule are checked before
+//!    blank line before a body, and the no-emoji rule are checked before
 //!    the commit runs, so a violation costs a re-run instead of an amend.
 //! 3. **An audit row on every attempt**, refusals included, carrying the
 //!    resolved checkout, pre/post HEAD, card id, whether the commit was
@@ -86,10 +86,6 @@ const EMOJI_RANGES: [(u32, u32); 5] = [
 /// Message given to the throwaway probe commit object so a stray `git fsck`
 /// on a dangling object reads as intentional rather than as corruption.
 const PROBE_MESSAGE: &str = "legion signer preflight (#854)";
-
-/// Trailer key every commit message must end with, including the colon.
-/// Matched case-insensitively -- see [`is_coauthor_trailer`].
-const COAUTHOR_KEY: &str = "co-authored-by:";
 
 /// Commit staged changes in the CWD's checkout, audited.
 ///
@@ -632,12 +628,12 @@ fn signer_failure_detail(stderr: &str) -> String {
 
 /// Enforce this repo's commit-message conventions, refusing by name.
 ///
-/// Four rules, each a distinct refusal so the caller knows what to change:
-/// no emoji anywhere, a conventional subject line, a blank line after the
-/// subject, and a `Co-Authored-By` trailer as the last line. The emoji scan
-/// runs first because it is the only rule that can fire on the subject AND
-/// the body, and reporting "bad subject" for a message whose real problem is
-/// a rocket in paragraph three would send the caller to the wrong line.
+/// Three rules, each a distinct refusal so the caller knows what to change:
+/// no emoji anywhere, a conventional subject line, and a blank line after the
+/// subject when a body is present. The emoji scan runs first because it is the
+/// only rule that can fire on the subject AND the body, and reporting "bad
+/// subject" for a message whose real problem is a rocket in paragraph three
+/// would send the caller to the wrong line.
 fn validate_message(message: &str) -> error::Result<()> {
     if let Some(ch) = find_emoji(message) {
         return Err(error::LegionError::CommitRefused {
@@ -667,34 +663,13 @@ fn validate_message(message: &str) -> error::Result<()> {
     }
     validate_subject(subject)?;
 
-    match lines.get(1) {
-        None => {
-            return Err(error::LegionError::CommitRefused {
-                reason: "commit message has no body -- it must end with a 'Co-Authored-By: \
-                         <name> <email>' trailer"
-                    .to_string(),
-            });
-        }
-        Some(second) if !second.trim().is_empty() => {
-            return Err(error::LegionError::CommitRefused {
-                reason: format!("the subject must be followed by a blank line, found: {second:?}"),
-            });
-        }
-        Some(_) => {}
-    }
-
-    let last: &str = lines
-        .iter()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .copied()
-        .unwrap_or("");
-    if !is_coauthor_trailer(last) {
+    // A body is optional. When one is present, keep the git convention of a
+    // blank line between the subject and the body.
+    if let Some(second) = lines.get(1)
+        && !second.trim().is_empty()
+    {
         return Err(error::LegionError::CommitRefused {
-            reason: format!(
-                "commit message must end with a 'Co-Authored-By: <name> <email>' trailer, \
-                 last line was: {last:?}"
-            ),
+            reason: format!("the subject must be followed by a blank line, found: {second:?}"),
         });
     }
 
@@ -770,22 +745,6 @@ fn find_emoji(text: &str) -> Option<char> {
             .iter()
             .any(|(start, end)| cp >= *start && cp <= *end)
     })
-}
-
-/// Whether `line` is a `Co-Authored-By` trailer with a non-empty value.
-/// Case-insensitive on the key: this repo's history carries both
-/// `Co-Authored-By:` and GitHub's canonical `Co-authored-by:`, and refusing
-/// one of the two spellings the repo already uses would be inventing a rule.
-fn is_coauthor_trailer(line: &str) -> bool {
-    let trimmed = line.trim();
-    let Some(rest) = trimmed
-        .get(..COAUTHOR_KEY.len())
-        .filter(|head| head.eq_ignore_ascii_case(COAUTHOR_KEY))
-        .map(|head| &trimmed[head.len()..])
-    else {
-        return false;
-    };
-    !rest.trim().is_empty()
 }
 
 /// Run `git commit -F <tempfile>` in `checkout` and report what landed.
@@ -966,17 +925,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_message_refuses_missing_trailer() {
+    fn validate_message_accepts_a_body_without_a_trailer() {
+        // The Co-Authored-By trailer is no longer required.
         let msg = "feat(#854): legion commit\n\nBody without a trailer.\n";
-        let reason = refusal_reason(validate_message(msg).unwrap_err());
-        assert!(reason.contains("Co-Authored-By"), "got: {reason}");
+        validate_message(msg).expect("a trailer is not required");
     }
 
     #[test]
-    fn validate_message_refuses_subject_only() {
-        let msg = "feat(#854): legion commit\n";
-        let reason = refusal_reason(validate_message(msg).unwrap_err());
-        assert!(reason.contains("no body"), "got: {reason}");
+    fn validate_message_accepts_subject_only() {
+        // A body is optional; a bare subject is a valid commit message.
+        validate_message("feat(#854): legion commit\n").expect("subject-only must validate");
     }
 
     #[test]
@@ -1045,27 +1003,6 @@ mod tests {
         assert_eq!(find_emoji("x \u{1F389}"), Some('\u{1F389}')); // pictographs
         assert_eq!(find_emoji("x \u{FE0F}"), Some('\u{FE0F}')); // variation selector
         assert_eq!(find_emoji("x \u{20E3}"), Some('\u{20E3}')); // keycap
-    }
-
-    #[test]
-    fn is_coauthor_trailer_matches_both_spellings_in_history() {
-        assert!(is_coauthor_trailer("Co-Authored-By: Claude <x@y.invalid>"));
-        assert!(is_coauthor_trailer("Co-authored-by: Claude <x@y.invalid>"));
-        assert!(is_coauthor_trailer(
-            "  co-authored-by: Claude <x@y.invalid>  "
-        ));
-    }
-
-    #[test]
-    fn is_coauthor_trailer_rejects_empty_value_and_near_misses() {
-        assert!(!is_coauthor_trailer("Co-Authored-By:"));
-        assert!(!is_coauthor_trailer("Co-Authored-By:   "));
-        assert!(!is_coauthor_trailer("Signed-off-by: Claude <x@y.invalid>"));
-        assert!(!is_coauthor_trailer(""));
-        // Multi-byte lead: the key match must not slice mid-codepoint.
-        assert!(!is_coauthor_trailer(
-            "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"
-        ));
     }
 
     #[test]

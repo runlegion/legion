@@ -955,8 +955,9 @@ pub(crate) enum Commands {
     /// retried in a loop.
     ///
     /// Validates the message and refuses violations by name: the subject
-    /// must be `<type>(<scope>): <summary>` with a scope, the message must
-    /// end with a `Co-Authored-By:` trailer, and no emoji anywhere.
+    /// must be `<type>(<scope>): <summary>` with a scope, a body (when
+    /// present) must be separated from the subject by a blank line, and no
+    /// emoji anywhere.
     ///
     /// Commits only the staged index (no `-a`, nothing is staged for you)
     /// and audit-logs every attempt -- refusals included -- with the
