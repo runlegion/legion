@@ -38,7 +38,20 @@
 //!   skipped, because `Wrapper` in the route table carries only
 //!   `options_before_command: bool` and not a flag-arity table. A wrapper
 //!   whose own option takes a non-numeric value ahead of the real command
-//!   (uncommon) is not covered.
+//!   (`sudo -u nobody gh ...`, `sudo anything gh ...`) is ordinary, not
+//!   rare, and `resolve_binary_position` stops at that value rather than
+//!   the real command. Because of this, [`analyze`]'s managed-binary
+//!   DETECTION does not rely on command-position resolution alone: it
+//!   falls back to scanning every word in the stage for a managed
+//!   binary's basename when position resolution does not land on one.
+//!   `resolve_binary_position` stays the sole authority for the `$VAR`
+//!   and opaque-interpreter checks and for what `splice` rewrites --
+//!   those genuinely need the real command position, and the fallback
+//!   never substitutes for it there. `matched` therefore means "a
+//!   managed binary is named somewhere in this stage," not "in command
+//!   position" -- broader than before, and deliberately so (NFR-CMD-002
+//!   favors a detection that fires too often over one a wrapper argument
+//!   can walk past).
 //! - The interpreter `-c` flag is recognized by name; `-e` (node) is not,
 //!   to stay literal to FR-CMD-004's named trigger. A bare inline-script
 //!   argument with no flag at all (`awk 'program' file`) is not recognized
@@ -815,23 +828,74 @@ fn token_text<'a>(src: &'a str, tok: &Token) -> &'a str {
     &src[tok.span.clone()]
 }
 
-/// Strip a uniform surrounding quote pair from a word's raw source text, for
-/// name matching only. An approximation: it does not unescape interior
-/// backslash sequences, it only recognizes a single wrap spanning the whole
-/// token.
+/// Reduce a word's raw source text to what it names at run time, for name
+/// matching only: strips quoting and resolves backslash escapes the same
+/// way [`scan_word`]'s outer (non-substitution) loop treats them -- a
+/// backslash is literal inside single quotes and an escape everywhere else,
+/// including outside any quoting at all.
+///
+/// This matters beyond a single leading backslash: `\gh` never reaches a
+/// uniform-quote-strip check at all (it has no surrounding quotes), so a
+/// scanner that only strips a matched quote pair leaves the leading `\`
+/// in place and `basename("\gh") != "gh"` -- `analyze` then never
+/// recognizes the managed binary. Walking the whole word's quote/escape
+/// state, the way this function now does, unescapes it to `gh` regardless
+/// of where in the word the escape sits.
 fn literal_command_text(raw: &str) -> String {
     let bytes = raw.as_bytes();
-    if bytes.len() >= 2 {
-        let first = bytes[0];
-        let last = bytes[bytes.len() - 1];
-        if (first == b'\'' || first == b'"') && first == last {
-            let inner = &raw[1..raw.len() - 1];
-            if !inner.contains(first as char) {
-                return inner.to_owned();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote == Some(b'\'') {
+            if b == b'\'' {
+                quote = None;
+                i += 1;
+                continue;
             }
+            let n = char_len(raw, i);
+            out.push_str(&raw[i..i + n]);
+            i += n;
+            continue;
         }
+        if b == b'\\' && quote != Some(b'\'') {
+            i += 1;
+            if i < bytes.len() {
+                let n = char_len(raw, i);
+                out.push_str(&raw[i..i + n]);
+                i += n;
+            }
+            continue;
+        }
+        if quote == Some(b'"') {
+            if b == b'"' {
+                quote = None;
+                i += 1;
+                continue;
+            }
+            let n = char_len(raw, i);
+            out.push_str(&raw[i..i + n]);
+            i += n;
+            continue;
+        }
+        if b == b'\'' {
+            quote = Some(b'\'');
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            quote = Some(b'"');
+            i += 1;
+            continue;
+        }
+        let n = char_len(raw, i);
+        out.push_str(&raw[i..i + n]);
+        i += n;
     }
-    raw.to_owned()
+
+    out
 }
 
 fn basename(word: &str) -> &str {
@@ -915,8 +979,9 @@ fn is_dollar_var(raw: &str) -> bool {
     raw.starts_with('$') && !raw.starts_with("$(")
 }
 
-fn substitution_inner_text(src: &str, tok: &Token) -> Option<String> {
-    let s = token_text(src, tok);
+/// Strip a `$(...)` or backtick wrapper off a substitution's own source
+/// text, returning the text inside it.
+fn inner_of_substitution_str(s: &str) -> Option<String> {
     if let Some(inner) = s.strip_prefix("$(").and_then(|s| s.strip_suffix(')')) {
         return Some(inner.to_owned());
     }
@@ -924,6 +989,30 @@ fn substitution_inner_text(src: &str, tok: &Token) -> Option<String> {
         return Some(inner.to_owned());
     }
     None
+}
+
+fn substitution_inner_text(src: &str, tok: &Token) -> Option<String> {
+    inner_of_substitution_str(token_text(src, tok))
+}
+
+/// Find the substitution embedded in a `Word` token that carries one
+/// (`live == true`) but is not itself a bare [`TokenKind::Subst`] -- a
+/// quoted substitution (`"$(gh pr view 1)"`) or one concatenated with other
+/// text (`pre$(gh pr view 1)`). [`classify_word`] only emits `Subst` when
+/// the substitution IS the whole unquoted word, so both of these reach
+/// `analyze` as `Word { live: true, .. }` and their inner text is otherwise
+/// never scanned.
+///
+/// Re-scanning the word's own text as its own mini-source is safe: a word
+/// token always starts at a quote/escape-free boundary (the same state
+/// `scan_word` starts in for any word), so the `subst_range` this second
+/// pass locates lines up with the same bytes the original scan found --
+/// just word-relative instead of command-relative, which is exactly what
+/// slicing `text` needs.
+fn live_word_substitution_inner(text: &str) -> Option<String> {
+    let scanned = scan_word(text, 0).ok()?;
+    let range = scanned.subst_range?;
+    inner_of_substitution_str(&text[range])
 }
 
 fn stage_is_opaque_interpreter(src: &str, stage: &Stage) -> bool {
@@ -1023,12 +1112,20 @@ pub fn analyze(
         // still Deny/Proxy-eligible, regardless of whether the substitution
         // sits in command position or argument position -- `echo $(gh pr
         // view 1)` names `gh` just as much as a bare `$(gh pr view 1)`
-        // would.
+        // would. This also covers a substitution that is quoted
+        // (`echo "$(gh pr view 1)"`) or concatenated with other text
+        // (`echo pre$(gh pr view 1)`): `classify_word` leaves both as
+        // `Word { live: true, .. }` rather than `Subst`, so their inner
+        // text is pulled out separately below instead of being skipped.
         for tok in &stage.tokens {
-            if !matches!(tok.kind, TokenKind::Subst { .. }) {
-                continue;
-            }
-            let Some(inner) = substitution_inner_text(command, tok) else {
+            let inner = match &tok.kind {
+                TokenKind::Subst { .. } => substitution_inner_text(command, tok),
+                TokenKind::Word { live: true, .. } => {
+                    live_word_substitution_inner(token_text(command, tok))
+                }
+                _ => None,
+            };
+            let Some(inner) = inner else {
                 continue;
             };
             let Ok(inner_tokens) = scan(&inner) else {
@@ -1092,11 +1189,35 @@ pub fn analyze(
             break;
         }
 
-        if managed.iter().any(|m| m == &base) && matched.is_none() {
-            matched = Some(Matched {
-                binary: base,
-                stage_span: i..i + 1,
-            });
+        if matched.is_none() {
+            if managed.iter().any(|m| m == &base) {
+                matched = Some(Matched {
+                    binary: base,
+                    stage_span: i..i + 1,
+                });
+            } else {
+                // `resolve_binary_position` landed on a word that is not
+                // the real command -- a wrapper argument its skip-loop
+                // does not recognize (`sudo -u nobody gh ...`, `sudo
+                // anything gh ...`). Detection falls back to scanning
+                // every word in the stage for a managed binary's
+                // basename; see the module doc's note on what `matched`
+                // means once this fallback fires.
+                for word_tok in &stage.tokens {
+                    if !matches!(word_tok.kind, TokenKind::Word { .. }) {
+                        continue;
+                    }
+                    let word_literal = literal_command_text(token_text(command, word_tok));
+                    let word_base = basename(&word_literal);
+                    if managed.iter().any(|m| m == word_base) {
+                        matched = Some(Matched {
+                            binary: word_base.to_owned(),
+                            stage_span: i..i + 1,
+                        });
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -1251,6 +1372,107 @@ mod tests {
             });
             assert_eq!(matched.binary, "gh", "{name}: `{cmd}`");
         }
+    }
+
+    // -- Detection bypasses (#1048): PARSEABLE-but-evasive input naming a
+    // managed binary must never resolve to Allow with matched: None.
+    // `malformed_and_evasive_input_never_resolves_to_allow` (below) only
+    // covers UNPARSEABLE input; every case here scans cleanly, runs `gh`,
+    // and previously reached `Decision::Allow` with `matched: None`. --
+
+    #[test]
+    fn controls_still_match_and_proxy_as_before() {
+        // Sibling controls for the suite below: these must keep working
+        // exactly as documented, or the fixes below are overcorrecting.
+        let plain =
+            analyze(&bash("gh pr view 1"), &managed_gh(), &[], &all_wrappers()).expect("analyzes");
+        assert_eq!(plain.matched.map(|m| m.binary), Some("gh".into()));
+
+        let subst = analyze(
+            &bash("$(gh pr view 1)"),
+            &managed_gh(),
+            &[],
+            &all_wrappers(),
+        )
+        .expect("analyzes");
+        assert_eq!(subst.matched.map(|m| m.binary), Some("gh".into()));
+        assert!(
+            matches!(subst.decision, Decision::Proxy(_)),
+            "a bare $(...) in command position must still Proxy, got {:?}",
+            subst.decision
+        );
+    }
+
+    #[test]
+    fn parseable_evasive_input_naming_a_managed_binary_never_reaches_allow_with_no_match() {
+        let cases: &[&str] = &[
+            // The five bypasses named in the issue.
+            "\\gh pr view 1",
+            "sudo -u nobody gh pr merge 1",
+            "sudo anything gh pr merge 1",
+            "echo \"$(gh pr view 1)\"",
+            "echo pre$(gh pr view 1)",
+            // Further evasions found while fixing the above: the backtick
+            // form of the same two substitution shapes, and a wrapper
+            // bypass chained behind a leading-backslash command-word
+            // bypass (both mechanisms must fire together, not just each
+            // alone).
+            "echo `gh pr view 1`",
+            "echo pre`gh pr view 1`",
+            "\\sudo -u nobody gh pr merge 1",
+            // A mid-word escape, not just a leading one.
+            "g\\h pr view 1",
+        ];
+
+        for cmd in cases {
+            let analysis = analyze(&bash(cmd), &managed_gh(), &[], &all_wrappers())
+                .unwrap_or_else(|| panic!("{cmd}: must analyze"));
+            // The bug this suite guards against is specifically `Allow`
+            // paired with `matched: None` -- a match the router never
+            // gets a chance to evaluate against the real route at all.
+            // The correct terminal state differs by shape: a bare
+            // command-position bypass (`\gh`, the `sudo` cases, the
+            // mid-word escape) trips no other trigger and lands on
+            // `Allow` with `matched: Some`, the same as the plain-`gh`
+            // control. A substitution bypass (`"$(gh ...)"`,
+            // `` pre`gh ...` ``) is inherently un-spliceable, so it also
+            // carries `matched: Some` but resolves to `Proxy`, the same
+            // as the bare `$(gh pr view 1)` control. Both are fine;
+            // `Allow` with `matched: None` is the only forbidden pairing.
+            assert_eq!(
+                analysis.matched.as_ref().map(|m| m.binary.as_str()),
+                Some("gh"),
+                "{cmd}: must resolve `gh` as matched, got matched={:?} decision={:?}",
+                analysis.matched,
+                analysis.decision
+            );
+            assert!(
+                !(analysis.matched.is_none() && analysis.decision == Decision::Allow),
+                "{cmd}: parseable evasive input naming a managed binary must never \
+                 resolve to Allow with matched: None, got matched={:?} decision={:?}",
+                analysis.matched,
+                analysis.decision
+            );
+        }
+    }
+
+    #[test]
+    fn a_literal_backslash_then_char_is_not_the_same_command_as_the_char_alone() {
+        // `\\gh` in real Bash is a literal backslash followed by `gh` (the
+        // first backslash escapes the second), which names a program
+        // called `\gh`, not `gh`. The unescape in `literal_command_text`
+        // must not over-eagerly collapse this to `gh`.
+        let analysis = analyze(
+            &bash("\\\\gh pr view 1"),
+            &managed_gh(),
+            &[],
+            &all_wrappers(),
+        )
+        .expect("analyzes");
+        assert_eq!(
+            analysis.matched, None,
+            "a doubled backslash names `\\gh`, not `gh`, and must not match"
+        );
     }
 
     // -- FR-CMD-003: only Bash is parsed. --
