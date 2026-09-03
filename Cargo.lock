@@ -1939,7 +1939,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "legion"
-version = "0.38.0"
+version = "0.37.4"
 dependencies = [
  "async-stream",
  "axum",
@@ -1954,7 +1954,6 @@ dependencies = [
  "ignore",
  "jiff",
  "jsonschema",
- "legion-cmd",
  "libc",
  "lightningcss",
  "mime_guess",
@@ -1985,16 +1984,6 @@ dependencies = [
  "tower-http",
  "uuid",
  "wait-timeout",
-]
-
-[[package]]
-name = "legion-cmd"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "toml",
 ]
 
 [[package]]

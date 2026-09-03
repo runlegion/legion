@@ -130,10 +130,7 @@ fi
 read -r -a TOKENS <<<"$COMMAND"
 [ "${#TOKENS[@]}" -ge 2 ] || exit 0
 
-# Basename after stripping a leading backslash escape (`\git` -- #1117),
-# same normalization no-git-push.sh and no-gh.sh use.
-FIRST_BIN="$(legion_hook_strip_escape "${TOKENS[0]}")"
-FIRST_BIN="${FIRST_BIN##*/}"
+FIRST_BIN="${TOKENS[0]##*/}"
 
 # Walk past git's own global options to find the subcommand, capturing `-C`
 # specially: it is the one global option this hook has to act on, since it
@@ -230,29 +227,6 @@ if [ "$SUBCOMMAND" != "commit" ]; then
     emit_deny "Refusing \`git commit\` -- it's composed with something else (a pipe, redirect, \`&&\`, \`;\`, or \`\$(...)\`), and legion's rewrite would replace the WHOLE command string.
 
 Translating it would silently drop everything else in it, or misread part of one command as belonging to another. Run the commit and the rest of your pipeline as separate steps:
-
-    legion commit --repo ${REPO} --message '<type>(<scope>): <summary>
-
-Co-Authored-By: <name> <email>'
-
-Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
-  # --- #1117: wrapper prefix (env/sudo/timeout/...) or a bare VAR=val ------
-  # --- assignment reaches `git commit` without any shell metacharacter -----
-  #
-  # This is a SIMPLE command (not compound, or the branch above would
-  # already have denied it), so no message-value lexer downstream ever
-  # runs for it -- there is nothing else here that would catch a raw
-  # `env X=1 git commit -m x`. FIRST_BIN above is `env`/`sudo`/`X=1`, not
-  # `git`, so SUBCOMMAND stayed empty and it fell straight through to
-  # this branch. Deny outright; never attempt a rewrite here, since the
-  # wrapper's own semantics (an env override, a privilege change) would
-  # be silently dropped by translating to `legion commit`.
-  elif legion_hook_wrapped_call "$COMMAND" git \
-    && legion_hook_token_present "$COMMAND" commit; then
-    legion_hook_covered || exit 0
-    emit_deny "Refusing \`git commit\` -- this command reaches \`git commit\` through a wrapper (env, sudo, timeout, nice, xargs, command, exec, time, or a leading VAR=val assignment) instead of calling it directly.
-
-Translating it would silently drop whatever the wrapper was for. Run the plain command instead:
 
     legion commit --repo ${REPO} --message '<type>(<scope>): <summary>
 

@@ -8,7 +8,6 @@
 mod common;
 
 mod bullpen;
-mod cmd_check;
 mod commit;
 mod css_symbols;
 mod daemon_watch;

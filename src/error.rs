@@ -210,10 +210,7 @@ pub enum LegionError {
     #[error("invalid finding severity: '{0}' (expected 'high', 'med', or 'low')")]
     InvalidFindingSeverity(String),
 
-    #[error(
-        "invalid finding status: '{0}' (expected 'pending', 'resolved', 'dispositioned', or \
-         'voided')"
-    )]
+    #[error("invalid finding status: '{0}' (expected 'pending', 'resolved', or 'dispositioned')")]
     InvalidFindingStatus(String),
 
     #[error(
@@ -259,21 +256,6 @@ pub enum LegionError {
          file) -- a resolved finding needs no disposition"
     )]
     FindingAlreadyResolved(String),
-
-    /// #1126 review MED1: `dispose_finding`'s terminal-status guard refused
-    /// only RESOLVED, so an operator could disposition a VOIDED finding and
-    /// clobber `disposition_reason` -- which was holding the void reason --
-    /// with a fabricated "someone judged this and waived it" story. A
-    /// distinct variant from `FindingAlreadyResolved` rather than reusing it
-    /// or a shared/generic terminal-status error, because "already
-    /// RESOLVED" on a voided finding would itself be a small lie: the two
-    /// terminal states are voided for different reasons and the message
-    /// must name which one actually blocked the call.
-    #[error(
-        "finding {0} is already VOIDED (the gate run that raised it was declared not-evidence) \
-         -- a voided finding needs no disposition"
-    )]
-    FindingAlreadyVoided(String),
 
     #[error("branch '{branch}' not found in any worktree checkout (searched: {searched})")]
     PushBranchNotFound { branch: String, searched: String },
@@ -351,19 +333,6 @@ pub enum LegionError {
         /// (e.g. a missing required top-level property).
         errors: Vec<String>,
     },
-
-    /// `legion cmd-check`'s embedded route table failed to load (#1042).
-    /// Should never fire in practice -- the embedded TOML is covered by
-    /// legion-cmd's own tests -- but `Router::new`/`RouteTable::embedded`
-    /// both return `Result`, so this closes the path without an `unwrap`.
-    #[error("legion-cmd router error: {0}")]
-    CmdCheckRouter(#[from] legion_cmd::TableError),
-
-    /// `legion cmd-check` could not resolve `--tool`/`<input>` to a
-    /// `ToolCall` (#1042): an unrecognized `--tool` name, or `<input>` that
-    /// does not parse as the JSON a non-Bash tool's input requires.
-    #[error("cmd-check error: {0}")]
-    CmdCheck(#[from] legion_cmd::CmdCheckError),
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
@@ -483,21 +452,11 @@ mod tests {
         assert!(err.to_string().contains("high"));
     }
 
-    /// Pins the full enumerated set in the message, not just one member --
-    /// the prior wording silently dropped "voided" after `FindingStatus`
-    /// grew that variant (#1126 review MED2) and a weaker assertion here
-    /// (checking only "pending") did not catch it across two review passes.
     #[test]
     fn invalid_finding_status_display() {
         let err = LegionError::InvalidFindingStatus("waived".to_string());
-        let msg = err.to_string();
-        assert!(msg.contains("waived"));
-        for status in ["pending", "resolved", "dispositioned", "voided"] {
-            assert!(
-                msg.contains(status),
-                "expected the error to name every valid status, missing '{status}': {msg}"
-            );
-        }
+        assert!(err.to_string().contains("waived"));
+        assert!(err.to_string().contains("pending"));
     }
 
     #[test]
@@ -511,13 +470,6 @@ mod tests {
         let err = LegionError::FindingAlreadyResolved("finding-2".to_string());
         assert!(err.to_string().contains("finding-2"));
         assert!(err.to_string().contains("RESOLVED"));
-    }
-
-    #[test]
-    fn finding_already_voided_display() {
-        let err = LegionError::FindingAlreadyVoided("finding-3".to_string());
-        assert!(err.to_string().contains("finding-3"));
-        assert!(err.to_string().contains("VOIDED"));
     }
 
     #[test]

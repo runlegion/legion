@@ -237,32 +237,4 @@ rm -rf "$REFPARENT"
 # worse than the bug it was added to fix.
 assert_rewritten "uninspectable cwd falls back to branch" '"git push origin feat/x"'
 
-
-# --- #1117: a wrapper prefix reaches `git push` without any shell ----------
-# --- metacharacter -----------------------------------------------------------
-
-echo "==> #1117: wrapper prefixes deny, never rewrite"
-assert_denied "env assignment"      '"env X=1 git push origin main"'
-assert_denied "sudo"                '"sudo anything git push origin main"'
-assert_denied "timeout"             '"timeout 5 git push origin main"'
-assert_denied "bare VAR=val prefix" '"X=1 git push origin main"'
-assert_denied "chained wrappers"    '"env X=1 timeout 5 git push origin main"'
-
-echo "==> #1117: a wrapped push is never silently translated"
-assert_not_contains "wrapped push carries no updatedInput" \
-  "$(run_hook '"env X=1 git push origin main"')" '"updatedInput"'
-
-echo "==> #1117: the wrapper deny names the wrapper class"
-assert_contains "names wrapper class" \
-  "$(run_hook '"env X=1 git push origin main"')" 'wrapper'
-
-echo "==> #1117: a backslash-escaped git is detected the same as bare git"
-assert_rewritten "escaped git still rewrites (no wrapper)" '"\\git push origin main"'
-
-echo "==> #1117: an escaped git inside a compound chain still denies via the compound guard"
-assert_denied "leading unrelated command, escaped git" '"npm test && \\git push origin main"'
-
-echo "==> #1117: wrapper detection does not over-fire on unrelated commands"
-assert_passthrough "env with no git anywhere" '"env X=1 npm test"'
-
 finish_tests

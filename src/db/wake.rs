@@ -1268,64 +1268,37 @@ mod tests {
     }
 
     #[test]
-    fn persona_lease_live_lease_blocks_a_concurrent_acquire() {
-        // The "live lease blocks" half of #811's crash-recovery test, split out
-        // so it carries NO timing dependency: the lease is taken with an hour
-        // TTL, so no amount of runner slowness can expire it before the second
-        // acquire runs. The sibling test covers the expiry direction.
-        let db = test_db();
-        assert!(
-            db.try_acquire_persona_lease("legion", "sig-live", "holder", Duration::from_secs(3600))
-                .unwrap()
-        );
-        assert!(
-            !db.try_acquire_persona_lease(
-                "legion",
-                "sig-live",
-                "contender",
-                Duration::from_secs(3600)
-            )
-            .unwrap(),
-            "a live lease must block a concurrent acquire"
-        );
-    }
-
-    #[test]
     fn persona_lease_acquire_succeeds_after_ttl_expires_without_release() {
         // Crash-recovery path: the holder acquires with a short TTL, never
         // calls release (simulating a crash), and after the TTL elapses the
         // next acquirer succeeds. This is the behavior the issue calls out:
         // "session crashes without releasing -> lease expires via heartbeat
         // TTL. Another wake on the same signal succeeds after expiration."
-        // THE LIVE-LEASE ASSERTION LIVES IN ITS OWN TEST, and that split is the
-        // point of this arrangement rather than tidiness. It used to sit here,
-        // between an acquire with a 100ms TTL and a sleep past it -- so it
-        // asserted "a live lease blocks" on the statement immediately after
-        // taking a lease that expires in 100ms. On a loaded runner more than
-        // 100ms elapses between those two statements, the lease is legitimately
-        // expired by the time the assertion runs, the second acquire correctly
-        // succeeds, and the test fails having found nothing wrong (#811).
-        //
-        // The two directions differ in how they fail under load, which is why
-        // they cannot share a TTL: "expired -> reacquirable" only needs the
-        // sleep to exceed the TTL, and a slow machine sleeps LONGER, so slowness
-        // can only help it. "live -> blocked" needs the assertion to run BEFORE
-        // expiry, and slowness can only hurt it. Separated, each is robust; kept
-        // together, one of them must be racing.
         let db = test_db();
         assert!(
             db.try_acquire_persona_lease(
                 "legion",
                 "sig-1",
                 "crashy-host",
-                Duration::from_millis(50)
+                Duration::from_millis(100)
             )
             .unwrap()
         );
 
-        // Wait past the TTL without calling release. No upper bound is asserted
-        // on how long this takes, so an arbitrarily slow runner is fine.
-        std::thread::sleep(Duration::from_millis(300));
+        // While the lease is still live, a second acquire must fail.
+        assert!(
+            !db.try_acquire_persona_lease(
+                "legion",
+                "sig-1",
+                "recovery-host",
+                Duration::from_secs(3600)
+            )
+            .unwrap(),
+            "live lease (even near expiry) must block a concurrent acquire"
+        );
+
+        // Wait past the TTL without calling release.
+        std::thread::sleep(Duration::from_millis(200));
 
         assert!(
             db.try_acquire_persona_lease(

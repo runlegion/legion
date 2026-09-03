@@ -1,26 +1,8 @@
 [package]
 name = "legion"
-version = "0.38.0"
+version = "0.37.4"
 edition = "2024"
 description = "Agent specialization through deliberate practice"
-
-# legion-cmd (#1058): legion's first extracted workspace crate -- the pure
-# command router. Root-package workspace: legion keeps its own [package] and
-# gains members, so `scripts/release.sh`'s exact-line awk bump still matches
-# the single `version =` line above. Deliberately NO [workspace.package]
-# version -- a second version line would drift from the one release.sh and
-# scripts/test-sync-version.sh both touch.
-[workspace]
-members = ["crates/legion-cmd"]
-resolver = "3"
-# Agent isolation worktrees live UNDER this directory (.claude/worktrees/*),
-# each a checkout of some other commit. Cargo resolves a workspace by walking
-# UP from the manifest it is invoked on, so without this exclude every command
-# run inside such a worktree finds THIS manifest and dies with "current package
-# believes it's in a workspace when it's not" -- even though that checkout may
-# predate the workspace entirely. The trap is invisible until an agent tries to
-# run its own gates, and the workaround it reaches for is editing Cargo.toml.
-exclude = [".claude/worktrees"]
 
 [dependencies]
 tantivy = "0.22"
@@ -129,12 +111,6 @@ oxc_span = "0.138.0"
 # sourcemap extras (serde-content, dashmap, rayon, parcel_sourcemap) this
 # binary never uses -- disabled for a lean dependency footprint.
 lightningcss = { version = "1.0.0-alpha.71", default-features = false }
-
-# legion-cmd (#1058): the pure command router, legion's first workspace member.
-# MUST stay above the cfg(unix) header below -- a TOML table consumes every key
-# until the next header, so a path dep listed after it would be unix-gated and
-# vanish on the Windows CI leg.
-legion-cmd = { path = "crates/legion-cmd" }
 
 # libc pulls in only on unix for killpg in call_plugin_inner's timeout arm.
 # Must stay AFTER all platform-independent deps -- TOML tables consume

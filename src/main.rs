@@ -358,12 +358,6 @@ fn run() -> error::Result<()> {
             all_hosts,
             json,
         } => cli::ops::handle_health(history, all_hosts, json)?,
-        Commands::CmdCheck {
-            tool,
-            repo,
-            json,
-            input,
-        } => cli::cmd_check::handle_cmd_check(tool, repo, json, input)?,
     }
 
     Ok(())

@@ -2,7 +2,6 @@
 //! Domain handlers live in the sibling modules; `main.rs` owns dispatch.
 
 pub(crate) mod autonomy;
-pub(crate) mod cmd_check;
 pub(crate) mod commit;
 pub(crate) mod datadir;
 pub(crate) mod deliver;
@@ -1194,32 +1193,6 @@ pub(crate) enum Commands {
         /// Output as JSON instead of a human-readable table
         #[arg(long)]
         json: bool,
-    },
-
-    /// Route one tool call through the legion-cmd router and print its
-    /// Decision and Targets (FR-CMD-008). The sole CLI entry point into the
-    /// legion-cmd crate -- slice 9's PreToolUse adapter calls the same
-    /// `Router::route` this verb calls, so the hook and the verb can never
-    /// diverge on what a call decides.
-    CmdCheck {
-        /// Which harness tool this call is for. For `Bash` (the default),
-        /// `<input>` is the raw command string; for any other accepted
-        /// tool, `<input>` is that tool's input as JSON.
-        #[arg(long, default_value = "Bash")]
-        tool: String,
-
-        /// Repository context for the call.
-        #[arg(long)]
-        repo: Option<String>,
-
-        /// Print the machine-readable schema the PreToolUse adapter and
-        /// scripts consume, instead of the human-readable field dump.
-        #[arg(long)]
-        json: bool,
-
-        /// The Bash command string (default `--tool`), or the tool's input
-        /// as JSON for any other `--tool` value.
-        input: String,
     },
 }
 

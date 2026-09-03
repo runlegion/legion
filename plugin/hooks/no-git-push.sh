@@ -87,10 +87,7 @@ legion_hook_covered || exit 0
 read -r -a TOKENS <<<"$COMMAND"
 [ "${#TOKENS[@]}" -ge 2 ] || exit 0
 
-# Basename after stripping a leading backslash escape (`\git` -- #1117),
-# same normalization no-git-commit.sh and no-gh.sh use.
-FIRST_BIN="$(legion_hook_strip_escape "${TOKENS[0]}")"
-FIRST_BIN="${FIRST_BIN##*/}"
+FIRST_BIN="${TOKENS[0]##*/}"
 
 # Walk past git's own global options to find the subcommand. Options that
 # take a value (-C, -c, --git-dir, --work-tree, --namespace) consume the
@@ -158,24 +155,6 @@ Translating it would silently drop everything else in it -- or worse, misread pa
 Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
 }
 
-# --- #1117: wrapper prefix (env/sudo/timeout/...) or a bare VAR=val --------
-# --- assignment reaches `git push` without any shell metacharacter --------
-#
-# Same gap as no-gh.sh and no-git-commit.sh: none of these are
-# metacharacters legion_hook_compound catches, so `env X=1 git push
-# origin main` left FIRST_BIN as `env`, SUBCOMMAND stayed empty, and it
-# fell through the compound-only check below untouched. Deny outright,
-# never rewrite: the wrapper's own semantics would be silently dropped.
-deny_wrapped_push() {
-  emit_deny "Refusing \`git push\` -- this command reaches \`git push\` through a wrapper (env, sudo, timeout, nice, xargs, command, exec, time, or a leading VAR=val assignment) instead of calling it directly.
-
-Translating it would silently drop whatever the wrapper was for (an environment override, a privilege change, a timeout). Run the plain command instead:
-
-    legion push --repo ${REPO}
-
-Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
-}
-
 if [ "$SUBCOMMAND" = "push" ]; then
   if legion_hook_compound "$COMMAND"; then
     deny_compound_push
@@ -186,9 +165,6 @@ else
     && legion_hook_token_present "$COMMAND" git \
     && legion_hook_token_present "$COMMAND" push; then
     deny_compound_push
-  elif legion_hook_wrapped_call "$COMMAND" git \
-    && legion_hook_token_present "$COMMAND" push; then
-    deny_wrapped_push
   fi
   exit 0
 fi

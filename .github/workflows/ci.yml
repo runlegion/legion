@@ -11,33 +11,6 @@ on:
   # every queued PR stalls with no checks reporting. See #814.
   merge_group:
 
-# Cancel a PR's in-flight run when a new commit supersedes it. Without this
-# every push starts a fresh seven-job run and the previous one keeps burning to
-# completion even though its result can no longer matter -- iterating on a PR
-# ran the full matrix once per push, in parallel, all of it wasted but the last.
-#
-# cancel-in-progress IS SCOPED TO pull_request ON PURPOSE. Cancelling a
-# `merge_group` run does not just waste the run: the queue reads the cancelled
-# check as a failure and EJECTS the PR from the queue. And cancelling a
-# push-on-main run would drop the only signal that main itself is green at that
-# commit (#921 -- a green PR check is not a green main), which is exactly the
-# check nobody else runs. Both must be allowed to finish.
-#
-# THE GROUP KEY GIVES NON-PR EVENTS A UNIQUE GROUP, and that is not belt-and-
-# braces -- it closes a hole `cancel-in-progress: false` does not. GitHub
-# cancels any PENDING run in a group when a newer one queues, INDEPENDENTLY of
-# cancel-in-progress, which only protects a run already in progress. For a push
-# to main `github.ref` is the static `refs/heads/main`, so every main push would
-# share one group: merge 1 runs, merge 2 queues behind it, merge 3 arrives and
-# silently drops merge 2's run, and that commit never gets a main-green signal.
-# Keying non-PR events on `github.run_id` makes every such run its own group, so
-# nothing can cancel it. A `pull_request` still keys on `github.ref`
-# (`refs/pull/<N>/merge`), which is per-PR, so a PR only ever cancels itself and
-# two PRs never collide.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 env:
   CARGO_TERM_COLOR: always
 
@@ -49,7 +22,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace
+      - run: cargo check
 
   fmt:
     name: Format
@@ -70,7 +43,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
 
   shellcheck:
     name: ShellCheck
@@ -97,4 +70,4 @@ jobs:
         run: rustup default stable
         shell: bash
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test

@@ -205,9 +205,9 @@ pub(crate) enum QualityGateAction {
     },
 
     /// List findings for the audit surface (#773 AC4): which findings were
-    /// fixed (RESOLVED), waived (DISPOSITIONED), voided along with their run
-    /// (VOIDED, #1126), or are still PENDING, over time. Filterable by
-    /// branch, skill, and status; unfiltered lists everything, newest first.
+    /// fixed (RESOLVED), waived (DISPOSITIONED), or are still PENDING, over
+    /// time. Filterable by branch, skill, and status; unfiltered lists
+    /// everything, newest first.
     FindingList {
         #[arg(long)]
         branch: Option<String>,
@@ -215,7 +215,7 @@ pub(crate) enum QualityGateAction {
         #[arg(long)]
         skill: Option<String>,
 
-        #[arg(long, value_parser = ["pending", "resolved", "dispositioned", "voided"])]
+        #[arg(long, value_parser = ["pending", "resolved", "dispositioned"])]
         status: Option<String>,
 
         /// Emit JSON array instead of a human table.
@@ -620,14 +620,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
         } => {
             let database = open_db()?;
             let full_id = resolve_gate_id(&database, &id)?;
-            // #1126: `void_quality_gate` voids the gate row AND cascades to
-            // this run's still-PENDING findings inside one transaction --
-            // they are not evidence either, so they stop blocking a later
-            // clean gate on a branch they were never about, and a failure
-            // partway through cannot leave the gate voided with its findings
-            // still PENDING.
-            let (row, voided_findings) =
-                database.void_quality_gate(&full_id, &reason, superseded_by.as_deref())?;
+            let row = database.void_quality_gate(&full_id, &reason, superseded_by.as_deref())?;
             println!(
                 "[legion] voided gate {} (skill '{}', commit {}): {}",
                 row.id, row.skill, row.commit_hash, reason
@@ -635,7 +628,6 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             if let Some(sup) = &row.superseded_by {
                 println!("  superseded by: {sup}");
             }
-            println!("  voided {voided_findings} finding(s) from this run");
         }
     }
     Ok(())
@@ -849,13 +841,10 @@ fn persist_raw_findings(
     //     -- checking PENDING alone would resurrect a fresh PENDING row the
     //     moment the reviewer honestly re-lists the same MED they already
     //     agreed not to fix, silently undoing the disposition and re-blocking
-    //     clean on a decision that was already made. RESOLVED and VOIDED are
+    //     clean on a decision that was already made. RESOLVED is
     //     deliberately excluded: a finding that recurs identically after
-    //     being fix-resolved is a regression worth a fresh PENDING row, and
-    //     a finding that recurs after its run was voided (#1126) was never
-    //     evidence in the first place -- a genuine new run reporting the same
-    //     shape must get its own PENDING row, not be silently swallowed as a
-    //     duplicate of a run that was declared not-evidence.
+    //     being fix-resolved is a regression worth a fresh PENDING row, not
+    //     something to suppress.
     // A query failure degrades to "no known duplicates" rather than blocking
     // the insert below on this best-effort dedup check -- but unlike every
     // other degrade-and-continue path in this function, that failure is now
@@ -883,7 +872,7 @@ fn persist_raw_findings(
             Vec::new()
         })
         .into_iter()
-        .filter(|f| !matches!(f.status, FindingStatus::Resolved | FindingStatus::Voided))
+        .filter(|f| f.status != FindingStatus::Resolved)
         .collect();
     let mut seen_this_call: std::collections::HashSet<(String, FindingSeverity, String)> =
         std::collections::HashSet::new();
@@ -1595,7 +1584,7 @@ mod tests {
         assert_eq!(resolve_gate_id(&db, &unique).unwrap(), a.id);
 
         // And the resolved id is what void consumes.
-        let (voided, _findings_voided) = db
+        let voided = db
             .void_quality_gate(
                 &resolve_gate_id(&db, &unique).unwrap(),
                 "false verdict",

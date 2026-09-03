@@ -208,40 +208,20 @@ fn cap_skip_summaries(skipped: &[String]) -> String {
 /// single persistent background row would otherwise repeat an identical
 /// line forever.
 pub fn list_live_sessions(claude_bin: &str) -> Vec<LiveSession> {
-    run_agents_json(claude_bin, &["agents", "--json"])
-}
-
-/// Core of [`list_live_sessions`], parameterized over the full argv rather
-/// than assuming `claude_bin` is exec'd directly with a fixed `agents
-/// --json` suffix.
-///
-/// Split out so the test fixture (`sessions_from_fake_agents`, #1109) can run
-/// its throwaway script through `sh <path>` -- program `sh`, with the script
-/// path as a plain argument -- instead of exec'ing a file the test process
-/// itself wrote. That distinction matters even though `into_temp_path`
-/// already closes our own write handle before any exec: `fork()` copies a
-/// process's whole descriptor table regardless of `O_CLOEXEC` (CLOEXEC acts
-/// at exec, not at fork), so a SIBLING test's child process can transiently
-/// hold a duplicate of this helper's write fd no matter when we close it,
-/// and an exec landing in that window still fails with `ETXTBSY` ("text file
-/// busy", errno 26, Linux-only). Running `sh` -- a stable system binary
-/// never open for writing by us -- with the script path as a data argument
-/// sidesteps the check entirely: the kernel's ETXTBSY guard applies to the
-/// file actually being exec'd, not to a file an interpreter merely opens for
-/// reading.
-fn run_agents_json(program: &str, args: &[&str]) -> Vec<LiveSession> {
-    let command_label = format!("{program} {}", args.join(" "));
-    let output = match std::process::Command::new(program).args(args).output() {
+    let output = match std::process::Command::new(claude_bin)
+        .args(["agents", "--json"])
+        .output()
+    {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("[legion watch] nudge: failed to run `{command_label}`: {e}");
+            eprintln!("[legion watch] nudge: failed to run `{claude_bin} agents --json`: {e}");
             return Vec::new();
         }
     };
 
     if !output.status.success() {
         eprintln!(
-            "[legion watch] nudge: `{command_label}` exited non-zero ({:?})",
+            "[legion watch] nudge: `{claude_bin} agents --json` exited non-zero ({:?})",
             output.status.code()
         );
         return Vec::new();
@@ -250,7 +230,9 @@ fn run_agents_json(program: &str, args: &[&str]) -> Vec<LiveSession> {
     let rows: Vec<serde_json::Value> = match serde_json::from_slice(&output.stdout) {
         Ok(rows) => rows,
         Err(e) => {
-            eprintln!("[legion watch] nudge: failed to parse `{command_label}` output: {e}");
+            eprintln!(
+                "[legion watch] nudge: failed to parse `{claude_bin} agents --json` output: {e}"
+            );
             return Vec::new();
         }
     };
@@ -299,7 +281,7 @@ fn run_agents_json(program: &str, args: &[&str]) -> Vec<LiveSession> {
         let capped_summary = cap_skip_summaries(&skipped);
         if skip_summary_should_log(&LAST_SKIP_SUMMARY, Some(&capped_summary)) {
             eprintln!(
-                "[legion watch] nudge: skipped {} row(s) from `{command_label}`: {}",
+                "[legion watch] nudge: skipped {} row(s) from `{claude_bin} agents --json`: {}",
                 skipped.len(),
                 capped_summary
             );
@@ -601,40 +583,32 @@ mod tests {
         );
     }
 
-    /// Write a throwaway shell script that `cat`s the given JSON to stdout
-    /// and exits 0, standing in for `claude agents --json`, and return the
+    /// Write a throwaway executable that `cat`s the given JSON to stdout and
+    /// exits 0, standing in for `claude agents --json`, and return the
     /// sessions `list_live_sessions` parses from it. Shared by every
     /// fixture-driven test below so each one only supplies its JSON body
     /// and assertions.
-    ///
-    /// Run through `/bin/sh <path>` (program `/bin/sh`, script path as a plain
-    /// argument) rather than exec'd directly -- see `run_agents_json`'s doc
-    /// for why (#1109): a sibling test's forked child can transiently hold
-    /// this file's write fd open regardless of when WE close it, and Linux
-    /// raises `ETXTBSY` for an exec landing in that window. `sh` is a
-    /// stable system binary, never open for writing by this process, so
-    /// invoking it with the script as a data argument cannot hit that
-    /// check at all -- no chmod, no closed-write-handle dance required.
-    ///
-    /// ABSOLUTE PATH, NOT A BARE `sh`, and this is load-bearing rather
-    /// than style. A bare name is resolved through `$PATH` at spawn time,
-    /// and `src/scip.rs`'s tests replace the process-global `PATH` with
-    /// directories holding no shell (six `env::set_var("PATH", ...)`
-    /// sites, guarded by that module's own `PATH_TEST_LOCK`). Those tests
-    /// live in this same test binary, cargo runs unit tests across threads
-    /// in one process, and this fixture takes no such lock -- so a bare
-    /// `sh` spawned inside one of those windows resolves to nothing,
-    /// `run_agents_json` fails open to an empty vec, and the assertion
-    /// below reports `left: 0` exactly as the ETXTBSY bug did. Trading a
-    /// Linux-only fd race for a cross-platform PATH race would have been
-    /// no fix at all. Do not shorten this back to `sh`.
     #[cfg(unix)]
     fn sessions_from_fake_agents(json: &str) -> Vec<LiveSession> {
         use std::io::Write;
         let mut script = tempfile::NamedTempFile::new().expect("tempfile");
-        writeln!(script, "cat <<'EOF'\n{json}\nEOF").expect("write script");
-        let path_str = script.path().to_string_lossy().into_owned();
-        run_agents_json("/bin/sh", &[&path_str])
+        writeln!(script, "#!/bin/sh\ncat <<'EOF'\n{json}\nEOF").expect("write script");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = script.as_file().metadata().expect("meta").permissions();
+            perms.set_mode(0o755);
+            script.as_file().set_permissions(perms).expect("chmod");
+        }
+        // Close the write handle before exec'ing the script: on Linux,
+        // running a binary that is still open for writing fails with
+        // ETXTBSY ("text file busy") -- the same class #682/#685 already
+        // hit. `into_temp_path` drops the `File` (closing the fd) while
+        // keeping the file on disk as a `TempPath` that still cleans up on
+        // drop, so the handle must stay bound past the `list_live_sessions`
+        // call below.
+        let path = script.into_temp_path();
+        let path_str = path.to_string_lossy().into_owned();
+        list_live_sessions(&path_str)
     }
 
     #[cfg(unix)]

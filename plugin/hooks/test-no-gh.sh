@@ -172,49 +172,6 @@ echo "==> #886: compound commands that never mention gh still pass through untou
 assert_empty "compound but no gh anywhere" "$(run_hook '"echo hi && ls /tmp"')"
 
 
-# --- #1117: a wrapper prefix reaches gh without any shell metacharacter ----
-
-echo "==> #1117: wrapper prefixes deny, never rewrite -- env/sudo/timeout/nice/xargs/command/exec/time"
-assert_wrapped_deny() {
-  local desc="$1" cmd="$2" out
-  out=$(run_hook "$cmd")
-  assert_contains "$desc (denied)" "$out" '"permissionDecision": "deny"'
-  assert_not_contains "$desc (no updatedInput)" "$out" '"updatedInput"'
-}
-assert_wrapped_deny "env assignment"       '"env X=1 gh pr merge 1"'
-assert_wrapped_deny "sudo"                 '"sudo anything gh pr merge 1"'
-assert_wrapped_deny "timeout"              '"timeout 5 gh pr merge 1"'
-assert_wrapped_deny "nice"                 '"nice -n 5 gh pr merge 1"'
-assert_wrapped_deny "xargs"                '"xargs gh pr merge 1"'
-assert_wrapped_deny "command builtin"      '"command gh pr merge 1"'
-assert_wrapped_deny "exec"                 '"exec gh pr merge 1"'
-assert_wrapped_deny "time keyword"         '"time gh pr merge 1"'
-assert_wrapped_deny "bare VAR=val prefix"  '"X=1 gh pr merge 1"'
-assert_wrapped_deny "chained wrappers"     '"env X=1 timeout 5 gh pr merge 1"'
-
-echo "==> #1117: a wrapped call is refused even when the verb would otherwise rewrite"
-# env X=1 gh pr view 1 must NOT become legion pr view -- that would
-# silently drop the environment assignment. Deny, always, for a wrapped
-# call, regardless of whether the bare form is rewrite-eligible.
-assert_wrapped_deny "wrapped rewrite-eligible verb" '"env X=1 gh pr view 1"'
-
-echo "==> #1117: the wrapper deny names the wrapper, not a fabricated translation"
-wrapped_out=$(run_hook '"env X=1 gh pr view 1"')
-assert_contains "names wrapper class" "$wrapped_out" 'wrapper'
-assert_not_contains "does not fabricate a rewrite" "$wrapped_out" 'legion pr view'
-
-echo "==> #1117: a backslash-escaped gh is detected the same as bare gh"
-assert_blocked "escaped gh, no legion equivalent" '"\\gh pr merge 1"'
-assert_rewrite "escaped gh, rewrite-eligible verb is still lossless (no wrapper)" \
-  '"\\gh pr view 1"' 'legion pr view --repo legion-test --number 1'
-
-echo "==> #1117: an escaped gh inside a compound chain still denies via the compound guard"
-assert_compound_deny "leading unrelated command, escaped gh" '"echo hi && \\gh pr merge 1"'
-
-echo "==> #1117: commands that merely mention a wrapper name or gh as an argument value stay allowed when not first-token-wrapped"
-assert_allowed "gh not first token, no wrapper marker" '"echo env gh pr merge 1"'
-
-
 # --- #828: exact redirect instead of a fixed menu, still holds -------------
 
 echo "==> reads the number from the --number flag form too"

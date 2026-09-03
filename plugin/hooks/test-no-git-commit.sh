@@ -239,32 +239,4 @@ echo "==> #886: a genuinely safe message is NOT over-denied by the compound guar
 # a normal commit with no composition at all must still rewrite cleanly.
 assert_rewritten "plain commit still rewrites, unaffected by the #886 guard" '"git commit -m fix"'
 
-
-# --- #1117: a wrapper prefix reaches `git commit` without any shell --------
-# --- metacharacter -----------------------------------------------------------
-
-echo "==> #1117: wrapper prefixes deny, never rewrite"
-assert_denied "env assignment"      '"env X=1 git commit -m fix"'
-assert_denied "sudo"                '"sudo anything git commit -m fix"'
-assert_denied "timeout"             '"timeout 5 git commit -m fix"'
-assert_denied "bare VAR=val prefix" '"X=1 git commit -m fix"'
-assert_denied "chained wrappers"    '"env X=1 timeout 5 git commit -m fix"'
-
-echo "==> #1117: a wrapped commit is never silently translated"
-assert_not_contains "wrapped commit carries no updatedInput" \
-  "$(run_hook '"env X=1 git commit -m fix"')" '"updatedInput"'
-
-echo "==> #1117: the wrapper deny names the wrapper class"
-assert_contains "names wrapper class" \
-  "$(run_hook '"env X=1 git commit -m fix"')" 'wrapper'
-
-echo "==> #1117: a backslash-escaped git is detected the same as bare git"
-assert_rewritten "escaped git still rewrites (no wrapper)" '"\\git commit -m fix"'
-
-echo "==> #1117: an escaped git inside a compound chain still denies via the compound guard"
-assert_denied "leading unrelated command, escaped git" '"npm test && \\git commit -m fix"'
-
-echo "==> #1117: wrapper detection does not over-fire on unrelated commands"
-assert_passthrough "env with no git anywhere" '"env X=1 npm test"'
-
 finish_tests
