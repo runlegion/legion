@@ -10,4 +10,5 @@
 //! rather than a rewrite of this file.
 
 pub mod no_local_memory;
+pub mod pre_grep;
 pub mod pre_read_sym;
