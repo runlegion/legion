@@ -13,6 +13,14 @@ description = "Agent specialization through deliberate practice"
 [workspace]
 members = ["crates/legion-cmd"]
 resolver = "3"
+# Agent isolation worktrees live UNDER this directory (.claude/worktrees/*),
+# each a checkout of some other commit. Cargo resolves a workspace by walking
+# UP from the manifest it is invoked on, so without this exclude every command
+# run inside such a worktree finds THIS manifest and dies with "current package
+# believes it's in a workspace when it's not" -- even though that checkout may
+# predate the workspace entirely. The trap is invisible until an agent tries to
+# run its own gates, and the workaround it reaches for is editing Cargo.toml.
+exclude = [".claude/worktrees"]
 
 [dependencies]
 tantivy = "0.22"
