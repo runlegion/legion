@@ -25,19 +25,61 @@ interpreters = []
 # pointing at the nearest group's help rather than Allowing silently.
 fully_gated_binaries = ["gh"]
 
-# Commands that wrap another command. Named so the tokenizer (slice 2) can see
-# through `env X=1 gh ...` to the binary that actually runs.
-wrappers = []
-
 # Sanctioned escape hatches (FR-CMD-012). A reason-required escape is the
 # point: an unexplained bypass is indistinguishable from an evasion.
 #
-# THIS MUST STAY ABOVE THE FIRST `[[group_help]]` ENTRY -- the same
-# bare-key-under-a-preceding-array-of-tables footgun `routes` below warns
-# about: a bare key written after `[[group_help]]` parses as a field of the
-# last `group_help` entry, not as a new top-level key, and is silently
-# discarded.
+# THIS MUST STAY ABOVE THE FIRST ARRAY-OF-TABLES SECTION BELOW (`wrappers`,
+# then `group_help`) -- the same bare-key-under-a-preceding-array-of-tables
+# footgun `routes` warns about further down: a bare key written after an
+# `[[array_of_tables]]` header parses as a field of that array's LAST entry,
+# not as a new top-level key, and is silently discarded.
 escape_vocabulary = []
+
+# Commands that wrap another command, seen through to the binary that
+# actually runs (`env X=1 gh ...`, `sudo -u nobody gh ...`). Every wrapper
+# the tokenizer's covered see-through set names (module doc, tokenizer.rs)
+# needs `options_before_command = true` to be recognized at all --
+# `resolve_binary_position` only skips past a name whose entry sets it, so a
+# `false` entry is inert. #1117 (fixed in no-gh.sh, v0.38.0): a wrapper
+# prefix reaching a managed binary without any shell metacharacter used to
+# fall straight through this crate's tokenizer with `wrappers` empty, so
+# `env X=1 gh pr view 1` matched no route at all and Allowed unaudited (#1044
+# review, gate 01a06638-3d08). Populating this list is what lets `analyze`
+# see through the prefix to `gh`'s real command position; `decide_stage`
+# (router.rs) then refuses to rewrite or proxy a call whose `Matched` reports
+# `wrapper_consumed` -- see that function for why Deny, never Proxy, is the
+# only honest answer for a fully-gated binary reached this way.
+[[wrappers]]
+name = "env"
+options_before_command = true
+
+[[wrappers]]
+name = "sudo"
+options_before_command = true
+
+[[wrappers]]
+name = "timeout"
+options_before_command = true
+
+[[wrappers]]
+name = "nice"
+options_before_command = true
+
+[[wrappers]]
+name = "xargs"
+options_before_command = true
+
+[[wrappers]]
+name = "command"
+options_before_command = true
+
+[[wrappers]]
+name = "exec"
+options_before_command = true
+
+[[wrappers]]
+name = "time"
+options_before_command = true
 
 # Where a binary's subcommand group documents itself, for guidance text --
 # used by an unmatched subcommand under a known group (#1044).

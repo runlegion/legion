@@ -1179,7 +1179,7 @@ pub fn analyze(
                 let Some(first) = inner_stages.first() else {
                     continue;
                 };
-                let Some((_, ibase, _, _)) =
+                let Some((_, ibase, _, inner_wrapper_consumed)) =
                     resolve_binary_position(&inner, &first.tokens, wrappers)
                 else {
                     continue;
@@ -1188,6 +1188,7 @@ pub fn analyze(
                     matched = Some(Matched {
                         binary: ibase,
                         stage_span: i..i + 1,
+                        wrapper_consumed: inner_wrapper_consumed,
                     });
                     decision = Decision::Proxy(
                         ProxyReason::CoverageUnknown {
@@ -1241,6 +1242,7 @@ pub fn analyze(
                 matched = Some(Matched {
                     binary: base,
                     stage_span: i..i + 1,
+                    wrapper_consumed,
                 });
             } else if wrapper_consumed {
                 // `resolve_binary_position` landed on a word that is not
@@ -1269,6 +1271,7 @@ pub fn analyze(
                         matched = Some(Matched {
                             binary: word_base.to_owned(),
                             stage_span: i..i + 1,
+                            wrapper_consumed: true,
                         });
                         break;
                     }

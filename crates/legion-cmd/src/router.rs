@@ -173,6 +173,28 @@ impl Router {
                 if let Some(o) = &p.equivalent_override {
                     check(o, &p.name)?;
                 }
+                // A pattern of a kind the evaluator does not implement yet
+                // (`kind_fires` returns `None` unconditionally for it) NEVER
+                // fires -- fine for an unused `Rewrite` pattern, which just
+                // never wins, but silently WRONG for `Deny`/`Proxy`: NFR-CMD-
+                // 005's ordering guarantee ("a blocking kind forces Proxy or
+                // Deny even when captures are present") only holds if every
+                // blocking pattern can actually block. A `Deny`/`Proxy`
+                // pattern naming an unimplemented kind would never fire,
+                // letting a later `Rewrite` pattern win unguarded -- refused
+                // at compile time rather than discovered as a live gap.
+                if !kind_is_implemented(&p.kind) && p.outcome != ArgOutcome::Rewrite {
+                    return Err(pattern_err(
+                        &p.name,
+                        format!(
+                            "kind {:?} has no Deny/Proxy evaluation yet -- only a Rewrite \
+                             pattern may use an unimplemented kind, since an unfired Rewrite \
+                             just never wins, but an unfired Deny/Proxy would let a later \
+                             Rewrite pattern win unguarded",
+                            p.kind
+                        ),
+                    ));
+                }
             }
         }
         Ok(Router { table })
@@ -197,6 +219,15 @@ impl Router {
     /// the table's routes by `decide_stage`, the one evaluator (NFR-CMD-005).
     /// A non-`Bash` call, or a `Bash` call naming no managed binary, falls
     /// through to `defaults.no_match` exactly as slice 1 did.
+    ///
+    /// `Routed.targets` is always `Targets::default()` here, even though
+    /// `decide_stage` already resolves `repo` and a numeric `n` capture for
+    /// a matched `gh` route. #1058 (slice 1) named `Targets` extraction as
+    /// needing both a populated table (this slice) AND slice 8's trigger
+    /// wiring, and left it unbuilt in either -- FR-CMD-014's exact contract
+    /// (verb string shape, `issues` vs `prs` from a bare `n`, `words`
+    /// stemming) has no test surface yet for this module to build against
+    /// correctly. Left for slice 8 deliberately rather than guessed at here.
     pub fn route(&self, call: &ToolCall, ctx: &Ctx) -> Routed {
         let Some(analysis) = tokenizer::analyze(
             call,
@@ -276,27 +307,49 @@ impl Router {
         // A fully-gated binary has no sanctioned bare use at all (NFR-CMD-005:
         // "an unmatched subcommand still denies"), so it never degrades to
         // `Proxy` -- "run it, credit nothing" -- the way a splice onto a
-        // non-sole/non-last pipeline stage otherwise would. The same posture
-        // applies to anything this stage is composed with that a rewrite
-        // cannot safely see past: a pipe/`&&`/`;`/newline boundary (a second
-        // stage), a redirect or heredoc attached to THIS stage (carried
-        // across a splice untouched, which is a different guarantee than
-        // never emitting one here), or a command substitution / backtick
-        // sitting among this stage's own words -- `gh pr view 42 $(id)`
-        // parses cleanly as a `Digits` capture of `42` with the substitution
-        // simply not a `Word` token, and rewriting would silently drop it
-        // rather than deny it. Deny, naming nothing invented.
-        if self.table.fully_gated_binaries.contains(&matched.binary)
-            && (stages.len() > 1 || stage_has_opaque_content(stage))
-        {
-            return Decision::Deny(format!(
-                "`{}` is composed with something else in this command (a pipe, redirect, `&&`, \
-                 `;`, or `$(...)`) -- legion's rewrite replaces one whole pipeline stage, and \
-                 translating a stage composed like this would either change what the pipeline \
-                 feeds downstream or silently drop part of what was typed. Run it as its own \
-                 step.",
-                matched.binary
-            ));
+        // non-sole/non-last pipeline stage otherwise would. Two things below
+        // it are not spliceable, and neither invents a translation:
+        if self.table.fully_gated_binaries.contains(&matched.binary) {
+            // A wrapper (env, sudo, timeout, ...) or a bare `VAR=val`
+            // assignment was skipped to reach this binary's command
+            // position (#1117, `Matched::wrapper_consumed` -- surfaced from
+            // `resolve_binary_position`, not recomputed here). Rewriting
+            // would silently drop whatever the wrapper was for, which is
+            // worse than not rewriting at all: an environment override, a
+            // privilege change, a timeout, all vanish with no sign anything
+            // was dropped. This deny must never fabricate a translation --
+            // it names the wrapper class, nothing else.
+            if matched.wrapper_consumed {
+                return Decision::Deny(format!(
+                    "`{}` is reached through a wrapper (env, sudo, timeout, nice, xargs, \
+                     command, exec, time, or a leading VAR=val assignment) instead of being \
+                     called directly. Translating it would silently drop whatever the wrapper \
+                     was for (an environment override, a privilege change, a timeout). Run the \
+                     plain legion equivalent without the wrapper.",
+                    matched.binary
+                ));
+            }
+
+            // The same posture applies to anything this stage is composed
+            // with that a rewrite cannot safely see past: a pipe/`&&`/`;`/
+            // newline boundary (a second stage), a redirect or heredoc
+            // attached to THIS stage (carried across a splice untouched,
+            // which is a different guarantee than never emitting one here),
+            // or a command substitution / backtick sitting among this
+            // stage's own words -- `gh pr view 42 $(id)` parses cleanly as a
+            // `Digits` capture of `42` with the substitution simply not a
+            // `Word` token, and rewriting would silently drop it rather than
+            // deny it. Deny, naming nothing invented.
+            if stages.len() > 1 || stage_has_opaque_content(stage) {
+                return Decision::Deny(format!(
+                    "`{}` is composed with something else in this command (a pipe, redirect, \
+                     `&&`, `;`, or `$(...)`) -- legion's rewrite replaces one whole pipeline \
+                     stage, and translating a stage composed like this would either change what \
+                     the pipeline feeds downstream or silently drop part of what was typed. Run \
+                     it as its own step.",
+                    matched.binary
+                ));
+            }
         }
 
         let Some(argv) = stage_argv_after_binary(command, stage, &matched.binary) else {
@@ -535,7 +588,11 @@ fn kind_fires(
         // to the module whose script case first needs it: pre-bash-grep,
         // no-git-commit, git grep). A pattern of one of these kinds never
         // matches here rather than guessing at semantics this module has no
-        // test evidence for.
+        // test evidence for. `Router::new` refuses to compile one of these
+        // on a Deny/Proxy pattern (a `None` outcome there would let a later
+        // Rewrite pattern win unguarded); a `Rewrite` pattern of one of
+        // these kinds simply never wins, which is safe but dead, and is not
+        // refused.
         ArgKind::Ext { .. }
         | ArgKind::Conflict { .. }
         | ArgKind::Path
@@ -543,6 +600,17 @@ fn kind_fires(
         | ArgKind::Append { .. }
         | ArgKind::Scope { .. } => None,
     }
+}
+
+/// Whether the evaluator has real Deny/Proxy semantics for this kind
+/// (`kind_fires` can return `Some` for it). Kept in sync with `kind_fires`
+/// by listing the same three implemented variants, so `Router::new` can
+/// refuse a table that would otherwise silently rely on one of the rest.
+fn kind_is_implemented(kind: &ArgKind) -> bool {
+    matches!(
+        kind,
+        ArgKind::Digits { .. } | ArgKind::Flags { .. } | ArgKind::NoExtraPositionals
+    )
 }
 
 /// Replace `{key}` with `captures[key]`, or `<key>` when absent -- rendered
@@ -944,5 +1012,45 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("missing"), "{msg}");
         assert!(msg.contains("scope-guard"), "names the pattern: {msg}");
+    }
+
+    #[test]
+    fn a_deny_pattern_of_an_unimplemented_kind_is_refused_at_compile_time() {
+        // `kind_fires` has no Deny/Proxy semantics for `Path` yet (#1044:
+        // only Digits, Flags, and NoExtraPositionals are implemented). Left
+        // uncaught, this pattern would silently never fire, and a later
+        // Rewrite pattern on the same route would win unguarded --
+        // NFR-CMD-005's "Deny/Proxy before Rewrite" ordering promise broken
+        // by omission rather than by a wrong evaluation.
+        let mut t = table_with("allow");
+        let mut r = route_named("gh", "pr list", "legion pr list");
+        r.patterns.push(ArgPattern {
+            name: "scope-guard".into(),
+            kind: ArgKind::Path,
+            outcome: ArgOutcome::Deny,
+            equivalent_override: None,
+        });
+        let err = {
+            t.routes.push(r);
+            Router::new(t).expect_err("must refuse")
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("scope-guard"), "names the pattern: {msg}");
+    }
+
+    #[test]
+    fn a_rewrite_pattern_of_an_unimplemented_kind_compiles_but_never_wins() {
+        // The mirror case: a `Rewrite` pattern that never fires is safe
+        // (just dead), so it is not refused the way a Deny/Proxy one is.
+        let mut t = table_with("allow");
+        let mut r = route_named("gh", "pr list", "legion pr list");
+        r.patterns.push(ArgPattern {
+            name: "dead".into(),
+            kind: ArgKind::Path,
+            outcome: ArgOutcome::Rewrite,
+            equivalent_override: None,
+        });
+        t.routes.push(r);
+        assert!(Router::new(t).is_ok());
     }
 }

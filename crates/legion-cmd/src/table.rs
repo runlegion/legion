@@ -258,7 +258,10 @@ recall_miss = \"allow\"
         let t = RouteTable::embedded().expect("embedded table must parse");
         assert!(!t.managed_binaries.is_empty());
         assert!(t.interpreters.is_empty());
-        assert!(t.wrappers.is_empty());
+        // Populated alongside #1044's gh section (gate 01a06638-3d08): an
+        // empty `wrappers` list is what let a wrapper-prefixed call (`env
+        // X=1 gh pr view 1`) reach no route at all and Allow unaudited.
+        assert!(!t.wrappers.is_empty());
         assert!(!t.fully_gated_binaries.is_empty());
         assert!(!t.group_help.is_empty());
         assert!(t.escape_vocabulary.is_empty());

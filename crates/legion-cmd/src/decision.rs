@@ -45,6 +45,13 @@ pub struct Carry {
 pub struct Matched {
     pub binary: String,
     pub stage_span: std::ops::Range<usize>,
+    /// Whether a named wrapper (`env`, `sudo`, `timeout`, ...) or a bare
+    /// `VAR=val` assignment was skipped over to reach this binary's command
+    /// position (#1117). `resolve_binary_position` (tokenizer.rs) already
+    /// computes this while resolving `binary` itself; it is surfaced here
+    /// rather than recomputed so a rule module can refuse to rewrite a
+    /// wrapped call without re-deriving wrapper detection on its own.
+    pub wrapper_consumed: bool,
 }
 
 /// What the call was about, for the record and for pre-load (FR-CMD-014).

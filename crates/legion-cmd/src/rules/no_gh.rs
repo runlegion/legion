@@ -285,6 +285,83 @@ mod tests {
         }
     }
 
+    // --- #1117: a wrapper prefix reaches gh without any shell metacharacter,
+    // and must deny -- never rewrite -- regardless of whether the wrapped
+    // verb would otherwise be lossless. -----------------------------------
+
+    #[test]
+    fn wrapper_prefixes_deny_never_rewrite() {
+        let r = router();
+        for cmd in [
+            "env X=1 gh pr merge 1",
+            "sudo anything gh pr merge 1",
+            "timeout 5 gh pr merge 1",
+            "nice -n 5 gh pr merge 1",
+            "xargs gh pr merge 1",
+            "command gh pr merge 1",
+            "exec gh pr merge 1",
+            "time gh pr merge 1",
+            "X=1 gh pr merge 1",
+            "env X=1 timeout 5 gh pr merge 1",
+        ] {
+            let routed = r.route(&bash(cmd), &ctx());
+            assert!(
+                matches!(routed.decision, Decision::Deny(_)),
+                "case {cmd:?}: expected deny, got {:?}",
+                routed.decision
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_call_denies_even_when_the_verb_would_otherwise_rewrite() {
+        // `env X=1 gh pr view 1` must NOT become `legion pr view` -- that
+        // would silently drop the environment assignment.
+        let r = router();
+        let routed = r.route(&bash("env X=1 gh pr view 1"), &ctx());
+        assert!(matches!(routed.decision, Decision::Deny(_)));
+    }
+
+    #[test]
+    fn the_wrapper_deny_names_the_wrapper_not_a_fabricated_translation() {
+        let r = router();
+        let routed = r.route(&bash("env X=1 gh pr view 1"), &ctx());
+        let reason = deny_reason(routed.decision, "env X=1 gh pr view 1");
+        assert!(reason.contains("wrapper"), "{reason}");
+        assert!(!reason.contains("legion pr view"), "{reason}");
+    }
+
+    #[test]
+    fn a_backslash_escaped_gh_is_detected_the_same_as_bare_gh() {
+        let r = router();
+        let routed = r.route(&bash("\\gh pr merge 1"), &ctx());
+        assert!(matches!(routed.decision, Decision::Deny(_)));
+
+        // No wrapper involved here -- the escape alone must not block a
+        // rewrite-eligible verb.
+        let routed = r.route(&bash("\\gh pr view 1"), &ctx());
+        assert_eq!(
+            rewrite_command(routed.decision, "\\gh pr view 1"),
+            "legion pr view --repo legion-test --number 1"
+        );
+    }
+
+    #[test]
+    fn a_leading_unrelated_command_with_an_escaped_gh_still_denies_via_the_compound_guard() {
+        let r = router();
+        let routed = r.route(&bash("echo hi && \\gh pr merge 1"), &ctx());
+        assert!(matches!(routed.decision, Decision::Deny(_)));
+    }
+
+    #[test]
+    fn a_wrapper_name_mentioned_as_a_plain_argument_stays_allowed() {
+        // `gh` sits in argument position to `echo`, not command position of
+        // its own stage, and no wrapper token was ever consumed to reach it.
+        let r = router();
+        let routed = r.route(&bash("echo env gh pr merge 1"), &ctx());
+        assert_eq!(routed.decision, Decision::Allow);
+    }
+
     // --- commands that merely mention gh, or another binary entirely --------
 
     #[test]
