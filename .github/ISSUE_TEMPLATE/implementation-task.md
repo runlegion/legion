@@ -45,6 +45,7 @@ Each step is mandatory. Do not skip steps or combine them.
 3. **Review** -- Run `/legion:legion-review`, which fans out parallel review dimensions (spec-vs-diff, correctness, quality, security) and adversarially verifies each finding. Do not create the PR yet.
 4. **Fix** -- Address every issue the review found. Re-run tests after fixes.
 5. **PR** -- Create the PR. Reference this issue number.
+6. **Verify** -- Run `/legion:legion-verify` (or `legion verify --issue <this issue>`). It reads the acceptance criteria, the diff, and the test output and emits one verdict per criterion against the **traced requirement**, not the issue's restatement of it, and it **witnesses every prediction emitted for this work** -- an emitted-but-unwitnessed prediction is an orphan, and verify is the stage that ends orphans. All-pass records a clean verify gate; any fail hard-blocks; any uncertain needs a human. Run this after Review, before the issue is closed -- it is the independent net, and skipping it is skipping the step.
 
 ### Rust Rules
 - No `unwrap()` in production code
@@ -60,6 +61,8 @@ Each step is mandatory. Do not skip steps or combine them.
 - [ ] Simplify pass completed
 - [ ] Review pass completed and issues fixed
 - [ ] PR created and linked to this issue
+- [ ] Verify pass recorded (all criteria pass against the traced requirement)
+- [ ] Predictions witnessed (the uncertainty chain is closed -- no orphans left by verify)
 
 **This issue is complete when:** [Specific, measurable completion condition]
 

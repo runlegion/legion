@@ -105,7 +105,7 @@ FINDINGS:
     fix: <specific suggestion>
   (or: "No issues found. Spec met, repo rules respected, tests cover the new behavior.")
 
-OUT OF SCOPE (noted, not blocking): <future-card material, or "none">
+OUT OF SCOPE (noted, not blocking): <future-issue material, or "none">
 
 SIGN-OFF: <approved: "Approved. Ready for merge path."
            changes_requested: "Re-review after the listed HIGH/MED findings are addressed.">
@@ -127,9 +127,7 @@ POST the report, SIGNAL a pointer, never mail the body. `legion post --repo <rep
 signal --repo <repo> --to <orchestrator> --verb answer --note "<one line: the outcome and
 the post id>"`. End your turn with that same single line.
 
-A mailed body enters the orchestrator's context permanently and is re-read on every one of
-its remaining turns, so a thousand-word report is paid for a thousand times. The
-280-character cap on a signal note is the system saying so. A pointer costs one read when
-the orchestrator decides it needs the detail, and nothing when it does not. Ending on one
-line matters for the same reason: the harness delivers your final output a second time as
-a truncated idle notice.
+A mailed body is re-read on every remaining orchestrator turn, so a long report is paid for
+many times over; a pointer costs one read only when the detail is needed, and nothing
+otherwise. End on one line -- the harness re-delivers your final output as a truncated idle
+notice.
