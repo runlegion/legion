@@ -63,13 +63,33 @@ Work-source actions go through legion so they land in the audit log (\`legion au
   exit 0
 fi
 
+# --- #1117: a wrapper prefix (env/sudo/timeout/...) or a bare VAR=val ------
+# --- assignment reaches gh without any shell metacharacter -----------------
+#
+# None of these are metacharacters legion_hook_compound catches, so a
+# wrapped invocation used to fall straight through the basename check
+# below as if the FIRST token were `env`/`sudo`/`timeout`/etc, never `gh`.
+# Deny outright rather than attempt a rewrite: `env X=1 gh pr view 1`
+# rewritten to `legion pr view --number 1` would silently drop the
+# environment assignment, and this hook cannot know whether it mattered.
+if legion_hook_wrapped_call "$COMMAND" gh; then
+  emit_deny "Refusing -- this command reaches \`gh\` through a wrapper (env, sudo, timeout, nice, xargs, command, exec, time, or a leading VAR=val assignment) instead of calling it directly.
+
+Translating it would silently drop whatever the wrapper was for (an environment override, a privilege change, a timeout). Run the plain legion equivalent without the wrapper:
+
+    legion --help
+
+Work-source actions go through legion so they land in the audit log (\`legion audit\`)."
+  exit 0
+fi
+
 # Check if the command invokes gh -- including by absolute path. Naive
 # prefix matching on `gh ` leaves /opt/homebrew/bin/gh, /usr/bin/gh,
 # ~/bin/gh as silent escape hatches. Take the basename of the first
-# whitespace-separated token, then compare to `gh`.
+# whitespace-separated token (also stripping a leading backslash escape,
+# `\gh` -- #1117), then compare to `gh`.
 TRIMMED="${COMMAND#"${COMMAND%%[![:space:]]*}"}"
-FIRST_TOKEN="${TRIMMED%%[[:space:]]*}"
-FIRST_BIN="${FIRST_TOKEN##*/}"
+FIRST_BIN="$(legion_hook_first_bin "$COMMAND")"
 
 if [ "$FIRST_BIN" != "gh" ]; then
   exit 0
