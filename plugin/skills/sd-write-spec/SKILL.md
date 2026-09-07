@@ -7,7 +7,7 @@ description: |
   in-body. Two input modes: from an intent alone (system work) or from a landed service
   design (product work). Invoke when a scope is ready to move from discovery to a buildable
   spec.
-version: 0.1.0
+version: 0.2.0
 user-invocable: true
 allowed-tools: Bash, Read
 ---
@@ -35,12 +35,39 @@ resolve the ambiguity.
   in present behavior) routes to a **RESEARCH document**, not a SHALL: build the toy first.
 - **UNCLEAR goes up, never resolved in-body.** A contradiction or silent gap in the inputs
   is escalated, not decided. Land the set as far as it goes, name the gap in the affected
-  requirement, and signal whoever owns the answer with
-  `legion signal --repo <your-repo> --to <owner> --verb question --note "<the gap>"`, one
-  signal per owner, and list every signal sent in the report. The report alone is not the
-  signal: an owner who is not woken never answers. This is the same park pattern the
-  pipeline uses. Resolving a gap in-body (labelling it DECIDED and moving on) is the exact failure
-  the meaning-drift audit found in the issue-writer; this skill does not repeat it.
+  requirement, and carry every gap in your report to your caller -- the caller routes it to
+  whoever owns the answer. The report to your caller IS the escalation: do not signal the
+  owner directly and do not post the run to the bullpen, both of which wake the whole team
+  for a cost the report already carries, and the caller is the one who wakes the owner. (A
+  run with no caller is the only case where the async
+  `legion signal --to <owner> --verb question` applies.) Resolving a gap in-body (labelling
+  it DECIDED and moving on) is the exact failure the meaning-drift audit found in the
+  issue-writer; this skill does not repeat it.
+
+## Distill each requirement as you write it
+
+A requirement is a block. Distill it at the block, as you write it, before the next one --
+not as a pass over the finished set (the checks are the `legion-distill` skill; the writer
+runs them here, a reader checks after). The block's one reader is a rule-follower who
+executes it without having done the thinking, so the test is: can that reader act on this
+requirement from its own text and its `traces_to`, with no hole to fall into? Run four
+checks per requirement:
+
+- **One SHALL.** The requirement states exactly one thing to build. Two things are two
+  requirements.
+- **Carries.** A rule-follower executes it from its text plus its cited source -- no term
+  left undefined, no step left to guess, acceptance naming an observable rather than an
+  intention.
+- **Traced.** `traces_to` names what earned it (invariant 1). A SHALL with no earner is a
+  stop.
+- **No invention is a stop.** If finishing the block needs a fact the inputs do not give --
+  a metric with no measurement, a resolution to a contradiction, a mechanism the intent only
+  proposes -- HALT that block. Do not fill the hole. Escalate it (invariant 2) or route it to
+  RESEARCH, and write no requirement over an invented fact. A block you cannot finish without
+  inventing is the gap to send up, not to smooth.
+
+The set is done when every block carries or is escalated, never when a hole was filled to
+make a block read complete.
 
 ## Input modes
 
