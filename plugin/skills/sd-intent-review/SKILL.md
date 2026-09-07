@@ -5,7 +5,7 @@ description: |
   agenda -- candidate services to test and claims to test -- with every item tracing to an
   intent field. Outputs hypotheses to validate against real discourse, never designed
   services. Invoke at the start of a repo's service design, before any artifact exists.
-version: 0.1.0
+version: 0.2.0
 user-invocable: true
 allowed-tools: Bash, Read
 ---
@@ -17,6 +17,18 @@ the world about -- not services, not artifacts, not statuses. The one failure mo
 matters: over-producing. A reviewed intent that comes back with system responses, real
 versus planned stamps, or merged service definitions has jumped two steps ahead; that is
 service design, and it happens only after the claims are tested.
+
+## Gate: distill the intent first
+
+Before deriving anything, cold-read the intent against distill (the checks in the
+`legion-distill` skill). You are a fresh reader of this intent, so you are the cold reader
+distill needs -- no separate agent. Judge whether you can act on the intent from its own
+text alone. A stop is any of: a claim that does not carry its own substance, a bare pointer
+to another id or document a reader would have to fetch to act, or a block that contradicts
+another. At a stop, HALT -- emit the specific gaps and derive no agenda. A schema-valid
+intent can still stop here: `document validate` checks the shape, distill checks whether a
+reader can follow it. Do not smooth a gap into an agenda item; an intent that fails distill
+goes back to its writer, not forward to a review.
 
 ## Procedure
 
@@ -114,6 +126,7 @@ exists to prevent. The discover report names each claim left unwitnessed and why
 - Stamping build status: real versus planned is build state and belongs to later steps.
 - Inventing claims the intent neither states nor implies -- an emergent insight is
   sd-discover's to discover from evidence, not this step's to guess.
-- Reviewing an intent that does not exist or does not validate: stop and say so.
+- Reviewing an intent that does not exist, does not validate, or does not pass the distill
+  gate (above): stop and emit the gaps.
 - Witnessing its own predictions. The review stakes them; sd-discover's verdicts score
   them. A self-witnessed claim is the rubber stamp the engine exists to catch.
