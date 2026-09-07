@@ -1,5 +1,84 @@
 # Legion Changelog
 
+## 0.37.6
+
+The distill-per-block release. Distill -- the gate that stops fluent-but-unfollowable prose
+from being stored -- moves from a pass over a finished draft to a check the writer runs on
+each block as it writes it. The unit is now the block: one section, one decision, one
+numbered rule, one bullet, one claim. Each block faces four checks -- it says exactly one
+thing, every word carries that thing, it stands on the artifact's own text rather than
+pointing at an id the reader must fetch to act, and it does not contradict a block above it
+-- and a block that fails is a HALT, not a note to write around. The HALT holds at every
+handoff, the input included: an agent handed a brief that fails distill sends it back rather
+than building from it. A separate cold reader still backstops the two things a writer cannot
+grade in its own work -- whether its prose is followable, and a cross-block contradiction it
+wrote past. The gate is then threaded into the two skills that produce documents, so it runs
+where drift actually enters.
+
+The release also narrows a delivery rule 0.37.4 made its headline. That release told every
+agent to report by posting its body to the bullpen and signalling a one-line pointer, argued
+from a cache-read measurement. For a writer that reasoning does not hold: a draft belongs to
+the one caller who asked for it, not the whole team. So `issue-writer` and `sd-write-spec`
+now report and escalate to their caller and stop broadcasting to the bullpen -- the
+pointer-not-body discipline still governs agents that report to an orchestrator, while a
+writer hands its work to the one reader who will route it.
+
+Patch release: four Markdown files -- one skill reframed around the block and three
+definitions that adopt it -- docs only, with no Rust code path touched, no wire-format
+change, and no schema migration.
+
+### Changed
+
+- **Distill is reframed around the block** (PR #1140, #1139). The `legion-distill` skill is
+  rewritten so the block is its unit -- a section, a decision, a numbered rule, a bullet, an
+  open question, a single claim -- and the writer distills each block at the pen, before the
+  next one, rather than passing over a finished draft. Four checks run per block: one job (the
+  block says exactly one thing), cut to carry (every word belongs to that thing), carry don't
+  point (the block stands on the artifact's own text and the reader's standing vocabulary; a
+  bare pointer to an id the reader must fetch to act is a stop, while a trailing cite is
+  provenance and never a substitute for the substance), and consistent (no contradiction or
+  duplication of a block above). A block that fails is a stop, and a stop is a HALT: emit the
+  gap, do not proceed, do not smooth it into fluent prose. The HALT holds at three handoffs --
+  on the input before you build from it, on your own draft per block, and before the artifact
+  is stored -- so an agent that finds ten gaps in its brief sends it back rather than writing
+  from it. The old fire-once-at-the-store step is replaced by this per-block gate; the
+  separate cold reader remains, reading the artifact from its text alone as the check on
+  whether the prose is followable and whether a cross-block contradiction slipped through.
+
+- **`sd-intent-review` distills the intent before deriving an agenda** (PR #1140, #1139). A
+  front-door gate now cold-reads the intent against the distill checks before anything is
+  derived -- and since a fresh read of the intent is itself the cold reader distill needs, no
+  separate agent is spawned. A schema-valid intent can still stop here: `document validate`
+  checks the shape, distill checks whether a reader can act on it, and the case that motivated
+  the gate is exactly that -- an intent that validated clean yet was unfollowable. On a stop --
+  a claim that does not carry its own substance, a bare pointer to another id, or a block that
+  contradicts another -- the reviewer HALTs, emits the specific gaps, and derives no agenda;
+  the intent goes back to its writer rather than forward into a review built over a broken
+  input. The Refuses list now stops on an intent that "does not pass the distill gate" beside
+  one that does not exist or does not validate.
+
+- **`sd-write-spec` distills each requirement as it writes it** (PR #1140, #1139). A
+  requirement is a block, and the reader it must serve is a rule-follower who executes the
+  SHALL without having done the thinking. Four checks run per requirement: one SHALL (exactly
+  one thing to build), carries (executable from its text plus its cited source, acceptance
+  naming an observable rather than an intention), traced (`traces_to` names what earned it),
+  and no-invention-is-a-stop -- if finishing the block needs a fact the inputs do not give (a
+  metric with no measurement, a resolution to a contradiction, a mechanism the intent only
+  proposes), the writer HALTs that block, escalates it or routes it to a RESEARCH document, and
+  writes no requirement over an invented fact. The set is done when every block carries or is
+  escalated, never when a hole was filled to make a block read complete.
+
+- **Writer agents report to their caller, not the bullpen** (PR #1140, #1139). This narrows
+  the delivery rule 0.37.4 set for every agent. `issue-writer`'s Delivery section, which told
+  it to post the report to the bullpen and signal a pointer, now says to send the title and
+  body to its caller with SendMessage and to no one else -- a writer never tells the whole team
+  what it did; the caller is the only reader who needs the draft and the one who routes it
+  onward. The same move lands in `sd-write-spec`'s escalation path: an UNCLEAR gap was
+  signalled directly to the owner with `legion signal --verb question`, which woke the whole
+  team, and now travels in the report to the caller, who wakes the owner -- the direct async
+  signal kept only for a run that has no caller. What changes is the destination: a writer's
+  output goes to the one caller who asked, not onto a team-wide board.
+
 ## 0.37.5
 
 The prompt-and-gate cleanup release. Two loose ends left by the 0.37.4 agent work are
