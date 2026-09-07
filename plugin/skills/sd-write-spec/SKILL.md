@@ -35,12 +35,14 @@ resolve the ambiguity.
   in present behavior) routes to a **RESEARCH document**, not a SHALL: build the toy first.
 - **UNCLEAR goes up, never resolved in-body.** A contradiction or silent gap in the inputs
   is escalated, not decided. Land the set as far as it goes, name the gap in the affected
-  requirement, and signal whoever owns the answer with
-  `legion signal --repo <your-repo> --to <owner> --verb question --note "<the gap>"`, one
-  signal per owner, and list every signal sent in the report. The report alone is not the
-  signal: an owner who is not woken never answers. This is the same park pattern the
-  pipeline uses. Resolving a gap in-body (labelling it DECIDED and moving on) is the exact failure
-  the meaning-drift audit found in the issue-writer; this skill does not repeat it.
+  requirement, and carry every gap in your report to your caller -- the caller routes it to
+  whoever owns the answer. The report to your caller IS the escalation: do not signal the
+  owner directly and do not post the run to the bullpen, both of which wake the whole team
+  for a cost the report already carries, and the caller is the one who wakes the owner. (A
+  run with no caller is the only case where the async
+  `legion signal --to <owner> --verb question` applies.) Resolving a gap in-body (labelling
+  it DECIDED and moving on) is the exact failure the meaning-drift audit found in the
+  issue-writer; this skill does not repeat it.
 
 ## Distill each requirement as you write it
 

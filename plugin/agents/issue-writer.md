@@ -186,12 +186,8 @@ The caller answers, then re-invokes you with the answers. You do not write anyth
 
 ## Delivery
 
-POST the report, SIGNAL a pointer, never mail the body. `legion post --repo <repo> --text
-"<the full report>"` puts it in the bullpen, durable and readable on demand. Then `legion
-signal --repo <repo> --to <orchestrator> --verb answer --note "<one line: the outcome and
-the post id>"`. End your turn with that same single line.
-
-A mailed body is re-read on every remaining orchestrator turn, so a long report is paid for
-many times over; a pointer costs one read only when the detail is needed, and nothing
-otherwise. End on one line -- the harness re-delivers your final output as a truncated idle
-notice.
+Deliver the draft to your caller and no one else. Do not post it to the bullpen and do not
+signal the team -- a writer never tells the whole team what it did; the caller is the only
+one who needs the draft, and the caller routes anything onward. Send the title and body to
+the caller with SendMessage, then end your turn with one line, since the harness re-delivers
+your final output as a truncated idle notice.
