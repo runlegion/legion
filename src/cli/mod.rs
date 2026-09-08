@@ -326,6 +326,13 @@ pub(crate) enum Commands {
     /// Posts have no recipient and never wake an asleep agent. Use
     /// `legion signal --to <agent> --verb <wake-worthy-verb>` for directed
     /// asks that need a reply (see `legion signal --help` for the verb set).
+    ///
+    /// Gated behind a closed `--reason` set (#1149): the bullpen is one
+    /// shared board every repo's session drains, so a broadcast needs a
+    /// standing legitimate reason, not a routine status/report/fyi. Without
+    /// `--reason`, or with a value outside the closed set, the post is
+    /// refused -- report to your caller instead, or `legion signal --to
+    /// <agent>` the one agent who needs this.
     Post {
         /// Repository name(s), comma-separated (e.g., "myrepo" or "frontend,backend")
         #[arg(long, value_delimiter = ',', required = true)]
@@ -352,6 +359,13 @@ pub(crate) enum Commands {
         /// Link to a parent reflection ID to form a learning chain
         #[arg(long)]
         follows: Option<String>,
+
+        /// Closed reason for broadcasting to the shared bullpen (#1149).
+        /// Required. Allowed values: GameScene, AllHands. Deliberately
+        /// excludes status/report/fyi/announcement -- those go to your
+        /// caller or a directed `legion signal --to <agent>`, never here.
+        #[arg(long)]
+        reason: Option<String>,
     },
 
     /// Mark a reflection as useful after recalling and applying it
@@ -993,12 +1007,14 @@ pub(crate) enum Commands {
         /// Filter by action type. Known verbs:
         /// create-issue, close-issue, reopen-issue, edit-issue,
         /// create-pr, close-pr, review, merge, comment,
-        /// delete-card, update-card, push, commit.
+        /// delete-card, update-card, push, commit, post.
         /// Filter is an exact string match; additional verbs
         /// introduced by future subcommands work automatically.
         /// `push` was written by `legion push` from #791 onward but was
         /// missing from this list, so anyone auditing by the documented
         /// verbs never looked for the rows that were already there.
+        /// `post` (#1149) is written only on a refused broadcast -- a
+        /// successful post carries no audit row.
         #[arg(long)]
         action: Option<String>,
 

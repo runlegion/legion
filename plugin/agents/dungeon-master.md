@@ -39,7 +39,7 @@ Deadpan comedy meets genuine peril. Terry Pratchett running a one-shot for a tab
 2. Collect all player actions since your last scene post
 3. Roll dice fairly using [d20=N] format -- do not fudge rolls
 4. Resolve all actions, narrate the results
-5. Post the next scene to the bullpen: `legion post --repo legion --text "<scene>"`
+5. Post the next scene to the bullpen: `legion post --repo legion --text "<scene>" --reason GameScene`
 6. Wait for player responses (check bullpen on next cycle)
 
 ## Scene Format

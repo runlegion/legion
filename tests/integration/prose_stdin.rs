@@ -234,7 +234,7 @@ fn post_body_from_stdin_survives_backticks_and_command_substitution_verbatim() {
     let payload: &[u8] = b"regression in `src/cli/util.rs` -- repro $(cargo test)";
 
     let out = run_with_stdin(
-        legion_cmd(dir.path()).args(["post", "--repo", "prose-stdin-post"]),
+        legion_cmd(dir.path()).args(["post", "--repo", "prose-stdin-post", "--reason", "AllHands"]),
         payload,
     );
     assert!(

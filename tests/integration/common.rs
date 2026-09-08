@@ -125,7 +125,15 @@ pub fn run_with_stdin(cmd: &mut Command, payload: &[u8]) -> Output {
 /// was documented by the (since-retired, #952) MCP push bridge test's own
 /// inline warmup; every new multi-process test should call this instead.
 pub fn warm_schema(data_dir: &Path) {
-    run_ok(legion_cmd(data_dir).args(["post", "--repo", "warmup-repo", "--text", "schema warmup"]));
+    run_ok(legion_cmd(data_dir).args([
+        "post",
+        "--repo",
+        "warmup-repo",
+        "--text",
+        "schema warmup",
+        "--reason",
+        "AllHands",
+    ]));
 }
 
 /// Land a permissive, always-passing JSON Schema document declaring

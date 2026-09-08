@@ -199,7 +199,8 @@ fn run() -> error::Result<()> {
             domain,
             tags,
             follows,
-        } => cli::signal::handle_post(repo, text, transcript, domain, tags, follows)?,
+            reason,
+        } => cli::signal::handle_post(repo, text, transcript, domain, tags, follows, reason)?,
         Commands::Signal {
             repo,
             to,

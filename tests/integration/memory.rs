@@ -616,7 +616,15 @@ fn quiet_by_default() {
 
     // Post without --verbose should also be quiet
     let out = legion_cmd(dir.path())
-        .args(["post", "--repo", "test", "--text", "quiet post"])
+        .args([
+            "post",
+            "--repo",
+            "test",
+            "--text",
+            "quiet post",
+            "--reason",
+            "AllHands",
+        ])
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -1429,6 +1437,8 @@ fn verbose_shows_confirmation() {
         "test",
         "--text",
         "verbose post",
+        "--reason",
+        "AllHands",
     ]));
     assert!(
         stderr.contains("posting"),

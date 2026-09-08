@@ -7,8 +7,69 @@ use crate::cli::datadir::data_dir;
 use crate::cli::memory::{
     backfill_embeddings, run_compound_command_with_meta, try_load_embed_model,
 };
-use crate::cli::util::{inline_or_stdin_unless, open_db, open_db_and_index};
+use crate::cli::util::{audit, inline_or_stdin_unless, open_db, open_db_and_index};
 use crate::{board, db, error, reflect, signal, task, verbs, watch};
+
+/// Closed set of reasons `legion post` accepts for broadcasting to the
+/// shared bullpen (#1149). Legion-defined and deliberately small -- add a
+/// variant only with operator sign-off. Deliberately EXCLUDES
+/// status/report/fyi/announcement: those are exactly the routine broadcasts
+/// this gate exists to stop; they go to the caller (the final message IS
+/// the report) or a directed `legion signal --to <agent>`.
+///
+/// Mirrors hzr's `RawFidelityReason` closed hatch (reflection 01a07eec):
+/// one small enum naming the few legitimate escapes from the default-closed
+/// path, parsed at the CLI boundary rather than trusted as a free string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostReason {
+    /// dungeon-master's per-turn scene narration -- the one standing
+    /// legitimate broadcast to the whole team (#1149).
+    GameScene,
+    /// An operator-declared all-hands broadcast.
+    AllHands,
+}
+
+impl PostReason {
+    const ALL: [PostReason; 2] = [PostReason::GameScene, PostReason::AllHands];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::GameScene => "GameScene",
+            Self::AllHands => "AllHands",
+        }
+    }
+
+    /// The allowed set, formatted for an error message.
+    fn allowed_list() -> String {
+        Self::ALL
+            .iter()
+            .map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Parse `legion post --reason`, mirroring hzr's
+/// `parse_raw_fidelity_reason` / MissingReason|InvalidReason ->
+/// Ask-with-prescription state machine (reflection 01a07eec): a missing
+/// reason is refused with the report-to-caller / signal-the-one-agent
+/// prescription, an unrecognized value is refused naming the closed set,
+/// and a recognized value authorizes the post.
+pub(crate) fn parse_post_reason(reason: Option<&str>) -> error::Result<PostReason> {
+    let Some(raw) = reason else {
+        return Err(error::LegionError::PostReasonMissing {
+            allowed: PostReason::allowed_list(),
+        });
+    };
+    PostReason::ALL
+        .iter()
+        .copied()
+        .find(|r| r.as_str() == raw)
+        .ok_or_else(|| error::LegionError::PostReasonInvalid {
+            reason: raw.to_string(),
+            allowed: PostReason::allowed_list(),
+        })
+}
 
 pub(crate) fn handle_post(
     repo: Vec<String>,
@@ -17,7 +78,36 @@ pub(crate) fn handle_post(
     domain: Option<String>,
     tags: Option<String>,
     follows: Option<String>,
+    reason: Option<String>,
 ) -> error::Result<()> {
+    // #1149: the closed reason gate. Checked before anything else -- no
+    // stdin read, no db write for the post itself -- so a refused post
+    // costs nothing beyond the audit row recorded below. Never silent: the
+    // refusal always propagates as a named, prescriptive error.
+    if let Err(e) = parse_post_reason(reason.as_deref()) {
+        // Best-effort audit row: the demand signal for where
+        // report-to-caller / signal-the-one-agent has not landed yet. A
+        // database that cannot be opened must not swallow the refusal
+        // itself -- only the audit write is best-effort, matching `audit`'s
+        // own contract elsewhere in this module.
+        if let Ok(database) = open_db() {
+            audit(
+                &database,
+                &db::AuditInput {
+                    agent: &repo.join(","),
+                    action: "post",
+                    target_type: "bullpen",
+                    target_ref: reason.as_deref().unwrap_or("<missing>"),
+                    task_id: None,
+                    source_type: "cli",
+                    details: Some(&e.to_string()),
+                    outcome: "refused",
+                },
+            );
+        }
+        return Err(e);
+    }
+
     // #917: fall to stdin only when neither --text nor --transcript was given.
     let text = inline_or_stdin_unless(text, transcript.is_some(), "--text")?;
 
@@ -534,6 +624,55 @@ mod tests {
         assert!(
             msg.contains("--to"),
             "error message must reference --to flag: {msg}"
+        );
+    }
+
+    // -- post reason gate (#1149) --------------------------------------------
+
+    #[test]
+    fn post_reason_none_is_refused_with_prescription() {
+        let err = parse_post_reason(None).expect_err("missing reason must be refused");
+        assert!(matches!(err, error::LegionError::PostReasonMissing { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("GameScene"));
+        assert!(msg.contains("AllHands"));
+    }
+
+    #[test]
+    fn post_reason_invalid_value_is_refused_naming_allowed_set() {
+        let err = parse_post_reason(Some("status")).expect_err("bad reason must be refused");
+        match &err {
+            error::LegionError::PostReasonInvalid { reason, allowed } => {
+                assert_eq!(reason, "status");
+                assert!(allowed.contains("GameScene"));
+                assert!(allowed.contains("AllHands"));
+            }
+            other => panic!("expected PostReasonInvalid, got {other:?}"),
+        }
+    }
+
+    /// The set deliberately excludes status/report/fyi/announcement -- these
+    /// are exactly the routine broadcasts the gate exists to stop, not an
+    /// oversight to patch later.
+    #[test]
+    fn post_reason_excludes_status_report_fyi_announce() {
+        for excluded in ["status", "report", "fyi", "announcement", "announce"] {
+            assert!(
+                parse_post_reason(Some(excluded)).is_err(),
+                "'{excluded}' must not be an accepted reason"
+            );
+        }
+    }
+
+    #[test]
+    fn post_reason_game_scene_and_all_hands_are_authorized() {
+        assert_eq!(
+            parse_post_reason(Some("GameScene")).expect("GameScene must be accepted"),
+            PostReason::GameScene
+        );
+        assert_eq!(
+            parse_post_reason(Some("AllHands")).expect("AllHands must be accepted"),
+            PostReason::AllHands
         );
     }
 

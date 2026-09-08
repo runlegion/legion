@@ -333,6 +333,26 @@ pub enum LegionError {
         /// (e.g. a missing required top-level property).
         errors: Vec<String>,
     },
+
+    /// `legion post` with no `--reason` (#1149). Mirrors hzr's raw-fidelity
+    /// hatch (reflection 01a07eec): a broadcast with no reason is refused
+    /// with a named prescription, never a silent post. The bullpen is a
+    /// shared board every repo's session drains -- status/report/fyi
+    /// broadcasts flood it, so this is exactly the class of post the gate
+    /// exists to stop.
+    #[error(
+        "legion post requires --reason (allowed: {allowed}) -- the bullpen is not a status \
+         channel. Report to your caller (your final message is your report), or `legion \
+         signal --to <agent>` the one agent who needs this."
+    )]
+    PostReasonMissing { allowed: String },
+
+    /// `legion post --reason <r>` where `r` is not in the closed set
+    /// (#1149). Same MissingReason/InvalidReason -> Ask-with-prescription
+    /// shape as `PostReasonMissing`, for the case where a reason was
+    /// supplied but does not match the closed, legion-defined set.
+    #[error("legion post --reason '{reason}' is not recognized -- allowed: {allowed}")]
+    PostReasonInvalid { reason: String, allowed: String },
 }
 
 pub type Result<T> = std::result::Result<T, LegionError>;
@@ -554,5 +574,29 @@ mod tests {
         assert!(msg.contains("yesterday"));
         assert!(msg.contains("2026-07-01T00:00:00+00:00"));
         assert!(msg.contains("not in the future"));
+    }
+
+    #[test]
+    fn post_reason_missing_display_carries_prescription() {
+        let err = LegionError::PostReasonMissing {
+            allowed: "GameScene, AllHands".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("--reason"));
+        assert!(msg.contains("GameScene, AllHands"));
+        assert!(msg.contains("Report to your caller"), "got: {msg}");
+        assert!(msg.contains("legion signal --to"), "got: {msg}");
+        assert!(msg.contains("not a status channel"), "got: {msg}");
+    }
+
+    #[test]
+    fn post_reason_invalid_display_names_reason_and_allowed_set() {
+        let err = LegionError::PostReasonInvalid {
+            reason: "status".to_string(),
+            allowed: "GameScene, AllHands".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("'status'"));
+        assert!(msg.contains("GameScene, AllHands"));
     }
 }

@@ -13,6 +13,8 @@ fn post_and_bullpen_roundtrip() {
         "kelex",
         "--text",
         "shared insight about schema parsing",
+        "--reason",
+        "AllHands",
     ]));
     assert!(
         !stdout.trim().is_empty(),
@@ -46,6 +48,8 @@ fn bullpen_count_output() {
         "kelex",
         "--text",
         "first shared thought",
+        "--reason",
+        "AllHands",
     ]));
 
     run_ok(legion_cmd(dir.path()).args([
@@ -54,6 +58,8 @@ fn bullpen_count_output() {
         "rafters",
         "--text",
         "second shared thought",
+        "--reason",
+        "AllHands",
     ]));
 
     // Check count from a reader that has not read the bullpen
@@ -79,7 +85,15 @@ fn bullpen_count_includes_pending_tasks() {
     let dir = tempfile::tempdir().unwrap();
 
     // Post to bullpen
-    run_ok(legion_cmd(dir.path()).args(["post", "--repo", "kelex", "--text", "a shared thought"]));
+    run_ok(legion_cmd(dir.path()).args([
+        "post",
+        "--repo",
+        "kelex",
+        "--text",
+        "a shared thought",
+        "--reason",
+        "AllHands",
+    ]));
 
     // Create a pending task for the reader
     run_ok(legion_cmd(dir.path()).args([
@@ -117,6 +131,8 @@ fn post_with_metadata_flags() {
         "auth",
         "--tags",
         "security,jwt",
+        "--reason",
+        "AllHands",
     ]));
     assert!(
         !stdout.trim().is_empty(),
@@ -136,7 +152,15 @@ fn surface_shows_recent_posts() {
     let dir = tempfile::tempdir().unwrap();
 
     // Post to the bullpen
-    run_ok(legion_cmd(dir.path()).args(["post", "--repo", "rafters", "--text", "synapse insight"]));
+    run_ok(legion_cmd(dir.path()).args([
+        "post",
+        "--repo",
+        "rafters",
+        "--text",
+        "synapse insight",
+        "--reason",
+        "AllHands",
+    ]));
 
     // Surface for a different repo should show the post
     let stdout = run_ok(legion_cmd(dir.path()).args(["surface", "--repo", "kelex"]));
@@ -170,7 +194,15 @@ fn bullpen_aliases_backward_compatible() {
     let dir = tempfile::tempdir().unwrap();
 
     // Seed a post
-    run_ok(legion_cmd(dir.path()).args(["post", "--repo", "kelex", "--text", "alias test"]));
+    run_ok(legion_cmd(dir.path()).args([
+        "post",
+        "--repo",
+        "kelex",
+        "--text",
+        "alias test",
+        "--reason",
+        "AllHands",
+    ]));
 
     // Old "board" alias still works
     run_ok(legion_cmd(dir.path()).args(["board", "--repo", "rafters"]));
@@ -291,6 +323,8 @@ fn bullpen_signals_filter() {
         "rafters",
         "--text",
         "deep thoughts about design patterns",
+        "--reason",
+        "AllHands",
     ]));
 
     // --signals should show only the signal
@@ -358,6 +392,168 @@ fn pending_replies_emits_wake_prompt_for_request_signals() {
     assert!(
         !stdout.contains("v0.9.5 shipped"),
         "informational announce must not appear in pending-replies, got: {stdout}"
+    );
+}
+
+// -- post reason gate (#1149) ------------------------------------------
+
+#[test]
+fn post_without_reason_is_refused_with_prescription() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "post",
+        "--repo",
+        "kelex",
+        "--text",
+        "shipping the auth refactor",
+    ]));
+    assert!(
+        stderr.contains("--reason"),
+        "expected the missing --reason named, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("report to your caller") || stderr.contains("Report to your caller"),
+        "expected the report-to-caller prescription, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("legion signal --to"),
+        "expected the directed-signal prescription, got: {stderr}"
+    );
+
+    // Nothing must have landed on the bullpen.
+    let stdout = run_ok(legion_cmd(dir.path()).args(["bullpen", "--repo", "platform"]));
+    assert!(
+        !stdout.contains("shipping the auth refactor"),
+        "refused post must not appear on the bullpen, got: {stdout}"
+    );
+}
+
+#[test]
+fn post_with_invalid_reason_is_refused_naming_allowed_set() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "post",
+        "--repo",
+        "kelex",
+        "--text",
+        "status update",
+        "--reason",
+        "status",
+    ]));
+    assert!(
+        stderr.contains("'status'"),
+        "expected the rejected reason named, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("GameScene"),
+        "expected the allowed set named, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("AllHands"),
+        "expected the allowed set named, got: {stderr}"
+    );
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["bullpen", "--repo", "platform"]));
+    assert!(
+        !stdout.contains("status update"),
+        "refused post must not appear on the bullpen, got: {stdout}"
+    );
+}
+
+#[test]
+fn post_with_reason_game_scene_passes_through() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "post",
+        "--repo",
+        "legion",
+        "--text",
+        "[DND] Scene 1: The Broken Shard",
+        "--reason",
+        "GameScene",
+    ]));
+    assert!(
+        !stdout.trim().is_empty(),
+        "expected a post id on stdout, got nothing"
+    );
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["bullpen", "--repo", "platform"]));
+    assert!(
+        stdout.contains("The Broken Shard"),
+        "expected the GameScene post on the bullpen, got: {stdout}"
+    );
+}
+
+#[test]
+fn post_with_reason_all_hands_passes_through() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "post",
+        "--repo",
+        "legion",
+        "--text",
+        "all-hands: freeze on main until further notice",
+        "--reason",
+        "AllHands",
+    ]));
+    assert!(
+        !stdout.trim().is_empty(),
+        "expected a post id on stdout, got nothing"
+    );
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["bullpen", "--repo", "platform"]));
+    assert!(
+        stdout.contains("freeze on main"),
+        "expected the AllHands post on the bullpen, got: {stdout}"
+    );
+}
+
+#[test]
+fn post_refusal_is_recorded_in_the_audit_log() {
+    let dir = tempfile::tempdir().unwrap();
+
+    run_fail(legion_cmd(dir.path()).args(["post", "--repo", "kelex", "--text", "status update"]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["audit", "--repo", "kelex", "--json"]));
+    assert!(
+        stdout.contains("\"action\": \"post\""),
+        "expected an audit row for the refused post, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"outcome\": \"refused\""),
+        "expected the refusal recorded, got: {stdout}"
+    );
+}
+
+#[test]
+fn signal_still_requires_no_reason_flag() {
+    // #1149 gates only the broadcast-to-everyone `post` path -- `legion
+    // signal --to <agent>` must remain first-class and unaffected, with no
+    // --reason requirement at all.
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "signal",
+        "--repo",
+        "kelex",
+        "--to",
+        "legion",
+        "--verb",
+        "review",
+        "--status",
+        "approved",
+        "--note",
+        "unaffected by the post reason gate",
+    ]));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["bullpen", "--repo", "platform"]));
+    assert!(
+        stdout.contains("unaffected by the post reason gate"),
+        "expected the directed signal to post as before, got: {stdout}"
     );
 }
 
