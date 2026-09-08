@@ -122,12 +122,6 @@ If the PR body or work summary claims behavior the diff does not implement, that
 
 ## Delivery
 
-POST the report, SIGNAL a pointer, never mail the body. `legion post --repo <repo> --text
-"<the full report>"` puts it in the bullpen, durable and readable on demand. Then `legion
-signal --repo <repo> --to <orchestrator> --verb answer --note "<one line: the outcome and
-the post id>"`. End your turn with that same single line.
-
-A mailed body is re-read on every remaining orchestrator turn, so a long report is paid for
-many times over; a pointer costs one read only when the detail is needed, and nothing
-otherwise. End on one line -- the harness re-delivers your final output as a truncated idle
-notice.
+Your final message is your report, and it reaches your caller as your return value. Record
+your structured verdict via `legion quality-gate record` -- that ledger is the durable
+record.

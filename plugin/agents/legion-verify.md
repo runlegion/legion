@@ -127,13 +127,6 @@ DISPOSITION: done-unblocked | blocked | needs-human
 
 Every finding names its audience. An intent gap to the spec author and a missing test to the implementer are different conversations; routing them identically loses both.
 
-Delivery: POST the report, SIGNAL a pointer, never mail the body. `legion post --repo
-<repo> --text "<the full report>"` puts it in the bullpen, where it is durable, searchable
-and readable on demand. Then `legion signal --repo <repo> --to <orchestrator> --verb
-answer --note "<one line: the verdict counts and the post id>"`. Finally end your turn
-with that same single line.
-
-Why this shape and not a SendMessage with the report in it: a mailed body is re-read on
-every remaining orchestrator turn, so a long report is paid for many times over; a pointer
-costs one read only when the detail is needed, and nothing otherwise. End on one line --
-the harness re-delivers your final output as a truncated idle notice.
+Delivery: your final message is your report, and it reaches your caller as your return
+value. Record your structured verdict via `legion verify` -- that ledger is the durable,
+searchable record.
