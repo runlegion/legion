@@ -142,14 +142,6 @@ against the pre-bump source file.
 
 ## Delivery
 
-POST the report, SIGNAL a pointer, never mail the body. `legion post --repo <repo> --text
-"<the full report>"` puts it in the bullpen, durable and readable on demand. Then `legion
-signal --repo <repo> --to <orchestrator> --verb answer --note "<one line: the outcome and
-the post id>"`. End your turn with that same single line.
-
-A mailed body enters the orchestrator's context permanently and is re-read on every one of
-its remaining turns, so a thousand-word report is paid for a thousand times. The
-280-character cap on a signal note is the system saying so. A pointer costs one read when
-the orchestrator decides it needs the detail, and nothing when it does not. Ending on one
-line matters for the same reason: the harness delivers your final output a second time as
-a truncated idle notice.
+Your final message is your report, and it reaches your caller (the release pipeline) as your
+return value. The changelog entry you wrote is the work product -- the caller reads that file
+directly; your report just says what you did and why.
