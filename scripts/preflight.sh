@@ -461,8 +461,15 @@ main() {
   step "cargo clippy --all-targets -- -D warnings"
   cargo clippy --all-targets -- -D warnings || fail "clippy"
 
-  step "cargo test"
-  cargo test || fail "tests"
+  # nextest runs the integration test binaries in parallel; fall back to
+  # cargo test on a machine that does not have it installed.
+  if command -v cargo-nextest >/dev/null 2>&1; then
+    step "cargo nextest run"
+    cargo nextest run || fail "tests"
+  else
+    step "cargo test (install cargo-nextest for parallel test runs)"
+    cargo test || fail "tests"
+  fi
 
   step "shell-script tests (disposable sandbox)"
   for t in "${PREFLIGHT_REQUIRED_SUITES[@]}"; do

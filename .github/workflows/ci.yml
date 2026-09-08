@@ -69,5 +69,9 @@ jobs:
       - if: runner.os == 'Windows'
         run: rustup default stable
         shell: bash
+      # nextest runs the 24 integration test binaries in parallel; `cargo test`
+      # runs them one at a time. legion is a binary crate (no lib, no doctests),
+      # so `nextest run` is a complete replacement -- no separate --doc step.
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - run: cargo nextest run
