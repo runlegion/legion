@@ -203,7 +203,7 @@ finish_tests() {
 #                            case rather than a quiet pass)
 #   LEGION_TEST_MARKER=<file> `telemetry ...` appends its argv (sans
 #                            leading "telemetry") here
-#   FAKE_DELIVER_DRAIN      `deliver drain` body (default empty, #941)
+#   FAKE_INBOX               `legion inbox` body (default empty, #941)
 #   FAKE_WATCH_STATUS        `watch status --json` body: one JSON line,
 #                            e.g. {"status":"alive","last_beat_age":null}
 #                            (default empty; #1019's `boot_section_watch`
@@ -408,9 +408,14 @@ case "${1:-}" in
     shift
     echo "$@" >> "${LEGION_TEST_MARKER:-/dev/null}"
     ;;
+  inbox)
+    [ -n "${FAKE_INBOX:-}" ] && printf '%s\n' "$FAKE_INBOX"
+    ;;
   deliver)
+    # The retired `deliver drain` spelling, still accepted by the binary for
+    # one release so a plugin ahead of its binary keeps delivering mail.
     if [ "${2:-}" = "drain" ]; then
-      [ -n "${FAKE_DELIVER_DRAIN:-}" ] && printf '%s\n' "$FAKE_DELIVER_DRAIN"
+      [ -n "${FAKE_INBOX:-}" ] && printf '%s\n' "$FAKE_INBOX"
     fi
     ;;
 esac

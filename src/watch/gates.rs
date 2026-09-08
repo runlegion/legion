@@ -113,7 +113,7 @@ pub fn poll_cycle(
         // that exact pair (via `get_unhandled_signals_for_repo`), so the mark
         // retires ONLY this entry's pending copy: the owner's copy lives under
         // the OWNER's repo_name, untouched, and the owner's wake is unaffected.
-        // Retiring it is the point -- nothing else ever drains a delegated
+        // Retiring it is the point -- nothing else ever delivers a delegated
         // entry's copy, so an unmarked row would sit pending until the 7-day
         // signal TTL, re-announcing this skip on every poll. The mark is also
         // anti-replay: if the operator later drops `agent` and un-delegates the
@@ -155,9 +155,9 @@ pub fn poll_cycle(
         //
         // HIGH-1: `find_pending_signals` is signal-only (@-addressed via
         // `get_unhandled_signals_for_repo`'s @-LIKE patterns). A repo whose
-        // only undrained mail is a general (non-@) bullpen post never
+        // only unread mail is a general (non-@) bullpen post never
         // appears in `signals` at all, so gating the nudge check behind
-        // "signals non-empty" made `repo_has_undrained_data` (which
+        // "signals non-empty" made `repo_has_unread_inbox` (which
         // correctly handles general posts via `should_notify` rule 5)
         // unreachable for that case -- the exact "OR undelivered bullpen
         // posts" half of the AC.
@@ -179,14 +179,14 @@ pub fn poll_cycle(
             && let Some(locks) = session_locks
             && let Some(pid) = locks.active_pid(&repo.name)
         {
-            // A live-but-IDLE session never drains its own mail -- the hook
-            // drain fires only on UserPromptSubmit/PostToolUse/Stop, all of
+            // A live-but-IDLE session never delivers its own mail -- the
+            // inbox lane fires only on UserPromptSubmit/PostToolUse/Stop, all of
             // which require a turn already underway. Before the "never
             // spawn a worker into a live session" skip below (#996, which
             // STAYS -- this repo still does not get a second worker), check
-            // whether the held session is idle with undrained data and, if
+            // whether the held session is idle with unread data and, if
             // so, dispatch a content-free PTY courier so the session takes a
-            // turn and its own drain delivers, unchanged.
+            // turn and its own inbox delivers, unchanged.
             //
             // The cooldown check runs FIRST, before `live_sessions()` shells
             // out to `claude agents --json`: a cooling repo cannot nudge
@@ -197,7 +197,7 @@ pub fn poll_cycle(
             if !cooling {
                 let live = live_sessions();
                 if let Some(target) = nudge::find_live_session_for_workdir(&live, &repo.workdir) {
-                    let has_data = nudge::repo_has_undrained_data(db, &repo.name);
+                    let has_data = nudge::repo_has_unread_inbox(db, &repo.name);
                     if nudge::should_nudge(target.status, has_data, cooling) {
                         let prompt = nudge::build_courier_prompt(&repo.name, target);
                         match courier_dispatch(&prompt) {
@@ -662,53 +662,53 @@ mod tests {
         }
     }
 
-    /// Seed a signal for `repo` AND make sure the hook-drain cursor sees it
-    /// as undrained -- `repo_has_undrained_data`'s cold-start rule treats an
+    /// Seed a signal for `repo` AND make sure the inbox cursor sees it
+    /// as unread -- `repo_has_unread_inbox`'s cold-start rule treats an
     /// unseeded hook cursor as "nothing new" (mirroring
-    /// `deliver::drain_for_hook`'s own seed-at-watermark-delivers-nothing
-    /// contract), so a prior seed post plus one drain call is needed before
-    /// the signal below can register as genuinely undrained.
-    fn seed_undrained_signal(db: &Database, repo: &str) {
-        // Warm the hook-drain cursor past cold start FIRST: a cold cursor
-        // reads as "nothing new" (`nudge::repo_has_undrained_data`'s own
-        // cold-start rule, mirroring `deliver::drain_for_hook`'s), so the
-        // repo needs a prior seed post plus one drain call before the signal
-        // below can register as genuinely undrained.
+    /// `deliver::claim_inbox`'s own seed-at-watermark-delivers-nothing
+    /// contract), so a prior seed post plus one inbox call is needed before
+    /// the signal below can register as genuinely unread.
+    fn seed_unread_signal(db: &Database, repo: &str) {
+        // Warm the inbox cursor past cold start FIRST: a cold cursor
+        // reads as "nothing new" (`nudge::repo_has_unread_inbox`'s own
+        // cold-start rule, mirroring `deliver::claim_inbox`'s), so the
+        // repo needs a prior seed post plus one inbox call before the signal
+        // below can register as genuinely unread.
         db.insert_reflection("kelex", "seed", "team")
             .expect("insert seed");
-        crate::deliver::drain_for_hook(db, repo).expect("warm hook cursor past cold start");
+        crate::deliver::claim_inbox(db, repo).expect("warm hook cursor past cold start");
         db.insert_reflection("kelex", &format!("@{repo} review:ready"), "team")
             .expect("insert signal");
     }
 
-    /// Seed a signal for `repo` whose hook-drain cursor has ALREADY been
-    /// warmed past it -- simulating a live session that already drained this
+    /// Seed a signal for `repo` whose inbox cursor has ALREADY been
+    /// warmed past it -- simulating a live session that already delivered this
     /// exact post on a prior turn, even though watch's own separate
     /// `watch_handled` bookkeeping still shows the signal as unhandled.
-    fn seed_signal_already_hook_drained(db: &Database, repo: &str) {
+    fn seed_signal_already_delivered(db: &Database, repo: &str) {
         db.insert_reflection("kelex", &format!("@{repo} review:ready"), "team")
             .expect("insert signal");
-        // Cold-start seeds the hook-drain cursor at the CURRENT watermark
-        // (see `deliver::drain_for_hook`'s docs), so the post inserted above
+        // Cold-start seeds the inbox cursor at the CURRENT watermark
+        // (see `deliver::claim_inbox`'s docs), so the post inserted above
         // is already "seen" from the hook lane's perspective after this one
         // call.
-        crate::deliver::drain_for_hook(db, repo).expect("seed hook cursor at current watermark");
+        crate::deliver::claim_inbox(db, repo).expect("seed hook cursor at current watermark");
     }
 
     /// Seed ONLY a general (non-@) bullpen post for `repo`, warmed past the
-    /// hook-drain cold start -- deliberately NO signal. `find_pending_signals`
+    /// inbox cold start -- deliberately NO signal. `find_pending_signals`
     /// (signal-only, @-addressed) returns empty for this repo; the nudge path
-    /// must still be reachable and must still see this post as undrained via
-    /// `repo_has_undrained_data`'s `should_notify` rule 5 (#999 HIGH-1 fix).
+    /// must still be reachable and must still see this post as unread via
+    /// `repo_has_unread_inbox`'s `should_notify` rule 5 (#999 HIGH-1 fix).
     ///
     /// `#[cfg(unix)]`: its only caller is `#[cfg(unix)]`-gated (see that
     /// test's note) -- gated the same way so it is not flagged as dead code
     /// on a non-Unix build.
     #[cfg(unix)]
-    fn seed_undrained_general_post(db: &Database, repo: &str) {
+    fn seed_unread_general_post(db: &Database, repo: &str) {
         db.insert_reflection("kelex", "seed", "team")
             .expect("insert seed");
-        crate::deliver::drain_for_hook(db, repo).expect("warm hook cursor past cold start");
+        crate::deliver::claim_inbox(db, repo).expect("warm hook cursor past cold start");
         db.insert_reflection("rafters", "just shipped the new palette work", "team")
             .expect("insert general post");
     }
@@ -729,7 +729,7 @@ mod tests {
     fn poll_cycle_dispatches_courier_when_idle_with_data_and_not_cooling() {
         let (db, _index, data_dir) = test_storage();
         let config = nudge_test_config("nudgetest");
-        seed_undrained_signal(&db, "nudgetest");
+        seed_unread_signal(&db, "nudgetest");
 
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
         locks
@@ -770,7 +770,7 @@ mod tests {
         assert_eq!(
             calls.len(),
             1,
-            "idle + undrained data + not cooling must dispatch exactly one courier"
+            "idle + unread data + not cooling must dispatch exactly one courier"
         );
         assert!(calls[0].contains("nudgetest"));
         assert!(
@@ -783,7 +783,7 @@ mod tests {
     fn poll_cycle_does_not_dispatch_courier_for_a_busy_session() {
         let (db, _index, data_dir) = test_storage();
         let config = nudge_test_config("nudgetest");
-        seed_undrained_signal(&db, "nudgetest");
+        seed_unread_signal(&db, "nudgetest");
 
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
         locks
@@ -822,13 +822,13 @@ mod tests {
     }
 
     #[test]
-    fn poll_cycle_does_not_dispatch_courier_when_no_undrained_data() {
+    fn poll_cycle_does_not_dispatch_courier_when_no_unread_data() {
         let (db, _index, data_dir) = test_storage();
         let config = nudge_test_config("nudgetest");
         // Idle session, pending per watch's own bookkeeping, but already
-        // drained via the hook lane -- the exact scenario that motivates
+        // delivered via the hook lane -- the exact scenario that motivates
         // checking the hook cursor instead of trusting `find_pending_signals`.
-        seed_signal_already_hook_drained(&db, "nudgetest");
+        seed_signal_already_delivered(&db, "nudgetest");
 
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
         locks
@@ -864,7 +864,7 @@ mod tests {
         assert_eq!(spawned, 0);
         assert_eq!(
             dispatch_count, 0,
-            "a repo with nothing new for the hook drain to find must not be nudged"
+            "a repo with nothing new for the inbox lane to find must not be nudged"
         );
     }
 
@@ -872,7 +872,7 @@ mod tests {
     fn poll_cycle_does_not_dispatch_courier_while_nudge_cooldown_is_active() {
         let (db, _index, data_dir) = test_storage();
         let config = nudge_test_config("nudgetest");
-        seed_undrained_signal(&db, "nudgetest");
+        seed_unread_signal(&db, "nudgetest");
 
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
         locks
@@ -925,7 +925,7 @@ mod tests {
         // later genuine wake-worthy spawn for the same repo.
         let (db, _index, data_dir) = test_storage();
         let config = nudge_test_config("nudgetest");
-        seed_undrained_signal(&db, "nudgetest");
+        seed_unread_signal(&db, "nudgetest");
 
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
         locks
@@ -1006,14 +1006,14 @@ mod tests {
     #[test]
     fn poll_cycle_dispatches_courier_for_a_general_post_with_no_signal_at_all() {
         // #999 HIGH-1 regression test: `find_pending_signals` is
-        // signal-only, so a repo whose only undrained mail is a general
+        // signal-only, so a repo whose only unread mail is a general
         // (non-@) bullpen post has an EMPTY `signals` list for the entire
         // poll_cycle iteration. The nudge path must still be reached and
         // must still dispatch, proving it is no longer gated behind the
         // signal-only early continue.
         let (db, _index, data_dir) = test_storage();
         let config = nudge_test_config("nudgetest");
-        seed_undrained_general_post(&db, "nudgetest");
+        seed_unread_general_post(&db, "nudgetest");
 
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
         locks
@@ -1053,7 +1053,7 @@ mod tests {
         assert_eq!(
             dispatched.borrow().len(),
             1,
-            "a repo with only a general (non-@) undrained post -- no signal at all -- \
+            "a repo with only a general (non-@) unread post -- no signal at all -- \
              must still be nudged"
         );
     }
@@ -1066,7 +1066,7 @@ mod tests {
         // #999 HIGH-2 regression test, the direction the earlier
         // wake-cooldown-independence test did not cover: drive a REAL wake
         // first (consuming the wake CooldownTracker's slot for this repo),
-        // then prove an idle session with undrained data is still nudged on
+        // then prove an idle session with unread data is still nudged on
         // the very next poll_cycle despite that active wake cooldown.
         let (db, _index, data_dir) = test_storage();
         let config = nudge_test_config("nudgetest");
@@ -1087,8 +1087,8 @@ mod tests {
             "precondition: the wake cooldown must be active"
         );
 
-        // Now an interactive session goes idle with undrained data.
-        seed_undrained_signal(&db, "nudgetest");
+        // Now an interactive session goes idle with unread data.
+        seed_unread_signal(&db, "nudgetest");
         let locks = SessionLockTracker::new(data_dir.path(), 3600);
         locks
             .record_interactive("nudgetest", std::process::id())
@@ -1123,7 +1123,7 @@ mod tests {
         assert_eq!(
             dispatched.borrow().len(),
             1,
-            "an idle session with undrained data must still be nudged even while the \
+            "an idle session with unread data must still be nudged even while the \
              (separate) wake cooldown is active for the same repo"
         );
     }
@@ -1244,7 +1244,7 @@ mod tests {
     /// Assert the delegated skip retired its OWN pending copy and only its own.
     ///
     /// Both halves are load-bearing, and neither is sufficient alone. The first
-    /// is the point of the mark: nothing else drains a delegated entry's copy,
+    /// is the point of the mark: nothing else delivers a delegated entry's copy,
     /// so an unmarked row re-announces the skip every poll until the signal's
     /// 7-day TTL. The second is what proves the mark is SCOPED -- the owner's
     /// copy is keyed under the owner's own `repo_name`, and a guard that marked
@@ -1257,7 +1257,7 @@ mod tests {
         let retired = find_pending_signals(db, delegated, &names, None).expect("delegated pending");
         assert!(
             retired.is_empty(),
-            "the delegated skip must retire {delegated}'s pending copy -- nothing else drains it"
+            "the delegated skip must retire {delegated}'s pending copy -- nothing else delivers it"
         );
 
         let owner_pending = find_pending_signals(db, owner, &names, None).expect("owner pending");
@@ -1315,7 +1315,7 @@ mod tests {
 
         // The skip retires ledger's own pending copy. `watch_handled` is
         // host-local and keyed (signal_id, repo_name), so nothing else would
-        // ever drain this row -- leaving it pending means re-announcing the
+        // ever clear this row -- leaving it pending means re-announcing the
         // skip every poll until the 7-day TTL.
         assert_delegated_copy_retired(&db, "ledger", "platform");
     }

@@ -48,7 +48,7 @@
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/delivery-drain.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/inbox.sh",
             "timeout": 8
           }
         ]
@@ -250,7 +250,7 @@
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/delivery-drain.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/inbox.sh",
             "timeout": 8
           }
         ]
@@ -330,7 +330,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/delivery-drain.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/inbox.sh",
             "timeout": 8
           }
         ]

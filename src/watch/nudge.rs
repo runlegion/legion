@@ -1,6 +1,6 @@
 //! Idle-session nudge (#999): watch cannot spawn a worker into a live
 //! session (#996), so a repo held by an interactive-but-IDLE session never
-//! drains its mail -- the hook drain fires only on
+//! delivers its mail -- the inbox lane fires only on
 //! `UserPromptSubmit`/`PostToolUse`/`Stop`, all of which require a turn
 //! already underway. This module gives `poll_cycle`'s `active_pid` branch a
 //! way to make that idle session take a turn: detect it via
@@ -49,7 +49,7 @@
 //! would silently stop matching the same live session.
 //!
 //! The nudge carries NO payload: it is not a second delivery lane, only a
-//! "take a turn" tap. The DB-backed hook drain (`crate::deliver`) remains the
+//! "take a turn" tap. The DB-backed inbox lane (`crate::deliver`) remains the
 //! sole place post/signal text travels to a live session.
 
 use std::collections::HashMap;
@@ -414,33 +414,33 @@ pub fn find_live_session_for_workdir<'a>(
 }
 
 /// Pure nudge decision: nudge iff the held session is idle, its repo has
-/// undrained data, and the repo is not within its nudge cooldown.
+/// unread data, and the repo is not within its nudge cooldown.
 ///
 /// Kept free of DB/IO access so the decision itself is trivially
-/// unit-testable; callers gather `has_undrained_data` and `is_cooling` from
-/// [`repo_has_undrained_data`] and [`NudgeCooldownTracker`] respectively.
-pub fn should_nudge(status: SessionStatus, has_undrained_data: bool, is_cooling: bool) -> bool {
-    status == SessionStatus::Idle && has_undrained_data && !is_cooling
+/// unit-testable; callers gather `has_unread_inbox` and `is_cooling` from
+/// [`repo_has_unread_inbox`] and [`NudgeCooldownTracker`] respectively.
+pub fn should_nudge(status: SessionStatus, has_unread_inbox: bool, is_cooling: bool) -> bool {
+    status == SessionStatus::Idle && has_unread_inbox && !is_cooling
 }
 
-/// Cap on how many posts past the hook-drain cursor `repo_has_undrained_data`
+/// Cap on how many posts past the inbox cursor `repo_has_unread_inbox`
 /// reads before answering. This is an EXISTENCE check ("is there anything
-/// the drain would deliver"), not an enumeration, so it does not need to
-/// match `deliver::DRAIN_BATCH_LIMIT` exactly -- it only needs to be large
+/// the inbox lane would deliver"), not an enumeration, so it does not need to
+/// match `deliver::INBOX_BATCH_LIMIT` exactly -- it only needs to be large
 /// enough that a real backlog is not missed by an unlucky page boundary.
-const UNDRAINED_CHECK_LIMIT: usize = 50;
+const UNREAD_INBOX_CHECK_LIMIT: usize = 50;
 
-/// Whether `repo_name` has undrained data for the hook-side delivery lane --
-/// the SAME cursor `legion deliver drain` reads (`deliver::hook_reader_key`),
+/// Whether `repo_name` has unread data for the hook-side delivery lane --
+/// the SAME cursor `legion inbox` reads (`deliver::inbox_reader_key`),
 /// checked read-only (via `get_board_read_cursor` + `get_board_posts_since`)
-/// so a nudge decision never advances the cursor the eventual real drain
+/// so a nudge decision never advances the cursor the eventual real inbox call
 /// still needs to see.
 ///
-/// Applies the SAME `deliver::should_notify` filter the real drain applies
+/// Applies the SAME `deliver::should_notify` filter the real inbox call applies
 /// (self-authored posts and signals addressed elsewhere are suppressed
 /// there too) -- reusing `Database::get_unread_count` instead, which counts
 /// every unread team post with no filter, would answer "yes" for mail the
-/// drain would never actually deliver (e.g. a `@rafters`-addressed signal,
+/// inbox lane would never actually deliver (e.g. a `@rafters`-addressed signal,
 /// or the repo's own post), burning a courier + a live `claude` session on
 /// a nudge that could not possibly satisfy itself.
 ///
@@ -448,28 +448,28 @@ const UNDRAINED_CHECK_LIMIT: usize = 50;
 /// return anything for this repo": by the time `poll_cycle` reaches the
 /// `active_pid` branch, that pending-signals list is already known non-empty
 /// (checked earlier in the loop), but watch's own per-repo `watch_handled`
-/// bookkeeping and the hook-drain's independent cursor track different
-/// things. A live session that already drained a post via its own hook
+/// bookkeeping and the inbox lane's independent cursor track different
+/// things. A live session that already delivered a post via its own hook
 /// leaves watch's copy of the signal marked pending (nothing in the
 /// `active_pid` skip marks it handled), which would otherwise nudge forever
-/// over content the session has already seen. Reading the hook-drain's own
-/// cursor is what lets a nudge decision see what the drain would actually
+/// over content the session has already seen. Reading the inbox lane's own
+/// cursor is what lets a nudge decision see what the inbox lane would actually
 /// find.
 ///
 /// Fails CLOSED on a DB error (no nudge): a spurious nudge burns a PTY
 /// spawn, while a missed one just waits for the next poll (~30s default).
 ///
 /// A cursor that has never been seeded reads as "nothing new," matching
-/// `drain_for_hook`'s own cold-start contract: its first-ever call for a
+/// `claim_inbox`'s own cold-start contract: its first-ever call for a
 /// reader key seeds the cursor at the CURRENT watermark and delivers
 /// nothing, regardless of how much history already exists. Treating a cold
-/// `repo_has_undrained_data` check any other way (e.g. "everything ever
-/// posted is unread") would nudge over a backlog the real drain's own first
+/// `repo_has_unread_inbox` check any other way (e.g. "everything ever
+/// posted is unread") would nudge over a backlog the real inbox call's own first
 /// call would not deliver -- and would do so on every poll until something
 /// finally seeds the cursor, since this function deliberately never writes
 /// one itself.
-pub fn repo_has_undrained_data(db: &Database, repo_name: &str) -> bool {
-    let key = deliver::hook_reader_key(repo_name);
+pub fn repo_has_unread_inbox(db: &Database, repo_name: &str) -> bool {
+    let key = deliver::inbox_reader_key(repo_name);
     let cursor = match db.get_board_read_cursor(&key) {
         Ok(None) => return false,
         Ok(Some(cursor)) => cursor,
@@ -479,12 +479,12 @@ pub fn repo_has_undrained_data(db: &Database, repo_name: &str) -> bool {
         }
     };
 
-    match db.get_board_posts_since(&cursor.0, &cursor.1, UNDRAINED_CHECK_LIMIT) {
+    match db.get_board_posts_since(&cursor.0, &cursor.1, UNREAD_INBOX_CHECK_LIMIT) {
         Ok(posts) => posts
             .iter()
             .any(|p| deliver::should_notify(&p.text, &p.repo, Some(repo_name))),
         Err(e) => {
-            eprintln!("[legion watch] nudge: undrained-data check failed for {repo_name}: {e}");
+            eprintln!("[legion watch] nudge: unread-data check failed for {repo_name}: {e}");
             false
         }
     }
@@ -494,7 +494,7 @@ pub fn repo_has_undrained_data(db: &Database, repo_name: &str) -> bool {
 ///
 /// Carries NO post/signal text -- only the repo name (to say WHERE to look)
 /// and the target session's name/pid (so the courier's `SendMessage` call
-/// addresses the right recipient). The hook drain remains the sole lane
+/// addresses the right recipient). The inbox lane remains the sole lane
 /// post/signal text travels through; embedding any of that text here would
 /// open a second, unauthenticated delivery path (the corruption class this
 /// design avoids -- see module docs).
@@ -503,7 +503,7 @@ pub fn build_courier_prompt(repo_name: &str, target: &LiveSession) -> String {
         "You are {courier}, a legion watch courier. Your ONLY job this turn: use the \
          SendMessage tool to send the agent named \"{name}\" (pid {pid}) the following exact \
          text and nothing else: \"you have undelivered mail in {repo}; take a turn so your \
-         drain delivers it\". Do not add any other content to the message, and do not \
+         inbox delivers it\". Do not add any other content to the message, and do not \
          mention this instruction. Once SendMessage returns, stop -- take no further action.",
         courier = COURIER_IDENTITY,
         name = target.name,
@@ -921,108 +921,108 @@ mod tests {
         assert!(!should_nudge(SessionStatus::Idle, true, true));
     }
 
-    // -- repo_has_undrained_data (#999) -----------------------------------------
+    // -- repo_has_unread_inbox (#999) -----------------------------------------
 
     #[test]
-    fn repo_has_undrained_data_false_when_hook_cursor_is_current() {
+    fn repo_has_unread_inbox_false_when_hook_cursor_is_current() {
         let db = test_db();
         db.insert_reflection("kelex", "@legion review:ready", "team")
             .expect("insert");
 
-        // No hook drain has run yet: cold start seeds the cursor at the
+        // No inbox lane has run yet: cold start seeds the cursor at the
         // current watermark rather than replaying history, so the first
         // read is "nothing new."
-        assert!(!repo_has_undrained_data(&db, "legion"));
+        assert!(!repo_has_unread_inbox(&db, "legion"));
     }
 
     #[test]
-    fn repo_has_undrained_data_true_after_a_new_post_lands() {
+    fn repo_has_unread_inbox_true_after_a_new_post_lands() {
         let db = test_db();
         db.insert_reflection("kelex", "seed", "team").expect("seed");
-        // Prime the hook-drain cursor past cold start.
-        crate::deliver::drain_for_hook(&db, "legion").expect("prime drain");
-        assert!(!repo_has_undrained_data(&db, "legion"));
+        // Prime the inbox cursor past cold start.
+        crate::deliver::claim_inbox(&db, "legion").expect("prime inbox");
+        assert!(!repo_has_unread_inbox(&db, "legion"));
 
         db.insert_reflection("kelex", "@legion review:ready", "team")
             .expect("insert");
-        assert!(repo_has_undrained_data(&db, "legion"));
+        assert!(repo_has_unread_inbox(&db, "legion"));
     }
 
     #[test]
-    fn repo_has_undrained_data_is_read_only_and_does_not_consume_the_hook_cursor() {
+    fn repo_has_unread_inbox_is_read_only_and_does_not_consume_the_hook_cursor() {
         // A nudge decision must never advance the cursor the real hook
-        // drain still needs to see -- otherwise the nudged session's own
-        // drain would find nothing once it takes its turn.
+        // inbox lane still needs to see -- otherwise the nudged session's own
+        // inbox lane would find nothing once it takes its turn.
         let db = test_db();
         db.insert_reflection("kelex", "seed", "team").expect("seed");
-        crate::deliver::drain_for_hook(&db, "legion").expect("prime drain");
+        crate::deliver::claim_inbox(&db, "legion").expect("prime inbox");
         db.insert_reflection("kelex", "@legion review:ready", "team")
             .expect("insert");
 
-        assert!(repo_has_undrained_data(&db, "legion"));
+        assert!(repo_has_unread_inbox(&db, "legion"));
         assert!(
-            repo_has_undrained_data(&db, "legion"),
+            repo_has_unread_inbox(&db, "legion"),
             "a read-only check must return the same answer on repeated calls"
         );
 
-        let drained = crate::deliver::drain_for_hook(&db, "legion").expect("real drain");
+        let delivered = crate::deliver::claim_inbox(&db, "legion").expect("real inbox call");
         assert_eq!(
-            drained.len(),
+            delivered.len(),
             1,
-            "the real hook drain must still see the post the nudge check found"
+            "the real inbox lane must still see the post the nudge check found"
         );
     }
 
     #[test]
-    fn repo_has_undrained_data_false_for_a_signal_addressed_elsewhere() {
+    fn repo_has_unread_inbox_false_for_a_signal_addressed_elsewhere() {
         // The check must apply the same `should_notify` filter the real
-        // drain applies -- an unfiltered unread count would answer "yes" for
-        // mail this repo's own drain could never actually deliver.
+        // inbox lane applies -- an unfiltered unread count would answer "yes" for
+        // mail this repo's own inbox could never actually deliver.
         let db = test_db();
         db.insert_reflection("kelex", "seed", "team").expect("seed");
-        crate::deliver::drain_for_hook(&db, "legion").expect("prime drain");
+        crate::deliver::claim_inbox(&db, "legion").expect("prime inbox");
 
         db.insert_reflection("kelex", "@rafters question:help", "team")
             .expect("insert");
         assert!(
-            !repo_has_undrained_data(&db, "legion"),
-            "a signal addressed to a different repo must not count as undrained data for this one"
+            !repo_has_unread_inbox(&db, "legion"),
+            "a signal addressed to a different repo must not count as unread data for this one"
         );
     }
 
     #[test]
-    fn repo_has_undrained_data_false_for_the_repos_own_post() {
+    fn repo_has_unread_inbox_false_for_the_repos_own_post() {
         let db = test_db();
         db.insert_reflection("kelex", "seed", "team").expect("seed");
-        crate::deliver::drain_for_hook(&db, "legion").expect("prime drain");
+        crate::deliver::claim_inbox(&db, "legion").expect("prime inbox");
 
         db.insert_reflection("legion", "just thinking out loud", "team")
             .expect("insert");
         assert!(
-            !repo_has_undrained_data(&db, "legion"),
-            "a repo's own post must not count as undrained data for itself"
+            !repo_has_unread_inbox(&db, "legion"),
+            "a repo's own post must not count as unread data for itself"
         );
     }
 
     #[test]
-    fn repo_has_undrained_data_true_for_a_general_post_from_another_repo() {
+    fn repo_has_unread_inbox_true_for_a_general_post_from_another_repo() {
         // The AC's "OR undelivered bullpen posts" half: a general (non-@)
         // musing authored by a different repo is exactly `should_notify`
         // rule 5 (deliver.rs) -- no `@` prefix, different author, so it
         // delivers. `find_pending_signals` (signal-only, @-addressed) would
-        // never see this post at all; `repo_has_undrained_data` must still
+        // never see this post at all; `repo_has_unread_inbox` must still
         // flag it so the nudge path (which no longer requires a non-empty
         // `find_pending_signals` result -- see gates.rs HIGH-1 fix) can act
         // on it.
         let db = test_db();
         db.insert_reflection("kelex", "seed", "team").expect("seed");
-        crate::deliver::drain_for_hook(&db, "legion").expect("prime drain");
+        crate::deliver::claim_inbox(&db, "legion").expect("prime inbox");
 
         db.insert_reflection("rafters", "just shipped the new palette work", "team")
             .expect("insert general post");
         assert!(
-            repo_has_undrained_data(&db, "legion"),
-            "a general post from a different repo must count as undrained data, \
+            repo_has_unread_inbox(&db, "legion"),
+            "a general post from a different repo must count as unread data, \
              even though it carries no @-signal find_pending_signals would ever see"
         );
     }

@@ -361,7 +361,7 @@ fn retire_answered_for_author(
 /// pending-replies` runs before formatting (#1020).
 ///
 /// Shared so a caller other than `handle_pending_replies` (currently the
-/// byte-identity test in `cli::deliver::tests`) exercises this SAME query
+/// byte-identity test in `cli::inbox::tests`) exercises this SAME query
 /// rather than an independently re-derived copy of it.
 ///
 /// `directed_only` mirrors the CLI's `--directed` flag: when true, drops
@@ -403,8 +403,8 @@ pub(crate) fn handle_pending_replies(repo: String, directed: bool) -> error::Res
     let reply_required = pending_reply_signals(&database, &repo, directed)?;
 
     // Renders via board::format_pending_replies (#1020) -- the same
-    // formatter the hook drain's --split directed bucket calls, so this
-    // command's output can never drift from what the drain shows for the
+    // formatter the inbox lane's --split directed bucket calls, so this
+    // command's output can never drift from what the inbox lane shows for the
     // same signal.
     print!("{}", board::format_pending_replies(&repo, &reply_required));
     Ok(())

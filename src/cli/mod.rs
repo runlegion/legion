@@ -4,8 +4,8 @@
 pub(crate) mod autonomy;
 pub(crate) mod commit;
 pub(crate) mod datadir;
-pub(crate) mod deliver;
 pub(crate) mod document;
+pub(crate) mod inbox;
 pub(crate) mod index_cmd;
 pub(crate) mod issue;
 pub(crate) mod memory;
@@ -26,8 +26,8 @@ use clap::{Parser, Subcommand};
 use crate::recall;
 
 use self::autonomy::AutonomyAction;
-use self::deliver::DeliverAction;
 use self::document::DocumentAction;
+use self::inbox::DeliverAction;
 use self::index_cmd::SymAction;
 use self::issue::{IssueAction, SubIssueAction};
 use self::memory::DedupeMode;
@@ -861,8 +861,22 @@ pub(crate) enum Commands {
         action: TaskAction,
     },
 
-    /// Hook-side delivery drain (#941): the code-side counterpart to the
-    /// retired MCP notification lane's push (#947)
+    /// Deliver this repo's unread bullpen posts and signals (#941): the
+    /// hook-side lane that replaced the retired MCP push (#947)
+    Inbox {
+        /// Repository name (the inbox cursor's reader identity)
+        #[arg(long)]
+        repo: String,
+
+        /// Print musings first, then a separator line, then the directed
+        /// (REQUIRES A REPLY) set -- so `inbox.sh` can build its result
+        /// block without parsing posts to sort them (#1020).
+        #[arg(long)]
+        split: bool,
+    },
+
+    /// Retired spelling of `inbox`, kept one release for plugin/binary skew
+    #[command(hide = true)]
     Deliver {
         #[command(subcommand)]
         action: DeliverAction,

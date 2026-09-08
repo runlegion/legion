@@ -5,7 +5,7 @@
 # a2d4-1587442dbd36): a Stop that ends the turn while a directed
 # wake-worthy signal sits unanswered is a silent ghost -- the miss that
 # prompted this gate was a 40-minute-unanswered rfc (01a04213) whose only
-# surfacing was a hook drain note easy to read past. This gate re-checks
+# surfacing was an inbox note easy to read past. This gate re-checks
 # `legion pending-replies --repo $REPO --directed` (excluding
 # @all/@everyone broadcasts -- review finding HIGH 1: a broadcast is not
 # addressed to this agent in particular, and hard-blocking every agent's
