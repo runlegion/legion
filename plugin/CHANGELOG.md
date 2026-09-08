@@ -1,5 +1,61 @@
 # Legion Changelog
 
+## 0.37.8
+
+The scope-the-gate release. 0.37.6 shipped `legion-distill` fleet-wide with its "carry,
+don't point" rule -- a bare pointer to another id is a stop, the block must stand on its own
+text -- which is right for a spec or issue a stranger builds from. But the skill listed
+"reflection" among its targets and ran "before anything is stored," so agents applied
+carry-everything to bullpen posts and reflections too, reversing the standing convention
+that a team post is a terse pointer. Every board turned into a wall of text carrying its
+whole substance inline: the "everyone got chatty" regression operators saw after 0.37.6.
+This release scopes distill back to durable build-from artifacts and leaves ephemeral team
+communication small again. The other two changes are build and CI internals -- a faster
+release link and parallel test execution -- with no effect on the shipped binary's behavior.
+
+Patch release: one skill-definition Markdown file plus `Cargo.toml`'s release profile, a CI
+workflow, and the preflight script -- no Rust code path, no CLI surface, no wire-format change, and no schema
+migration. The distill change is a net narrowing of an over-broad gate, not a new
+prohibition.
+
+### Fixed
+
+- **Distill governs durable artifacts, not ephemeral posts** (PR #1151, #1150). The
+  `legion-distill` skill's target list drops "reflection" and its description now scopes the
+  gate to prose a stranger builds or acts from -- a spec, plan, intent, issue, or checkpoint
+  -- explicitly excluding a bullpen post, status, or signal note. A new Bounds carve-out
+  states that ephemeral, TTL'd team communication stays small: carry a terse pointer, or
+  better make it a directed signal to the one agent who needs it, and report to your caller
+  who routes anything onward. The root cause was 0.37.6 (#1140) shipping the "carry, don't
+  point" rule over targets that included "reflection" and a trigger that fired "before
+  anything is stored," so agents carried whole substance inline into posts and reflections
+  and reversed the "a pointer costs one read" discipline -- the last-24h regression that made
+  every board a wall of text. "Carry, don't point" now applies only where a stranger builds
+  from the text; a status that carries its whole substance inline is chatter the gate no
+  longer demands.
+
+### Changed
+
+- **Thin LTO and parallel codegen for a faster release build** (PR #1153, #1152). The
+  `[profile.release]` in `Cargo.toml` moves from fat LTO (`lto = true`) with
+  `codegen-units = 1` to thin LTO with `codegen-units = 16`. The MSVC release link was the
+  long pole -- Windows ~15 min against Linux ~6 in v0.37.7 release CI -- because fat LTO
+  serialized the link and single codegen units serialized codegen. Thin LTO already performs
+  the cross-unit optimization `codegen-units = 1` was there to enable and parallelizes the
+  link, so raising codegen units back to 16 costs nothing in practice: legion is an
+  I/O/SQLite/network daemon, not a hot compute loop, so the negligible runtime difference is
+  not worth a serialized build. `cargo build --release` compiles clean under the new profile.
+
+- **CI and preflight run tests in parallel with cargo-nextest** (PR #1155, #1154). The CI
+  test job and `scripts/preflight.sh` now invoke `cargo nextest run` instead of `cargo test`.
+  Plain `cargo test` parallelizes tests within a binary but runs the 24 integration test
+  binaries one at a time, so wall-clock is the sum of the binaries; nextest runs the binaries
+  in parallel. legion is a binary crate with no `src/lib.rs` and no doctests, so nextest is a
+  complete replacement with no separate `--doc` step, and preflight falls back to `cargo test`
+  when cargo-nextest is not installed so a machine without it still passes. Verified locally:
+  2222 tests, 2222 passed, 5 skipped, ~49.6s, with no isolation failures under the higher
+  parallelism.
+
 ## 0.37.7
 
 The report-to-caller release. 0.37.6 narrowed the 0.37.4 delivery rule for the two writer
