@@ -1,6 +1,6 @@
 ---
 name: legion-distill
-description: The per-block gate for durable prose -- a spec, plan, intent, issue, checkpoint, reflection -- and for the input you build one from. The unit is the block: the writer distills each block as it writes it (one job, every word carrying, standing on the text alone, consistent with the blocks above), and a block that fails is a stop -- HALT, emit the gap, never smooth it. A separate cold reader backstops what a writer cannot grade in its own work. Run it at the pen, on every input before you build from it, and before anything is stored.
+description: The per-block gate for durable prose a stranger builds or acts from -- a spec, plan, intent, issue, or checkpoint -- and for the input you build one from. It does NOT govern an ephemeral team post, a status, or a signal note; those stay small -- a terse pointer, or better a directed signal to the one agent who needs it -- never carry-everything. The unit is the block: the writer distills each block as it writes it (one job, every word carrying, standing on the text alone, consistent with the blocks above), and a block that fails is a stop -- HALT, emit the gap, never smooth it. A separate cold reader backstops what a writer cannot grade in its own work. Run it at the pen, on every input before you build from it, and before anything is stored.
 ---
 
 # Distill
@@ -43,3 +43,4 @@ For a self-note like a checkpoint you cannot spawn the reader; run the per-block
 - It does not judge whether the content is good or true. That is review and verify.
 - A trailing cite being present is mechanical; whether the cite supports the block is a read -- the cold reader's and the operator's, not this gate's.
 - It catches two things only: a block a later reader cannot follow from the artifact alone, and a claim with no source -- or a source that must be fetched to act, the same failure wearing a cite. The wax and the confabulation, nothing more.
+- It governs a durable artifact a stranger builds or acts from, NOT ephemeral team communication. A bullpen post, a status, a signal note is TTL'd and its job is to stay small enough not to flood every reader's drain: carry a terse pointer, or make it a directed signal to the one agent who needs it. "Carry, don't point" is for the spec someone builds from -- a status broadcast that carries its whole substance inline is chatter, and turning this gate on one is the misfire that makes every board a wall of text. Report to your caller; the caller routes anything onward.
