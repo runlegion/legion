@@ -123,6 +123,14 @@ libc = "0.2"
 tempfile = "3"
 
 [profile.release]
-lto = true
-codegen-units = 1
+# thin LTO + parallel codegen: fat LTO (`lto = true`) with `codegen-units = 1`
+# made the release build both slow to link and single-threaded in codegen --
+# the MSVC link was the long pole at ~15 min on windows-latest vs ~6 on linux
+# (v0.37.7 release CI). Thin LTO keeps nearly all of fat LTO's runtime benefit
+# while parallelizing the link, and it already does the cross-unit optimization
+# that `codegen-units = 1` was there for, so raising codegen-units lets codegen
+# run in parallel again. legion is an I/O/SQLite/network daemon, not a hot
+# compute loop, so the tiny runtime cost is not worth the serialized build.
+lto = "thin"
+codegen-units = 16
 strip = true
