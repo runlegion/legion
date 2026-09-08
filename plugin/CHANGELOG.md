@@ -1,5 +1,45 @@
 # Legion Changelog
 
+## 0.37.7
+
+The report-to-caller release. 0.37.6 narrowed the 0.37.4 delivery rule for the two writer
+agents; this carries the same correction across the rest of the fleet. `legion-verify`,
+`legion-review`, `changelog`, and `legion-explore` each rewrote its `## Delivery` block so
+the agent's final message -- the return value its caller reads once -- is its report,
+instead of posting the full body to the bullpen and signalling a one-line pointer. The
+bullpen is a single global board that every repo's session on the machine drains, so a
+`legion-verify` run inside one repo was dumping its multi-hundred-line report onto the same
+board every other repo's session reads: a subagent reporting to its caller was broadcasting
+to the whole fleet. The verdict-carrying agents still record their structured result to its
+durable ledger (`legion verify`, `legion quality-gate record`), which is the searchable
+record the old bullpen post claimed to be; the prose report now goes to the one caller who
+routes anything onward.
+
+Patch release: four agent-definition Markdown files, docs only -- no Rust code path, no CLI
+surface, no wire-format change, and no schema migration. It is a net removal of the
+bullpen-over-mail rationale for these agents, not a new prohibition; `dungeon-master` (which
+legitimately posts scenes to the board) and `issue-writer` (already fixed in #1140) are
+untouched.
+
+### Changed
+
+- **Fleet agents report to their caller, not the shared bullpen** (PR #1146, #1145). The
+  `## Delivery` block of `legion-verify`, `legion-review`, `changelog`, and `legion-explore`
+  is replaced so each agent's final message is its report to its caller, dropping the
+  `legion post` of the body to the bullpen and the `legion signal` of a pointer to the team.
+  The root cause was the bullpen being one global board shared across every repo on the
+  machine while each agent treated it as its own report channel, so a report meant for a
+  single orchestrator flooded every other repo's session that drains that board. The old
+  context-cost rationale (post-a-pointer because a mailed body is re-read every orchestrator
+  turn) is removed rather than left in place, since a subagent's final message is a return
+  value the caller reads once, not a mailed body -- leaving the paragraph would have had each
+  file argue against its own new instruction. `legion-verify` and `legion-review` keep
+  writing their structured verdict to its ledger (`legion verify` and `legion quality-gate
+  record`), which remains the durable, searchable record; `changelog` and `legion-explore`
+  have no ledger, so their replacement text states plainly that the caller is the only
+  reader. This is the fleet-wide extension of the report-to-caller fix that #1140 landed for
+  the writer agents.
+
 ## 0.37.6
 
 The distill-per-block release. Distill -- the gate that stops fluent-but-unfollowable prose
