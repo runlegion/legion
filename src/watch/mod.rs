@@ -50,7 +50,7 @@ pub use tracker::TrackedChild;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::db::{Database, RedeliveryOutcome, ReflectionMeta};
+use crate::db::{Database, RedeliveryOutcome};
 use crate::error::Result;
 use crate::health::HealthSampler;
 
@@ -596,11 +596,12 @@ fn reap_dead_pid_attempts(
 /// never actually settled.
 ///
 /// A DB error re-arming is logged and swallowed, matching every other
-/// reaper convention in this file. An `Exhausted` outcome is loud: an
-/// `eprintln!` naming every identifying field, plus a best-effort bullpen
-/// post to `repo_name` (log-and-swallow on post failure, mirroring
-/// `QuotaPanicGate::check_and_post`) -- there is no future retry point for
-/// this event since `watch_handled` is deliberately left in place.
+/// reaper convention in this file. An `Exhausted` outcome is loud in the
+/// DAEMON LOG only (#1073) -- an `eprintln!` naming every identifying
+/// field. It is deliberately NOT a bullpen post: a courier reporting its
+/// own delivery failure to the shared board is meta-mail every session
+/// pays to read. There is no future retry point for this event since
+/// `watch_handled` is deliberately left in place.
 pub(crate) fn rearm_or_abandon(
     db: &Database,
     attempt_id: &str,
@@ -621,27 +622,41 @@ pub(crate) fn rearm_or_abandon(
         let RedeliveryOutcome::Exhausted { attempts } = outcome else {
             continue;
         };
-        // The post body carries no log prefix -- it is a bullpen message
-        // for a human/agent reader, not a log line (mirrors
-        // `QuotaPanicGate::check_and_post`, whose post text is likewise
-        // prefix-free while its own eprintln! calls carry `self.host`).
-        let post_text = format!(
-            "redelivery ABANDONED: signal {signal_id} for {repo_name} exhausted {attempts} \
-             delivery attempts (cap {max_attempts}) -- wake_attempt {attempt_id} settled failed; \
-             signal stays permanently handled for this repo"
+        // Log only, never a bullpen post (#1073). This is the courier
+        // reporting its own delivery failure, and a board post makes it
+        // meta-mail about mail: every draining session on the machine pays
+        // to read a notice about a signal addressed to someone else, and
+        // the cost multiplies by the roster. Ten of these landed as board
+        // content in a single hour (shingle, kelex, http-sql) and were the
+        // second half of the issue's evidence. The detail is unchanged --
+        // the same fields, in the daemon log, where the operator debugging
+        // a stuck wake actually looks. The signal still stays permanently
+        // handled for this repo; nothing about the settle changes.
+        eprintln!(
+            "{log_prefix} {}",
+            abandonment_notice(&signal_id, repo_name, attempts, max_attempts, attempt_id)
         );
-        eprintln!("{log_prefix} {post_text}");
-        if let Err(e) = db.insert_reflection_with_meta(
-            repo_name,
-            &post_text,
-            "team",
-            &ReflectionMeta::default(),
-        ) {
-            eprintln!(
-                "{log_prefix} redelivery abandonment bullpen post failed for signal {signal_id}: {e}"
-            );
-        }
     }
+}
+
+/// The abandonment notice's text, built apart from the `eprintln!` that
+/// emits it so the CONTENT is assertable (#1073 review). Clause 2 of the
+/// issue has two halves -- the notice leaves the board AND still reaches the
+/// daemon log -- and a test that only checks the board is empty would pass
+/// if the notice were dropped entirely, which is the same silent-loss shape
+/// this change exists to fix on the other side.
+fn abandonment_notice(
+    signal_id: &str,
+    repo_name: &str,
+    attempts: u32,
+    max_attempts: u32,
+    attempt_id: &str,
+) -> String {
+    format!(
+        "redelivery ABANDONED: signal {signal_id} for {repo_name} exhausted {attempts} \
+         delivery attempts (cap {max_attempts}) -- wake_attempt {attempt_id} settled failed; \
+         signal stays permanently handled for this repo"
+    )
 }
 
 /// Auto-revert delegated work whose linked wake attempt is no longer live
@@ -1500,7 +1515,7 @@ mod tests {
     /// post a loud abandonment notice to the recipient repo's own bullpen.
     #[cfg(unix)]
     #[test]
-    fn reap_dead_pid_attempts_exhausts_and_posts_bullpen_alarm() {
+    fn reap_dead_pid_attempts_exhausts_without_posting_to_the_bullpen() {
         let (db, _index, _dir) = test_storage();
 
         let mut child = std::process::Command::new("true")
@@ -1564,15 +1579,55 @@ mod tests {
             .expect("count watch_handled");
         assert_eq!(handled, 1, "exhausted signal must stay handled");
 
-        // A best-effort bullpen post must land on smugglr's own board.
+        // #1073: the abandonment is loud in the DAEMON LOG and silent on the
+        // board. This assertion is the inverse of what it was: the courier
+        // reporting its own delivery failure as a bullpen post is meta-mail
+        // about mail, and every draining session on the machine paid to read
+        // a notice about a signal addressed to someone else. Ten of them
+        // landed in one hour, which is the evidence that closed the issue.
+        // The settle itself is unchanged -- watch_handled stays, asserted
+        // above -- so this test guards the notice's DESTINATION, not the
+        // outcome.
         let posts = db.get_board_posts().expect("get board posts");
         assert!(
-            posts
+            !posts
                 .iter()
-                .any(|p| p.repo == "smugglr" && p.text.contains("redelivery ABANDONED")),
-            "exhausted redelivery must post a loud abandonment notice to smugglr's bullpen; got: {:?}",
+                .any(|p| p.text.contains("redelivery ABANDONED")),
+            "an exhausted redelivery must not reach any bullpen; got: {:?}",
             posts.iter().map(|p| (&p.repo, &p.text)).collect::<Vec<_>>()
         );
+    }
+
+    /// Pins the CONTENT of the abandonment notice so a field cannot quietly
+    /// drop out of it: clause 2 of #1073 requires the same detail that used
+    /// to reach the board to reach the daemon log instead.
+    ///
+    /// What this does NOT cover, stated so nobody reads more into it: it
+    /// asserts nothing about the `eprintln!` firing. Deleting the emission
+    /// outright still leaves the suite green (#1073 review M4), because
+    /// proving a line reached stderr needs capture this harness does not
+    /// have. So the notice could still vanish silently -- the same shape as
+    /// the bug this change fixes on the board side, one layer over. Judged
+    /// not worth a production signature change for a sink parameter; the
+    /// residual risk is a notice nobody sees, not a wrong settle.
+    #[test]
+    fn abandonment_notice_names_every_identifying_field() {
+        let notice = abandonment_notice("sig-7", "smugglr", 3, 3, "attempt-42");
+
+        for needle in [
+            "redelivery ABANDONED",
+            "sig-7",
+            "smugglr",
+            "exhausted 3",
+            "cap 3",
+            "attempt-42",
+            "stays permanently handled",
+        ] {
+            assert!(
+                notice.contains(needle),
+                "the daemon-log notice must still name {needle}; got: {notice}"
+            );
+        }
     }
 
     // -- delegated-work reaper (#778, card-free since #931) -------------------
