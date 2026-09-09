@@ -536,6 +536,156 @@ fn push_force_survives_rebase_onto_squash_merged_base_with_no_reason() {
     );
 }
 
+/// The actual incident #1172 was filed for: #1167 squash-merged THREE
+/// commits into one main commit (ee5deb2e, a66616e9, 3a2b9764 -> 1e71d611
+/// in the real history). `git patch-id` is computed per-commit, so none of
+/// three individually patch-id-matches a squash combining all three --
+/// the per-commit `AlreadyInMainByPatchId` test alone would wrongly orphan
+/// every one of them despite their content being fully upstream. This is
+/// the cumulative-diff fallback's reason to exist; the single-commit-squash
+/// test above does NOT exercise it (a one-commit squash's diff equals the
+/// squash commit's diff directly, so the per-commit test alone already
+/// passes it -- that is why this needs its own, shaped-like-the-incident
+/// fixture rather than trusting the one-commit case to generalize).
+#[cfg(unix)]
+#[test]
+fn push_force_survives_three_commit_squash_merge_via_cumulative_fallback() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = tempfile::tempdir().unwrap();
+    let lp = local.path();
+
+    run_git_fixture(lp, &["init", "-q", "-b", "main"]);
+    run_git_fixture(
+        lp,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    std::fs::write(lp.join("seed.txt"), "seed\n").unwrap();
+    run_git_fixture(lp, &["add", "seed.txt"]);
+    run_git_fixture(lp, &["commit", "-q", "-m", "seed"]);
+    run_git_fixture(lp, &["push", "-q", "origin", "main"]);
+
+    // Predecessor branch: THREE commits, each touching its own file, never
+    // itself pushed (mirroring #1167->#1168: only the successor branch had
+    // been pushed, carrying these as ancestors via `git merge`).
+    run_git_fixture(lp, &["checkout", "-q", "-b", "predecessor"]);
+    std::fs::write(lp.join("a.txt"), "a\n").unwrap();
+    run_git_fixture(lp, &["add", "a.txt"]);
+    run_git_fixture(lp, &["commit", "-q", "-m", "predecessor part 1"]);
+    std::fs::write(lp.join("b.txt"), "b\n").unwrap();
+    run_git_fixture(lp, &["add", "b.txt"]);
+    run_git_fixture(lp, &["commit", "-q", "-m", "predecessor part 2"]);
+    std::fs::write(lp.join("c.txt"), "c\n").unwrap();
+    run_git_fixture(lp, &["add", "c.txt"]);
+    run_git_fixture(lp, &["commit", "-q", "-m", "predecessor part 3"]);
+    let c1_sha = run_git_fixture_output(lp, &["rev-parse", "predecessor~2"]);
+    let c2_sha = run_git_fixture_output(lp, &["rev-parse", "predecessor~1"]);
+    let c3_sha = run_git_fixture_output(lp, &["rev-parse", "predecessor"]);
+
+    // Stacked branch: predecessor's three commits as ancestors, plus its own.
+    run_git_fixture(lp, &["checkout", "-q", "-b", "topic"]);
+    std::fs::write(lp.join("topic.txt"), "topic content\n").unwrap();
+    run_git_fixture(lp, &["add", "topic.txt"]);
+    run_git_fixture(lp, &["commit", "-q", "-m", "topic feature"]);
+    run_git_fixture(lp, &["push", "-q", "origin", "topic"]);
+    let old_remote_sha = run_git_fixture_output(lp, &["rev-parse", "HEAD"]);
+
+    // Simulate a GitHub squash-merge of the THREE-commit predecessor PR: all
+    // three files land in ONE new commit on main. No individual pre-squash
+    // commit's diff equals this combined diff -- patch-id is per-commit.
+    run_git_fixture(lp, &["checkout", "-q", "main"]);
+    std::fs::write(lp.join("a.txt"), "a\n").unwrap();
+    std::fs::write(lp.join("b.txt"), "b\n").unwrap();
+    std::fs::write(lp.join("c.txt"), "c\n").unwrap();
+    run_git_fixture(lp, &["add", "a.txt", "b.txt", "c.txt"]);
+    run_git_fixture(
+        lp,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "squash: predecessor feature, 3 commits (#1000)",
+        ],
+    );
+    run_git_fixture(lp, &["push", "-q", "origin", "main"]);
+
+    // Rebuild `topic` onto the squashed `main`, replaying only its own
+    // commit.
+    run_git_fixture(lp, &["checkout", "-q", "topic"]);
+    run_git_fixture(
+        lp,
+        &["rebase", "-q", "--onto", "main", "predecessor", "topic"],
+    );
+    let new_local_sha = run_git_fixture_output(lp, &["rev-parse", "HEAD"]);
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(push_cmd(data_dir.path(), lp).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--branch",
+        "topic",
+        "--force",
+    ]));
+    assert!(
+        stdout.contains("topic"),
+        "expected the push to succeed with NO --force-reason -- if this failed, the \
+         cumulative-diff fallback did not clear the 3-commit squash, and the feature does \
+         not solve the problem it was built for. got: {stdout}"
+    );
+
+    let remote_topic = rev_parse(remote.path(), "refs/heads/topic");
+    assert_eq!(
+        String::from_utf8_lossy(&remote_topic.stdout).trim(),
+        new_local_sha,
+        "expected the remote to carry the rebased sha after the force-push"
+    );
+
+    let details = audit_details_for(data_dir.path(), "topic");
+    assert_eq!(
+        details.len(),
+        1,
+        "expected exactly one push attempt: {details:?}"
+    );
+    let d = &details[0];
+    assert_eq!(d["outcome"], "success", "{d:?}");
+    assert!(
+        d["force_reason"].is_null(),
+        "no --force-reason should have been needed: {d:?}"
+    );
+    assert_eq!(
+        d["discarded_count"], 4,
+        "expected all 3 predecessor commits plus topic's own: {d:?}"
+    );
+
+    let discarded = d["discarded"]
+        .as_array()
+        .expect("discarded must be an array");
+    let verdict_for = |sha: &str| -> String {
+        discarded
+            .iter()
+            .find(|c| c["sha"] == sha)
+            .unwrap_or_else(|| panic!("commit {sha} missing from discarded list: {discarded:?}"))
+            ["survival"]
+            .as_str()
+            .expect("survival must be a string")
+            .to_string()
+    };
+    for (label, sha) in [("C1", &c1_sha), ("C2", &c2_sha), ("C3", &c3_sha)] {
+        assert_eq!(
+            verdict_for(sha),
+            "already-in-main-by-cumulative-diff",
+            "{label} ({sha}) should have survived via the cumulative fallback, not been left \
+             an orphan -- discarded: {discarded:?}"
+        );
+    }
+    assert_eq!(
+        verdict_for(&old_remote_sha),
+        "present-in-new-history",
+        "topic's own commit should still survive via the ordinary per-commit patch-id test"
+    );
+}
+
 /// Done-When #2: a branch with a genuinely orphaned remote commit is
 /// refused, names that commit, and proceeds only with `--force-reason`.
 #[cfg(unix)]

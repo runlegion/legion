@@ -214,8 +214,18 @@ enum SurvivalVerdict {
     /// fast-forward already landed it).
     AlreadyInMainBySha,
     /// Patch-id equivalent to a commit unique to `main` (the squash-merge
-    /// case: the commit's content is on `main` under a different sha).
+    /// case: the commit's content is on `main` under a different sha) --
+    /// covers a squash that combined exactly ONE commit, where the squash
+    /// commit's whole diff equals this commit's own diff.
     AlreadyInMainByPatchId,
+    /// Not individually patch-id equivalent to anything, but every file the
+    /// WHOLE remaining-orphan set touched is byte-identical between the old
+    /// remote head and the new local head -- the multi-commit squash case
+    /// (patch-id is per-commit, so three pre-squash commits combined into
+    /// one main commit never patch-id-match individually, even though their
+    /// content is fully upstream). See the cumulative fallback in
+    /// [`analyze_force_push`].
+    AlreadyInMainByCumulativeDiff,
     /// None of the above -- this push would genuinely destroy the commit.
     Orphan,
 }
@@ -230,6 +240,7 @@ impl SurvivalVerdict {
             SurvivalVerdict::PresentInNewHistory => "present-in-new-history",
             SurvivalVerdict::AlreadyInMainBySha => "already-in-main-by-sha",
             SurvivalVerdict::AlreadyInMainByPatchId => "already-in-main-by-patch-id",
+            SurvivalVerdict::AlreadyInMainByCumulativeDiff => "already-in-main-by-cumulative-diff",
             SurvivalVerdict::Orphan => "orphan",
         }
     }
@@ -265,12 +276,8 @@ struct ForceAnalysis {
 /// 2. Patch-id equivalent to a commit unique to `main` (`git cherry
 ///    <main_ref> <old_remote_sha>`). This is the squash-merge case this
 ///    issue exists for -- a rebased stacked branch whose base just
-///    squash-merged. Note: a squash-merge that combines MULTIPLE commits
-///    into one main commit will not patch-id-match any single pre-squash
-///    commit (patch-id is per-commit, not cumulative) -- those commits
-///    correctly surface as orphans and require `--force-reason`, even
-///    though their content is genuinely upstream. That is the deliberately
-///    conservative failure mode: refuse and name them, rather than guess.
+///    squash-merged -- but ONLY when the squash combined a single commit
+///    (the squash commit's whole diff then equals this commit's own diff).
 /// 3. Patch-id equivalent to a commit unique to the new local history (`git
 ///    cherry <new_local_head> <old_remote_sha>` -- candidates are exactly
 ///    `new_local_head..old_remote_sha`, checked against
@@ -278,7 +285,26 @@ struct ForceAnalysis {
 ///    change is already in the new history). This is the ordinary
 ///    amend/rebase case.
 ///
-/// A commit that fails all three is an orphan.
+/// Anything still failing all three falls to a CUMULATIVE check before
+/// being declared an orphan: a squash-merge that combines MULTIPLE commits
+/// into one main commit cannot patch-id-match any single pre-squash commit
+/// (patch-id is computed per-commit, not cumulatively) even though the
+/// content is fully upstream -- this is the actual #1167->#1168 incident
+/// #1172 was filed for, not an edge case. For every commit still failing
+/// tests 1-3, take the union of files touched across ALL of them and
+/// compare their content directly between `old_remote_sha` and
+/// `new_local_head`. If every one of those files is byte-identical in the
+/// new state, the whole remaining group is upgraded to
+/// [`SurvivalVerdict::AlreadyInMainByCumulativeDiff`] together -- nothing
+/// was actually lost in aggregate, however many shas it took to get there.
+/// A real loss anywhere in that group leaves at least one file differing,
+/// so this never upgrades a genuine loss to "survives"; it CAN
+/// conservatively decline to upgrade a legitimate squash if an unrelated
+/// genuine loss happens to share the same remaining-orphan batch -- that
+/// mixed case still requires `--force-reason` for the whole batch, which is
+/// the safe direction to fail in.
+///
+/// A commit that fails all four is a genuine orphan.
 fn analyze_force_push(
     checkout: &Path,
     branch: &str,
@@ -335,6 +361,26 @@ fn analyze_force_push(
             subject,
             verdict,
         });
+    }
+
+    // Cumulative fallback (see the doc comment above): only spend the extra
+    // git calls when at least one commit is still an orphan after the
+    // per-commit tests.
+    if discarded
+        .iter()
+        .any(|c| c.verdict == SurvivalVerdict::Orphan)
+    {
+        let old_base = merge_base(checkout, new_local_head, &old_remote_sha)?;
+        let touched_files = diff_name_only(checkout, &old_base, &old_remote_sha, &[])?;
+        if !touched_files.is_empty()
+            && diff_name_only(checkout, &old_remote_sha, new_local_head, &touched_files)?.is_empty()
+        {
+            for c in &mut discarded {
+                if c.verdict == SurvivalVerdict::Orphan {
+                    c.verdict = SurvivalVerdict::AlreadyInMainByCumulativeDiff;
+                }
+            }
+        }
     }
 
     Ok(ForceAnalysis {
@@ -482,12 +528,12 @@ fn orphan_refusal(branch: &str, orphans: &[&DiscardedCommit]) -> error::LegionEr
     error::LegionError::PushRefused {
         branch: branch.to_string(),
         reason: format!(
-            "force-push would discard {} commit(s) with no surviving copy (not present in the \
-             new history, not on main by sha, not on main by patch-id):\n  {listing}\n\nnote: a \
-             squash-merge that combined MULTIPLE commits into one main commit will not \
-             patch-id-match any single pre-squash commit even when its content is fully \
-             upstream -- if you have verified by hand that these are genuinely already \
-             upstream, override with --force-reason \"...\"",
+            "force-push would discard {} commit(s) with no surviving copy -- not present in the \
+             new history, not on main by sha, not on main by patch-id, and the combined content \
+             these commits touched is not byte-identical in the new state either (the \
+             cumulative squash check already ran and did not clear them):\n  {listing}\n\nif you \
+             have verified by hand that these are genuinely already upstream (e.g. a squash \
+             mixed with other changes since), override with --force-reason \"...\"",
             orphans.len()
         ),
     }
@@ -904,6 +950,63 @@ fn fetch_main_ref(checkout: &Path) -> error::Result<String> {
          failed ({}) and no local 'main' branch exists",
         String::from_utf8_lossy(&fetch.stderr).trim()
     )))
+}
+
+/// The best common ancestor of `a` and `b` (`git merge-base`).
+fn merge_base(checkout: &Path, a: &str, b: &str) -> error::Result<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["merge-base", a, b])
+        .output()
+        .map_err(|e| {
+            error::LegionError::WorkSource(format!("failed to spawn git merge-base: {e}"))
+        })?;
+    if !out.status.success() {
+        return Err(error::LegionError::WorkSource(format!(
+            "git merge-base {a} {b} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// File paths that differ between `a` and `b` (`git diff --name-only <a>
+/// <b>`), optionally restricted to `paths` (empty means the whole tree).
+/// Used two ways by the cumulative survival fallback: first with an empty
+/// `paths` to discover which files the discarded set touched at all, then
+/// with that exact file list to check whether those specific files still
+/// differ in the new state -- an empty result the second time means every
+/// one of them is byte-identical, i.e. nothing was lost.
+fn diff_name_only(
+    checkout: &Path,
+    a: &str,
+    b: &str,
+    paths: &[String],
+) -> error::Result<Vec<String>> {
+    let mut args: Vec<&str> = vec!["diff", "--name-only", a, b];
+    if !paths.is_empty() {
+        args.push("--");
+        args.extend(paths.iter().map(String::as_str));
+    }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(&args)
+        .output()
+        .map_err(|e| error::LegionError::WorkSource(format!("failed to spawn git diff: {e}")))?;
+    if !out.status.success() {
+        return Err(error::LegionError::WorkSource(format!(
+            "git diff --name-only {a} {b} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Commits reachable from `include` but not from `exclude` (`git rev-list

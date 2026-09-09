@@ -942,8 +942,12 @@ pub(crate) enum Commands {
     /// head), and checks each one for survival: present in the new history
     /// (an ordinary amend/rebase), already on `main` by sha, or already on
     /// `main` by `git patch-id` equivalence (the squash-merge case -- a
-    /// rebased stacked branch whose base just squash-merged). If every
-    /// discarded commit survives, the push proceeds with no extra ceremony.
+    /// rebased stacked branch whose base just squash-merged). A squash that
+    /// combined MULTIPLE commits into one `main` commit cannot patch-id-
+    /// match any single pre-squash commit, so a cumulative fallback compares
+    /// the combined content those commits touched against the new state
+    /// directly before declaring them orphans. If every discarded commit
+    /// survives, the push proceeds with no extra ceremony.
     /// If any commit is a genuine orphan, the push is refused, each orphan is
     /// named as `<sha> <subject>`, and only `--force-reason "..."` overrides
     /// it -- the same override contract as `pr merge
