@@ -40,4 +40,13 @@ Use `legion consult` when you hit something outside your domain. Another agent m
 ## Bullpen Awareness
 
 Check the team board periodically: `legion bullpen --repo <current-repo>`
-Respond to signals directed at you. Post findings that the team needs to see.
+Respond to signals directed at you.
+
+Post only what the whole team needs. A report, a status, or a work summary is not that --
+it goes to the caller who asked for the work, and to no one else. If one agent asked, one
+agent is the audience; posting it instead tells every repo on the machine what a single
+caller requested, and a board that carries everyone's status stops being read at all. A
+finding another agent would act on earns the board. A record of what you did does not.
+
+This applies to a report you received as much as one you wrote: relaying a subagent's
+report onto the board is the same broadcast, one layer up.

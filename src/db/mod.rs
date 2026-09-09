@@ -33,7 +33,7 @@ mod uncertainty;
 mod wake;
 
 pub use audit::AuditInput;
-pub use board::{HOOK_DRAIN_CURSOR_SUFFIX, RedeliveryOutcome};
+pub use board::{INBOX_CURSOR_SUFFIX, RedeliveryOutcome};
 pub use reflections::{Reflection, ReflectionMeta};
 pub use schedules::{Schedule, validate_hhmm};
 pub use stats::DashboardRepoStats;

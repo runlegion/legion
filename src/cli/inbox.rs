@@ -1,7 +1,15 @@
-//! CLI surface for the hook-side delivery drain (#941): `legion deliver
-//! drain`. Domain logic lives in `crate::deliver`; this module is the thin
-//! clap wiring + stdout formatting layer, following the `TaskAction` /
+//! CLI surface for the hook-side inbox lane (#941): `legion inbox`.
+//! Domain logic lives in `crate::deliver`; this module is the thin clap
+//! wiring + stdout formatting layer, following the `TaskAction` /
 //! `handle_task` convention in `cli/misc.rs`.
+//!
+//! `legion deliver drain` is the retired spelling of this command, kept as
+//! a hidden alias for one release. A plugin can be updated ahead of the
+//! binary (`setup-binary` is a separate step), and `inbox.sh` swallows a
+//! failed shell-out -- an old binary meeting the new hook would look
+//! exactly like an empty inbox rather than an error. The alias is what
+//! makes that skew survivable; delete it once the floor version is past
+//! this release.
 
 use std::io::Write;
 
@@ -12,18 +20,20 @@ use crate::cli::util::open_db;
 use crate::db::Reflection;
 use crate::{board, deliver, error, telemetry};
 
+/// Retired spelling of `legion inbox`, hidden from help and kept for one
+/// release so a plugin that is ahead of the binary still delivers mail --
+/// see the module docs for why a missing subcommand is indistinguishable
+/// from an empty inbox at the hook.
 #[derive(Subcommand)]
 pub(crate) enum DeliverAction {
-    /// Drain undelivered bullpen posts/signals for the hook-side delivery
-    /// lane
+    /// Deliver this repo's unread bullpen posts/signals (use `legion inbox`)
     Drain {
-        /// Repository name (the hook-drain cursor's reader identity)
+        /// Repository name (the inbox cursor's reader identity)
         #[arg(long)]
         repo: String,
 
         /// Print musings first, then a separator line, then the directed
-        /// (REQUIRES A REPLY) set -- so `delivery-drain.sh` can build its
-        /// result block without parsing posts to sort them (#1020).
+        /// (REQUIRES A REPLY) set (#1020).
         #[arg(long)]
         split: bool,
     },
@@ -31,45 +41,45 @@ pub(crate) enum DeliverAction {
 
 pub(crate) fn handle(action: DeliverAction) -> error::Result<()> {
     match action {
-        DeliverAction::Drain { repo, split } => handle_deliver_drain(repo, split)?,
+        DeliverAction::Drain { repo, split } => handle_inbox(repo, split)?,
     }
     Ok(())
 }
 
-/// `legion deliver drain --repo <REPO> [--split]`. This is the command
-/// `plugin/hooks/delivery-drain.sh` shells out to, the same way
+/// `legion inbox --repo <REPO> [--split]`. This is the command
+/// `plugin/hooks/inbox.sh` shells out to, the same way
 /// `identity-chain-load.sh` shells out to `legion chain --id`.
 ///
-/// Without `--split`, prints `board::format_bullpen` of the drained posts.
+/// Without `--split`, prints `board::format_bullpen` of the delivered posts.
 /// With `--split` (#1020), prints musings then a separator then the
-/// directed set via `emit_drained_split` -- see that function.  Either way,
+/// directed set via `emit_inbox_split` -- see that function.  Either way,
 /// nothing is printed when there is nothing new.
 ///
 /// Telemetry ordering (#941 review): the `lane = "hook"` `DeliveryRecord`
-/// rows are written only AFTER the drained text has been printed and
+/// rows are written only AFTER the delivered text has been printed and
 /// flushed -- emission first, record second, so a failed write yields no
 /// row. This mirrors the MCP lane's recording point (after `write_ok`),
 /// making the two lanes' rows comparable: each asserts "the bytes left the
 /// last stage this process controls," and neither can see the harness-side
 /// tail beyond it. `--split` records the same rows for the same reason:
-/// every drained post is emitted either way, just into a different bucket.
-pub(crate) fn handle_deliver_drain(repo: String, split: bool) -> error::Result<()> {
+/// every delivered post is emitted either way, just into a different bucket.
+pub(crate) fn handle_inbox(repo: String, split: bool) -> error::Result<()> {
     let database = open_db()?;
-    let posts = deliver::drain_for_hook(&database, &repo)?;
+    let posts = deliver::claim_inbox(&database, &repo)?;
     if split {
-        emit_drained_split(&repo, &posts, &mut std::io::stdout())?;
+        emit_inbox_split(&repo, &posts, &mut std::io::stdout())?;
     } else {
-        emit_drained(&posts, &mut std::io::stdout())?;
+        emit_inbox(&posts, &mut std::io::stdout())?;
     }
     record_hook_telemetry(&repo, &posts);
     Ok(())
 }
 
-/// Write the drained posts to `out` and flush. Nothing is written for an
+/// Write the claimed posts to `out` and flush. Nothing is written for an
 /// empty batch. On any write/flush error the caller propagates and must
 /// NOT record telemetry -- an unemitted post keeps no delivery row (its
 /// cursor claim stands; the post remains readable via `legion bullpen`).
-fn emit_drained(posts: &[Reflection], out: &mut impl Write) -> error::Result<()> {
+fn emit_inbox(posts: &[Reflection], out: &mut impl Write) -> error::Result<()> {
     if posts.is_empty() {
         return Ok(());
     }
@@ -85,16 +95,16 @@ fn emit_drained(posts: &[Reflection], out: &mut impl Write) -> error::Result<()>
 const SPLIT_SEPARATOR: &str = "---";
 
 /// Write `posts` split into musings then a separator then the directed
-/// (REQUIRES A REPLY) set -- `legion deliver drain --split` (#1020).
+/// (REQUIRES A REPLY) set -- `legion inbox --split` (#1020).
 ///
-/// `posts` is split via `deliver::split_drained`; musings render through
+/// `posts` is split via `deliver::split_inbox`; musings render through
 /// `board::format_bullpen` (the existing lighter header), and the directed
 /// set renders through `board::format_pending_replies` -- the same
 /// formatter `legion pending-replies` uses, so this bucket's text can
 /// never drift from what boot/post-compact would show for the same
 /// signal. Nothing is written for an empty batch.
-fn emit_drained_split(repo: &str, posts: &[Reflection], out: &mut impl Write) -> error::Result<()> {
-    let (musings, directed) = deliver::split_drained(posts);
+fn emit_inbox_split(repo: &str, posts: &[Reflection], out: &mut impl Write) -> error::Result<()> {
+    let (musings, directed) = deliver::split_inbox(posts);
 
     let musings_txt = board::format_bullpen(&musings);
     let directed_tuples: Vec<(String, String, String)> = directed
@@ -133,7 +143,7 @@ fn record_hook_telemetry(repo: &str, posts: &[Reflection]) {
         };
         if let Err(e) = telemetry::append_delivery(&record) {
             eprintln!(
-                "[legion deliver] telemetry write failed for post {}: {e}",
+                "[legion inbox] telemetry write failed for post {}: {e}",
                 post.id
             );
         }
@@ -145,8 +155,8 @@ mod tests {
     use super::*;
     use crate::db::testutil::test_db;
 
-    /// A sink that refuses every write -- shared by the emit_drained and
-    /// emit_drained_split write-failure tests below.
+    /// A sink that refuses every write -- shared by the emit_inbox and
+    /// emit_inbox_split write-failure tests below.
     struct FailingSink;
     impl Write for FailingSink {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -158,22 +168,22 @@ mod tests {
     }
 
     #[test]
-    fn emit_drained_prints_seeded_post_then_empty_on_rerun() {
+    fn emit_inbox_prints_seeded_post_then_empty_on_rerun() {
         let db = test_db();
 
-        // Prime past cold start: the first-ever drain against a nonempty
+        // Prime past cold start: the first-ever inbox call against a nonempty
         // board seeds from the current watermark rather than replaying
         // history, so it delivers nothing.
         db.insert_reflection("seed", "sentinel", "team").unwrap();
         let mut out = Vec::new();
-        emit_drained(&deliver::drain_for_hook(&db, "legion").unwrap(), &mut out).unwrap();
-        assert!(out.is_empty(), "cold-start drain must emit nothing");
+        emit_inbox(&deliver::claim_inbox(&db, "legion").unwrap(), &mut out).unwrap();
+        assert!(out.is_empty(), "cold-start inbox call must emit nothing");
 
         db.insert_reflection("rafters", "hello team", "team")
             .unwrap();
 
         let mut out = Vec::new();
-        emit_drained(&deliver::drain_for_hook(&db, "legion").unwrap(), &mut out).unwrap();
+        emit_inbox(&deliver::claim_inbox(&db, "legion").unwrap(), &mut out).unwrap();
         let first = String::from_utf8(out).unwrap();
         assert!(
             first.contains("hello team"),
@@ -181,47 +191,47 @@ mod tests {
         );
 
         let mut out = Vec::new();
-        emit_drained(&deliver::drain_for_hook(&db, "legion").unwrap(), &mut out).unwrap();
+        emit_inbox(&deliver::claim_inbox(&db, "legion").unwrap(), &mut out).unwrap();
         assert!(out.is_empty(), "expected empty output on immediate rerun");
     }
 
     #[test]
-    fn emit_drained_failure_precedes_telemetry_recording() {
-        // emit_drained must propagate a refused write, and
-        // handle_deliver_drain's ordering (emit before
+    fn emit_inbox_failure_precedes_telemetry_recording() {
+        // emit_inbox must propagate a refused write, and
+        // handle_inbox's ordering (emit before
         // record_hook_telemetry) means no DeliveryRecord is written for an
         // unemitted post. The ordering itself is structural -- this test
         // pins the propagation half.
         let db = test_db();
         db.insert_reflection("seed", "sentinel", "team").unwrap();
-        assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
+        assert!(deliver::claim_inbox(&db, "legion").unwrap().is_empty());
         db.insert_reflection("rafters", "doomed post", "team")
             .unwrap();
 
-        let posts = deliver::drain_for_hook(&db, "legion").unwrap();
+        let posts = deliver::claim_inbox(&db, "legion").unwrap();
         assert_eq!(posts.len(), 1);
         assert!(
-            emit_drained(&posts, &mut FailingSink).is_err(),
+            emit_inbox(&posts, &mut FailingSink).is_err(),
             "a refused write must propagate, not be swallowed"
         );
     }
 
     #[test]
-    fn emit_drained_split_puts_the_directed_set_after_the_musings_with_a_separator() {
+    fn emit_inbox_split_puts_the_directed_set_after_the_musings_with_a_separator() {
         let db = test_db();
         db.insert_reflection("seed", "sentinel", "team").unwrap();
-        assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
+        assert!(deliver::claim_inbox(&db, "legion").unwrap().is_empty());
 
         db.insert_reflection("rafters", "just a musing for the team", "team")
             .unwrap();
         db.insert_reflection("kelex", "@legion question: which lane owns retries", "team")
             .unwrap();
 
-        let posts = deliver::drain_for_hook(&db, "legion").unwrap();
+        let posts = deliver::claim_inbox(&db, "legion").unwrap();
         assert_eq!(posts.len(), 2);
 
         let mut out = Vec::new();
-        emit_drained_split("legion", &posts, &mut out).unwrap();
+        emit_inbox_split("legion", &posts, &mut out).unwrap();
         let rendered = String::from_utf8(out).unwrap();
 
         let musing_pos = rendered
@@ -242,17 +252,17 @@ mod tests {
     }
 
     #[test]
-    fn emit_drained_split_omits_the_separator_when_only_one_bucket_is_nonempty() {
+    fn emit_inbox_split_omits_the_separator_when_only_one_bucket_is_nonempty() {
         let db = test_db();
         db.insert_reflection("seed", "sentinel", "team").unwrap();
-        assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
+        assert!(deliver::claim_inbox(&db, "legion").unwrap().is_empty());
 
         db.insert_reflection("rafters", "just a musing for the team", "team")
             .unwrap();
-        let posts = deliver::drain_for_hook(&db, "legion").unwrap();
+        let posts = deliver::claim_inbox(&db, "legion").unwrap();
 
         let mut out = Vec::new();
-        emit_drained_split("legion", &posts, &mut out).unwrap();
+        emit_inbox_split("legion", &posts, &mut out).unwrap();
         let rendered = String::from_utf8(out).unwrap();
 
         assert!(rendered.contains("just a musing for the team"));
@@ -264,25 +274,25 @@ mod tests {
     }
 
     #[test]
-    fn emit_drained_split_empty_batch_emits_nothing() {
+    fn emit_inbox_split_empty_batch_emits_nothing() {
         let mut out = Vec::new();
-        emit_drained_split("legion", &[], &mut out).unwrap();
+        emit_inbox_split("legion", &[], &mut out).unwrap();
         assert!(out.is_empty());
     }
 
     #[test]
-    fn emit_drained_split_directed_only_batch_renders_no_musings_header() {
+    fn emit_inbox_split_directed_only_batch_renders_no_musings_header() {
         let db = test_db();
         db.insert_reflection("seed", "sentinel", "team").unwrap();
-        assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
+        assert!(deliver::claim_inbox(&db, "legion").unwrap().is_empty());
 
         db.insert_reflection("kelex", "@legion question: which lane owns retries", "team")
             .unwrap();
-        let posts = deliver::drain_for_hook(&db, "legion").unwrap();
+        let posts = deliver::claim_inbox(&db, "legion").unwrap();
         assert_eq!(posts.len(), 1);
 
         let mut out = Vec::new();
-        emit_drained_split("legion", &posts, &mut out).unwrap();
+        emit_inbox_split("legion", &posts, &mut out).unwrap();
         let rendered = String::from_utf8(out).unwrap();
 
         assert!(
@@ -300,27 +310,27 @@ mod tests {
     }
 
     #[test]
-    fn emit_drained_split_failure_propagates() {
+    fn emit_inbox_split_failure_propagates() {
         let db = test_db();
         db.insert_reflection("seed", "sentinel", "team").unwrap();
-        assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
+        assert!(deliver::claim_inbox(&db, "legion").unwrap().is_empty());
         db.insert_reflection("rafters", "doomed musing", "team")
             .unwrap();
 
-        let posts = deliver::drain_for_hook(&db, "legion").unwrap();
+        let posts = deliver::claim_inbox(&db, "legion").unwrap();
         assert_eq!(posts.len(), 1);
         assert!(
-            emit_drained_split("legion", &posts, &mut FailingSink).is_err(),
+            emit_inbox_split("legion", &posts, &mut FailingSink).is_err(),
             "a refused write must propagate, not be swallowed"
         );
     }
 
     /// #1020 review (correcting the original board.rs placement of this
-    /// test): `legion pending-replies` and the hook drain's `--split`
+    /// test): `legion pending-replies` and the inbox lane's `--split`
     /// directed bucket must render the SAME signal identically. This
     /// drives BOTH real production call paths -- `cli::signal::
     /// pending_reply_signals` (what `handle_pending_replies` calls) and
-    /// the actual private `emit_drained_split` (what the hook shells out
+    /// the actual private `emit_inbox_split` (what the hook shells out
     /// to via `--split`) -- rather than re-deriving either path's steps,
     /// so a regression in either caller's wiring, not just in
     /// `format_pending_replies` itself, would fail this test.
@@ -330,7 +340,7 @@ mod tests {
 
         let db = test_db();
         db.insert_reflection("seed", "sentinel", "team").unwrap();
-        assert!(deliver::drain_for_hook(&db, "legion").unwrap().is_empty());
+        assert!(deliver::claim_inbox(&db, "legion").unwrap().is_empty());
 
         db.insert_reflection(
             "rafters",
@@ -347,11 +357,11 @@ mod tests {
             "expected a non-empty REQUIRES A REPLY block from the pending-replies path"
         );
 
-        // Path B: the hook drain's --split directed bucket, via the real
-        // (private) emit_drained_split.
-        let drained = deliver::drain_for_hook(&db, "legion").unwrap();
+        // Path B: the inbox lane's --split directed bucket, via the real
+        // (private) emit_inbox_split.
+        let delivered = deliver::claim_inbox(&db, "legion").unwrap();
         let mut out = Vec::new();
-        emit_drained_split("legion", &drained, &mut out).unwrap();
+        emit_inbox_split("legion", &delivered, &mut out).unwrap();
         let split_output = String::from_utf8(out).unwrap();
 
         assert!(

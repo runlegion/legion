@@ -243,13 +243,13 @@ pub fn format_bullpen(posts: &[Reflection]) -> String {
 /// filter, it only formats. Empty input renders nothing.
 ///
 /// Extracted from `cli::signal::handle_pending_replies` (#1020) as a
-/// named seam between that command and the hook drain's `--split`
-/// directed bucket (`cli::deliver::emit_drained_split`). `crate::watch::
+/// named seam between that command and the inbox lane's `--split`
+/// directed bucket (`cli::inbox::emit_inbox_split`). `crate::watch::
 /// build_wake_prompt` was already the one function both would end up
 /// calling before this extraction, so this does not by itself close a
 /// drift that could previously occur -- what it adds is a stable,
 /// independently testable call boundary the two callers share by
-/// construction, which is what `cli::deliver::tests` pins against. See
+/// construction, which is what `cli::inbox::tests` pins against. See
 /// HOOK OUTPUT DOCTRINE, reflection 01a0421f-3bb1-7a91-a2d4-1587442dbd36
 /// -- the miss it addresses was a directed signal delivered as a note
 /// mid-stream instead of a result in this shape.
@@ -798,8 +798,8 @@ mod tests {
     }
 
     // The byte-identity contract between `legion pending-replies` and the
-    // hook drain's `--split` directed bucket is pinned in
-    // `cli::deliver::tests` (#1020 review), where the real private
-    // `emit_drained_split` can be called directly instead of
+    // inbox lane's `--split` directed bucket is pinned in
+    // `cli::inbox::tests` (#1020 review), where the real private
+    // `emit_inbox_split` can be called directly instead of
     // re-deriving its formatting steps here.
 }

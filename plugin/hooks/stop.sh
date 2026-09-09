@@ -38,7 +38,7 @@
 # 2. PENDING-REPLIES GATE (#1020, HOOK OUTPUT DOCTRINE -- Sean, 2026-08-27,
 #    reflection 01a0421f-3bb1-7a91-a2d4-1587442dbd36). A directed
 #    wake-worthy signal sat unanswered for forty minutes because nothing
-#    stopped the turn from ending while it was open -- delivery-drain.sh's
+#    stopped the turn from ending while it was open -- inbox.sh's
 #    additionalContext note was easy to read past. This gate re-checks
 #    `legion pending-replies --repo $REPO --directed` at Stop time and
 #    hard-blocks (decision:block) when it is non-empty, naming the open
@@ -192,11 +192,11 @@ fi
 
 # ---------- (2) Pending-replies gate (#1020) ----------
 #
-# Coverage-gated (#353), like delivery-drain.sh: $REPO here is
+# Coverage-gated (#353), like inbox.sh: $REPO here is
 # basename($CWD) (legion_hook_parse), which in a git worktree is the
 # WORKTREE directory name, not the parent repo's name in watch.toml --
-# e.g. "1020-drain-last", never "legion". `legion_hook_covered` (the same
-# gate delivery-drain.sh already applies) skips a name with NO legion
+# e.g. "1020-inbox-last", never "legion". `legion_hook_covered` (the same
+# gate inbox.sh already applies) skips a name with NO legion
 # footprint at all -- absent from watch.toml AND with zero reflections.
 # This is a heuristic, not a guarantee: the moment anything reflects
 # under a worktree's basename, that name reads as "covered" and this

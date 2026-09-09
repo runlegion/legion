@@ -203,7 +203,10 @@ finish_tests() {
 #                            case rather than a quiet pass)
 #   LEGION_TEST_MARKER=<file> `telemetry ...` appends its argv (sans
 #                            leading "telemetry") here
-#   FAKE_DELIVER_DRAIN      `deliver drain` body (default empty, #941)
+#   FAKE_INBOX               `legion inbox` body (default empty, #941)
+#   FAKE_STUB_FAIL_INBOX=1   `inbox` exits 2 with empty stdout, modelling a
+#                            binary older than the `legion inbox` rename --
+#                            drives the hook's `deliver drain` compat fallback
 #   FAKE_WATCH_STATUS        `watch status --json` body: one JSON line,
 #                            e.g. {"status":"alive","last_beat_age":null}
 #                            (default empty; #1019's `boot_section_watch`
@@ -408,9 +411,34 @@ case "${1:-}" in
     shift
     echo "$@" >> "${LEGION_TEST_MARKER:-/dev/null}"
     ;;
+  inbox)
+    # FAKE_STUB_FAIL_INBOX models a binary that predates `legion inbox`: clap
+    # exits 2 on an unknown subcommand, printing nothing to stdout. This is the
+    # only way the hook's compat fallback becomes reachable from the suite.
+    if [ -n "${FAKE_STUB_FAIL_INBOX:-}" ]; then
+      echo "error: unrecognized subcommand 'inbox'" >&2
+      exit 2
+    fi
+    # FAKE_STUB_PARTIAL_INBOX models the dangerous shape: the cursor is claimed
+    # and COMMITTED before the emit call prints, so a call can print posts and
+    # THEN fail mid-write. Those posts are consumed -- see the paired `deliver`
+    # arm, which returns nothing because the cursor already advanced. A hook
+    # that retries on exit status alone loses them.
+    if [ -n "${FAKE_STUB_PARTIAL_INBOX:-}" ]; then
+      [ -n "${FAKE_INBOX:-}" ] && printf '%s\n' "$FAKE_INBOX"
+      echo "error: failed writing the directed bucket" >&2
+      exit 1
+    fi
+    [ -n "${FAKE_INBOX:-}" ] && printf '%s\n' "$FAKE_INBOX"
+    ;;
   deliver)
+    # The retired `deliver drain` spelling, still accepted by the binary for
+    # one release so a plugin ahead of its binary keeps delivering mail.
     if [ "${2:-}" = "drain" ]; then
-      [ -n "${FAKE_DELIVER_DRAIN:-}" ] && printf '%s\n' "$FAKE_DELIVER_DRAIN"
+      # Under FAKE_STUB_PARTIAL_INBOX the preceding `inbox` call already
+      # advanced the cursor, so this retry legitimately finds nothing.
+      [ -n "${FAKE_STUB_PARTIAL_INBOX:-}" ] && exit 0
+      [ -n "${FAKE_INBOX:-}" ] && printf '%s\n' "$FAKE_INBOX"
     fi
     ;;
 esac

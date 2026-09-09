@@ -1,4 +1,4 @@
-//! Hook-side delivery drain (#941): the live-session delivery lane. Gives
+//! Hook-side inbox lane (#941): the live-session delivery lane. Gives
 //! interactive sessions the same no-inference-roundtrip delivery path the
 //! watch daemon already has for sleeping/spawned agents, driven by plugin
 //! hook events. It ran alongside the MCP subprocess's
@@ -8,42 +8,42 @@
 //! -- no new table.
 //!
 //! The hook lane's cursor row is keyed by a distinct `reader_repo` string
-//! (`hook_reader_key`) so it cannot collide with manual `legion bullpen`'s
+//! (`inbox_reader_key`) so it cannot collide with manual `legion bullpen`'s
 //! cursor (`Database::mark_board_read`, keyed by the plain repo name).
 //! Independent cursor rows on the same table are what the parity
 //! comparison needed -- each lane had to observe every eligible post on
 //! its own rather than race the others for one shared cursor -- and the
-//! separation still earns its keep: a hook drain must not move the unread
+//! separation still earns its keep: an inbox delivery must not move the unread
 //! count that manual `bullpen` drives.
 //!
 //! Reusing `mark_board_read`/`get_and_mark_unread_board_posts` directly
 //! was considered and rejected: those also drive `archive_read_posts`'s
-//! "all known readers have read" gate, so a hook drain that touched them
+//! "all known readers have read" gate, so an inbox delivery that touched them
 //! would let an agent who only ever receives posts via hooks silently
 //! satisfy archival without anyone running `legion bullpen` by hand.
 
-use crate::db::{Database, HOOK_DRAIN_CURSOR_SUFFIX, Reflection};
+use crate::db::{Database, INBOX_CURSOR_SUFFIX, Reflection};
 use crate::error::Result;
 use crate::signal as sig;
 use crate::watch;
 
-/// Batch size cap for a single drain call. Half the 100-row cap the
-/// retired MCP notifier used: drains fire per hook event, far more often
+/// Batch size cap for a single inbox call. Half the 100-row cap the
+/// retired MCP notifier used: inbox calls fire per hook event, far more often
 /// than that lane's poll ticks, so each call can afford a smaller bite.
 /// Overflow is safe -- anything beyond the cap is picked up on the next
-/// drain because the cursor advances to the last fetched row.
-const DRAIN_BATCH_LIMIT: usize = 50;
+/// call because the cursor advances to the last fetched row.
+const INBOX_BATCH_LIMIT: usize = 50;
 
-/// Cursor key the hook-drain lane writes to `board_reads`, namespaced
+/// Cursor key the inbox lane writes to `board_reads`, namespaced
 /// apart from the plain `repo` key manual `legion bullpen` uses (and the
-/// retired MCP notifier used). Built from `db::HOOK_DRAIN_CURSOR_SUFFIX`, the
+/// retired MCP notifier used). Built from `db::INBOX_CURSOR_SUFFIX`, the
 /// same constant `archive_read_posts` uses to exclude these rows from its
 /// aggregate -- the key scheme and the exclusion cannot drift apart.
-pub fn hook_reader_key(repo: &str) -> String {
-    format!("{repo}{HOOK_DRAIN_CURSOR_SUFFIX}")
+pub fn inbox_reader_key(repo: &str) -> String {
+    format!("{repo}{INBOX_CURSOR_SUFFIX}")
 }
 
-/// Claim this repo's undrained bullpen posts/signals via the hook-drain
+/// Claim this repo's unread bullpen posts/signals via the inbox
 /// cursor. The claim -- cursor read, batch fetch, cursor advance, and
 /// cold-start watermark seed -- is one atomic operation
 /// (`Database::claim_board_posts_for_reader`, an IMMEDIATE transaction),
@@ -55,15 +55,15 @@ pub fn hook_reader_key(repo: &str) -> String {
 /// the single notion of "should this post reach this agent" rather than
 /// re-derived for the hook lane.
 ///
-/// This function records NO telemetry: a claimed post is drained, not yet
-/// delivered. The `lane = "hook"` `DeliveryRecord` is written by the CLI
-/// handler (`cli::deliver`) only after the drained text has been printed
+/// This function records NO telemetry: claiming a post is not delivering it.
+/// The `lane = "hook"` `DeliveryRecord` is written by the CLI
+/// handler (`cli::inbox`) only after the delivered text has been printed
 /// and flushed -- the last stage this process controls. What it cannot
 /// verify is the harness-side tail (the additionalContext injection);
 /// that residual asymmetry is documented on
 /// `telemetry::DeliveryRecord`.
-pub fn drain_for_hook(db: &Database, repo: &str) -> Result<Vec<Reflection>> {
-    let batch = db.claim_board_posts_for_reader(&hook_reader_key(repo), DRAIN_BATCH_LIMIT)?;
+pub fn claim_inbox(db: &Database, repo: &str) -> Result<Vec<Reflection>> {
+    let batch = db.claim_board_posts_for_reader(&inbox_reader_key(repo), INBOX_BATCH_LIMIT)?;
 
     Ok(batch
         .into_iter()
@@ -92,7 +92,7 @@ pub fn drain_for_hook(db: &Database, repo: &str) -> Result<Vec<Reflection>> {
 ///
 /// Relocated from `src/mcp/notifier.rs` (#952) when the MCP server and its
 /// notification-channel push (already retired in #947) were removed
-/// entirely; this hook-drain lane (`drain_for_hook`, above) is now the
+/// entirely; this inbox lane (`claim_inbox`, above) is now the
 /// filter's sole caller.
 pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool {
     if sig::is_signal(text) {
@@ -122,18 +122,18 @@ pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool 
     true
 }
 
-/// Split a hook-drained batch into (musings, directed) for `legion deliver
-/// drain --split` (#1020).
+/// Split a claimed batch into (musings, directed) for `legion inbox
+/// --split` (#1020).
 ///
 /// `directed` is filtered by the same reply-required predicate
 /// (`watch::signal_requires_reply`, verb-only) `cli::signal::
 /// pending_reply_signals` filters on -- but it is NOT exactly the set
 /// `legion pending-replies` renders, for two reasons: (1) it is applied to
-/// the posts THIS drain window already claimed via the hook cursor, not a
+/// the posts THIS inbox window already claimed via the hook cursor, not a
 /// fresh DB query, so a signal `pending-replies` sees right now may not
-/// have been in any single drain's batch; and (2) the two paths reach
+/// have been in any single batch; and (2) the two paths reach
 /// their candidate posts through different addressing rules -- this
-/// drain's batch was already filtered by `should_notify` (exact-case
+/// batch was already filtered by `should_notify` (exact-case
 /// match on the plain repo name, or `@all`), while `find_pending_signals`
 /// matches `wake_addresses()` (broadcast tags, case-insensitive LIKE).
 /// `signal_requires_reply` itself is verb-only and does not distinguish a
@@ -142,10 +142,10 @@ pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool 
 /// `pending-replies`'s un-filtered set -- this function makes no broadcast
 /// exception (see `cli::signal::pending_reply_signals`'s `directed_only`
 /// param for where that exception IS made, on the Stop-gate path). Cloning
-/// is deliberate: the caller (`cli::deliver::handle_deliver_drain`) still
+/// is deliberate: the caller (`cli::inbox::handle_inbox`) still
 /// needs the full, unsplit batch afterward to record hook-lane telemetry
-/// for every drained post regardless of which bucket it landed in.
-pub fn split_drained(posts: &[Reflection]) -> (Vec<Reflection>, Vec<Reflection>) {
+/// for every delivered post regardless of which bucket it landed in.
+pub fn split_inbox(posts: &[Reflection]) -> (Vec<Reflection>, Vec<Reflection>) {
     let mut musings = Vec::new();
     let mut directed = Vec::new();
     for post in posts {
@@ -164,7 +164,7 @@ mod tests {
     use crate::db::testutil::test_db;
 
     #[test]
-    fn split_drained_routes_reply_required_signals_to_directed() {
+    fn split_inbox_routes_reply_required_signals_to_directed() {
         let musing = Reflection {
             id: "id-musing".into(),
             repo: "rafters".into(),
@@ -188,7 +188,7 @@ mod tests {
             ..musing.clone()
         };
 
-        let (musings, directed) = split_drained(&[
+        let (musings, directed) = split_inbox(&[
             musing.clone(),
             informational.clone(),
             directed_signal.clone(),
@@ -203,42 +203,42 @@ mod tests {
     }
 
     #[test]
-    fn split_drained_empty_input_yields_two_empty_buckets() {
-        let (musings, directed) = split_drained(&[]);
+    fn split_inbox_empty_input_yields_two_empty_buckets() {
+        let (musings, directed) = split_inbox(&[]);
         assert!(musings.is_empty());
         assert!(directed.is_empty());
     }
 
     #[test]
-    fn drain_for_hook_delivers_each_post_exactly_once_across_two_calls() {
+    fn claim_inbox_delivers_each_post_exactly_once_across_two_calls() {
         let db = test_db();
 
         // Prime past cold start: a fresh cursor seeds from the current
         // watermark, not full history (see
-        // drain_for_hook_cold_start_seeds_from_watermark_not_full_history),
+        // claim_inbox_cold_start_seeds_from_watermark_not_full_history),
         // so the first-ever call against a nonempty board delivers nothing.
         db.insert_reflection("seed", "sentinel", "team").unwrap();
-        assert!(drain_for_hook(&db, "legion").unwrap().is_empty());
+        assert!(claim_inbox(&db, "legion").unwrap().is_empty());
 
         db.insert_reflection("rafters", "musing one", "team")
             .unwrap();
         db.insert_reflection("kelex", "musing two", "team").unwrap();
 
-        let first = drain_for_hook(&db, "legion").unwrap();
+        let first = claim_inbox(&db, "legion").unwrap();
         assert_eq!(first.len(), 2);
 
-        let second = drain_for_hook(&db, "legion").unwrap();
+        let second = claim_inbox(&db, "legion").unwrap();
         assert!(second.is_empty(), "expected empty on second call");
 
         db.insert_reflection("rafters", "musing three", "team")
             .unwrap();
-        let third = drain_for_hook(&db, "legion").unwrap();
+        let third = claim_inbox(&db, "legion").unwrap();
         assert_eq!(third.len(), 1);
         assert_eq!(third[0].text, "musing three");
     }
 
     #[test]
-    fn drain_for_hook_leaves_notifier_and_manual_bullpen_cursors_untouched() {
+    fn claim_inbox_leaves_notifier_and_manual_bullpen_cursors_untouched() {
         let db = test_db();
         db.insert_reflection("rafters", "old post", "team").unwrap();
 
@@ -252,15 +252,15 @@ mod tests {
 
         // Prime the hook lane past cold start (it swallows whatever is
         // already on the board at its first-ever call).
-        assert!(drain_for_hook(&db, "legion").unwrap().is_empty());
+        assert!(claim_inbox(&db, "legion").unwrap().is_empty());
 
         db.insert_reflection("kelex", "new post", "team").unwrap();
         assert_eq!(db.get_unread_count("legion").unwrap(), 1);
 
-        let drained = drain_for_hook(&db, "legion").unwrap();
-        assert_eq!(drained.len(), 1);
+        let delivered = claim_inbox(&db, "legion").unwrap();
+        assert_eq!(delivered.len(), 1);
 
-        // The hook drain must not have moved the plain-repo cursor or the
+        // The inbox lane must not have moved the plain-repo cursor or the
         // unread count it drives.
         assert_eq!(
             db.get_board_read_cursor("legion").unwrap(),
@@ -268,76 +268,76 @@ mod tests {
         );
         assert_eq!(db.get_unread_count("legion").unwrap(), 1);
 
-        // But the hook-drain's own cursor row DID advance.
+        // But the inbox lane's own cursor row DID advance.
         assert!(
-            db.get_board_read_cursor(&hook_reader_key("legion"))
+            db.get_board_read_cursor(&inbox_reader_key("legion"))
                 .unwrap()
                 .is_some()
         );
     }
 
     #[test]
-    fn drain_for_hook_cursor_does_not_affect_archive_read_posts() {
+    fn claim_inbox_cursor_does_not_affect_archive_read_posts() {
         // archive_read_posts's "all known readers have read" gate takes
         // MIN(last_read_at) over every row in board_reads, with no filter
-        // on reader_repo (db/board.rs). A hook-drain cursor row must not
+        // on reader_repo (db/board.rs). An inbox cursor row must not
         // participate in that aggregate: an empty/cold cursor would drag
-        // the MIN down to "" and stop archival entirely, and any hook-drain
+        // the MIN down to "" and stop archival entirely, and any inbox
         // row present would only ever make archival more conservative than
-        // pre-#941 behavior. Two identically-seeded boards -- one drained
+        // pre-#941 behavior. Two identically-seeded boards -- one claimed
         // via the hook lane, one not -- must archive the same count.
-        let without_drain = test_db();
-        without_drain
+        let without_inbox = test_db();
+        without_inbox
             .insert_reflection("rafters", "old post", "team")
             .unwrap();
-        without_drain.mark_board_read("legion").unwrap();
-        let archived_without_drain = without_drain.archive_read_posts().unwrap();
-        assert_eq!(archived_without_drain, 1);
+        without_inbox.mark_board_read("legion").unwrap();
+        let archived_without_inbox = without_inbox.archive_read_posts().unwrap();
+        assert_eq!(archived_without_inbox, 1);
 
-        let with_drain = test_db();
-        with_drain
+        let with_inbox = test_db();
+        with_inbox
             .insert_reflection("rafters", "old post", "team")
             .unwrap();
-        with_drain.mark_board_read("legion").unwrap();
-        // Cold-start hook drain -- persists a cursor row for
-        // hook_reader_key("legion") on an otherwise-empty board_reads
+        with_inbox.mark_board_read("legion").unwrap();
+        // Cold-start inbox lane -- persists a cursor row for
+        // inbox_reader_key("legion") on an otherwise-empty board_reads
         // history for this key.
-        assert!(drain_for_hook(&with_drain, "legion").unwrap().is_empty());
-        let archived_with_drain = with_drain.archive_read_posts().unwrap();
+        assert!(claim_inbox(&with_inbox, "legion").unwrap().is_empty());
+        let archived_with_inbox = with_inbox.archive_read_posts().unwrap();
         assert_eq!(
-            archived_with_drain, archived_without_drain,
-            "a hook-drain cursor row must not change archive_read_posts's count"
+            archived_with_inbox, archived_without_inbox,
+            "an inbox cursor row must not change archive_read_posts's count"
         );
     }
 
     #[test]
-    fn drain_for_hook_cold_start_seeds_from_watermark_not_full_history() {
+    fn claim_inbox_cold_start_seeds_from_watermark_not_full_history() {
         let db = test_db();
-        // Old history that predates the hook lane's first drain -- must
+        // Old history that predates the hook lane's first delivery -- must
         // NOT be replayed.
         db.insert_reflection("rafters", "ancient musing", "team")
             .unwrap();
         db.insert_reflection("kelex", "another ancient musing", "team")
             .unwrap();
 
-        // First drain call: no cursor row yet, seeds from the watermark
+        // First inbox call: no cursor row yet, seeds from the watermark
         // (the current tail), so nothing from before this call is
         // delivered.
-        let first = drain_for_hook(&db, "legion").unwrap();
+        let first = claim_inbox(&db, "legion").unwrap();
         assert!(first.is_empty(), "cold start must not replay full history");
 
         // A post created after the cold-start seed IS delivered.
         db.insert_reflection("rafters", "fresh musing", "team")
             .unwrap();
-        let second = drain_for_hook(&db, "legion").unwrap();
+        let second = claim_inbox(&db, "legion").unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].text, "fresh musing");
     }
 
     #[test]
-    fn drain_for_hook_claims_each_post_once_across_concurrent_sessions() {
+    fn claim_inbox_claims_each_post_once_across_concurrent_sessions() {
         // Regression for the #941 review race: two live sessions on the
-        // same repo share one hook-drain cursor row, and the pre-fix
+        // same repo share one inbox cursor row, and the pre-fix
         // read-fetch-advance sequence let both deliver the same post. The
         // IMMEDIATE transaction in claim_board_posts_for_reader serializes
         // the claim: the loser either sees the advanced cursor (empty) or
@@ -353,7 +353,7 @@ mod tests {
         seed_db
             .insert_reflection("seed", "sentinel", "team")
             .unwrap();
-        assert!(drain_for_hook(&seed_db, "legion").unwrap().is_empty());
+        assert!(claim_inbox(&seed_db, "legion").unwrap().is_empty());
         seed_db
             .insert_reflection("rafters", "raced post", "team")
             .unwrap();
@@ -367,7 +367,7 @@ mod tests {
                 std::thread::spawn(move || {
                     let db = Database::open(&path).unwrap();
                     barrier.wait();
-                    drain_for_hook(&db, "legion").map(|p| p.len()).unwrap_or(0)
+                    claim_inbox(&db, "legion").map(|p| p.len()).unwrap_or(0)
                 })
             })
             .collect();
@@ -377,12 +377,12 @@ mod tests {
     }
 
     #[test]
-    fn drain_for_hook_advances_past_suppressed_rows_without_redelivering() {
+    fn claim_inbox_advances_past_suppressed_rows_without_redelivering() {
         let db = test_db();
 
         // Prime past cold start.
         db.insert_reflection("seed", "sentinel", "team").unwrap();
-        assert!(drain_for_hook(&db, "legion").unwrap().is_empty());
+        assert!(claim_inbox(&db, "legion").unwrap().is_empty());
 
         // A post FROM "legion" itself -- should_notify suppresses
         // own-repo musings (no `@` prefix).
@@ -395,14 +395,14 @@ mod tests {
         db.insert_reflection("rafters", "team musing", "team")
             .unwrap();
 
-        let first = drain_for_hook(&db, "legion").unwrap();
+        let first = claim_inbox(&db, "legion").unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].text, "team musing");
 
         // The cursor advanced past ALL three rows (not just the delivered
         // one) -- a second call with no new posts returns nothing,
         // proving the suppressed rows were not left behind for re-scan.
-        let second = drain_for_hook(&db, "legion").unwrap();
+        let second = claim_inbox(&db, "legion").unwrap();
         assert!(second.is_empty());
     }
 

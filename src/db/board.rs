@@ -19,11 +19,21 @@ const ACTIVE_TEAM_POST_WHERE: &str =
     "audience = 'team' AND archived_at IS NULL AND deleted_at IS NULL";
 
 /// Suffix that marks a `board_reads` cursor row as belonging to the
-/// hook-side delivery lane (#941). `deliver::hook_reader_key` builds keys
+/// hook-side inbox lane (#941). `deliver::inbox_reader_key` builds keys
 /// with it, and `archive_read_posts` excludes rows carrying it from the
 /// "all known readers have read" aggregate -- one constant so the two
 /// sites cannot drift apart.
-pub const HOOK_DRAIN_CURSOR_SUFFIX: &str = "::hook-drain";
+///
+/// THE VALUE IS FROZEN AT ITS PRE-RENAME SPELLING and must not be edited
+/// to match the constant's name. It is not a label; it is half of a
+/// PRIMARY KEY already written to `board_reads` on every installed
+/// machine. Changing it orphans every existing cursor row, and those
+/// orphans then fail the `NOT LIKE '%' || ?2` exclusion in
+/// `archive_read_posts` -- so they count as known readers whose
+/// `last_read_at` never advances again, and archival stops permanently.
+/// No test can catch that: every test builds a fresh database and would
+/// write the new spelling consistently throughout.
+pub const INBOX_CURSOR_SUFFIX: &str = "::hook-drain";
 
 /// TTL hours for design or architecture posts.
 const TTL_DESIGN_HOURS: i64 = 14 * 24;
@@ -491,17 +501,17 @@ impl Database {
     /// after the post's created_at. Uses a single UPDATE with subquery to
     /// avoid race conditions between SELECT and UPDATE.
     ///
-    /// The `MIN(last_read_at)` subquery excludes `hook-drain` cursor rows
-    /// (#941, `deliver::hook_reader_key`, keyed by
-    /// [`HOOK_DRAIN_CURSOR_SUFFIX`]).
+    /// The `MIN(last_read_at)` subquery excludes inbox cursor rows
+    /// (#941, `deliver::inbox_reader_key`, keyed by
+    /// [`INBOX_CURSOR_SUFFIX`]).
     /// Those rows are not a "known reader" for this gate's purpose -- they
-    /// exist purely so the hook-side delivery lane can track what it has
+    /// exist purely so the hook-side inbox lane can track what it has
     /// already surfaced, independent of the MCP notifier's and manual
-    /// `legion bullpen`'s cursors on the same table. Letting a hook-drain
+    /// `legion bullpen`'s cursors on the same table. Letting an inbox
     /// row into this aggregate would change archival's existing semantics
     /// as an unintended side effect of adding the row: an unset/empty
     /// cursor (fresh cold start) would drag the MIN down to `''` and halt
-    /// archival entirely, and any hook-drain row present only ever makes
+    /// archival entirely, and any inbox row present only ever makes
     /// the MIN more conservative than the pre-#941 behavior.
     /// Returns the number of posts archived.
     pub fn archive_read_posts(&self) -> Result<u64> {
@@ -514,7 +524,7 @@ impl Database {
                  SELECT MIN(last_read_at) FROM board_reads \
                  WHERE reader_repo NOT LIKE '%' || ?2 \
              )",
-            rusqlite::params![now, HOOK_DRAIN_CURSOR_SUFFIX],
+            rusqlite::params![now, INBOX_CURSOR_SUFFIX],
         )?;
 
         Ok(count as u64)
