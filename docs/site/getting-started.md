@@ -538,9 +538,9 @@ legion cluster enable           # resume
 
 ### What syncs
 
-`legion watch` spawns the sync actor when `cluster.enabled = true`. Reflections, kanban cards, and schedules flow between nodes. Conflicts are resolved last-write-wins on `updated_at`, so operators should run NTP. Deletes are tombstones that replicate to peers and are hard-deleted after 7 days by the weekly housekeeper.
+`legion watch` spawns the sync actor when `cluster.enabled = true`. Reflections and schedules flow between nodes. Conflicts are resolved last-write-wins on `updated_at`, so operators should run NTP. Deletes are tombstones that replicate to peers and are hard-deleted after 7 days by the weekly housekeeper.
 
-The delta format is shipped (ReflectionDelta, CardDelta, ScheduleDelta). Broadcast transport is scaffolded and still landing behind it.
+The delta format is shipped (ReflectionDelta, ScheduleDelta). Broadcast transport is scaffolded and still landing behind it.
 
 ### Security notes
 
