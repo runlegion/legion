@@ -308,7 +308,13 @@ fn run() -> error::Result<()> {
         Commands::Schedule { action } => cli::schedule::handle(action)?,
         Commands::Issue { action } => cli::issue::handle(action)?,
         Commands::Pr { action } => cli::pr::handle(action)?,
-        Commands::Push { repo, branch, tag } => cli::push::handle_push(repo, branch, tag)?,
+        Commands::Push {
+            repo,
+            branch,
+            tag,
+            force,
+            force_reason,
+        } => cli::push::handle_push(repo, branch, tag, force, force_reason)?,
         Commands::Commit {
             repo,
             message,

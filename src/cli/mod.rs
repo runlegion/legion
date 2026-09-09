@@ -922,11 +922,11 @@ pub(crate) enum Commands {
     /// Refuses to push `main`/`master` (Sean merges; agents never push main)
     /// and refuses any `--branch` value shaped like a git flag or a
     /// force/retarget refspec (leading `-`/`+`, embedded `:`, whitespace) --
-    /// there is no `--force` flag on this command, and a crafted branch
-    /// value cannot recover force semantics either. Sets upstream (`-u
-    /// origin <branch>`) on every push, which is a no-op after the first.
-    /// Every attempt (success or failure) is audit-logged with the branch,
-    /// resolved checkout path, and head SHA.
+    /// force-pushing goes through the audited `--force` flag below, never a
+    /// crafted branch value. Sets upstream (`-u origin <branch>`) on every
+    /// push, which is a no-op after the first. Every attempt (success or
+    /// failure) is audit-logged with the branch, resolved checkout path, and
+    /// head SHA.
     /// `--tag <name>` pushes a tag instead (#915). Mutually exclusive with
     /// `--branch`. Before #915 there was no sanctioned tag path at all:
     /// `legion push` was branch-only, the guard rewrote a positional tag into
@@ -935,6 +935,25 @@ pub(crate) enum Commands {
     /// row. Refuses a tag whose target commit is not reachable from any branch
     /// on origin, because publishing a tag that points at an unpushed commit
     /// resolves for the tagger and dangles for everyone else.
+    ///
+    /// `--force` (#1172) is a sanctioned, gated force-push, not a raw
+    /// passthrough. It fetches the remote ref, computes the commits the push
+    /// would discard (reachable from the remote head but not the new local
+    /// head), and checks each one for survival: present in the new history
+    /// (an ordinary amend/rebase), already on `main` by sha, or already on
+    /// `main` by `git patch-id` equivalence (the squash-merge case -- a
+    /// rebased stacked branch whose base just squash-merged). If every
+    /// discarded commit survives, the push proceeds with no extra ceremony.
+    /// If any commit is a genuine orphan, the push is refused, each orphan is
+    /// named as `<sha> <subject>`, and only `--force-reason "..."` overrides
+    /// it -- the same override contract as `pr merge
+    /// --merge-despite-failures` and `issue close --force`. The push itself
+    /// always uses `--force-with-lease=<branch>:<fetched-sha>`, so a
+    /// concurrent push by another agent or node loses the race instead of
+    /// being silently clobbered. Mutually exclusive with `--tag` (a moved tag
+    /// is a different, out-of-scope problem). The audit row always carries
+    /// the old remote sha, the new sha, every discarded commit with which
+    /// survival test it passed, and the `--force-reason` when given.
     Push {
         /// Repository name (identifies the calling agent for the audit log)
         #[arg(long)]
@@ -947,6 +966,18 @@ pub(crate) enum Commands {
         /// Tag to push. Mutually exclusive with `--branch`.
         #[arg(long)]
         tag: Option<String>,
+
+        /// Force-push, gated on the discarded-commit survival analysis
+        /// (#1172). See the command doc above. Mutually exclusive with
+        /// `--tag`.
+        #[arg(long, conflicts_with = "tag")]
+        force: bool,
+
+        /// Justification for overriding a force-push refusal. Only consulted
+        /// (and only required) when the discarded-commit analysis finds a
+        /// genuine orphan; ignored when every discarded commit survives.
+        #[arg(long, requires = "force")]
+        force_reason: Option<String>,
     },
 
     /// Commit the staged index -- the sanctioned in-band commit path (#854).

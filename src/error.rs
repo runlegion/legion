@@ -266,6 +266,25 @@ pub enum LegionError {
     #[error("git push failed: {stderr}")]
     PushFailed { stderr: String },
 
+    /// `legion push --force` (#1172) fetched the remote ref, computed
+    /// `--force-with-lease=<branch>:<expected>`, and the remote had already
+    /// moved past `expected` by the time the push reached the server --
+    /// another agent or node pushed concurrently. Names the sha the remote
+    /// actually moved to (re-fetched after the rejection) rather than
+    /// surfacing git's raw "stale info" text, so the operator knows exactly
+    /// what changed instead of having to re-fetch themselves to find out.
+    #[error(
+        "refusing to force-push '{branch}': the remote moved to {actual} after the fetch this \
+         push was leased against (expected {expected}) -- someone pushed concurrently. Re-run \
+         `legion push --force` to recompute the discarded-commit analysis against the new \
+         remote state."
+    )]
+    PushLeaseStale {
+        branch: String,
+        expected: String,
+        actual: String,
+    },
+
     /// `legion commit` (#854) declined before the commit ran: bad
     /// arguments, no git repo, a message-convention violation, or git
     /// itself refusing the signer probe (an unresolvable committer identity

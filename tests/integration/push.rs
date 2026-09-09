@@ -73,6 +73,41 @@ fn rev_parse(repo: &Path, rev: &str) -> std::process::Output {
         .expect("git rev-parse must spawn")
 }
 
+/// Every `push` audit row's `details` field, parsed as JSON (the CLI's
+/// `details` column is itself a JSON string, so this parses it twice: once
+/// for the outer `audit --json` array, once for each row's `details`
+/// string). Oldest first, so index `[0]` is the first attempt.
+///
+/// Parsing the JSON structurally, rather than substring-matching the raw
+/// `--json` text, is deliberate: the outer array is pretty-printed (space
+/// after `:`) while `details` -- a JSON string embedded in that pretty
+/// output -- carries its own backslash-escaped quotes, so a naive
+/// `contains("\"key\":value")` check silently never matches either form.
+/// The returned `Value` is the row's parsed `details` object with an
+/// `"outcome"` field merged in from the outer row, so a caller can assert on
+/// both from one value.
+fn audit_details_for(data_dir: &Path, target_ref: &str) -> Vec<serde_json::Value> {
+    let audit_out = run_ok(legion_cmd(data_dir).args(["audit", "--action", "push", "--json"]));
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&audit_out).expect("audit --json must produce a JSON array");
+    let mut matching: Vec<(String, serde_json::Value)> = rows
+        .into_iter()
+        .filter(|row| row["target_ref"] == target_ref)
+        .map(|row| {
+            let timestamp = row["timestamp"].as_str().unwrap_or_default().to_string();
+            let details_str = row["details"].as_str().unwrap_or_default();
+            let mut details: serde_json::Value =
+                serde_json::from_str(details_str).unwrap_or_else(|e| {
+                    panic!("audit row details did not parse as JSON: {details_str:?}: {e}")
+                });
+            details["outcome"] = row["outcome"].clone();
+            (timestamp, details)
+        })
+        .collect();
+    matching.sort_by(|a, b| a.0.cmp(&b.0));
+    matching.into_iter().map(|(_, d)| d).collect()
+}
+
 /// Happy path: pushing a feature branch from the checkout that has it
 /// checked out succeeds, lands the ref on the remote, and sets the
 /// upstream tracking branch (`-u`).
@@ -184,8 +219,8 @@ fn push_refuses_master() {
 }
 
 /// A `--branch` value shaped like a git flag or a force/retarget refspec is
-/// refused -- this command has no `--force` flag, and a crafted branch
-/// value must not be able to recover force semantics.
+/// refused -- force-pushing goes through the audited `--force` flag (#1172),
+/// never a crafted branch value.
 #[cfg(unix)]
 #[test]
 fn push_refuses_flag_shaped_branch_value() {
@@ -358,5 +393,287 @@ fn push_underlying_git_failure_surfaces_error_and_audits_failure() {
     assert!(
         audit_out.contains("\"outcome\": \"failure\""),
         "expected a failure-outcome audit row for the failed push, got: {audit_out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1172: `legion push --force`, gated on the discarded-commit survival
+// analysis.
+// ---------------------------------------------------------------------------
+
+/// Done-When #1: a branch rebased onto a squash-merged base pushes with
+/// `--force` and no `--force-reason`, because every discarded commit is
+/// patch-equivalent to something in the new state -- the predecessor's
+/// pre-squash commit matches `main`'s squash commit by patch-id, and the
+/// branch's own commit matches its rebased replay by patch-id.
+///
+/// Also covers Done-When #5 (the audit row): asserts the discarded commits
+/// and their survival verdicts, plus old/new sha, land in the audit details.
+#[cfg(unix)]
+#[test]
+fn push_force_survives_rebase_onto_squash_merged_base_with_no_reason() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = tempfile::tempdir().unwrap();
+    let lp = local.path();
+
+    run_git_fixture(lp, &["init", "-q", "-b", "main"]);
+    run_git_fixture(
+        lp,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    std::fs::write(lp.join("seed.txt"), "seed\n").unwrap();
+    run_git_fixture(lp, &["add", "seed.txt"]);
+    run_git_fixture(lp, &["commit", "-q", "-m", "seed"]);
+    run_git_fixture(lp, &["push", "-q", "origin", "main"]);
+
+    // Predecessor branch: one commit, never itself pushed (mirroring the
+    // #1167->#1168 scenario: only the SUCCESSOR branch had been pushed,
+    // carrying the predecessor's commit as an ancestor via `git merge`).
+    run_git_fixture(lp, &["checkout", "-q", "-b", "predecessor"]);
+    std::fs::write(lp.join("predecessor.txt"), "predecessor content\n").unwrap();
+    run_git_fixture(lp, &["add", "predecessor.txt"]);
+    run_git_fixture(lp, &["commit", "-q", "-m", "predecessor feature"]);
+
+    // Stacked branch: predecessor's commit as an ancestor, plus its own.
+    run_git_fixture(lp, &["checkout", "-q", "-b", "topic"]);
+    std::fs::write(lp.join("topic.txt"), "topic content\n").unwrap();
+    run_git_fixture(lp, &["add", "topic.txt"]);
+    run_git_fixture(lp, &["commit", "-q", "-m", "topic feature"]);
+    run_git_fixture(lp, &["push", "-q", "origin", "topic"]);
+    let old_remote_sha = run_git_fixture_output(lp, &["rev-parse", "HEAD"]);
+
+    // Simulate a GitHub squash-merge of the (single-commit) predecessor PR:
+    // the SAME diff lands on main as one new commit with a different sha and
+    // message -- identical diff means identical `git patch-id`, regardless
+    // of commit metadata.
+    run_git_fixture(lp, &["checkout", "-q", "main"]);
+    std::fs::write(lp.join("predecessor.txt"), "predecessor content\n").unwrap();
+    run_git_fixture(lp, &["add", "predecessor.txt"]);
+    run_git_fixture(
+        lp,
+        &["commit", "-q", "-m", "squash: predecessor feature (#1000)"],
+    );
+    run_git_fixture(lp, &["push", "-q", "origin", "main"]);
+
+    // Rebuild `topic` onto the squashed `main`, replaying only its own
+    // commit (dropping the now-redundant predecessor ancestor) -- the
+    // recovery this issue exists to make pushable.
+    run_git_fixture(lp, &["checkout", "-q", "topic"]);
+    run_git_fixture(
+        lp,
+        &["rebase", "-q", "--onto", "main", "predecessor", "topic"],
+    );
+    let new_local_sha = run_git_fixture_output(lp, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        old_remote_sha, new_local_sha,
+        "the rebase must have produced a new sha"
+    );
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(push_cmd(data_dir.path(), lp).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--branch",
+        "topic",
+        "--force",
+    ]));
+    assert!(
+        stdout.contains("topic"),
+        "expected confirmation naming the branch, got: {stdout}"
+    );
+
+    let remote_topic = rev_parse(remote.path(), "refs/heads/topic");
+    assert!(
+        remote_topic.status.success(),
+        "expected topic to still exist on the remote after the force-push"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&remote_topic.stdout).trim(),
+        new_local_sha,
+        "expected the remote to carry the rebased sha after the force-push"
+    );
+
+    let details = audit_details_for(data_dir.path(), "topic");
+    assert_eq!(
+        details.len(),
+        1,
+        "expected exactly one push attempt: {details:?}"
+    );
+    let d = &details[0];
+    assert_eq!(d["outcome"], "success", "{d:?}");
+    assert_eq!(d["forced"], true);
+    assert_eq!(d["old_remote_sha"], old_remote_sha, "{d:?}");
+    assert_eq!(d["new_sha"], new_local_sha, "{d:?}");
+    assert_eq!(d["discarded_count"], 2, "{d:?}");
+    assert!(d["force_reason"].is_null(), "{d:?}");
+
+    let discarded = d["discarded"]
+        .as_array()
+        .expect("discarded must be an array");
+    assert_eq!(discarded.len(), 2, "{discarded:?}");
+    let verdict_for = |sha: &str| -> String {
+        discarded
+            .iter()
+            .find(|c| c["sha"] == sha)
+            .unwrap_or_else(|| panic!("commit {sha} missing from discarded list: {discarded:?}"))
+            ["survival"]
+            .as_str()
+            .expect("survival must be a string")
+            .to_string()
+    };
+    assert_eq!(
+        verdict_for(&old_remote_sha),
+        "present-in-new-history",
+        "topic's own commit should survive by patch-id match to its rebased replay"
+    );
+    let predecessor_sha = run_git_fixture_output(lp, &["rev-parse", "predecessor"]);
+    assert_eq!(
+        verdict_for(&predecessor_sha),
+        "already-in-main-by-patch-id",
+        "the predecessor's pre-squash commit should survive via main's squash commit"
+    );
+}
+
+/// Done-When #2: a branch with a genuinely orphaned remote commit is
+/// refused, names that commit, and proceeds only with `--force-reason`.
+#[cfg(unix)]
+#[test]
+fn push_force_refuses_orphan_commit_names_it_and_succeeds_with_reason() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path()); // leaves checkout on feat/x, pushed
+    let lp = local.path();
+    run_git_fixture(lp, &["push", "-q", "origin", "feat/x"]);
+
+    let orphan_sha = run_git_fixture_output(lp, &["rev-parse", "HEAD"]);
+    let orphan_subject = run_git_fixture_output(lp, &["log", "-1", "--format=%s"]);
+
+    // Drop the commit locally with no replacement anywhere -- a genuine
+    // orphan: not present in the new history, not on main by sha, not on
+    // main by patch-id.
+    run_git_fixture(lp, &["reset", "-q", "--hard", "main"]);
+    let new_local_sha = run_git_fixture_output(lp, &["rev-parse", "HEAD"]);
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let (_stdout, stderr) = run_fail(push_cmd(data_dir.path(), lp).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--branch",
+        "feat/x",
+        "--force",
+    ]));
+    assert!(
+        stderr.contains(&format!("{orphan_sha} {orphan_subject}")),
+        "expected the orphan named as '<sha> <subject>', got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--force-reason"),
+        "expected the override named, got: {stderr}"
+    );
+
+    let remote_after_refusal = rev_parse(remote.path(), "refs/heads/feat/x");
+    assert_eq!(
+        String::from_utf8_lossy(&remote_after_refusal.stdout).trim(),
+        orphan_sha,
+        "the refused push must not have touched the remote"
+    );
+
+    let stdout = run_ok(push_cmd(data_dir.path(), lp).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--branch",
+        "feat/x",
+        "--force",
+        "--force-reason",
+        "confirmed the dropped commit is intentionally gone",
+    ]));
+    assert!(stdout.contains("feat/x"), "got: {stdout}");
+
+    let remote_after_override = rev_parse(remote.path(), "refs/heads/feat/x");
+    assert_eq!(
+        String::from_utf8_lossy(&remote_after_override.stdout).trim(),
+        new_local_sha,
+        "expected the override push to have updated the remote"
+    );
+
+    let details = audit_details_for(data_dir.path(), "feat/x");
+    assert_eq!(
+        details.len(),
+        2,
+        "expected the refused attempt AND the overridden attempt both audited: {details:?}"
+    );
+    let refused = &details[0];
+    let overridden = &details[1];
+
+    assert_eq!(refused["outcome"], "failure", "{refused:?}");
+    assert_eq!(overridden["outcome"], "success", "{overridden:?}");
+    assert_eq!(refused["discarded_count"], 1, "{refused:?}");
+    assert_eq!(refused["discarded"][0]["sha"], orphan_sha, "{refused:?}");
+    assert_eq!(
+        refused["discarded"][0]["survival"], "orphan",
+        "the refused attempt's audit row must record the orphan verdict: {refused:?}"
+    );
+    assert!(
+        refused["force_reason"].is_null(),
+        "no reason was given on the refused attempt: {refused:?}"
+    );
+
+    assert_eq!(
+        overridden["discarded"][0]["survival"], "orphan",
+        "the overridden attempt's audit row must ALSO record the orphan verdict -- the \
+         override changes the outcome, not the analysis: {overridden:?}"
+    );
+    assert_eq!(
+        overridden["force_reason"], "confirmed the dropped commit is intentionally gone",
+        "{overridden:?}"
+    );
+}
+
+/// Done-When #4: `main` is refused with `--force` exactly as without it --
+/// `validate_branch` runs before the force analysis ever starts.
+#[cfg(unix)]
+#[test]
+fn push_force_still_refuses_main() {
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path());
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(push_cmd(data_dir.path(), local.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--branch",
+        "main",
+        "--force",
+    ]));
+    assert!(
+        stderr.contains("main") && stderr.to_lowercase().contains("refus"),
+        "expected a refusal naming main, got: {stderr}"
+    );
+}
+
+/// `--force` and `--tag` are mutually exclusive at the clap layer -- a moved
+/// tag is a different, out-of-scope problem.
+#[cfg(unix)]
+#[test]
+fn push_force_conflicts_with_tag() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(push_cmd(data_dir.path(), local.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "--tag",
+        "v1.0.0",
+        "--force",
+    ]));
+    assert!(
+        stderr.contains("force") && stderr.to_lowercase().contains("cannot be used"),
+        "expected clap's conflicts_with refusal, got: {stderr}"
     );
 }
