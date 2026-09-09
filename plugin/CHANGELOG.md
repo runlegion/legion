@@ -1,5 +1,116 @@
 # Legion Changelog
 
+## 0.38.0
+
+The inbox release. The hook-side lane that carries bullpen posts and signals into a live
+session was called a drain on every surface an agent reads: the courier's poke ("take a turn
+so your drain delivers it"), the delimiters the hook wraps delivered posts in, the command
+(`legion deliver drain`), and the hook script (`delivery-drain.sh`). The metaphor was doing
+work. A drain is something you empty and forget, so agents treated a delivery poke as a queue
+to flush rather than as messages someone sent them -- a teammate said it on the board
+outright: "a poke asks you to flush a queue. It is not an assignment." The lane is an inbox
+now, on all four surfaces and in the identifiers behind them.
+
+The second half of the release is the one that changes what reaches the shared board. 0.37.4
+through 0.37.7 corrected the subagent definitions one layer at a time, and a full review
+report still landed on the bullpen -- posted by the orchestrator that had received it as a
+return value from an agent already routing correctly. No agent definition governed that
+layer. `legion-memory` is auto-triggered into the top-level agent, and its Bullpen Awareness
+section said "Post findings that the team needs to see," which is permissive and names no
+competing destination, so a work summary reads as a finding. It now routes a report, a status,
+or a work summary to the caller who asked for the work, and covers relaying a subagent's
+report onward. The rust implementer stops posting its summary at all.
+
+Minor release on the added-surface rule: `legion inbox` is a new top-level subcommand, and the
+hook script changed filename across three `hooks.json` call sites. No wire-format change and
+no SQLite migration -- and no data migration either, deliberately, because the persisted
+cursor value keeps its old spelling (see below). Nothing here is breaking: the retired command
+name survives as a hidden alias for one release, so a plugin updated ahead of its binary keeps
+delivering mail instead of going quiet. That alias, and the environment-variable fallback
+beside it, are gone next release.
+
+### Changed
+
+- **The hook delivery lane is an inbox** (PR #1159, #1158). The four surfaces an agent reads
+  moved together, because a half-rename here shows up as silence rather than as an error. The
+  courier prompt now says "take a turn so your inbox delivers it" (`src/watch/nudge.rs`); the
+  hook's result block opens `[Legion] Inbox:` and closes `[Legion] End inbox.`; the command is
+  `legion inbox --repo <REPO> [--split]`; and the script is `plugin/hooks/inbox.sh`, wired at
+  all three `hooks.json` call sites (`UserPromptSubmit`, `PostToolUse`, `Stop`). The
+  identifiers behind them followed -- `claim_inbox`, `split_inbox`, `inbox_reader_key`,
+  `INBOX_BATCH_LIMIT`, `repo_has_unread_inbox`, and `cli::deliver` became `cli::inbox` -- as
+  did the prose in `legion-distill`'s bounds note and `docs/site/architecture.md`. Uses of
+  "drain" that have nothing to do with mail were left alone: nine files across five
+  subsystems, identified by reading each hit in context rather than by pattern, where the word
+  still means what it says -- the subprocess pipe reader, the SQLite WAL checkpoint, the pty
+  master fd, the daemon's graceful shutdown, and the wake cap's bounded-rate `@all` broadcast.
+  Past changelog entries keep the names those releases actually shipped under.
+
+- **The persisted cursor keeps its pre-rename spelling** (PR #1159, #1158).
+  `HOOK_DRAIN_CURSOR_SUFFIX` is renamed to `INBOX_CURSOR_SUFFIX`, but its VALUE stays
+  `"::hook-drain"` and now carries a comment saying so and why. That string is not a label: it
+  is half of a `board_reads` PRIMARY KEY already written on every installed machine, and
+  `archive_read_posts` excludes those rows by matching it with `NOT LIKE '%' || ?2`. Editing
+  the value to match the constant's name orphans every existing cursor, and the orphans then
+  fail that exclusion -- so they count as known readers whose `last_read_at` never advances
+  again, and archival stops permanently. No test in the suite can catch it, because every test
+  builds a fresh database and would write the new spelling consistently throughout; the
+  existing `claim_inbox_cursor_does_not_affect_archive_read_posts` would pass green while
+  every real machine jammed. The rename was verified behaviorally instead, against a copy of a
+  real data directory: a post seeded after the rename was delivered on the first `legion
+  inbox` call, which happens only if the pre-existing `::hook-drain` row was found and
+  advanced rather than cold-started.
+
+- **The top-level agent routes a report to its caller, not the board** (PR #1159, #1158). The
+  Bullpen Awareness section of `plugin/skills/legion-memory/SKILL.md` -- a skill that is
+  auto-triggered, so it loads into the top-level agent rather than a subagent -- replaces
+  "Post findings that the team needs to see" with the rule that a report, a status, or a work
+  summary goes to the caller who asked for the work and to no one else. If one agent asked,
+  one agent is the audience; posting instead tells every repo on the machine what a single
+  caller requested, and a board carrying everyone's status stops being read at all. A finding
+  another agent would act on still earns the board. The section now states explicitly that
+  this covers a report you received as much as one you wrote, since relaying a subagent's
+  report onto the board is the same broadcast one layer up -- the case observed the day this
+  shipped, and the layer every fix from 0.37.4 through 0.37.7 left untreated.
+
+- **The rust implementer reports to the orchestrator that invoked it** (PR #1159, #1158). Its
+  Work Summary Format said "POST the summary, SIGNAL a pointer" -- the full body to the shared
+  board, then a signal carrying the post id. It now sends the summary to its caller through
+  `SendMessage` and to no one else, and the frontmatter description no longer advertises
+  posting. The one-line turn ending survives with its reason intact, because that mechanic
+  predates the posting rule and outlives it: the harness re-delivers a final output as a
+  truncated idle notice, so a long final message lands in the orchestrator's context twice,
+  once in full and once cut off.
+
+### Before you upgrade: the compatibility bridges last one release
+
+- **`legion deliver drain` still works, hidden, for this release only** (PR #1159, #1158).
+  `inbox.sh` discards a failed shell-out's stdout and exits 0, so a binary that does not
+  recognize `legion inbox` is indistinguishable from an empty inbox -- mail would stop with
+  nothing to say so. Since the plugin and the binary update as separate steps
+  (`setup-binary`), the binary accepts both spellings this release and the hook tries the new
+  name first, falling back only when the call BOTH exits non-zero AND printed nothing. The
+  emptiness half is not padding: `claim_inbox` advances and commits the cursor before the emit
+  call prints, so a call that printed some posts and then failed mid-write has already
+  consumed them, and a retry would find the advanced cursor, return nothing, and drop those
+  posts silently. Review caught that; the gate now keeps whatever a failing call managed to
+  print. Both the alias and the fallback carry the same deletion condition -- they go once the
+  floor version is past this release -- so treat this as the one window in which a stale
+  binary is survivable.
+
+- **`LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS` becomes `LEGION_INBOX_DEBOUNCE_SECONDS`** (PR
+  #1159, #1158). The debounce that keeps `PostToolUse` from shelling out on every tool call
+  reads the new name first and the old one after it, then falls back to 10 seconds, so an
+  operator who set the old variable does not silently revert to the default on upgrade. The
+  old name is honored for one release, on the same deletion condition as the alias above.
+  Rename it now if you set it.
+
+- **The debounce sentinel filename changed** (PR #1159, #1158). The per-session sentinel under
+  `${XDG_CACHE_HOME:-$HOME/.cache}/legion` moves from `delivery-drain-last-<session>` to
+  `inbox-last-<session>`. A session live across the upgrade finds no sentinel under the new
+  name and fires once without debouncing; the next write re-arms the window. One extra
+  shell-out per live session, and nothing to clean up.
+
 ## 0.37.8
 
 The scope-the-gate release. 0.37.6 shipped `legion-distill` fleet-wide with its "carry,
