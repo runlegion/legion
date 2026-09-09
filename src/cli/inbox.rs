@@ -89,6 +89,13 @@ fn emit_inbox(posts: &[Reflection], out: &mut impl Write) -> error::Result<()> {
     // musings through one formatter, so without the check a batch of purely
     // directed asks would carry a line telling the reader to pass them in
     // silence -- the opposite of what a directed ask requires (#1073).
+    //
+    // Placement differs from `--split`, deliberately. Here the norm lands at
+    // the very end, after any directed one-liners `format_bullpen` rendered;
+    // there it lands before the separator so the REQUIRES A REPLY block stays
+    // last inside the result block. #1020's ordering binds only where that
+    // block exists, and this path renders none. The hook always passes
+    // `--split`, so the ordered path is the one an agent actually reads.
     let (musings, _) = deliver::split_inbox(posts);
     if !musings.is_empty() {
         writeln!(out)?;
@@ -117,6 +124,13 @@ const SPLIT_SEPARATOR: &str = "---";
 /// commentary is re-billed as input on every later turn and eventually
 /// becomes what compaction remembers instead of the work. Dissent and
 /// questions are explicitly encouraged spends; only idle assent is cut.
+///
+/// One inherited edge, from `split_inbox`'s verb-only predicate (#1020):
+/// a wake-worthy `@all` broadcast buckets as directed, so a batch of only
+/// those renders no norm even though the posts are not addressed to the
+/// reading agent specifically. Defensible -- a wake-worthy broadcast does
+/// want an answer -- but it is a place where this gate and the issue's
+/// "not directed at the reading agent" wording diverge.
 const READ_NOT_RESPOND_NORM: &str = "These posts are for reading. Act on what concerns you; \
      pass the rest in silence. Do not think out loud about them -- no commentary, summaries, or \
      reactions in your session: anything you write about this mail lives in your context on every \
@@ -387,9 +401,19 @@ mod tests {
             "directed-only batch must not carry the norm on the non-split path"
         );
 
+        // A genuinely MIXED batch, claimed in one call. The earlier claim
+        // already consumed the directed post, so seeding both here is what
+        // makes this case mixed rather than musing-only -- without it a gate
+        // of `musings.len() == posts.len()` would survive (#1073 review M3).
         db.insert_reflection("rafters", "a broadcast musing", "team")
             .unwrap();
+        db.insert_reflection("kelex", "@legion question: still directed", "team")
+            .unwrap();
         let with_musing = deliver::claim_inbox(&db, "legion").unwrap();
+        assert!(
+            with_musing.len() == 2,
+            "this case must be mixed to pin the gate"
+        );
         let mut out = Vec::new();
         emit_inbox(&with_musing, &mut out).unwrap();
         assert!(
@@ -397,6 +421,59 @@ mod tests {
                 .unwrap()
                 .contains("These posts are for reading"),
             "a batch carrying a musing must render the norm on the non-split path"
+        );
+    }
+
+    /// Kills the gate-narrowing mutation (#1073 review): tying the norm to
+    /// `!directed_txt.is_empty()` leaves every other norm test green while
+    /// breaking the MOST COMMON drain there is -- a pure broadcast batch with
+    /// no directed ask, which is the primary case of the criterion.
+    #[test]
+    fn emit_inbox_split_renders_the_norm_for_a_musings_only_batch() {
+        let db = test_db();
+        db.insert_reflection("seed", "sentinel", "team").unwrap();
+        assert!(deliver::claim_inbox(&db, "legion").unwrap().is_empty());
+
+        db.insert_reflection("rafters", "a musing with no ask attached", "team")
+            .unwrap();
+
+        let posts = deliver::claim_inbox(&db, "legion").unwrap();
+        let mut out = Vec::new();
+        emit_inbox_split("legion", &posts, &mut out).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+
+        assert!(
+            rendered.contains("These posts are for reading"),
+            "a musings-only batch is the primary case for the norm, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(SPLIT_SEPARATOR),
+            "nothing to separate when the directed bucket is empty, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("REQUIRES A REPLY"),
+            "no directed bucket should render, got:\n{rendered}"
+        );
+    }
+
+    /// Kills the truncation mutation (#1073 review). Every other test matches
+    /// only the opening clause, so the const could be cut back to its first
+    /// sentence with a green suite -- and cutting it removes the operator's
+    /// sharpening, leaving a norm that reads as suppressing dissent. The text
+    /// IS the deliverable here, so it is pinned verbatim against #1073's
+    /// Behavior clause rather than sampled.
+    #[test]
+    fn read_not_respond_norm_matches_the_issue_text_verbatim() {
+        assert_eq!(
+            READ_NOT_RESPOND_NORM,
+            "These posts are for reading. Act on what concerns you; pass the rest in silence. \
+Do not think out loud about them -- no commentary, summaries, or reactions in your session: \
+anything you write about this mail lives in your context on every later turn. A reply is right \
+when you are addressed, when you own the far side, when you DISAGREE (adversarial opinion is \
+never wrong if it is true), or when you want to learn more -- dissent and questions are \
+encouraged spends; only idle assent is cut. In every case, add nothing to your own context \
+beyond the reply itself.",
+            "the norm text is the deliverable; it must match #1073 exactly"
         );
     }
 

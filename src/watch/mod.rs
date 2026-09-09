@@ -633,11 +633,30 @@ pub(crate) fn rearm_or_abandon(
         // a stuck wake actually looks. The signal still stays permanently
         // handled for this repo; nothing about the settle changes.
         eprintln!(
-            "{log_prefix} redelivery ABANDONED: signal {signal_id} for {repo_name} exhausted \
-             {attempts} delivery attempts (cap {max_attempts}) -- wake_attempt {attempt_id} \
-             settled failed; signal stays permanently handled for this repo"
+            "{log_prefix} {}",
+            abandonment_notice(&signal_id, repo_name, attempts, max_attempts, attempt_id)
         );
     }
+}
+
+/// The abandonment notice's text, built apart from the `eprintln!` that
+/// emits it so the CONTENT is assertable (#1073 review). Clause 2 of the
+/// issue has two halves -- the notice leaves the board AND still reaches the
+/// daemon log -- and a test that only checks the board is empty would pass
+/// if the notice were dropped entirely, which is the same silent-loss shape
+/// this change exists to fix on the other side.
+fn abandonment_notice(
+    signal_id: &str,
+    repo_name: &str,
+    attempts: u32,
+    max_attempts: u32,
+    attempt_id: &str,
+) -> String {
+    format!(
+        "redelivery ABANDONED: signal {signal_id} for {repo_name} exhausted {attempts} \
+         delivery attempts (cap {max_attempts}) -- wake_attempt {attempt_id} settled failed; \
+         signal stays permanently handled for this repo"
+    )
 }
 
 /// Auto-revert delegated work whose linked wake attempt is no longer live
@@ -1577,6 +1596,38 @@ mod tests {
             "an exhausted redelivery must not reach any bullpen; got: {:?}",
             posts.iter().map(|p| (&p.repo, &p.text)).collect::<Vec<_>>()
         );
+    }
+
+    /// Pins the CONTENT of the abandonment notice so a field cannot quietly
+    /// drop out of it: clause 2 of #1073 requires the same detail that used
+    /// to reach the board to reach the daemon log instead.
+    ///
+    /// What this does NOT cover, stated so nobody reads more into it: it
+    /// asserts nothing about the `eprintln!` firing. Deleting the emission
+    /// outright still leaves the suite green (#1073 review M4), because
+    /// proving a line reached stderr needs capture this harness does not
+    /// have. So the notice could still vanish silently -- the same shape as
+    /// the bug this change fixes on the board side, one layer over. Judged
+    /// not worth a production signature change for a sink parameter; the
+    /// residual risk is a notice nobody sees, not a wrong settle.
+    #[test]
+    fn abandonment_notice_names_every_identifying_field() {
+        let notice = abandonment_notice("sig-7", "smugglr", 3, 3, "attempt-42");
+
+        for needle in [
+            "redelivery ABANDONED",
+            "sig-7",
+            "smugglr",
+            "exhausted 3",
+            "cap 3",
+            "attempt-42",
+            "stays permanently handled",
+        ] {
+            assert!(
+                notice.contains(needle),
+                "the daemon-log notice must still name {needle}; got: {notice}"
+            );
+        }
     }
 
     // -- delegated-work reaper (#778, card-free since #931) -------------------
