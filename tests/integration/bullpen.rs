@@ -75,35 +75,6 @@ fn bullpen_count_output() {
 }
 
 #[test]
-fn bullpen_count_includes_pending_tasks() {
-    let dir = tempfile::tempdir().unwrap();
-
-    // Post to bullpen
-    run_ok(legion_cmd(dir.path()).args(["post", "--repo", "kelex", "--text", "a shared thought"]));
-
-    // Create a pending task for the reader
-    run_ok(legion_cmd(dir.path()).args([
-        "task",
-        "create",
-        "--from",
-        "kelex",
-        "--to",
-        "platform",
-        "--text",
-        "urgent work",
-        "--priority",
-        "high",
-    ]));
-
-    // Count should show both posts and tasks
-    let stdout = run_ok(legion_cmd(dir.path()).args(["bullpen", "--repo", "platform", "--count"]));
-    assert!(
-        stdout.contains("1 unread posts, 1 pending tasks on the bullpen"),
-        "expected combined count, got: {stdout}"
-    );
-}
-
-#[test]
 fn post_with_metadata_flags() {
     let dir = tempfile::tempdir().unwrap();
 

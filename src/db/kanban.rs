@@ -2,18 +2,24 @@
 //!
 //! Before #931, this table also carried kanban cards (the removed CRUD sat
 //! side by side with this task CRUD, sharing one table). The card CRUD, its
-//! schema migrations, and its query surface are gone; this file now owns
-//! only what `src/task.rs` (`legion task create/list/accept/done/block/
-//! unblock`) needs. Card-content columns added by the old migrations
-//! (labels, source_url, problem, solution, acceptance, document_id, wake_at,
-//! pre_defer_status, ...) still exist on databases that had cards -- DB
-//! migrations are one-way and columns are never dropped (rule 13) -- but
-//! nothing here reads or writes them going forward; they sit inert on any
-//! pre-existing rows.
+//! schema migrations, and its query surface are gone.
+//!
+//! #1166 removed the `legion task` CRUD verb (create/list/accept/done/
+//! block/unblock) and everything that only served it -- `legion done`'s
+//! announce-and-notify path, the dashboard's task endpoints, and the
+//! cross-node `CardDelta` sync protocol. What remains here is the read
+//! path `legion surface` and the bullpen `--count` flag still use
+//! (`get_pending_tasks_for_repo`, `count_pending_tasks_for_repo`), plus
+//! `insert_task`/`update_task_status`, kept `#[cfg(test)]`-only as the
+//! fixture writers for those reads' test coverage now that nothing in
+//! production ever creates a task row. Card-content columns added by the
+//! old migrations (labels, source_url, problem, solution, acceptance,
+//! document_id, wake_at, pre_defer_status, ...) still exist on databases
+//! that had cards -- DB migrations are one-way and columns are never
+//! dropped (rule 13) -- but nothing here reads or writes them going
+//! forward; they sit inert on any pre-existing rows.
 
-use chrono::Utc;
 use rusqlite::Connection;
-use uuid::Uuid;
 
 use super::Database;
 use crate::error::{LegionError, Result};
@@ -42,13 +48,14 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
 
 /// Column migrations for `tasks`, in their original patch order.
 ///
-/// Only the migration `legion task` still needs (`deleted_at`, for its
-/// tombstone/soft-delete filtering and multi-node sync) survives here. The
-/// card-only migrations (labels, parent_card_id, source_url, source_type,
-/// sort_order, assigned_at, started_at, completed_at, problem, solution,
-/// acceptance, document_id, wake_at, pre_defer_status) are removed: a fresh
-/// database no longer gets those columns at all, and an existing database's
-/// copies of them go inert rather than being dropped (rule 13).
+/// Only the migration the surviving reads need (`deleted_at`, so their
+/// `WHERE deleted_at IS NULL` filters stay valid on pre-existing rows)
+/// survives here. The card-only migrations (labels, parent_card_id,
+/// source_url, source_type, sort_order, assigned_at, started_at,
+/// completed_at, problem, solution, acceptance, document_id, wake_at,
+/// pre_defer_status) are removed: a fresh database no longer gets those
+/// columns at all, and an existing database's copies of them go inert
+/// rather than being dropped (rule 13).
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
     // Migration 13: Soft delete support for multi-node sync (#245).
     if !Database::has_column(conn, "tasks", "deleted_at")? {
@@ -66,20 +73,13 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
 }
 
 impl Database {
-    /// Get all tasks regardless of repo (for the legacy `/api/tasks` feed).
-    pub fn get_all_tasks(&self) -> Result<Vec<crate::task::Task>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-             FROM tasks WHERE deleted_at IS NULL ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([], crate::task::map_task_row)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(LegionError::Database)
-    }
-
-    // --- Task CRUD ---
-
     /// Insert a new task and return its UUIDv7 ID.
+    ///
+    /// #1166: no production caller remains (the `legion task create` verb
+    /// and the dashboard's `/api/tasks/create` are gone) -- this is the
+    /// fixture writer for `task.rs`'s and this module's own tests, which
+    /// need a way to seed pending/accepted rows for the surviving reads.
+    #[cfg(test)]
     pub fn insert_task(
         &self,
         from_repo: &str,
@@ -88,8 +88,8 @@ impl Database {
         context: Option<&str>,
         priority: &str,
     ) -> Result<String> {
-        let id = Uuid::now_v7().to_string();
-        let now = Utc::now().to_rfc3339();
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
 
         self.conn.execute(
             "INSERT INTO tasks (id, from_repo, to_repo, text, context, priority, status, created_at, updated_at) \
@@ -100,55 +100,35 @@ impl Database {
         Ok(id)
     }
 
-    /// Retrieve a single task by ID.
-    pub fn get_task_by_id(&self, id: &str) -> Result<Option<crate::task::Task>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-             FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
-        )?;
-        let mut rows = stmt.query_map([id], crate::task::map_task_row)?;
-        match rows.next() {
-            Some(row) => Ok(Some(row?)),
-            None => Ok(None),
-        }
-    }
-
-    /// List tasks for a repo filtered by direction (inbound or outbound).
-    pub fn get_tasks(
-        &self,
-        repo: &str,
-        direction: crate::task::Direction,
-    ) -> Result<Vec<crate::task::Task>> {
-        let sql = match direction {
-            crate::task::Direction::Inbound => {
-                "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-                 FROM tasks WHERE to_repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC"
-            }
-            crate::task::Direction::Outbound => {
-                "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-                 FROM tasks WHERE from_repo = ?1 AND deleted_at IS NULL ORDER BY created_at DESC"
-            }
-        };
-
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map([repo], crate::task::map_task_row)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(LegionError::Database)
-    }
-
     /// Update a task's status and optional note. Sets updated_at to now.
     ///
-    /// Returns an error if no task with the given ID exists.
+    /// #1166: test-only, alongside `insert_task` -- see its doc comment.
+    #[cfg(test)]
     pub fn update_task_status(&self, id: &str, status: &str, note: Option<&str>) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let rows = self.conn.execute(
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
             "UPDATE tasks SET status = ?1, note = COALESCE(?2, note), updated_at = ?3 WHERE id = ?4 AND deleted_at IS NULL",
             rusqlite::params![status, &note, &now, id],
         )?;
-        if rows == 0 {
-            return Err(LegionError::TaskNotFound(id.to_string()));
-        }
         Ok(())
+    }
+
+    /// Soft-delete a task row by setting its `deleted_at` timestamp.
+    ///
+    /// #1166: test-only, alongside `insert_task` -- its production caller
+    /// was the `CardDelta` tombstone-propagation path (`db/sync.rs`),
+    /// removed along with the rest of the cross-node task sync protocol.
+    /// Kept as the fixture writer for `db/sync.rs`'s generic
+    /// `cleanup_tombstones` coverage, which still exercises the `tasks`
+    /// table's tombstone cleanup alongside reflections and schedules.
+    #[cfg(test)]
+    pub fn soft_delete_task(&self, id: &str) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE tasks SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now, id],
+        )?;
+        Ok(rows > 0)
     }
 
     /// Count pending tasks assigned to a repo (for bullpen --count path).
@@ -183,46 +163,5 @@ impl Database {
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(LegionError::Database)
-    }
-
-    /// Get active (pending, accepted, blocked) tasks assigned to a repo.
-    ///
-    /// Used by `legion status` to show the YOUR WORK section.
-    pub fn get_active_tasks_for_repo(&self, repo: &str) -> Result<Vec<crate::task::Task>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, from_repo, to_repo, text, context, priority, status, note, created_at, updated_at \
-             FROM tasks WHERE to_repo = ?1 AND status IN ('pending', 'accepted', 'blocked') AND deleted_at IS NULL \
-             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'med' THEN 1 WHEN 'low' THEN 2 END, created_at DESC",
-        )?;
-        let rows = stmt.query_map([repo], crate::task::map_task_row)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(LegionError::Database)
-    }
-
-    /// Get the most recent updated_at timestamp from tasks.
-    pub fn get_max_task_updated_at(&self) -> Result<Option<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT MAX(updated_at) FROM tasks WHERE deleted_at IS NULL")?;
-        let result: Option<String> = stmt
-            .query_row([], |row| row.get(0))
-            .map_err(LegionError::Database)?;
-        Ok(result)
-    }
-
-    /// Soft-delete a task row by setting its `deleted_at` timestamp.
-    ///
-    /// Preserves the row for multi-node sync tombstone propagation: it
-    /// becomes invisible to normal queries but still syncs to other nodes
-    /// via `get_card_deltas_since`/`apply_card_delta` (db/sync.rs -- named
-    /// for the table's history, not its current-day contents; #931).
-    #[allow(dead_code)] // exercised by db/sync.rs's tombstone tests; no CLI delete-task verb yet
-    pub fn soft_delete_task(&self, id: &str) -> Result<bool> {
-        let now = chrono::Utc::now().to_rfc3339();
-        let rows = self.conn.execute(
-            "UPDATE tasks SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-            rusqlite::params![now, id],
-        )?;
-        Ok(rows > 0)
     }
 }

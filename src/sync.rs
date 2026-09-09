@@ -61,37 +61,6 @@ impl ReflectionDelta {
     }
 }
 
-/// A `tasks` row (legacy inter-agent task delegation) serialized for sync
-/// transmission.
-///
-/// Named `CardDelta` historically: before #931 this table also carried
-/// kanban cards, and this delta type -- with no filter distinguishing the
-/// two -- synced whichever rows the table held. #931 removed the card
-/// content columns (text/context/problem/solution/acceptance were never
-/// unique to cards, but labels/source_url/parent_card_id/sort_order/
-/// assigned_at/started_at/completed_at were) from the protocol along with
-/// the schema; only the fields `src/task.rs` still writes remain. This is a
-/// breaking wire change for a peer running pre-#931 code -- its wider
-/// struct has no `#[serde(default)]` on the dropped fields, so it will fail
-/// to deserialize a packet built from this narrower shape. Deliberate: the
-/// issue that authorized this removal explicitly directs "the protocol
-/// changes WITH the schema," and rolling the whole fleet together is an
-/// operator decision, not something this type can paper over.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CardDelta {
-    pub id: String,
-    pub from_repo: String,
-    pub to_repo: String,
-    pub text: String,
-    pub context: Option<String>,
-    pub priority: String,
-    pub status: String, // String, not an enum, for serde compatibility
-    pub note: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub deleted_at: Option<String>,
-}
-
 /// A rate-limit sample serialized for sync transmission.
 ///
 /// Written by `legion statusline` on every Claude Code render. Synced
