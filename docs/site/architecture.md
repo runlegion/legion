@@ -542,18 +542,18 @@ Unknown fields round-trip via `#[serde(flatten)] toml::Table extras`.
 
 ### Sync actor
 
-When `cluster.enabled = true`, `legion watch` spawns a sync actor alongside the health/spawn loops. The actor discovers peers by listening on the configured UDP port, and periodically queries the local database for deltas produced since the last broadcast. Delta transmission over the wire is scaffolded -- the serialization format is shipped (ReflectionDelta, CardDelta, ScheduleDelta) but the broadcast/apply pipeline is still landing behind it.
+When `cluster.enabled = true`, `legion watch` spawns a sync actor alongside the health/spawn loops. The actor discovers peers by listening on the configured UDP port, and periodically queries the local database for deltas produced since the last broadcast. Delta transmission over the wire is scaffolded -- the serialization format is shipped (ReflectionDelta, ScheduleDelta) but the broadcast/apply pipeline is still landing behind it.
 
 ### Soft delete + LWW
 
-Every syncable table (reflections, tasks, schedules) carries `deleted_at` and `updated_at`:
+Every syncable table (reflections, schedules) carries `deleted_at` and `updated_at`:
 
 - **Soft delete**: deletes set `deleted_at` rather than removing the row. Reads are filtered through partial indexes (migration #15) that skip tombstoned rows. This lets delete operations replicate to peers that may not have received the row yet.
 - **LWW conflict resolution**: when two nodes update the same row, the higher `updated_at` wins. Clock skew is not handled -- operators are expected to run NTP.
 
 ### Delta types
 
-`ReflectionDelta`, `CardDelta`, and `ScheduleDelta` are the wire-format shapes. Each carries the row's primary key, its `updated_at`, and the full field set. Apply is idempotent: re-applying an older delta is a no-op because the local `updated_at` already exceeds the incoming one.
+`ReflectionDelta` and `ScheduleDelta` are the wire-format shapes. Each carries the row's primary key, its `updated_at`, and the full field set. Apply is idempotent: re-applying an older delta is a no-op because the local `updated_at` already exceeds the incoming one. (`CardDelta`, the `tasks` table's delta type, was removed in #1166 along with the `legion task`/`legion done` cluster it served -- the table itself stays, but nothing syncs it across nodes any more.)
 
 ### Tombstone housekeeper
 

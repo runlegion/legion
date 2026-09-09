@@ -9,8 +9,7 @@ use rusqlite::OptionalExtension;
 use super::Database;
 use crate::error::{LegionError, Result};
 use crate::sync::{
-    CardDelta, ReflectionDelta, ScheduleDelta, UncertaintyCalibrationSnapshotDelta,
-    UncertaintyPredictionDelta,
+    ReflectionDelta, ScheduleDelta, UncertaintyCalibrationSnapshotDelta, UncertaintyPredictionDelta,
 };
 
 /// Result of tombstone cleanup operation.
@@ -72,42 +71,6 @@ impl Database {
                 recall_count: row.get(9)?,
                 last_recalled_at: row.get(10)?,
                 parent_id: row.get(11)?,
-            })
-        })?;
-
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(LegionError::Database)
-    }
-
-    /// Get task deltas for multi-node sync.
-    ///
-    /// Returns all `tasks` rows (`legion task` inter-agent delegation, #931:
-    /// no longer kanban cards too) that have been modified or soft-deleted
-    /// since the given timestamp. Used for delta synchronization between
-    /// nodes.
-    #[allow(dead_code)] // Used by sync broadcast in #249
-    pub fn get_card_deltas_since(&self, since: &str) -> Result<Vec<CardDelta>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, from_repo, to_repo, text, context, priority, status, note, \
-             created_at, updated_at, deleted_at \
-             FROM tasks \
-             WHERE updated_at > ?1 OR deleted_at > ?1 \
-             ORDER BY COALESCE(updated_at, deleted_at) ASC",
-        )?;
-
-        let rows = stmt.query_map([since], |row| {
-            Ok(CardDelta {
-                id: row.get(0)?,
-                from_repo: row.get(1)?,
-                to_repo: row.get(2)?,
-                text: row.get(3)?,
-                context: row.get(4)?,
-                priority: row.get(5)?,
-                status: row.get(6)?,
-                note: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
-                deleted_at: row.get(10)?,
             })
         })?;
 
@@ -484,72 +447,6 @@ impl Database {
                             &delta.recall_count,
                             &delta.last_recalled_at,
                             &delta.parent_id,
-                        ],
-                    )?;
-                }
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Apply a peer's task delta with last-write-wins merge (#536). Same
-    /// LWW rule as [`Self::apply_reflection_delta`].
-    pub fn apply_card_delta(&self, delta: &crate::sync::CardDelta) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-
-        let local: Option<(String, Option<String>, Option<String>)> = tx
-            .query_row(
-                "SELECT created_at, updated_at, deleted_at FROM tasks WHERE id = ?1",
-                rusqlite::params![&delta.id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-
-        let updated = Some(delta.updated_at.clone());
-        let delta_ts = effective_sync_ts(&delta.created_at, &updated, &delta.deleted_at);
-        match local {
-            None => {
-                tx.execute(
-                    "INSERT INTO tasks \
-                     (id, from_repo, to_repo, text, context, priority, status, note, \
-                      created_at, updated_at, deleted_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    rusqlite::params![
-                        &delta.id,
-                        &delta.from_repo,
-                        &delta.to_repo,
-                        &delta.text,
-                        &delta.context,
-                        &delta.priority,
-                        &delta.status,
-                        &delta.note,
-                        &delta.created_at,
-                        &delta.updated_at,
-                        &delta.deleted_at,
-                    ],
-                )?;
-            }
-            Some((local_created, local_updated, local_deleted)) => {
-                let local_ts = effective_sync_ts(&local_created, &local_updated, &local_deleted);
-                if delta_ts > local_ts {
-                    tx.execute(
-                        "UPDATE tasks SET from_repo = ?2, to_repo = ?3, text = ?4, context = ?5, \
-                         priority = ?6, status = ?7, note = ?8, created_at = ?9, \
-                         updated_at = ?10, deleted_at = ?11 \
-                         WHERE id = ?1",
-                        rusqlite::params![
-                            &delta.id,
-                            &delta.from_repo,
-                            &delta.to_repo,
-                            &delta.text,
-                            &delta.context,
-                            &delta.priority,
-                            &delta.status,
-                            &delta.note,
-                            &delta.created_at,
-                            &delta.updated_at,
-                            &delta.deleted_at,
                         ],
                     )?;
                 }
@@ -944,52 +841,6 @@ mod tests {
     }
 
     #[test]
-    fn get_card_deltas_since_returns_modified_cards() {
-        let db = test_db();
-
-        // Insert two tasks.
-        let id1 = db
-            .insert_task("kelex", "legion", "task 1", None, "med")
-            .unwrap();
-        let _id2 = db
-            .insert_task("kelex", "legion", "task 2", None, "high")
-            .unwrap();
-
-        // Use an old cutoff -- both should appear.
-        let old_cutoff = "2020-01-01T00:00:00Z";
-        let deltas = db.get_card_deltas_since(old_cutoff).unwrap();
-        assert_eq!(deltas.len(), 2);
-
-        // Verify fields are populated.
-        let delta1 = deltas.iter().find(|d| d.id == id1).unwrap();
-        assert_eq!(delta1.from_repo, "kelex");
-        assert_eq!(delta1.to_repo, "legion");
-        assert_eq!(delta1.text, "task 1");
-        assert_eq!(delta1.priority, "med");
-        assert_eq!(delta1.status, "pending");
-        assert!(delta1.deleted_at.is_none());
-    }
-
-    #[test]
-    fn get_card_deltas_since_includes_soft_deleted() {
-        let db = test_db();
-
-        let id = db
-            .insert_task("kelex", "legion", "will delete", None, "low")
-            .unwrap();
-
-        // Soft delete the task.
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        db.soft_delete_task(&id).unwrap();
-
-        // Should still appear in deltas with deleted_at set.
-        let deltas = db.get_card_deltas_since("2020-01-01T00:00:00Z").unwrap();
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(deltas[0].id, id);
-        assert!(deltas[0].deleted_at.is_some());
-    }
-
-    #[test]
     fn get_schedule_deltas_since_returns_modified_schedules() {
         let db = test_db();
 
@@ -1257,42 +1108,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deleted.as_deref(), Some("2026-06-04T00:00:00Z"));
-    }
-
-    #[test]
-    fn apply_card_delta_insert_then_lww() {
-        let db = test_db();
-        let mut delta = crate::sync::CardDelta {
-            id: "c-1".into(),
-            from_repo: "legion".into(),
-            to_repo: "legion".into(),
-            text: "card v1".into(),
-            context: None,
-            priority: "med".into(),
-            status: "pending".into(),
-            note: None,
-            created_at: "2026-06-01T00:00:00Z".into(),
-            updated_at: "2026-06-02T00:00:00Z".into(),
-            deleted_at: None,
-        };
-        db.apply_card_delta(&delta).unwrap();
-
-        delta.text = "card v2".into();
-        delta.updated_at = "2026-06-03T00:00:00Z".into();
-        db.apply_card_delta(&delta).unwrap();
-
-        // Stale write loses.
-        delta.text = "card stale".into();
-        delta.updated_at = "2026-06-01T12:00:00Z".into();
-        db.apply_card_delta(&delta).unwrap();
-
-        let text: String = db
-            .conn
-            .query_row("SELECT text FROM tasks WHERE id = ?1", ["c-1"], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(text, "card v2");
     }
 
     #[test]

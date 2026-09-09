@@ -3,7 +3,6 @@ use chrono::Utc;
 use crate::db::{Database, Reflection};
 use crate::error::Result;
 use crate::signal;
-use crate::task::Task;
 use crate::timefmt::relative_time;
 use crate::verbs;
 
@@ -20,14 +19,8 @@ pub struct StatusItem {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StatusOutput {
     pub repo: String,
-    pub your_work: Vec<StatusItem>,
     pub team_needs: Vec<StatusItem>,
     pub what_changed: Vec<StatusItem>,
-    /// Total active task count for the repo. Sourced directly from the DB
-    /// query in `get_your_work`, not parsed from the `your_work` display text.
-    pub active_task_count: usize,
-    /// Subset of `active_task_count` that are currently blocked.
-    pub blocked_task_count: usize,
     /// Watch session diagnostic for the past 24h (#389). Surfaces when an
     /// agent has had unproductive watch wakes (spawned, exited, no
     /// observable artifact). `None` when there is nothing to report.
@@ -46,10 +39,6 @@ const MAX_NEEDS_FOCUSED: usize = 20;
 
 /// Gather the full status for a repo.
 pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
-    let tasks: Vec<Task> = db.get_active_tasks_for_repo(repo)?;
-    let active_task_count = tasks.len();
-    let blocked_task_count = tasks.iter().filter(|t| t.status == "blocked").count();
-    let your_work = your_work_items(&tasks, repo);
     let posts: Vec<Reflection> =
         db.get_recent_board_posts(LOOKBACK_HOURS, &crate::timerange::TimeRange::default())?;
     let (team_needs, seen_ids) = get_team_needs(&posts, repo);
@@ -59,11 +48,8 @@ pub fn get_status(db: &Database, repo: &str) -> Result<StatusOutput> {
 
     Ok(StatusOutput {
         repo: repo.to_string(),
-        your_work,
         team_needs,
         what_changed,
-        active_task_count,
-        blocked_task_count,
         session_health,
     })
 }
@@ -102,32 +88,6 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// Find agents who mentioned being blocked on this repo in recent bullpen posts.
-pub fn find_blocked_agents(db: &Database, repo: &str) -> Result<Vec<String>> {
-    let posts: Vec<Reflection> = db.get_recent_board_posts(
-        NEEDS_LOOKBACK_HOURS,
-        &crate::timerange::TimeRange::default(),
-    )?;
-    let repo_lower: String = repo.to_lowercase();
-    let blocked_pattern: String = format!("blocked on {}", repo_lower);
-    let waiting_pattern: String = format!("waiting on {}", repo_lower);
-    let mut agents: Vec<String> = Vec::new();
-
-    for p in &posts {
-        if p.repo.to_lowercase() == repo_lower {
-            continue;
-        }
-        let text_lower: String = p.text.to_lowercase();
-        if (text_lower.contains(&blocked_pattern) || text_lower.contains(&waiting_pattern))
-            && !agents.contains(&p.repo)
-        {
-            agents.push(p.repo.clone());
-        }
-    }
-
-    Ok(agents)
-}
-
 /// Gather focused team needs for a repo (wider lookback, more items than status).
 /// Used by `legion needs` when an agent is idle and looking for ways to help.
 pub fn get_needs(db: &Database, repo: &str) -> Result<Vec<StatusItem>> {
@@ -161,8 +121,6 @@ pub fn format_needs(repo: &str, items: &[StatusItem]) -> String {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StatusSummary {
     pub repo: String,
-    pub tasks: usize,
-    pub blocked: usize,
     pub team_needs: usize,
     pub what_changed: usize,
 }
@@ -171,8 +129,6 @@ pub struct StatusSummary {
 pub fn format_summary(output: &StatusOutput) -> StatusSummary {
     StatusSummary {
         repo: output.repo.clone(),
-        tasks: output.active_task_count,
-        blocked: output.blocked_task_count,
         team_needs: output.team_needs.len(),
         what_changed: output.what_changed.len(),
     }
@@ -180,8 +136,7 @@ pub fn format_summary(output: &StatusOutput) -> StatusSummary {
 
 /// Format status output for terminal display.
 pub fn format_status(output: &StatusOutput) -> String {
-    if output.your_work.is_empty()
-        && output.team_needs.is_empty()
+    if output.team_needs.is_empty()
         && output.what_changed.is_empty()
         && output.session_health.is_none()
     {
@@ -189,7 +144,6 @@ pub fn format_status(output: &StatusOutput) -> String {
     }
 
     let mut out = format!("[Legion] Status for {}:\n", output.repo);
-    format_section(&mut out, "YOUR WORK", &output.your_work);
     format_section(&mut out, "TEAM NEEDS YOU", &output.team_needs);
     format_section(&mut out, "WHAT CHANGED", &output.what_changed);
     if let Some(line) = &output.session_health {
@@ -210,36 +164,6 @@ fn format_section(out: &mut String, header: &str, items: &[StatusItem]) {
             item.category, item.text, item.from, item.age
         ));
     }
-}
-
-/// YOUR WORK: summary count of active tasks assigned to this repo.
-/// Shows blocked tasks individually (they need attention), everything else as a count.
-///
-/// Takes pre-fetched tasks so `get_status` can derive both the display items
-/// and the counts from a single DB query, without round-tripping the count
-/// through the display text.
-fn your_work_items(tasks: &[Task], repo: &str) -> Vec<StatusItem> {
-    let mut items: Vec<StatusItem> = Vec::new();
-
-    if !tasks.is_empty() {
-        items.push(StatusItem {
-            category: "TASKS".to_string(),
-            text: format!("{} tasks (`legion kanban list` for details)", tasks.len()),
-            from: repo.to_string(),
-            age: String::new(),
-        });
-    }
-
-    for t in tasks.iter().filter(|t| t.status == "blocked") {
-        items.push(StatusItem {
-            category: format!("TASK:{}", t.priority),
-            text: format!("{} [BLOCKED]", t.text),
-            from: t.from_repo.clone(),
-            age: relative_time(&t.created_at),
-        });
-    }
-
-    items
 }
 
 /// TEAM NEEDS YOU: recent posts with actionable requests directed at this repo.
@@ -475,7 +399,6 @@ mod tests {
     fn status_empty_database_returns_empty() {
         let (db, _index, _dir) = test_storage();
         let output = get_status(&db, "kelex").expect("get_status");
-        assert!(output.your_work.is_empty());
         assert!(output.team_needs.is_empty());
         assert!(output.what_changed.is_empty());
     }
@@ -484,11 +407,8 @@ mod tests {
     fn format_status_empty_returns_empty_string() {
         let output = StatusOutput {
             repo: "kelex".to_string(),
-            your_work: vec![],
             team_needs: vec![],
             what_changed: vec![],
-            active_task_count: 0,
-            blocked_task_count: 0,
             session_health: None,
         };
         assert!(format_status(&output).is_empty());
@@ -498,12 +418,6 @@ mod tests {
     fn format_status_shows_sections() {
         let output = StatusOutput {
             repo: "kelex".to_string(),
-            your_work: vec![StatusItem {
-                category: "TASK:high".to_string(),
-                text: "implement search".to_string(),
-                from: "platform".to_string(),
-                age: "3h ago".to_string(),
-            }],
             team_needs: vec![StatusItem {
                 category: "REVIEW".to_string(),
                 text: "PR #36 needs review".to_string(),
@@ -516,14 +430,10 @@ mod tests {
                 from: "eavesdrop".to_string(),
                 age: "4h ago".to_string(),
             }],
-            active_task_count: 1,
-            blocked_task_count: 0,
             session_health: None,
         };
         let formatted = format_status(&output);
         assert!(formatted.contains("[Legion] Status for kelex:"));
-        assert!(formatted.contains("YOUR WORK:"));
-        assert!(formatted.contains("[TASK:high] implement search"));
         assert!(formatted.contains("TEAM NEEDS YOU:"));
         assert!(formatted.contains("[REVIEW] PR #36 needs review"));
         assert!(formatted.contains("WHAT CHANGED:"));
@@ -531,79 +441,9 @@ mod tests {
     }
 
     #[test]
-    fn your_work_shows_count_summary() {
-        let (db, _index, _dir) = test_storage();
-        crate::task::create_task(&db, "platform", "kelex", "build the thing", None, "high")
-            .expect("create");
-        crate::task::create_task(&db, "platform", "kelex", "another task", None, "med")
-            .expect("create");
-
-        let output = get_status(&db, "kelex").expect("get_status");
-        assert_eq!(output.active_task_count, 2);
-        assert_eq!(output.blocked_task_count, 0);
-        assert_eq!(output.your_work.len(), 1);
-        assert_eq!(output.your_work[0].category, "TASKS");
-        assert!(output.your_work[0].text.contains("2 tasks"));
-    }
-
-    #[test]
-    fn your_work_shows_blocked_plus_count() {
-        let (db, _index, _dir) = test_storage();
-        let id = crate::task::create_task(&db, "platform", "kelex", "stuck work", None, "high")
-            .expect("create");
-        crate::task::accept_task(&db, &id).expect("accept");
-        crate::task::block_task(&db, &id, Some("waiting")).expect("block");
-        crate::task::create_task(&db, "platform", "kelex", "other work", None, "med")
-            .expect("create");
-
-        let output = get_status(&db, "kelex").expect("get_status");
-        assert_eq!(output.active_task_count, 2);
-        assert_eq!(output.blocked_task_count, 1);
-        assert_eq!(output.your_work.len(), 2);
-        assert_eq!(output.your_work[0].category, "TASKS");
-        assert!(output.your_work[0].text.contains("2 tasks"));
-        assert_eq!(output.your_work[1].category, "TASK:high");
-        assert!(output.your_work[1].text.contains("[BLOCKED]"));
-    }
-
-    #[test]
-    fn your_work_shows_blocked_tasks() {
-        let (db, _index, _dir) = test_storage();
-        let id = crate::task::create_task(&db, "platform", "kelex", "blocked work", None, "med")
-            .expect("create");
-        crate::task::accept_task(&db, &id).expect("accept");
-        crate::task::block_task(&db, &id, Some("waiting")).expect("block");
-
-        let output = get_status(&db, "kelex").expect("get_status");
-        assert_eq!(output.blocked_task_count, 1);
-        assert_eq!(output.your_work.len(), 2);
-        assert_eq!(output.your_work[0].category, "TASKS");
-        assert!(output.your_work[1].text.contains("[BLOCKED]"));
-    }
-
-    #[test]
-    fn your_work_excludes_done_tasks() {
-        let (db, _index, _dir) = test_storage();
-        let id = crate::task::create_task(&db, "platform", "kelex", "done work", None, "med")
-            .expect("create");
-        crate::task::accept_task(&db, &id).expect("accept");
-        crate::task::complete_task(&db, &id, None).expect("complete");
-
-        let output = get_status(&db, "kelex").expect("get_status");
-        assert_eq!(output.active_task_count, 0);
-        assert!(output.your_work.is_empty());
-    }
-
-    #[test]
     fn format_summary_maps_all_fields() {
         let output = StatusOutput {
             repo: "legion".to_string(),
-            your_work: vec![StatusItem {
-                category: "TASKS".to_string(),
-                text: "3 tasks (...)".to_string(),
-                from: "legion".to_string(),
-                age: String::new(),
-            }],
             team_needs: vec![
                 StatusItem {
                     category: "REVIEW".to_string(),
@@ -624,15 +464,11 @@ mod tests {
                 from: "rafters".to_string(),
                 age: "30m".to_string(),
             }],
-            active_task_count: 3,
-            blocked_task_count: 1,
             session_health: None,
         };
 
         let summary = format_summary(&output);
         assert_eq!(summary.repo, "legion");
-        assert_eq!(summary.tasks, 3);
-        assert_eq!(summary.blocked, 1);
         assert_eq!(summary.team_needs, 2);
         assert_eq!(summary.what_changed, 1);
     }

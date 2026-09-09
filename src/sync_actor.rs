@@ -32,7 +32,7 @@ use tokio::runtime::Runtime;
 use crate::cluster::ClusterConfig;
 use crate::db::Database;
 use crate::error::Result;
-use crate::sync::{CardDelta, PersonaWakeLeaseDelta, ReflectionDelta, ScheduleDelta};
+use crate::sync::{PersonaWakeLeaseDelta, ReflectionDelta, ScheduleDelta};
 
 /// Delta data flows on `discovery port + DATA_PORT_OFFSET`.
 const DATA_PORT_OFFSET: u16 = 1;
@@ -43,7 +43,6 @@ const SEAL_RESERVE: usize = 64;
 
 /// Table names on the wire. The receive path matches on these exactly.
 const TABLE_REFLECTIONS: &str = "reflections";
-const TABLE_CARDS: &str = "cards";
 const TABLE_SCHEDULES: &str = "schedules";
 const TABLE_LEASES: &str = "persona_wake_leases";
 
@@ -315,8 +314,6 @@ fn build_delta_packets(
         TABLE_REFLECTIONS,
         &reflections,
     )?;
-    let cards = db.get_card_deltas_since(last_sync)?;
-    pack_table(&mut packets, source_id, seq, TABLE_CARDS, &cards)?;
     let schedules = db.get_schedule_deltas_since(last_sync)?;
     pack_table(&mut packets, source_id, seq, TABLE_SCHEDULES, &schedules)?;
     let leases = db.get_persona_wake_lease_deltas_since(last_sync)?;
@@ -452,9 +449,6 @@ fn apply_packet(db: &Database, packet: &DeltaPacket) -> usize {
             TABLE_REFLECTIONS => serde_json::from_value::<ReflectionDelta>(value)
                 .map_err(|e| e.to_string())
                 .and_then(|d| db.apply_reflection_delta(&d).map_err(|e| e.to_string())),
-            TABLE_CARDS => serde_json::from_value::<CardDelta>(value)
-                .map_err(|e| e.to_string())
-                .and_then(|d| db.apply_card_delta(&d).map_err(|e| e.to_string())),
             TABLE_SCHEDULES => serde_json::from_value::<ScheduleDelta>(value)
                 .map_err(|e| e.to_string())
                 .and_then(|d| db.apply_schedule_delta(&d).map_err(|e| e.to_string())),

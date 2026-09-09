@@ -23,7 +23,6 @@ mod module_graph;
 mod prose_stdin;
 mod push;
 mod sym_tree;
-mod task;
 mod uncertainty;
 mod usage;
 mod whoami_generate;

@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn surface_shows_pending_tasks() {
         let (db, _index, _dir) = test_storage();
-        task::create_task(&db, "kelex", "legion", "implement search", None, "high")
+        db.insert_task("kelex", "legion", "implement search", None, "high")
             .expect("create task");
 
         let result = surface(&db, "legion", &TimeRange::default()).expect("surface");
@@ -216,8 +216,7 @@ mod tests {
     #[test]
     fn surface_format_includes_pending_tasks() {
         let (db, _index, _dir) = test_storage();
-        task::create_task(
-            &db,
+        db.insert_task(
             "kelex",
             "legion",
             "implement search",

@@ -1,88 +1,13 @@
 //! Small one-call dispatch arms: init, now, surface, whoami, status, work,
 //! daemon control, statusline and friends (carved from main.rs, #610).
 
-use clap::Subcommand;
-
 use crate::cli::datadir::data_dir;
 use crate::cli::memory::try_load_embed_model;
 use crate::cli::util::{open_db, open_db_and_index};
 use crate::{
     daemon, defer, error, identity_generate, init, now, queue, recall, stats, status, statusline,
-    surface, task,
+    surface,
 };
-
-#[derive(Subcommand)]
-pub(crate) enum TaskAction {
-    /// Create a new task for another agent
-    Create {
-        /// Sender repository name
-        #[arg(long)]
-        from: String,
-
-        /// Target repository name
-        #[arg(long)]
-        to: String,
-
-        /// Task description
-        #[arg(long)]
-        text: String,
-
-        /// Additional context for the task
-        #[arg(long)]
-        context: Option<String>,
-
-        /// Priority: low, med, high (default: med)
-        #[arg(long, default_value = "med", value_parser = ["low", "med", "high"])]
-        priority: String,
-    },
-
-    /// List tasks for a repo
-    List {
-        /// Repository name
-        #[arg(long)]
-        repo: String,
-
-        /// Show outbound tasks (tasks created by this repo) instead of inbound
-        #[arg(long)]
-        from: bool,
-    },
-
-    /// Accept a pending task
-    Accept {
-        /// Task ID
-        #[arg(long)]
-        id: String,
-    },
-
-    /// Mark an accepted task as done
-    Done {
-        /// Task ID
-        #[arg(long)]
-        id: String,
-
-        /// Completion note
-        #[arg(long)]
-        note: Option<String>,
-    },
-
-    /// Block an accepted task
-    Block {
-        /// Task ID
-        #[arg(long)]
-        id: String,
-
-        /// Reason for blocking
-        #[arg(long)]
-        reason: Option<String>,
-    },
-
-    /// Unblock a blocked task (returns to accepted)
-    Unblock {
-        /// Task ID
-        #[arg(long)]
-        id: String,
-    },
-}
 
 pub(crate) fn handle_now(json: bool) -> error::Result<()> {
     // The default and `--banner` output are the same one-line
@@ -299,56 +224,6 @@ pub(crate) fn handle_undefer(work_item: String) -> error::Result<()> {
     match defer::undefer_work_item(&database, &work_item)? {
         Some(_) => println!("{work_item}"),
         None => info!("[legion] {work_item} was not deferred"),
-    }
-    Ok(())
-}
-
-pub(crate) fn handle_task(action: TaskAction) -> error::Result<()> {
-    let database = open_db()?;
-
-    match action {
-        TaskAction::Create {
-            from,
-            to,
-            text,
-            context,
-            priority,
-        } => {
-            let id =
-                task::create_task(&database, &from, &to, &text, context.as_deref(), &priority)?;
-            println!("{id}");
-            info!("[legion] task created: {} -> {}", from, to);
-        }
-        TaskAction::List { repo, from } => {
-            let direction = if from {
-                task::Direction::Outbound
-            } else {
-                task::Direction::Inbound
-            };
-            let tasks = task::list_tasks(&database, &repo, direction)?;
-            let output = task::format_task_list(&tasks, &repo, direction);
-            if output.is_empty() {
-                info!("[legion] no tasks found");
-            } else {
-                print!("{output}");
-            }
-        }
-        TaskAction::Accept { id } => {
-            task::accept_task(&database, &id)?;
-            info!("[legion] task accepted: {}", id);
-        }
-        TaskAction::Done { id, note } => {
-            task::complete_task(&database, &id, note.as_deref())?;
-            info!("[legion] task completed: {}", id);
-        }
-        TaskAction::Block { id, reason } => {
-            task::block_task(&database, &id, reason.as_deref())?;
-            info!("[legion] task blocked: {}", id);
-        }
-        TaskAction::Unblock { id } => {
-            task::unblock_task(&database, &id)?;
-            info!("[legion] task unblocked: {}", id);
-        }
     }
     Ok(())
 }
