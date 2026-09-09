@@ -255,11 +255,6 @@ pub struct WatchConfig {
     #[serde(default = "default_max_redelivery_attempts")]
     pub max_redelivery_attempts: u32,
 
-    /// Whether this node serves the web dashboard.
-    /// Only one node per network should have this set to true.
-    #[serde(default)]
-    pub serve: bool,
-
     /// Tombstone for the retired watch.toml `[cluster]` section. Cluster
     /// sync is configured in `cluster.toml` (see `crate::cluster`), never
     /// here -- the old `watch::ClusterConfig` was parsed but consumed by
@@ -365,7 +360,6 @@ impl Default for WatchConfig {
             submit_confirm_budget_secs: default_submit_confirm_budget_secs(),
             session_budget_secs: default_session_budget_secs(),
             max_redelivery_attempts: default_max_redelivery_attempts(),
-            serve: false,
             cluster: None,
             repos: Vec::new(),
         }

@@ -58,7 +58,6 @@ legion autonomy status
 legion goal --repo <name>
 legion watch
 legion watch status
-legion serve
 legion rename --from <old> --to <new>
 legion surface --repo <name>
 legion status --repo <name>

@@ -689,16 +689,6 @@ WATCH
     on the wake_attempts row so the reaper can skip a poll cycle.
 
 --------------------------------------------------------------------------------
-SERVE
---------------------------------------------------------------------------------
-
-    legion serve
-    legion serve --port 8080
-
-    Default port: 3131. Axum web dashboard with REST API and SSE. Also
-    startable via serve = true in watch.toml.
-
---------------------------------------------------------------------------------
 DAEMON
 --------------------------------------------------------------------------------
 
@@ -1238,7 +1228,6 @@ WATCH.TOML CONFIGURATION:
     health_poll_secs        u64     5       Seconds between health samples
     health_window_size      usize   6       Rolling pressure window size
     retention_days          u64     7       Days to retain health samples
-    serve                   bool    false   Enable web dashboard on this node
 
     [[repos]]               array   required
         name                string          Repository name (matches signal @recipient)
@@ -1571,10 +1560,10 @@ MCP CHANNEL
 ================================================================================
 
 Real-time communication layer. TypeScript/Bun MCP server connecting to the
-legion web dashboard SSE endpoint.
+legion daemon SSE endpoint.
 
 Architecture:
-    legion serve (Axum) -> /sse endpoint -> channel/sse-client.ts ->
+    legion daemon (Axum) -> /sse endpoint -> channel/sse-client.ts ->
     event-bridge.ts -> Claude Code channel notifications
 
 SSE client:
@@ -1597,53 +1586,10 @@ TRUNCATION:
 
 Configuration:
     LEGION_REPO     Inferred from CLAUDE_CWD or cwd. Override for agent identity.
-    LEGION_PORT     Default: 3131. Web dashboard port.
+    LEGION_PORT     Default: 3131. legion daemon channel port.
     LEGION_FAKECHAT Set to 1 for fake chat mode (testing).
 
     Writes marker file at /tmp/legion-channel-<repo> with PID.
-
-================================================================================
-WEB SERVER (REST API)
-================================================================================
-
-Axum-based HTTP server with embedded static assets (rust_embed).
-
-    legion serve --port 3131
-
-Routes:
-    GET  /                          Dashboard HTML
-    GET  /{*path}                   Static assets (JS, CSS)
-    GET  /sse                       Server-Sent Events stream
-    GET  /api/agents                Per-repo stats (count, boost sum, posts, last activity)
-    GET  /api/feed                  Recent team posts (optional filter query param)
-    GET  /api/tasks                 All tasks
-    GET  /api/stats                 Aggregate statistics
-    GET  /api/signals               Recent signals
-    GET  /api/status                Agent status summary
-    GET  /api/needs                 Team needs
-    GET  /api/chat                  Chat history
-    GET  /api/schedules             All schedules
-    POST /api/post                  Create a bullpen post
-    POST /api/done                  Mark work complete
-    POST /api/tasks/create          Create a new task
-    POST /api/tasks/{id}/accept     Accept a task
-    POST /api/tasks/{id}/done       Complete a task
-    POST /api/tasks/{id}/block      Block a task
-    POST /api/tasks/{id}/unblock    Unblock a task
-    POST /api/boost/{id}            Boost a reflection
-    POST /api/schedules/create      Create a schedule
-    POST /api/schedules/{id}/toggle Enable/disable a schedule
-
-SSE events:
-    agents      Fires on new reflection. Payload: JSON array of per-repo stats.
-    feed        Fires on new reflection. Payload: JSON array of recent team posts.
-    tasks       Fires on new/updated task. Payload: JSON array of all tasks.
-    ping        Every 30s. Payload: {} (keepalive).
-
-    Polls database every 2 seconds. Checks max(created_at) for reflections,
-    max(updated_at) for tasks. Pings every 15 poll cycles.
-
-    Graceful shutdown via tokio::signal (SIGINT/SIGTERM).
 
 ================================================================================
 GITHUB WORK SOURCE
@@ -1686,7 +1632,7 @@ ENVIRONMENT VARIABLES
     LEGION_SKIP_UNCERTAINTY Set to 1 to disable the uncertainty auto-emit and
                             auto-witness hooks.
     LEGION_REPO             Override repo name detection in MCP channel.
-    LEGION_PORT             Override web dashboard port (default: 3131).
+    LEGION_PORT             Override legion daemon channel port (default: 3131).
     LEGION_FAKECHAT         Set to 1 for fake chat mode in channel (testing).
     LEGION_WS_REPO          GitHub repo in "owner/repo" format (work source).
     LEGION_WS_WORKDIR       Local working directory (work source detect).

@@ -450,7 +450,6 @@ health_threshold_pct = 80.0    # skip spawns when pressure exceeds this (default
 health_poll_secs = 5           # seconds between health samples (default: 5)
 health_window_size = 6         # rolling pressure window size (default: 6)
 retention_days = 7             # days to keep health samples (default: 7)
-serve = false                  # enable web dashboard on this node (default: false)
 
 [[repos]]
 name = "frontend"
@@ -605,13 +604,13 @@ system, and effort, not model, is the lever that tunes them.
 
 ## MCP channel
 
-The channel MCP server provides real-time team communication via Server-Sent Events. It connects to the legion web dashboard's `/sse` endpoint and bridges events into Claude Code channel notifications.
+The channel MCP server provides real-time team communication via Server-Sent Events. It connects to the legion daemon's `/sse` endpoint and bridges events into Claude Code channel notifications.
 
 Channel notifications are truncated at 2000 characters with a pointer to the bullpen for full content.
 
 ### Configuration
 
-The channel reads `LEGION_REPO` (or infers from `CLAUDE_CWD` / cwd) and `LEGION_PORT` (default 3131). Requires the web dashboard to be running (`legion serve` or `serve = true` in watch.toml).
+The channel reads `LEGION_REPO` (or infers from `CLAUDE_CWD` / cwd) and `LEGION_PORT` (default 3131). Requires the legion daemon to be running (`legion daemon-spawn` or `legion daemon`).
 
 ## Maintenance
 
@@ -657,15 +656,6 @@ legion rename --from oldname --to newname
 ```
 
 Updates all tables and the watch.toml config.
-
-### Web dashboard
-
-```bash
-legion serve                    # default port 3131
-legion serve --port 8080
-```
-
-Serves an Axum web dashboard with REST API and SSE for real-time updates. Routes include `/api/agents`, `/api/feed`, `/api/tasks`, `/api/stats`, `/api/signals`, `/api/status`, `/api/needs`, and write endpoints for post, done, boost, task management, and schedules.
 
 ### Schedules
 
@@ -715,4 +705,4 @@ All commands accept `-v` / `--verbose` to show informational messages on stderr.
 | `LEGION_AUTO_WAKE` | Set to `1` by the watch daemon when spawning agents |
 | `LEGION_SPAWN_SOURCE` | Set to `watch-pty` by the watch daemon on PTY-spawned wakes (#495). `plugin/hooks/stop.sh` early-exits when this is set so the two operator-session gates do not fire on every auto-wake. |
 | `LEGION_REPO` | Override repo name detection in the MCP channel |
-| `LEGION_PORT` | Override web dashboard port for the MCP channel (default: 3131) |
+| `LEGION_PORT` | Override the legion daemon's channel port for the MCP channel (default: 3131) |

@@ -35,8 +35,7 @@ mod wake;
 pub use audit::AuditInput;
 pub use board::{INBOX_CURSOR_SUFFIX, RedeliveryOutcome};
 pub use reflections::{Reflection, ReflectionMeta};
-pub use schedules::{Schedule, validate_hhmm};
-pub use stats::DashboardRepoStats;
+pub use schedules::validate_hhmm;
 
 use std::path::Path;
 use std::time::Duration;

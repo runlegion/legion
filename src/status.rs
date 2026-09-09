@@ -102,13 +102,6 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// Result of a `legion done` operation.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DoneResult {
-    pub announcement: String,
-    pub notified: Vec<String>,
-}
-
 /// Find agents who mentioned being blocked on this repo in recent bullpen posts.
 pub fn find_blocked_agents(db: &Database, repo: &str) -> Result<Vec<String>> {
     let posts: Vec<Reflection> = db.get_recent_board_posts(

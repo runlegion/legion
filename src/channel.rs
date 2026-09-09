@@ -63,12 +63,13 @@ pub enum ChannelEvent {
 
 /// Which server process answers the shared endpoints. Baked into /health
 /// as the `role` field so port-:3131 clients -- above all the SessionStart
-/// supervisor (#321) -- can tell the daemon from a `legion serve` and pick
-/// the right remedy on version mismatch (#613, absorbed #601).
+/// supervisor (#321) -- can read it when picking the right remedy on
+/// version mismatch (#613, absorbed #601). `legion serve` (the former
+/// dashboard process, #1165) is gone, leaving `Daemon` as the only role;
+/// the type stays because /health's `role` field is a wire contract older
+/// clients may still read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerRole {
-    /// `legion serve`: the dashboard process.
-    Serve,
     /// `legion daemon`: watch loop + channel HTTP in one process.
     Daemon,
 }
@@ -77,7 +78,6 @@ impl ServerRole {
     /// Wire value for the /health `role` field.
     pub fn as_str(self) -> &'static str {
         match self {
-            ServerRole::Serve => "serve",
             ServerRole::Daemon => "daemon",
         }
     }
@@ -212,23 +212,17 @@ const DOCUMENT_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// This is a standalone router -- the caller mounts it into the main axum
 /// app. It is the single owner of the shared endpoint contract (#613):
-/// /health, /sse, /api/feed, /api/tasks, /api/post. Both `legion serve`
-/// (which merges this router into the dashboard app) and the daemon (which
-/// serves it bare) answer these paths with the same implementation, so the
-/// wire shapes cannot fork again.
+/// /health, /sse, /api/feed, /api/tasks, /api/post. The daemon (which
+/// serves it bare) answers these paths.
 ///
-/// `GET /api/search` (#1037, document search) is registered only when
-/// `state.role == ServerRole::Daemon`. `legion serve`'s own app (src/serve.rs)
-/// already owns `/api/search` for BM25 reflection search -- a distinct,
-/// pre-existing, differently-shaped endpoint (required `q`, optional
-/// `repo`, reflection JSON with score/domain/tags). Registering the same
-/// path here unconditionally would make axum panic on a route collision
-/// the moment `legion serve` merges this router in. The legion-app
-/// document search box this endpoint serves talks to the daemon directly
-/// (per #1037's own framing: "a search box over the daemon"), so scoping
-/// registration to `ServerRole::Daemon` satisfies both the literal path
-/// the acceptance criteria name and the actual consumer, without touching
-/// serve.rs's live endpoint.
+/// `GET /api/search` (#1037, document search) is gated on
+/// `state.role == ServerRole::Daemon`, the only role left since `legion
+/// serve` (the former dashboard process; owned a separate, differently
+/// shaped `/api/search` for BM25 reflection search) was removed in #1165.
+/// The legion-app document search box this endpoint serves talks to the
+/// daemon directly (per #1037's own framing: "a search box over the
+/// daemon"), so the role check stays as a guard even though `ServerRole`
+/// now has one variant.
 pub fn router(state: ChannelState) -> Router {
     let is_daemon = state.role == ServerRole::Daemon;
 
@@ -1392,7 +1386,7 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-05-10T12:01:30Z")
             .expect("parse")
             .with_timezone(&chrono::Utc);
-        let body = build_health_body(ServerRole::Serve, started, now);
+        let body = build_health_body(ServerRole::Daemon, started, now);
         assert_eq!(body["status"], "ok");
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(body["build_id"], env!("LEGION_BUILD_ID"));
@@ -1406,12 +1400,9 @@ mod tests {
                 .is_empty(),
             "build_id must be non-empty"
         );
-        assert_eq!(body["role"], "serve");
+        assert_eq!(body["role"], "daemon");
         assert_eq!(body["started_at"], "2026-05-10T12:00:00+00:00");
         assert_eq!(body["uptime_secs"], 90);
-
-        let daemon_body = build_health_body(ServerRole::Daemon, started, now);
-        assert_eq!(daemon_body["role"], "daemon");
     }
 
     #[test]
@@ -1617,22 +1608,6 @@ mod tests {
 
         let port = spawn_test_server(data_dir, ServerRole::Daemon).await;
         (port, dir)
-    }
-
-    #[tokio::test]
-    async fn api_search_not_registered_under_serve_role() {
-        // `legion serve`'s own app owns /api/search for reflection search
-        // (src/serve.rs); this router must not answer it under
-        // ServerRole::Serve, or merging the two routers would panic on a
-        // route collision (the failure this guard exists to prevent).
-        let dir = tempfile::tempdir().expect("tempdir");
-        let port = spawn_test_server(dir.path().to_path_buf(), ServerRole::Serve).await;
-
-        let (status, _) = http_req(port, "GET", "/api/search?q=mapping&repo=kelex", None).await;
-        assert!(
-            status.starts_with("HTTP/1.1 404"),
-            "ServerRole::Serve must not answer /api/search: {status}"
-        );
     }
 
     #[tokio::test]
