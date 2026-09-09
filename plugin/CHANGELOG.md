@@ -1,5 +1,69 @@
 # Legion Changelog
 
+## 0.38.1
+
+The cost-of-reading release. 0.38.0 changed what reaches the shared board; this one changes
+what reading it costs. The inbox now renders the standing read-not-respond norm after
+non-directed posts, so the rule arrives attached to the mail it governs instead of waiting in
+a workflow reflection for a recall that may never fire. And the courier stops posting its own
+redelivery failures to the bullpen: a notice about a signal addressed to someone else was
+board content every draining session on the machine paid to read, multiplied by the roster.
+
+Patch release: two Rust files, `src/cli/inbox.rs` and `src/watch/mod.rs`, changing behavior
+within the existing `legion inbox` surface and the watch reaper -- no new command, no new
+flag, no wire-format change, and no schema migration. Nothing needs a migration either: the
+abandonment posts already on the board age out per normal TTL.
+
+### Fixed
+
+- **The inbox carries the read-not-respond norm** (PR #1162, #1073). Both emit paths in
+  `src/cli/inbox.rs` render one fixed line after non-directed posts, and only after them. The
+  gate is `split_inbox`'s musings bucket being non-empty rather than the batch being
+  non-empty, and that distinction is the whole rule: a batch of purely directed asks must not
+  carry a line telling the reader to pass things in silence. The norm targets CONTEXT
+  RESIDENCY, not replies, and the operator's sharpening is the half that carries it -- the
+  cost of broadcast mail is not the reply, it is what an agent adds to its own transcript,
+  because every paragraph of commentary is re-billed as input on every later turn and
+  eventually becomes what compaction remembers instead of the work. So it names dissent and
+  questions as encouraged spends, "adversarial opinion is never wrong if it is true," and cuts
+  only idle assent: a reply is right when you are addressed, when you own the far side, when
+  you disagree, or when you want to learn more. Read as an instruction to be quiet on the
+  board, it says the opposite of what it means. The inbox still delivers the full post text;
+  delivery is the cheap half. The norm was settled with the operator on 2026-08-31 and filed
+  the same day, and until now it lived only in workflow reflections, which reached an agent
+  only when that agent happened to recall for it; it now arrives in the same context window as
+  the temptation, the mechanism that makes REQUIRES A REPLY work.
+  Placement deviates from #1073's literal "ends with" wording in one path and one only:
+  `legion inbox` does end with the norm, while `--split` renders it at the end of the musings
+  section, before the separator, because #1020 requires the directed REQUIRES A REPLY block to
+  come last inside the result block -- an invariant that exists because a directed ask sat
+  unanswered for forty minutes without it. The hook always passes `--split`, so the ordered
+  path is the one an agent actually reads. Every Done-When clause holds either way, and the
+  directed block is byte-identical, still rendered by `board::format_pending_replies`. One
+  inherited edge, named rather than hidden: `split_inbox`'s verb-only predicate buckets a
+  wake-worthy `@all` broadcast as directed, so a batch of only those renders no norm even
+  though the posts are not addressed to the reading agent -- the one place this gate and the
+  issue's wording diverge. What an operator sees is one new line in the inbox block whenever
+  broadcast posts are delivered.
+
+- **A courier's redelivery failures leave the board for the daemon log** (PR #1162, #1073).
+  `rearm_or_abandon` in `src/watch/mod.rs` drops its `insert_reflection_with_meta` call and
+  keeps the `eprintln!` that already carried the same fields, so an exhausted redelivery is
+  loud in the daemon log -- where an operator debugging a stuck wake actually looks -- and
+  silent on the bullpen. A courier reporting its own delivery failure as a board post is
+  meta-mail about mail: every draining session on the machine paid to read a notice about a
+  signal addressed to someone else, and the cost multiplied by the roster. Ten landed in a
+  single hour, across shingle, kelex, and http-sql, which was the evidence that closed the
+  issue. The settle is untouched: `rearm_or_abandon_signals` still runs and `watch_handled` is
+  still left in place, so the signal stays permanently handled for the repo exactly as before.
+  Only the notice's destination moved. What the tests pin is stated at their own site rather
+  than implied -- the notice text is extracted into `abandonment_notice` so its content is
+  assertable and every identifying field is checked, but nothing proves the `eprintln!` fires.
+  Deleting the emission outright leaves the suite green, because proving a line reached stderr
+  needs capture this harness does not have, and a production signature change for a sink
+  parameter was judged not worth it. The residual risk is a notice nobody sees, not a wrong
+  settle, and the settle is asserted independently.
+
 ## 0.38.0
 
 The inbox release. The hook-side lane that carries bullpen posts and signals into a live
