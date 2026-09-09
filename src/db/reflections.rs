@@ -876,27 +876,6 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Retrieve reflections by a list of IDs. Returns them in the order found
-    /// (not necessarily the input order). Missing IDs are silently skipped.
-    pub fn get_reflections_by_ids(&self, ids: &[&str]) -> Result<Vec<Reflection>> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
-        let sql = format!(
-            "SELECT {REFLECTION_COLUMNS} FROM reflections WHERE id IN ({}) AND deleted_at IS NULL",
-            placeholders.join(", ")
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = ids
-            .iter()
-            .map(|id| id as &dyn rusqlite::types::ToSql)
-            .collect();
-        let rows = stmt.query_map(params.as_slice(), map_reflection_row)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(LegionError::Database)
-    }
-
     /// Retrieve all reflections for a repository, ordered newest first.
     #[cfg(test)]
     pub fn get_reflections_by_repo(&self, repo: &str) -> Result<Vec<Reflection>> {
@@ -1134,54 +1113,6 @@ mod tests {
         let all = db.get_reflections_by_repo("kelex").unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, r.id);
-    }
-
-    #[test]
-    fn get_reflections_by_ids_round_trip() {
-        let db = test_db();
-        let root = db
-            .insert_reflection("kelex", "root reflection", "self")
-            .unwrap();
-        let meta = ReflectionMeta {
-            domain: Some("workflow".to_string()),
-            tags: Some("alpha,beta".to_string()),
-            parent_id: Some(root.id.clone()),
-        };
-        let child = db
-            .insert_reflection_with_meta("kelex", "child reflection", "self", &meta)
-            .unwrap();
-
-        let ids = [root.id.as_str(), child.id.as_str(), "missing-id"];
-        let found = db.get_reflections_by_ids(&ids).unwrap();
-        // Missing IDs are silently skipped.
-        assert_eq!(found.len(), 2);
-
-        let got_root = found.iter().find(|r| r.id == root.id).unwrap();
-        assert_eq!(got_root.text, "root reflection");
-        // Regression for #606: the SELECT omitted updated_at, shifting every
-        // column from index 4 on (audience loaded into updated_at, and the
-        // parent_id read indexed past the row -- InvalidColumnIndex).
-        assert_eq!(
-            got_root.updated_at.as_deref(),
-            Some(root.created_at.as_str())
-        );
-        assert_eq!(got_root.audience, "self");
-        assert_eq!(got_root.parent_id, None);
-
-        let got_child = found.iter().find(|r| r.id == child.id).unwrap();
-        assert_eq!(
-            got_child.updated_at.as_deref(),
-            Some(child.created_at.as_str())
-        );
-        assert_eq!(got_child.domain.as_deref(), Some("workflow"));
-        assert_eq!(got_child.tags.as_deref(), Some("alpha,beta"));
-        assert_eq!(got_child.parent_id.as_deref(), Some(root.id.as_str()));
-    }
-
-    #[test]
-    fn get_reflections_by_ids_empty_input() {
-        let db = test_db();
-        assert!(db.get_reflections_by_ids(&[]).unwrap().is_empty());
     }
 
     #[test]

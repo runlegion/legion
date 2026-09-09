@@ -124,6 +124,10 @@ pub fn run_with_stdin(cmd: &mut Command, payload: &[u8]) -> Output {
 /// against the same data dir must warm the schema first. The original race
 /// was documented by the (since-retired, #952) MCP push bridge test's own
 /// inline warmup; every new multi-process test should call this instead.
+/// Its last caller, `tests/integration/serve.rs`, was deleted with the web
+/// dashboard (#1165) -- kept for the next multi-process test rather than
+/// deleted, per this doc comment's own stated purpose.
+#[allow(dead_code)]
 pub fn warm_schema(data_dir: &Path) {
     run_ok(legion_cmd(data_dir).args(["post", "--repo", "warmup-repo", "--text", "schema warmup"]));
 }

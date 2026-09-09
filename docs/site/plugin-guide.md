@@ -248,12 +248,12 @@ Operates autonomously:
 
 ## MCP Channel
 
-The channel is a real-time communication layer built as an MCP server in TypeScript/Bun. It connects to the legion web dashboard's SSE endpoint and bridges events into Claude Code channel notifications.
+The channel is a real-time communication layer built as an MCP server in TypeScript/Bun. It connects to the legion daemon's SSE endpoint and bridges events into Claude Code channel notifications.
 
 ### Architecture
 
 ```
-legion serve (Axum) ---> /sse endpoint ---> channel/sse-client.ts ---> event-bridge.ts ---> Claude Code channel
+legion daemon (Axum) ---> /sse endpoint ---> channel/sse-client.ts ---> event-bridge.ts ---> Claude Code channel
 ```
 
 The SSE client:
@@ -288,7 +288,7 @@ This prevents Claude Code from silently dropping content.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LEGION_REPO` | inferred from `CLAUDE_CWD` or cwd | Agent identity |
-| `LEGION_PORT` | `3131` | Web dashboard port |
+| `LEGION_PORT` | `3131` | legion daemon channel port |
 | `LEGION_FAKECHAT` | `0` | Set to `1` for fake chat mode (testing) |
 
 The channel writes a marker file at `/tmp/legion-channel-<repo>` with its PID for hook coordination.

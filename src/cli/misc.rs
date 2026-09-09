@@ -7,8 +7,8 @@ use crate::cli::datadir::data_dir;
 use crate::cli::memory::try_load_embed_model;
 use crate::cli::util::{open_db, open_db_and_index};
 use crate::{
-    daemon, defer, error, identity_generate, init, now, queue, recall, serve, stats, status,
-    statusline, surface, task, watch,
+    daemon, defer, error, identity_generate, init, now, queue, recall, stats, status, statusline,
+    surface, task,
 };
 
 #[derive(Subcommand)]
@@ -221,22 +221,6 @@ pub(crate) fn handle_whatami(repo: String, limit: usize) -> error::Result<()> {
 pub(crate) fn handle_stats(repo: Option<String>) -> error::Result<()> {
     let database = open_db()?;
     stats::stats(&database, repo.as_deref())?;
-    Ok(())
-}
-
-pub(crate) fn handle_serve(port: u16) -> error::Result<()> {
-    let base = data_dir()?;
-    let watch_path = base.join("watch.toml");
-    if watch_path.exists() {
-        let contents = std::fs::read_to_string(&watch_path)?;
-        let config: watch::WatchConfig = toml::from_str(&contents)?;
-        if !config.serve {
-            return Err(error::LegionError::Server(
-                "serve is not enabled on this node. Set serve = true in watch.toml to designate this machine as the dashboard server.".to_string(),
-            ));
-        }
-    }
-    serve::run_server(port, base)?;
     Ok(())
 }
 

@@ -184,16 +184,6 @@ fn read_daemon_pid(pid_path: &Path) -> Option<u32> {
     contents.trim().parse::<u32>().ok()
 }
 
-/// PID of the live daemon tracked by `data_dir/daemon.pid`, if any.
-///
-/// #613 (absorbed #601): lets `legion serve` name the daemon as the port
-/// holder when its own bind fails, instead of emitting a bare bind error.
-/// Stale pidfiles (dead process) read as None.
-pub(crate) fn live_daemon_pid(data_dir: &Path) -> Option<u32> {
-    let pid = read_daemon_pid(&data_dir.join(DAEMON_PID_FILE))?;
-    watch::process_alive(pid).then_some(pid)
-}
-
 /// Send a signal (e.g. "TERM", "KILL") to a process. Unix-only; returns false on
 /// other platforms. Uses `kill` to avoid a libc dependency, matching
 /// `watch::process_alive`.
@@ -321,11 +311,15 @@ fn process_cmdline(pid: u32) -> Option<String> {
 /// `node serve --legion-mode` contains both "legion" and "serve" but is not a
 /// legion daemon and must never be killed.
 ///
-/// The `serve` subcommand is intentionally accepted: `legion serve` is the
-/// legacy daemon form (pre-daemon-spawn split) and is harmless because only the
-/// daemon-port holder is ever examined. `daemon-spawn`/`daemon-restart` do NOT
-/// match (they are short-lived CLI calls, never the port holder), and neither
-/// do other legion subcommands (`recall`, `post`, ...).
+/// The `serve` subcommand is intentionally still accepted, even though the
+/// `legion serve` verb itself was removed from the CLI in #1165 (the web
+/// dashboard it ran is gone): a machine can still be running an
+/// already-spawned `legion serve` process from a pre-#1165 binary, and this
+/// match is the only thing standing between that stray process and an
+/// orphaned port. Matching it is harmless because only the daemon-port
+/// holder is ever examined. `daemon-spawn`/`daemon-restart` do NOT match
+/// (they are short-lived CLI calls, never the port holder), and neither do
+/// other legion subcommands (`recall`, `post`, ...).
 fn cmdline_is_legion_daemon(cmdline: &str) -> bool {
     let mut tokens = cmdline.split_whitespace();
     // argv[0]: the program. Its basename must be exactly "legion".

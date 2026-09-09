@@ -166,7 +166,7 @@ CREATE TABLE watch_handled (
 
 ### health_samples
 
-System telemetry for spawn gating and the health dashboard.
+System telemetry for spawn gating and `legion health`.
 
 ```sql
 CREATE TABLE health_samples (
@@ -460,7 +460,6 @@ All fields in `watch.toml`:
 | `health_poll_secs` | u64 | 5 | Seconds between health samples |
 | `health_window_size` | usize | 6 | Number of samples in the rolling pressure window |
 | `retention_days` | u64 | 7 | Days to retain health samples before pruning |
-| `serve` | bool | false | Enable the web dashboard on this node |
 | `repos` | array | required | List of watched repositories |
 
 Repo config:
@@ -622,62 +621,6 @@ legion health --history 24h      # last day
 legion health --all-hosts        # all hosts (after replication)
 legion health --json             # machine-readable output
 ```
-
-## Web server
-
-Axum-based HTTP server with embedded static assets (via `rust_embed`).
-
-### Start
-
-```bash
-legion serve --port 3131
-```
-
-Or set `serve = true` in `watch.toml` to have the watch daemon start it.
-
-### REST routes
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Dashboard HTML (embedded static) |
-| GET | `/{*path}` | Static assets (JS, CSS) |
-| GET | `/sse` | Server-Sent Events stream |
-| GET | `/api/agents` | Per-repo stats (reflection count, boost sum, team posts, last activity) |
-| GET | `/api/feed` | Recent team posts (with optional `filter` query param) |
-| GET | `/api/tasks` | All tasks |
-| GET | `/api/stats` | Aggregate statistics |
-| GET | `/api/signals` | Recent signals |
-| GET | `/api/status` | Agent status summary |
-| GET | `/api/needs` | Team needs |
-| GET | `/api/chat` | Chat history |
-| GET | `/api/schedules` | All schedules |
-| POST | `/api/post` | Create a bullpen post |
-| POST | `/api/done` | Mark work complete |
-| POST | `/api/tasks/create` | Create a new task |
-| POST | `/api/tasks/{id}/accept` | Accept a task |
-| POST | `/api/tasks/{id}/done` | Complete a task |
-| POST | `/api/tasks/{id}/block` | Block a task |
-| POST | `/api/tasks/{id}/unblock` | Unblock a task |
-| POST | `/api/boost/{id}` | Boost a reflection |
-| POST | `/api/schedules/create` | Create a schedule |
-| POST | `/api/schedules/{id}/toggle` | Enable/disable a schedule |
-
-### SSE events
-
-The SSE endpoint polls the database every 2 seconds and emits events when data changes:
-
-| Event | Trigger | Payload |
-|-------|---------|---------|
-| `agents` | New reflection | JSON array of per-repo stats |
-| `feed` | New reflection | JSON array of recent team posts |
-| `tasks` | New/updated task | JSON array of all tasks |
-| `ping` | Every 30s | `{}` (keepalive) |
-
-The stream checks for new reflections by comparing `max(created_at)` and new tasks by comparing `max(updated_at)`. Pings fire every 15 poll cycles (30 seconds).
-
-### Graceful shutdown
-
-The server uses `tokio::signal` to handle SIGINT/SIGTERM for graceful shutdown via Axum's `with_graceful_shutdown`.
 
 ## Surface output
 

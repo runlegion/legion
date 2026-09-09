@@ -768,13 +768,6 @@ pub(crate) enum Commands {
         repo: Option<String>,
     },
 
-    /// Start the web dashboard
-    Serve {
-        /// Port to listen on
-        #[arg(long, default_value = "3131")]
-        port: u16,
-    },
-
     /// Check your work state, team needs, and recent changes
     Status {
         /// Repository name

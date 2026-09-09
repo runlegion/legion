@@ -46,9 +46,7 @@ dirs = "5"
 model2vec-rs = "0.1"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-rust-embed = "8"
 tower-http = { version = "0.6", features = ["cors"] }
-mime_guess = "2"
 tokio-stream = "0.1"
 async-stream = "0.3"
 toml = "0.8"

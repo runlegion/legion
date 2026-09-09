@@ -30,7 +30,6 @@ mod recall;
 mod reflect;
 mod scip;
 mod search;
-mod serve;
 mod signal;
 mod simplify_check;
 mod stats;
@@ -291,7 +290,6 @@ fn run() -> error::Result<()> {
         Commands::Stats { repo } => cli::misc::handle_stats(repo)?,
         Commands::Telemetry { action } => cli::ops::handle_telemetry(action)?,
         Commands::Uncertainty { action } => cli::ops::handle_uncertainty(action)?,
-        Commands::Serve { port } => cli::misc::handle_serve(port)?,
         Commands::Status { repo, json } => cli::misc::handle_status(repo, json)?,
         Commands::Needs { repo } => cli::misc::handle_needs(repo)?,
         Commands::Done {
