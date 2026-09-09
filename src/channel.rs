@@ -212,8 +212,9 @@ const DOCUMENT_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 ///
 /// This is a standalone router -- the caller mounts it into the main axum
 /// app. It is the single owner of the shared endpoint contract (#613):
-/// /health, /sse, /api/feed, /api/tasks, /api/post. The daemon (which
-/// serves it bare) answers these paths.
+/// /health, /sse, /api/feed, /api/post (#1166 dropped /api/tasks: the
+/// `legion task` CRUD it served is gone). The daemon (which serves it
+/// bare) answers these paths.
 ///
 /// `GET /api/search` (#1037, document search) is registered
 /// unconditionally. It used to be gated on `ServerRole::Daemon` because
@@ -243,7 +244,6 @@ pub fn router(state: ChannelState) -> Router {
         .route("/health", get(health_endpoint))
         .route("/sse", get(sse_handler))
         .route("/api/feed", get(api_feed))
-        .route("/api/tasks", get(api_tasks))
         .route("/api/post", post(api_post))
         .route("/api/search", get(api_search))
         .merge(document_routes)
@@ -903,14 +903,6 @@ pub async fn api_feed(
     Ok(Json(items))
 }
 
-/// GET /api/tasks -- all tasks serialized as the legacy Task shape.
-pub async fn api_tasks(
-    State(state): State<ChannelState>,
-) -> Result<Json<Vec<crate::task::Task>>, ServeError> {
-    let db = open_db(&state.data_dir)?;
-    Ok(Json(db.get_all_tasks()?))
-}
-
 /// POST /api/post request body.
 #[derive(serde::Deserialize)]
 pub struct PostRequest {
@@ -1103,7 +1095,6 @@ pub async fn sse_handler(
         };
 
         let mut last_reflection_ts: Option<String> = None;
-        let mut last_task_ts: Option<String> = None;
         let poll_fallback = Duration::from_secs(SSE_POLL_FALLBACK_SECS);
         let ping_interval = Duration::from_secs(PING_INTERVAL_SECS);
         let mut last_emit = tokio::time::Instant::now();
@@ -1150,19 +1141,6 @@ pub async fn sse_handler(
 
                 if let Ok(feed_json) = build_feed_json(&db) {
                     yield Ok(Event::default().event("feed").data(feed_json));
-                    emitted = true;
-                }
-            }
-
-            // Tasks: emit when max task updated_at changes.
-            let current_task_ts = db.get_max_task_updated_at().ok().flatten();
-            if current_task_ts != last_task_ts && current_task_ts.is_some() {
-                last_task_ts = current_task_ts;
-
-                if let Ok(tasks) = db.get_all_tasks()
-                    && let Ok(json) = serde_json::to_string(&tasks)
-                {
-                    yield Ok(Event::default().event("tasks").data(json));
                     emitted = true;
                 }
             }

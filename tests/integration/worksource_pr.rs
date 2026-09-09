@@ -2402,52 +2402,29 @@ esac
     );
 }
 
-/// Create a card on repo `stub` linked to external issue #42 and promote
-/// it to a Done-eligible state (Backlog -> assign -> accept). Shared by
-/// the Done propagation tests.
-#[cfg(unix)]
-/// #931: `legion done --number` closes the linked work-source issue
-/// through the exact same gated path `legion issue close` uses
-/// (`close_issue_gated`), so it writes the same `close-issue` audit row.
-/// Card<->issue linking (`propagate_card_close_to_worksource`) is gone with
-/// the card surface; `--number` names the issue directly.
-#[cfg(unix)]
-#[test]
-fn done_with_linked_issue_propagates_close_and_writes_audit_row() {
-    let data_dir = tempfile::tempdir().unwrap();
-    let plugin_root = tempfile::tempdir().unwrap();
-    setup_pr_read_stub(data_dir.path(), plugin_root.path(), &close_stub_plugin(0));
-
-    let stdout = run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
-        "done", "--repo", "stub", "--text", "shipped", "--number", "42",
-    ]));
-    assert!(
-        stdout.contains("closed issue #42 on owner/stub"),
-        "expected the close confirmation, got: {stdout}"
-    );
-
-    let audit_out = run_ok(legion_cmd(data_dir.path()).args(["audit", "--action", "close-issue"]));
-    assert!(
-        audit_out.contains("#42"),
-        "expected a close-issue audit row for the closed issue, got: {audit_out}"
-    );
-}
-
-/// A `legion done --number` whose issue close FAILS at the plugin returns a
+/// A `legion issue close` whose issue close FAILS at the plugin returns a
 /// non-zero exit and surfaces the plugin's failure -- there is no local
 /// card state left to leave in an inconsistent "done locally, not closed
 /// upstream" partial-success shape (#931 removed that whole class of
 /// warning along with `propagate_card_close_to_worksource`).
+///
+/// #1166: this used to run through `legion done --number`, which shared
+/// `close_issue_gated` with `legion issue close` (#931) precisely so the
+/// two commands could not diverge on this behavior. `legion done` is gone
+/// (no surviving reader of the announce-and-notify path it existed for);
+/// `legion issue close` is the one remaining caller of that gate, so the
+/// coverage moves here rather than disappearing with the verb.
 #[cfg(unix)]
 #[test]
-fn done_propagation_failure_warns_on_stdout() {
+fn issue_close_propagation_failure_warns_on_stdout() {
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
     setup_pr_read_stub(data_dir.path(), plugin_root.path(), &close_stub_plugin(1));
 
-    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
-        "done", "--repo", "stub", "--text", "shipped", "--number", "42",
-    ]));
+    let (_stdout, stderr) = run_fail(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["issue", "close", "--repo", "stub", "--number", "42"]),
+    );
     assert!(
         stderr.contains("plugin failed"),
         "expected the plugin failure to surface, got: {stderr}"

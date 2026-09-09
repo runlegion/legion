@@ -31,7 +31,6 @@ use self::inbox::DeliverAction;
 use self::index_cmd::SymAction;
 use self::issue::{IssueAction, SubIssueAction};
 use self::memory::DedupeMode;
-use self::misc::TaskAction;
 use self::ops::{ClusterAction, MeshAction, TelemetryAction, UncertaintyAction};
 use self::pr::PrAction;
 use self::schedule::ScheduleAction;
@@ -786,47 +785,6 @@ pub(crate) enum Commands {
         repo: String,
     },
 
-    /// Announce completed work and notify blocked agents (#931: closes the
-    /// linked work-source issue instead of transitioning a kanban card --
-    /// the card surface is gone, issues are the work source of record).
-    ///
-    /// Runs the exact same verify gate and close path as
-    /// `legion issue close`: the two must never diverge on whether a clean
-    /// verdict is required before Done.
-    Done {
-        /// Repository name
-        #[arg(long)]
-        repo: String,
-
-        /// Description of what was completed. Posted as the team
-        /// announcement, and (when `--number` is given) as the issue's
-        /// closing comment.
-        #[arg(long)]
-        text: String,
-
-        /// Work-source issue number to close as part of this Done
-        /// (optional -- a Done with no linked issue just posts the
-        /// announcement). When the issue declares acceptance criteria (or
-        /// traces to a requirement), a clean `legion verify` verdict must
-        /// exist for it; exits non-zero otherwise.
-        #[arg(long)]
-        number: Option<u64>,
-
-        /// Additional closing comment, appended after `--text`. Rarely
-        /// needed -- `--text` alone already becomes the closing comment.
-        #[arg(long)]
-        comment: Option<String>,
-
-        /// Close despite a failed or missing verify verdict (#930). Same
-        /// override contract as `legion issue close --force`.
-        #[arg(long, requires = "force_reason")]
-        force: bool,
-
-        /// Why the verify verdict is being overridden. Required with --force.
-        #[arg(long)]
-        force_reason: Option<String>,
-    },
-
     /// Get the next candidate work item: the highest-priority open issue
     /// on the repo's configured work source (#931 -- sourced live, no
     /// local queue/board).
@@ -846,12 +804,6 @@ pub(crate) enum Commands {
     Cluster {
         #[command(subcommand)]
         action: ClusterAction,
-    },
-
-    /// Manage delegated tasks between agents (deprecated, use work-source issues)
-    Task {
-        #[command(subcommand)]
-        action: TaskAction,
     },
 
     /// Deliver this repo's unread bullpen posts and signals (#941): the
