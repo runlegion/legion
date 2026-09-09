@@ -215,17 +215,13 @@ const DOCUMENT_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 /// /health, /sse, /api/feed, /api/tasks, /api/post. The daemon (which
 /// serves it bare) answers these paths.
 ///
-/// `GET /api/search` (#1037, document search) is gated on
-/// `state.role == ServerRole::Daemon`, the only role left since `legion
-/// serve` (the former dashboard process; owned a separate, differently
-/// shaped `/api/search` for BM25 reflection search) was removed in #1165.
-/// The legion-app document search box this endpoint serves talks to the
-/// daemon directly (per #1037's own framing: "a search box over the
-/// daemon"), so the role check stays as a guard even though `ServerRole`
-/// now has one variant.
+/// `GET /api/search` (#1037, document search) is registered
+/// unconditionally. It used to be gated on `ServerRole::Daemon` because
+/// `legion serve` owned a separate, differently shaped `/api/search` for
+/// BM25 reflection search, and merging the two routers would have panicked
+/// on the route collision. #1165 deleted `legion serve`, so the collision
+/// it guarded against cannot occur and the daemon is the only role.
 pub fn router(state: ChannelState) -> Router {
-    let is_daemon = state.role == ServerRole::Daemon;
-
     // Split out so `DOCUMENT_BODY_LIMIT_BYTES` applies only to these routes
     // -- `route_layer` scopes to whatever is already in the Router it is
     // called on, so building the document routes as their own Router
@@ -243,17 +239,15 @@ pub fn router(state: ChannelState) -> Router {
         .route("/api/documents/{id}/revise", post(api_document_revise))
         .route_layer(DefaultBodyLimit::max(DOCUMENT_BODY_LIMIT_BYTES));
 
-    let mut r = Router::new()
+    Router::new()
         .route("/health", get(health_endpoint))
         .route("/sse", get(sse_handler))
         .route("/api/feed", get(api_feed))
         .route("/api/tasks", get(api_tasks))
         .route("/api/post", post(api_post))
-        .merge(document_routes);
-    if is_daemon {
-        r = r.route("/api/search", get(api_search));
-    }
-    r.with_state(state)
+        .route("/api/search", get(api_search))
+        .merge(document_routes)
+        .with_state(state)
 }
 
 /// Query parameters for GET /api/documents. All optional; omitting every
