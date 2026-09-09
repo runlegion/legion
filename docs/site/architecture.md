@@ -166,7 +166,7 @@ CREATE TABLE watch_handled (
 
 ### health_samples
 
-System telemetry for spawn gating and the health dashboard.
+System telemetry for spawn gating and `legion health`.
 
 ```sql
 CREATE TABLE health_samples (
