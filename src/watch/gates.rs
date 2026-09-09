@@ -113,7 +113,7 @@ pub fn poll_cycle(
         // that exact pair (via `get_unhandled_signals_for_repo`), so the mark
         // retires ONLY this entry's pending copy: the owner's copy lives under
         // the OWNER's repo_name, untouched, and the owner's wake is unaffected.
-        // Retiring it is the point -- nothing else ever delivers a delegated
+        // Retiring it is the point -- nothing else ever clears a delegated
         // entry's copy, so an unmarked row would sit pending until the 7-day
         // signal TTL, re-announcing this skip on every poll. The mark is also
         // anti-replay: if the operator later drops `agent` and un-delegates the

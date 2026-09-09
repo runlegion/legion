@@ -404,7 +404,7 @@ pub(crate) fn handle_pending_replies(repo: String, directed: bool) -> error::Res
 
     // Renders via board::format_pending_replies (#1020) -- the same
     // formatter the inbox lane's --split directed bucket calls, so this
-    // command's output can never drift from what the inbox lane shows for the
+    // command's output can never drift from what the hook delivers for the
     // same signal.
     print!("{}", board::format_pending_replies(&repo, &reply_required));
     Ok(())

@@ -75,7 +75,7 @@ pub(crate) fn handle_inbox(repo: String, split: bool) -> error::Result<()> {
     Ok(())
 }
 
-/// Write the delivered posts to `out` and flush. Nothing is written for an
+/// Write the claimed posts to `out` and flush. Nothing is written for an
 /// empty batch. On any write/flush error the caller propagates and must
 /// NOT record telemetry -- an unemitted post keeps no delivery row (its
 /// cursor claim stands; the post remains readable via `legion bullpen`).

@@ -143,4 +143,31 @@ assert_empty "uncovered repo emits nothing" "$out"
 assert_not_contains "uncovered repo never calls inbox" "$(cat "$LEGION_STUB_LOG")" "^inbox"
 unset FAKE_INBOX
 
+echo "==> compat fallback: a binary that does not know 'inbox' still delivers via 'deliver drain'"
+: > "$LEGION_STUB_LOG"
+export FAKE_STUB_FAIL_INBOX=1
+export FAKE_INBOX="[Legion] Bullpen (1 posts):
+- [rafters] delivered through the compat fallback (2026-09-08)"
+out=$(run_hook '{"hook_event_name":"Stop","cwd":"/tmp/legion-test","session_id":"inbox-test-compat","tool_name":""}')
+assert_contains "post still reaches the session" "$out" "delivered through the compat fallback"
+assert_file_contains "the new spelling is tried first" "$LEGION_STUB_LOG" "^inbox --repo legion-test --split"
+assert_file_contains "then the retired spelling" "$LEGION_STUB_LOG" "^deliver drain --repo legion-test --split"
+unset FAKE_STUB_FAIL_INBOX
+
+echo "==> a first call that printed and THEN failed keeps its output (the cursor is already spent)"
+: > "$LEGION_STUB_LOG"
+export FAKE_STUB_PARTIAL_INBOX=1
+out=$(run_hook '{"hook_event_name":"Stop","cwd":"/tmp/legion-test","session_id":"inbox-test-partial","tool_name":""}')
+assert_contains "posts the failed call already printed still reach the session" "$out" \
+  "delivered through the compat fallback"
+assert_contains "and they are still wrapped as a result block" "$out" "Inbox:"
+unset FAKE_STUB_PARTIAL_INBOX
+
+echo "==> compat fallback does NOT fire when the new spelling works"
+: > "$LEGION_STUB_LOG"
+out=$(run_hook '{"hook_event_name":"Stop","cwd":"/tmp/legion-test","session_id":"inbox-test-nocompat","tool_name":""}')
+assert_contains "post is delivered by the first call" "$out" "delivered through the compat fallback"
+assert_file_not_contains "no second shell-out on the common path" "$LEGION_STUB_LOG" "^deliver drain"
+unset FAKE_INBOX
+
 finish_tests

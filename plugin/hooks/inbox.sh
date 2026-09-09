@@ -91,7 +91,11 @@ EVENT_NAME=$(legion_hook_field '.hook_event_name')
 # Minimum seconds between deliveries for one session. PostToolUse can fire many
 # times a minute; this keeps the inbox from shelling out to `legion` on
 # every single tool call.
-DEBOUNCE_SECONDS="${LEGION_INBOX_DEBOUNCE_SECONDS:-10}"
+#
+# LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS is the retired name, still honored so
+# an operator who set it does not silently fall back to the default on upgrade.
+# Same one-release deletion condition as the command alias below.
+DEBOUNCE_SECONDS="${LEGION_INBOX_DEBOUNCE_SECONDS:-${LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS:-10}}"
 
 SAFE_SESSION=$(printf '%s' "$SESSION_ID" | tr -c 'a-zA-Z0-9_-' '_')
 
@@ -128,8 +132,21 @@ printf '%s' "$NOW" >"$SENTINEL" 2>/dev/null
 # otherwise be indistinguishable from an empty inbox. The common path pays
 # nothing -- a successful call never runs the second. Delete the fallback
 # once the floor version is past the release that added `legion inbox`.
-DELIVERED=$("$LEGION" inbox --repo "$REPO" --split 2>>"$LOG") ||
+DELIVERED=$("$LEGION" inbox --repo "$REPO" --split 2>>"$LOG")
+INBOX_RC=$?
+
+# Retry ONLY when the call both failed and produced nothing -- the signature of
+# a binary that does not know the subcommand. The emptiness test is not
+# belt-and-braces: `claim_inbox` advances and COMMITS the cursor before the
+# emit call prints, so a first call that already printed some posts and then
+# failed mid-write has consumed them. Falling back on exit status alone would
+# reassign this variable wholesale, the retry would find the advanced cursor
+# and return nothing, and those posts would be gone with no output and nothing
+# in the log -- the exact silent loss this lane exists to prevent. Keep
+# whatever the first call managed to print.
+if [ "$INBOX_RC" -ne 0 ] && [ -z "$DELIVERED" ]; then
   DELIVERED=$("$LEGION" deliver drain --repo "$REPO" --split 2>>"$LOG")
+fi
 
 if [ -z "$DELIVERED" ]; then
   exit 0

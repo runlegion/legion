@@ -28,7 +28,7 @@ use crate::signal as sig;
 use crate::watch;
 
 /// Batch size cap for a single inbox call. Half the 100-row cap the
-/// retired MCP notifier used: delivers fire per hook event, far more often
+/// retired MCP notifier used: inbox calls fire per hook event, far more often
 /// than that lane's poll ticks, so each call can afford a smaller bite.
 /// Overflow is safe -- anything beyond the cap is picked up on the next
 /// call because the cursor advances to the last fetched row.
@@ -55,8 +55,8 @@ pub fn inbox_reader_key(repo: &str) -> String {
 /// the single notion of "should this post reach this agent" rather than
 /// re-derived for the hook lane.
 ///
-/// This function records NO telemetry: a claimed post is delivered, not yet
-/// delivered. The `lane = "hook"` `DeliveryRecord` is written by the CLI
+/// This function records NO telemetry: claiming a post is not delivering it.
+/// The `lane = "hook"` `DeliveryRecord` is written by the CLI
 /// handler (`cli::inbox`) only after the delivered text has been printed
 /// and flushed -- the last stage this process controls. What it cannot
 /// verify is the harness-side tail (the additionalContext injection);
@@ -122,7 +122,7 @@ pub fn should_notify(text: &str, repo: &str, client_repo: Option<&str>) -> bool 
     true
 }
 
-/// Split a delivered batch into (musings, directed) for `legion inbox
+/// Split a claimed batch into (musings, directed) for `legion inbox
 /// --split` (#1020).
 ///
 /// `directed` is filtered by the same reply-required predicate
@@ -280,11 +280,11 @@ mod tests {
     fn claim_inbox_cursor_does_not_affect_archive_read_posts() {
         // archive_read_posts's "all known readers have read" gate takes
         // MIN(last_read_at) over every row in board_reads, with no filter
-        // on reader_repo (db/board.rs). A inbox cursor row must not
+        // on reader_repo (db/board.rs). An inbox cursor row must not
         // participate in that aggregate: an empty/cold cursor would drag
         // the MIN down to "" and stop archival entirely, and any inbox
         // row present would only ever make archival more conservative than
-        // pre-#941 behavior. Two identically-seeded boards -- one delivered
+        // pre-#941 behavior. Two identically-seeded boards -- one claimed
         // via the hook lane, one not -- must archive the same count.
         let without_inbox = test_db();
         without_inbox
