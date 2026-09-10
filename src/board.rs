@@ -253,11 +253,15 @@ pub fn format_bullpen(posts: &[Reflection]) -> String {
 /// HOOK OUTPUT DOCTRINE, reflection 01a0421f-3bb1-7a91-a2d4-1587442dbd36
 /// -- the miss it addresses was a directed signal delivered as a note
 /// mid-stream instead of a result in this shape.
-pub fn format_pending_replies(repo_name: &str, signals: &[(String, String, String)]) -> String {
+pub fn format_pending_replies(
+    repo_name: &str,
+    signals: &[(String, String, String)],
+    delivery: crate::watch::Delivery,
+) -> String {
     if signals.is_empty() {
         return String::new();
     }
-    crate::watch::build_wake_prompt(repo_name, signals)
+    crate::watch::build_wake_prompt(repo_name, signals, delivery)
 }
 
 /// Format unread bullpen count for display.
@@ -772,7 +776,10 @@ mod tests {
 
     #[test]
     fn format_pending_replies_empty_input_renders_nothing() {
-        assert_eq!(format_pending_replies("legion", &[]), "");
+        assert_eq!(
+            format_pending_replies("legion", &[], crate::watch::Delivery::Wake),
+            ""
+        );
     }
 
     #[test]
@@ -782,7 +789,7 @@ mod tests {
             "@legion question: which lane owns retries".to_string(),
             "rafters".to_string(),
         )];
-        let out = format_pending_replies("legion", &signals);
+        let out = format_pending_replies("legion", &signals, crate::watch::Delivery::Wake);
         assert!(
             out.contains("REQUIRES A REPLY"),
             "expected the REQUIRES A REPLY framing, got:\n{out}"

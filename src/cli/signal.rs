@@ -406,7 +406,12 @@ pub(crate) fn handle_pending_replies(repo: String, directed: bool) -> error::Res
     // formatter the inbox lane's --split directed bucket calls, so this
     // command's output can never drift from what the hook delivers for the
     // same signal.
-    print!("{}", board::format_pending_replies(&repo, &reply_required));
+    // Boot and post-compact: mail is the whole reason this turn exists,
+    // so it carries the stronger Wake framing (#1175).
+    print!(
+        "{}",
+        board::format_pending_replies(&repo, &reply_required, crate::watch::Delivery::Wake)
+    );
     Ok(())
 }
 

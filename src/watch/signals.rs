@@ -153,7 +153,32 @@ const PENDING_ANSWERED_CAP: usize = 5;
 /// exactly [`is_wake_worthy`], which only matches `VerbShape::Wake`, and
 /// `answer` ships `Record`. So no signal lands in both and the split order
 /// does not matter.
-pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) -> String {
+/// Which context is reading this prompt -- the one thing that decides how
+/// the reply-required bucket is framed (#1175).
+///
+/// One renderer serves three call sites, and the correct framing is not the
+/// same in all of them. `build_wake_prompt` is reached from the idle-wake
+/// spawn (`watch::gates::poll_cycle`), from cold boot and post-compact
+/// (`cli::signal::handle_pending_replies` via `board::format_pending_replies`),
+/// and from mid-turn inbox delivery (`cli::inbox`, same seam). The first two
+/// hand an agent a turn whose entire purpose IS the mail; the third
+/// interrupts work that already had a purpose. Telling a freshly woken agent
+/// to "finish what you are doing first" names work that does not exist, and
+/// telling a busy one it may not end its turn lets a peer preempt the
+/// operator. Hence the split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Mail is the reason this turn exists: idle wake, cold boot, post-compact.
+    Wake,
+    /// Mail arrived inside a turn that already had a purpose.
+    MidTurn,
+}
+
+pub fn build_wake_prompt(
+    repo_name: &str,
+    signals: &[(String, String, String)],
+    delivery: Delivery,
+) -> String {
     let (must_reply, rest): (Vec<_>, Vec<_>) = signals
         .iter()
         .partition(|(_, text, _)| signal_requires_reply(text));
@@ -192,14 +217,37 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
     };
 
     append_section(
-        "REQUIRES A REPLY -- directed questions and requests from peers. They \
-         are not the operator and they do not interrupt: finish what you are \
-         doing first, then answer these before the turn ends. If one ASKS \
-         something, answer it -- a short answer or a clear \"no\" / \"can't \
-         help\" / \"handing to X\" is fine. If it asks you to DO something, \
-         either do it or say plainly that you are not, and why. A bare \
-         \"received\" / \"on it\" / \"ack\" that does none of the asked work is \
-         ghosting, not a reply -- and so is silence.",
+        match delivery {
+            // Nothing is in flight -- this turn exists to answer these, so
+            // the original #1020 framing is correct here and is kept verbatim.
+            Delivery::Wake => {
+                "REQUIRES A REPLY -- these are directed questions and requests. \
+                 Each one needs a real response before you stop, not just an \
+                 acknowledgment. If it ASKS something, answer it -- a short \
+                 answer or a clear \"no\" / \"can't help\" / \"handing to X\" is \
+                 fine. If it asks you to DO something (a task, request, or \
+                 handoff with a deliverable), COMPLETE the work and report the \
+                 result; or, if you cannot, reply explicitly with the blocker \
+                 or a decline and the reason. A bare \"received\" / \"on it\" / \
+                 \"ack\" that stops without doing the asked work is ghosting, \
+                 not a reply -- and so is silence. Do not end your turn until \
+                 each item below is either done-and-reported or explicitly \
+                 declined/blocked."
+            }
+            // Work is already in flight and it is the operator's, not a
+            // peer's. Same obligation, deferred to the end of the turn.
+            Delivery::MidTurn => {
+                "REQUIRES A REPLY -- directed questions and requests from \
+                 peers. They are not the operator and they do not interrupt: \
+                 finish what you are doing first, then answer these before the \
+                 turn ends. If one ASKS something, answer it -- a short answer \
+                 or a clear \"no\" / \"can't help\" / \"handing to X\" is fine. If \
+                 it asks you to DO something, either do it or say plainly that \
+                 you are not, and why. A bare \"received\" / \"on it\" / \"ack\" \
+                 that does none of the asked work is ghosting, not a reply -- \
+                 and so is silence."
+            }
+        },
         &must_reply,
         PENDING_REPLY_CAP,
     );
@@ -249,7 +297,7 @@ mod tests {
             "shingle".to_string(),
         )];
 
-        let prompt = build_wake_prompt("legion", &signals);
+        let prompt = build_wake_prompt("legion", &signals, Delivery::Wake);
 
         let entries = prompt.lines().filter(|l| l.starts_with("- [from ")).count();
         assert_eq!(
@@ -439,7 +487,7 @@ mod tests {
             ),
         ];
 
-        let prompt = build_wake_prompt("legion", &signals);
+        let prompt = build_wake_prompt("legion", &signals, Delivery::Wake);
         assert!(prompt.contains("auto-woken by legion watch"));
         assert!(prompt.contains("@legion review:approved"));
         assert!(prompt.contains("@all announce: shipped"));
@@ -460,7 +508,7 @@ mod tests {
             "legion".to_string(),
         )];
 
-        let prompt = build_wake_prompt("kessel", &signals);
+        let prompt = build_wake_prompt("kessel", &signals, Delivery::MidTurn);
 
         // The reply-required section must still forbid ack-and-stop, and must
         // now ALSO say peer mail does not preempt the operator (#1175): the
@@ -484,9 +532,35 @@ mod tests {
             !prompt.contains("Do not end your turn"),
             "the turn-seizing framing must not come back (#1175)"
         );
+    }
+
+    /// The Wake side of #1175's split: an idle-woken, cold-booted or
+    /// post-compact agent has no work in flight, so the mail IS its turn and
+    /// the original stronger framing is correct there. Pinned as a pair with
+    /// the MidTurn test above -- one renderer serves both, and a future edit
+    /// that collapses them back into one framing must fail one of these.
+    #[test]
+    fn wake_delivery_keeps_the_stronger_framing() {
+        let signals = vec![(
+            "id-req".to_string(),
+            "@kessel request:open -- read your repo and post your conventions".to_string(),
+            "legion".to_string(),
+        )];
+
+        let prompt = build_wake_prompt("kessel", &signals, Delivery::Wake);
+
+        assert!(prompt.contains("REQUIRES A REPLY"));
         assert!(
-            prompt.contains("ghosting"),
-            "a bare ack that stops must be named as ghosting"
+            prompt.contains("COMPLETE the work"),
+            "a woken agent has nothing else in flight -- the mail is the work"
+        );
+        assert!(
+            prompt.contains("done-and-reported or explicitly declined/blocked"),
+            "the wake path keeps its real-outcome requirement"
+        );
+        assert!(
+            !prompt.contains("do not interrupt"),
+            "there is no work in flight to defer to on a wake (#1175)"
         );
     }
 
@@ -510,7 +584,7 @@ mod tests {
             ),
         ];
 
-        let prompt = build_wake_prompt("kessel", &signals);
+        let prompt = build_wake_prompt("kessel", &signals, Delivery::MidTurn);
 
         // Directed questions/requests MUST be flagged as reply-required.
         assert!(
@@ -575,7 +649,7 @@ mod tests {
             ),
         ];
 
-        let prompt = build_wake_prompt("platform", &signals);
+        let prompt = build_wake_prompt("platform", &signals, Delivery::Wake);
 
         assert!(prompt.contains("REQUIRES A REPLY"));
         assert!(prompt.contains("INFORMATIONAL"));
@@ -779,7 +853,7 @@ mod tests {
             ),
         ];
 
-        let prompt = build_wake_prompt("veneer", &signals);
+        let prompt = build_wake_prompt("veneer", &signals, Delivery::Wake);
 
         let reply_idx = prompt.find("REQUIRES A REPLY").expect("reply section");
         let answered_idx = prompt
@@ -825,7 +899,7 @@ mod tests {
                 )
             })
             .collect();
-        let prompt = build_wake_prompt("veneer", &answers);
+        let prompt = build_wake_prompt("veneer", &answers, Delivery::Wake);
         let rendered = prompt.matches("(id: id-ans-").count();
         assert_eq!(
             rendered, PENDING_ANSWERED_CAP,
@@ -897,7 +971,7 @@ mod tests {
                 )
             })
             .collect();
-        let prompt = build_wake_prompt("legion", &questions);
+        let prompt = build_wake_prompt("legion", &questions, Delivery::Wake);
         let rendered = prompt.matches("(id: id-q-").count();
         assert_eq!(
             rendered, PENDING_REPLY_CAP,
@@ -922,7 +996,7 @@ mod tests {
                 )
             })
             .collect();
-        let prompt = build_wake_prompt("legion", &announcements);
+        let prompt = build_wake_prompt("legion", &announcements, Delivery::Wake);
         let rendered = prompt.matches("(id: id-a-").count();
         assert_eq!(
             rendered, PENDING_INFORMATIONAL_CAP,
@@ -941,7 +1015,7 @@ mod tests {
             "@all announce: shipped v0.9.3".to_string(),
             "rafters".to_string(),
         )];
-        let prompt = build_wake_prompt("legion", &announce_only);
+        let prompt = build_wake_prompt("legion", &announce_only, Delivery::Wake);
         assert!(!prompt.contains("REQUIRES A REPLY"));
         assert!(prompt.contains("INFORMATIONAL"));
         assert!(
@@ -954,7 +1028,7 @@ mod tests {
             "@eavesdrop question: when does the feed index?".to_string(),
             "huttspawn".to_string(),
         )];
-        let prompt = build_wake_prompt("eavesdrop", &question_only);
+        let prompt = build_wake_prompt("eavesdrop", &question_only, Delivery::Wake);
         assert!(prompt.contains("REQUIRES A REPLY"));
         assert!(!prompt.contains("INFORMATIONAL"));
         assert!(!prompt.contains("YOUR ASK WAS ANSWERED"));
@@ -966,7 +1040,7 @@ mod tests {
             "@veneer answer:resolved {resolves: id-ask} -- shipped it".to_string(),
             "rafters".to_string(),
         )];
-        let prompt = build_wake_prompt("veneer", &answered_only);
+        let prompt = build_wake_prompt("veneer", &answered_only, Delivery::Wake);
         assert!(prompt.contains("YOUR ASK WAS ANSWERED"));
         assert!(!prompt.contains("REQUIRES A REPLY"));
         assert!(!prompt.contains("INFORMATIONAL"));

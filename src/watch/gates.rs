@@ -331,7 +331,7 @@ pub fn poll_cycle(
             repo.name
         );
 
-        let prompt = build_wake_prompt(recipient, &signals);
+        let prompt = build_wake_prompt(recipient, &signals, crate::watch::Delivery::Wake);
 
         if spawned > 0 && config.stagger_secs > 0 {
             std::thread::sleep(Duration::from_secs(config.stagger_secs));
