@@ -131,13 +131,15 @@ const SPLIT_SEPARATOR: &str = "---";
 /// reading agent specifically. Defensible -- a wake-worthy broadcast does
 /// want an answer -- but it is a place where this gate and the issue's
 /// "not directed at the reading agent" wording diverge.
-const READ_NOT_RESPOND_NORM: &str = "These posts are for reading. Act on what concerns you; \
-     pass the rest in silence. Do not think out loud about them -- no commentary, summaries, or \
-     reactions in your session: anything you write about this mail lives in your context on every \
-     later turn. A reply is right when you are addressed, when you own the far side, when you \
-     DISAGREE (adversarial opinion is never wrong if it is true), or when you want to learn more \
-     -- dissent and questions are encouraged spends; only idle assent is cut. In every case, add \
-     nothing to your own context beyond the reply itself.";
+const READ_NOT_RESPOND_NORM: &str = "These posts are for reading, at the end of what you were \
+     doing. Act on what concerns you; pass the rest in silence. Do not think out loud about them \
+     -- no commentary, summaries, or reactions in your session: anything you write about this \
+     mail lives in your context on every later turn. Do not report team conversations to the \
+     operator either; they did not ask about them and do not need a digest. Raise one only when \
+     you need their input. A reply is right when you are addressed, when you own the far side, \
+     when you DISAGREE (adversarial opinion is never wrong if it is true), or when you want to \
+     learn more -- dissent and questions are encouraged spends; only idle assent is cut. In every \
+     case, add nothing to your own context beyond the reply itself.";
 
 /// Write `posts` split into musings then a separator then the directed
 /// (REQUIRES A REPLY) set -- `legion inbox --split` (#1020).
@@ -466,14 +468,16 @@ mod tests {
     fn read_not_respond_norm_matches_the_issue_text_verbatim() {
         assert_eq!(
             READ_NOT_RESPOND_NORM,
-            "These posts are for reading. Act on what concerns you; pass the rest in silence. \
-Do not think out loud about them -- no commentary, summaries, or reactions in your session: \
-anything you write about this mail lives in your context on every later turn. A reply is right \
-when you are addressed, when you own the far side, when you DISAGREE (adversarial opinion is \
-never wrong if it is true), or when you want to learn more -- dissent and questions are \
-encouraged spends; only idle assent is cut. In every case, add nothing to your own context \
+            "These posts are for reading, at the end of what you were doing. Act on what \
+concerns you; pass the rest in silence. Do not think out loud about them -- no commentary, \
+summaries, or reactions in your session: anything you write about this mail lives in your \
+context on every later turn. Do not report team conversations to the operator either; they did \
+not ask about them and do not need a digest. Raise one only when you need their input. A reply \
+is right when you are addressed, when you own the far side, when you DISAGREE (adversarial \
+opinion is never wrong if it is true), or when you want to learn more -- dissent and questions \
+are encouraged spends; only idle assent is cut. In every case, add nothing to your own context \
 beyond the reply itself.",
-            "the norm text is the deliverable; it must match #1073 exactly"
+            "the norm text is the deliverable; it must match #1073 as amended by #1175"
         );
     }
 

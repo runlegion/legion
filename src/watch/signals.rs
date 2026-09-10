@@ -192,16 +192,14 @@ pub fn build_wake_prompt(repo_name: &str, signals: &[(String, String, String)]) 
     };
 
     append_section(
-        "REQUIRES A REPLY -- these are directed questions and requests. Each one \
-         needs a real response before you stop, not just an acknowledgment. \
-         If it ASKS something, answer it -- a short answer or a clear \"no\" / \
-         \"can't help\" / \"handing to X\" is fine. If it asks you to DO something \
-         (a task, request, or handoff with a deliverable), COMPLETE the work and \
-         report the result; or, if you cannot, reply explicitly with the blocker \
-         or a decline and the reason. A bare \"received\" / \"on it\" / \"ack\" that \
-         stops without doing the asked work is ghosting, not a reply -- and so is \
-         silence. Do not end your turn until each item below is either \
-         done-and-reported or explicitly declined/blocked.",
+        "REQUIRES A REPLY -- directed questions and requests from peers. They \
+         are not the operator and they do not interrupt: finish what you are \
+         doing first, then answer these before the turn ends. If one ASKS \
+         something, answer it -- a short answer or a clear \"no\" / \"can't \
+         help\" / \"handing to X\" is fine. If it asks you to DO something, \
+         either do it or say plainly that you are not, and why. A bare \
+         \"received\" / \"on it\" / \"ack\" that does none of the asked work is \
+         ghosting, not a reply -- and so is silence.",
         &must_reply,
         PENDING_REPLY_CAP,
     );
@@ -464,16 +462,27 @@ mod tests {
 
         let prompt = build_wake_prompt("kessel", &signals);
 
-        // The reply-required section must spell out the do-the-work path and
-        // forbid ack-and-stop, so the framing survives prompt edits.
+        // The reply-required section must still forbid ack-and-stop, and must
+        // now ALSO say peer mail does not preempt the operator (#1175): the
+        // old framing said "do not end your turn", which let any peer seize a
+        // turn already spent on operator work. Both properties are pinned so
+        // a later prompt edit cannot quietly restore either failure.
         assert!(prompt.contains("REQUIRES A REPLY"));
         assert!(
-            prompt.contains("COMPLETE the work"),
-            "request framing must tell the agent to complete the work, not just reply"
+            prompt.contains("either do it or say plainly that you are not"),
+            "request framing must still spell out the do-the-work path"
         );
         assert!(
-            prompt.contains("done-and-reported or explicitly declined/blocked"),
-            "framing must require a real outcome before the turn ends"
+            prompt.contains("ghosting"),
+            "framing must still name ack-and-stop as ghosting"
+        );
+        assert!(
+            prompt.contains("do not interrupt"),
+            "framing must say peer mail does not preempt work in flight (#1175)"
+        );
+        assert!(
+            !prompt.contains("Do not end your turn"),
+            "the turn-seizing framing must not come back (#1175)"
         );
         assert!(
             prompt.contains("ghosting"),
