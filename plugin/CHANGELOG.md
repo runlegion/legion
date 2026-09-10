@@ -1,5 +1,178 @@
 # Legion Changelog
 
+## 0.39.0
+
+The deletion release. Two surfaces leave the binary and one arrives. The web dashboard and
+the `legion serve` verb behind it are gone (PR #1167, #1165), and so is the task/card cluster
+-- `legion task`, `legion done`, `GET /api/tasks` and the SSE `tasks` event, and the
+`CardDelta` row type on the cross-node wire (PR #1171, #1166). The dashboard's premise is
+worth recording, because it explains why five months passed without anyone noticing:
+`src/serve.rs` embedded `static/`, whose three files were last touched on 2026-04-06, and
+nothing ever copied `app/dist` into it. The React rewrite in `app/` had never reached a
+running process, so what the binary served was the pre-rewrite dashboard, and the operator's
+ruling on 2026-09-09 was that "it's not been used or working in six months". The task cluster
+finishes #931, which removed the card surface's consumers and left its producers running:
+`check_auto_unblock` was deleted there while `legion done` kept posting "{repo} completed:"
+to a board with no reader.
+
+The addition comes from the deletions' own PR chain. #1167 squash-merged into main while
+#1168 was open on a branch stacked on it, and the sanctioned toolchain -- `legion push` with
+no force path, `git push` guarded, `git reset --hard` denied -- had no way to publish the
+rebase. The recovery cost a PR number, its review thread, and a re-record of three HEAD-keyed
+gates, and the replacement PR is #1171, the second deletion in this release. `legion push
+--force` (PR #1173, #1172) clears that case without becoming a passthrough: it decides on an
+analysis of what the push would actually destroy.
+
+Minor release rather than a patch, on the removed-surface counterpart of the added-surface
+rule: three verbs leave the CLI and a delta type leaves the wire. No schema migration -- the
+`tasks` table stays and goes inert, per migration rule 13 -- and no config key an operator
+must touch; the `serve` field leaves watch.toml and a stale one is ignored (see below). The
+shape of the release is the deletion: 25,022 lines removed against 46 added for the
+dashboard, 1,365 against 106 for the task cluster, against 1,467 added for the force path.
+
+### Removed
+
+- **The web dashboard, `legion serve`, and the code whose only caller was `serve.rs`** (PR
+  #1167, #1165). `app/` (source, `dist`, `node_modules`, config, lockfile), `static/`,
+  `src/serve.rs`, `tests/integration/serve.rs`, the clap verb and its dispatch, and the
+  `serve` field in watch config all go, along with the `rust-embed` and `mime_guess`
+  dependencies only `serve.rs` used. Deleting a 991-line file exposed what it alone had kept
+  alive, and that was cut in the same pass rather than left as orphaned surface: the
+  `ServerRole::Serve` variant, `status::DoneResult` (its `api_done` was the only
+  constructor), `db::reflections::get_reflections_by_ids` (its `api_search` was the only
+  caller), `daemon::live_daemon_pid` (called only by the bind-refusal deleted with the file),
+  and two `db::` re-exports. `tests/integration/common.rs`'s `warm_schema` was kept under
+  `#[allow(dead_code)]`, because its own doc comment frames it as reusable multi-process test
+  infrastructure rather than serve-specific.
+
+  What survives is the daemon's channel router, unchanged in shape: `/health`, `/sse`,
+  `/api/feed`, `/api/post`, `/api/search`, and the `/api/documents` routes. `/api/search` is
+  now registered directly. With `ServerRole` down to a single variant its `if is_daemon`
+  guard was unconditionally true -- a dead conditional that read as a live gate, under a
+  comment describing a route-collision risk with `serve.rs`'s own `/api/search` that died
+  with the file. Two things were deliberately not carried over. The bind-refusal message
+  explained which of two competing processes owned the port, and one of the two no longer
+  exists; the daemon keeps its bare `failed to bind {addr}: {e}`, and port-holder
+  identification for its own spawn path already lives in `should_kill_port_holder` /
+  `kill_orphaned_daemon_on_port_with`. And `docs/site/{architecture,getting-started,
+  plugin-guide,llms,llms-full}` drop the dashboard rather than describing a binary surface
+  that is gone, reattributing the surviving SSE and channel behavior to the daemon.
+
+- **The task/card cluster: `legion task`, `legion done`, `/api/tasks`, and `CardDelta`** (PR
+  #1171, #1166). `legion done` made two unconditional `audience = "team"` inserts -- the
+  completion broadcast and the blocked-agent notify -- whose only reader #931 had already
+  deleted, and `legion task`'s own help had called it deprecated for releases with no caller
+  outside docs and changelog history. Both verbs are gone. `legion issue close` is now the
+  one caller of `close_issue_gated`, and it is the exact replacement for `legion done
+  --number N`: same verify gate, same close path. The no-`--number` form, which just
+  announced completion to the board, has no replacement, and that is the point of the
+  ruling behind this issue -- "only messages that are required to be posted", no status, no
+  ceremony.
+
+  The reads went with the writers. `GET /api/tasks` and the SSE `tasks` event leave
+  `channel::router` -- the `sse-client.ts` consumer the docs described was already gone from
+  disk, so nothing on the wire loses a subscriber. `legion status` drops YOUR WORK, the
+  active and blocked task counts (structurally zero since #931, and injected into agent
+  context anyway), and `find_blocked_agents`, which scanned board posts for the substring
+  "blocked on <repo>" -- a guess at who cares, not a subscription; it keeps TEAM NEEDS and
+  WHAT CHANGED. `CardDelta` leaves `src/sync.rs`, `src/db/sync.rs` and `sync_actor`'s
+  `TABLE_CARDS` path. The `tasks` table itself stays and goes inert, per migration rule 13:
+  columns and tables are not dropped. #798 is closed as moot rather than fixed -- it reported
+  that status surfaces silently uncount Delegated cards, and the counting surface is gone. No
+  plugin skill, hook script, or agent brief referenced either verb.
+
+### Added
+
+- **`legion push --force`, gated on where the discarded commits would go** (PR #1173,
+  #1172). The old refusal existed to stop an agent silently destroying work that lives only
+  on the remote, which is a narrower thing than "no force ever" and is mechanically
+  detectable. The flag fetches the remote ref, computes the commits reachable from the remote
+  head but not from the new local head, and tests each one for survival: reachable from
+  `main` by sha, `git patch-id`-equivalent to a commit unique to `main` (a squash that
+  combined exactly one commit), or patch-id-equivalent to a commit unique to the new local
+  history (an ordinary amend or rebase). `main` is tested first, because the new head is
+  normally built on top of it, so a squash-merge would otherwise be collected under the
+  technically-true-but-misleading "present in new history" label. Every discarded commit
+  surviving allows the push with no ceremony beyond the audit row; any orphan refuses,
+  printing each as `<sha> <subject>` so the operator can judge what would be lost, and
+  `--force-reason "..."` is the sole override -- the same contract as `pr merge
+  --merge-despite-failures` and `issue close --force`.
+
+  Per-commit patch-id alone was not enough, and the release's own history is why. A squash
+  that combined SEVERAL commits into one main commit can never patch-id-match any single
+  pre-squash commit, because patch-id is computed per commit and the squash's diff is their
+  sum: `git cherry main 3a2b9764` marks all three of #1165's commits unmatched even though
+  `1e71d611` contains every one of them. So a cumulative fallback runs when the per-commit
+  tests leave any orphan: take every file the remote-only history touched since the merge
+  base, and compare those files directly between the old remote head and the new local head.
+  All byte-identical means nothing was lost in aggregate, however many shas it took, and the
+  whole remaining group clears together. A genuine loss leaves at least one file differing,
+  so the fallback never upgrades a real loss; a mixed batch -- one real orphan sharing files
+  with a legitimate squash -- stays refused as a whole, which is the safe direction to fail
+  in.
+
+  The push always runs `--force-with-lease=<branch>:<fetched-sha>`, so a concurrent push from
+  another agent or node loses the race, and a stale lease reports the sha the remote actually
+  moved to rather than a raw git error. One finding from the branch is worth carrying,
+  because it is invisible in the flag names: passing a bare `--force` alongside
+  `--force-with-lease` DISABLES the lease on this git version -- a deliberately stale lease
+  pushed anyway -- so lease-only is what ships. Every existing refusal is unchanged and runs
+  before the force analysis: never `main`/`master`, never a branch value shaped like a flag
+  or a refspec, always from the checkout that has the branch checked out. `--force` conflicts
+  with `--tag` at the clap layer; a moved tag is a different and worse problem. Every attempt
+  -- refused, failed, or succeeded -- is audited with the old and new sha, every discarded
+  commit, and which survival test each passed. A force-push that leaves no trace of what it
+  discarded is the thing the original refusal existed to prevent.
+
+### Before you upgrade: three verbs are gone, and one bridge is still standing
+
+- **`legion serve`, `legion done` and `legion task` are no longer verbs.** Callers of `legion
+  done` use `legion issue close --number N --comment "..."`, which runs the same gate and
+  close path. Nothing replaces the announcement-only form.
+
+- **A stale `serve = true` in an existing watch.toml is ignored, not a parse error.**
+  `WatchConfig` carries no `deny_unknown_fields`, so an unknown top-level key deserializes
+  and drops; the only section rejected by name is a populated `[cluster]` (#611). There is
+  nothing to do on upgrade, though the line is now noise and can go.
+
+- **A peer on an older binary can still send a cards packet, and nothing breaks.**
+  `apply_packet` matches table names exactly, and with the `cards` arm gone each row falls
+  through to `unknown table 'cards'`, logged as `[legion sync] apply failed (table: cards)`
+  and skipped. No panic and no partial write, and the reflections, schedules and lease rows
+  in the same sync apply as normal.
+
+- **The 0.38.0 compatibility bridges are still here.** The hidden `legion deliver` alias
+  (`src/cli/mod.rs`) and `inbox.sh`'s fallback to the retired spelling, along with the
+  `LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS` variable read, all survive this release rather
+  than being removed in it as 0.38.0 said they would be. The plugin/binary skew window stays
+  open.
+
+### Known gaps, named rather than implied
+
+- **#1166's second acceptance criterion still fails** (PR #1171, #1166). `legion verify
+  --issue 1166` recorded FAIL on "no code path inserts a reflection with `audience = "team"`
+  except `legion post` and `legion signal`". #1171 removed the two inserts `legion done`
+  owned, which were the ones in its scope; two writes in `src/watch/` predate it and remain
+  -- the subscription quota panic-stop's board announcement in `gates.rs`, and the deferred
+  reaper wake in `mod.rs` that hand-builds a signal and inserts the row directly instead of
+  going through `legion signal`'s own write path. #1169 carries both, plus the last two
+  structurally-empty task reads in `legion surface` and `legion bullpen --count` that this
+  release left standing.
+
+- **The cumulative-diff verdict label claims a comparison that does not run** (PR #1173,
+  #1172). `AlreadyInMainByCumulativeDiff` reaches both the audit row and the refusal message
+  as `already-in-main-by-cumulative-diff`, but the fallback never reads `main`: it compares
+  the old remote head to the new local head. What it proves -- every touched file
+  byte-identical in the new state -- is a stronger claim than the name makes, so the
+  mechanism is right and the label is not. Raised in the simplify pass and dispositioned
+  rather than fixed, to stop making work on a branch that was being frozen to ship. Recorded
+  here so a later reader of that audit field is not misled by it.
+
+- **The stale-lease path is proven at the function level, not end to end** (PR #1173, #1172).
+  The full CLI path fetches immediately before pushing, leaving no seam to interpose a
+  concurrent push, so `run_push_force_reports_stale_lease_and_names_the_actual_sha` drives it
+  against a real bare-remote fixture one layer below `legion push --force`.
+
 ## 0.38.1
 
 The cost-of-reading release. 0.38.0 changed what reaches the shared board; this one changes
