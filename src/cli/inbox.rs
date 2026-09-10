@@ -588,17 +588,28 @@ beyond the reply itself.",
         emit_inbox_split("legion", &delivered, &mut out).unwrap();
         let split_output = String::from_utf8(out).unwrap();
 
-        // What must NOT drift: the entry line itself. A signal rendered one
-        // way here and another way there is how a reader ends up acting on a
-        // different ask than the one that was sent.
-        let entry = "- [from rafters] @legion question: which lane owns retries";
+        // What must NOT drift: the WHOLE entry line, id included. A signal
+        // rendered one way here and another way there is how a reader ends up
+        // acting on a different ask than the one that was sent, and the id is
+        // what a reply is addressed to -- an entry whose text matches but
+        // whose id does not sends the answer to the wrong ask.
+        //
+        // The id is asserted because review mutation-tested this: corrupting
+        // `emit_inbox_split`'s tuple construction to emit a hardcoded wrong id
+        // still passed when the expected string stopped before the ` (id: `
+        // suffix. The byte-identity check this test replaced covered that by
+        // construction; matching the full line is what restores it.
+        let signal_id = &reply_required[0].0;
+        let entry =
+            format!("- [from rafters] @legion question: which lane owns retries (id: {signal_id})");
         assert!(
-            pending_replies_output.contains(entry),
-            "pending-replies must render the entry verbatim:\n{pending_replies_output}"
+            pending_replies_output.contains(&entry),
+            "pending-replies must render the entry verbatim, id included:\n{pending_replies_output}"
         );
         assert!(
-            split_output.contains(entry),
-            "the inbox directed bucket must render the same entry verbatim:\n{split_output}"
+            split_output.contains(&entry),
+            "the inbox directed bucket must render the same entry verbatim, id included:\
+             \n{split_output}"
         );
 
         // What must differ, and why: boot/post-compact hands the agent a turn
