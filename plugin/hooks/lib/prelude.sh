@@ -137,7 +137,18 @@ legion_hook_parse() {
         *) _legion_common_dir="$CWD/$_legion_common_dir" ;;
       esac
       _legion_repo_root=$(dirname "$_legion_common_dir")
-      if [ -d "$_legion_repo_root" ]; then
+      # `dirname(git-common-dir) == repo root` holds when the common dir is
+      # `<root>/.git` -- true for a normal checkout AND for a worktree, whose
+      # common dir points at the ORIGINAL repo's .git. It is FALSE inside a
+      # submodule, where the common dir is `<super>/.git/modules/<name>`:
+      # dirname gives `<super>/.git/modules`, whose basename is the literal
+      # string "modules". That is worse than the basename it replaced, which
+      # at least gave the submodule's own directory name, and `[ -d ]` alone
+      # does not catch it because `.git/modules` really is a directory.
+      # Requiring a `.git` INSIDE the resolved root is what distinguishes a
+      # real repo root from an internal git directory: a bare repo (common
+      # dir `.`) and a submodule both fail it and fall back.
+      if [ -e "$_legion_repo_root/.git" ]; then
         REPO=$(basename "$_legion_repo_root")
       fi
     fi

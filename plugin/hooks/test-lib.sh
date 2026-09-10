@@ -61,6 +61,27 @@ echo "==> a plain checkout still resolves to its own basename"
 out=$(run_parse "{\"cwd\":\"$wt_root\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
 assert_eq "normal repo unchanged" "${out##*|}" "wt-origin"
 
+echo "==> a submodule falls back to its own name, never the literal 'modules'"
+# Inside a submodule, --git-common-dir is <super>/.git/modules/<name>, so
+# dirname is <super>/.git/modules and its basename is the literal string
+# "modules" -- a name that matches no repo, and WORSE than the basename it
+# replaced. `[ -d ]` does not catch it because .git/modules really is a
+# directory; requiring a .git INSIDE the resolved root does. Found by review,
+# verified against a real submodule rather than reasoned about.
+sm_root="$WORK/sm"
+mkdir -p "$sm_root"
+git -C "$sm_root" init -q super 2>/dev/null
+git -C "$sm_root" init -q subm 2>/dev/null
+git -C "$sm_root/subm" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+git -C "$sm_root/super" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+git -C "$sm_root/super" -c protocol.file.allow=always submodule add -q ../subm subm 2>/dev/null
+if [ -e "$sm_root/super/subm/.git" ]; then
+  out=$(run_parse "{\"cwd\":\"$sm_root/super/subm\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
+  assert_eq "submodule resolves to its own dir name" "${out##*|}" "subm"
+else
+  echo "  SKIP: submodule fixture unavailable in this environment"
+fi
+
 echo "==> a non-git directory still falls back to basename (fail-open)"
 mkdir -p "$WORK/plain-dir"
 out=$(run_parse "{\"cwd\":\"$WORK/plain-dir\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
