@@ -330,6 +330,28 @@ fn pending_replies_emits_wake_prompt_for_request_signals() {
         !stdout.contains("v0.9.5 shipped"),
         "informational announce must not appear in pending-replies, got: {stdout}"
     );
+
+    // ROUTING, not rendering (#1175). `build_wake_prompt` serves three call
+    // sites and picks its framing from a `Delivery` variant each one passes.
+    // The unit tests hand the function a variant directly, so they prove the
+    // arms render correctly and prove NOTHING about which arm a real call site
+    // reaches -- review mutation-tested that and found two of three call sites
+    // could flip their variant with the whole suite still green.
+    //
+    // This assertion drives the real `handle_pending_replies` through the
+    // binary, so flipping `cli/signal.rs`'s variant fails here. `pending-replies`
+    // renders at cold boot and post-compact, where the mail IS the turn, so the
+    // stronger Wake framing is correct and the deferring MidTurn text is not.
+    assert!(
+        stdout.contains("Do not end your turn"),
+        "pending-replies is a Wake context -- mail is the whole turn at boot and \
+         post-compact, so it must carry the stronger framing, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("they do not interrupt"),
+        "the mid-turn deferring framing must not reach a boot/post-compact reader, \
+         which has no work in flight to defer to, got: {stdout}"
+    );
 }
 
 #[test]
