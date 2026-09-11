@@ -1,5 +1,111 @@
 # Legion Changelog
 
+## 0.39.1
+
+The framing release. Mail keeps arriving when it arrives -- the three `inbox.sh` wirings
+(`Stop`, `UserPromptSubmit`, `PostToolUse`) are untouched, because delivery latency was never
+the defect and each wiring exists for its own reason. What changes is how the delivered block
+tells the reading agent to handle it. The old directed-signal text said "COMPLETE the work
+and report the result" and "Do not end your turn until each item below is either
+done-and-reported or explicitly declined/blocked," and nothing in it stated precedence, so an
+arbitrary peer's signal became a turn-blocking obligation landing inside work with a different
+purpose. Observed during the 0.39.0 release: an ask arrived mid-turn and the orchestrator
+answered it before finishing the tag. The copy was the defect, and the copy is what this
+release fixes.
+
+Patch release: prompt copy in two Rust files (`src/watch/signals.rs`, `src/cli/inbox.rs`) and
+one hook shell function (`plugin/hooks/lib/prelude.sh`), with their tests. No new verb, no new
+flag, no wire-format change, no schema migration. `build_wake_prompt` and
+`board::format_pending_replies` each gained a `Delivery` parameter, internal to the binary --
+the hook interface is unchanged.
+
+### Fixed
+
+- **Directed mail defers to work in flight and stops narrating itself** (PR #1176, #1175).
+  `build_wake_prompt` serves three call sites -- the idle-wake spawn
+  (`watch::gates::poll_cycle`), cold boot and post-compact (`cli::signal::handle_pending_replies`
+  via `board::format_pending_replies`), and mid-turn inbox delivery (`cli::inbox`, same seam) --
+  and one framing cannot be right for all of them. A freshly woken agent has no work in flight;
+  telling it to "finish what you are doing first" names something that does not exist. A busy
+  agent is doing the operator's work; telling it not to end its turn lets a peer preempt the
+  operator. So the renderer takes a `Delivery`. `Wake` keeps the original #1020 text verbatim:
+
+  > "Each one needs a real response before you stop, not just an acknowledgment. ... COMPLETE
+  > the work and report the result ... Do not end your turn until each item below is either
+  > done-and-reported or explicitly declined/blocked."
+
+  `MidTurn` carries the deferring framing:
+
+  > "They are not the operator and they do not interrupt: finish what you are doing first,
+  > then answer these before the turn ends. ... either do it or say plainly that you are not,
+  > and why. A bare 'received' / 'on it' / 'ack' that does none of the asked work is ghosting,
+  > not a reply -- and so is silence."
+
+  The signal is not weakened: a reply is still required before the turn is over, the
+  do-the-work path is still spelled out, and a bare ack is still named as ghosting. What
+  changes is when the mail is serviced, not whether. The `REQUIRES A REPLY` header literal is
+  unchanged -- four shell consumers (`inbox.sh`, `lib/boot-sections.sh`, `test-inbox.sh`,
+  `test-stop.sh`) match against it.
+
+  The read-not-respond norm gained two clauses. "These posts are for reading, at the end of
+  what you were doing" makes the deferral explicit in the musings path. "Do not report team
+  conversations to the operator either; they did not ask about them and do not need a digest.
+  Raise one only when you need their input" closes the second half of the problem: agents were
+  already told not to think out loud about mail in their own context, but nothing stopped them
+  reporting team exchanges to the operator, who had not asked.
+
+  The drift test between the inbox's directed bucket and `legion pending-replies` was rewritten
+  rather than deleted. Byte-identity was the right guarantee while one framing served both;
+  now the entry rendering -- the part whose drift would misattribute a signal -- is pinned
+  identical, the framing divergence is asserted, and the signal id is included in the match
+  after review mutation-tested the old substring and found a wrong-id mutant still passing.
+
+- **A worktree resolves to its parent repo, not its own directory name** (PR #1176). Unrelated
+  to #1175 and carried at the operator's request rather than as its own PR.
+  `legion_hook_parse` (`plugin/hooks/lib/prelude.sh`) derived the repo as `basename "$CWD"`.
+  Inside a git worktree that is the worktree's own label -- for an agent worktree,
+  `.claude/worktrees/agent-a2a0cccd3c9ef1c8e` -- so every hook addressed the session as a repo
+  legion has never heard of. The visible symptom is the Stop nudge telling an agent to run
+  `legion reflect --repo agent-a2a0cccd3c9ef1c8e`, but the same wrong name reached coverage
+  gates and recall, which then queried a repo with no rows. The problem is documented in five
+  independent reflections spanning two months, each naming the same root cause and the same
+  fix.
+
+  `git rev-parse --git-common-dir` points at the original repo's `.git` from inside a
+  worktree and at plain `.git` in a normal checkout, so its parent is the real repo root in
+  both cases. Falls back to the basename when git is absent or the directory is not a repo at
+  all, preserving the function's fail-open contract. A submodule, where the common dir is
+  `<super>/.git/modules/<name>`, also falls back -- `dirname` there gives
+  `<super>/.git/modules`, whose basename is the literal string "modules", and the guard
+  catches it by requiring a `.git` inside the resolved root, which an internal git directory
+  does not have.
+
+  Four assertions in `plugin/hooks/test-lib.sh` against real git fixtures: a worktree
+  resolves to the parent, a plain checkout is unchanged, a submodule falls back to its own
+  name, and a non-git directory falls back. All 20 hook suites pass.
+
+### Known gaps, named rather than implied
+
+- **One `Delivery` call site is uncovered by tests.** Review mutation-tested all three call
+  sites and found that `watch::gates::poll_cycle`'s idle-wake spawn can flip its `Delivery`
+  variant from `Wake` to `MidTurn` with the whole suite green. The unit tests prove the arms
+  render correctly; they prove nothing about which arm a real call site reaches.
+  `cli::signal::handle_pending_replies` is now covered end-to-end through the binary and
+  mutation-verified; `poll_cycle` is not, because its prompt goes straight into `spawn_agent`
+  and nothing reads it back, so covering it needs a production hook added for testability.
+  Routing there is verified correct today by review's own mutation run; the missing piece is
+  the guard that keeps it correct.
+
+- **The negative assertion is case-sensitive and exact.** The test that guards against the old
+  framing's return matches the literal string "Do not end your turn". A rephrase like "don't
+  end your turn" would walk past it.
+
+- **Reflections written under worktree-derived repo names stay where they are.** Any reflection
+  stored as `--repo agent-a2a0...` before this fix remains under that key. Recall for the real
+  repo will not find it. These are orphaned rather than migrated, the same treatment as the
+  cursor-spelling note in 0.38.0 -- the rows exist, they age out per normal TTL, and nothing
+  needs touching on upgrade.
+
 ## 0.39.0
 
 The deletion release. Two surfaces leave the binary and one arrives. The web dashboard and
