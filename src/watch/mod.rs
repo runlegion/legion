@@ -27,7 +27,8 @@ pub(crate) use locks::{process_alive, terminate_process};
 #[allow(unused_imports)]
 pub use nudge::{DEFAULT_CLAUDE_BIN, LiveSession, NudgeCooldownTracker, SessionStatus};
 pub use signals::{
-    build_wake_prompt, directed_verb_will_not_wake, find_pending_signals, signal_requires_reply,
+    Delivery, build_wake_prompt, directed_verb_will_not_wake, find_pending_signals,
+    signal_requires_reply,
 };
 pub use spawn::{SpawnMode, record_session_end};
 pub use tracker::AgentTracker;

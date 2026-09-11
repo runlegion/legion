@@ -43,6 +43,50 @@ echo "==> missing cwd leaves repo empty (no basename guessing)"
 out=$(run_parse '{"tool_name":"Grep","session_id":"s1"}')
 assert_eq "no cwd -> empty repo" "$out" "|Grep|s1|"
 
+echo "==> a git worktree resolves to the PARENT repo, not the worktree directory name"
+# A worktree's basename is its own label -- for an agent worktree that is
+# `agent-a2a0...`, a name legion has never heard of. Taking it verbatim made
+# the Stop nudge tell agents to `legion reflect --repo agent-a2a0...`, and
+# coverage/recall queried a repo with no rows. --git-common-dir points at the
+# ORIGINAL repo's .git from inside a worktree, so its parent is the real root.
+wt_root="$WORK/wt-origin"
+mkdir -p "$wt_root"
+git -C "$wt_root" init -q 2>/dev/null
+git -C "$wt_root" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+git -C "$wt_root" worktree add -q "$WORK/agent-deadbeef" -b probe-branch 2>/dev/null
+out=$(run_parse "{\"cwd\":\"$WORK/agent-deadbeef\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
+assert_eq "worktree resolves to the parent repo name" "${out##*|}" "wt-origin"
+
+echo "==> a plain checkout still resolves to its own basename"
+out=$(run_parse "{\"cwd\":\"$wt_root\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
+assert_eq "normal repo unchanged" "${out##*|}" "wt-origin"
+
+echo "==> a submodule falls back to its own name, never the literal 'modules'"
+# Inside a submodule, --git-common-dir is <super>/.git/modules/<name>, so
+# dirname is <super>/.git/modules and its basename is the literal string
+# "modules" -- a name that matches no repo, and WORSE than the basename it
+# replaced. `[ -d ]` does not catch it because .git/modules really is a
+# directory; requiring a .git INSIDE the resolved root does. Found by review,
+# verified against a real submodule rather than reasoned about.
+sm_root="$WORK/sm"
+mkdir -p "$sm_root"
+git -C "$sm_root" init -q super 2>/dev/null
+git -C "$sm_root" init -q subm 2>/dev/null
+git -C "$sm_root/subm" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+git -C "$sm_root/super" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+git -C "$sm_root/super" -c protocol.file.allow=always submodule add -q ../subm subm 2>/dev/null
+if [ -e "$sm_root/super/subm/.git" ]; then
+  out=$(run_parse "{\"cwd\":\"$sm_root/super/subm\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
+  assert_eq "submodule resolves to its own dir name" "${out##*|}" "subm"
+else
+  echo "  SKIP: submodule fixture unavailable in this environment"
+fi
+
+echo "==> a non-git directory still falls back to basename (fail-open)"
+mkdir -p "$WORK/plain-dir"
+out=$(run_parse "{\"cwd\":\"$WORK/plain-dir\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
+assert_eq "non-repo falls back to basename" "${out##*|}" "plain-dir"
+
 echo "==> empty stdin returns 1 from legion_hook_parse"
 printf '' | bash -c "source '$PRELUDE'; legion_hook_parse"
 assert_rc "empty stdin -> rc 1" 1 $?

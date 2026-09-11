@@ -118,7 +118,41 @@ legion_hook_parse() {
   if [ -n "${LEGION_REPO:-}" ]; then
     REPO="$LEGION_REPO"
   elif [ -n "$CWD" ]; then
+    # A git WORKTREE's basename is its own directory name -- for an
+    # agent worktree that is the branch/agent label
+    # (`.claude/worktrees/agent-a2a0...`), not the repo. Taking it
+    # verbatim made every hook address the session as a repo legion has
+    # never heard of: the Stop nudge told agents to run `legion reflect
+    # --repo agent-a2a0...`, coverage gates missed, and recall queried a
+    # name with no rows. `--git-common-dir` points at the ORIGINAL
+    # repo's .git for a worktree (and at plain `.git` for a normal
+    # checkout), so its parent is the real repo root in both cases.
+    # Falls back to the basename when git is absent or CWD is not a
+    # repo at all -- the pre-existing fail-open behavior.
     REPO=$(basename "$CWD")
+    _legion_common_dir=$(git -C "$CWD" rev-parse --git-common-dir 2>/dev/null)
+    if [ -n "$_legion_common_dir" ]; then
+      case "$_legion_common_dir" in
+        /*) ;;
+        *) _legion_common_dir="$CWD/$_legion_common_dir" ;;
+      esac
+      _legion_repo_root=$(dirname "$_legion_common_dir")
+      # `dirname(git-common-dir) == repo root` holds when the common dir is
+      # `<root>/.git` -- true for a normal checkout AND for a worktree, whose
+      # common dir points at the ORIGINAL repo's .git. It is FALSE inside a
+      # submodule, where the common dir is `<super>/.git/modules/<name>`:
+      # dirname gives `<super>/.git/modules`, whose basename is the literal
+      # string "modules". That is worse than the basename it replaced, which
+      # at least gave the submodule's own directory name, and `[ -d ]` alone
+      # does not catch it because `.git/modules` really is a directory.
+      # Requiring a `.git` INSIDE the resolved root is what distinguishes a
+      # real repo root from an internal git directory: a bare repo (common
+      # dir `.`) and a submodule both fail it and fall back.
+      if [ -e "$_legion_repo_root/.git" ]; then
+        REPO=$(basename "$_legion_repo_root")
+      fi
+    fi
+    unset _legion_common_dir _legion_repo_root
   fi
   return 0
 }

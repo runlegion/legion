@@ -131,13 +131,15 @@ const SPLIT_SEPARATOR: &str = "---";
 /// reading agent specifically. Defensible -- a wake-worthy broadcast does
 /// want an answer -- but it is a place where this gate and the issue's
 /// "not directed at the reading agent" wording diverge.
-const READ_NOT_RESPOND_NORM: &str = "These posts are for reading. Act on what concerns you; \
-     pass the rest in silence. Do not think out loud about them -- no commentary, summaries, or \
-     reactions in your session: anything you write about this mail lives in your context on every \
-     later turn. A reply is right when you are addressed, when you own the far side, when you \
-     DISAGREE (adversarial opinion is never wrong if it is true), or when you want to learn more \
-     -- dissent and questions are encouraged spends; only idle assent is cut. In every case, add \
-     nothing to your own context beyond the reply itself.";
+const READ_NOT_RESPOND_NORM: &str = "These posts are for reading, at the end of what you were \
+     doing. Act on what concerns you; pass the rest in silence. Do not think out loud about them \
+     -- no commentary, summaries, or reactions in your session: anything you write about this \
+     mail lives in your context on every later turn. Do not report team conversations to the \
+     operator either; they did not ask about them and do not need a digest. Raise one only when \
+     you need their input. A reply is right when you are addressed, when you own the far side, \
+     when you DISAGREE (adversarial opinion is never wrong if it is true), or when you want to \
+     learn more -- dissent and questions are encouraged spends; only idle assent is cut. In every \
+     case, add nothing to your own context beyond the reply itself.";
 
 /// Write `posts` split into musings then a separator then the directed
 /// (REQUIRES A REPLY) set -- `legion inbox --split` (#1020).
@@ -156,7 +158,10 @@ fn emit_inbox_split(repo: &str, posts: &[Reflection], out: &mut impl Write) -> e
         .iter()
         .map(|r| (r.id.clone(), r.text.clone(), r.repo.clone()))
         .collect();
-    let directed_txt = board::format_pending_replies(repo, &directed_tuples);
+    // Mid-turn: this hook fires inside a turn that already had a purpose
+    // (#1175), so the directed bucket must not tell the agent to stop.
+    let directed_txt =
+        board::format_pending_replies(repo, &directed_tuples, crate::watch::Delivery::MidTurn);
 
     if musings_txt.is_empty() && directed_txt.is_empty() {
         return Ok(());
@@ -466,14 +471,16 @@ mod tests {
     fn read_not_respond_norm_matches_the_issue_text_verbatim() {
         assert_eq!(
             READ_NOT_RESPOND_NORM,
-            "These posts are for reading. Act on what concerns you; pass the rest in silence. \
-Do not think out loud about them -- no commentary, summaries, or reactions in your session: \
-anything you write about this mail lives in your context on every later turn. A reply is right \
-when you are addressed, when you own the far side, when you DISAGREE (adversarial opinion is \
-never wrong if it is true), or when you want to learn more -- dissent and questions are \
-encouraged spends; only idle assent is cut. In every case, add nothing to your own context \
+            "These posts are for reading, at the end of what you were doing. Act on what \
+concerns you; pass the rest in silence. Do not think out loud about them -- no commentary, \
+summaries, or reactions in your session: anything you write about this mail lives in your \
+context on every later turn. Do not report team conversations to the operator either; they did \
+not ask about them and do not need a digest. Raise one only when you need their input. A reply \
+is right when you are addressed, when you own the far side, when you DISAGREE (adversarial \
+opinion is never wrong if it is true), or when you want to learn more -- dissent and questions \
+are encouraged spends; only idle assent is cut. In every case, add nothing to your own context \
 beyond the reply itself.",
-            "the norm text is the deliverable; it must match #1073 exactly"
+            "the norm text is the deliverable; it must match #1073 as amended by #1175"
         );
     }
 
@@ -538,8 +545,20 @@ beyond the reply itself.",
     /// to via `--split`) -- rather than re-deriving either path's steps,
     /// so a regression in either caller's wiring, not just in
     /// `format_pending_replies` itself, would fail this test.
+    /// The two paths render the same SIGNAL identically and frame it
+    /// differently on purpose (#1175).
+    ///
+    /// This test used to assert byte-identity between the inbox lane's
+    /// directed bucket and `legion pending-replies`, which was the right
+    /// guarantee while one framing served both. It no longer is: the inbox
+    /// fires inside a turn that already had a purpose and must not tell the
+    /// agent to stop, while pending-replies renders at boot and post-compact
+    /// where the mail IS the turn. So the entry rendering -- the part that
+    /// could silently drift and misattribute a signal -- is still pinned as
+    /// identical, and the framing divergence is asserted rather than left as
+    /// an accident nobody notices.
     #[test]
-    fn directed_bucket_is_byte_identical_to_pending_replies_for_the_same_signal() {
+    fn directed_bucket_renders_the_same_signal_with_context_appropriate_framing() {
         use crate::cli::signal::pending_reply_signals;
 
         let db = test_db();
@@ -555,7 +574,8 @@ beyond the reply itself.",
 
         // Path A: legion pending-replies's own query and formatting.
         let reply_required = pending_reply_signals(&db, "legion", false).unwrap();
-        let pending_replies_output = board::format_pending_replies("legion", &reply_required);
+        let pending_replies_output =
+            board::format_pending_replies("legion", &reply_required, crate::watch::Delivery::Wake);
         assert!(
             !pending_replies_output.is_empty(),
             "expected a non-empty REQUIRES A REPLY block from the pending-replies path"
@@ -568,11 +588,60 @@ beyond the reply itself.",
         emit_inbox_split("legion", &delivered, &mut out).unwrap();
         let split_output = String::from_utf8(out).unwrap();
 
+        // What must NOT drift: the WHOLE entry line, id included. A signal
+        // rendered one way here and another way there is how a reader ends up
+        // acting on a different ask than the one that was sent, and the id is
+        // what a reply is addressed to -- an entry whose text matches but
+        // whose id does not sends the answer to the wrong ask.
+        //
+        // The id is asserted because review mutation-tested this: corrupting
+        // `emit_inbox_split`'s tuple construction to emit a hardcoded wrong id
+        // still passed when the expected string stopped before the ` (id: `
+        // suffix. The byte-identity check this test replaced covered that by
+        // construction; matching the full line is what restores it.
+        let signal_id = &reply_required[0].0;
+        let entry =
+            format!("- [from rafters] @legion question: which lane owns retries (id: {signal_id})");
         assert!(
-            split_output.contains(&pending_replies_output),
-            "the directed section of --split output must equal legion pending-replies' \
-             rendering for the same signal verbatim; split output was:\n{split_output}\n\
-             expected to find:\n{pending_replies_output}"
+            pending_replies_output.contains(&entry),
+            "pending-replies must render the entry verbatim, id included:\n{pending_replies_output}"
         );
+        assert!(
+            split_output.contains(&entry),
+            "the inbox directed bucket must render the same entry verbatim, id included:\
+             \n{split_output}"
+        );
+
+        // What must differ, and why: boot/post-compact hands the agent a turn
+        // whose whole purpose is this mail; the inbox interrupts work that
+        // already had one.
+        assert!(
+            pending_replies_output.contains("Do not end your turn"),
+            "boot/post-compact keeps the stronger framing -- mail is the turn there:\
+             \n{pending_replies_output}"
+        );
+        assert!(
+            !split_output.contains("Do not end your turn"),
+            "mid-turn delivery must not tell the agent to stop working (#1175):\n{split_output}"
+        );
+        assert!(
+            split_output.contains("they do not interrupt"),
+            "mid-turn delivery must say peer mail defers to work in flight (#1175):\n{split_output}"
+        );
+
+        // Both keep the obligation. The change is when it is serviced.
+        for (label, text) in [
+            ("pending-replies", &pending_replies_output),
+            ("inbox --split", &split_output),
+        ] {
+            assert!(
+                text.contains("REQUIRES A REPLY"),
+                "{label} must keep the directed header"
+            );
+            assert!(
+                text.contains("ghosting"),
+                "{label} must still name ack-and-stop as ghosting"
+            );
+        }
     }
 }
