@@ -7,6 +7,15 @@
 //! for def/refs/list/hover stays a bare array (or, for hover, the existing
 //! bare object/`null`), exactly as before this issue.
 
+// Every test (and helper) in this file is `#[cfg(unix)]` -- the fixture
+// builder needs `std::os::unix::fs::PermissionsExt` to chmod the PATH-shim
+// script executable, which does not exist on Windows. Gating this `use`
+// block to match is not cosmetic: an ungated `use` naming a `#[cfg(unix)]`
+// item is a hard compile error on Windows (E0432, "found an item that was
+// configured out"), and it takes the whole integration test binary down
+// with it -- no test in the suite runs, on any platform, until the crate
+// compiles for Windows too.
+#[cfg(unix)]
 use crate::common::{
     index_via_fake_scip_rust, legion_cmd, run_git_fixture, run_git_fixture_output, run_ok,
     run_ok_output, run_ok_stderr, seed_watch_toml,
@@ -84,7 +93,10 @@ fn index_fixture_repo(
 
 /// Advance `repo_dir`'s HEAD past what was indexed, without re-running
 /// `legion index` -- the exact drift scenario `sym tree`'s equivalent test
-/// exercises.
+/// exercises. `#[cfg(unix)]` because it calls `run_git_fixture`, which is
+/// only imported under the same gate (see the `use` block's doc comment for
+/// why an ungated caller of a gated import fails the Windows build).
+#[cfg(unix)]
 fn advance_head(repo_dir: &std::path::Path) {
     std::fs::write(repo_dir.join("b.rs"), "fn b() {}\n").expect("write fixture");
     run_git_fixture(repo_dir, &["add", "b.rs"]);
