@@ -138,6 +138,29 @@ fn find_content_default_output_is_location_only_text_flag_restores_text() {
     );
 }
 
+/// #1190 review finding (LOW): a successful zero-hit scan now prints a
+/// count line where stdout used to be silent -- pin the new shape rather
+/// than leaving it untested.
+#[test]
+fn find_content_zero_hits_prints_zero_count_on_stdout() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(repo_dir.path().join("empty.txt"), "nothing here\n").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("etcrepo", repo_dir.path())]);
+
+    let stdout = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "etc", "find-content", "needle", "--repo", "etcrepo"]),
+    );
+    assert_eq!(
+        stdout.trim(),
+        "0 matches printed",
+        "a successful zero-hit scan must print the count line, got:\n{stdout}"
+    );
+}
+
 #[test]
 fn find_content_unknown_repo_fails_loudly() {
     let data_dir = tempfile::tempdir().expect("data dir");
@@ -345,6 +368,36 @@ fn find_content_hit_cap_warns_on_stdout_and_stderr() {
     assert!(
         stderr.contains("5 more matches suppressed (cap 500)"),
         "expected the existing stderr suppression note unchanged, got:\n{stderr}"
+    );
+}
+
+/// #1190 review finding (LOW): exactly `MAX_HITS` matches with nothing left
+/// over must NOT print a truncation clause -- only `result.suppressed > 0`
+/// triggers it, and this pins the boundary the hit-cap test above doesn't
+/// reach.
+#[test]
+fn find_content_exact_cap_boundary_prints_no_truncation_clause() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    // Exactly MAX_HITS matching lines: nothing suppressed.
+    std::fs::write(repo_dir.path().join("many.txt"), "needle\n".repeat(500))
+        .expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("etcrepo", repo_dir.path())]);
+
+    let stdout = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "etc", "find-content", "needle", "--repo", "etcrepo"]),
+    );
+    assert_eq!(
+        stdout.lines().count(),
+        501,
+        "500 locations plus the count line, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("500 matches printed") && !stdout.contains("suppressed"),
+        "hitting the cap exactly must not claim truncation, got:\n{stdout}"
     );
 }
 
