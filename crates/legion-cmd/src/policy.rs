@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::decision::ProxyReason;
+use crate::decision::{Decision, ManagedTarget, ProxyReason};
 
 /// Errors raised while parsing or validating a policy document. Each names
 /// the JSON pointer of the invalid entry, so an operator editing
@@ -55,6 +55,19 @@ pub enum PolicyError {
     /// A sym job has an empty `sym_command`.
     #[error("{pointer}: sym job must name a non-empty sym command")]
     EmptySymCommand { pointer: String },
+
+    /// A sym job has an empty `interpreter_patterns` list, which can never
+    /// match anything.
+    #[error("{pointer}: sym job must have at least one interpreter pattern")]
+    EmptySymPatterns { pointer: String },
+
+    /// A tool kind's rules are shaped for the wrong kind of tool: `Bash`
+    /// must use `"kind": "bash"`, and every other tool kind must use
+    /// `"kind": "fields"`. Both shapes parse fine on their own, but paired
+    /// with the wrong tool kind they can never be evaluated correctly, so
+    /// this is rejected here rather than silently treated as ungoverned.
+    #[error("{pointer}: {message}")]
+    MismatchedToolRulesShape { pointer: String, message: String },
 }
 
 /// The tool kinds the policy can route on (FR-CMD-011). A `Bash` call
@@ -88,10 +101,6 @@ impl ToolKind {
             .iter()
             .find(|(known, _)| *known == name)
             .map(|(_, kind)| *kind)
-    }
-
-    fn from_policy_key(key: &str) -> Option<ToolKind> {
-        ToolKind::from_tool_name(key)
     }
 }
 
@@ -213,41 +222,19 @@ impl Predicate {
     }
 }
 
-/// The outcome a matched [`Rule`] yields: one of the five closed
-/// [`crate::Decision`] arms, expressed as data rather than as a
-/// caller-constructed `Decision`, since some fields (a proxy reason, an
-/// ask question) need validation the parser performs once at load time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuleOutcome {
-    Allow {
-        note: Option<String>,
-    },
-    Rewrite {
-        target: String,
-        reason: String,
-    },
-    Proxy {
-        reason: ProxyReason,
-    },
-    Deny {
-        reason: String,
-        instead: String,
-    },
-    Ask {
-        question: String,
-        reason: String,
-        needs_operator: bool,
-    },
-}
-
 /// One argument-level rule (FR-CMD-011): a predicate, the lookups it
-/// requires, and the outcome it yields when both are satisfied.
+/// requires, and the [`Decision`] it yields when both are satisfied,
+/// already validated at parse time through `Decision`'s own constructors
+/// (see [`convert_decision`]). `needs_operator` (FR-CMD-006) is only
+/// meaningful when `decision` is [`Decision::Ask`]; it is always `false`
+/// otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub id: String,
     pub predicate: Predicate,
     pub requires: Vec<RequiredLookup>,
-    pub outcome: RuleOutcome,
+    pub decision: Decision,
+    pub needs_operator: bool,
 }
 
 /// One job `legion sym` serves (FR-CMD-007): the sym command that job maps
@@ -347,19 +334,26 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
     let mut tools = BTreeMap::new();
     for (key, raw_rules) in raw.tools {
         let pointer = format!("/tools/{key}");
-        let kind = ToolKind::from_policy_key(&key).ok_or_else(|| PolicyError::UnknownToolKind {
+        let kind = ToolKind::from_tool_name(&key).ok_or_else(|| PolicyError::UnknownToolKind {
             pointer: pointer.clone(),
             value: key.clone(),
         })?;
-        let rules = convert_tool_rules(&pointer, raw_rules)?;
+        let rules = convert_tool_rules(&pointer, kind, raw_rules)?;
         tools.insert(kind, rules);
     }
 
     let mut sym_jobs = Vec::with_capacity(raw.sym_jobs.len());
     for (index, raw_job) in raw.sym_jobs.into_iter().enumerate() {
-        let pointer = format!("/sym_jobs/{index}/sym_command");
+        let job_pointer = format!("/sym_jobs/{index}");
         if raw_job.sym_command.is_empty() {
-            return Err(PolicyError::EmptySymCommand { pointer });
+            return Err(PolicyError::EmptySymCommand {
+                pointer: format!("{job_pointer}/sym_command"),
+            });
+        }
+        if raw_job.interpreter_patterns.is_empty() {
+            return Err(PolicyError::EmptySymPatterns {
+                pointer: format!("{job_pointer}/interpreter_patterns"),
+            });
         }
         sym_jobs.push(SymJob {
             id: raw_job.id,
@@ -371,9 +365,19 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
     Ok(Policy { tools, sym_jobs })
 }
 
-fn convert_tool_rules(pointer: &str, raw: RawToolRules) -> Result<ToolRules, PolicyError> {
-    match raw {
-        RawToolRules::Bash { families } => {
+/// Converts a tool kind's raw rules, rejecting a shape that does not fit
+/// `kind`: `Bash` must carry `"kind": "bash"` families, and every other
+/// tool kind must carry `"kind": "fields"` rules (FR-CMD-011). Both raw
+/// shapes parse fine on their own; only pairing them with the wrong tool
+/// kind is invalid, since `evaluate` would otherwise treat a mismatched
+/// tool as ungoverned and silently allow everything routed to it.
+fn convert_tool_rules(
+    pointer: &str,
+    kind: ToolKind,
+    raw: RawToolRules,
+) -> Result<ToolRules, PolicyError> {
+    match (kind, raw) {
+        (ToolKind::Bash, RawToolRules::Bash { families }) => {
             let mut converted = BTreeMap::new();
             for (name, raw_family) in families {
                 let family_pointer = format!("{pointer}/families/{name}");
@@ -384,8 +388,20 @@ fn convert_tool_rules(pointer: &str, raw: RawToolRules) -> Result<ToolRules, Pol
                 families: converted,
             })
         }
-        RawToolRules::Fields { rules } => Ok(ToolRules::Fields {
+        (ToolKind::Bash, RawToolRules::Fields { .. }) => {
+            Err(PolicyError::MismatchedToolRulesShape {
+                pointer: pointer.to_string(),
+                message: "Bash requires \"kind\": \"bash\", found \"fields\"".to_string(),
+            })
+        }
+        (_, RawToolRules::Fields { rules }) => Ok(ToolRules::Fields {
             rules: convert_rules(&format!("{pointer}/rules"), rules)?,
+        }),
+        (_, RawToolRules::Bash { .. }) => Err(PolicyError::MismatchedToolRulesShape {
+            pointer: pointer.to_string(),
+            message:
+                "every tool kind other than Bash requires \"kind\": \"fields\", found \"bash\""
+                    .to_string(),
         }),
     }
 }
@@ -396,18 +412,26 @@ fn convert_rules(pointer: &str, raw_rules: Vec<RawRule>) -> Result<Vec<Rule>, Po
         .enumerate()
         .map(|(index, raw_rule)| {
             let rule_pointer = format!("{pointer}/{index}");
-            let outcome = convert_outcome(&format!("{rule_pointer}/outcome"), &raw_rule.outcome)?;
+            let (decision, needs_operator) =
+                convert_decision(&format!("{rule_pointer}/outcome"), &raw_rule.outcome)?;
             Ok(Rule {
                 id: raw_rule.id,
                 predicate: raw_rule.predicate,
                 requires: raw_rule.requires,
-                outcome,
+                decision,
+                needs_operator,
             })
         })
         .collect()
 }
 
-fn convert_outcome(pointer: &str, value: &Value) -> Result<RuleOutcome, PolicyError> {
+/// Converts a rule's raw `outcome` JSON into a validated [`Decision`] plus
+/// its `needs_operator` mark. Building the `Decision` through its own
+/// constructors (`Decision::deny`, `Decision::ask`, `ProxyReason::try_from`)
+/// rather than re-implementing their non-empty checks here means the two
+/// cannot drift apart, and nothing downstream needs to `.expect()` past an
+/// invariant this function already enforced.
+fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), PolicyError> {
     let kind =
         value
             .get("kind")
@@ -443,13 +467,23 @@ fn convert_outcome(pointer: &str, value: &Value) -> Result<RuleOutcome, PolicyEr
     }
 
     match kind {
-        "allow" => Ok(RuleOutcome::Allow {
-            note: field("note"),
-        }),
-        "rewrite" => Ok(RuleOutcome::Rewrite {
-            target: required_field("target")?,
-            reason: required_field("reason")?,
-        }),
+        "allow" => Ok((
+            Decision::Allow {
+                note: field("note"),
+            },
+            false,
+        )),
+        "rewrite" => {
+            let target = required_field("target")?;
+            let reason = required_field("reason")?;
+            Ok((
+                Decision::Rewrite {
+                    target: ManagedTarget::new(target),
+                    reason,
+                },
+                false,
+            ))
+        }
         "proxy" => {
             let reason_pointer = format!("{pointer}/reason");
             let raw_reason = required_field("reason").map_err(|_| PolicyError::InvalidOutcome {
@@ -462,29 +496,31 @@ fn convert_outcome(pointer: &str, value: &Value) -> Result<RuleOutcome, PolicyEr
                     value: raw_reason,
                 }
             })?;
-            Ok(RuleOutcome::Proxy { reason })
+            Ok((Decision::Proxy { reason }, false))
         }
-        "deny" => Ok(RuleOutcome::Deny {
-            reason: required_field("reason")?,
-            instead: required_field("instead")?,
-        }),
+        "deny" => {
+            let reason = field("reason").unwrap_or_default();
+            let instead = field("instead").unwrap_or_default();
+            let decision =
+                Decision::deny(reason, instead).map_err(|_| PolicyError::InvalidOutcome {
+                    pointer: pointer.to_string(),
+                    message: "a \"deny\" outcome must have a non-empty \"reason\" and \"instead\""
+                        .to_string(),
+                })?;
+            Ok((decision, false))
+        }
         "ask" => {
             let question = field("question").unwrap_or_default();
             let reason = field("reason").unwrap_or_default();
-            if question.is_empty() || reason.is_empty() {
-                return Err(PolicyError::EmptyAskRule {
+            let decision =
+                Decision::ask(question, reason).map_err(|_| PolicyError::EmptyAskRule {
                     pointer: pointer.to_string(),
-                });
-            }
+                })?;
             let needs_operator = value
                 .get("needs_operator")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            Ok(RuleOutcome::Ask {
-                question,
-                reason,
-                needs_operator,
-            })
+            Ok((decision, needs_operator))
         }
         other => Err(PolicyError::UnknownDecisionKind {
             pointer: pointer.to_string(),
@@ -631,8 +667,8 @@ mod tests {
             Some(ToolRules::Bash { families }) => {
                 let rule = &families.get("gh").expect("gh family").rules[0];
                 assert_eq!(
-                    rule.outcome,
-                    RuleOutcome::Proxy {
+                    rule.decision,
+                    Decision::Proxy {
                         reason: ProxyReason::Opaque
                     }
                 );
@@ -677,6 +713,47 @@ mod tests {
                 assert_eq!(pointer, "/sym_jobs/0/sym_command");
             }
             other => panic!("expected EmptySymCommand, got {other:?}"),
+        }
+    }
+
+    // -- Sym job without any interpreter patterns ---------------------------
+
+    #[test]
+    fn sym_job_without_interpreter_patterns_is_rejected_with_pointer() {
+        let text =
+            r#"{"sym_jobs": [{"id": "job-1", "sym_command": "legion sym etc find-content"}]}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::EmptySymPatterns { pointer } => {
+                assert_eq!(pointer, "/sym_jobs/0/interpreter_patterns");
+            }
+            other => panic!("expected EmptySymPatterns, got {other:?}"),
+        }
+    }
+
+    // -- A tool kind's rules must be shaped for that kind -------------------
+
+    #[test]
+    fn bash_tool_kind_with_fields_shaped_rules_is_rejected() {
+        let text = r#"{"tools": {"Bash": {"kind": "fields", "rules": []}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::MismatchedToolRulesShape { pointer, .. } => {
+                assert_eq!(pointer, "/tools/Bash");
+            }
+            other => panic!("expected MismatchedToolRulesShape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_bash_tool_kind_with_bash_shaped_rules_is_rejected() {
+        let text = r#"{"tools": {"Edit": {"kind": "bash", "families": {}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::MismatchedToolRulesShape { pointer, .. } => {
+                assert_eq!(pointer, "/tools/Edit");
+            }
+            other => panic!("expected MismatchedToolRulesShape, got {other:?}"),
         }
     }
 
@@ -807,7 +884,7 @@ mod tests {
 
     #[test]
     fn policy_with_only_sym_jobs_is_not_empty() {
-        let text = r#"{"sym_jobs": [{"id": "j", "sym_command": "legion sym etc find-content"}]}"#;
+        let text = r#"{"sym_jobs": [{"id": "j", "sym_command": "legion sym etc find-content", "interpreter_patterns": ["rglob("]}]}"#;
         let policy = parse_policy(text).expect("valid policy");
         assert!(!policy.is_empty());
     }

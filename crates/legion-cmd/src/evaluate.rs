@@ -8,9 +8,7 @@ use std::collections::BTreeMap;
 use crate::decision::{
     Context, DecidingEntry, Decision, Facts, Lookup, ProxyReason, Routed, ToolCall,
 };
-use crate::policy::{
-    Family, MatchInput, Policy, RequiredLookup, Rule, RuleOutcome, ToolKind, ToolRules,
-};
+use crate::policy::{Family, MatchInput, Policy, RequiredLookup, Rule, ToolKind, ToolRules};
 use crate::tokenizer::{self, Invocation, Opaque, Scan};
 
 /// The message every FR-CMD-016 default carries, so the agent always sees
@@ -60,15 +58,14 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
             // policy still asks here rather than denying, since there is
             // no command shape yet to apply the empty-policy default to.
             let message = err.to_string();
-            let decision = Decision::ask(
+            // `err.to_string()` is a thiserror `#[error(...)]` display, so
+            // it is never empty, and the reason is a non-empty constant --
+            // both non-empty by construction, so the infallible
+            // constructor is safe here without a panic path.
+            let decision = Decision::ask_infallible(
                 format!("the command could not be parsed: {message}"),
                 "a malformed command cannot be routed safely",
-            )
-            .unwrap_or_else(|_| {
-                // ContractError only fires on an empty string, and both
-                // arguments above are non-empty constants/format!s.
-                unreachable!("ask() constructor arguments are always non-empty")
-            });
+            );
             return Routed {
                 decision,
                 facts: Facts::default(),
@@ -96,13 +93,15 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     if let Some((job_id, sym_command, matched_patterns)) =
         find_sym_job(&policy.sym_jobs, &scan.opaque)
     {
-        let decision = Decision::deny(
+        // `sym_command` is non-empty because `parse_policy` already
+        // rejects an empty one (`PolicyError::EmptySymCommand`), and the
+        // reason is a non-empty format! -- both non-empty by construction.
+        let decision = Decision::deny_infallible(
             format!(
                 "this command's job is one legion sym serves (matched patterns: {matched_patterns})"
             ),
             sym_command,
-        )
-        .expect("reason and instead are both non-empty here");
+        );
         return Routed {
             decision,
             facts,
@@ -119,7 +118,7 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         .iter()
         .map(|inv| evaluate_invocation(families, inv, ctx))
         .collect();
-    parts.extend(scan.opaque.iter().map(opaque_part));
+    parts.extend(scan.opaque.iter().map(|_| opaque_part()));
 
     fold(parts, facts)
 }
@@ -185,10 +184,10 @@ fn evaluate_rules(
             );
         }
         return (
-            decision_from_outcome(&rule.outcome),
+            rule.decision.clone(),
             DecidingEntry::Rule {
                 id: rule.id.clone(),
-                needs_operator: matches!(rule.outcome, RuleOutcome::Ask { needs_operator, .. } if needs_operator),
+                needs_operator: rule.needs_operator,
             },
         );
     }
@@ -210,27 +209,10 @@ fn missing_required_lookup(requires: &[RequiredLookup], ctx: &Context) -> bool {
     })
 }
 
-fn decision_from_outcome(outcome: &RuleOutcome) -> Decision {
-    match outcome {
-        RuleOutcome::Allow { note } => Decision::Allow { note: note.clone() },
-        RuleOutcome::Rewrite { target, reason } => Decision::Rewrite {
-            target: crate::decision::ManagedTarget::new(target.clone()),
-            reason: reason.clone(),
-        },
-        RuleOutcome::Proxy { reason } => Decision::Proxy { reason: *reason },
-        RuleOutcome::Deny { reason, instead } => Decision::deny(reason.clone(), instead.clone())
-            .expect("policy parsing already rejected empty deny fields"),
-        RuleOutcome::Ask {
-            question, reason, ..
-        } => Decision::ask(question.clone(), reason.clone())
-            .expect("policy parsing already rejected empty ask fields"),
-    }
-}
-
 /// Every non-interpreter opaque region is proxied with reason opaque
 /// (FR-CMD-004, FR-CMD-007): the scanner cannot see into it, so it is
 /// recorded coverage-unknown rather than silently allowed.
-fn opaque_part(_opaque: &Opaque) -> (Decision, DecidingEntry) {
+fn opaque_part() -> (Decision, DecidingEntry) {
     (
         Decision::Proxy {
             reason: ProxyReason::Opaque,
@@ -254,9 +236,9 @@ fn find_sym_job(
             continue;
         };
         for job in sym_jobs {
-            if job.interpreter_patterns.is_empty() {
-                continue;
-            }
+            // `parse_policy` already rejects a sym job with an empty
+            // `interpreter_patterns` list (`PolicyError::EmptySymPatterns`),
+            // so every job reaching here has at least one pattern to check.
             if job
                 .interpreter_patterns
                 .iter()
@@ -276,17 +258,16 @@ fn find_sym_job(
 /// falls through to the no-managed-binary allow default, the same as any
 /// other command nothing in the policy governs.
 fn fold(parts: Vec<(Decision, DecidingEntry)>, facts: Facts) -> Routed {
-    if parts.is_empty() {
+    let Some((decision, entry)) = parts
+        .into_iter()
+        .min_by_key(|(decision, _)| severity(decision))
+    else {
         return Routed {
             decision: allow_default(default_messages::NO_MANAGED_BINARY),
             facts,
             entry: DecidingEntry::Default,
         };
-    }
-    let (decision, entry) = parts
-        .into_iter()
-        .min_by_key(|(decision, _)| severity(decision))
-        .expect("checked non-empty above");
+    };
     Routed {
         decision,
         facts,
@@ -351,8 +332,10 @@ fn allow_default(message: &str) -> Decision {
 }
 
 fn deny_default(message: &str) -> Decision {
-    Decision::deny(message, default_messages::DEFAULT_INSTEAD)
-        .expect("default messages are fixed non-empty constants")
+    // `message` is always one of the `default_messages` constants above,
+    // and `DEFAULT_INSTEAD` is a fixed non-empty constant -- both
+    // non-empty by construction, so the infallible constructor is safe.
+    Decision::deny_infallible(message, default_messages::DEFAULT_INSTEAD)
 }
 
 fn routed_default_deny(message: &str, facts: Facts) -> Routed {

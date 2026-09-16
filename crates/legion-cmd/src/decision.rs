@@ -105,6 +105,37 @@ impl Decision {
     ) -> Result<Decision, ContractError> {
         Ok(Decision::Ask(AskDetails::new(question, reason)?))
     }
+
+    /// Builds a [`Decision::Deny`] from text already known to be non-empty:
+    /// a fixed default message and instead-text, or a `reason`/`instead`
+    /// pair `parse_policy` has already run through [`DenyDetails::new`].
+    /// Crate-internal only, so it cannot be reached with caller-supplied
+    /// text that has not been validated -- this exists so those call sites
+    /// do not need a panic path to bridge a fallible constructor back to
+    /// an invariant already guaranteed elsewhere.
+    pub(crate) fn deny_infallible(
+        reason: impl Into<String>,
+        instead: impl Into<String>,
+    ) -> Decision {
+        Decision::Deny(DenyDetails {
+            reason: reason.into(),
+            instead: instead.into(),
+        })
+    }
+
+    /// Builds a [`Decision::Ask`] from text already known to be non-empty
+    /// (a fixed default message, or `question`/`reason` `evaluate` builds
+    /// from a non-empty [`crate::tokenizer::ScanError`] display and a fixed
+    /// constant). See [`Decision::deny_infallible`] for the same rationale.
+    pub(crate) fn ask_infallible(
+        question: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Decision {
+        Decision::Ask(AskDetails {
+            question: question.into(),
+            reason: reason.into(),
+        })
+    }
 }
 
 /// A denied command's reason and its replacement (FR-CMD-005).
@@ -343,8 +374,9 @@ pub struct Facts {
 pub enum DecidingEntry {
     /// A specific policy rule or sym job matched. `needs_operator` is only
     /// meaningful when the resulting [`Decision`] is [`Decision::Ask`]
-    /// (FR-CMD-006); it is always `false` for every other outcome, and
-    /// `#1237` is what sets it from the agent's confirmation.
+    /// (FR-CMD-006); it is always `false` for every other outcome, and it
+    /// is copied straight from the matched rule's own `needs_operator`
+    /// mark -- `#1237` reads it here, it does not set it.
     Rule { id: String, needs_operator: bool },
 
     /// No rule matched; one of FR-CMD-016's defaults applied (no managed
