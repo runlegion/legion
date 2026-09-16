@@ -182,7 +182,7 @@ impl Scanner {
         if self.starts("<(") || self.starts(">(") {
             self.i += 2;
             let offset = self.i;
-            let inner = self.read_balanced('(', ')', 1, true).ok_or(
+            let inner = self.read_balanced('(', ')', 1, true)?.ok_or(
                 ScanError::UnterminatedSubstitution {
                     offset: self.byte_offset(offset),
                 },
@@ -202,7 +202,7 @@ impl Scanner {
         }
         if self.starts("<<") {
             let op_offset = self.i;
-            let (delim, strip) = self.read_heredoc_op();
+            let (delim, strip) = self.read_heredoc_op()?;
             if delim.is_empty() {
                 return Err(ScanError::MissingHeredocDelimiter {
                     offset: self.byte_offset(op_offset),
@@ -236,7 +236,7 @@ impl Scanner {
     /// position: the optional `-` strip flag, the whitespace before the
     /// delimiter, and the delimiter word itself. Returns an empty delimiter
     /// if none was found.
-    fn read_heredoc_op(&mut self) -> (String, bool) {
+    fn read_heredoc_op(&mut self) -> Result<(String, bool), ScanError> {
         self.i += 2; // "<<"
         let strip = self.peek(0) == Some('-');
         if strip {
@@ -245,13 +245,15 @@ impl Scanner {
         while matches!(self.peek(0), Some(' ' | '\t')) {
             self.i += 1;
         }
-        (self.read_heredoc_delimiter(), strip)
+        Ok((self.read_heredoc_delimiter()?, strip))
     }
 
     /// A heredoc delimiter word: unquoted, single-, or double-quoted, with
     /// quoting stripped. Quoting only controls expansion inside the body,
     /// which this scanner never performs, so only the bare text matters.
-    fn read_heredoc_delimiter(&mut self) -> String {
+    /// An unterminated quote stops at the newline rather than consuming the
+    /// rest of the input looking for a closing quote that may not exist.
+    fn read_heredoc_delimiter(&mut self) -> Result<String, ScanError> {
         let mut delim = String::new();
         while let Some(c) = self.peek(0) {
             if c.is_whitespace() || is_meta(c) {
@@ -259,13 +261,30 @@ impl Scanner {
             }
             match c {
                 '\'' | '"' => {
+                    let quote_offset = self.i;
                     self.i += 1;
+                    let mut closed = false;
                     while let Some(q) = self.peek(0) {
+                        if q == '\n' {
+                            break;
+                        }
                         self.i += 1;
                         if q == c {
+                            closed = true;
                             break;
                         }
                         delim.push(q);
+                    }
+                    if !closed {
+                        return Err(if c == '\'' {
+                            ScanError::UnterminatedSingleQuote {
+                                offset: self.byte_offset(quote_offset),
+                            }
+                        } else {
+                            ScanError::UnterminatedDoubleQuote {
+                                offset: self.byte_offset(quote_offset),
+                            }
+                        });
                     }
                 }
                 '\\' => {
@@ -281,7 +300,7 @@ impl Scanner {
                 }
             }
         }
-        delim
+        Ok(delim)
     }
 
     /// Reads lines until one equals `delim` (after stripping leading tabs,
@@ -358,10 +377,19 @@ impl Scanner {
                         continue;
                     }
                     w.quoted = true;
-                    if let Some(n) = self.peek(1) {
-                        w.text.push(n);
+                    match self.peek(1) {
+                        Some(n) => {
+                            w.text.push(n);
+                            self.i += 2;
+                        }
+                        None => {
+                            // A lone trailing backslash at the end of the
+                            // input escapes nothing: keep it as a literal
+                            // `\` rather than silently dropping it.
+                            w.text.push('\\');
+                            self.i += 1;
+                        }
                     }
-                    self.i += 2;
                 }
                 '\'' => {
                     let quote_offset = self.i;
@@ -456,7 +484,7 @@ impl Scanner {
         if self.starts("$((") {
             self.i += 3;
             let offset = self.i;
-            let inner = self.read_balanced('(', ')', 2, false).ok_or(
+            let inner = self.read_balanced('(', ')', 2, false)?.ok_or(
                 ScanError::UnterminatedSubstitution {
                     offset: self.byte_offset(offset),
                 },
@@ -469,7 +497,7 @@ impl Scanner {
         } else if self.starts("$(") {
             self.i += 2;
             let offset = self.i;
-            let inner = self.read_balanced('(', ')', 1, true).ok_or(
+            let inner = self.read_balanced('(', ')', 1, true)?.ok_or(
                 ScanError::UnterminatedSubstitution {
                     offset: self.byte_offset(offset),
                 },
@@ -482,7 +510,7 @@ impl Scanner {
         } else if self.starts("${") {
             let offset = self.i;
             self.i += 2;
-            let inner = self.read_balanced('{', '}', 1, false).ok_or(
+            let inner = self.read_balanced('{', '}', 1, false)?.ok_or(
                 ScanError::UnterminatedSubstitution {
                     offset: self.byte_offset(offset),
                 },
@@ -609,7 +637,7 @@ impl Scanner {
         close: char,
         initial_depth: usize,
         quote_aware: bool,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, ScanError> {
         let start = self.i;
         let mut depth = initial_depth;
         let mut heredocs: Vec<InlineHeredoc> = Vec::new();
@@ -617,7 +645,7 @@ impl Scanner {
             if quote_aware {
                 match c {
                     '<' if self.peek(1) == Some('<') && self.peek(2) != Some('<') => {
-                        let (delimiter, strip_tabs) = self.read_heredoc_op();
+                        let (delimiter, strip_tabs) = self.read_heredoc_op()?;
                         if !delimiter.is_empty() {
                             heredocs.push(InlineHeredoc {
                                 delimiter,
@@ -649,7 +677,7 @@ impl Scanner {
                     }
                     '"' => {
                         self.i += 1;
-                        self.skip_double();
+                        self.skip_double()?;
                         continue;
                     }
                     '`' => {
@@ -673,30 +701,31 @@ impl Scanner {
                 self.i += 1;
                 if depth == 0 {
                     let end = self.i.saturating_sub(initial_depth).max(start);
-                    return Some(self.c[start..end.min(self.c.len())].iter().collect());
+                    return Ok(Some(self.c[start..end.min(self.c.len())].iter().collect()));
                 }
             } else {
                 self.i += 1;
             }
         }
-        None
+        Ok(None)
     }
 
-    fn skip_double(&mut self) {
+    fn skip_double(&mut self) -> Result<(), ScanError> {
         while let Some(c) = self.peek(0) {
             match c {
                 '\\' => self.i += 2,
                 '"' => {
                     self.i += 1;
-                    return;
+                    return Ok(());
                 }
                 '$' if self.peek(1) == Some('(') => {
                     self.i += 2;
-                    let _ = self.read_balanced('(', ')', 1, true);
+                    let _ = self.read_balanced('(', ')', 1, true)?;
                 }
                 _ => self.i += 1,
             }
         }
+        Ok(())
     }
 
     /// Returns the byte length (in chars) consumed by a function-definition
@@ -770,7 +799,7 @@ impl Scanner {
         let header_start = self.i;
         self.i = header_start + header_len; // just past the opening `{`
         let brace_offset = self.byte_offset(self.i - 1);
-        self.read_balanced('{', '}', 1, true)
+        self.read_balanced('{', '}', 1, true)?
             .ok_or(ScanError::UnterminatedFunctionBody {
                 offset: brace_offset,
             })

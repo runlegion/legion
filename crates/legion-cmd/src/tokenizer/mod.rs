@@ -99,8 +99,9 @@ pub enum Opaque {
     ScriptFile,
     /// `eval` and its argument.
     Eval,
-    /// A command name built at runtime: a bare `$VAR`, `$@`, `$*`, or a
-    /// whole-word substitution used as the command itself.
+    /// A command name that is not a static, non-empty word: a bare `$VAR`,
+    /// `$@`, `$*`, a whole-word substitution used as the command itself, or
+    /// a word whose basename is empty (`""`, `dir/`).
     DynamicCommand,
     /// An interpreter or shell reading its program from stdin or a heredoc,
     /// with no inline code and no script file named.

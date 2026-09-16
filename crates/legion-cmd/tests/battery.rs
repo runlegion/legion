@@ -11,7 +11,11 @@
 //!   command that mixes a resolved call with an opaque region.
 //! - `opaque` rows list `opaque_kinds: [<kebab-case Opaque variant name>]`;
 //!   every named kind must be present in `scan.opaque`.
-//! - `benign` rows have neither: `scan` must succeed with no further claim.
+//! - `benign` rows have neither, but may carry `absent: [binary...]`: none
+//!   of those binaries may appear as an invocation anywhere except at
+//!   `First` (the row's own head command may legitimately be one of them,
+//!   e.g. `pnpm` in `pnpm wrangler deploy`; what must never happen is that
+//!   binary showing up as a second, separately-resolved invocation).
 //! - `error` is not one of FR-CMD-007's three verdicts: a deliberate,
 //!   disclosed extension for exactly one row (`unterminated-quote`) whose
 //!   only honest expectation is a [`legion_cmd::ScanError`]. It is excluded
@@ -43,7 +47,10 @@ enum Expected {
     Opaque {
         opaque_kinds: Vec<String>,
     },
-    Benign,
+    Benign {
+        #[serde(default)]
+        absent: Vec<String>,
+    },
     Error,
 }
 
@@ -150,7 +157,21 @@ fn check_row(row: &Row, result: &legion_cmd::Scan) -> Result<(), String> {
             check_opaque_kinds(opaque_kinds, result)
         }
         Expected::Opaque { opaque_kinds } => check_opaque_kinds(opaque_kinds, result),
-        Expected::Benign => Ok(()),
+        Expected::Benign { absent } => {
+            for binary in absent {
+                let bad = result
+                    .invocations
+                    .iter()
+                    .any(|inv| &inv.binary == binary && inv.position != Position::First);
+                if bad {
+                    return Err(format!(
+                        "expected `{binary}` to never appear except at First, got {:#?}",
+                        result.invocations
+                    ));
+                }
+            }
+            Ok(())
+        }
         Expected::Error => {
             unreachable!("Expected::Error rows are handled before check_row is called")
         }

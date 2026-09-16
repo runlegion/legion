@@ -16,8 +16,11 @@ pub(super) const CLAUSE_KEYWORDS: &[&str] = &[
 /// (wrapper name, options that take a separate value word, positional
 /// arguments consumed before the wrapped command) -- FR-CMD-007's inline
 /// wrapper table, hardened per RESEARCH-CMD-bounded-tokenizer's
-/// `next_step.if_yes` with `watch`, `ssh`, `parallel`, and `setsid`.
-/// `docker exec` is handled separately: it is a two-word wrapper.
+/// `next_step.if_yes` with `watch`, `ssh`, `parallel`, and `setsid`, and per
+/// FR-CMD-007 revision 6 with the single-word JS package runners.
+/// `docker exec` and the two-word JS runner forms (`pnpm exec`, `pnpm dlx`,
+/// `npm exec`, `yarn exec`, `yarn dlx`) are handled separately, by
+/// [`TWO_WORD_WRAPPERS`].
 pub(super) const WRAPPERS: &[(&str, &[&str], usize)] = &[
     ("env", &["-u", "-C", "--unset", "--chdir"], 0),
     ("sudo", &["-u", "-g", "-p", "-C", "-D"], 0),
@@ -61,6 +64,32 @@ pub(super) const WRAPPERS: &[(&str, &[&str], usize)] = &[
     ),
     ("parallel", &[], 0),
     ("setsid", &[], 0),
+    // JS package runners, single-word form (FR-CMD-007 revision 6, operator
+    // decision 2026-09-16 / reflection 01a0ac2d): `npx`/`pnpx`/`bunx -y
+    // rg ...` reach the wrapped command the same way `env`/`sudo` do. `-p`
+    // and `--package` take a value; `-y`/`--yes` is boolean and needs no
+    // entry.
+    ("npx", &["-p", "--package"], 0),
+    ("pnpx", &["-p", "--package"], 0),
+    ("bunx", &["-p", "--package"], 0),
+];
+
+/// `docker`'s own global options that can precede the `exec` subcommand
+/// (`docker -H tcp://host exec box grep ...`), the ones that take a
+/// separate value word. Boolean flags (`-D`/`--debug`, `--tls`,
+/// `--tlsverify`, ...) need no table entry: the option-skip walk already
+/// skips any unlisted `-flag`/`--flag` as a single token.
+pub(super) const DOCKER_GLOBAL_VALUE_OPTS: &[&str] = &[
+    "-H",
+    "--host",
+    "-c",
+    "--context",
+    "--config",
+    "-l",
+    "--log-level",
+    "--tlscacert",
+    "--tlscert",
+    "--tlskey",
 ];
 
 /// `docker exec`'s options that take a separate value word. Not a
@@ -69,6 +98,42 @@ pub(super) const WRAPPERS: &[(&str, &[&str], usize)] = &[
 /// invocations), only `docker exec` is.
 pub(super) const DOCKER_EXEC_VALUE_OPTS: &[&str] =
     &["-u", "-w", "-e", "--user", "--workdir", "--env"];
+
+/// No global options precede `pnpm`/`npm`/`yarn`'s `exec`/`dlx`, unlike
+/// `docker`'s `-H`/`-c`/... before `exec`.
+const NO_GLOBAL_OPTS: &[&str] = &[];
+
+/// (first word, second word, the first word's own options that can precede
+/// the second word, the second word's own options, positional arguments
+/// consumed before the wrapped command -- `docker exec` needs the
+/// container name, the JS runners do not).
+type TwoWordWrapper = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+    usize,
+);
+
+/// Two-word inline wrappers (FR-CMD-007 revision 6, operator decision
+/// 2026-09-16 / reflection 01a0ac2d): `docker exec` and the JS
+/// package-runner `exec`/`dlx` forms, one shared mechanism rather than a
+/// special case per tool. A bare `pnpm <name>` (no `exec`/`dlx`) is not a
+/// wrapper at all: it falls through to an ordinary invocation.
+pub(super) const TWO_WORD_WRAPPERS: &[TwoWordWrapper] = &[
+    (
+        "docker",
+        "exec",
+        DOCKER_GLOBAL_VALUE_OPTS,
+        DOCKER_EXEC_VALUE_OPTS,
+        1,
+    ),
+    ("pnpm", "exec", NO_GLOBAL_OPTS, &["--package", "-p"], 0),
+    ("pnpm", "dlx", NO_GLOBAL_OPTS, &["--package", "-p"], 0),
+    ("npm", "exec", NO_GLOBAL_OPTS, &["--package", "-p"], 0),
+    ("yarn", "exec", NO_GLOBAL_OPTS, &[], 0),
+    ("yarn", "dlx", NO_GLOBAL_OPTS, &[], 0),
+];
 
 /// Launchers this scanner recognizes as wrapper-shaped -- a bare command
 /// followed by the command it runs -- but which FR-CMD-007's table does not

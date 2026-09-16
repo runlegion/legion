@@ -3,8 +3,8 @@
 
 use super::lexer::{Scanner, Tok, Word};
 use super::tables::{
-    CLAUSE_KEYWORDS, DOCKER_EXEC_VALUE_OPTS, END_KEYWORDS, INTERPRETERS, LOOKUPS, PREFIX_KEYWORDS,
-    SCRIPT_EXTENSIONS, SHELLS, UNKNOWN_WRAPPERS, WRAPPERS,
+    CLAUSE_KEYWORDS, END_KEYWORDS, INTERPRETERS, LOOKUPS, PREFIX_KEYWORDS, SCRIPT_EXTENSIONS,
+    SHELLS, TWO_WORD_WRAPPERS, UNKNOWN_WRAPPERS, WRAPPERS,
 };
 use super::{Invocation, MAX_DEPTH, Opaque, Position, Scan, ScanError};
 
@@ -171,17 +171,13 @@ fn skip_prefix(words: &[Word], mut i: usize, mut position: Position) -> (usize, 
 
 /// Skips `-flag`/`--flag` options starting at `words[from]`, consuming a
 /// separate value word for each name in `value_opts`, and stopping at `--`
-/// (consumed), a non-flag word, or the end of `words`. When
-/// `skip_assignment`, an `env`-style `NAME=value` word is also skipped
-/// (only `env` itself takes bare assignments ahead of its wrapped command).
-/// Returns the index of the first word that is not part of the option run.
-fn skip_options(words: &[Word], from: usize, value_opts: &[&str], skip_assignment: bool) -> usize {
+/// (consumed), a non-flag word, or the end of `words`. Returns the index of
+/// the first word that is not part of the option run.
+fn skip_options(words: &[Word], from: usize, value_opts: &[&str]) -> usize {
     let mut j = from;
     while let Some(word) = words.get(j) {
         let t = word.text.as_str();
-        if skip_assignment && is_assignment(t) {
-            j += 1;
-        } else if t == "--" {
+        if t == "--" {
             j += 1;
             break;
         } else if t.starts_with('-') && t.len() > 1 {
@@ -238,9 +234,18 @@ fn resolve_at(
     let bin = basename(raw);
     let rest = &words[i + 1..];
     if bin.is_empty() {
+        // `""`, `dir/`, ...: no static, non-empty word names the command.
+        out.opaque.push(Opaque::DynamicCommand);
         return Ok(());
     }
-    if SCRIPT_EXTENSIONS.iter().any(|e| bin.ends_with(e)) {
+    if SCRIPT_EXTENSIONS.iter().any(|e| {
+        // Byte-slice, not str-slice: `bin` may contain multibyte
+        // characters before the extension, and a byte offset that does
+        // not land on a UTF-8 char boundary would panic a `&str` slice.
+        // Raw bytes have no such requirement.
+        bin.len() >= e.len()
+            && bin.as_bytes()[bin.len() - e.len()..].eq_ignore_ascii_case(e.as_bytes())
+    }) {
         out.opaque.push(Opaque::ScriptFile);
         return Ok(());
     }
@@ -266,19 +271,31 @@ fn resolve_at(
         }
         return Ok(());
     }
-    if bin == "docker" && rest.first().map(|w| w.text.as_str()) == Some("exec") {
-        let mut j = skip_options(words, i + 2, DOCKER_EXEC_VALUE_OPTS, false);
-        j += 1; // the container name
-        if j < words.len() {
-            return resolve_from(
-                words,
-                heredocs,
-                j,
-                position.max(Position::Wrapper),
-                depth,
-                out,
-            );
+    if TWO_WORD_WRAPPERS.iter().any(|(first, ..)| *first == bin) {
+        for (first, second, global_opts, sub_opts, positionals) in TWO_WORD_WRAPPERS {
+            if *first != bin {
+                continue;
+            }
+            let after_globals = skip_options(words, i + 1, global_opts);
+            if words.get(after_globals).map(|w| w.text.as_str()) == Some(*second) {
+                let mut j = skip_options(words, after_globals + 1, sub_opts);
+                j += positionals;
+                if j < words.len() {
+                    return resolve_from(
+                        words,
+                        heredocs,
+                        j,
+                        position.max(Position::Wrapper),
+                        depth,
+                        out,
+                    );
+                }
+                break;
+            }
         }
+        // Either no second word matched (a bare `pnpm grep`, an ordinary
+        // `docker build`, ...) or the wrapped command was missing: stays
+        // an ordinary invocation of the first word, already recorded above.
         return Ok(());
     }
     if UNKNOWN_WRAPPERS.contains(&bin) {
@@ -293,14 +310,10 @@ fn resolve_at(
         {
             return Ok(()); // a lookup, not an invocation of the target
         }
-        if bin == "env"
-            && let Some(k) = rest.iter().position(|w| w.text == "-S")
-            && let Some(payload) = rest.get(k + 1)
-        {
-            resolve_env_dash_s(&payload.text, position, depth, out);
-            return Ok(());
+        if bin == "env" {
+            return resolve_env(words, heredocs, i, value_opts, position, depth, out);
         }
-        let mut j = skip_options(words, i + 1, value_opts, bin == "env");
+        let mut j = skip_options(words, i + 1, value_opts);
         j += positionals;
         if j < words.len() {
             return resolve_from(
@@ -382,6 +395,53 @@ fn git_c_alias_value(rest: &[Word]) -> Option<String> {
         }
     }
     None
+}
+
+/// `env`'s own leading options: `NAME=value` assignments and flags are
+/// walked one at a time from `words[i + 1]`, so a `-S` that belongs to the
+/// wrapped command (`env sort -S 1G file`) is never mistaken for env's own
+/// `-S` -- unlike scanning `rest` for the first `-S` anywhere in it, which
+/// would. Stops at the first non-option word (the wrapped command) or, on
+/// finding env's own `-S`, dispatches to [`resolve_env_dash_s`].
+fn resolve_env(
+    words: &[Word],
+    heredocs: &[String],
+    i: usize,
+    value_opts: &[&str],
+    position: Position,
+    depth: u8,
+    out: &mut Scan,
+) -> Result<(), ScanError> {
+    let mut j = i + 1;
+    while let Some(word) = words.get(j) {
+        let t = word.text.as_str();
+        if is_assignment(t) {
+            j += 1;
+        } else if t == "-S" {
+            if let Some(payload) = words.get(j + 1) {
+                resolve_env_dash_s(&payload.text, position, depth, out);
+            }
+            return Ok(());
+        } else if t == "--" {
+            j += 1;
+            break;
+        } else if t.starts_with('-') && t.len() > 1 {
+            j += if value_opts.contains(&t) { 2 } else { 1 };
+        } else {
+            break;
+        }
+    }
+    if j < words.len() {
+        return resolve_from(
+            words,
+            heredocs,
+            j,
+            position.max(Position::Wrapper),
+            depth,
+            out,
+        );
+    }
+    Ok(())
 }
 
 /// `env -S '<command line>' ...`: the payload is a single string built at

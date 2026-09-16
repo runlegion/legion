@@ -108,6 +108,101 @@ fn env_dash_s_splits_its_payload_and_resolves_the_head() {
 }
 
 #[test]
+fn env_dash_s_belonging_to_the_wrapped_command_is_not_envs_own() {
+    // `-S` on `sort` is `sort`'s own flag (a 1 GiB buffer size), not env's
+    // string-splitting `-S`. Scanning `rest` for the first `-S` anywhere in
+    // it (rather than walking env's own leading options one at a time)
+    // would misread this as env's `-S` and turn "1G" into a bogus head
+    // invocation while losing `sort` entirely.
+    let scan = scan("env sort -S 1G file").expect("valid");
+    let sort = invocation(&scan, "sort").expect("sort resolved as env's wrapped command");
+    assert_eq!(sort.position, Position::Wrapper);
+    assert_eq!(sort.args, vec!["-S", "1G", "file"]);
+    assert!(invocation(&scan, "1G").is_none());
+}
+
+#[test]
+fn docker_global_options_precede_exec() {
+    let scan = scan("docker -H tcp://h exec box grep -c x f").expect("valid");
+    assert!(invocation(&scan, "docker").is_some());
+    let grep = invocation(&scan, "grep").expect("grep resolved through docker exec");
+    assert_eq!(grep.position, Position::Wrapper);
+}
+
+#[test]
+fn empty_basename_is_a_dynamic_command_not_a_silent_return() {
+    let scan = scan("dir/ -rn foo src").expect("valid");
+    assert!(
+        scan.opaque
+            .iter()
+            .any(|o| matches!(o, Opaque::DynamicCommand))
+    );
+    assert!(scan.invocations.is_empty());
+}
+
+#[test]
+fn script_extension_match_is_ascii_case_insensitive() {
+    let scan = scan("./scripts/RELEASE.SH --dry-run").expect("valid");
+    assert!(scan.opaque.iter().any(|o| matches!(o, Opaque::ScriptFile)));
+    assert!(scan.invocations.is_empty());
+}
+
+#[test]
+fn npx_is_a_single_word_wrapper() {
+    let scan = scan("npx -y rg --version").expect("valid");
+    assert!(invocation(&scan, "npx").is_some());
+    let rg = invocation(&scan, "rg").expect("rg resolved through npx");
+    assert_eq!(rg.position, Position::Wrapper);
+}
+
+#[test]
+fn pnpx_is_a_single_word_wrapper() {
+    let scan = scan("pnpx rg --version").expect("valid");
+    let rg = invocation(&scan, "rg").expect("rg resolved through pnpx");
+    assert_eq!(rg.position, Position::Wrapper);
+}
+
+#[test]
+fn bunx_is_a_single_word_wrapper() {
+    let scan = scan("bunx rg --version").expect("valid");
+    let rg = invocation(&scan, "rg").expect("rg resolved through bunx");
+    assert_eq!(rg.position, Position::Wrapper);
+}
+
+#[test]
+fn pnpm_exec_is_a_two_word_wrapper() {
+    let scan = scan("pnpm exec wrangler tail").expect("valid");
+    assert!(invocation(&scan, "pnpm").is_some());
+    let wrangler = invocation(&scan, "wrangler").expect("wrangler resolved through pnpm exec");
+    assert_eq!(wrangler.position, Position::Wrapper);
+}
+
+#[test]
+fn pnpm_dlx_is_a_two_word_wrapper() {
+    let scan = scan("pnpm dlx create-react-app my-app").expect("valid");
+    let created = invocation(&scan, "create-react-app").expect("resolved through pnpm dlx");
+    assert_eq!(created.position, Position::Wrapper);
+}
+
+#[test]
+fn yarn_dlx_is_a_two_word_wrapper() {
+    let scan = scan("yarn dlx cowsay hello").expect("valid");
+    let cowsay = invocation(&scan, "cowsay").expect("cowsay resolved through yarn dlx");
+    assert_eq!(cowsay.position, Position::Wrapper);
+}
+
+#[test]
+fn bare_pnpm_with_a_non_runner_argument_is_an_ordinary_invocation() {
+    // FR-CMD-007 revision 6: only `pnpm exec`/`pnpm dlx` are wrappers. A
+    // bare `pnpm grep` (the mandated benign false positive) must stay an
+    // ordinary invocation of pnpm, never reaching into "grep".
+    let scan = scan("pnpm grep").expect("valid");
+    let pnpm = invocation(&scan, "pnpm").expect("pnpm resolved");
+    assert_eq!(pnpm.args, vec!["grep"]);
+    assert!(invocation(&scan, "grep").is_none());
+}
+
+#[test]
 fn time_is_a_wrapper_not_a_skipped_keyword() {
     let scan = scan("time rg -n foo").expect("valid");
     assert!(invocation(&scan, "time").is_some());
@@ -363,6 +458,25 @@ fn unterminated_single_quote_is_a_scan_error() {
 fn unterminated_dollar_single_quote_is_a_scan_error() {
     let err = scan("grep -n $'oops src").expect_err("unterminated $'...' quote");
     assert!(matches!(err, ScanError::UnterminatedSingleQuote { .. }));
+}
+
+#[test]
+fn trailing_backslash_at_end_of_input_is_kept_literal() {
+    let scan = scan("echo foo\\").expect("a lone trailing backslash is not an error");
+    let echo = invocation(&scan, "echo").expect("echo resolved");
+    assert_eq!(echo.args, vec!["foo\\"]);
+}
+
+#[test]
+fn unterminated_quote_in_heredoc_delimiter_is_a_scan_error() {
+    // Before the fix, the unclosed `'` inside the delimiter word consumed
+    // the rest of the input looking for a closing quote that never came.
+    let err =
+        scan("bash <<'EOF\ngrep -rn foo src\nEOF\n").expect_err("unterminated delimiter quote");
+    assert!(matches!(
+        err,
+        ScanError::UnterminatedSingleQuote { .. } | ScanError::MissingHeredocDelimiter { .. }
+    ));
 }
 
 #[test]

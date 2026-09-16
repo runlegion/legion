@@ -640,14 +640,23 @@
     "cmd": "pnpm wrangler deploy --env prod",
     "provenance": "synthetic",
     "expected": "benign",
-    "note": "pnpm is not in FR-CMD-007's closed wrapper table (env, sudo, timeout, nice, nohup, stdbuf, xargs, command, exec, time, plus the research's hardening additions); relabeled from the toy's fixture, which predates the closed table, to benign -- pnpm is an ordinary invocation and wrangler is just its argument, never resolved on its own"
+    "note": "a bare `pnpm <name>` (no exec/dlx) is not a wrapper at all -- only `pnpm exec` and `pnpm dlx` are (FR-CMD-007 revision 6); wrangler here is just pnpm's argument, never resolved on its own",
+    "absent": [
+      "wrangler"
+    ]
   },
   {
     "id": "pnpm-exec-wrangler",
     "cmd": "pnpm exec wrangler tail",
     "provenance": "synthetic",
-    "expected": "benign",
-    "note": "same relabeling as pnpm-wrangler: pnpm is not a named wrapper"
+    "expected": "visible",
+    "binaries": [
+      {
+        "binary": "wrangler",
+        "position": "wrapper"
+      }
+    ],
+    "note": "FR-CMD-007 revision 6: `pnpm exec` is a two-word inline wrapper"
   },
   {
     "id": "comment-hides-nothing",
@@ -809,8 +818,14 @@
     "id": "npx-grep-nonsense",
     "cmd": "npx -y rg --version",
     "provenance": "synthetic",
-    "expected": "benign",
-    "note": "npx is not in FR-CMD-007's closed wrapper table either; relabeled from the toy's fixture for the same reason as pnpm-wrangler"
+    "expected": "visible",
+    "binaries": [
+      {
+        "binary": "rg",
+        "position": "wrapper"
+      }
+    ],
+    "note": "FR-CMD-007 revision 6: npx is a single-word inline wrapper"
   },
   {
     "id": "perl-ne",
@@ -831,14 +846,11 @@
     ]
   },
   {
-    "id": "derived-dynamic-positional-args",
-    "cmd": "set -- grep -rn foo src; \"$@\"",
-    "source": "RESEARCH-CMD-bounded-tokenizer caveat: \"held for cooperative input only ... a command name built at runtime, \\\"$@\\\", source <(...), aliases, ...\"",
-    "expected": "opaque",
-    "opaque_kinds": [
-      "dynamic-command"
-    ],
-    "note": "\"$@\" as the command head is built from positional params at runtime; no parser resolves it without executing set"
+    "id": "derived-git-log-dash-dash-sfoo-benign",
+    "cmd": "git log -- -Sfoo",
+    "source": "issue #1226: known false positives (\"git log --grep-reflog=x\", \"git log -- -Sfoo\", \"pnpm grep\", \"git stash push\", `gh` as a for-loop word, `gh` inside a quoted argument)",
+    "expected": "benign",
+    "note": "`--` marks -Sfoo a literal pathspec, not the -S content-search flag; the scanner never inspects git flags at all, so this is correct without any special-casing"
   },
   {
     "id": "derived-sourced-process-substitution",
@@ -1023,15 +1035,21 @@
   {
     "id": "derived-git-log-grep-reflog-benign",
     "cmd": "git log --grep-reflog=x",
-    "source": "FINDINGS.md verdict (the toy's adversarial-review corpus sample): known false positive -- `--grep-reflog` superficially contains \"grep\" but is an ordinary git log flag, not a search",
+    "source": "issue #1226: known false positives (\"git log --grep-reflog=x\", \"git log -- -Sfoo\", \"pnpm grep\", \"git stash push\", `gh` as a for-loop word, `gh` inside a quoted argument)",
     "expected": "benign",
-    "note": "the scanner never pattern-matches flag substrings; git's args are recorded verbatim, so this never becomes anything but an ordinary git invocation"
+    "note": "the scanner never pattern-matches flag substrings; git's args are recorded verbatim, so this never becomes anything but an ordinary git invocation",
+    "absent": [
+      "grep"
+    ]
   },
   {
     "id": "derived-pnpm-grep-benign",
     "cmd": "pnpm grep",
-    "source": "FINDINGS.md verdict (the toy's adversarial-review corpus sample): known false positive -- `pnpm grep` is an ordinary pnpm script name, not the grep binary",
+    "source": "issue #1226: known false positives (\"git log --grep-reflog=x\", \"git log -- -Sfoo\", \"pnpm grep\", \"git stash push\", `gh` as a for-loop word, `gh` inside a quoted argument)",
     "expected": "benign",
-    "note": "pnpm is not in the wrapper table (it was deliberately dropped from this scanner's dispatch, per FR-CMD-007's fixed wrapper list); `grep` here is just pnpm's first argument, never resolved as its own invocation"
+    "note": "pnpm is not in the wrapper table (it was deliberately dropped from this scanner's dispatch, per FR-CMD-007's fixed wrapper list); `grep` here is just pnpm's first argument, never resolved as its own invocation",
+    "absent": [
+      "grep"
+    ]
   }
 ]
