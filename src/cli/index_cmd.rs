@@ -426,13 +426,15 @@ fn run_etc_find_content(
     } else {
         let cross_repo = repo.is_none() && repo_count > 1;
         for hit in &result.hits {
-            match (cross_repo, text) {
-                (true, true) => {
-                    println!("{}/{}:{}: {}", hit.repo, hit.path, hit.line, hit.text)
-                }
-                (true, false) => println!("{}/{}:{}", hit.repo, hit.path, hit.line),
-                (false, true) => println!("{}:{}: {}", hit.path, hit.line, hit.text),
-                (false, false) => println!("{}:{}", hit.path, hit.line),
+            let location = if cross_repo {
+                format!("{}/{}:{}", hit.repo, hit.path, hit.line)
+            } else {
+                format!("{}:{}", hit.path, hit.line)
+            };
+            if text {
+                println!("{location}: {}", hit.text);
+            } else {
+                println!("{location}");
             }
         }
         if result.suppressed > 0 {
