@@ -199,6 +199,13 @@ pub(crate) enum EtcShape {
         /// include them, and any matching line is printed to stdout/JSON.
         #[arg(long)]
         no_ignore: bool,
+        /// Print the matched line's text alongside each hit (today's
+        /// output). Off by default (#1190): find-content answers are
+        /// locations by default so the caller is not billed context for
+        /// source text it usually does not read; the text is still on every
+        /// hit in `--json` output regardless of this flag.
+        #[arg(long)]
+        text: bool,
         /// Emit results as a JSON array of ContentHit objects
         #[arg(long)]
         json: bool,
@@ -333,14 +340,24 @@ fn run_sym_etc(database: &db::Database, shape: EtcShape) -> error::Result<()> {
             fixed_strings,
             hidden,
             no_ignore,
+            text,
             json,
         } => {
             // #1010: checked here (rather than threading `database` into
-            // `run_etc_find_content`, which is already at the 7-argument
-            // clippy ceiling) since `run_sym_etc` already holds both the
-            // repo scope and the database handle.
+            // `run_etc_find_content`, which is already at the clippy
+            // too-many-arguments ceiling) since `run_sym_etc` already holds
+            // both the repo scope and the database handle.
             maybe_warn_worktree_divergence(database, repo.as_deref());
-            run_etc_find_content(&pattern, repo, ext, fixed_strings, hidden, no_ignore, json)
+            run_etc_find_content(
+                &pattern,
+                repo,
+                ext,
+                fixed_strings,
+                hidden,
+                no_ignore,
+                text,
+                json,
+            )
         }
         EtcShape::Extract { path, field, json } => run_etc_extract(&path, &field, json),
         EtcShape::FindFile {
@@ -353,13 +370,19 @@ fn run_sym_etc(database: &db::Database, shape: EtcShape) -> error::Result<()> {
 }
 
 /// `sym etc find-content` (#707): exact content search over watch.toml
-/// workdirs via the in-process ripgrep engine. Prints `path:line: text`
-/// (repo-prefixed when scanning cross-repo) or a JSON hit array; suppressed,
-/// skipped, and binary counts go to stderr so truncation is never silent,
-/// and a repo whose workdir cannot be walked is named. Telemetry records one
-/// row per invocation -- error exits (empty corpus, unknown repo, invalid
-/// regex, unscannable corpus) carry the error text so the epic's metric can
-/// separate "tool answered zero" from "tool failed to answer" (#704).
+/// workdirs via the in-process ripgrep engine. Prints `path:line`
+/// (repo-prefixed when scanning cross-repo), or `path:line: text` with
+/// `--text`, followed by one stdout count line -- or a JSON hit array, which
+/// always carries the matched text regardless of `--text` (#1190: locations
+/// are the default answer shape since the text is 54% of every byte
+/// find-content returns and the caller usually does not read it). Suppressed,
+/// skipped, and binary counts go to stderr so truncation is never silent
+/// there either, and a repo whose workdir cannot be walked is named.
+/// Telemetry records one row per invocation -- error exits (empty corpus,
+/// unknown repo, invalid regex, unscannable corpus) carry the error text so
+/// the epic's metric can separate "tool answered zero" from "tool failed to
+/// answer" (#704).
+#[allow(clippy::too_many_arguments)]
 fn run_etc_find_content(
     pattern: &str,
     repo: Option<String>,
@@ -367,6 +390,7 @@ fn run_etc_find_content(
     fixed_strings: bool,
     hidden: bool,
     no_ignore: bool,
+    text: bool,
     json: bool,
 ) -> error::Result<()> {
     let scan = scan_etc_content(
@@ -402,11 +426,24 @@ fn run_etc_find_content(
     } else {
         let cross_repo = repo.is_none() && repo_count > 1;
         for hit in &result.hits {
-            if cross_repo {
-                println!("{}/{}:{}: {}", hit.repo, hit.path, hit.line, hit.text);
-            } else {
-                println!("{}:{}: {}", hit.path, hit.line, hit.text);
+            match (cross_repo, text) {
+                (true, true) => {
+                    println!("{}/{}:{}: {}", hit.repo, hit.path, hit.line, hit.text)
+                }
+                (true, false) => println!("{}/{}:{}", hit.repo, hit.path, hit.line),
+                (false, true) => println!("{}:{}: {}", hit.path, hit.line, hit.text),
+                (false, false) => println!("{}:{}", hit.path, hit.line),
             }
+        }
+        if result.suppressed > 0 {
+            println!(
+                "{} matches printed (truncated at cap {}; {} more suppressed)",
+                result.hits.len(),
+                etc::MAX_HITS,
+                result.suppressed
+            );
+        } else {
+            println!("{} matches printed", result.hits.len());
         }
     }
     for (name, err) in &result.failed_repos {
