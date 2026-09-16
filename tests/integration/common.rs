@@ -551,6 +551,63 @@ impl Drop for RealRepoConfigGuard {
     }
 }
 
+/// Seed (or extend) a watch.toml in `data_dir` registering `repos` (name,
+/// workdir). Used by every fixture test that needs `legion index`/`legion
+/// sym` to resolve a repo name to a real on-disk workdir without going
+/// through `watch add` (which would also spawn a background indexer the
+/// test does not want racing its own setup). Appends to any existing
+/// watch.toml rather than overwriting it, so a test can build up a
+/// multi-repo registration with one call per repo (e.g. one call per
+/// `index_fixture_repo` invocation in a cross-repo test) without a later
+/// call clobbering an earlier repo's entry.
+pub fn seed_watch_toml(data_dir: &Path, repos: &[(&str, &Path)]) {
+    let mut toml = std::fs::read_to_string(data_dir.join("watch.toml")).unwrap_or_default();
+    for (name, workdir) in repos {
+        toml.push_str(&format!(
+            "[[repos]]\nname = \"{}\"\nworkdir = \"{}\"\n\n",
+            name,
+            workdir.display().to_string().replace('\\', "/")
+        ));
+    }
+    std::fs::write(data_dir.join("watch.toml"), toml).expect("seed watch.toml");
+}
+
+/// Index `name` via a PATH-shimmed fake `scip-rust` that copies a pre-built
+/// `blob` into place as `index.scip`, then runs `legion index <name>` for
+/// real -- the trick that lets a test pin legion's own indexing/query
+/// plumbing (watch.toml resolution, blob storage, symbol query) without
+/// needing a real rust-analyzer on the runner. Callers build their own
+/// `scip::types::Index` (occurrences, symbols) since that content is
+/// test-specific; this is only the shim/PATH/run-index plumbing every such
+/// test needs identically.
+#[cfg(unix)]
+pub fn index_via_fake_scip_rust(data_dir: &Path, name: &str, blob: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let blob_path = data_dir.join(format!("{name}-index.scip"));
+    std::fs::write(&blob_path, blob).expect("write blob");
+
+    let shim_dir = tempfile::tempdir().expect("shim dir");
+    let shim = shim_dir.path().join("scip-rust");
+    std::fs::write(
+        &shim,
+        format!("#!/bin/sh\ncp '{}' index.scip\n", blob_path.display()),
+    )
+    .expect("write shim");
+    let mut perm = std::fs::metadata(&shim)
+        .expect("shim metadata")
+        .permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&shim, perm).expect("chmod shim");
+    let shim_path = format!("{}:/usr/bin:/bin", shim_dir.path().display());
+
+    run_ok(
+        legion_cmd(data_dir)
+            .env("PATH", &shim_path)
+            .args(["index", name]),
+    );
+}
+
 #[cfg(test)]
 mod config_guard_tests {
     use super::*;

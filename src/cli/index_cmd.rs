@@ -599,6 +599,11 @@ fn scan_etc_content(
 /// runs `sym::query_symbols` per blob, and prints byte-cheap entries. A repo
 /// with no index, or no matching definitions, is a clean exit 0 (enumeration
 /// of nothing is informational, not a lookup failure).
+///
+/// (#1187) Prints the freshness line via `print_freshness_lines`, scoped to
+/// the repos actually represented in `all`. The `--lang css` delegate
+/// (`run_css_sym_list`) is untouched -- CSS symbols are not SCIP-indexed, so
+/// there is no snapshot to report freshness against.
 fn run_sym_list(
     database: &db::Database,
     repo: Option<String>,
@@ -648,6 +653,12 @@ fn run_sym_list(
             .then(a.line.cmp(&b.line))
             .then(a.name.cmp(&b.name))
     });
+
+    print_freshness_lines(
+        database,
+        repo.as_deref(),
+        all.iter().map(|h| h.repo.as_str()),
+    );
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -1033,6 +1044,31 @@ fn compute_freshness<'a>(
         });
     }
     Ok(result)
+}
+
+/// `compute_freshness` + one stderr line per repo, for a caller with no
+/// `--json` envelope to carry the freshness metadata instead (#1187): `sym
+/// def`/`sym refs`/`sym impl` (via `run_location_query`), `sym list`, and
+/// `sym hover` all share this exact shape, unlike `sym tree`/`sym imports`/
+/// `sym importers`/`sym etc find-file`, which fold `SnapshotFreshness` into
+/// their `--json` output via `FreshJsonEnvelope` and so print the stderr
+/// line only on the human-output path. These callers have no such envelope
+/// (`--json` must stay each verb's existing bare shape), so the line always
+/// goes to stderr, in both `--json` and human mode. A `compute_freshness`
+/// failure degrades to silence, never an error, matching
+/// `maybe_warn_worktree_divergence`'s guard-style contract elsewhere in
+/// this file.
+fn print_freshness_lines<'a>(
+    database: &db::Database,
+    repo: Option<&str>,
+    entry_repos: impl Iterator<Item = &'a str>,
+) {
+    if let Ok(snapshots) = compute_freshness(database, repo, entry_repos) {
+        let now = chrono::Utc::now();
+        for s in &snapshots {
+            eprintln!("[legion] {}", format_freshness_line(s, now));
+        }
+    }
 }
 
 /// Shorten a full SHA to git's conventional 7-char display form. Shorter
@@ -2974,6 +3010,18 @@ fn render_index_status_banner(
     lines.join("\n")
 }
 
+/// Shared implementation for `sym def`, `sym refs` and `sym impl` (#558,
+/// #772, #1187): run `query` over every matching index, sort, and print.
+///
+/// (#1187) Prints the freshness line via `print_freshness_lines`, scoped to
+/// the repos actually represented in `all` (`compute_freshness`'s `--repo`
+/// override still applies, so an explicit `--repo` always gets its one line
+/// even on a zero-hit result). Unlike `sym tree`/`sym imports`/`sym
+/// importers`/`sym etc find-file`, `--json` here stays a bare
+/// `SymbolLocation` array -- the grep hooks' `jq` filter over `sym def
+/// --json` and the deny-tier prose that embeds it both require the bare
+/// shape (#1187 constraint), so there is no `FreshJsonEnvelope` to carry the
+/// line instead.
 fn run_location_query<F>(
     database: &db::Database,
     repo: Option<String>,
@@ -3020,6 +3068,12 @@ where
             .then(a.line.cmp(&b.line))
     });
 
+    print_freshness_lines(
+        database,
+        repo.as_deref(),
+        all.iter().map(|h| h.repo.as_str()),
+    );
+
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     if json {
@@ -3041,6 +3095,11 @@ where
 /// `list_scip_indexes_filtered` (sorted by repo, lang) and returns the
 /// first symbol that matches. When the query spans multiple indexes,
 /// callers typically scope with `--repo` / `--lang` to disambiguate.
+///
+/// (#1187) Prints the freshness line via `print_freshness_lines`, scoped to
+/// `hover`'s one resulting repo (or, with an explicit `--repo` and no
+/// match, that repo still gets its line -- see `compute_freshness`).
+/// `--json` stays the existing bare `HoverInfo`/`null` shape.
 fn run_hover_query(
     database: &db::Database,
     name: &str,
@@ -3062,6 +3121,12 @@ fn run_hover_query(
             break;
         }
     }
+
+    print_freshness_lines(
+        database,
+        repo.as_deref(),
+        hover.iter().map(|h| h.repo.as_str()),
+    );
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
