@@ -86,11 +86,15 @@ fn is_definition(symbol_roles: i32) -> bool {
 ///   not match `MyFoo#`. `Foo#bar().` matches `mod/Foo#bar().`. `mod/Foo#`
 ///   matches only when both Namespace `mod` and Type `Foo` appear in order.
 ///
-/// - Symbol parses + bare-name query -> exact-name match against any
-///   descriptor in the symbol. `Foo` matches `mod/Foo#` (descriptor name
-///   `Foo`) but not `MyFoo#` (descriptor name `MyFoo`). This is the
-///   precision win over substring -- bare queries no longer bleed into
-///   composite identifiers.
+/// - Symbol parses + bare-name query -> exact-name match against the
+///   symbol's leaf (last) descriptor only. `Foo` matches `mod/Foo#` (leaf
+///   descriptor name `Foo`) but not `MyFoo#` (leaf name `MyFoo`), and not
+///   `Foo/bar().` (leaf name `bar`) even though `Foo` names an ancestor.
+///   This is the precision win over matching any descriptor in the path --
+///   a bare query no longer returns every symbol nested under a module or
+///   type that happens to share its name. A caller who wants every symbol
+///   under `mod` still has that route: it is the descriptor-path syntax
+///   above, e.g. `mod/` as an explicit-suffix query.
 ///
 /// - Symbol fails to parse -> substring fallback against the raw symbol
 ///   string. Defensive path for unusual indexer output. Preserves the v1
@@ -103,7 +107,7 @@ fn symbol_matches(scip_symbol: &str, query: &str) -> bool {
     match scip_parse_symbol(scip_symbol) {
         Ok(parsed) => match query_descs {
             Some(qd) => descriptor_path_match(&parsed.descriptors, &qd),
-            None => parsed.descriptors.iter().any(|d| d.name == query),
+            None => parsed.descriptors.last().is_some_and(|d| d.name == query),
         },
         Err(_) => scip_symbol.contains(query),
     }
@@ -712,6 +716,22 @@ mod tests {
         let scip_my_foo = "rust-analyzer cargo legion 0.9.10 src/sym.rs/MyFoo#";
         assert!(symbol_matches(scip_foo, "Foo"));
         assert!(!symbol_matches(scip_my_foo, "Foo"));
+    }
+
+    #[test]
+    fn bare_name_matches_leaf_descriptor_not_ancestors() {
+        let scip_emit = "rust-analyzer cargo legion 0.9.10 generators/motion_derivation/emit().";
+        assert!(symbol_matches(scip_emit, "emit"));
+        assert!(!symbol_matches(scip_emit, "generators"));
+        assert!(!symbol_matches(scip_emit, "motion_derivation"));
+    }
+
+    #[test]
+    fn bare_name_matches_type_not_its_field() {
+        let scip_type = "rust-analyzer cargo legion 0.9.10 src/telemetry.rs/EtcUsageRecord#";
+        let scip_field = "rust-analyzer cargo legion 0.9.10 src/telemetry.rs/EtcUsageRecord#count.";
+        assert!(symbol_matches(scip_type, "EtcUsageRecord"));
+        assert!(!symbol_matches(scip_field, "EtcUsageRecord"));
     }
 
     #[test]

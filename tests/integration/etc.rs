@@ -36,7 +36,8 @@ fn find_content_cli_end_to_end_with_json_and_telemetry() {
     .expect("write fixture");
     seed_watch_toml(data_dir.path(), &[("etcrepo", repo_dir.path())]);
 
-    // Human output: path:line: text, punctuation literal survives argv + matching.
+    // Human output with --text: path:line: text, punctuation literal
+    // survives argv + matching.
     let stdout = run_ok(
         legion_cmd(data_dir.path())
             .env("XDG_STATE_HOME", state_dir.path())
@@ -48,11 +49,12 @@ fn find_content_cli_end_to_end_with_json_and_telemetry() {
                 "--repo",
                 "etcrepo",
                 "--fixed-strings",
+                "--text",
             ]),
     );
     assert!(
         stdout.contains("style.css:1: --spacing-0.5: 4px;"),
-        "expected path:line: text hit, got:\n{stdout}"
+        "expected path:line: text hit under --text, got:\n{stdout}"
     );
 
     // JSON output: structured ContentHit array.
@@ -75,6 +77,8 @@ fn find_content_cli_end_to_end_with_json_and_telemetry() {
     assert_eq!(hits[0]["repo"], "etcrepo");
     assert_eq!(hits[0]["path"], "style.css");
     assert_eq!(hits[0]["line"], 2);
+    // --json always carries the matched text, --text or not (#1190).
+    assert_eq!(hits[0]["text"], "body { margin: 0; }");
 
     // Telemetry side effect: one row per completed search in etc-usage.jsonl.
     let usage_path = state_dir.path().join("legion/etc-usage.jsonl");
@@ -86,6 +90,75 @@ fn find_content_cli_end_to_end_with_json_and_telemetry() {
     assert_eq!(first["pattern"], "--spacing-0.5");
     assert_eq!(first["fixed_strings"], true);
     assert_eq!(first["hit_count"], 1);
+}
+
+/// #1190: the default answer is a location, not the matched source line --
+/// find-content's text was 54% of every byte `legion sym` returned in the
+/// audit corpus, and the caller usually did not read it. `--text` restores
+/// today's `path:line: text` shape for a caller who wants it.
+#[test]
+fn find_content_default_output_is_location_only_text_flag_restores_text() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(repo_dir.path().join("style.css"), "body { margin: 0; }\n")
+        .expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("etcrepo", repo_dir.path())]);
+
+    let default_out = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "etc", "find-content", "margin", "--repo", "etcrepo"]),
+    );
+    assert!(
+        default_out.contains("style.css:1"),
+        "expected the bare location, got:\n{default_out}"
+    );
+    assert!(
+        !default_out.contains("margin: 0"),
+        "default output must not carry the matched text, got:\n{default_out}"
+    );
+
+    let text_out = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args([
+                "sym",
+                "etc",
+                "find-content",
+                "margin",
+                "--repo",
+                "etcrepo",
+                "--text",
+            ]),
+    );
+    assert!(
+        text_out.contains("style.css:1: body { margin: 0; }"),
+        "--text must restore path:line: text, got:\n{text_out}"
+    );
+}
+
+/// #1190 review finding (LOW): a successful zero-hit scan now prints a
+/// count line where stdout used to be silent -- pin the new shape rather
+/// than leaving it untested.
+#[test]
+fn find_content_zero_hits_prints_zero_count_on_stdout() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    std::fs::write(repo_dir.path().join("empty.txt"), "nothing here\n").expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("etcrepo", repo_dir.path())]);
+
+    let stdout = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "etc", "find-content", "needle", "--repo", "etcrepo"]),
+    );
+    assert_eq!(
+        stdout.trim(),
+        "0 matches printed",
+        "a successful zero-hit scan must print the count line, got:\n{stdout}"
+    );
 }
 
 #[test]
@@ -185,7 +258,7 @@ fn find_content_partial_corpus_failure_warns_and_lands_in_telemetry() {
     );
     // Cross-repo scan over >1 repo prefixes hits with the repo name.
     assert!(
-        stdout.contains("alive/ok.txt:1: needle"),
+        stdout.contains("alive/ok.txt:1"),
         "expected the live repo's hit, got:\n{stdout}"
     );
     assert!(
@@ -231,7 +304,7 @@ fn find_content_hidden_flag_cli_end_to_end() {
             .env("XDG_STATE_HOME", state_dir.path())
             .args(["sym", "etc", "find-content", "needle", "--repo", "etcrepo"]),
     );
-    assert!(default_out.contains("seen.txt:1: needle"));
+    assert!(default_out.contains("seen.txt:1"));
     assert!(
         !default_out.contains(".github"),
         "default walk must skip hidden files, got:\n{default_out}"
@@ -251,7 +324,7 @@ fn find_content_hidden_flag_cli_end_to_end() {
             ]),
     );
     assert!(
-        hidden_out.contains(".github/workflows/ci.yml:1: needle"),
+        hidden_out.contains(".github/workflows/ci.yml:1"),
         "--hidden must admit dotdirs, got:\n{hidden_out}"
     );
     assert!(
@@ -261,9 +334,12 @@ fn find_content_hidden_flag_cli_end_to_end() {
 }
 
 /// The hit-cap warning is a human-facing contract: truncation is never
-/// silent. Unit tests pin the counters; this pins the stderr note itself.
+/// silent. Unit tests pin the counters; this pins the stderr note itself, and
+/// (#1190) that a truncated answer says so on stdout too -- before this fix,
+/// stdout carried no marker and an agent reading it alone could not tell a
+/// complete answer from a truncated one.
 #[test]
-fn find_content_hit_cap_warns_on_stderr() {
+fn find_content_hit_cap_warns_on_stdout_and_stderr() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let repo_dir = tempfile::tempdir().expect("repo dir");
     let state_dir = tempfile::tempdir().expect("state dir");
@@ -283,10 +359,45 @@ fn find_content_hit_cap_warns_on_stderr() {
         out.status.success(),
         "capped scan still succeeds:\n{stderr}"
     );
-    assert_eq!(stdout.lines().count(), 500, "output capped at MAX_HITS");
+    // 500 location lines plus the stdout count/truncation line.
+    assert_eq!(stdout.lines().count(), 501, "output capped at MAX_HITS");
+    assert!(
+        stdout.contains("500 matches printed") && stdout.contains("5 more suppressed"),
+        "expected a stdout truncation marker, got:\n{stdout}"
+    );
     assert!(
         stderr.contains("5 more matches suppressed (cap 500)"),
-        "expected the suppression note, got:\n{stderr}"
+        "expected the existing stderr suppression note unchanged, got:\n{stderr}"
+    );
+}
+
+/// #1190 review finding (LOW): exactly `MAX_HITS` matches with nothing left
+/// over must NOT print a truncation clause -- only `result.suppressed > 0`
+/// triggers it, and this pins the boundary the hit-cap test above doesn't
+/// reach.
+#[test]
+fn find_content_exact_cap_boundary_prints_no_truncation_clause() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    // Exactly MAX_HITS matching lines: nothing suppressed.
+    std::fs::write(repo_dir.path().join("many.txt"), "needle\n".repeat(500))
+        .expect("write fixture");
+    seed_watch_toml(data_dir.path(), &[("etcrepo", repo_dir.path())]);
+
+    let stdout = run_ok(
+        legion_cmd(data_dir.path())
+            .env("XDG_STATE_HOME", state_dir.path())
+            .args(["sym", "etc", "find-content", "needle", "--repo", "etcrepo"]),
+    );
+    assert_eq!(
+        stdout.lines().count(),
+        501,
+        "500 locations plus the count line, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("500 matches printed") && !stdout.contains("suppressed"),
+        "hitting the cap exactly must not claim truncation, got:\n{stdout}"
     );
 }
 
@@ -321,7 +432,7 @@ fn find_content_no_ignore_flag_parses_independently_of_hidden() {
             ]),
     );
     assert!(
-        out.contains("ignored.txt:1: needle"),
+        out.contains("ignored.txt:1"),
         "--no-ignore alone must be accepted by clap and reach a gitignored file, got:\n{out}"
     );
 }
@@ -375,7 +486,7 @@ fn find_content_no_ignore_and_hidden_together_reach_gitignored_dot_dir() {
             ]),
     );
     assert!(
-        both.contains(".rafters/output/rafters.css:1: needle"),
+        both.contains(".rafters/output/rafters.css:1"),
         "--no-ignore + --hidden together must reach the gitignored dot-dir, got:\n{both}"
     );
 }
