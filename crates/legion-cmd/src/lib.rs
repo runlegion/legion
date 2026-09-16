@@ -10,8 +10,10 @@
 //! pure data and pure functions over that data.
 
 mod decision;
+mod tokenizer;
 
 pub use decision::{
     AskDetails, Context, ContractError, Decision, DenyDetails, Facts, Lookup, ManagedTarget,
     NO_GO_INSTEAD, ProxyReason, Routed, ToolCall,
 };
+pub use tokenizer::{Invocation, MAX_DEPTH, Opaque, Position, Scan, ScanError, scan};

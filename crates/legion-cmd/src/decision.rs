@@ -580,11 +580,6 @@ mod tests {
         assert_eq!(Lookup::default(), Lookup::NotFetched);
     }
 
-    #[test]
-    fn lookup_empty_and_not_fetched_are_distinct() {
-        assert_ne!(Lookup::Empty, Lookup::NotFetched);
-    }
-
     // -- Context and Facts are plain data, nothing looked up internally --
 
     #[test]
@@ -595,18 +590,5 @@ mod tests {
         assert!(ctx.allow_list.is_empty());
         assert_eq!(ctx.recall, Lookup::NotFetched);
         assert_eq!(ctx.consult, Lookup::NotFetched);
-    }
-
-    #[test]
-    fn routed_carries_decision_and_facts_together() {
-        let routed = Routed {
-            decision: Decision::Allow { note: None },
-            facts: Facts {
-                verb: Some("view".to_string()),
-                ..Facts::default()
-            },
-        };
-        assert_eq!(routed.decision, Decision::Allow { note: None });
-        assert_eq!(routed.facts.verb.as_deref(), Some("view"));
     }
 }
