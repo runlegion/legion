@@ -1,38 +1,25 @@
-//! The FR-CMD-007 adversarial battery: 88 rows (72 hand-labelled by
-//! RESEARCH-CMD-bounded-tokenizer's toy, 16 derived from that research's
-//! adversarial review) at `tests/fixtures/battery.json`, each with an
-//! expected verdict: `visible`, `opaque`, or `benign`.
+//! Runs the FR-CMD-007 adversarial battery at `tests/fixtures/battery.json`:
+//! 88 rows, each an `id`, a `cmd`, and an expected verdict.
 //!
-//! Row shape and matching convention (there is no single canonical shape
-//! for "a git subcommand is managed" once `scan` stopped classifying
-//! `managed`, so this file fixes one):
-//!
-//! - `visible` rows list `binaries: [{binary, position, args_prefix?}]`.
-//!   A match requires an invocation with that `binary` and `position`
-//!   whose `args` contain `args_prefix` as a contiguous run somewhere in
-//!   the list, when given (`git commit` in the toy's fixtures becomes
-//!   `{binary: "git", args_prefix: ["commit"]}` here, since `scan` now
-//!   reports the executable and its argv rather than folding a subcommand
-//!   into the binary name; a run anywhere rather than strictly at index 0
-//!   because global options can precede the subcommand, e.g. `git -C dir
-//!   -c k=v push`). This is containment, not
-//!   exact-set equality: a `visible` row may also carry `opaque_kinds` for
-//!   a fixture whose command mixes a resolved call with an opaque region
-//!   (e.g. the outer `grep` in a piped `python3 <<'PY' | grep ...` is
-//!   visible while the heredoc body is opaque); the `opaque_kinds` are
-//!   still checked when present.
+//! - `visible` rows list `binaries: [{binary, position, args_prefix?}]`. A
+//!   match requires an invocation with that `binary` and `position` whose
+//!   `args` contain `args_prefix` as a contiguous run anywhere in the list
+//!   (anywhere rather than only at index 0 because global options can
+//!   precede a subcommand, e.g. `git -C dir -c k=v push`). This is
+//!   containment, not exact-set equality: a `visible` row may also carry
+//!   `opaque_kinds`, checked the same way an `opaque` row's are, for a
+//!   command that mixes a resolved call with an opaque region.
 //! - `opaque` rows list `opaque_kinds: [<kebab-case Opaque variant name>]`;
 //!   every named kind must be present in `scan.opaque`.
-//! - `benign` rows have neither: `scan` must succeed, and by convention
-//!   they are commands a naive heuristic could false-positive on but this
-//!   scanner does not need any special handling to get right.
+//! - `benign` rows have neither: `scan` must succeed with no further claim.
+//! - `error` is not one of FR-CMD-007's three verdicts: a deliberate,
+//!   disclosed extension for exactly one row (`unterminated-quote`) whose
+//!   only honest expectation is a [`legion_cmd::ScanError`]. It is excluded
+//!   from the parse-error-rate assertion below and checked separately.
 //!
-//! Every row is expected to parse without a [`legion_cmd::ScanError`]: none
-//! of the three verdicts is "parse error" (a parse error is tested
-//! separately, in `tokenizer.rs`'s unit tests). This file counts and
-//! reports the parse-error rate across the battery, since
-//! RESEARCH-CMD-bounded-tokenizer's kill condition is keyed on it staying
-//! under 0.1 percent.
+//! Every other row is expected to parse without a `ScanError`. This file
+//! counts and reports that rate, since RESEARCH-CMD-bounded-tokenizer's
+//! kill condition is keyed on it staying under 0.1 percent.
 
 use legion_cmd::{Opaque, Position, scan};
 use serde::Deserialize;
@@ -40,7 +27,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 struct ExpectedBinary {
     binary: String,
-    position: String,
+    position: Position,
     #[serde(default)]
     args_prefix: Vec<String>,
 }
@@ -57,15 +44,6 @@ enum Expected {
         opaque_kinds: Vec<String>,
     },
     Benign,
-    /// Not one of FR-CMD-007's three battery verdicts: a deliberate,
-    /// disclosed extension for exactly one row (`unterminated-quote`). That
-    /// row's original toy label assumed the toy's lenient recovery from a
-    /// malformed command; FR-CMD-007 requires the opposite ("a malformed
-    /// command returns ScanError, never a partial Scan"). Re-checking the
-    /// label against the spec rather than copying it (the issue's own
-    /// instruction) means this row can only demonstrate a `ScanError`, so
-    /// it is excluded from the "no row is a parse-error case" assertion and
-    /// checked here instead.
     Error,
 }
 
@@ -75,21 +53,6 @@ struct Row {
     cmd: String,
     #[serde(flatten)]
     expected: Expected,
-}
-
-fn position_from_str(s: &str) -> Position {
-    match s {
-        "first" => Position::First,
-        "after-operator" => Position::AfterOperator,
-        "after-assignment" => Position::AfterAssignment,
-        "wrapper" => Position::Wrapper,
-        "inline-shell" => Position::InlineShell,
-        "heredoc-shell" => Position::HeredocShell,
-        "find-exec" => Position::FindExec,
-        "function-body" => Position::FunctionBody,
-        "substitution" => Position::Substitution,
-        other => panic!("battery.json names an unknown position `{other}`"),
-    }
 }
 
 fn load_rows() -> Vec<Row> {
@@ -169,16 +132,18 @@ fn check_row(row: &Row, result: &legion_cmd::Scan) -> Result<(), String> {
             opaque_kinds,
         } => {
             for expected in binaries {
-                let position = position_from_str(&expected.position);
                 let found = result.invocations.iter().any(|inv| {
                     inv.binary == expected.binary
-                        && inv.position == position
+                        && inv.position == expected.position
                         && contains_run(&inv.args, &expected.args_prefix)
                 });
                 if !found {
                     return Err(format!(
                         "expected a `{}` invocation at {:?} (args_prefix {:?}), got {:#?}",
-                        expected.binary, position, expected.args_prefix, result.invocations
+                        expected.binary,
+                        expected.position,
+                        expected.args_prefix,
+                        result.invocations
                     ));
                 }
             }
@@ -207,17 +172,32 @@ fn contains_run(haystack: &[String], needle: &[String]) -> bool {
 
 fn check_opaque_kinds(kinds: &[String], result: &legion_cmd::Scan) -> Result<(), String> {
     for kind in kinds {
-        let found = result.opaque.iter().any(|o| o.kind_name() == kind);
+        let found = result.opaque.iter().any(|o| opaque_kind_matches(o, kind));
         if !found {
             return Err(format!(
                 "expected an opaque region of kind `{kind}`, got {:#?}",
-                result
-                    .opaque
-                    .iter()
-                    .map(Opaque::kind_name)
-                    .collect::<Vec<_>>()
+                result.opaque
             ));
         }
     }
     Ok(())
+}
+
+/// Matches a battery-fixture kebab-case kind name against an [`Opaque`]
+/// variant, without needing a stringly-typed accessor on the public type:
+/// this file is the only place battery.json's kind names and the enum's
+/// variants need to agree.
+fn opaque_kind_matches(o: &Opaque, kind: &str) -> bool {
+    match kind {
+        "interpreter" => matches!(o, Opaque::Interpreter { .. }),
+        "script-file" => matches!(o, Opaque::ScriptFile),
+        "eval" => matches!(o, Opaque::Eval),
+        "dynamic-command" => matches!(o, Opaque::DynamicCommand),
+        "stdin-script" => matches!(o, Opaque::StdinScript),
+        "sourced" => matches!(o, Opaque::Sourced),
+        "alias" => matches!(o, Opaque::Alias),
+        "unknown-wrapper" => matches!(o, Opaque::UnknownWrapper),
+        "too-deep" => matches!(o, Opaque::TooDeep),
+        other => panic!("battery.json names an unknown opaque kind `{other}`"),
+    }
 }
