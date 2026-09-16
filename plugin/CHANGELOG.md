@@ -1,5 +1,123 @@
 # Legion Changelog
 
+## 0.39.2
+
+The audit release. All four changes come out of the `legion sym` audit of 2026-09-15, run
+against main at 2ca32fc0, and they share one shape: sym returned too much of the wrong thing
+and too little of what a caller needs to trust the answer. A bare `sym def generators` returned
+1,170 lines with no definition of `generators` among them (finding W3). `etc find-content` spent
+54% of every byte sym returned on matched source text the caller did not ask for, and marked
+nothing on stdout when it truncated at the cap (S1). `def`, `refs`, `list` and `hover` never
+admitted their index might be stale, though four sibling verbs already did (W2). And the
+worktree guard stayed silent in exactly the case a worktree exists for (W1).
+
+Patch release: two Rust files (`src/cli/index_cmd.rs`, `src/sym.rs`), one new flag (`--text`),
+no new verb, no wire-format change, no schema migration. One consumer-visible change is worth
+stating plainly rather than filing under "nothing to see": `legion sym etc find-content` now
+prints `path:line` by default where it printed `path:line: text`, and its default output now
+ends with a count line on stdout. `--json` is unchanged on every verb this release touches, and the
+freshness lines added here go to stderr, so no verb's stdout gains anything but that one
+find-content count line.
+
+### Fixed
+
+- **A bare-name query matches the leaf descriptor, not any ancestor** (PR #1212, #1181).
+  `symbol_matches` (`src/sym.rs`) resolved a bare query with
+  `parsed.descriptors.iter().any(|d| d.name == query)`, and a SCIP symbol's descriptor path
+  carries its namespace and type segments, so the query matched ancestors as readily as the
+  identifier the caller asked for. On a name that is also a module or a directory this returned
+  everything nested underneath it: `legion sym def generators --repo rafters` printed 1,170
+  lines and 90,968 bytes, none of them a definition of anything named `generators`, and across
+  the audit's corpus 3,741 of 4,177 hits on directory-like names sat on a different identifier.
+  The arm is now `parsed.descriptors.last().is_some_and(|d| d.name == query)`, the same
+  "leaf is the last descriptor" rule `symbol_leaf_name` already uses for display, so the match
+  and the label finally agree. `EtcUsageRecord` returns the struct rather than the struct plus
+  its ten fields. SCIP's encoding is not the defect here and was not touched -- the match rule
+  was ours. The descriptor-path syntax is unchanged: `Foo#`, `mod/Foo#` and `Foo#bar().` still
+  match a contiguous run anywhere in the path, so a caller who wants every symbol under a module
+  keeps that route as an explicit-suffix query, and the substring fallback for symbols that fail
+  to parse is untouched. The narrowing reaches `query_definitions`, `query_references`,
+  `query_implementors` and `query_hover` together, and through `run_consult_symbol` it also
+  reaches `legion consult --symbol`, which calls the first two directly -- the same correction
+  arriving at the same defect through a non-`sym` surface.
+
+- **`find-content` answers with locations, and says so when it truncates** (PR #1213, #1190).
+  find-content was the single largest consumer of agent context in the audit: 1,745 results and
+  3,261,418 bytes, 54% of the 6,023,886 bytes sym returned across 3,915 real calls -- more than
+  `list`, `tree`, `refs` and `def` combined. The bytes were the matched source lines, at 95 to
+  142 bytes apiece on a capped call. Default output is now `path:line`, or `repo/path:line` when
+  the scan spans repos, and the new `--text` flag restores the old `path:line: text` shape for a
+  caller who does want the source. `--json` is untouched and unconditional: `ContentHit` still
+  serializes repo, path, line and text regardless of `--text`, so a JSON consumer loses nothing
+  and needs no flag. Default output now also ends with one count line on stdout -- `N matches printed`,
+  or `N matches printed (truncated at cap 500; M more suppressed)` when the scan hit `MAX_HITS`.
+  Previously only stderr carried the truncation signal, so an agent reading stdout alone could
+  not tell a complete answer from a capped one; all three capped calls in the audit printed
+  exactly 500 lines with nothing on stdout to distinguish them. The existing stderr reporting of
+  suppressed, skipped and binary counts, and of a repo whose workdir could not be walked, is
+  unchanged.
+
+- **`def`, `refs`, `impl`, `list` and `hover` print the freshness line** (PR #1215, #1187). #746
+  gave four verbs a per-repo freshness line -- `tree`, `imports`/`importers`, and
+  `etc find-file` -- and the location queries never got it, so the verbs an agent reaches for
+  most were the ones that never admitted their answers might be old. The audit's reproduction:
+  `legion sym def stopClass --repo shingle -v` against an index eight days behind printed six
+  hits and nothing else, exit 0. `run_location_query`, `run_sym_list` and `run_hover_query` now
+  call a new `print_freshness_lines`, which wraps the existing `compute_freshness` and
+  `format_freshness_line` unchanged. `sym impl` inherits it by sharing `run_location_query` with
+  `def` and `refs`. The line is scoped to the repos actually represented in the results, so a
+  no-hit query does not enumerate every registered repo, while an explicit `--repo` still gets
+  its one line even on zero hits. Unlike the four #746 verbs, these do not fold freshness into
+  `--json` through a `FreshJsonEnvelope`: the grep hooks' `jq` filter over `sym def --json` and
+  the deny-tier prose that embeds it both require the bare array, so `--json` stays a bare
+  `SymbolLocation` array, a bare `SymbolEntry` array, or hover's existing bare object/null, and
+  the freshness line goes to stderr in both human and `--json` mode. A `compute_freshness`
+  failure degrades to no line rather than a failed query, matching the guard-style contract
+  `maybe_warn_worktree_divergence` already uses in the same file. `sym list --lang css` is
+  deliberately excluded -- CSS symbols are not SCIP-indexed, so there is no snapshot to report
+  freshness against.
+
+- **The worktree guard warns on a matching HEAD too** (PR #1214, #1186). `worktree_divergence_warning`
+  returned early whenever the invoking checkout's HEAD equalled the registered checkout's
+  `head_at_index`. Sitting in a worktree at the same commit is the ordinary case -- it is what a
+  worktree is for -- and it was exactly the case that warned about nothing while answering from
+  the registered checkout's index, which cannot see the worktree's own uncommitted edits. The
+  audit's reviewer reproduced it directly: from a worktree at 2ca32fc0 with an uncommitted `fn`
+  added to `src/sym.rs`, both `find-content` and `sym def` returned nothing and exited 0, with
+  no warning even under `-v`. 643 of 3,950 real sym calls in the corpus (16%), across 111
+  sessions, ran from a worktree, and that count is the measurement #1010 asked for when it
+  deferred this by name. Only the HEAD-equality return goes away. The three other guards stay
+  exactly as they were: the return when the invoking checkout canonicalizes to the registered
+  workdir (this invocation *is* the registered checkout), the `git_common_dir` identity gate
+  (an unrelated repository must never be reported as a divergent worktree), and the
+  `head_at_index?` return (a repo never indexed is covered by the existing no-snapshot
+  message). The HEAD comparison survives only to choose wording: "this worktree's branch was
+  not seen by the last index" is false when the HEADs match, so that clause is dropped there,
+  while the rest of the line -- results reflect the registered checkout, not where you are
+  sitting -- holds either way.
+
+### Before you upgrade: find-content's stdout shape changed
+
+- **`sym etc find-content` prints locations, plus a trailing count line.** Anything parsing that
+  stdout is affected. A hit is now `path:line` (or `repo/path:line`) with no text; pass `--text`
+  for the old shape, or use `--json`, which never dropped the text. Line counting changes too:
+  in default output the count line always prints, so N hits arrive as N+1 lines, and a
+  successful zero-hit scan now prints `0 matches printed` where stdout used to be empty. Empty
+  output is no longer the zero-hit signal. `--json` emits the array alone, with no count line.
+
+### Known gaps, named rather than implied
+
+- **The new freshness lines are invisible to a `--json` consumer reading stdout.** For `def`,
+  `refs`, `impl`, `list` and `hover` the line only ever goes to stderr, because those verbs'
+  `--json` must stay a bare array for the grep hooks' `jq` filter (#1187). A caller that
+  captures stdout and discards stderr still gets no staleness signal from these five verbs.
+  That is a deliberate trade against breaking the hook filter, not an oversight.
+
+- **The worktree guard warns; it still does not answer from the worktree.** #1186 makes the
+  warning fire in the common case, but worktree-aware resolution remains out of scope per
+  #1010's decision, so a re-run from the worktree still indexes the registered workdir. The
+  warning says so, and names checking the branch out in the registered checkout as the fix.
+
 ## 0.39.1
 
 The framing release. Mail keeps arriving when it arrives -- the three `inbox.sh` wirings
