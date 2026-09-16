@@ -82,6 +82,31 @@
       "interpreter_patterns": ["os.walk(", ".read()"]
     },
     {
+      "id": "interpreter-find-content-oswalk-iterlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["os.walk(", "enumerate("]
+    },
+    {
+      "id": "interpreter-find-content-pathlib-iterlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["rglob(", "enumerate("]
+    },
+    {
+      "id": "interpreter-find-content-glob",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["glob.glob(", ".read()"]
+    },
+    {
+      "id": "interpreter-find-content-glob-iterlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["glob.glob(", "enumerate("]
+    },
+    {
+      "id": "interpreter-find-content-glob-readlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["glob.glob(", "readlines()"]
+    },
+    {
       "id": "interpreter-find-content-node",
       "sym_command": "legion sym etc find-content",
       "interpreter_patterns": ["readdirSync(", "readFileSync("]
@@ -90,6 +115,11 @@
       "id": "interpreter-find-file-pathlib",
       "sym_command": "legion sym etc find-file",
       "interpreter_patterns": ["rglob("]
+    },
+    {
+      "id": "interpreter-find-file-glob",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["glob.glob("]
     },
     {
       "id": "interpreter-find-file-node",

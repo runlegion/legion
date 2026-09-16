@@ -69,6 +69,69 @@ fn node_readdir_alone_reaches_find_file_not_find_content() {
     assert_eq!(deny_instead(command), "legion sym etc find-file");
 }
 
+// -- Real-corpus gaps found by measuring against real agent Bash commands
+// (a local, uncommitted mining toy over a corpus that never enters this
+// repo -- see the PR body for counts). These are hand-written synthetic
+// shapes reproducing what the toy found, not copies of any real command.
+
+#[test]
+fn oswalk_with_line_by_line_iteration_and_no_read_call_reaches_find_content() {
+    // A real miss: `for line in enumerate(f, 1)` (or any bare iteration
+    // over the open file object) is a genuine per-line content search,
+    // but carries no literal `.read()` call for the original oswalk
+    // content job to match on.
+    let command = r#"python3 -c "
+import os
+for root, dirs, files in os.walk('src'):
+    for fn in files:
+        if fn.endswith('.rs'):
+            path = os.path.join(root, fn)
+            with open(path) as f:
+                for i, line in enumerate(f, 1):
+                    if 'needle' in line:
+                        print(path, i, line)
+""#;
+    assert_eq!(deny_instead(command), "legion sym etc find-content");
+}
+
+#[test]
+fn glob_glob_with_read_reaches_find_content() {
+    // A real miss: glob.glob(...) is as common a traversal call in the
+    // corpus as os.walk(...) or rglob(...), but the shipped policy had no
+    // glob.glob job at all until this measurement found it.
+    let command = r#"python3 -c "
+import glob
+for f in glob.glob('packages/**/*.ts', recursive=True):
+    text = open(f).read()
+    if 'needle' in text:
+        print(f)
+""#;
+    assert_eq!(deny_instead(command), "legion sym etc find-content");
+}
+
+#[test]
+fn glob_glob_with_line_iteration_reaches_find_content() {
+    let command = r#"python3 -c "
+import glob
+for f in glob.glob('src/**/*.rs', recursive=True):
+    with open(f) as fh:
+        for i, line in enumerate(fh, 1):
+            if 'needle' in line:
+                print(f, i, line)
+""#;
+    assert_eq!(deny_instead(command), "legion sym etc find-content");
+}
+
+#[test]
+fn glob_glob_alone_reaches_find_file_not_find_content() {
+    let command = r#"python3 -c "
+import glob
+for f in glob.glob('**/biome.json', recursive=True):
+    print(f)
+""#;
+    assert_eq!(deny_instead(command), "legion sym etc find-file");
+}
+
 // -- Negative: a read with no traversal token matches no sym job ----------
 
 #[test]
