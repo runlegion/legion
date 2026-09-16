@@ -54,7 +54,7 @@ about YOUR artifact, and verify will witness it against the intent audit.
 
 ## When a spec exists: transcribe and narrow. Never re-derive.
 
-The pipeline is thesis -> service design -> spec -> issues -> work -> PR. The issue is
+The pipeline is intent -> service design -> spec -> issues -> work -> PR. The issue is
 the decomposition stage: it takes a SLICE of a requirement and scopes it to one unit of
 work. The implementer executes what YOU write, not what the spec said -- every sentence
 you rephrase is a place the build can drift from what was agreed, and issue-authoring
