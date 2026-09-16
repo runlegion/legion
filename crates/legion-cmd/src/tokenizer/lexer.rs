@@ -128,11 +128,6 @@ impl Scanner {
                         self.i += 1;
                     }
                 }
-                _ if at_token_start && self.peek_function_def().is_some() => {
-                    let body = self.read_function_def()?;
-                    toks.push(Tok::FunctionDef { body });
-                    at_token_start = false;
-                }
                 ';' | '&' | '|' => {
                     if ch == '&' && self.peek(1) == Some('>') {
                         self.i += if self.peek(2) == Some('>') { 3 } else { 2 };
@@ -160,7 +155,10 @@ impl Scanner {
                     at_token_start = true;
                 }
                 _ => {
-                    if let Some(w) = self.read_word()? {
+                    if at_token_start && let Some(header_len) = self.peek_function_def() {
+                        let body = self.read_function_def(header_len)?;
+                        toks.push(Tok::FunctionDef { body });
+                    } else if let Some(w) = self.read_word()? {
                         toks.push(Tok::Word(w));
                     }
                     at_token_start = false;
@@ -181,7 +179,7 @@ impl Scanner {
         pending: &mut Vec<PendingHeredoc>,
         toks: &mut Vec<Tok>,
     ) -> Result<(), ScanError> {
-        if (self.starts("<(") || self.starts(">(")) && !self.starts("<<") {
+        if self.starts("<(") || self.starts(">(") {
             self.i += 2;
             let offset = self.i;
             let inner = self.read_balanced('(', ')', 1, true).ok_or(
@@ -484,37 +482,21 @@ impl Scanner {
         } else if self.starts("${") {
             let offset = self.i;
             self.i += 2;
-            let mut depth = 1;
-            let mut inner = String::new();
-            let mut closed = false;
-            while let Some(c) = self.peek(0) {
-                self.i += 1;
-                match c {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            closed = true;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                inner.push(c);
-            }
-            if !closed {
-                return Err(ScanError::UnterminatedSubstitution {
+            let inner = self.read_balanced('{', '}', 1, false).ok_or(
+                ScanError::UnterminatedSubstitution {
                     offset: self.byte_offset(offset),
-                });
-            }
+                },
+            )?;
             Ok(DollarPart {
                 text: format!("${{{inner}}}"),
                 subst: None,
                 quoted: false,
             })
         } else if self.starts("$'") {
+            let quote_offset = self.i;
             self.i += 2;
             let mut text = String::new();
+            let mut closed = false;
             while let Some(c) = self.peek(0) {
                 self.i += 1;
                 if c == '\\' {
@@ -525,9 +507,15 @@ impl Scanner {
                     continue;
                 }
                 if c == '\'' {
+                    closed = true;
                     break;
                 }
                 text.push(c);
+            }
+            if !closed {
+                return Err(ScanError::UnterminatedSingleQuote {
+                    offset: self.byte_offset(quote_offset),
+                });
             }
             Ok(DollarPart {
                 text,
@@ -774,10 +762,11 @@ impl Scanner {
         Some(self.c[idx..end].iter().collect())
     }
 
-    fn read_function_def(&mut self) -> Result<String, ScanError> {
-        let header_len = self
-            .peek_function_def()
-            .expect("caller checked peek_function_def().is_some()");
+    /// Reads a function body, given the header length [`Self::peek_function_def`]
+    /// already found at the current position. Taking that length as a
+    /// parameter (rather than recomputing it here) means there is no panic
+    /// path: the caller only calls this after a successful peek.
+    fn read_function_def(&mut self, header_len: usize) -> Result<String, ScanError> {
         let header_start = self.i;
         self.i = header_start + header_len; // just past the opening `{`
         let brace_offset = self.byte_offset(self.i - 1);

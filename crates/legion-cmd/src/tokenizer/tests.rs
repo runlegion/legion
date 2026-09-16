@@ -4,6 +4,21 @@ fn invocation<'a>(scan: &'a Scan, binary: &str) -> Option<&'a Invocation> {
     scan.invocations.iter().find(|inv| inv.binary == binary)
 }
 
+// -- Position's Display and its independently-derived serde name agree ---
+
+#[test]
+fn position_display_matches_the_serde_kebab_case_name_for_every_variant() {
+    for position in Position::ALL {
+        let json = format!("\"{position}\"");
+        let parsed: Position = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("Display name `{position}` did not deserialize: {e}"));
+        assert_eq!(
+            parsed, position,
+            "Display and serde disagree for {position:?}"
+        );
+    }
+}
+
 // -- Plain, first-position visibility --------------------------------
 
 #[test]
@@ -341,6 +356,12 @@ fn gh_inside_a_quoted_argument_is_never_an_invocation() {
 #[test]
 fn unterminated_single_quote_is_a_scan_error() {
     let err = scan("grep -n 'oops src").expect_err("unterminated quote");
+    assert!(matches!(err, ScanError::UnterminatedSingleQuote { .. }));
+}
+
+#[test]
+fn unterminated_dollar_single_quote_is_a_scan_error() {
+    let err = scan("grep -n $'oops src").expect_err("unterminated $'...' quote");
     assert!(matches!(err, ScanError::UnterminatedSingleQuote { .. }));
 }
 

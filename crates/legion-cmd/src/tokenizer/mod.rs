@@ -45,14 +45,27 @@ pub enum Position {
 }
 
 impl Position {
-    fn strongest(self, other: Position) -> Position {
-        self.max(other)
-    }
-}
+    /// Every member, for exhaustive iteration (tests only): kept behind
+    /// `cfg(test)` so it is not dead code in a non-test build.
+    #[cfg(test)]
+    const ALL: [Position; 9] = [
+        Position::First,
+        Position::AfterOperator,
+        Position::AfterAssignment,
+        Position::Wrapper,
+        Position::InlineShell,
+        Position::HeredocShell,
+        Position::FindExec,
+        Position::FunctionBody,
+        Position::Substitution,
+    ];
 
-impl fmt::Display for Position {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
+    /// The kebab-case name, written once here: [`fmt::Display`] uses it
+    /// directly, and a test ties it to serde's independently-derived
+    /// `rename_all = "kebab-case"` spelling so the two cannot drift apart
+    /// unnoticed.
+    fn as_str(self) -> &'static str {
+        match self {
             Position::First => "first",
             Position::AfterOperator => "after-operator",
             Position::AfterAssignment => "after-assignment",
@@ -62,8 +75,13 @@ impl fmt::Display for Position {
             Position::FindExec => "find-exec",
             Position::FunctionBody => "function-body",
             Position::Substitution => "substitution",
-        };
-        f.write_str(s)
+        }
+    }
+}
+
+impl fmt::Display for Position {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

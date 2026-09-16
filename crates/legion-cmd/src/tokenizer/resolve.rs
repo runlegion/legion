@@ -90,12 +90,7 @@ pub(super) fn walk(
                 });
                 for w in &cmd.words {
                     for inner in &w.substs {
-                        descend(
-                            inner,
-                            depth,
-                            position.strongest(Position::Substitution),
-                            out,
-                        )?;
+                        descend(inner, depth, position.max(Position::Substitution), out)?;
                     }
                 }
                 resolve_from(&cmd.words, &cmd.heredocs, 0, position, depth, out)?;
@@ -160,12 +155,12 @@ fn skip_prefix(words: &[Word], mut i: usize, mut position: Position) -> (usize, 
         };
         let t = w.text.as_str();
         if is_assignment(t) && !w.quoted {
-            position = position.strongest(Position::AfterAssignment);
+            position = position.max(Position::AfterAssignment);
             i += 1;
             continue;
         }
         if !w.quoted && PREFIX_KEYWORDS.contains(&t) {
-            position = position.strongest(Position::AfterOperator);
+            position = position.max(Position::AfterOperator);
             i += 1;
             continue;
         }
@@ -279,7 +274,7 @@ fn resolve_at(
                 words,
                 heredocs,
                 j,
-                position.strongest(Position::Wrapper),
+                position.max(Position::Wrapper),
                 depth,
                 out,
             );
@@ -312,7 +307,7 @@ fn resolve_at(
                 words,
                 heredocs,
                 j,
-                position.strongest(Position::Wrapper),
+                position.max(Position::Wrapper),
                 depth,
                 out,
             );
@@ -327,7 +322,8 @@ fn resolve_at(
         return Ok(());
     }
     if INTERPRETERS.contains(&bin) || bin.starts_with("python3.") {
-        return resolve_interpreter(rest, bin, out);
+        resolve_interpreter(rest, bin, out);
+        return Ok(());
     }
     if bin == "find" {
         let mut j = i + 1;
@@ -345,7 +341,7 @@ fn resolve_at(
                         &words[..end],
                         &[],
                         start,
-                        position.strongest(Position::FindExec),
+                        position.max(Position::FindExec),
                         next_depth,
                         out,
                     )?;
@@ -400,7 +396,7 @@ fn resolve_env_dash_s(payload: &str, position: Position, depth: u8, out: &mut Sc
         out,
         basename(head),
         args,
-        position.strongest(Position::Wrapper),
+        position.max(Position::Wrapper),
         depth,
     );
 }
@@ -439,7 +435,7 @@ fn resolve_shell(
             return descend(
                 &script.text,
                 depth,
-                position.strongest(Position::InlineShell),
+                position.max(Position::InlineShell),
                 out,
             );
         }
@@ -448,14 +444,14 @@ fn resolve_shell(
     if words.get(j).is_some() {
         out.opaque.push(Opaque::ScriptFile);
     } else if let Some(body) = heredocs.first() {
-        descend(body, depth, position.strongest(Position::HeredocShell), out)?;
+        descend(body, depth, position.max(Position::HeredocShell), out)?;
     } else {
         out.opaque.push(Opaque::StdinScript);
     }
     Ok(())
 }
 
-fn resolve_interpreter(rest: &[Word], bin: &str, out: &mut Scan) -> Result<(), ScanError> {
+fn resolve_interpreter(rest: &[Word], bin: &str, out: &mut Scan) {
     let family = bin.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
     let mut j = 0;
     while j < rest.len() {
@@ -475,7 +471,7 @@ fn resolve_interpreter(rest: &[Word], bin: &str, out: &mut Scan) -> Result<(), S
                 interpreter: bin.to_string(),
                 body: code,
             });
-            return Ok(());
+            return;
         }
         if t.starts_with('-') && t.len() > 1 {
             j += 1;
@@ -485,10 +481,9 @@ fn resolve_interpreter(rest: &[Word], bin: &str, out: &mut Scan) -> Result<(), S
             break;
         }
         out.opaque.push(Opaque::ScriptFile);
-        return Ok(());
+        return;
     }
     out.opaque.push(Opaque::StdinScript);
-    Ok(())
 }
 
 fn resolve_awk(rest: &[Word], out: &mut Scan) {
