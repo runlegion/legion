@@ -846,13 +846,6 @@
     ]
   },
   {
-    "id": "derived-git-log-dash-dash-sfoo-benign",
-    "cmd": "git log -- -Sfoo",
-    "source": "issue #1226: known false positives (\"git log --grep-reflog=x\", \"git log -- -Sfoo\", \"pnpm grep\", \"git stash push\", `gh` as a for-loop word, `gh` inside a quoted argument)",
-    "expected": "benign",
-    "note": "`--` marks -Sfoo a literal pathspec, not the -S content-search flag; the scanner never inspects git flags at all, so this is correct without any special-casing"
-  },
-  {
     "id": "derived-sourced-process-substitution",
     "cmd": "source <(echo \"grep -rn foo src\")",
     "source": "RESEARCH-CMD-bounded-tokenizer caveat: \"... source <(...), aliases, globbed or shell-expanded binary names ...\"",
@@ -1033,23 +1026,39 @@
     "note": "flock is not one of FR-CMD-007's named wrappers nor one of the research's hardening additions; it must not be silently treated as though it were"
   },
   {
-    "id": "derived-git-log-grep-reflog-benign",
-    "cmd": "git log --grep-reflog=x",
-    "source": "issue #1226: known false positives (\"git log --grep-reflog=x\", \"git log -- -Sfoo\", \"pnpm grep\", \"git stash push\", `gh` as a for-loop word, `gh` inside a quoted argument)",
-    "expected": "benign",
-    "note": "the scanner never pattern-matches flag substrings; git's args are recorded verbatim, so this never becomes anything but an ordinary git invocation",
-    "absent": [
-      "grep"
-    ]
+    "id": "derived-dynamic-positional-args",
+    "cmd": "set -- grep -rn foo src; \"$@\"",
+    "source": "RESEARCH-CMD-bounded-tokenizer caveat: \"held for cooperative input only. Evasive input has silent-miss classes no parser fixes, because they are semantic rather than grammatical: a command name built at runtime, \\\"$@\\\", source <(...), aliases, globbed or shell-expanded binary names, system() inside another program, and search tools outside the managed table\" -- the \"$@\" item",
+    "expected": "opaque",
+    "opaque_kinds": [
+      "dynamic-command"
+    ],
+    "note": "\"$@\" as the command head is built from positional params at runtime; no parser resolves it without executing set"
   },
   {
-    "id": "derived-pnpm-grep-benign",
-    "cmd": "pnpm grep",
-    "source": "issue #1226: known false positives (\"git log --grep-reflog=x\", \"git log -- -Sfoo\", \"pnpm grep\", \"git stash push\", `gh` as a for-loop word, `gh` inside a quoted argument)",
-    "expected": "benign",
-    "note": "pnpm is not in the wrapper table (it was deliberately dropped from this scanner's dispatch, per FR-CMD-007's fixed wrapper list); `grep` here is just pnpm's first argument, never resolved as its own invocation",
-    "absent": [
-      "grep"
-    ]
+    "id": "derived-globbed-binary-name-visible",
+    "cmd": "gr?p -n foo bar.txt",
+    "source": "RESEARCH-CMD-bounded-tokenizer caveat: \"held for cooperative input only. Evasive input has silent-miss classes no parser fixes, because they are semantic rather than grammatical: a command name built at runtime, \\\"$@\\\", source <(...), aliases, globbed or shell-expanded binary names, system() inside another program, and search tools outside the managed table\" -- the \"globbed or shell-expanded binary names\" item",
+    "expected": "visible",
+    "binaries": [
+      {
+        "binary": "gr?p",
+        "position": "first"
+      }
+    ],
+    "note": "the scanner is bounded and does no filesystem globbing, so it resolves the literal, unexpanded word `gr?p` as the binary -- the shell would expand this before exec, which is exactly the silent-miss the research names: route's managed-name match on the literal string misses it, not the scanner"
+  },
+  {
+    "id": "derived-search-tool-outside-managed-table-visible",
+    "cmd": "zgrep -rn foo access.log.gz",
+    "source": "RESEARCH-CMD-bounded-tokenizer caveat: \"held for cooperative input only. Evasive input has silent-miss classes no parser fixes, because they are semantic rather than grammatical: a command name built at runtime, \\\"$@\\\", source <(...), aliases, globbed or shell-expanded binary names, system() inside another program, and search tools outside the managed table\" -- the \"search tools outside the managed table\" item",
+    "expected": "visible",
+    "binaries": [
+      {
+        "binary": "zgrep",
+        "position": "first"
+      }
+    ],
+    "note": "zgrep is a real search tool the scanner resolves like any other binary; whether it is treated as managed is a policy-table question (route, #1227), not a scanner defect"
   }
 ]

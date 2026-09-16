@@ -501,6 +501,10 @@ fn git_log_grep_reflog_flag_is_an_ordinary_argument() {
     let scan = scan("git log --grep-reflog=x").expect("valid");
     let git = invocation(&scan, "git").expect("git resolved");
     assert_eq!(git.args, vec!["log", "--grep-reflog=x"]);
+    // The scanner never pattern-matches flag substrings: "--grep-reflog"
+    // superficially contains "grep" but must never become its own
+    // invocation.
+    assert!(invocation(&scan, "grep").is_none());
 }
 
 #[test]
@@ -515,6 +519,9 @@ fn pnpm_grep_is_an_ordinary_invocation_of_pnpm() {
     let scan = scan("pnpm grep").expect("valid");
     let pnpm = invocation(&scan, "pnpm").expect("pnpm resolved");
     assert_eq!(pnpm.args, vec!["grep"]);
+    // pnpm is not a wrapper here (only `pnpm exec`/`pnpm dlx` are): "grep"
+    // is just pnpm's argument, never resolved as its own invocation.
+    assert!(invocation(&scan, "grep").is_none());
 }
 
 #[test]
