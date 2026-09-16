@@ -107,34 +107,52 @@ impl Decision {
     }
 
     /// Builds a [`Decision::Deny`] from text already known to be non-empty:
-    /// a fixed default message and instead-text, or a `reason`/`instead`
-    /// pair `parse_policy` has already run through [`DenyDetails::new`].
-    /// Crate-internal only, so it cannot be reached with caller-supplied
-    /// text that has not been validated -- this exists so those call sites
-    /// do not need a panic path to bridge a fallible constructor back to
-    /// an invariant already guaranteed elsewhere.
+    /// a fixed default message and instead-text, or the parse-validated
+    /// `sym_command` a matched [`crate::policy::SymJob`] carries. This
+    /// constructor is crate-internal only, so it cannot be reached with
+    /// caller-supplied text that has not been validated -- it exists so
+    /// those call sites do not need a panic path to bridge a fallible
+    /// constructor back to an invariant already guaranteed elsewhere.
+    /// `debug_assert!`s the invariant in debug builds rather than trusting
+    /// callers silently: see [`DenyDetails`]'s doc for why this is the
+    /// type's only unchecked construction path.
     pub(crate) fn deny_infallible(
         reason: impl Into<String>,
         instead: impl Into<String>,
     ) -> Decision {
-        Decision::Deny(DenyDetails {
-            reason: reason.into(),
-            instead: instead.into(),
-        })
+        let reason = reason.into();
+        let instead = instead.into();
+        debug_assert!(
+            !reason.is_empty(),
+            "deny_infallible: reason must be non-empty"
+        );
+        debug_assert!(
+            !instead.is_empty(),
+            "deny_infallible: instead must be non-empty"
+        );
+        Decision::Deny(DenyDetails { reason, instead })
     }
 
     /// Builds a [`Decision::Ask`] from text already known to be non-empty
     /// (a fixed default message, or `question`/`reason` `evaluate` builds
     /// from a non-empty [`crate::tokenizer::ScanError`] display and a fixed
-    /// constant). See [`Decision::deny_infallible`] for the same rationale.
+    /// constant). See [`Decision::deny_infallible`] for the same rationale
+    /// and [`AskDetails`]'s doc for why this is its only unchecked path.
     pub(crate) fn ask_infallible(
         question: impl Into<String>,
         reason: impl Into<String>,
     ) -> Decision {
-        Decision::Ask(AskDetails {
-            question: question.into(),
-            reason: reason.into(),
-        })
+        let question = question.into();
+        let reason = reason.into();
+        debug_assert!(
+            !question.is_empty(),
+            "ask_infallible: question must be non-empty"
+        );
+        debug_assert!(
+            !reason.is_empty(),
+            "ask_infallible: reason must be non-empty"
+        );
+        Decision::Ask(AskDetails { question, reason })
     }
 }
 
@@ -142,7 +160,12 @@ impl Decision {
 ///
 /// Fields are private so the invariant -- neither string is empty -- holds
 /// for every `DenyDetails` in existence, not just the ones built through
-/// [`DenyDetails::new`].
+/// [`DenyDetails::new`]. The one unchecked construction path is
+/// crate-internal, [`Decision::deny_infallible`], used only with a fixed
+/// default message or a parse-validated `sym_command`; it `debug_assert!`s
+/// the invariant rather than re-running [`DenyDetails::new`]'s check, so a
+/// future caller that breaks the "already non-empty" contract fails loudly
+/// in debug builds instead of silently constructing an empty `DenyDetails`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DenyDetails {
     reason: String,
@@ -191,7 +214,12 @@ impl DenyDetails {
 ///
 /// Fields are private so the invariant -- neither string is empty -- holds
 /// for every `AskDetails` in existence, not just the ones built through
-/// [`AskDetails::new`].
+/// [`AskDetails::new`]. The one unchecked construction path is
+/// crate-internal, [`Decision::ask_infallible`], used only with fixed
+/// default text; it `debug_assert!`s the invariant rather than re-running
+/// [`AskDetails::new`]'s check, so a future caller that breaks the
+/// "already non-empty" contract fails loudly in debug builds instead of
+/// silently constructing an empty `AskDetails`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskDetails {
     question: String,
@@ -461,6 +489,58 @@ mod tests {
             }
             _ => panic!("expected Rewrite"),
         }
+    }
+
+    // -- The infallible constructors still enforce the invariant, via
+    // debug_assert!, rather than silently accepting an empty string
+    // (#1225's "holds for every DenyDetails/AskDetails in existence").
+
+    #[test]
+    fn deny_infallible_builds_a_deny_with_both_fields() {
+        let decision = Decision::deny_infallible("no", "do something else");
+        match decision {
+            Decision::Deny(details) => {
+                assert_eq!(details.reason(), "no");
+                assert_eq!(details.instead(), "do something else");
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "reason must be non-empty")]
+    fn deny_infallible_panics_on_empty_reason_in_debug_builds() {
+        let _ = Decision::deny_infallible("", "do something else");
+    }
+
+    #[test]
+    #[should_panic(expected = "instead must be non-empty")]
+    fn deny_infallible_panics_on_empty_instead_in_debug_builds() {
+        let _ = Decision::deny_infallible("no", "");
+    }
+
+    #[test]
+    fn ask_infallible_builds_an_ask_with_both_fields() {
+        let decision = Decision::ask_infallible("sure?", "needs a look");
+        match decision {
+            Decision::Ask(details) => {
+                assert_eq!(details.question(), "sure?");
+                assert_eq!(details.reason(), "needs a look");
+            }
+            other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "question must be non-empty")]
+    fn ask_infallible_panics_on_empty_question_in_debug_builds() {
+        let _ = Decision::ask_infallible("", "needs a look");
+    }
+
+    #[test]
+    #[should_panic(expected = "reason must be non-empty")]
+    fn ask_infallible_panics_on_empty_reason_in_debug_builds() {
+        let _ = Decision::ask_infallible("sure?", "");
     }
 
     // -- ProxyReason is closed (FR-CMD-004) ------------------------------
