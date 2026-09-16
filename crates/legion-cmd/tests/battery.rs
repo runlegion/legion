@@ -1,5 +1,6 @@
 //! Runs the FR-CMD-007 adversarial battery at `tests/fixtures/battery.json`:
-//! 88 rows, each an `id`, a `cmd`, and an expected verdict.
+//! 88 rows, each an `id`, a `cmd`, and one of FR-CMD-007's four expected
+//! verdicts: `visible`, `opaque`, `benign`, or `error`.
 //!
 //! - `visible` rows list `binaries: [{binary, position, args_prefix?}]`. A
 //!   match requires an invocation with that `binary` and `position` whose
@@ -16,10 +17,11 @@
 //!   `First` (the row's own head command may legitimately be one of them,
 //!   e.g. `pnpm` in `pnpm wrangler deploy`; what must never happen is that
 //!   binary showing up as a second, separately-resolved invocation).
-//! - `error` is not one of FR-CMD-007's three verdicts: a deliberate,
-//!   disclosed extension for exactly one row (`unterminated-quote`) whose
-//!   only honest expectation is a [`legion_cmd::ScanError`]. It is excluded
-//!   from the parse-error-rate assertion below and checked separately.
+//! - `error` rows (currently one, `unterminated-quote`) expect a
+//!   [`legion_cmd::ScanError`]: a malformed command must return `ScanError`,
+//!   never a partial `Scan`. Excluded from the parse-error-rate assertion
+//!   below, since that rate is about commands expected to parse cleanly,
+//!   and checked separately.
 //!
 //! Every other row is expected to parse without a `ScanError`. This file
 //! counts and reports that rate, since RESEARCH-CMD-bounded-tokenizer's

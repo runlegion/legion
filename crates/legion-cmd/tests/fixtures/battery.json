@@ -784,7 +784,7 @@
     "cmd": "grep -n 'oops src",
     "provenance": "synthetic",
     "expected": "error",
-    "note": "re-checked against FR-CMD-007 rather than copied (issue instruction): the toy's code recovered from the unterminated quote and still resolved grep, so its fixture labeled this row managed/visible. FR-CMD-007 requires the opposite: \"a malformed command returns ScanError, never a partial Scan\" and \"a parse error routes ask\". This is the label FINDINGS.md says was changed to match the (lenient) toy code; relabeled here to `error` to match the spec instead. `expected: error` is a deliberate, disclosed extension beyond the issue's literal {visible, opaque, benign} for this one row -- see the work summary."
+    "note": "re-checked against FR-CMD-007 rather than copied (issue instruction): the toy's code recovered from the unterminated quote and still resolved grep, so its fixture labeled this row managed/visible. FR-CMD-007 requires the opposite: \"a malformed command returns ScanError, never a partial Scan\" and \"a parse error routes ask\". This is the label FINDINGS.md says was changed to match the (lenient) toy code; relabeled here to `error`, one of FR-CMD-007 revision 7's four battery verdicts (visible, opaque, benign, or error -- a malformed command, which must return ScanError)."
   },
   {
     "id": "arithmetic-not-subst",
