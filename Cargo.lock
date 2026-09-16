@@ -1954,6 +1954,7 @@ dependencies = [
  "ignore",
  "jiff",
  "jsonschema",
+ "legion-cmd",
  "libc",
  "lightningcss",
  "model2vec-rs",
@@ -1982,6 +1983,15 @@ dependencies = [
  "tower-http",
  "uuid",
  "wait-timeout",
+]
+
+[[package]]
+name = "legion-cmd"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
