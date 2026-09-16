@@ -1140,8 +1140,13 @@ fn resolve_invoking_checkout(basis_dir: &Path) -> Option<InvokingCheckout> {
 /// checked out at cwd must never be reported as a divergent worktree of
 /// `repo`); `registered_workdir` itself has no git context (mirrors
 /// `resolve_invoking_checkout`'s umbrella, applied to the other side of
-/// the comparison); or `head_at_index` is absent, or matches the invoking
-/// checkout's HEAD (nothing to compare, or no drift).
+/// the comparison); or `head_at_index` is absent (the repo has never been
+/// indexed -- the existing no-snapshot freshness message covers that
+/// case). Once those hold, this warns regardless of whether the invoking
+/// checkout's HEAD matches `head_at_index` (#1186): sitting in a worktree
+/// on the same commit as the registered checkout is the ordinary case, and
+/// it is exactly the case whose uncommitted edits the registered index
+/// cannot see either.
 fn worktree_divergence_warning(
     invoking: &InvokingCheckout,
     repo: &str,
@@ -1167,17 +1172,26 @@ fn worktree_divergence_warning(
         return None;
     }
 
-    // Both a recorded index-time HEAD and the invoking checkout's current
-    // HEAD must be known, and differ, for this to be worth a warning.
-    // Narrowing `head_at_index` to `&str` via `?` here (rather than calling
-    // the boolean `head_drift` helper used elsewhere in this file) means
-    // the rest of this function never has to re-unwrap an `Option` it
-    // already knows is present.
+    // A recorded index-time HEAD must be known for there to be anything to
+    // report; the invoking checkout's current HEAD need not differ from it
+    // (#1186) -- a worktree on the same commit as the registered checkout
+    // still answers from that checkout's index, not from what is actually
+    // on disk in the worktree. Narrowing `head_at_index` to `&str` via `?`
+    // here (rather than calling the boolean `head_drift` helper used
+    // elsewhere in this file) means the rest of this function never has to
+    // re-unwrap an `Option` it already knows is present.
     let head_at_index = head_at_index?;
     let invoking_head = inventory::current_head(&invoking.canon)?;
-    if head_at_index == invoking_head {
-        return None;
-    }
+    // "This worktree's branch was not seen by the last index" is only true
+    // when the HEADs actually differ (#1186) -- on a matching HEAD the
+    // branch WAS seen, so that clause is dropped, but the rest of the line
+    // still holds: results come from the registered checkout, not from
+    // wherever the operator is sitting, which is true either way.
+    let drift_clause = if head_at_index == invoking_head {
+        ""
+    } else {
+        "; this worktree's branch was not seen by the last index"
+    };
     // "Re-run ... from this worktree" would be a lie: worktree-aware
     // resolution is explicitly out of scope (#1010 decision), so a re-run
     // invoked from the worktree still indexes `registered_workdir`, not the
@@ -1185,8 +1199,8 @@ fn worktree_divergence_warning(
     // works: check the branch out in the registered checkout.
     let mut line = format!(
         "{repo}: invoked from worktree {} (HEAD {}) -- WARNING: results reflect the registered \
-         checkout {} at HEAD {}; this worktree's branch was not seen by the last index. To \
-         query this branch, check it out in {} and run 'legion index {repo}'.",
+         checkout {} at HEAD {}{drift_clause}. To query this branch, check it out in {} and run \
+         'legion index {repo}'.",
         invoking.canon.display(),
         short_sha(&invoking_head),
         canon_registered.display(),
@@ -2367,7 +2381,12 @@ mod worktree_divergence_tests {
     }
 
     #[test]
-    fn returns_none_when_worktree_head_matches_indexed_head() {
+    fn warns_naming_both_checkouts_when_worktree_head_matches_indexed_head() {
+        // #1186: a worktree on the SAME commit as the registered checkout is
+        // the ordinary case a worktree exists for, and it is exactly the
+        // case that used to warn about nothing -- silently answering from
+        // the registered checkout's index while the worktree's own working
+        // tree (uncommitted or otherwise) went unseen.
         let dir = tempfile::tempdir().unwrap();
         git_in(dir.path(), &["init", "-q", "-b", "main"]);
         git_in(
@@ -2382,10 +2401,21 @@ mod worktree_divergence_tests {
         let worktree_dir = dir.path().join("wt");
         let invoking = resolve_invoking_checkout(&worktree_dir).expect("worktree has a checkout");
 
-        assert_eq!(
-            worktree_divergence_warning(&invoking, "r", dir.path(), Some(&head), None),
-            None,
-            "the worktree has not moved past the indexed HEAD -- nothing to warn about"
+        let line = worktree_divergence_warning(&invoking, "r", dir.path(), Some(&head), None)
+            .expect("a same-HEAD worktree must still warn");
+        assert!(line.contains("WARNING"), "got: {line}");
+        assert!(
+            line.contains(worktree_dir.canonicalize().unwrap().to_str().unwrap()),
+            "expected the worktree path to be named, got: {line}"
+        );
+        assert!(
+            line.contains(dir.path().canonicalize().unwrap().to_str().unwrap()),
+            "expected the registered checkout path to be named, got: {line}"
+        );
+        assert!(line.contains(short_sha(&head)), "got: {line}");
+        assert!(
+            !line.contains("was not seen by the last index"),
+            "that clause is false when HEADs match, got: {line}"
         );
     }
 }
