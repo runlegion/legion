@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/legion-cmd"]
+
 [package]
 name = "legion"
 version = "0.39.2"
@@ -5,6 +8,7 @@ edition = "2024"
 description = "Agent specialization through deliberate practice"
 
 [dependencies]
+legion-cmd = { path = "crates/legion-cmd" }
 tantivy = "0.22"
 rusqlite = { version = "0.34", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
