@@ -672,6 +672,109 @@ fn find_file_from_primary_checkout_with_matching_head_is_unchanged() {
     );
 }
 
+/// #1186 acceptance test 1: a linked worktree on the SAME commit as the
+/// registered checkout still warns. Before this fix,
+/// `worktree_divergence_warning`'s HEAD-equality early return swallowed
+/// this case silently -- sitting in a worktree at the same commit is the
+/// ordinary case a worktree exists for, and it was exactly the case that
+/// warned about nothing (audit finding W1, test gap T4).
+#[cfg(unix)]
+#[test]
+fn sym_def_warns_when_invoked_from_worktree_on_same_head() {
+    let _guard = RealRepoConfigGuard::new();
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+
+    seed_watch_toml(data_dir.path(), &[("samehead", repo_dir.path())]);
+    let primary_head = seed_scip_fixture(data_dir.path(), repo_dir.path(), "samehead");
+
+    // A linked worktree on a new branch, left at the SAME commit, with an
+    // uncommitted edit -- the audit's live reproduction of W1: `sym`
+    // answers from the registered checkout's index, unaware the worktree's
+    // working tree differs at all.
+    let worktree_dir = add_worktree(repo_dir.path());
+    std::fs::write(
+        worktree_dir.join("src/lib.rs"),
+        "pub struct Greeter;\npub fn hello() {}\n// uncommitted local edit\n",
+    )
+    .expect("write fixture");
+    let worktree_head = git_head(&worktree_dir);
+    assert_eq!(
+        primary_head, worktree_head,
+        "fixture must stay on the same commit as the registered checkout"
+    );
+
+    let stderr = run_ok_stderr(
+        legion_cmd(data_dir.path())
+            .current_dir(&worktree_dir)
+            .args(["sym", "def", "Greeter", "--repo", "samehead"]),
+    );
+    assert!(
+        stderr.contains("WARNING"),
+        "expected a worktree-divergence warning even on a matching HEAD, got:\n{stderr}"
+    );
+    let canon_wt = worktree_dir.canonicalize().expect("canonicalize worktree");
+    assert!(
+        stderr.contains(canon_wt.to_str().expect("utf8 path")),
+        "expected the worktree path to be named, got:\n{stderr}"
+    );
+    let canon_registered = repo_dir
+        .path()
+        .canonicalize()
+        .expect("canonicalize registered checkout");
+    assert!(
+        stderr.contains(canon_registered.to_str().expect("utf8 path")),
+        "expected the registered checkout path to be named, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&primary_head[..7]),
+        "expected the shared HEAD to be named, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("was not seen by the last index"),
+        "that clause is false when HEADs match and must not appear, got:\n{stderr}"
+    );
+}
+
+/// #1186 acceptance test 2: invoked from the registered checkout itself
+/// (not a worktree), a same-HEAD fixture is completely unaffected -- the
+/// early return for "this invocation IS the registered checkout" (kept
+/// exactly as-is by #1186) still fires before the HEAD comparison this
+/// issue removed is ever reached.
+#[cfg(unix)]
+#[test]
+fn sym_def_from_registered_checkout_with_matching_head_is_unchanged() {
+    let _guard = RealRepoConfigGuard::new();
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let repo_dir = tempfile::tempdir().expect("repo dir");
+
+    seed_watch_toml(data_dir.path(), &[("samehead2", repo_dir.path())]);
+    seed_scip_fixture(data_dir.path(), repo_dir.path(), "samehead2");
+
+    let out = legion_cmd(data_dir.path())
+        .current_dir(repo_dir.path())
+        .args(["sym", "def", "Greeter", "--repo", "samehead2"])
+        .output()
+        .expect("legion must spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        !stderr.contains("WARNING"),
+        "invoking from the registered checkout must never warn, got:\n{stderr}"
+    );
+    assert!(!stderr.contains("invoked from worktree"), "got:\n{stderr}");
+    assert!(
+        stdout.contains("src/lib.rs") && stdout.contains("samehead2"),
+        "expected the definition to still print, got:\n{stdout}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "exit code must be exactly what it was before this fix"
+    );
+}
+
 /// #1010 review finding MED 2(b): `sym impact` (`run_sym_impact`) is a
 /// third, separate SCIP-reading dispatch path from `run_location_query`
 /// and `run_sym_list`, and needs its own guard call.
