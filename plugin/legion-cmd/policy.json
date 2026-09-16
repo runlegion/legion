@@ -8,7 +8,7 @@
           "rules": [
             {
               "id": "git-push-force",
-              "predicate": { "flag_present": "--force" },
+              "predicate": { "arg_equals": "--force" },
               "outcome": {
                 "kind": "deny",
                 "reason": "a force-push rewrites shared history other agents may already be based on",
@@ -35,29 +35,27 @@
             }
           ]
         },
-        "gh": {
+        "gh issue": {
           "rules": [
             {
               "id": "gh-issue-list",
-              "predicate": {
-                "all": [
-                  { "flag_present": "issue" },
-                  { "flag_present": "list" }
-                ]
-              },
+              "predicate": { "arg_equals": "list" },
               "outcome": {
                 "kind": "rewrite",
                 "target": "legion issue list",
                 "reason": "gh issue list duplicates legion's own issue tracking surface"
               }
-            },
+            }
+          ]
+        },
+        "gh pr": {
+          "rules": [
             {
               "id": "gh-pr-merge-admin",
               "predicate": {
                 "all": [
-                  { "flag_present": "pr" },
-                  { "flag_present": "merge" },
-                  { "flag_present": "--admin" }
+                  { "arg_equals": "merge" },
+                  { "arg_equals": "--admin" }
                 ]
               },
               "outcome": {

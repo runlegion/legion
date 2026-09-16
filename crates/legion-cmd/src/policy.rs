@@ -129,7 +129,7 @@ pub enum RequiredLookup {
 /// `Not`) let a policy author build a compound condition out of the
 /// primitives without inventing a second predicate language.
 ///
-/// `FlagPresent`/`FlagAbsent`/`OperandContains` read a Bash invocation's
+/// `ArgEquals`/`ArgAbsent`/`OperandContains` read a Bash invocation's
 /// argument list; `Field`/`FieldContains` read a top-level field of a
 /// non-Bash tool call's JSON input. Evaluating the wrong kind of predicate
 /// against the wrong kind of input is not an error -- it simply does not
@@ -141,10 +141,11 @@ pub enum Predicate {
     /// rule). Used for a catch-all rule at the end of a family's list.
     #[default]
     Always,
-    /// A literal argument equal to `flag` appears in the invocation.
-    FlagPresent(String),
-    /// No argument equal to `flag` appears in the invocation.
-    FlagAbsent(String),
+    /// A literal argument equal to `value` appears in the invocation --
+    /// a flag (`"--force"`) or a bare word (`"push"`, `"merge"`) alike.
+    ArgEquals(String),
+    /// No argument equal to `value` appears in the invocation.
+    ArgAbsent(String),
     /// Some argument contains `needle` as a substring.
     OperandContains(String),
     /// The named top-level JSON field, read as a string, equals `equals`.
@@ -179,11 +180,11 @@ impl Predicate {
     pub fn matches(&self, input: MatchInput<'_>) -> bool {
         match self {
             Predicate::Always => true,
-            Predicate::FlagPresent(flag) => match input {
+            Predicate::ArgEquals(flag) => match input {
                 MatchInput::Args(args) => args.iter().any(|a| a == flag),
                 MatchInput::Json(_) => false,
             },
-            Predicate::FlagAbsent(flag) => match input {
+            Predicate::ArgAbsent(flag) => match input {
                 MatchInput::Args(args) => !args.iter().any(|a| a == flag),
                 MatchInput::Json(_) => false,
             },
@@ -428,6 +429,19 @@ fn convert_outcome(pointer: &str, value: &Value) -> Result<RuleOutcome, PolicyEr
             })
     };
 
+    // `needs_operator` (FR-CMD-006) only means anything on an `ask`
+    // outcome: rejecting it elsewhere, rather than silently ignoring it,
+    // means a policy author who typos the outcome kind on an
+    // operator-gated rule finds out at parse time, not at review time.
+    if kind != "ask" && value.get("needs_operator").is_some() {
+        return Err(PolicyError::InvalidOutcome {
+            pointer: pointer.to_string(),
+            message: format!(
+                "\"needs_operator\" only applies to an \"ask\" outcome, not \"{kind}\""
+            ),
+        });
+    }
+
     match kind {
         "allow" => Ok(RuleOutcome::Allow {
             note: field("note"),
@@ -496,7 +510,7 @@ mod tests {
                             "rules": [
                                 {
                                     "id": "git-push-force",
-                                    "predicate": {"flag_present": "--force"},
+                                    "predicate": {"arg_equals": "--force"},
                                     "outcome": {
                                         "kind": "deny",
                                         "reason": "force-push rewrites shared history",
@@ -678,6 +692,18 @@ mod tests {
     }
 
     #[test]
+    fn needs_operator_on_a_non_ask_outcome_is_rejected() {
+        // needs_operator only means anything on an ask outcome (FR-CMD-006);
+        // a policy author who sets it on a deny outcome by mistake should
+        // find out at parse time, not have it silently ignored.
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh": {"rules": [
+            {"id": "r1", "outcome": {"kind": "deny", "reason": "no", "instead": "x", "needs_operator": true}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        assert!(matches!(err, PolicyError::InvalidOutcome { .. }));
+    }
+
+    #[test]
     fn rewrite_outcome_without_target_is_rejected() {
         let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh": {"rules": [
             {"id": "r1", "outcome": {"kind": "rewrite", "reason": "use legion instead"}}
@@ -689,15 +715,15 @@ mod tests {
     // -- Predicate combinators ----------------------------------------------
 
     #[test]
-    fn predicate_flag_present_matches_args() {
-        let p = Predicate::FlagPresent("-r".to_string());
+    fn predicate_arg_equals_matches_args() {
+        let p = Predicate::ArgEquals("-r".to_string());
         assert!(p.matches(MatchInput::Args(&["-r".to_string(), "foo".to_string()])));
         assert!(!p.matches(MatchInput::Args(&["foo".to_string()])));
     }
 
     #[test]
-    fn predicate_flag_absent_matches_args() {
-        let p = Predicate::FlagAbsent("-r".to_string());
+    fn predicate_arg_absent_matches_args() {
+        let p = Predicate::ArgAbsent("-r".to_string());
         assert!(p.matches(MatchInput::Args(&["foo".to_string()])));
         assert!(!p.matches(MatchInput::Args(&["-r".to_string()])));
     }
@@ -733,7 +759,7 @@ mod tests {
 
     #[test]
     fn predicate_wrong_input_kind_never_matches() {
-        let flag = Predicate::FlagPresent("-r".to_string());
+        let flag = Predicate::ArgEquals("-r".to_string());
         let json = serde_json::json!({"file_path": "-r"});
         assert!(!flag.matches(MatchInput::Json(&json)));
 
@@ -747,7 +773,7 @@ mod tests {
     #[test]
     fn predicate_all_requires_every_part() {
         let p = Predicate::All(vec![
-            Predicate::FlagPresent("-r".to_string()),
+            Predicate::ArgEquals("-r".to_string()),
             Predicate::OperandContains("foo".to_string()),
         ]);
         assert!(p.matches(MatchInput::Args(&["-r".to_string(), "foo".to_string()])));
@@ -757,8 +783,8 @@ mod tests {
     #[test]
     fn predicate_any_requires_one_part() {
         let p = Predicate::Any(vec![
-            Predicate::FlagPresent("-r".to_string()),
-            Predicate::FlagPresent("-n".to_string()),
+            Predicate::ArgEquals("-r".to_string()),
+            Predicate::ArgEquals("-n".to_string()),
         ]);
         assert!(p.matches(MatchInput::Args(&["-n".to_string()])));
         assert!(!p.matches(MatchInput::Args(&["-z".to_string()])));
@@ -766,7 +792,7 @@ mod tests {
 
     #[test]
     fn predicate_not_inverts() {
-        let p = Predicate::Not(Box::new(Predicate::FlagPresent("-r".to_string())));
+        let p = Predicate::Not(Box::new(Predicate::ArgEquals("-r".to_string())));
         assert!(p.matches(MatchInput::Args(&["foo".to_string()])));
         assert!(!p.matches(MatchInput::Args(&["-r".to_string()])));
     }

@@ -93,11 +93,13 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     // alongside an unrelated Proxy part would wrongly lose to the Proxy.
     // Deciding the sym job first, outside the fold, keeps "never allowed
     // or proxied" true regardless of what #1228 changes.
-    if let Some((job_id, sym_command, matched_pattern)) =
+    if let Some((job_id, sym_command, matched_patterns)) =
         find_sym_job(&policy.sym_jobs, &scan.opaque)
     {
         let decision = Decision::deny(
-            format!("this command's job is one legion sym serves ({matched_pattern})"),
+            format!(
+                "this command's job is one legion sym serves (matched patterns: {matched_patterns})"
+            ),
             sym_command,
         )
         .expect("reason and instead are both non-empty here");
@@ -260,7 +262,8 @@ fn find_sym_job(
                 .iter()
                 .all(|pattern| body.contains(pattern.as_str()))
             {
-                return Some((job.id.clone(), job.sym_command.clone(), job.id.clone()));
+                let patterns = job.interpreter_patterns.join(", ");
+                return Some((job.id.clone(), job.sym_command.clone(), patterns));
             }
         }
     }
@@ -467,7 +470,7 @@ mod tests {
                         "rules": [
                             {
                                 "id": "git-push-force",
-                                "predicate": {"flag_present": "--force"},
+                                "predicate": {"arg_equals": "--force"},
                                 "outcome": {
                                     "kind": "deny",
                                     "reason": "force-push rewrites shared history",
@@ -497,38 +500,42 @@ mod tests {
                     "gh": {
                         "rules": [
                             {
+                                "id": "gh-recall-gated",
+                                "predicate": {"arg_equals": "--recall-gated"},
+                                "requires": ["recall"],
+                                "outcome": {
+                                    "kind": "allow",
+                                    "note": "cleared by recall"
+                                }
+                            }
+                        ]
+                    },
+                    "gh issue": {
+                        "rules": [
+                            {
                                 "id": "gh-issue-list",
-                                "predicate": {"all": [
-                                    {"flag_present": "issue"},
-                                    {"flag_present": "list"}
-                                ]},
+                                "predicate": {"arg_equals": "list"},
                                 "outcome": {
                                     "kind": "rewrite",
                                     "target": "legion issue list",
                                     "reason": "gh issue list duplicates legion's issue tracking surface"
                                 }
-                            },
+                            }
+                        ]
+                    },
+                    "gh pr": {
+                        "rules": [
                             {
                                 "id": "gh-pr-merge-admin",
                                 "predicate": {"all": [
-                                    {"flag_present": "pr"},
-                                    {"flag_present": "merge"},
-                                    {"flag_present": "--admin"}
+                                    {"arg_equals": "merge"},
+                                    {"arg_equals": "--admin"}
                                 ]},
                                 "outcome": {
                                     "kind": "ask",
                                     "question": "merge bypassing branch protection?",
                                     "reason": "--admin skips required checks",
                                     "needs_operator": true
-                                }
-                            },
-                            {
-                                "id": "gh-recall-gated",
-                                "predicate": {"flag_present": "--recall-gated"},
-                                "requires": ["recall"],
-                                "outcome": {
-                                    "kind": "allow",
-                                    "note": "cleared by recall"
                                 }
                             }
                         ]
