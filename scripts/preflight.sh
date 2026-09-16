@@ -458,14 +458,7 @@ main() {
   step "cargo fmt -- --check"
   cargo fmt -- --check || fail "formatting (run: cargo fmt)"
 
-  # --workspace: the root Cargo.toml is a workspace as of #1225
-  # (crates/legion-cmd). Bare `cargo clippy`/`cargo test`/`cargo nextest run`
-  # only select the root `legion` package -- verified empirically: without
-  # --workspace, legion-cmd's tests never ran (no "Running unittests
-  # src/lib.rs" for legion_cmd in the output) even though the crate compiled
-  # as a dependency. `cargo fmt -- --check` does not need the flag: it walks
-  # the whole workspace by default, confirmed by a deliberately malformed
-  # crates/legion-cmd/src/lib.rs failing the bare command.
+  # --workspace: bare clippy/test/nextest only select the root package, skipping legion-cmd.
   step "cargo clippy --workspace --all-targets -- -D warnings"
   cargo clippy --workspace --all-targets -- -D warnings || fail "clippy"
 

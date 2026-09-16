@@ -12,6 +12,6 @@
 mod decision;
 
 pub use decision::{
-    Context, ContractError, Decision, DenyDetails, Facts, Lookup, ManagedTarget, NO_GO_INSTEAD,
-    ProxyReason, Routed, ToolCall,
+    AskDetails, Context, ContractError, Decision, DenyDetails, Facts, Lookup, ManagedTarget,
+    NO_GO_INSTEAD, ProxyReason, Routed, ToolCall,
 };

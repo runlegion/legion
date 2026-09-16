@@ -6,7 +6,7 @@
 //! side -- [`ToolCall`] and [`Context`] -- is fixed here too, so the later
 //! `route` slice has a stable signature to implement against.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// The exact `instead` text a no-go deny carries (FR-CMD-005): no command
 /// replaces a no-go command, so every no-go deny names the same fixed text
@@ -33,6 +33,14 @@ pub enum ContractError {
     /// [`ProxyReason`] (FR-CMD-004).
     #[error("unknown proxy reason: {0}")]
     UnknownProxyReason(String),
+
+    /// An [`AskDetails`] was constructed with an empty question (FR-CMD-006).
+    #[error("ask question cannot be empty")]
+    EmptyAskQuestion,
+
+    /// An [`AskDetails`] was constructed with an empty reason (FR-CMD-006).
+    #[error("ask reason cannot be empty")]
+    EmptyAskReason,
 }
 
 /// The only five outcomes `route` can return (FR-CMD-001). No sixth arm
@@ -63,10 +71,13 @@ pub enum Decision {
     /// instead (FR-CMD-005); see [`DenyDetails::new`] for the invariant.
     Deny(DenyDetails),
 
-    /// Escalate to the operator (FR-CMD-006). Only the variant is built in
-    /// this slice -- when route may return it, and what rule it leaves
-    /// behind, are open (parent issue #1224, ruling 3).
-    Ask { question: String },
+    /// Refuse the command and put a question, with a reason, to the agent
+    /// first (FR-CMD-006). The agent drops the command or confirms it with
+    /// a reason; the operator is prompted only when the matched policy
+    /// entry marks the command as needing the operator, and only after the
+    /// agent has confirmed, with the agent's reason attached. See
+    /// [`AskDetails::new`] for the invariant.
+    Ask(AskDetails),
 }
 
 impl Decision {
@@ -84,6 +95,15 @@ impl Decision {
     /// command. Building the no-go list itself is out of scope here.
     pub fn no_go(reason: impl Into<String>) -> Result<Decision, ContractError> {
         Ok(Decision::Deny(DenyDetails::no_go(reason)?))
+    }
+
+    /// Builds a [`Decision::Ask`], rejecting an empty question or an empty
+    /// reason (FR-CMD-006).
+    pub fn ask(
+        question: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<Decision, ContractError> {
+        Ok(Decision::Ask(AskDetails::new(question, reason)?))
     }
 }
 
@@ -136,6 +156,47 @@ impl DenyDetails {
     }
 }
 
+/// An asked question and the reason behind it (FR-CMD-006).
+///
+/// Fields are private so the invariant -- neither string is empty -- holds
+/// for every `AskDetails` in existence, not just the ones built through
+/// [`AskDetails::new`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskDetails {
+    question: String,
+    reason: String,
+}
+
+impl AskDetails {
+    /// Rejects an empty `question` or an empty `reason` (FR-CMD-006): the
+    /// agent cannot act on an ask that does not say what is being asked or
+    /// why.
+    pub fn new(
+        question: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<Self, ContractError> {
+        let question = question.into();
+        let reason = reason.into();
+        if question.is_empty() {
+            return Err(ContractError::EmptyAskQuestion);
+        }
+        if reason.is_empty() {
+            return Err(ContractError::EmptyAskReason);
+        }
+        Ok(Self { question, reason })
+    }
+
+    /// The question put to the agent.
+    pub fn question(&self) -> &str {
+        &self.question
+    }
+
+    /// Why the question is being asked.
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
 /// The managed command a [`Decision::Rewrite`] points to (FR-CMD-003).
 ///
 /// `route` only names the target; the adapter resolves it to an actual
@@ -158,12 +219,12 @@ impl ManagedTarget {
 }
 
 /// The closed set of seven proxy reasons (FR-CMD-004). No other value can be
-/// constructed: [`TryFrom<&str>`] rejects anything outside the seven, and
-/// the custom [`Deserialize`] impl below routes through that same check, so
-/// a `ProxyReason` read from JSON is held to the identical set as one built
-/// in Rust. Serialized forms use the seven kebab-case names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+/// constructed: [`TryFrom<&str>`] and [`Deserialize`] both search [`ALL`]
+/// via [`as_str`], so the wire name for each reason has one source.
+///
+/// [`ALL`]: ProxyReason::ALL
+/// [`as_str`]: ProxyReason::as_str
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyReason {
     Binary,
     Checksum,
@@ -176,20 +237,49 @@ pub enum ProxyReason {
     Opaque,
 }
 
+impl ProxyReason {
+    /// Every member of the closed set, for exhaustive iteration and lookup.
+    pub const ALL: [ProxyReason; 7] = [
+        ProxyReason::Binary,
+        ProxyReason::Checksum,
+        ProxyReason::MachineProtocol,
+        ProxyReason::CompleteLog,
+        ProxyReason::FullPatch,
+        ProxyReason::VerbatimSource,
+        ProxyReason::Opaque,
+    ];
+
+    /// The reason's kebab-case wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProxyReason::Binary => "binary",
+            ProxyReason::Checksum => "checksum",
+            ProxyReason::MachineProtocol => "machine-protocol",
+            ProxyReason::CompleteLog => "complete-log",
+            ProxyReason::FullPatch => "full-patch",
+            ProxyReason::VerbatimSource => "verbatim-source",
+            ProxyReason::Opaque => "opaque",
+        }
+    }
+}
+
 impl TryFrom<&str> for ProxyReason {
     type Error = ContractError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "binary" => Ok(Self::Binary),
-            "checksum" => Ok(Self::Checksum),
-            "machine-protocol" => Ok(Self::MachineProtocol),
-            "complete-log" => Ok(Self::CompleteLog),
-            "full-patch" => Ok(Self::FullPatch),
-            "verbatim-source" => Ok(Self::VerbatimSource),
-            "opaque" => Ok(Self::Opaque),
-            other => Err(ContractError::UnknownProxyReason(other.to_string())),
-        }
+        ProxyReason::ALL
+            .into_iter()
+            .find(|reason| reason.as_str() == value)
+            .ok_or_else(|| ContractError::UnknownProxyReason(value.to_string()))
+    }
+}
+
+impl Serialize for ProxyReason {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -215,18 +305,14 @@ pub enum Lookup {
 }
 
 /// The small caller-supplied context (FR-CMD-001): the repo, whether the
-/// code index exists, the allow-list, and any rulings, recall, or consult
-/// results already fetched. Every field is passed in; nothing here is
-/// looked up by legion-cmd itself (NFR-CMD-001).
+/// code index exists, the allow-list, and any recall or consult results
+/// already fetched. Every field is passed in; nothing here is looked up by
+/// legion-cmd itself (NFR-CMD-001).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Context {
     pub repo: Option<String>,
     pub index_exists: bool,
     pub allow_list: Vec<String>,
-    // Rulings: the caller passes the rulings it already fetched, but the
-    // spec fixes no schema for a ruling. Do not invent one; this field is
-    // added when the escalation design is specified (parent issue #1224,
-    // ruling 3).
     pub recall: Lookup,
     pub consult: Lookup,
 }
@@ -280,9 +366,7 @@ mod tests {
                 reason: ProxyReason::Binary,
             },
             Decision::deny("no managed equivalent", "run it manually").expect("valid deny"),
-            Decision::Ask {
-                question: "which repo?".to_string(),
-            },
+            Decision::ask("which repo?", "the command names no repo").expect("valid ask"),
         ];
         for decision in decisions {
             match decision {
@@ -290,7 +374,7 @@ mod tests {
                 Decision::Rewrite { .. } => {}
                 Decision::Proxy { .. } => {}
                 Decision::Deny(_) => {}
-                Decision::Ask { .. } => {}
+                Decision::Ask(_) => {}
             }
         }
     }
@@ -330,16 +414,7 @@ mod tests {
     /// enforced by the compiler.
     #[test]
     fn proxy_reasons_are_exhaustively_named() {
-        let reasons = [
-            ProxyReason::Binary,
-            ProxyReason::Checksum,
-            ProxyReason::MachineProtocol,
-            ProxyReason::CompleteLog,
-            ProxyReason::FullPatch,
-            ProxyReason::VerbatimSource,
-            ProxyReason::Opaque,
-        ];
-        for reason in reasons {
+        for reason in ProxyReason::ALL {
             match reason {
                 ProxyReason::Binary => {}
                 ProxyReason::Checksum => {}
@@ -394,17 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn proxy_reason_serializes_to_kebab_case() {
-        let json = serde_json::to_string(&ProxyReason::MachineProtocol).expect("serializes");
-        assert_eq!(json, "\"machine-protocol\"");
-    }
-
-    #[test]
-    fn opaque_proxy_reason_round_trips() {
-        let json = serde_json::to_string(&ProxyReason::Opaque).expect("serializes");
-        assert_eq!(json, "\"opaque\"");
-        let reason: ProxyReason = serde_json::from_str(&json).expect("valid reason");
-        assert_eq!(reason, ProxyReason::Opaque);
+    fn every_proxy_reason_round_trips_through_its_kebab_case_name() {
+        for reason in ProxyReason::ALL {
+            let json = serde_json::to_string(&reason).expect("serializes");
+            assert_eq!(json, format!("\"{}\"", reason.as_str()));
+            let parsed: ProxyReason = serde_json::from_str(&json).expect("valid reason");
+            assert_eq!(parsed, reason);
+        }
     }
 
     // -- Deny cannot be built without both fields (FR-CMD-005) -----------
@@ -466,6 +537,40 @@ mod tests {
             }
             _ => panic!("expected Deny"),
         }
+    }
+
+    // -- Ask cannot be built without both fields (FR-CMD-006) ------------
+
+    #[test]
+    fn ask_details_rejects_empty_question() {
+        let result = AskDetails::new("", "the command names no repo");
+        assert_eq!(result, Err(ContractError::EmptyAskQuestion));
+    }
+
+    #[test]
+    fn ask_details_rejects_empty_reason() {
+        let result = AskDetails::new("which repo?", "");
+        assert_eq!(result, Err(ContractError::EmptyAskReason));
+    }
+
+    #[test]
+    fn ask_details_holds_both_fields_when_valid() {
+        let details =
+            AskDetails::new("which repo?", "the command names no repo").expect("both non-empty");
+        assert_eq!(details.question(), "which repo?");
+        assert_eq!(details.reason(), "the command names no repo");
+    }
+
+    #[test]
+    fn decision_ask_constructor_rejects_empty_fields() {
+        assert_eq!(
+            Decision::ask("", "the command names no repo"),
+            Err(ContractError::EmptyAskQuestion)
+        );
+        assert_eq!(
+            Decision::ask("which repo?", ""),
+            Err(ContractError::EmptyAskReason)
+        );
     }
 
     // -- Lookup distinguishes not-fetched from fetched-and-empty ---------
