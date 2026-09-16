@@ -92,10 +92,8 @@ pub(super) const DOCKER_GLOBAL_VALUE_OPTS: &[&str] = &[
     "--tlskey",
 ];
 
-/// `docker exec`'s options that take a separate value word. Not a
-/// [`WRAPPERS`] row because that table is keyed on a single word; `docker`
-/// alone is not a wrapper (`docker build`, `docker ps`, ... are ordinary
-/// invocations), only `docker exec` is.
+/// `docker exec`'s own options that take a separate value word, used by
+/// its [`TWO_WORD_WRAPPERS`] row.
 pub(super) const DOCKER_EXEC_VALUE_OPTS: &[&str] =
     &["-u", "-w", "-e", "--user", "--workdir", "--env"];
 

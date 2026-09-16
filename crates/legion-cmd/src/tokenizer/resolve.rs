@@ -271,11 +271,12 @@ fn resolve_at(
         }
         return Ok(());
     }
-    if TWO_WORD_WRAPPERS.iter().any(|(first, ..)| *first == bin) {
-        for (first, second, global_opts, sub_opts, positionals) in TWO_WORD_WRAPPERS {
-            if *first != bin {
-                continue;
-            }
+    let mut two_word_rows = TWO_WORD_WRAPPERS
+        .iter()
+        .filter(|(first, ..)| *first == bin)
+        .peekable();
+    if two_word_rows.peek().is_some() {
+        for (_, second, global_opts, sub_opts, positionals) in two_word_rows {
             let after_globals = skip_options(words, i + 1, global_opts);
             if words.get(after_globals).map(|w| w.text.as_str()) == Some(*second) {
                 let mut j = skip_options(words, after_globals + 1, sub_opts);
