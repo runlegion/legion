@@ -1,19 +1,24 @@
 //! CLI end-to-end tests for the #1010 worktree-divergence guard.
 //!
 //! `legion sym`/`legion index` resolve a repo to the single workdir path
-//! `watch.toml` registers for it. Invoked from inside a linked git worktree
-//! on a branch that workdir's last `legion index` run never saw, they used
-//! to answer for the registered (primary) checkout silently -- #1003's
-//! `sym refs` miss. The fix is a guard (Sean's decision on #1010, not
-//! worktree-aware resolution): before answering, compare the invoking
-//! checkout's toplevel + HEAD against the registered workdir + its last
-//! indexed HEAD, and print a WARNING naming both HEADs and the worktree
-//! path when they diverge. The pure decision logic (`worktree_divergence_
-//! warning`, `inventory::git_common_dir`) is unit-tested in
-//! `src/cli/index_cmd.rs` and `src/inventory.rs`; these tests exercise the
-//! actual binary surface named in the issue: `sym refs`, `sym etc
-//! find-content`, and `legion index --file`, plus the primary-checkout
-//! regression case.
+//! `watch.toml` registers for it. Invoked from inside a linked git worktree,
+//! they used to answer for the registered (primary) checkout silently --
+//! #1003's `sym refs` miss. The fix is a guard (Sean's decision on #1010,
+//! not worktree-aware resolution): before answering, check whether the
+//! invoking checkout is a different directory from the registered workdir
+//! but the SAME underlying repository (`inventory::git_common_dir`), and
+//! print a WARNING naming both checkouts when so. #1010 shipped this guard
+//! comparing HEADs too and returning silently on a match; #1186 removed
+//! that early return -- a worktree at the same commit as the registered
+//! checkout is the ordinary case, not one that needs to differ before it is
+//! worth a warning. The HEAD comparison survives only to pick the message's
+//! wording: "this worktree's branch was not seen by the last index" appears
+//! only when the HEADs actually differ. The pure decision logic
+//! (`worktree_divergence_warning`, `inventory::git_common_dir`) is
+//! unit-tested in `src/cli/index_cmd.rs` and `src/inventory.rs`; these
+//! tests exercise the actual binary surface named in the issues: `sym
+//! refs`/`sym def`, `sym etc find-content`, and `legion index --file`, plus
+//! the primary-checkout regression cases (both differing- and same-HEAD).
 
 use crate::common::{RealRepoConfigGuard, legion_cmd, run_ok, run_ok_stderr};
 
