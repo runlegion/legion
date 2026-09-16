@@ -508,12 +508,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "reason must be non-empty")]
     fn deny_infallible_panics_on_empty_reason_in_debug_builds() {
         let _ = Decision::deny_infallible("", "do something else");
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "instead must be non-empty")]
     fn deny_infallible_panics_on_empty_instead_in_debug_builds() {
         let _ = Decision::deny_infallible("no", "");
@@ -532,12 +534,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "question must be non-empty")]
     fn ask_infallible_panics_on_empty_question_in_debug_builds() {
         let _ = Decision::ask_infallible("", "needs a look");
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "reason must be non-empty")]
     fn ask_infallible_panics_on_empty_reason_in_debug_builds() {
         let _ = Decision::ask_infallible("sure?", "");
