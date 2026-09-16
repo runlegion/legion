@@ -1,0 +1,102 @@
+{
+  "_comment": "legion-cmd's default routing policy (FR-CMD-011). Parsed by legion-cmd::parse_policy; route never reads this file itself -- the adapter does. This slice ships only enough rules to exercise every Decision arm end to end; the hook-parity issue fills in the rules that account for the current hooks.",
+  "tools": {
+    "Bash": {
+      "kind": "bash",
+      "families": {
+        "git push": {
+          "rules": [
+            {
+              "id": "git-push-force",
+              "predicate": { "flag_present": "--force" },
+              "outcome": {
+                "kind": "deny",
+                "reason": "a force-push rewrites shared history other agents may already be based on",
+                "instead": "git push --force-with-lease"
+              }
+            },
+            {
+              "id": "git-push-default",
+              "predicate": "always",
+              "outcome": { "kind": "allow", "note": null }
+            }
+          ]
+        },
+        "chmod": {
+          "rules": [
+            {
+              "id": "chmod-world-writable",
+              "predicate": { "operand_contains": "777" },
+              "outcome": {
+                "kind": "deny",
+                "reason": "777 opens the tree to every user on the machine",
+                "instead": "chmod 755"
+              }
+            }
+          ]
+        },
+        "gh": {
+          "rules": [
+            {
+              "id": "gh-issue-list",
+              "predicate": {
+                "all": [
+                  { "flag_present": "issue" },
+                  { "flag_present": "list" }
+                ]
+              },
+              "outcome": {
+                "kind": "rewrite",
+                "target": "legion issue list",
+                "reason": "gh issue list duplicates legion's own issue tracking surface"
+              }
+            },
+            {
+              "id": "gh-pr-merge-admin",
+              "predicate": {
+                "all": [
+                  { "flag_present": "pr" },
+                  { "flag_present": "merge" },
+                  { "flag_present": "--admin" }
+                ]
+              },
+              "outcome": {
+                "kind": "ask",
+                "question": "merge this PR bypassing branch protection?",
+                "reason": "--admin skips required status checks and reviews",
+                "needs_operator": true
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "sym_jobs": [
+    {
+      "id": "interpreter-find-content-pathlib",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["rglob(", "read_text()"]
+    },
+    {
+      "id": "interpreter-find-content-oswalk",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["os.walk(", ".read()"]
+    },
+    {
+      "id": "interpreter-find-content-node",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["readdirSync(", "readFileSync("]
+    },
+    {
+      "id": "interpreter-find-file-pathlib",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["rglob("]
+    },
+    {
+      "id": "interpreter-find-file-node",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["readdirSync("]
+    }
+  ]
+}

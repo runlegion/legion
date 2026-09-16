@@ -335,12 +335,36 @@ pub struct Facts {
     pub keywords: Vec<String>,
 }
 
+/// The policy entry that decided a command (#1227): a matched rule's id, an
+/// FR-CMD-016 default with no specific rule to name, or a tokenizer parse
+/// error. The adapter (#1229) reads this to build its refusal; the ledger
+/// (#1231, #1237) records it as the audit trail for the decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecidingEntry {
+    /// A specific policy rule or sym job matched. `needs_operator` is only
+    /// meaningful when the resulting [`Decision`] is [`Decision::Ask`]
+    /// (FR-CMD-006); it is always `false` for every other outcome, and
+    /// `#1237` is what sets it from the agent's confirmation.
+    Rule { id: String, needs_operator: bool },
+
+    /// No rule matched; one of FR-CMD-016's defaults applied (no managed
+    /// binary, an unresolvable managed rule, a missing recall or consult
+    /// result, or an empty policy).
+    Default,
+
+    /// The tokenizer could not parse the command (FR-CMD-007); `route`
+    /// returns [`Decision::Ask`] and this entry carries the parse error's
+    /// message.
+    ParseError(String),
+}
+
 /// `route`'s return value: exactly one [`Decision`] plus the [`Facts`] it
-/// extracted (FR-CMD-001).
+/// extracted (FR-CMD-001), and the [`DecidingEntry`] that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Routed {
     pub decision: Decision,
     pub facts: Facts,
+    pub entry: DecidingEntry,
 }
 
 #[cfg(test)]
