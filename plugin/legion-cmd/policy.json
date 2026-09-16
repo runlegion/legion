@@ -107,6 +107,21 @@
       "interpreter_patterns": ["glob.glob(", "readlines()"]
     },
     {
+      "id": "interpreter-find-content-oslistdir",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["os.listdir(", ".read()"]
+    },
+    {
+      "id": "interpreter-find-content-oslistdir-iterlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["os.listdir(", "enumerate("]
+    },
+    {
+      "id": "interpreter-find-content-oslistdir-readlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["os.listdir(", "readlines()"]
+    },
+    {
       "id": "interpreter-find-content-node",
       "sym_command": "legion sym etc find-content",
       "interpreter_patterns": ["readdirSync(", "readFileSync("]
@@ -122,9 +137,29 @@
       "interpreter_patterns": ["glob.glob("]
     },
     {
+      "id": "interpreter-find-file-oswalk",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["os.walk("]
+    },
+    {
+      "id": "interpreter-find-file-oslistdir",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["os.listdir("]
+    },
+    {
       "id": "interpreter-find-file-node",
       "sym_command": "legion sym etc find-file",
       "interpreter_patterns": ["readdirSync("]
+    },
+    {
+      "id": "interpreter-find-file-subprocess-find-single-quoted",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["subprocess", "'find'"]
+    },
+    {
+      "id": "interpreter-find-file-subprocess-find-double-quoted",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["subprocess", "\"find\""]
     }
   ]
 }

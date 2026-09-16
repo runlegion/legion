@@ -132,6 +132,88 @@ for f in glob.glob('**/biome.json', recursive=True):
     assert_eq!(deny_instead(command), "legion sym etc find-file");
 }
 
+// -- Real-corpus RECALL gaps found by a second, targeted measurement pass
+// (same rules: local uncommitted mining toy, counts and hand-written
+// synthetic shapes only, nothing from the corpus copied here). The first
+// pass measured precision on matched bodies; this pass measured how many
+// unmatched bodies still carried an obvious traversal token. Of ~9,700
+// interpreter bodies, os.walk(/os.listdir( appeared in 79 unmatched
+// bodies that were never routed to sym at all -- the policy only ever
+// matched os.walk(/rglob(/glob.glob( when paired with a content-read
+// token, so a pure file-listing job (traverse and print names, no
+// content read) fell through to opaque proxy every time.
+
+#[test]
+fn oswalk_alone_with_no_content_read_reaches_find_file() {
+    let command = r#"python3 -c "
+import os
+for root, dirs, files in os.walk('src'):
+    for f in files:
+        if f.endswith('.rs'):
+            print(os.path.join(root, f))
+""#;
+    assert_eq!(deny_instead(command), "legion sym etc find-file");
+}
+
+#[test]
+fn oslistdir_alone_with_no_content_read_reaches_find_file() {
+    let command = r#"python3 -c "
+import os
+for f in sorted(os.listdir('src')):
+    print(f)
+""#;
+    assert_eq!(deny_instead(command), "legion sym etc find-file");
+}
+
+#[test]
+fn oslistdir_with_read_reaches_find_content() {
+    let command = r#"python3 -c "
+import os
+for f in sorted(os.listdir('src')):
+    content = open(f).read()
+    if 'needle' in content:
+        print(f)
+""#;
+    assert_eq!(deny_instead(command), "legion sym etc find-content");
+}
+
+#[test]
+fn subprocess_find_single_quoted_reaches_find_file() {
+    let command = r#"python3 -c "
+import subprocess
+out = subprocess.run(['find', '.', '-name', '*.rs'], capture_output=True, text=True)
+print(out.stdout)
+""#;
+    assert_eq!(deny_instead(command), "legion sym etc find-file");
+}
+
+#[test]
+fn subprocess_find_double_quoted_reaches_find_file() {
+    let command = r#"python3 -c '
+import subprocess
+out = subprocess.run(["find", ".", "-name", "*.rs"], capture_output=True, text=True)
+print(out.stdout)
+'"#;
+    assert_eq!(deny_instead(command), "legion sym etc find-file");
+}
+
+// -- Negative: a subprocess call unrelated to find must not match --------
+
+#[test]
+fn subprocess_without_find_matches_no_sym_job() {
+    let routed = route(
+        &policy(),
+        &bash_call(r#"python3 -c "import subprocess; print(subprocess.run(['ls']).stdout)""#),
+        &Context::default(),
+    );
+    assert_eq!(
+        routed.decision,
+        Decision::Proxy {
+            reason: legion_cmd::ProxyReason::Opaque
+        }
+    );
+}
+
 // -- Negative: a read with no traversal token matches no sym job ----------
 
 #[test]
