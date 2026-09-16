@@ -2,10 +2,11 @@
 # preflight.sh: the quality bar that must pass before a release (or any push
 # the developer wants gated). Reusable unit shared by scripts/release.sh.
 #
-#   1. cargo fmt -- --check          (formatting is committed-clean)
-#   2. cargo clippy --all-targets -D warnings  (CI parity -- bare clippy misses
-#                                               test/example/bench code)
-#   3. cargo test                    (the suite is green)
+#   1. cargo fmt -- --check                     (formatting is committed-clean)
+#   2. cargo clippy --workspace --all-targets -D warnings  (CI parity -- bare
+#                                               clippy misses test/example/bench
+#                                               code, and the workspace crates)
+#   3. cargo test --workspace        (the suite is green, workspace-wide)
 #   4. scripts/test-*.sh             (the shell suites, IN A DISPOSABLE SANDBOX)
 #   5. legion index <repo>           (SCIP index regenerated so sym queries
 #                                     answer against current code)
