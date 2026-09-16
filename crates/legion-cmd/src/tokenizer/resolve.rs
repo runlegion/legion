@@ -4,7 +4,7 @@
 use super::lexer::{Scanner, Tok, Word};
 use super::tables::{
     CLAUSE_KEYWORDS, END_KEYWORDS, INTERPRETERS, LOOKUPS, PREFIX_KEYWORDS, SCRIPT_EXTENSIONS,
-    SHELLS, TWO_WORD_WRAPPERS, UNKNOWN_WRAPPERS, WRAPPERS,
+    SHELLS, TWO_WORD_WRAPPERS, TwoWordWrapper, UNKNOWN_WRAPPERS, WRAPPERS,
 };
 use super::{Invocation, MAX_DEPTH, Opaque, Position, Scan, ScanError};
 
@@ -271,14 +271,15 @@ fn resolve_at(
         }
         return Ok(());
     }
-    let mut two_word_rows = TWO_WORD_WRAPPERS
+    let two_word_rows: Vec<TwoWordWrapper> = TWO_WORD_WRAPPERS
         .iter()
+        .copied()
         .filter(|(first, ..)| *first == bin)
-        .peekable();
-    if two_word_rows.peek().is_some() {
-        for (_, second, global_opts, sub_opts, positionals) in two_word_rows {
+        .collect();
+    if !two_word_rows.is_empty() {
+        for (_, second, global_opts, sub_opts, positionals) in two_word_rows.iter().copied() {
             let after_globals = skip_options(words, i + 1, global_opts);
-            if words.get(after_globals).map(|w| w.text.as_str()) == Some(*second) {
+            if words.get(after_globals).map(|w| w.text.as_str()) == Some(second) {
                 let mut j = skip_options(words, after_globals + 1, sub_opts);
                 j += positionals;
                 if j < words.len() {
@@ -291,12 +292,24 @@ fn resolve_at(
                         out,
                     );
                 }
-                break;
+                return Ok(());
             }
         }
-        // Either no second word matched (a bare `pnpm grep`, an ordinary
-        // `docker build`, ...) or the wrapped command was missing: stays
-        // an ordinary invocation of the first word, already recorded above.
+        // No row's second word matched at its expected spot. A bare
+        // `pnpm grep` (no `exec`/`dlx` anywhere) stays an ordinary
+        // invocation, but if the runner's own second word still appears
+        // later in the command -- an option this table does not yet model
+        // consumed the wrong number of words -- fail closed rather than
+        // silently treating it as a plain invocation: this is a wrapper we
+        // recognize but could not correctly unwrap.
+        let second_word_appears_later = rest.iter().any(|w| {
+            two_word_rows
+                .iter()
+                .any(|(_, second, ..)| w.text == *second)
+        });
+        if second_word_appears_later {
+            out.opaque.push(Opaque::UnknownWrapper);
+        }
         return Ok(());
     }
     if UNKNOWN_WRAPPERS.contains(&bin) {

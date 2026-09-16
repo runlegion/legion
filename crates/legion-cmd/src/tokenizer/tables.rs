@@ -97,15 +97,26 @@ pub(super) const DOCKER_GLOBAL_VALUE_OPTS: &[&str] = &[
 pub(super) const DOCKER_EXEC_VALUE_OPTS: &[&str] =
     &["-u", "-w", "-e", "--user", "--workdir", "--env"];
 
-/// No global options precede `pnpm`/`npm`/`yarn`'s `exec`/`dlx`, unlike
-/// `docker`'s `-H`/`-c`/... before `exec`.
-const NO_GLOBAL_OPTS: &[&str] = &[];
+/// `pnpm`'s own global options that can precede `exec`/`dlx` and take a
+/// separate value word: `-F`/`--filter <selector>`, `-C`/`--dir <path>`,
+/// `--config <path>`.
+const PNPM_GLOBAL_VALUE_OPTS: &[&str] = &["-F", "--filter", "-C", "--dir", "--config"];
+
+/// `npm`'s own global options that can precede `exec` and take a separate
+/// value word: `--prefix <path>`, `-w`/`--workspace <name>`, `--userconfig
+/// <path>`. npm has no `-C`/`--cwd`-shaped flag (checked against npm's own
+/// docs rather than assumed from git's or pnpm's `-C`), so none is listed.
+const NPM_GLOBAL_VALUE_OPTS: &[&str] = &["--prefix", "-w", "--workspace", "--userconfig"];
+
+/// `yarn`'s own global option that can precede `exec`/`dlx` and takes a
+/// separate value word: `--cwd <path>`.
+const YARN_GLOBAL_VALUE_OPTS: &[&str] = &["--cwd"];
 
 /// (first word, second word, the first word's own options that can precede
 /// the second word, the second word's own options, positional arguments
 /// consumed before the wrapped command -- `docker exec` needs the
 /// container name, the JS runners do not).
-type TwoWordWrapper = (
+pub(super) type TwoWordWrapper = (
     &'static str,
     &'static str,
     &'static [&'static str],
@@ -126,11 +137,29 @@ pub(super) const TWO_WORD_WRAPPERS: &[TwoWordWrapper] = &[
         DOCKER_EXEC_VALUE_OPTS,
         1,
     ),
-    ("pnpm", "exec", NO_GLOBAL_OPTS, &["--package", "-p"], 0),
-    ("pnpm", "dlx", NO_GLOBAL_OPTS, &["--package", "-p"], 0),
-    ("npm", "exec", NO_GLOBAL_OPTS, &["--package", "-p"], 0),
-    ("yarn", "exec", NO_GLOBAL_OPTS, &[], 0),
-    ("yarn", "dlx", NO_GLOBAL_OPTS, &[], 0),
+    (
+        "pnpm",
+        "exec",
+        PNPM_GLOBAL_VALUE_OPTS,
+        &["--package", "-p"],
+        0,
+    ),
+    (
+        "pnpm",
+        "dlx",
+        PNPM_GLOBAL_VALUE_OPTS,
+        &["--package", "-p"],
+        0,
+    ),
+    (
+        "npm",
+        "exec",
+        NPM_GLOBAL_VALUE_OPTS,
+        &["--package", "-p"],
+        0,
+    ),
+    ("yarn", "exec", YARN_GLOBAL_VALUE_OPTS, &[], 0),
+    ("yarn", "dlx", YARN_GLOBAL_VALUE_OPTS, &[], 0),
 ];
 
 /// Launchers this scanner recognizes as wrapper-shaped -- a bare command

@@ -191,6 +191,90 @@ fn yarn_dlx_is_a_two_word_wrapper() {
     assert_eq!(cowsay.position, Position::Wrapper);
 }
 
+// -- A value-taking global option before exec/dlx must not lose the
+// -- wrapped command (round-2 review, reproduced): before per-tool global
+// -- option tables existed, `--filter foo` (etc.) was treated as a boolean
+// -- flag, so its value word "foo" landed where "exec" was expected,
+// -- silently failing to match and leaving only the runner resolved.
+
+#[test]
+fn pnpm_filter_precedes_exec() {
+    let scan = scan("pnpm --filter foo exec eslint .").expect("valid");
+    let eslint = invocation(&scan, "eslint").expect("eslint resolved through pnpm --filter exec");
+    assert_eq!(eslint.position, Position::Wrapper);
+}
+
+#[test]
+fn pnpm_dash_c_dir_precedes_exec() {
+    let scan = scan("pnpm -C packages/foo exec eslint .").expect("valid");
+    let eslint = invocation(&scan, "eslint").expect("eslint resolved through pnpm -C exec");
+    assert_eq!(eslint.position, Position::Wrapper);
+}
+
+#[test]
+fn npm_prefix_precedes_exec() {
+    let scan = scan("npm --prefix dir exec eslint .").expect("valid");
+    let eslint = invocation(&scan, "eslint").expect("eslint resolved through npm --prefix exec");
+    assert_eq!(eslint.position, Position::Wrapper);
+}
+
+#[test]
+fn npm_workspace_precedes_exec() {
+    let scan = scan("npm -w foo exec eslint .").expect("valid");
+    let eslint = invocation(&scan, "eslint").expect("eslint resolved through npm -w exec");
+    assert_eq!(eslint.position, Position::Wrapper);
+}
+
+#[test]
+fn yarn_cwd_precedes_exec() {
+    let scan = scan("yarn --cwd dir exec eslint .").expect("valid");
+    let eslint = invocation(&scan, "eslint").expect("eslint resolved through yarn --cwd exec");
+    assert_eq!(eslint.position, Position::Wrapper);
+}
+
+#[test]
+fn unmodeled_global_option_before_exec_fails_closed_to_unknown_wrapper() {
+    // An option this table does not know shifts the position so "exec"
+    // is not found where expected, but "exec" still appears later in the
+    // command: this is a recognized two-word wrapper we could not
+    // correctly unwrap, so it must be opaque, not a silent ordinary
+    // invocation of pnpm.
+    let scan = scan("pnpm --some-unknown-opt val exec eslint .").expect("valid");
+    assert!(
+        scan.opaque
+            .iter()
+            .any(|o| matches!(o, Opaque::UnknownWrapper))
+    );
+    assert!(invocation(&scan, "eslint").is_none());
+}
+
+#[test]
+fn bare_pnpm_grep_stays_ordinary_after_the_fail_closed_change() {
+    // The mandated benign false positive: no `exec`/`dlx` anywhere in the
+    // command, so this must stay a plain invocation, not UnknownWrapper.
+    let scan = scan("pnpm grep").expect("valid");
+    assert!(
+        !scan
+            .opaque
+            .iter()
+            .any(|o| matches!(o, Opaque::UnknownWrapper))
+    );
+    let pnpm = invocation(&scan, "pnpm").expect("pnpm resolved");
+    assert_eq!(pnpm.args, vec!["grep"]);
+}
+
+#[test]
+fn bare_pnpm_wrangler_stays_ordinary_after_the_fail_closed_change() {
+    let scan = scan("pnpm wrangler deploy --env prod").expect("valid");
+    assert!(
+        !scan
+            .opaque
+            .iter()
+            .any(|o| matches!(o, Opaque::UnknownWrapper))
+    );
+    assert!(invocation(&scan, "wrangler").is_none());
+}
+
 #[test]
 fn bare_pnpm_with_a_non_runner_argument_is_an_ordinary_invocation() {
     // FR-CMD-007 revision 6: only `pnpm exec`/`pnpm dlx` are wrappers. A
