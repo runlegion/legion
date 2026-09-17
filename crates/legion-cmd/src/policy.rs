@@ -12,7 +12,7 @@
 //! walk is where every [`PolicyError`] below is raised, each one carrying
 //! the JSON pointer of the entry that failed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -75,6 +75,26 @@ pub enum PolicyError {
     /// two conflicting ways to).
     #[error("{pointer}: {message}")]
     AmbiguousSymJobMatcher { pointer: String, message: String },
+
+    /// A sym job's `rewrite.translatable` declares no flag and no operand
+    /// at all (FR-CMD-008): a rewrite eligibility with nothing declared
+    /// translatable is exactly the verb-only judgment FR-CMD-008 forbids,
+    /// since no invocation with any argument at all could ever satisfy it
+    /// on purpose.
+    #[error(
+        "{pointer}: a rewrite's translatable arguments must declare at least one flag or a non-zero max_operands"
+    )]
+    EmptyTranslatableArgSpec { pointer: String },
+
+    /// A sym job declares `rewrite` alongside `interpreter_patterns`. An
+    /// interpreter job's opaque body carries no parsed argument list to
+    /// check a `translatable` declaration against, so the declaration
+    /// could never take effect -- rejected here rather than silently
+    /// ignored.
+    #[error(
+        "{pointer}: rewrite eligibility requires an \"invocation\" matcher; this sym job uses \"interpreter_patterns\", whose opaque body has no argument list to check"
+    )]
+    RewriteOnOpaqueSymJob { pointer: String },
 
     /// A sym job's `invocation` matcher names an empty `binary`.
     #[error("{pointer}: sym job's invocation matcher must name a non-empty binary")]
@@ -293,11 +313,82 @@ pub struct Rule {
 /// split into args, e.g. `grep -rn foo src` at any position or depth), or
 /// the raw text of an [`crate::Opaque::Interpreter`] body the tokenizer
 /// cannot parse into args at all (e.g. a Python one-liner).
+///
+/// `rewrite` is the FR-CMD-008 lossless-rewrite declaration: when present,
+/// a matched invocation whose arguments the declaration's `translatable`
+/// [`ArgSpec`] covers is rewritten to `sym_command` instead of denied
+/// naming it. `parse_policy` only accepts `rewrite` on a job whose matcher
+/// is [`SymJobMatcher::Invocation`] (see [`PolicyError::RewriteOnOpaqueSymJob`]):
+/// an [`SymJobMatcher::InterpreterPatterns`] job's opaque body has no
+/// parsed argument list for a `translatable` declaration to check, so it
+/// stays a Deny naming `sym_command` regardless.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymJob {
     pub id: String,
     pub sym_command: String,
     pub matcher: SymJobMatcher,
+    pub rewrite: Option<RewriteSpec>,
+}
+
+/// A sym job's lossless-rewrite eligibility (FR-CMD-008): the arguments
+/// its target expresses exactly. `route` rewrites to the job's
+/// `sym_command` only when the matched invocation's arguments are fully
+/// covered by `translatable`; any argument outside it denies naming
+/// `sym_command` instead (FR-CMD-005's depends_on).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RewriteSpec {
+    pub translatable: ArgSpec,
+}
+
+/// The flags and operand count a rewrite target expresses exactly
+/// (FR-CMD-008). Losslessness is judged from the specific invocation's
+/// arguments, never from the binary or verb alone: [`ArgSpec::covers`]
+/// checks every argument the invocation actually carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct ArgSpec {
+    /// Every flag (an argument starting with `-`) the target expresses
+    /// exactly, e.g. `"-r"`, `"--fixed-strings"`. An invocation carrying a
+    /// flag outside this set is not covered.
+    #[serde(default)]
+    pub flags: BTreeSet<String>,
+    /// The maximum number of non-flag operands the target expresses
+    /// exactly (e.g. `1` for a target that takes only a search pattern,
+    /// with no path operand). An invocation with more non-flag operands
+    /// than this is not covered.
+    #[serde(default)]
+    pub max_operands: usize,
+}
+
+impl ArgSpec {
+    /// True when every one of `args` is covered by this declaration: each
+    /// flag must be named in `flags`, and the count of non-flag operands
+    /// must not exceed `max_operands`. This reads the specific arguments
+    /// the invocation carries, never the binary or verb (FR-CMD-008).
+    pub fn covers(&self, args: &[String]) -> bool {
+        let mut operand_count = 0usize;
+        for arg in args {
+            if arg.starts_with('-') {
+                if !self.flags.contains(arg) {
+                    return false;
+                }
+            } else {
+                operand_count += 1;
+                if operand_count > self.max_operands {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// True when this declaration covers nothing at all: no flag and no
+    /// operand. Such a declaration would only ever cover an invocation
+    /// with zero arguments, which is exactly the verb-only judgment
+    /// FR-CMD-008 forbids -- `parse_policy` rejects it rather than
+    /// accepting a rewrite spec that can never do useful work.
+    fn is_vacuous(&self) -> bool {
+        self.flags.is_empty() && self.max_operands == 0
+    }
 }
 
 /// How a [`SymJob`] recognizes a command as its job (FR-CMD-007).
@@ -394,6 +485,8 @@ struct RawSymJob {
     interpreter_patterns: Option<Vec<String>>,
     #[serde(default)]
     invocation: Option<RawSymJobInvocation>,
+    #[serde(default)]
+    rewrite: Option<RewriteSpec>,
 }
 
 #[derive(Deserialize)]
@@ -465,10 +558,23 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
                 });
             }
         };
+        if let Some(rewrite) = &raw_job.rewrite {
+            if matches!(matcher, SymJobMatcher::InterpreterPatterns(_)) {
+                return Err(PolicyError::RewriteOnOpaqueSymJob {
+                    pointer: format!("{job_pointer}/rewrite"),
+                });
+            }
+            if rewrite.translatable.is_vacuous() {
+                return Err(PolicyError::EmptyTranslatableArgSpec {
+                    pointer: format!("{job_pointer}/rewrite/translatable"),
+                });
+            }
+        }
         sym_jobs.push(SymJob {
             id: raw_job.id,
             sym_command: raw_job.sym_command,
             matcher,
+            rewrite: raw_job.rewrite,
         });
     }
 
@@ -901,6 +1007,103 @@ mod tests {
             }
             other => panic!("expected Invocation matcher, got {other:?}"),
         }
+    }
+
+    // -- Sym job rewrite eligibility (FR-CMD-008) ---------------------------
+
+    #[test]
+    fn sym_job_invocation_matcher_with_rewrite_parses() {
+        let text = r#"{"sym_jobs": [{
+            "id": "grep-recursive",
+            "sym_command": "legion sym etc find-content",
+            "invocation": {"binary": "grep", "predicate": {"operand_contains": "-r"}},
+            "rewrite": {"translatable": {"flags": ["-r", "-n"], "max_operands": 1}}
+        }]}"#;
+        let policy = parse_policy(text).expect("valid rewrite spec should parse");
+        let rewrite = policy.sym_jobs[0]
+            .rewrite
+            .as_ref()
+            .expect("rewrite spec present");
+        assert!(rewrite.translatable.flags.contains("-r"));
+        assert!(rewrite.translatable.flags.contains("-n"));
+        assert_eq!(rewrite.translatable.max_operands, 1);
+    }
+
+    #[test]
+    fn sym_job_rewrite_with_no_flags_and_no_operands_is_rejected_with_pointer() {
+        let text = r#"{"sym_jobs": [{
+            "id": "grep-recursive",
+            "sym_command": "legion sym etc find-content",
+            "invocation": {"binary": "grep"},
+            "rewrite": {"translatable": {}}
+        }]}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::EmptyTranslatableArgSpec { pointer } => {
+                assert_eq!(pointer, "/sym_jobs/0/rewrite/translatable");
+            }
+            other => panic!("expected EmptyTranslatableArgSpec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sym_job_rewrite_on_an_interpreter_patterns_job_is_rejected_with_pointer() {
+        // An interpreter job's opaque body has no parsed argument list for
+        // a `translatable` declaration to check, so declaring `rewrite`
+        // here can never take effect (FR-CMD-008).
+        let text = r#"{"sym_jobs": [{
+            "id": "py-rglob",
+            "sym_command": "legion sym etc find-file",
+            "interpreter_patterns": ["rglob("],
+            "rewrite": {"translatable": {"max_operands": 1}}
+        }]}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::RewriteOnOpaqueSymJob { pointer } => {
+                assert_eq!(pointer, "/sym_jobs/0/rewrite");
+            }
+            other => panic!("expected RewriteOnOpaqueSymJob, got {other:?}"),
+        }
+    }
+
+    // -- ArgSpec::covers is a function of the specific arguments, not the
+    // verb (FR-CMD-008) -----------------------------------------------------
+
+    #[test]
+    fn arg_spec_covers_an_invocation_within_its_declared_flags_and_operands() {
+        let spec = ArgSpec {
+            flags: BTreeSet::from(["-r".to_string(), "-n".to_string()]),
+            max_operands: 1,
+        };
+        assert!(spec.covers(&args(&["-r", "-n", "pattern"])));
+    }
+
+    #[test]
+    fn arg_spec_does_not_cover_a_flag_outside_its_declared_set() {
+        let spec = ArgSpec {
+            flags: BTreeSet::from(["-r".to_string()]),
+            max_operands: 1,
+        };
+        // "-l" (files-only) has no equivalent the target expresses, so an
+        // invocation carrying it is not covered even though "-r" and the
+        // single operand both are.
+        assert!(!spec.covers(&args(&["-r", "-l", "pattern"])));
+    }
+
+    #[test]
+    fn arg_spec_does_not_cover_more_operands_than_declared() {
+        let spec = ArgSpec {
+            flags: BTreeSet::from(["-r".to_string()]),
+            max_operands: 1,
+        };
+        // A second operand (e.g. a directory to search) has no declared
+        // translation, even though every flag is covered.
+        assert!(!spec.covers(&args(&["-r", "pattern", "some/dir"])));
+    }
+
+    #[test]
+    fn arg_spec_default_is_vacuous() {
+        assert!(ArgSpec::default().is_vacuous());
     }
 
     // -- A tool kind's rules must be shaped for that kind -------------------

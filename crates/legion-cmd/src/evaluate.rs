@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use crate::decision::{
-    Context, DecidingEntry, Decision, Facts, Lookup, ProxyReason, Routed, ToolCall,
+    Context, DecidingEntry, Decision, Facts, Lookup, ManagedTarget, ProxyReason, Routed, ToolCall,
 };
 use crate::policy::{
     Family, MatchInput, Policy, RequiredLookup, Rule, SymJob, SymJobMatcher, ToolKind, ToolRules,
@@ -85,23 +85,40 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     // FR-CMD-007: a compound command whose job `legion sym` serves is
     // never allowed or proxied, regardless of what the rest of the
     // command's parts would otherwise decide. This is checked and
-    // returned before the strictest-order fold below, deliberately: today
-    // every sym job yields Deny, which the fold would also produce on its
-    // own, but #1228 turns the lossless cases into Rewrite -- weaker than
-    // Proxy in fold order -- so once that lands, a sym-job Rewrite folded
-    // alongside an unrelated Proxy part would wrongly lose to the Proxy.
-    // Deciding the sym job first, outside the fold, keeps "never allowed
-    // or proxied" true regardless of what #1228 changes.
-    if let Some((job_id, sym_command, matched_description)) =
-        find_sym_job(&policy.sym_jobs, &scan.invocations, &scan.opaque)
-    {
-        // `sym_command` is non-empty because `parse_policy` already
-        // rejects an empty one (`PolicyError::EmptySymCommand`), and the
-        // reason is a non-empty format! -- both non-empty by construction.
-        let decision = Decision::deny_infallible(
-            format!("this command's job is one legion sym serves ({matched_description})"),
-            sym_command,
-        );
+    // returned before the strictest-order fold below, deliberately: a sym
+    // job now yields Rewrite when its arguments translate losslessly
+    // (FR-CMD-008), otherwise Deny -- and Rewrite is weaker than Proxy in
+    // fold order, so a sym-job Rewrite folded alongside an unrelated Proxy
+    // part would wrongly lose to the Proxy. Deciding the sym job first,
+    // outside the fold, keeps "never allowed or proxied" true regardless
+    // of which of the two outcomes this step produces.
+    if let Some(outcome) = find_sym_job(&policy.sym_jobs, &scan.invocations, &scan.opaque) {
+        let (decision, job_id) = match outcome {
+            SymJobOutcome::Rewrite { job_id, sym_command } => (
+                Decision::Rewrite {
+                    target: ManagedTarget::new(sym_command),
+                    reason:
+                        "this command's job is one legion sym serves, and its arguments translate losslessly to the managed target"
+                            .to_string(),
+                },
+                job_id,
+            ),
+            SymJobOutcome::Deny {
+                job_id,
+                sym_command,
+                description,
+            } => {
+                // `sym_command` is non-empty because `parse_policy` already
+                // rejects an empty one (`PolicyError::EmptySymCommand`),
+                // and the reason is a non-empty format! -- both non-empty
+                // by construction.
+                let decision = Decision::deny_infallible(
+                    format!("this command's job is one legion sym serves ({description})"),
+                    sym_command,
+                );
+                (decision, job_id)
+            }
+        };
         return Routed {
             decision,
             facts,
@@ -221,6 +238,22 @@ fn opaque_part() -> (Decision, DecidingEntry) {
     )
 }
 
+/// What a matched [`SymJob`] decides (FR-CMD-008): a rewrite to its
+/// `sym_command` when the matched invocation's arguments translate
+/// losslessly, or a deny naming `sym_command` otherwise -- carrying
+/// `description` for the deny's reason text.
+enum SymJobOutcome {
+    Rewrite {
+        job_id: String,
+        sym_command: String,
+    },
+    Deny {
+        job_id: String,
+        sym_command: String,
+        description: String,
+    },
+}
+
 /// Checks every sym job against the whole command, in declared order,
 /// returning the first one that matches. An [`crate::policy::SymJobMatcher::Invocation`]
 /// job is checked against every resolved [`Invocation`] (any position or
@@ -230,20 +263,41 @@ fn opaque_part() -> (Decision, DecidingEntry) {
 /// patterns to appear. Declared order matters for both: a policy author
 /// lists a job's more specific match before a broader one so the more
 /// specific job wins when both would otherwise match the same command.
+///
+/// An `Invocation` job that also declares `rewrite` (FR-CMD-008) checks
+/// the matched invocation's arguments against the declaration's
+/// `translatable` [`crate::policy::ArgSpec`]: covered arguments yield
+/// [`SymJobOutcome::Rewrite`], anything outside it yields
+/// [`SymJobOutcome::Deny`] -- the same outcome a job with no `rewrite`
+/// declaration always yields. An `InterpreterPatterns` job's opaque body
+/// has no parsed argument list to check, so it always denies
+/// (`parse_policy` already refuses `rewrite` on such a job).
 fn find_sym_job(
     sym_jobs: &[SymJob],
     invocations: &[Invocation],
     opaque: &[Opaque],
-) -> Option<(String, String, String)> {
+) -> Option<SymJobOutcome> {
     for job in sym_jobs {
         match &job.matcher {
             SymJobMatcher::Invocation { binary, predicate } => {
                 let matched = invocations.iter().find(|inv| {
                     &inv.binary == binary && predicate.matches(MatchInput::Args(&inv.args))
                 });
-                if matched.is_some() {
+                if let Some(inv) = matched {
+                    if let Some(rewrite) = &job.rewrite
+                        && rewrite.translatable.covers(&inv.args)
+                    {
+                        return Some(SymJobOutcome::Rewrite {
+                            job_id: job.id.clone(),
+                            sym_command: job.sym_command.clone(),
+                        });
+                    }
                     let description = format!("invocation of {binary}");
-                    return Some((job.id.clone(), job.sym_command.clone(), description));
+                    return Some(SymJobOutcome::Deny {
+                        job_id: job.id.clone(),
+                        sym_command: job.sym_command.clone(),
+                        description,
+                    });
                 }
             }
             SymJobMatcher::InterpreterPatterns(patterns) => {
@@ -261,7 +315,11 @@ fn find_sym_job(
                 });
                 if matched {
                     let description = patterns.join(", ");
-                    return Some((job.id.clone(), job.sym_command.clone(), description));
+                    return Some(SymJobOutcome::Deny {
+                        job_id: job.id.clone(),
+                        sym_command: job.sym_command.clone(),
+                        description,
+                    });
                 }
             }
         }
@@ -764,6 +822,115 @@ mod tests {
             other => panic!("expected the sym job's Deny to win, got {other:?}"),
         }
         assert!(matches!(routed.entry, DecidingEntry::Rule { .. }));
+    }
+
+    // -- Lossless sym-job rewrite (FR-CMD-008) -------------------------
+
+    const LOSSLESS_REWRITE_POLICY: &str = r#"{
+        "sym_jobs": [
+            {
+                "id": "grep-recursive",
+                "sym_command": "legion sym etc find-content",
+                "invocation": {
+                    "binary": "grep",
+                    "predicate": {"any": [
+                        {"arg_equals": "-r"},
+                        {"arg_equals": "-rn"},
+                        {"arg_equals": "-nr"}
+                    ]}
+                },
+                "rewrite": {
+                    "translatable": {
+                        "flags": ["-r", "-n", "-rn", "-nr"],
+                        "max_operands": 1
+                    }
+                }
+            }
+        ]
+    }"#;
+
+    fn lossless_policy() -> Policy {
+        parse_policy(LOSSLESS_REWRITE_POLICY).expect("lossless rewrite test policy is well-formed")
+    }
+
+    #[test]
+    fn sym_invocation_with_only_translatable_arguments_rewrites_to_sym() {
+        // Every argument -- the recursive flag and the single pattern
+        // operand -- is covered by the job's declared translatable set.
+        let routed = evaluate(
+            &lossless_policy(),
+            &bash_call("grep -rn foo"),
+            &Context::default(),
+        );
+        match &routed.decision {
+            Decision::Rewrite { target, .. } => {
+                assert_eq!(target.as_str(), "legion sym etc find-content")
+            }
+            other => panic!("expected Rewrite, got {other:?}"),
+        }
+        assert_eq!(
+            routed.entry,
+            DecidingEntry::Rule {
+                id: "grep-recursive".to_string(),
+                needs_operator: false,
+            }
+        );
+    }
+
+    #[test]
+    fn sym_invocation_with_an_untranslatable_flag_denies_naming_sym() {
+        // Same verb and same recursive/pattern shape as the rewritten case
+        // above, but "-l" (files-only) has no equivalent the target
+        // expresses -- FR-CMD-008: two commands sharing a verb but
+        // differing in arguments may receive different Decisions.
+        let routed = evaluate(
+            &lossless_policy(),
+            &bash_call("grep -rn -l foo"),
+            &Context::default(),
+        );
+        match &routed.decision {
+            Decision::Deny(details) => {
+                assert_eq!(details.instead(), "legion sym etc find-content")
+            }
+            other => panic!("expected Deny naming sym, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sym_invocation_with_more_operands_than_declared_denies_naming_sym() {
+        // A second operand (a directory to search) has no declared
+        // translation, even though every flag is covered.
+        let routed = evaluate(
+            &lossless_policy(),
+            &bash_call("grep -rn foo src"),
+            &Context::default(),
+        );
+        match &routed.decision {
+            Decision::Deny(details) => {
+                assert_eq!(details.instead(), "legion sym etc find-content")
+            }
+            other => panic!("expected Deny naming sym, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sym_rewrite_is_not_outranked_by_an_unrelated_proxy_sibling() {
+        // Rewrite is weaker than Proxy in the strictest-order fold
+        // (severity 3 vs 2), so if the sym job's decision were folded
+        // alongside the pipeline's other (opaque, proxied) part instead of
+        // being decided before the fold, the Proxy would wrongly win. It
+        // must not: the sym job's Rewrite is decided and returned before
+        // the fold ever runs.
+        let routed = evaluate(
+            &lossless_policy(),
+            &bash_call("grep -rn foo | ./notify.sh"),
+            &Context::default(),
+        );
+        assert!(
+            matches!(routed.decision, Decision::Rewrite { .. }),
+            "expected the sym job's Rewrite to win over the sibling's Proxy, got {:?}",
+            routed.decision
+        );
     }
 
     // -- Parse errors route ask (FR-CMD-006, FR-CMD-007) --------------------
