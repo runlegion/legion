@@ -629,6 +629,9 @@
         "legion",
         "First"
       ]
+    ],
+    "forbidden_opaque": [
+      "Eval"
     ]
   },
   {

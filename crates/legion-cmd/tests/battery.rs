@@ -9,9 +9,15 @@
 //!
 //! A `visible`/`benign` row's `managed` list is a presence check: each
 //! named `(binary, position)` pair must appear among `scan`'s resolved
-//! invocations. A `benign` row also names `forbidden` binaries that must
-//! NOT appear as a resolved invocation -- the known false positives a
-//! naive text-match would wrongly flag. An `opaque` row's `opaque` list
+//! invocations. A `benign` row also names `forbidden` binaries and/or
+//! `forbidden_opaque` classes that must NOT appear -- the known false
+//! positives a naive text-match would wrongly flag. Some `benign` rows
+//! carry neither: their false-positive concern (an argument *shape*, like
+//! `git stash push` vs `git push`, or a heuristic outside `scan`'s own
+//! output surface, like a naive grep over the raw command text) is not
+//! one this battery's schema -- resolved binaries and `Opaque` classes --
+//! can assert against, since `scan` never sees or reports argument shape
+//! or route-level classification. An `opaque` row's `opaque` list
 //! names the expected `Opaque` variant per entry (`Interpreter:name` for
 //! the interpreter case, matching both the variant and its interpreter
 //! field). An `error` row asserts `scan` returns `Err`, never a partial
@@ -44,10 +50,22 @@ struct Row {
     opaque: Vec<String>,
     #[serde(default)]
     forbidden: Vec<String>,
+    /// Like `forbidden`, but for an `Opaque` class rather than a resolved
+    /// binary: a `benign` row whose false-positive concern is that `scan`
+    /// might wrongly emit a specific `Opaque` variant (e.g. `Eval` for the
+    /// word "eval" appearing inside a quoted argument, not as a binary)
+    /// names it here, so the row asserts something that would actually
+    /// fail if that false positive fired.
+    #[serde(default)]
+    forbidden_opaque: Vec<String>,
     #[serde(default)]
     source: Option<String>,
     /// A free-text explanation some rows carry; not asserted on, but a
     /// recognized field so `deny_unknown_fields` does not reject it.
+    /// Deliberately never read: it documents the row for a human reading
+    /// the fixture, and the test's job is to reject an unrecognized key,
+    /// not to consume this one.
+    #[expect(dead_code)]
     #[serde(default)]
     note: Option<String>,
 }
@@ -168,6 +186,18 @@ fn battery_matches_expected_verdict_per_row() {
                 !found,
                 "row {}: {forbidden:?} must not be a resolved invocation, got {:?}",
                 row.id, scanned.invocations
+            );
+        }
+
+        for forbidden_class in &row.forbidden_opaque {
+            let found = scanned
+                .opaque
+                .iter()
+                .any(|entry| opaque_matches(entry, forbidden_class));
+            assert!(
+                !found,
+                "row {}: opaque class {forbidden_class:?} must not appear, got {:?}",
+                row.id, scanned.opaque
             );
         }
 

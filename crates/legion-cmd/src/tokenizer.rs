@@ -24,17 +24,22 @@ use tables::{Tables, WrapperMatch};
 /// wrapper's own flags are shaped (FR-CMD-007's Behavior section names
 /// this exact set).
 ///
-/// Every specific tool name the tokenizer resolves lives here, as data a
+/// Every specific tool *name* the tokenizer resolves lives here, as data a
 /// generic resolver reads, not as a name literal scattered through the
 /// grammar -- mirroring the policy-as-data shape FR-CMD-011 requires of
 /// `route`'s later policy file. `route` itself (#1227) reads a much
 /// larger, externally supplied policy for managed-binary rules; this
 /// table is smaller and fixed, because it exists only to resolve grammar
-/// positions, never to decide anything about the resolved command. The
-/// resolver's own code still names the shell keywords that guard a
-/// wrapper's target (`if`, `while`, `until`) directly: those are shell
-/// grammar, the scanner's own concern (RESEARCH-CMD-bounded-tokenizer),
-/// not tool knowledge.
+/// positions, never to decide anything about the resolved command. Three
+/// things stay outside this table, each named directly in the resolver's
+/// own code rather than as a table row, because each is shell grammar or
+/// a single behavior FR-CMD-007 names explicitly, not a per-tool shape
+/// that generalizes across a table of names: the shell keywords that
+/// guard a wrapper's target (`if`, `while`, `until`); the shell family's
+/// own `-c` flag, including its short-option clusters (`-lc`, `-euc`),
+/// since every `sh`-family shell shares one clustering rule, not a
+/// per-shell entry; and `find`'s `-exec`/`-execdir`, the one binary-
+/// specific case FR-CMD-007's Behavior section names by name.
 mod tables {
     /// One inline wrapper's shape: which of its own flags take a
     /// following value (so that value is never mistaken for the wrapped
@@ -52,6 +57,14 @@ mod tables {
         pub suppress_flags: &'static [&'static str],
         pub positional_skip: usize,
         pub subcommand_gate: Option<&'static [&'static str]>,
+        /// The wrapper takes the command it runs as a single command
+        /// *line* (its own remaining words joined with spaces), not an
+        /// argv tail: `ssh host 'grep foo /var/log'`, `watch -n 5 'grep
+        /// foo x'`, `parallel 'grep foo {}'`. Unlike `command_line_flags`
+        /// (a flag's value is the line, e.g. `env -S`), here the line is
+        /// whatever positional words remain after the wrapper's own
+        /// flags and `positional_skip`.
+        pub trailing_command_line: bool,
     }
 
     /// One interpreter's shape: which flags carry an inline program as
@@ -75,6 +88,15 @@ mod tables {
         NoTarget,
         /// A flag's value is itself a full command line (e.g. `env -S`).
         CommandLine { line_word: Option<&'a super::Word> },
+        /// The wrapper's remaining positional words, joined with spaces,
+        /// are themselves a full command line (e.g. `ssh host 'grep foo
+        /// x'`, `watch -n 5 grep foo x`): [`WrapperSpec::trailing_command_line`].
+        /// Carries the first remaining word too, so the caller can offset
+        /// a nested parse error back onto the outer command.
+        TrailingLine {
+            line: String,
+            first_word: &'a super::Word,
+        },
         /// The remaining words, starting at the wrapped command.
         Target(&'a [super::Word]),
     }
@@ -108,11 +130,12 @@ mod tables {
                 wrappers: &[
                     WrapperSpec {
                         name: "env",
-                        value_flags: &["-u", "-C", "-P", "-chdir"],
+                        value_flags: &["-u", "-C", "-P", "--chdir"],
                         command_line_flags: &["-S"],
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "sudo",
@@ -121,14 +144,16 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "timeout",
-                        value_flags: &["--signal", "-k", "--kill-after"],
+                        value_flags: &["-s", "--signal", "-k", "--kill-after"],
                         command_line_flags: &[],
                         suppress_flags: &[],
                         positional_skip: 1,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "nice",
@@ -137,6 +162,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "nohup",
@@ -145,6 +171,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "stdbuf",
@@ -153,6 +180,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "xargs",
@@ -161,6 +189,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "command",
@@ -169,6 +198,7 @@ mod tables {
                         suppress_flags: &["-v", "-V"],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "exec",
@@ -177,6 +207,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "time",
@@ -185,6 +216,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "npx",
@@ -193,6 +225,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "pnpx",
@@ -201,6 +234,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "bunx",
@@ -209,6 +243,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     // A bare `pnpm <name>` is an ordinary pnpm invocation
                     // (FR-CMD-007); only `pnpm exec`/`pnpm dlx` unwrap.
@@ -219,6 +254,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: Some(&["exec", "dlx"]),
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "npm",
@@ -227,6 +263,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: Some(&["exec"]),
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "yarn",
@@ -235,6 +272,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: Some(&["exec", "dlx"]),
+                        trailing_command_line: false,
                     },
                     // Hardening additions (RESEARCH-CMD-bounded-tokenizer
                     // next_step.if_yes).
@@ -245,14 +283,21 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        // `watch -n 5 'grep foo x'` runs a command line, not
+                        // an argv tail (FR-CMD-007's ssh/watch/parallel
+                        // hardening item).
+                        trailing_command_line: true,
                     },
                     WrapperSpec {
                         name: "ssh",
-                        value_flags: &["-p", "-i", "-o", "-l"],
+                        value_flags: &["-p", "-i", "-o", "-l", "-F"],
                         command_line_flags: &[],
                         suppress_flags: &[],
                         positional_skip: 1,
                         subcommand_gate: None,
+                        // `ssh host 'grep foo /var/log'` runs the remote
+                        // command as one command line, not an argv tail.
+                        trailing_command_line: true,
                     },
                     WrapperSpec {
                         name: "parallel",
@@ -261,6 +306,9 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        // `parallel 'grep foo {}'` runs a command line, not
+                        // an argv tail.
+                        trailing_command_line: true,
                     },
                     WrapperSpec {
                         name: "setsid",
@@ -269,6 +317,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 0,
                         subcommand_gate: None,
+                        trailing_command_line: false,
                     },
                     WrapperSpec {
                         name: "docker",
@@ -277,6 +326,7 @@ mod tables {
                         suppress_flags: &[],
                         positional_skip: 1,
                         subcommand_gate: Some(&["exec"]),
+                        trailing_command_line: false,
                     },
                 ],
                 shells: &["sh", "bash", "zsh", "ksh", "dash"],
@@ -492,11 +542,46 @@ pub enum ScanError {
     #[error("unbalanced parenthesis starting at byte {0}")]
     UnbalancedParen(usize),
 
+    #[error("unbalanced brace starting at byte {0}")]
+    UnbalancedBrace(usize),
+
     #[error("unterminated heredoc '{delimiter}' starting at byte {offset}")]
     UnterminatedHeredoc { delimiter: String, offset: usize },
 
     #[error("dangling escape character at byte {0}")]
     DanglingEscape(usize),
+
+    #[error("unterminated parameter expansion starting at byte {0}")]
+    UnterminatedParameterExpansion(usize),
+
+    #[error("unterminated case statement starting at byte {0}")]
+    UnterminatedCase(usize),
+}
+
+impl ScanError {
+    /// Rebases a byte offset raised while parsing a nested, independently
+    /// zero-based command line (`sh -c`, `env -S`, a wrapper's trailing
+    /// command line -- see [`ListParser::scan_command_line_as`]) back onto
+    /// the buffer the caller sees, by adding `base_offset`, the byte
+    /// offset at which that nested text began in the caller's buffer.
+    fn rebase(self, base_offset: usize) -> Self {
+        match self {
+            Self::UnterminatedSingleQuote(o) => Self::UnterminatedSingleQuote(o + base_offset),
+            Self::UnterminatedDoubleQuote(o) => Self::UnterminatedDoubleQuote(o + base_offset),
+            Self::UnterminatedSubstitution(o) => Self::UnterminatedSubstitution(o + base_offset),
+            Self::UnbalancedParen(o) => Self::UnbalancedParen(o + base_offset),
+            Self::UnbalancedBrace(o) => Self::UnbalancedBrace(o + base_offset),
+            Self::UnterminatedHeredoc { delimiter, offset } => Self::UnterminatedHeredoc {
+                delimiter,
+                offset: offset + base_offset,
+            },
+            Self::DanglingEscape(o) => Self::DanglingEscape(o + base_offset),
+            Self::UnterminatedParameterExpansion(o) => {
+                Self::UnterminatedParameterExpansion(o + base_offset)
+            }
+            Self::UnterminatedCase(o) => Self::UnterminatedCase(o + base_offset),
+        }
+    }
 }
 
 /// Maximum recursion depth `scan` will resolve into (FR-CMD-007): a new
@@ -520,6 +605,8 @@ pub fn scan(command: &str) -> Result<Scan, ScanError> {
         tables: &tables::TABLES,
         invocations: Vec::new(),
         opaque: Vec::new(),
+        subshell_nesting: 0,
+        wrapper_chain_nesting: 0,
     };
     let mut parser = ListParser::new(&mut ctx, 0, chars.len(), 0);
     parser.run()?;
@@ -547,7 +634,22 @@ struct ScanCtx<'a> {
     tables: &'a Tables,
     invocations: Vec<Invocation>,
     opaque: Vec<Opaque>,
+    /// How many subshell groups (`(...)`) are currently nested, and how
+    /// many wrapper links (`sudo sudo sudo ...`) are currently chained.
+    /// Neither counts against [`MAX_DEPTH`] (a subshell is the same text
+    /// region, not a new one; a wrapper chain does not enter a nested
+    /// string), so each recurses through Rust's own call stack rather
+    /// than `scan_nested`'s depth-bounded region recursion. Bounding them
+    /// separately turns a pathological, deeply-nested input (adversarial,
+    /// not agent-shaped) into an [`Opaque::TooDeep`] region instead of an
+    /// uncatchable stack overflow.
+    subshell_nesting: u32,
+    wrapper_chain_nesting: u32,
 }
+
+/// Caps on [`ScanCtx::subshell_nesting`] and
+/// [`ScanCtx::wrapper_chain_nesting`] (see their doc comment).
+const MAX_STRUCTURAL_NESTING: u32 = 64;
 
 impl ScanCtx<'_> {
     fn byte_at(&self, char_index: usize) -> usize {
@@ -569,6 +671,15 @@ struct Word {
     is_assignment: bool,
     has_dynamic_fragment: bool,
     leading_backslash_literal: bool,
+    /// Byte offset, in the buffer this word was read from, of the first
+    /// byte of `text`'s *source*: the character right after an opening
+    /// quote when the word starts with one, or the word's own first
+    /// character otherwise. Used to rebase a [`ScanError`] raised while
+    /// re-parsing this word's text as a nested command line (`sh -c`,
+    /// `env -S`, a wrapper's trailing command line) back onto the buffer
+    /// the caller sees, since that reparse builds its own zero-based
+    /// [`ScanCtx`] (see [`ListParser::scan_command_line_as`]).
+    content_start: usize,
 }
 
 /// Parses a sequence of simple commands separated by operators (`|`, `&&`,
@@ -653,7 +764,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         if let Some(heredoc) = self.pending_heredocs.first() {
             return Err(ScanError::UnterminatedHeredoc {
                 delimiter: heredoc.delimiter.clone(),
-                offset: self.byte_here(),
+                offset: heredoc.offset,
             });
         }
         Ok(())
@@ -691,8 +802,13 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
     }
 
     /// True if the parser sits at a keyword (`then`, `fi`, `done`, `esac`,
-    /// `elif`, `else`, `}`) that closes the caller's construct rather than
-    /// starting a new simple command here.
+    /// `elif`, `else`, `}`) that ends the word list of a simple command
+    /// being read (used only inside [`Self::read_simple_command`]'s word
+    /// loop, so e.g. `grep foo; fi` never absorbs `fi` as an argument).
+    /// This does not by itself end the enclosing list: `consume_separator`
+    /// treats the same keywords as transparent boundaries and keeps
+    /// parsing past them, since every recursive region is already bounded
+    /// structurally, never by a keyword.
     fn at_closing_keyword(&self) -> bool {
         matches!(
             self.peek_keyword().as_deref(),
@@ -759,20 +875,46 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
             Some('(') => {
                 // Subshell group: recurse at the same depth (a subshell is
                 // not a new text region route can't see; it is the same
-                // command string, just grouped).
+                // command string, just grouped). This does not count
+                // against MAX_DEPTH, so it is bounded separately by
+                // `subshell_nesting` (see its doc comment): unbounded
+                // recursion here is a stack overflow, not a catchable
+                // error, on deeply nested adversarial input like `(((...`.
                 let start_paren = self.byte_here();
                 self.pos += 1;
                 let group_end = find_balanced_paren(self.ctx, self.pos, self.end, start_paren)?;
-                {
-                    let mut inner = ListParser::new(self.ctx, self.pos, group_end, self.depth);
-                    inner.run()?;
+                if self.ctx.subshell_nesting >= MAX_STRUCTURAL_NESTING {
+                    self.ctx.opaque.push(Opaque::TooDeep);
+                } else {
+                    self.ctx.subshell_nesting += 1;
+                    let result = {
+                        let mut inner = ListParser::new(self.ctx, self.pos, group_end, self.depth);
+                        inner.run()
+                    };
+                    self.ctx.subshell_nesting -= 1;
+                    result?;
                 }
                 self.pos = group_end + 1;
                 Ok(Some(Position::AfterOperator))
             }
             Some(_) | None => {
+                // `then`/`do`/`else`/`elif`/`{`/`in` open a construct's
+                // body; `fi`/`done`/`esac`/`}` close one. The scanner does
+                // not track which construct is open at this list level
+                // (every recursive region -- subshell, function body,
+                // substitution, inline shell, heredoc shell -- is already
+                // bounded by its own structural end, never by a keyword),
+                // so both sets are transparent list boundaries here, same
+                // as `;`: a closer is consumed and parsing continues past
+                // it rather than ending the list (this is the fix for the
+                // keyword-drop class of bug -- see the module tests for
+                // `if`/`then`/`fi`, `while`/`do`/`done`, and `case`/`esac`
+                // followed by more commands in the same list).
                 if let Some(word) = self.peek_keyword()
-                    && matches!(word.as_str(), "then" | "do" | "else" | "elif" | "{" | "in")
+                    && matches!(
+                        word.as_str(),
+                        "then" | "do" | "else" | "elif" | "{" | "in" | "fi" | "done" | "esac" | "}"
+                    )
                 {
                     self.pos += word.chars().count();
                     return Ok(Some(Position::AfterOperator));
@@ -797,13 +939,19 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         // `elif` take when `run`'s own loop starts reading the next
         // command right after one of these (e.g. a `for ... ; do <cmd>`
         // body), since `consume_separator` only recognizes them when they
-        // sit between two already-read commands.
+        // sit between two already-read commands. `!` (pipeline negation)
+        // is transparent the same way: this loop, not recursion, is what
+        // lets `! grep foo` (and `! ! ! grep foo`, however many times)
+        // still reach and resolve `grep` -- a recursive call per `!` would
+        // recurse once per token on adversarial input like `! ! ! ...`,
+        // the same unbounded-stack class of bug as the subshell/wrapper-
+        // chain fix above.
         loop {
             match self.peek_keyword() {
                 Some(kw)
                     if matches!(
                         kw.as_str(),
-                        "then" | "do" | "else" | "elif" | "if" | "while" | "until"
+                        "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "!"
                     ) =>
                 {
                     self.pos += kw.chars().count();
@@ -860,8 +1008,9 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                     return Ok(None);
                 }
                 "case" => {
+                    let case_open = self.byte_here();
                     self.pos += word.chars().count();
-                    self.parse_case()?;
+                    self.parse_case(case_open)?;
                     return Ok(None);
                 }
                 "select" => {
@@ -871,10 +1020,6 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                     return Ok(None);
                 }
                 "{" => {
-                    self.pos += 1;
-                    return Ok(None);
-                }
-                "!" => {
                     self.pos += 1;
                     return Ok(None);
                 }
@@ -953,7 +1098,10 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                 self.pos += 1;
             }
         }
-        let mut word = Word::default();
+        let mut word = Word {
+            content_start: self.byte_here(),
+            ..Word::default()
+        };
         let mut produced = false;
         loop {
             match self.peek() {
@@ -961,10 +1109,16 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                 Some(c) if c.is_whitespace() => break,
                 Some('|') | Some('&') | Some(';') | Some('(') | Some(')') => break,
                 Some('\'') => {
+                    if !produced {
+                        word.content_start = self.byte_here() + 1;
+                    }
                     self.read_single_quoted(&mut word)?;
                     produced = true;
                 }
                 Some('"') => {
+                    if !produced {
+                        word.content_start = self.byte_here() + 1;
+                    }
                     self.read_double_quoted(&mut word)?;
                     produced = true;
                 }
@@ -1147,15 +1301,17 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
             return Ok(());
         }
         // `$name`, `${...}`, `$@`, `$1`, or a bare `$`.
+        let dollar_open = self.byte_here();
         word.has_dynamic_fragment = true;
         word.text.push('$');
         self.pos += 1;
         if self.peek() == Some('{') {
+            let open = dollar_open;
             let mut depth = 1usize;
             self.pos += 1;
             while depth > 0 {
                 match self.peek() {
-                    None => break,
+                    None => return Err(ScanError::UnterminatedParameterExpansion(open)),
                     Some('{') => {
                         depth += 1;
                         self.pos += 1;
@@ -1250,6 +1406,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
     /// `run` after the line's remaining operators are parsed, matching
     /// real shell behavior.
     fn read_heredoc_operator(&mut self, words_so_far: &[Word]) -> Result<(), ScanError> {
+        let operator_offset = self.byte_here();
         self.pos += 2; // `<<`
         let strip_tabs = if self.peek() == Some('-') {
             self.pos += 1;
@@ -1286,6 +1443,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
             delimiter: delim_word.text,
             strip_tabs,
             shell_owner,
+            offset: operator_offset,
         });
         Ok(())
     }
@@ -1336,7 +1494,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         Ok(())
     }
 
-    fn parse_case(&mut self) -> Result<(), ScanError> {
+    fn parse_case(&mut self, case_open: usize) -> Result<(), ScanError> {
         self.skip_insignificant()?;
         self.skip_word_no_classify()?; // the case subject
         self.skip_insignificant()?;
@@ -1350,7 +1508,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                 break;
             }
             if self.pos >= self.end {
-                break;
+                return Err(ScanError::UnterminatedCase(case_open));
             }
             // Pattern list up to `)`.
             while self.peek().is_some() && self.peek() != Some(')') {
@@ -1358,6 +1516,8 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
             }
             if self.peek() == Some(')') {
                 self.pos += 1;
+            } else {
+                return Err(ScanError::UnterminatedCase(case_open));
             }
             // Body up to `;;` or `esac`.
             loop {
@@ -1366,8 +1526,11 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                     self.pos += 2;
                     break;
                 }
-                if self.peek_keyword().as_deref() == Some("esac") || self.pos >= self.end {
+                if self.peek_keyword().as_deref() == Some("esac") {
                     break;
+                }
+                if self.pos >= self.end {
+                    return Err(ScanError::UnterminatedCase(case_open));
                 }
                 let command = self.read_simple_command(Position::AfterOperator)?;
                 if let Some(command) = command {
@@ -1402,12 +1565,11 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         }
         for heredoc in pending {
             let body_start = self.pos;
-            let open = self.byte_here();
             loop {
                 if self.pos >= self.end {
                     return Err(ScanError::UnterminatedHeredoc {
                         delimiter: heredoc.delimiter.clone(),
-                        offset: open,
+                        offset: heredoc.offset,
                     });
                 }
                 let line_start = self.pos;
@@ -1495,10 +1657,18 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                 }
                 WrapperMatch::CommandLine { line_word } => {
                     if let Some(line) = line_word {
-                        self.scan_command_line_as(&line.text, Position::Wrapper)?;
+                        self.scan_command_line_as(
+                            &line.text,
+                            Position::Wrapper,
+                            line.content_start,
+                        )?;
                     } else {
                         self.ctx.opaque.push(Opaque::DynamicCommand);
                     }
+                    return Ok(());
+                }
+                WrapperMatch::TrailingLine { line, first_word } => {
+                    self.scan_command_line_as(&line, Position::Wrapper, first_word.content_start)?;
                     return Ok(());
                 }
                 WrapperMatch::Target(rest) => {
@@ -1506,21 +1676,39 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                         self.emit_invocation(binary, &[], position);
                         return Ok(());
                     }
+                    // A wrapper chain (`sudo sudo sudo ... grep`) recurses
+                    // through Rust's own call stack, not through
+                    // `scan_nested`'s MAX_DEPTH-bounded region recursion,
+                    // so it is bounded separately by `wrapper_chain_nesting`
+                    // (see its doc comment): unbounded recursion here is a
+                    // stack overflow, not a catchable error.
+                    if self.ctx.wrapper_chain_nesting >= MAX_STRUCTURAL_NESTING {
+                        self.ctx.opaque.push(Opaque::TooDeep);
+                        return Ok(());
+                    }
+                    self.ctx.wrapper_chain_nesting += 1;
                     // `time` before a shell keyword (RESEARCH-CMD-bounded-
                     // tokenizer hardening: "time as a wrapper before a
                     // keyword"): the keyword itself is not a command, so
                     // skip it rather than treat it as the wrapped binary.
-                    if matches!(rest[0].text.as_str(), "if" | "while" | "until") {
-                        return self.resolve_from(&rest[1..], Position::Wrapper);
-                    }
-                    return self.resolve_from(rest, Position::Wrapper);
+                    let result = if matches!(rest[0].text.as_str(), "if" | "while" | "until") {
+                        self.resolve_from(&rest[1..], Position::Wrapper)
+                    } else {
+                        self.resolve_from(rest, Position::Wrapper)
+                    };
+                    self.ctx.wrapper_chain_nesting -= 1;
+                    return result;
                 }
             }
         }
 
         if self.ctx.tables.shell(&binary).is_some() {
-            if let Some(script_arg) = find_flag_value(&words[1..], "-c") {
-                self.scan_command_line_as(&script_arg.text, Position::InlineShell)?;
+            if let Some(script_arg) = find_shell_dash_c_value(&words[1..]) {
+                self.scan_command_line_as(
+                    &script_arg.text,
+                    Position::InlineShell,
+                    script_arg.content_start,
+                )?;
                 return Ok(());
             }
             if words[1..].iter().any(|w| !w.text.starts_with('-')) {
@@ -1605,7 +1793,18 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
     /// `InlineShell`, `env -S` labels it `Wrapper` since `env` (not a
     /// shell) is doing the unwrapping. Both are a whitespace/quote-split
     /// command line embedded in one argument, structurally the same shape.
-    fn scan_command_line_as(&mut self, script: &str, label: Position) -> Result<(), ScanError> {
+    /// `base_offset` is where `script`'s text began in the buffer the
+    /// caller sees (the source [`Word`]'s `content_start`): a
+    /// [`ScanError`] raised while parsing `script` carries an offset into
+    /// this fresh, zero-based [`ScanCtx`], so it is rebased by
+    /// `base_offset` before propagating, to point at the failure in the
+    /// command the caller (ultimately [`scan`]) was actually given.
+    fn scan_command_line_as(
+        &mut self,
+        script: &str,
+        label: Position,
+        base_offset: usize,
+    ) -> Result<(), ScanError> {
         if self.depth >= MAX_DEPTH {
             self.ctx.opaque.push(Opaque::TooDeep);
             return Ok(());
@@ -1619,10 +1818,12 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
             tables: self.ctx.tables,
             invocations: Vec::new(),
             opaque: Vec::new(),
+            subshell_nesting: 0,
+            wrapper_chain_nesting: 0,
         };
         {
             let mut parser = ListParser::new(&mut nested_ctx, 0, chars.len(), self.depth + 1);
-            parser.run_as(label)?;
+            parser.run_as(label).map_err(|e| e.rebase(base_offset))?;
         }
         self.ctx.invocations.extend(nested_ctx.invocations);
         self.ctx.opaque.extend(nested_ctx.opaque);
@@ -1647,7 +1848,15 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         let mut position = label.unwrap_or(Position::First);
         loop {
             self.skip_insignificant()?;
-            if self.pos >= self.end || self.at_closing_keyword() {
+            // Termination is structural (`self.pos >= self.end`) only: every
+            // region this loop can be driving over is already bounded by
+            // its own paren/brace/substitution end or explicit char range,
+            // never by a keyword. A closing keyword like `fi`/`done`/`esac`
+            // is handled by `consume_separator` as a transparent boundary,
+            // the same as `;` -- it must never end the list on its own
+            // (previously it did, via `at_closing_keyword`, which silently
+            // dropped every command after the closer at this list level).
+            if self.pos >= self.end {
                 return self.finish();
             }
             let command = self.read_simple_command(position)?;
@@ -1704,6 +1913,10 @@ struct PendingHeredoc {
     delimiter: String,
     strip_tabs: bool,
     shell_owner: bool,
+    /// Byte offset of the `<<` operator itself, so an unterminated heredoc
+    /// is reported at the construct that failed, not at wherever the
+    /// scanner happened to run out of input.
+    offset: usize,
 }
 
 /// Finds a `-exec` / `-execdir` in `find`'s arguments and returns the
@@ -1739,6 +1952,33 @@ fn find_flag_value<'a>(words: &'a [Word], flag: &str) -> Option<&'a Word> {
     let mut i = 0;
     while i < words.len() {
         if words[i].text == flag {
+            return words.get(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Finds the word carrying a shell's inline script, matching `-c` either
+/// standalone or inside a combined short-flag cluster (`bash -lc '...'`,
+/// `sh -euc '...'`, `sh -cx '...'`). A cluster only counts when every
+/// character is an ASCII letter (no `--long` form, no value already
+/// consumed by another flag in the cluster): this is shell grammar (how a
+/// POSIX getopt-style cluster is written), not a per-shell table entry,
+/// since every `sh`-family shell shares the same short-option clustering
+/// rule.
+fn find_shell_dash_c_value(words: &[Word]) -> Option<&Word> {
+    if let Some(w) = find_flag_value(words, "-c") {
+        return Some(w);
+    }
+    let mut i = 0;
+    while i < words.len() {
+        let text = &words[i].text;
+        let is_cluster = text.len() > 1
+            && text.starts_with('-')
+            && !text.starts_with("--")
+            && text[1..].chars().all(|c| c.is_ascii_alphabetic());
+        if is_cluster && text.contains('c') {
             return words.get(i + 1);
         }
         i += 1;
@@ -1792,12 +2032,14 @@ fn find_substitution_end(
     while i < end {
         match ctx.chars[i] {
             '\'' => {
+                let quote_open = ctx.byte_at(i);
                 i = skip_single_quoted(ctx.chars, i, end)
-                    .ok_or_else(|| ScanError::UnterminatedSingleQuote(ctx.byte_at(end)))?;
+                    .ok_or(ScanError::UnterminatedSingleQuote(quote_open))?;
             }
             '"' => {
+                let quote_open = ctx.byte_at(i);
                 i = skip_double_quoted(ctx.chars, i, end)
-                    .map_err(|overrun| ScanError::UnterminatedDoubleQuote(ctx.byte_at(overrun)))?;
+                    .map_err(|_overrun| ScanError::UnterminatedDoubleQuote(quote_open))?;
             }
             '\\' => {
                 i += 2;
@@ -1919,10 +2161,11 @@ fn skip_heredoc_as_literal(ctx: &ScanCtx, at: usize, end: usize) -> Result<usize
 /// text (via the same [`skip_single_quoted`]/[`skip_double_quoted`] helpers
 /// [`find_substitution_end`] uses, so the two never disagree on where a
 /// quote ends). Unlike a substitution, an unterminated quote here is not
-/// itself reported: the outer loop simply runs out and reports
-/// [`ScanError::UnbalancedParen`], the only such variant `ScanError`
-/// defines. Shared by [`find_balanced_paren`] and [`find_balanced_brace`],
-/// which differ only in which character pair they balance.
+/// itself reported: the outer loop simply runs out and reports `mk_err`'s
+/// variant, naming the actual unbalanced construct (a paren or a brace,
+/// never the other). Shared by [`find_balanced_paren`] and
+/// [`find_balanced_brace`], which differ only in which character pair they
+/// balance and which `ScanError` variant that failure names.
 fn find_balanced(
     ctx: &ScanCtx,
     start: usize,
@@ -1930,6 +2173,7 @@ fn find_balanced(
     open: usize,
     open_ch: char,
     close_ch: char,
+    mk_err: fn(usize) -> ScanError,
 ) -> Result<usize, ScanError> {
     let mut i = start;
     let mut depth = 1i32;
@@ -1955,7 +2199,7 @@ fn find_balanced(
             _ => i += 1,
         }
     }
-    Err(ScanError::UnbalancedParen(open))
+    Err(mk_err(open))
 }
 
 fn find_balanced_paren(
@@ -1964,7 +2208,7 @@ fn find_balanced_paren(
     end: usize,
     open: usize,
 ) -> Result<usize, ScanError> {
-    find_balanced(ctx, start, end, open, '(', ')')
+    find_balanced(ctx, start, end, open, '(', ')', ScanError::UnbalancedParen)
 }
 
 fn find_balanced_brace(
@@ -1973,7 +2217,7 @@ fn find_balanced_brace(
     end: usize,
     open: usize,
 ) -> Result<usize, ScanError> {
-    find_balanced(ctx, start, end, open, '{', '}')
+    find_balanced(ctx, start, end, open, '{', '}', ScanError::UnbalancedBrace)
 }
 
 fn wrapper_match<'a>(spec: &tables::WrapperSpec, rest: &'a [Word]) -> WrapperMatch<'a> {
@@ -2017,6 +2261,17 @@ fn wrapper_match<'a>(spec: &tables::WrapperSpec, rest: &'a [Word]) -> WrapperMat
     }
     if i >= rest.len() {
         return WrapperMatch::NoTarget;
+    }
+    if spec.trailing_command_line {
+        let line = rest[i..]
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        return WrapperMatch::TrailingLine {
+            line,
+            first_word: &rest[i],
+        };
     }
     WrapperMatch::Target(&rest[i..])
 }
@@ -2351,9 +2606,10 @@ mod tests {
         // outer scan reports the brace as never closing instead. This is
         // the documented divergence from find_substitution_end -- the two
         // callers of the shared quote-skip helpers choose different
-        // errors on purpose, not by accident.
+        // errors on purpose, not by accident. The failing construct here
+        // is a brace, so the error names a brace, not a parenthesis.
         let result = scan("foo() { echo 'oops");
-        assert!(matches!(result, Err(ScanError::UnbalancedParen(_))));
+        assert!(matches!(result, Err(ScanError::UnbalancedBrace(_))));
     }
 
     #[test]
@@ -2386,5 +2642,234 @@ mod tests {
         let scan_result = scan("").expect("empty command is not malformed");
         assert!(scan_result.invocations.is_empty());
         assert!(scan_result.opaque.is_empty());
+    }
+
+    // -- Review fix: a closing keyword no longer drops the rest of the
+    // list (was: `then`/`fi`/`done`/`esac`/`}` ended the whole list at
+    // this nesting level, silently dropping every command after it) ----
+
+    #[test]
+    fn if_then_body_is_visible_and_a_command_after_fi_is_not_dropped() {
+        let inv = invocations("if grep -q foo bar; then rm -rf build; fi; echo done");
+        assert!(inv.iter().any(|i| i.binary == "grep"));
+        assert!(
+            inv.iter().any(|i| i.binary == "rm"),
+            "then-body command must be visible, got {inv:?}"
+        );
+        assert!(
+            inv.iter().any(|i| i.binary == "echo"),
+            "a command after fi must not be dropped, got {inv:?}"
+        );
+    }
+
+    #[test]
+    fn for_do_done_followed_by_pipe_does_not_drop_the_pipe_target() {
+        let inv = invocations("for f in *.rs; do echo $f; done | grep foo");
+        assert!(
+            inv.iter().any(|i| i.binary == "grep"),
+            "a command after `done` must not be dropped, got {inv:?}"
+        );
+    }
+
+    #[test]
+    fn command_after_case_esac_is_not_dropped() {
+        let inv = invocations("case $x in a) echo a ;; esac; grep foo");
+        assert!(
+            inv.iter().any(|i| i.binary == "grep"),
+            "a command after esac must not be dropped, got {inv:?}"
+        );
+    }
+
+    #[test]
+    fn command_after_closing_brace_group_is_not_dropped() {
+        let inv = invocations("{ echo a; }; grep foo");
+        assert!(
+            inv.iter().any(|i| i.binary == "grep"),
+            "a command after a closing brace group must not be dropped, got {inv:?}"
+        );
+    }
+
+    #[test]
+    fn if_then_fi_inside_a_function_body_keeps_the_then_body_visible() {
+        let inv = invocations("g() { if true; then grep foo; fi; }");
+        assert!(
+            inv.iter().any(|i| i.binary == "grep"),
+            "a then-body command inside a function body must not be dropped, got {inv:?}"
+        );
+    }
+
+    // -- Review fix: `ssh`/`watch`/`parallel` run a command *line*, not an
+    // argv tail (was: the whole quoted line was handed to `basename`,
+    // producing a fabricated binary and missing the real one) ------------
+
+    #[test]
+    fn ssh_runs_its_quoted_argument_as_a_command_line() {
+        let inv = invocations("ssh host 'grep foo /var/log'");
+        let grep = inv
+            .iter()
+            .find(|i| i.binary == "grep")
+            .unwrap_or_else(|| panic!("expected grep, got {inv:?}"));
+        assert_eq!(grep.args, vec!["foo", "/var/log"]);
+        assert_eq!(grep.position, Position::Wrapper);
+    }
+
+    #[test]
+    fn ssh_joins_an_unquoted_remote_command_into_one_line() {
+        let inv = invocations("ssh user@host grep -rn foo /etc");
+        assert!(inv.iter().any(|i| i.binary == "grep"));
+    }
+
+    #[test]
+    fn watch_runs_its_quoted_argument_as_a_command_line() {
+        let inv = invocations("watch -n 5 'grep foo x'");
+        assert!(inv.iter().any(|i| i.binary == "grep"));
+    }
+
+    #[test]
+    fn parallel_runs_its_quoted_argument_as_a_command_line() {
+        let inv = invocations("parallel 'grep foo {}'");
+        assert!(inv.iter().any(|i| i.binary == "grep"));
+    }
+
+    // -- Review fix: wrapper table gaps that shifted positional alignment -
+
+    #[test]
+    fn timeout_dash_s_signal_does_not_shift_the_binary() {
+        let inv = invocations("timeout -s KILL 5 grep foo");
+        let grep = inv
+            .iter()
+            .find(|i| i.binary == "grep")
+            .unwrap_or_else(|| panic!("expected grep, got {inv:?}"));
+        assert_eq!(grep.args, vec!["foo"]);
+    }
+
+    #[test]
+    fn ssh_dash_capital_f_config_does_not_shift_the_binary() {
+        let inv = invocations("ssh -F cfg host grep foo");
+        assert!(inv.iter().any(|i| i.binary == "grep"));
+    }
+
+    #[test]
+    fn env_dash_dash_chdir_does_not_shift_the_binary() {
+        let inv = invocations("env --chdir /x grep foo");
+        assert!(inv.iter().any(|i| i.binary == "grep"));
+    }
+
+    // -- Review fix: `sh`/`bash` combined short-flag clusters resolve -c --
+
+    #[test]
+    fn bash_dash_lc_resolves_the_inline_script() {
+        let inv = invocations("bash -lc \"grep -rn foo src\"");
+        assert!(inv.iter().any(|i| i.binary == "grep"));
+    }
+
+    #[test]
+    fn sh_dash_euc_resolves_the_inline_script() {
+        let inv = invocations("sh -euc \"grep -rn foo src\"");
+        assert!(inv.iter().any(|i| i.binary == "grep"));
+    }
+
+    // -- Review fix: `!` negation reads the negated command instead of
+    // dropping it -------------------------------------------------------
+
+    #[test]
+    fn negated_command_is_still_resolved() {
+        let inv = invocations("! grep foo");
+        assert!(inv.iter().any(|i| i.binary == "grep"));
+    }
+
+    // -- Review fix: malformed constructs error instead of returning a
+    // partial Scan --------------------------------------------------------
+
+    #[test]
+    fn unterminated_parameter_expansion_is_an_error() {
+        let result = scan("echo ${FOO");
+        assert!(matches!(
+            result,
+            Err(ScanError::UnterminatedParameterExpansion(_))
+        ));
+    }
+
+    #[test]
+    fn unterminated_case_is_an_error() {
+        let result = scan("case $x in a) rg foo");
+        assert!(matches!(result, Err(ScanError::UnterminatedCase(_))));
+    }
+
+    // -- Review fix: ScanError byte offsets locate the failing construct --
+
+    #[test]
+    fn unterminated_quote_inside_substitution_reports_the_quotes_own_offset() {
+        let cmd = "echo $(grep -n 'oops foo)";
+        let result = scan(cmd);
+        match result {
+            Err(ScanError::UnterminatedSingleQuote(offset)) => {
+                assert_eq!(&cmd[offset..offset + 1], "'");
+            }
+            other => panic!("expected UnterminatedSingleQuote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unterminated_heredoc_reports_the_operator_offset() {
+        let cmd = "cat <<EOF";
+        let result = scan(cmd);
+        match result {
+            Err(ScanError::UnterminatedHeredoc { offset, .. }) => {
+                assert_eq!(&cmd[offset..offset + 2], "<<");
+            }
+            other => panic!("expected UnterminatedHeredoc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unterminated_quote_inside_sh_dash_c_reports_the_outer_offset() {
+        let cmd = "echo hello && sh -c \"grep 'foo\"";
+        let result = scan(cmd);
+        match result {
+            Err(ScanError::UnterminatedSingleQuote(offset)) => {
+                assert_eq!(&cmd[offset..offset + 1], "'");
+            }
+            other => panic!("expected UnterminatedSingleQuote, got {other:?}"),
+        }
+    }
+
+    // -- Review fix: deeply nested subshells and wrapper chains stop at a
+    // bounded [`Opaque::TooDeep`] instead of overflowing the call stack --
+
+    #[test]
+    fn deeply_nested_subshells_do_not_overflow_the_stack() {
+        // The finding measured a release-build overflow at 20000 nested
+        // `(`; go past that so this test would fail before the fix.
+        let depth = 25000;
+        let cmd = format!("{}echo hi{}", "(".repeat(depth), ")".repeat(depth));
+        // Must return, not abort with a stack overflow, regardless of the
+        // Result it produces.
+        let _ = scan(&cmd);
+    }
+
+    #[test]
+    fn a_long_wrapper_chain_does_not_overflow_the_stack() {
+        // The finding measured a release-build overflow at 50000 chained
+        // `sudo `; go past that so this test would fail before the fix.
+        let cmd = format!("{}grep foo", "sudo ".repeat(55000));
+        let _ = scan(&cmd);
+    }
+
+    #[test]
+    fn a_long_negation_chain_does_not_overflow_the_stack() {
+        let cmd = format!("{}grep foo", "! ".repeat(55000));
+        let _ = scan(&cmd);
+    }
+
+    #[test]
+    fn a_long_wrapper_chain_beyond_the_cap_is_too_deep() {
+        let cmd = format!("{}grep foo", "sudo ".repeat(200));
+        let scanned = scan(&cmd).expect("a long but well-formed chain is not malformed");
+        assert!(
+            scanned.opaque.contains(&Opaque::TooDeep),
+            "expected an Opaque::TooDeep once the wrapper chain cap is exceeded, got {:?}",
+            scanned.opaque
+        );
     }
 }
