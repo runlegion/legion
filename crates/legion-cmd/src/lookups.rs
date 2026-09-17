@@ -1,27 +1,23 @@
 //! The pure pre-pass over a policy and a command (#1229): before the
 //! adapter calls [`crate::route`], it needs to know which recall/consult
-//! lookups the rule that will govern this command requires, so it can fetch
-//! them within its own deadline and hand the results back through
+//! lookups the rule(s) that will govern this command require, so it can
+//! fetch them within its own deadline and hand the results back through
 //! [`crate::Context`] before calling `route` for the decision that counts
 //! (FR-CMD-016: a required lookup `route` cannot see is a missing-lookup
 //! deny, not a silent skip).
 //!
-//! This module answers a narrower question than `route` does -- "what would
-//! the first rule that matches this command need fetched" -- using only
-//! [`crate::Policy`]'s and [`crate::Predicate`]'s already-public surface. It
-//! deliberately does not replicate `route`'s sym-job precedence or
-//! compound-command folding: neither of those changes which lookups a
-//! *matched* rule declares, and the shipped policy declares no `requires`
-//! at all today, so the common case matches nothing and this returns empty.
-//! It has no filesystem, network, database, or process dependency
-//! (NFR-CMD-001), same as the rest of this crate -- running the lookups it
-//! names is the adapter's job.
-
-use std::collections::BTreeMap;
+//! This module used to duplicate a small first-match rule-selection walk
+//! of its own; now that [`crate::evaluate::candidate_rules`] exposes
+//! `evaluate`'s real rule-selection step (sym-job precedence, the
+//! family/global-value-option-aware subcommand resolver, everything),
+//! this module is a thin consumer of it and can never disagree with what
+//! `route` actually consults. It has no filesystem, network, database, or
+//! process dependency (NFR-CMD-001), same as the rest of this crate --
+//! running the lookups it names is the adapter's job.
 
 use crate::decision::ToolCall;
-use crate::policy::{Family, MatchInput, Policy, RequiredLookup, Rule, ToolKind, ToolRules};
-use crate::tokenizer::{self, Invocation};
+use crate::evaluate::candidate_rules;
+use crate::policy::{Policy, RequiredLookup};
 
 /// One lookup a matched rule requires, with the free-text query to run it.
 /// `query` is the whole Bash command string, or a Fields tool's JSON input
@@ -33,71 +29,41 @@ pub struct RequiredQuery {
     pub query: String,
 }
 
-/// Finds the [`RequiredQuery`]s the rule that would govern `call` under
-/// `policy` declares. Empty when no rule matches, or when the matching rule
-/// declares no requirement.
+/// Finds the [`RequiredQuery`]s the rule(s) that would govern `call` under
+/// `policy` declare. Empty when no rule matches, or when every matching
+/// rule declares no requirement (the shipped policy today).
+///
+/// `Context` (which `route` reads) carries exactly one `Lookup` per kind
+/// (`recall`, `consult`), not one per rule, so a compound command whose
+/// invocations resolve to two different rules that both `require` the
+/// same kind gets one query for that kind -- from the first candidate
+/// rule (scan order) that declares it. Two governed invocations in one
+/// compound command each needing a *different* lookup query is a real
+/// but unexercised edge case: no shipped rule declares `requires` at all
+/// today.
 pub fn required_lookups(policy: &Policy, call: &ToolCall) -> Vec<RequiredQuery> {
-    let Some(rule) = matching_rule(policy, call) else {
-        return Vec::new();
-    };
-    if rule.requires.is_empty() {
-        return Vec::new();
-    }
     let query = query_text(call);
-    rule.requires
-        .iter()
-        .map(|lookup| RequiredQuery {
-            lookup: *lookup,
-            query: query.clone(),
-        })
-        .collect()
-}
+    let mut seen_recall = false;
+    let mut seen_consult = false;
+    let mut found = Vec::new();
 
-fn matching_rule<'p>(policy: &'p Policy, call: &ToolCall) -> Option<&'p Rule> {
-    if call.tool == "Bash" {
-        return matching_bash_rule(policy, call);
-    }
-    let kind = ToolKind::from_tool_name(&call.tool)?;
-    match policy.tools.get(&kind) {
-        Some(ToolRules::Fields { rules }) => first_match(rules, MatchInput::Json(&call.input)),
-        _ => None,
-    }
-}
-
-/// Mirrors `crate::evaluate`'s verb-scoped-then-bare family lookup
-/// (`"git push"` before `"git"`), so a rule this finds is the same rule
-/// `route` itself would reach for the first invocation that names it.
-fn matching_bash_rule<'p>(policy: &'p Policy, call: &ToolCall) -> Option<&'p Rule> {
-    let families = match policy.tools.get(&ToolKind::Bash) {
-        Some(ToolRules::Bash { families }) => families,
-        _ => return None,
-    };
-    let command = call
-        .input
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let scan = tokenizer::scan(command).ok()?;
-    scan.invocations.iter().find_map(|inv| {
-        let family = find_family(families, inv)?;
-        first_match(&family.rules, MatchInput::Args(&inv.args))
-    })
-}
-
-fn find_family<'p>(families: &'p BTreeMap<String, Family>, inv: &Invocation) -> Option<&'p Family> {
-    if let Some(first) = inv.args.first()
-        && !first.starts_with('-')
-    {
-        let two_word = format!("{} {first}", inv.binary);
-        if let Some(family) = families.get(&two_word) {
-            return Some(family);
+    for rule in candidate_rules(policy, call) {
+        for lookup in &rule.requires {
+            let seen = match lookup {
+                RequiredLookup::Recall => &mut seen_recall,
+                RequiredLookup::Consult => &mut seen_consult,
+            };
+            if *seen {
+                continue;
+            }
+            *seen = true;
+            found.push(RequiredQuery {
+                lookup: *lookup,
+                query: query.clone(),
+            });
         }
     }
-    families.get(&inv.binary)
-}
-
-fn first_match<'p>(rules: &'p [Rule], input: MatchInput<'_>) -> Option<&'p Rule> {
-    rules.iter().find(|rule| rule.predicate.matches(input))
+    found
 }
 
 fn query_text(call: &ToolCall) -> String {
@@ -205,6 +171,26 @@ mod tests {
         // nothing to name, the same way `route` itself would return Ask
         // rather than consult a rule at all.
         assert!(required_lookups(&policy, &bash_call("echo '")).is_empty());
+    }
+
+    #[test]
+    fn a_sym_job_match_requires_nothing_even_if_a_family_rule_would_have() {
+        // A sym job matching takes precedence over every family rule
+        // (evaluate_bash returns before evaluate_invocation ever runs), so
+        // the pre-pass must not report a lookup a rule that never gets
+        // consulted would have required.
+        let policy = parse_policy(
+            r#"{"tools": {"Bash": {"kind": "bash", "families": {"grep": {"rules": [
+                {"id": "grep-rule", "predicate": "always", "requires": ["recall"],
+                 "outcome": {"kind": "deny", "reason": "no", "instead": "none"}}
+            ]}}}},
+            "sym_jobs": [
+                {"id": "sym-grep", "sym_command": "legion sym etc find-content",
+                 "invocation": {"binary": "grep", "predicate": "always"}}
+            ]}"#,
+        )
+        .expect("valid policy");
+        assert!(required_lookups(&policy, &bash_call("grep -rn foo src")).is_empty());
     }
 
     #[test]
