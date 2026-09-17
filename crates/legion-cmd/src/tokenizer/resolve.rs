@@ -13,6 +13,13 @@ struct Cmd {
     words: Vec<Word>,
     heredocs: Vec<String>,
     after_sep: bool,
+    /// At least one redirect operator (`>`, `<`, `>>`, ...) appeared in
+    /// this command. The redirect target itself is never kept as a word
+    /// (see the `Tok::Word` arm below), so this is the only trace of it --
+    /// needed by [`walk`] to decide FR-CMD-008's whole-command atomicity
+    /// fact, since a redirect changes the command's effect the same way a
+    /// pipe or `&&` does.
+    has_redirect: bool,
 }
 
 enum CmdOrDef {
@@ -32,7 +39,15 @@ fn group(toks: Vec<Tok>, out: &mut Vec<CmdOrDef>) {
                 cur.after_sep = true;
                 redirect_pending = false;
             }
-            Tok::Redirect => redirect_pending = true,
+            Tok::Redirect => {
+                redirect_pending = true;
+                // Marked here, where the redirect operator itself is
+                // produced, not where its target word is consumed: a
+                // target-less or glued-digit redirect (`>&2`, `2>/dev/null`)
+                // may never reach the `Tok::Word` branch below, and this
+                // trace must not depend on it doing so.
+                cur.has_redirect = true;
+            }
             Tok::Heredoc { body } => cur.heredocs.push(body),
             Tok::Word(w) => {
                 if redirect_pending {
@@ -80,7 +95,7 @@ pub(super) fn walk(
     let toks = Scanner::new(src).run()?;
     let mut grouped = Vec::new();
     group(toks, &mut grouped);
-    for item in grouped {
+    for item in &grouped {
         match item {
             CmdOrDef::Cmd(cmd) => {
                 let position = inherited.unwrap_or(if cmd.after_sep {
@@ -100,9 +115,29 @@ pub(super) fn walk(
                 // Its commands are still resolved -- a later call to the
                 // function would run them -- so route sees them, marked as
                 // reached through a function body.
-                descend(&body, depth, Position::FunctionBody, out)?;
+                descend(body, depth, Position::FunctionBody, out)?;
             }
         }
+    }
+    // FR-CMD-008: a rewrite replaces the WHOLE command string, so it is
+    // lossless only when the invocation it targets IS the whole command.
+    // Computed once, at the true top level (never inside a substitution,
+    // wrapper, or other recursion -- `inherited` is `None` only there):
+    // exactly one top-level group, with no redirect and no heredoc on it
+    // (an operator or `;`/`&&`/`|` would already have produced a second
+    // group via `Tok::Sep`, but a redirect target is dropped rather than
+    // grouped, so it needs its own check), and the whole scan -- including
+    // whatever the group's words recursed into -- resolved to exactly one
+    // invocation, at `Position::First` (not `AfterAssignment`: an
+    // `env_var=1 rewritable` prefix would also be dropped by a whole-string
+    // replacement, and is not visible to the invocation's own `args`),
+    // with nothing left opaque.
+    if depth == 0 && inherited.is_none() {
+        out.is_single_simple_command = matches!(
+            grouped.as_slice(),
+            [CmdOrDef::Cmd(cmd)] if !cmd.has_redirect && cmd.heredocs.is_empty()
+        ) && out.opaque.is_empty()
+            && matches!(out.invocations.as_slice(), [inv] if inv.position == Position::First);
     }
     Ok(())
 }

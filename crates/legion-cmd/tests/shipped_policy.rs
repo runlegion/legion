@@ -440,13 +440,81 @@ fn chmod_777_denies() {
     assert_eq!(deny_instead("chmod 777 x"), "chmod 755");
 }
 
+// `legion issue list` requires `--repo`; the shipped target carries the
+// `{repo}` placeholder the adapter substitutes from `Context.repo` (the
+// only placeholder this contract supports -- see
+// `PolicyError::UnsupportedRewriteTargetPlaceholder`). `route` passes the
+// target through unchanged, so every assertion below checks for the
+// literal placeholder text, not a filled-in repo name.
+const GH_ISSUE_LIST_TARGET: &str = "legion issue list --repo {repo}";
+
 #[test]
 fn gh_issue_list_rewrites_to_legion_issue_list() {
     let routed = route(&policy(), &bash_call("gh issue list"), &Context::default());
     match routed.decision {
-        Decision::Rewrite { target, .. } => assert_eq!(target.as_str(), "legion issue list"),
+        Decision::Rewrite { target, .. } => assert_eq!(target.as_str(), GH_ISSUE_LIST_TARGET),
         other => panic!("expected Rewrite, got {other:?}"),
     }
+}
+
+// -- FR-CMD-008: gh-issue-list's rewrite is lossless only for a bare
+// invocation, and only when it is the whole command. `--repo other/org`
+// would otherwise silently rewrite against whatever repo the adapter
+// defaults to via `{repo}`, not the repo the agent named -- the exact bug
+// this rule's `translatable` declaration exists to close. Operator
+// correction (2026-09-16): nothing carries an argument into a rewrite
+// target today, so `--label`/`--state`/`--draft` deny for the same reason
+// `--repo` does, not because they lack a nominal equivalent.
+
+#[test]
+fn gh_issue_list_with_repo_flag_denies_instead_of_dropping_it() {
+    assert_eq!(
+        deny_instead("gh issue list --repo other/org"),
+        GH_ISSUE_LIST_TARGET
+    );
+}
+
+#[test]
+fn gh_issue_list_with_label_flag_denies_instead_of_dropping_it() {
+    assert_eq!(
+        deny_instead("gh issue list --label bug"),
+        GH_ISSUE_LIST_TARGET
+    );
+}
+
+#[test]
+fn gh_issue_list_with_state_flag_denies_instead_of_dropping_it() {
+    assert_eq!(
+        deny_instead("gh issue list --state closed"),
+        GH_ISSUE_LIST_TARGET
+    );
+}
+
+#[test]
+fn gh_issue_list_with_draft_flag_denies_instead_of_dropping_it() {
+    // FR-CMD-008 correction requirement 3: an unknown flag on a governed
+    // verb must never fall to the permissive side.
+    assert_eq!(deny_instead("gh issue list --draft"), GH_ISSUE_LIST_TARGET);
+}
+
+#[test]
+fn gh_issue_list_piped_denies_instead_of_rewriting_the_whole_command() {
+    // The harness would replace the WHOLE command string with the
+    // rewrite's target, silently dropping `| head` if this rewrote.
+    assert_eq!(deny_instead("gh issue list | head"), GH_ISSUE_LIST_TARGET);
+}
+
+#[test]
+fn gh_issue_list_redirected_denies_instead_of_rewriting_the_whole_command() {
+    assert_eq!(
+        deny_instead("gh issue list > out.txt"),
+        GH_ISSUE_LIST_TARGET
+    );
+}
+
+#[test]
+fn gh_issue_list_after_and_and_denies_instead_of_rewriting_the_whole_command() {
+    assert_eq!(deny_instead("cd x && gh issue list"), GH_ISSUE_LIST_TARGET);
 }
 
 #[test]

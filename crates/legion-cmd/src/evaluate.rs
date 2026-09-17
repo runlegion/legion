@@ -120,14 +120,17 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
                 (decision, job_id)
             }
         };
-        return Routed {
-            decision,
-            facts,
-            entry: DecidingEntry::Rule {
-                id: job_id,
-                needs_operator: false,
+        return gate_rewrite_on_whole_command(
+            Routed {
+                decision,
+                facts,
+                entry: DecidingEntry::Rule {
+                    id: job_id,
+                    needs_operator: false,
+                },
             },
-        };
+            scan.is_single_simple_command,
+        );
     }
 
     let (families, binaries) = bash_tool_rules(policy);
@@ -138,7 +141,35 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         .collect();
     parts.extend(scan.opaque.iter().map(|_| opaque_part()));
 
-    fold(parts, facts)
+    gate_rewrite_on_whole_command(fold(parts, facts), scan.is_single_simple_command)
+}
+
+/// FR-CMD-008: the harness that acts on a [`Decision::Rewrite`] replaces
+/// the WHOLE command string with the rewrite's target, so a rewrite is
+/// lossless only when the invocation it targets IS the whole command --
+/// `scan.is_single_simple_command` is that fact. Applied once, here,
+/// after either a sym job's precedence-step decision or the
+/// strictest-order fold has produced the final [`Decision`], so it
+/// governs a sym-job Rewrite and a family-rule Rewrite identically and
+/// lives in route rather than needing a matching check in the adapter.
+fn gate_rewrite_on_whole_command(routed: Routed, is_single_simple_command: bool) -> Routed {
+    if is_single_simple_command {
+        return routed;
+    }
+    match routed.decision {
+        Decision::Rewrite { target, .. } => Routed {
+            decision: Decision::deny_infallible(
+                format!(
+                    "the command is not just {}; a rewrite would replace the whole command and drop the rest of it",
+                    target.as_str()
+                ),
+                target.as_str().to_string(),
+            ),
+            facts: routed.facts,
+            entry: routed.entry,
+        },
+        _ => routed,
+    }
 }
 
 fn bash_tool_rules(
@@ -267,6 +298,15 @@ fn evaluate_invocation(
 /// predicate matches but whose required lookup is missing counts as
 /// resolved-but-blocked (FR-CMD-016's missing-lookup default), not as a
 /// non-match that falls through to the next rule.
+///
+/// A matched rule whose decision is [`Decision::Rewrite`] and whose
+/// `rewrite_translatable` is declared (FR-CMD-008) is checked against
+/// `input`'s arguments before its decision is trusted: an argument
+/// outside the declaration denies naming the rewrite's target instead of
+/// rewriting, the family-rule counterpart to a sym job's own check in
+/// [`find_sym_job`]. `rewrite_translatable` is `None` for a Fields rule's
+/// Rewrite (`parse_policy` forbids it there), so this never runs against
+/// `MatchInput::Json`.
 fn evaluate_rules(
     rules: &[Rule],
     input: MatchInput<'_>,
@@ -280,6 +320,25 @@ fn evaluate_rules(
             return (
                 deny_default(default_messages::MISSING_LOOKUP),
                 DecidingEntry::Default,
+            );
+        }
+        if let (Decision::Rewrite { target, .. }, MatchInput::Args(args), Some(spec)) =
+            (&rule.decision, input, &rule.rewrite_translatable)
+            && let Some(bad_arg) = spec.untranslatable(args)
+        {
+            let decision = Decision::deny_infallible(
+                format!(
+                    "argument {bad_arg:?} has no lossless translation to {}",
+                    target.as_str()
+                ),
+                target.as_str().to_string(),
+            );
+            return (
+                decision,
+                DecidingEntry::Rule {
+                    id: rule.id.clone(),
+                    needs_operator: false,
+                },
             );
         }
         return (
@@ -665,8 +724,9 @@ mod tests {
                                 "predicate": {"arg_equals": "list"},
                                 "outcome": {
                                     "kind": "rewrite",
-                                    "target": "legion issue list",
-                                    "reason": "gh issue list duplicates legion's issue tracking surface"
+                                    "target": "legion issue list --repo {repo}",
+                                    "reason": "gh issue list duplicates legion's issue tracking surface",
+                                    "translatable": {"max_operands": 2}
                                 }
                             }
                         ]
@@ -737,7 +797,9 @@ mod tests {
     fn rewrite_arm_from_a_family_rule() {
         let routed = evaluate(&policy(), &bash_call("gh issue list"), &Context::default());
         match routed.decision {
-            Decision::Rewrite { target, .. } => assert_eq!(target.as_str(), "legion issue list"),
+            Decision::Rewrite { target, .. } => {
+                assert_eq!(target.as_str(), "legion issue list --repo {repo}")
+            }
             other => panic!("expected Rewrite, got {other:?}"),
         }
         assert_eq!(
@@ -747,6 +809,50 @@ mod tests {
                 needs_operator: false
             }
         );
+    }
+
+    #[test]
+    fn family_rewrite_with_an_untranslatable_flag_denies_naming_the_target() {
+        // FR-CMD-008 applies to every rewrite, not only sym jobs: "--repo"
+        // (the gh flag, distinct from the target's own `{repo}`
+        // placeholder) has no equivalent the test policy's
+        // "gh-issue-list" rule declares translatable, so it denies naming
+        // the target instead of silently dropping the flag.
+        let routed = evaluate(
+            &policy(),
+            &bash_call("gh issue list --repo other/org"),
+            &Context::default(),
+        );
+        match &routed.decision {
+            Decision::Deny(details) => {
+                assert_eq!(details.instead(), "legion issue list --repo {repo}");
+                assert!(
+                    details.reason().contains("\"--repo\""),
+                    "reason should name the untranslatable flag: {}",
+                    details.reason()
+                );
+            }
+            other => panic!("expected Deny naming the target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn family_rewrite_composed_with_another_command_denies_instead_of_rewriting_the_whole_command()
+    {
+        // FR-CMD-008: the harness replaces the WHOLE command string, so a
+        // family rewrite that would otherwise be lossless still does not
+        // rewrite when it is not the whole command.
+        let routed = evaluate(
+            &policy(),
+            &bash_call("gh issue list | head"),
+            &Context::default(),
+        );
+        match &routed.decision {
+            Decision::Deny(details) => {
+                assert_eq!(details.instead(), "legion issue list --repo {repo}")
+            }
+            other => panic!("expected Deny naming the target, got {other:?}"),
+        }
     }
 
     #[test]
@@ -926,37 +1032,30 @@ mod tests {
 
     // -- Lossless sym-job rewrite (FR-CMD-008) -------------------------
     //
-    // This test policy exercises the mechanism (`ArgSpec` coverage
-    // deciding Rewrite vs. Deny) with a synthetic `translatable`
-    // declaration on the real `grep` -> `legion sym etc find-content` sym
-    // job. It is not a claim that this declaration is what should ship:
-    // real `grep -r` searches the invoking shell's cwd tree and sees
-    // gitignored/hidden files, while `find-content` searches every repo
-    // in `watch.toml` and excludes both by default -- a scope and
-    // ignore-semantics gap no flag or operand count can close. Whether
-    // any real `grep` invocation is losslessly translatable at all, and
-    // what `plugin/legion-cmd/policy.json` should declare, is left to the
+    // Operator correction (2026-09-16): nothing today carries an argument
+    // into a rewrite target -- the adapter replaces the whole command with
+    // the target string verbatim -- so a rewrite is lossless only when the
+    // invocation carries no argument beyond what the job's own matcher
+    // already requires. This test policy uses `Predicate::Always` (rather
+    // than a real search-flag predicate) so a genuinely zero-argument
+    // invocation can reach the job at all; it is a mechanism proof, not a
+    // claim that any real `grep` invocation is losslessly rewritable
+    // today. Whether one ever will be, and what
+    // `plugin/legion-cmd/policy.json` should declare, is left to the
     // hook-parity issue that owns which rewrite rules exist for which
-    // binaries; today it ships no `rewrite` declaration for this job.
+    // binaries; today it ships no `rewrite` declaration for any sym job.
 
     const LOSSLESS_REWRITE_POLICY: &str = r#"{
         "sym_jobs": [
             {
-                "id": "grep-recursive",
+                "id": "grep-bare",
                 "sym_command": "legion sym etc find-content",
                 "invocation": {
                     "binary": "grep",
-                    "predicate": {"any": [
-                        {"arg_equals": "-r"},
-                        {"arg_equals": "-rn"},
-                        {"arg_equals": "-nr"}
-                    ]}
+                    "predicate": "always"
                 },
                 "rewrite": {
-                    "translatable": {
-                        "flags": ["-r", "-n", "-rn", "-nr"],
-                        "max_operands": 1
-                    }
+                    "translatable": {"max_operands": 0}
                 }
             }
         ]
@@ -967,14 +1066,10 @@ mod tests {
     }
 
     #[test]
-    fn sym_invocation_with_only_translatable_arguments_rewrites_to_sym() {
-        // Every argument -- the recursive flag and the single pattern
-        // operand -- is covered by the job's declared translatable set.
-        let routed = evaluate(
-            &lossless_policy(),
-            &bash_call("grep -rn foo"),
-            &Context::default(),
-        );
+    fn sym_invocation_with_no_extra_arguments_rewrites_to_sym() {
+        // The invocation carries nothing beyond the bare binary, so it is
+        // fully covered by the job's "no extra args" declaration.
+        let routed = evaluate(&lossless_policy(), &bash_call("grep"), &Context::default());
         match &routed.decision {
             Decision::Rewrite { target, .. } => {
                 assert_eq!(target.as_str(), "legion sym etc find-content")
@@ -984,21 +1079,21 @@ mod tests {
         assert_eq!(
             routed.entry,
             DecidingEntry::Rule {
-                id: "grep-recursive".to_string(),
+                id: "grep-bare".to_string(),
                 needs_operator: false,
             }
         );
     }
 
     #[test]
-    fn sym_invocation_with_an_untranslatable_flag_denies_naming_sym() {
-        // Same verb and same recursive/pattern shape as the rewritten case
-        // above, but "-l" (files-only) has no equivalent the target
-        // expresses -- FR-CMD-008: two commands sharing a verb but
-        // differing in arguments may receive different Decisions.
+    fn sym_invocation_with_a_flag_denies_naming_sym() {
+        // FR-CMD-008: two commands sharing a verb but differing in
+        // arguments may receive different Decisions. Nothing carries "-r"
+        // into the rewrite target, so its presence denies rather than
+        // silently dropping it.
         let routed = evaluate(
             &lossless_policy(),
-            &bash_call("grep -rn -l foo"),
+            &bash_call("grep -r"),
             &Context::default(),
         );
         match &routed.decision {
@@ -1008,7 +1103,7 @@ mod tests {
                 // just "something didn't translate" -- the issue's own
                 // fallback wording (FR-CMD-005's depends_on).
                 assert!(
-                    details.reason().contains("\"-l\""),
+                    details.reason().contains("\"-r\""),
                     "reason should name the untranslatable flag: {}",
                     details.reason()
                 );
@@ -1018,19 +1113,20 @@ mod tests {
     }
 
     #[test]
-    fn sym_invocation_with_more_operands_than_declared_denies_naming_sym() {
-        // A second operand (a directory to search) has no declared
-        // translation, even though every flag is covered.
+    fn sym_invocation_with_an_operand_denies_naming_sym() {
+        // The search pattern itself is an argument nothing carries into
+        // the rewrite target today, so it denies rather than being
+        // silently dropped.
         let routed = evaluate(
             &lossless_policy(),
-            &bash_call("grep -rn foo src"),
+            &bash_call("grep foo"),
             &Context::default(),
         );
         match &routed.decision {
             Decision::Deny(details) => {
                 assert_eq!(details.instead(), "legion sym etc find-content");
                 assert!(
-                    details.reason().contains("\"src\""),
+                    details.reason().contains("\"foo\""),
                     "reason should name the untranslatable operand: {}",
                     details.reason()
                 );
@@ -1040,23 +1136,27 @@ mod tests {
     }
 
     #[test]
-    fn sym_rewrite_is_not_outranked_by_an_unrelated_proxy_sibling() {
-        // Rewrite is weaker than Proxy in the strictest-order fold
-        // (severity 3 vs 2), so if the sym job's decision were folded
-        // alongside the pipeline's other (opaque, proxied) part instead of
-        // being decided before the fold, the Proxy would wrongly win. It
-        // must not: the sym job's Rewrite is decided and returned before
-        // the fold ever runs.
+    fn sym_rewrite_in_a_pipeline_denies_instead_of_rewriting_the_whole_command() {
+        // FR-CMD-008: the harness replaces the WHOLE command string with a
+        // rewrite's target, so a sym job whose arguments would otherwise
+        // translate losslessly still does not rewrite when it shares the
+        // command with an unrelated sibling part (here, a piped opaque
+        // script) -- rewriting would silently drop that sibling. This is
+        // decided by the same precedence step that keeps a sym job's
+        // decision from being outranked by the fold (deciding it before
+        // the fold ever runs), now downgrading Rewrite to Deny rather than
+        // letting a non-atomic command rewrite.
         let routed = evaluate(
             &lossless_policy(),
-            &bash_call("grep -rn foo | ./notify.sh"),
+            &bash_call("grep | ./notify.sh"),
             &Context::default(),
         );
-        assert!(
-            matches!(routed.decision, Decision::Rewrite { .. }),
-            "expected the sym job's Rewrite to win over the sibling's Proxy, got {:?}",
-            routed.decision
-        );
+        match &routed.decision {
+            Decision::Deny(details) => {
+                assert_eq!(details.instead(), "legion sym etc find-content")
+            }
+            other => panic!("expected Deny naming sym, got {other:?}"),
+        }
     }
 
     // -- Parse errors route ask (FR-CMD-006, FR-CMD-007) --------------------

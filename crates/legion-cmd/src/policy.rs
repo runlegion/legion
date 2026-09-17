@@ -89,15 +89,34 @@ pub enum PolicyError {
     #[error("{pointer}: {message}")]
     MismatchedPredicateKind { pointer: String, message: String },
 
-    /// A sym job's `rewrite.translatable` declares no flag and no operand
-    /// at all (FR-CMD-008): a rewrite eligibility with nothing declared
-    /// translatable is exactly the verb-only judgment FR-CMD-008 forbids,
-    /// since no invocation with any argument at all could ever satisfy it
-    /// on purpose.
+    /// A `translatable` declaration names one or more `flags` (FR-CMD-008,
+    /// operator correction 2026-09-16). Nothing carries an argument into a
+    /// rewrite target today -- the adapter replaces the whole command with
+    /// the target string verbatim, with no facts spliced in -- so a
+    /// declared-translatable flag would promise a forwarding that never
+    /// happens. Only `max_operands` (a count of words the rule's own
+    /// predicate and family key already fix, e.g. the two literal words
+    /// `"issue"`/`"list"` for `gh issue list`, never user-supplied data)
+    /// may be declared until an adapter that can carry a flag into the
+    /// target exists.
     #[error(
-        "{pointer}: a rewrite's translatable arguments must declare at least one flag or a non-zero max_operands"
+        "{pointer}: a rewrite's translatable declaration cannot name any flags; nothing carries a flag into the rewrite target today"
     )]
-    EmptyTranslatableArgSpec { pointer: String },
+    TranslatableFlagsUnsupported { pointer: String },
+
+    /// A rewrite outcome's `target` names a `{...}` placeholder other than
+    /// `{repo}` (FR-CMD-008, operator correction 2026-09-16). `route`
+    /// passes `target` through unchanged; `{repo}`, substituted from
+    /// `Context.repo` by the adapter, is the only placeholder any
+    /// downstream code fills in. Any other placeholder -- or an
+    /// unterminated `{` -- would reach the agent unresolved.
+    #[error(
+        "{pointer}: rewrite target names an unsupported placeholder \"{{{placeholder}}}\"; only \"{{repo}}\" is supported"
+    )]
+    UnsupportedRewriteTargetPlaceholder {
+        pointer: String,
+        placeholder: String,
+    },
 
     /// A sym job declares `rewrite` alongside `interpreter_patterns`. An
     /// interpreter job's opaque body carries no parsed argument list to
@@ -108,6 +127,26 @@ pub enum PolicyError {
         "{pointer}: rewrite eligibility requires an \"invocation\" matcher; this sym job uses \"interpreter_patterns\", whose opaque body has no argument list to check"
     )]
     RewriteOnOpaqueSymJob { pointer: String },
+
+    /// A Bash family rule's outcome is `"rewrite"` with no `"translatable"`
+    /// declaration (FR-CMD-008). Applies to every rewrite, not just sym
+    /// jobs: a rewrite rule with no declared argument coverage is the
+    /// verb-only judgment FR-CMD-008 forbids, whether it decides a sym
+    /// job's precedence step or an ordinary family rule.
+    #[error(
+        "{pointer}: a \"rewrite\" outcome on a Bash family rule must declare \"translatable\" arguments (FR-CMD-008)"
+    )]
+    MissingRewriteTranslatable { pointer: String },
+
+    /// A Fields rule's `"rewrite"` outcome declares `"translatable"`. A
+    /// Fields call's JSON input has no argument list for it to check, so
+    /// the declaration could never take effect -- rejected here rather
+    /// than silently ignored, the same reasoning as
+    /// [`PolicyError::RewriteOnOpaqueSymJob`].
+    #[error(
+        "{pointer}: a Fields rule's \"rewrite\" outcome cannot declare \"translatable\" arguments; its JSON input has no argument list to check"
+    )]
+    RewriteTranslatableOnFieldsRule { pointer: String },
 }
 
 /// The tool kinds the policy can route on (FR-CMD-011). A `Bash` call
@@ -380,6 +419,18 @@ fn looks_like_a_file_name(operand: &str) -> bool {
 /// (see [`convert_decision`]). `needs_operator` (FR-CMD-006) is only
 /// meaningful when `decision` is [`Decision::Ask`]; it is always `false`
 /// otherwise.
+///
+/// `rewrite_translatable` is FR-CMD-008's lossless-rewrite declaration for
+/// this rule, the family-rule counterpart to [`SymJob::rewrite`]: when
+/// `decision` is [`Decision::Rewrite`] and the rule governs a Bash
+/// invocation's arguments, `parse_policy` requires it (see
+/// [`PolicyError::MissingRewriteTranslatable`]) and `evaluate` denies
+/// naming the rewrite's target instead of rewriting when the matched
+/// invocation's arguments are not fully covered by it. It is always
+/// `None` for every other decision kind, and `parse_policy` refuses it on
+/// a Fields rule's Rewrite decision (see
+/// [`PolicyError::RewriteTranslatableOnFieldsRule`]), since a Fields
+/// call's JSON input has no argument list to check it against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub id: String,
@@ -387,6 +438,7 @@ pub struct Rule {
     pub requires: Vec<RequiredLookup>,
     pub decision: Decision,
     pub needs_operator: bool,
+    pub rewrite_translatable: Option<ArgSpec>,
 }
 
 /// One job `legion sym` serves (FR-CMD-007): the sym command that job maps
@@ -422,21 +474,31 @@ pub struct RewriteSpec {
     pub translatable: ArgSpec,
 }
 
-/// The flags and operand count a rewrite target expresses exactly
-/// (FR-CMD-008). Losslessness is judged from the specific invocation's
-/// arguments, never from the binary or verb alone: [`ArgSpec::untranslatable`]
-/// checks every argument the invocation actually carries.
+/// The arguments a rewrite target expresses exactly (FR-CMD-008).
+/// Losslessness is judged from the specific invocation's arguments, never
+/// from the binary or verb alone: [`ArgSpec::untranslatable`] checks every
+/// argument the invocation actually carries.
+///
+/// Operator correction (2026-09-16): nothing carries an argument into a
+/// rewrite target today -- the adapter replaces the whole command with the
+/// target string verbatim, splicing in no facts -- so `flags` must always
+/// be empty (`parse_policy` rejects a non-empty one, see
+/// [`PolicyError::TranslatableFlagsUnsupported`]); it stays on this type
+/// for when an adapter that can carry a flag into the target exists.
+/// `max_operands` is not "extra room for real arguments" either -- it is
+/// the count of words the rule's own predicate and family key already fix
+/// (e.g. the two literal words `"issue"`/`"list"` for `gh issue list`,
+/// always present whenever the rule matches, never user-supplied data).
+/// The practical effect: a rewrite is lossless only when the invocation
+/// carries no argument beyond the ones the rule already governs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ArgSpec {
-    /// Every flag (an argument starting with `-`) the target expresses
-    /// exactly, e.g. `"-r"`, `"--fixed-strings"`. An invocation carrying a
-    /// flag outside this set is not covered.
+    /// Reserved for a future adapter that can carry a flag into the
+    /// rewrite target. Always empty today; see this type's doc.
     #[serde(default)]
     pub flags: BTreeSet<String>,
-    /// The maximum number of non-flag operands the target expresses
-    /// exactly (e.g. `1` for a target that takes only a search pattern,
-    /// with no path operand). An invocation with more non-flag operands
-    /// than this is not covered.
+    /// The number of non-flag words the rule's own predicate and family
+    /// key already fix (not a budget for additional real arguments).
     #[serde(default)]
     pub max_operands: usize,
 }
@@ -444,11 +506,13 @@ pub struct ArgSpec {
 impl ArgSpec {
     /// The first argument in `args` this declaration does not cover, or
     /// `None` when every one does (FR-CMD-008): each flag must be named in
-    /// `flags`, and the count of non-flag operands must not exceed
-    /// `max_operands`. This reads the specific arguments the invocation
-    /// carries, never the binary or verb -- and, on a miss, names the
-    /// exact argument so the deny built from it (FR-CMD-005) tells the
-    /// agent what to drop, not just that something was untranslatable.
+    /// `flags` (always empty today, so any flag argument is untranslatable
+    /// by construction), and the count of non-flag operands must not
+    /// exceed `max_operands`. This reads the specific arguments the
+    /// invocation carries, never the binary or verb -- and, on a miss,
+    /// names the exact argument so the deny built from it (FR-CMD-005)
+    /// tells the agent what to drop, not just that something was
+    /// untranslatable.
     pub fn untranslatable<'a>(&self, args: &'a [String]) -> Option<&'a str> {
         let mut operand_count = 0usize;
         for arg in args {
@@ -464,15 +528,6 @@ impl ArgSpec {
             }
         }
         None
-    }
-
-    /// True when this declaration covers nothing at all: no flag and no
-    /// operand. Such a declaration would only ever cover an invocation
-    /// with zero arguments, which is exactly the verb-only judgment
-    /// FR-CMD-008 forbids -- `parse_policy` rejects it rather than
-    /// accepting a rewrite spec that can never do useful work.
-    fn is_vacuous(&self) -> bool {
-        self.flags.is_empty() && self.max_operands == 0
     }
 }
 
@@ -656,8 +711,8 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
                     pointer: format!("{job_pointer}/rewrite"),
                 });
             }
-            if rewrite.translatable.is_vacuous() {
-                return Err(PolicyError::EmptyTranslatableArgSpec {
+            if !rewrite.translatable.flags.is_empty() {
+                return Err(PolicyError::TranslatableFlagsUnsupported {
                     pointer: format!("{job_pointer}/rewrite/translatable"),
                 });
             }
@@ -734,26 +789,66 @@ fn convert_rules(
                 context,
                 &raw_rule.predicate,
             )?;
-            let (decision, needs_operator) =
-                convert_decision(&format!("{rule_pointer}/outcome"), &raw_rule.outcome)?;
+            let (decision, needs_operator, rewrite_translatable) = convert_decision(
+                &format!("{rule_pointer}/outcome"),
+                context,
+                &raw_rule.outcome,
+            )?;
             Ok(Rule {
                 id: raw_rule.id,
                 predicate: raw_rule.predicate,
                 requires: raw_rule.requires,
                 decision,
                 needs_operator,
+                rewrite_translatable,
             })
         })
         .collect()
 }
 
-/// Converts a rule's raw `outcome` JSON into a validated [`Decision`] plus
-/// its `needs_operator` mark. Building the `Decision` through its own
-/// constructors (`Decision::deny`, `Decision::ask`, `ProxyReason::try_from`)
-/// rather than re-implementing their non-empty checks here means the two
-/// cannot drift apart, and nothing downstream needs to `.expect()` past an
-/// invariant this function already enforced.
-fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), PolicyError> {
+/// Rejects a rewrite `target` naming a `{...}` placeholder other than
+/// `{repo}` (FR-CMD-008, operator correction 2026-09-16): `route` passes
+/// `target` through unchanged, so `{repo}` -- substituted from
+/// `Context.repo` by the adapter -- is the only placeholder any
+/// downstream code fills in. An unterminated `{` is rejected the same
+/// way: whatever follows it can never be a valid placeholder either.
+fn validate_rewrite_target(pointer: &str, target: &str) -> Result<(), PolicyError> {
+    let mut rest = target;
+    while let Some(open) = rest.find('{') {
+        let after_open = &rest[open + 1..];
+        let placeholder_and_rest = after_open.find('}').map(|close| {
+            let (placeholder, after_close) = after_open.split_at(close);
+            (placeholder, &after_close[1..])
+        });
+        let Some((placeholder, after_close)) = placeholder_and_rest else {
+            return Err(PolicyError::UnsupportedRewriteTargetPlaceholder {
+                pointer: pointer.to_string(),
+                placeholder: after_open.to_string(),
+            });
+        };
+        if placeholder != "repo" {
+            return Err(PolicyError::UnsupportedRewriteTargetPlaceholder {
+                pointer: pointer.to_string(),
+                placeholder: placeholder.to_string(),
+            });
+        }
+        rest = after_close;
+    }
+    Ok(())
+}
+
+/// Converts a rule's raw `outcome` JSON into a validated [`Decision`],
+/// its `needs_operator` mark, and -- for a `"rewrite"` outcome -- its
+/// FR-CMD-008 `rewrite_translatable` declaration. Building the `Decision`
+/// through its own constructors (`Decision::deny`, `Decision::ask`,
+/// `ProxyReason::try_from`) rather than re-implementing their non-empty
+/// checks here means the two cannot drift apart, and nothing downstream
+/// needs to `.expect()` past an invariant this function already enforced.
+fn convert_decision(
+    pointer: &str,
+    context: PredicateContext,
+    value: &Value,
+) -> Result<(Decision, bool, Option<ArgSpec>), PolicyError> {
     let kind =
         value
             .get("kind")
@@ -787,6 +882,16 @@ fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), Po
             ),
         });
     }
+    // `translatable` (FR-CMD-008) only means anything on a `rewrite`
+    // outcome, the same reasoning as `needs_operator` above.
+    if kind != "rewrite" && value.get("translatable").is_some() {
+        return Err(PolicyError::InvalidOutcome {
+            pointer: pointer.to_string(),
+            message: format!(
+                "\"translatable\" only applies to a \"rewrite\" outcome, not \"{kind}\""
+            ),
+        });
+    }
 
     match kind {
         "allow" => Ok((
@@ -794,16 +899,54 @@ fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), Po
                 note: field("note"),
             },
             false,
+            None,
         )),
         "rewrite" => {
             let target = required_field("target")?;
             let reason = required_field("reason")?;
+            validate_rewrite_target(&format!("{pointer}/target"), &target)?;
+            // FR-CMD-008: losslessness is a function of the specific
+            // arguments, never the verb alone, so every rewrite -- a sym
+            // job's or an ordinary family rule's -- must declare which
+            // arguments it can translate. A Bash rule's invocation carries
+            // an argument list to check this against; a Fields rule's
+            // JSON input does not, so the declaration is required for one
+            // context and forbidden for the other.
+            let translatable_value = value.get("translatable");
+            let rewrite_translatable = match (context, translatable_value) {
+                (PredicateContext::Args, Some(raw)) => {
+                    let spec: ArgSpec = serde_json::from_value(raw.clone()).map_err(|e| {
+                        PolicyError::InvalidOutcome {
+                            pointer: format!("{pointer}/translatable"),
+                            message: format!("invalid \"translatable\" ArgSpec: {e}"),
+                        }
+                    })?;
+                    if !spec.flags.is_empty() {
+                        return Err(PolicyError::TranslatableFlagsUnsupported {
+                            pointer: format!("{pointer}/translatable"),
+                        });
+                    }
+                    Some(spec)
+                }
+                (PredicateContext::Args, None) => {
+                    return Err(PolicyError::MissingRewriteTranslatable {
+                        pointer: pointer.to_string(),
+                    });
+                }
+                (PredicateContext::Fields, None) => None,
+                (PredicateContext::Fields, Some(_)) => {
+                    return Err(PolicyError::RewriteTranslatableOnFieldsRule {
+                        pointer: format!("{pointer}/translatable"),
+                    });
+                }
+            };
             Ok((
                 Decision::Rewrite {
                     target: ManagedTarget::new(target),
                     reason,
                 },
                 false,
+                rewrite_translatable,
             ))
         }
         "proxy" => {
@@ -818,7 +961,7 @@ fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), Po
                     value: raw_reason,
                 }
             })?;
-            Ok((Decision::Proxy { reason }, false))
+            Ok((Decision::Proxy { reason }, false, None))
         }
         "deny" => {
             let reason = field("reason").unwrap_or_default();
@@ -829,7 +972,7 @@ fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), Po
                     message: "a \"deny\" outcome must have a non-empty \"reason\" and \"instead\""
                         .to_string(),
                 })?;
-            Ok((decision, false))
+            Ok((decision, false, None))
         }
         "ask" => {
             let question = field("question").unwrap_or_default();
@@ -842,7 +985,7 @@ fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), Po
                 .get("needs_operator")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            Ok((decision, needs_operator))
+            Ok((decision, needs_operator, None))
         }
         other => Err(PolicyError::UnknownDecisionKind {
             pointer: pointer.to_string(),
@@ -1123,32 +1266,34 @@ mod tests {
             "id": "grep-recursive",
             "sym_command": "legion sym etc find-content",
             "invocation": {"binary": "grep", "predicate": {"operand_contains": "-r"}},
-            "rewrite": {"translatable": {"flags": ["-r", "-n"], "max_operands": 1}}
+            "rewrite": {"translatable": {"max_operands": 0}}
         }]}"#;
         let policy = parse_policy(text).expect("valid rewrite spec should parse");
         let rewrite = policy.sym_jobs[0]
             .rewrite
             .as_ref()
             .expect("rewrite spec present");
-        assert!(rewrite.translatable.flags.contains("-r"));
-        assert!(rewrite.translatable.flags.contains("-n"));
-        assert_eq!(rewrite.translatable.max_operands, 1);
+        assert!(rewrite.translatable.flags.is_empty());
+        assert_eq!(rewrite.translatable.max_operands, 0);
     }
 
     #[test]
-    fn sym_job_rewrite_with_no_flags_and_no_operands_is_rejected_with_pointer() {
+    fn sym_job_rewrite_declaring_a_flag_is_rejected_with_pointer() {
+        // Nothing carries a flag into a rewrite target today, so declaring
+        // one translatable would promise a forwarding that never happens
+        // (FR-CMD-008, operator correction 2026-09-16).
         let text = r#"{"sym_jobs": [{
             "id": "grep-recursive",
             "sym_command": "legion sym etc find-content",
             "invocation": {"binary": "grep"},
-            "rewrite": {"translatable": {}}
+            "rewrite": {"translatable": {"flags": ["-r"]}}
         }]}"#;
         let err = parse_policy(text).unwrap_err();
         match err {
-            PolicyError::EmptyTranslatableArgSpec { pointer } => {
+            PolicyError::TranslatableFlagsUnsupported { pointer } => {
                 assert_eq!(pointer, "/sym_jobs/0/rewrite/translatable");
             }
-            other => panic!("expected EmptyTranslatableArgSpec, got {other:?}"),
+            other => panic!("expected TranslatableFlagsUnsupported, got {other:?}"),
         }
     }
 
@@ -1169,6 +1314,122 @@ mod tests {
                 assert_eq!(pointer, "/sym_jobs/0/rewrite");
             }
             other => panic!("expected RewriteOnOpaqueSymJob, got {other:?}"),
+        }
+    }
+
+    // -- FR-CMD-008 applies to every rewrite, not only sym jobs: a Bash
+    // family rule's "rewrite" outcome must declare "translatable", and a
+    // Fields rule's must not (it has no argument list to check).
+
+    #[test]
+    fn bash_family_rewrite_outcome_without_translatable_is_rejected_with_pointer() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "why"}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::MissingRewriteTranslatable { pointer } => {
+                assert_eq!(pointer, "/tools/Bash/families/gh issue/rules/0/outcome");
+            }
+            other => panic!("expected MissingRewriteTranslatable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_family_rewrite_outcome_with_translatable_parses() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "why",
+                         "translatable": {"max_operands": 2}}}
+        ]}}}}}"#;
+        let policy = parse_policy(text).expect("valid translatable rewrite should parse");
+        match policy.tools.get(&ToolKind::Bash) {
+            Some(ToolRules::Bash { families, .. }) => {
+                let rule = &families.get("gh issue").expect("gh issue family").rules[0];
+                let spec = rule
+                    .rewrite_translatable
+                    .as_ref()
+                    .expect("rewrite_translatable present");
+                assert_eq!(spec.max_operands, 2);
+            }
+            other => panic!("expected Bash families, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_family_rewrite_outcome_with_an_empty_translatable_parses() {
+        // An all-empty ArgSpec is not vacuous: it is the common, correct
+        // declaration for a rewrite whose invocation must carry no
+        // argument at all beyond what the rule's own predicate already
+        // fixes (operator correction 2026-09-16).
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh": {"rules": [
+            {"id": "r1", "predicate": "always",
+             "outcome": {"kind": "rewrite", "target": "legion gh", "reason": "why",
+                         "translatable": {}}}
+        ]}}}}}"#;
+        let policy = parse_policy(text).expect("an empty translatable declaration should parse");
+        match policy.tools.get(&ToolKind::Bash) {
+            Some(ToolRules::Bash { families, .. }) => {
+                let rule = &families.get("gh").expect("gh family").rules[0];
+                let spec = rule
+                    .rewrite_translatable
+                    .as_ref()
+                    .expect("rewrite_translatable present");
+                assert!(spec.flags.is_empty());
+                assert_eq!(spec.max_operands, 0);
+            }
+            other => panic!("expected Bash families, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_family_rewrite_outcome_declaring_a_flag_is_rejected() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "why",
+                         "translatable": {"flags": ["--state"], "max_operands": 2}}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::TranslatableFlagsUnsupported { pointer } => {
+                assert_eq!(
+                    pointer,
+                    "/tools/Bash/families/gh issue/rules/0/outcome/translatable"
+                );
+            }
+            other => panic!("expected TranslatableFlagsUnsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fields_rule_rewrite_outcome_with_translatable_is_rejected_with_pointer() {
+        let text = r#"{"tools": {"Edit": {"kind": "fields", "rules": [
+            {"id": "r1", "predicate": "always",
+             "outcome": {"kind": "rewrite", "target": "legion edit", "reason": "why",
+                         "translatable": {"max_operands": 1}}}
+        ]}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::RewriteTranslatableOnFieldsRule { pointer } => {
+                assert_eq!(pointer, "/tools/Edit/rules/0/outcome/translatable");
+            }
+            other => panic!("expected RewriteTranslatableOnFieldsRule, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fields_rule_rewrite_outcome_without_translatable_parses() {
+        let text = r#"{"tools": {"Edit": {"kind": "fields", "rules": [
+            {"id": "r1", "predicate": "always",
+             "outcome": {"kind": "rewrite", "target": "legion edit", "reason": "why"}}
+        ]}}}"#;
+        let policy = parse_policy(text).expect("valid Fields rewrite should parse");
+        match policy.tools.get(&ToolKind::Edit) {
+            Some(ToolRules::Fields { rules }) => {
+                assert_eq!(rules[0].rewrite_translatable, None);
+            }
+            other => panic!("expected Edit fields rules, got {other:?}"),
         }
     }
 
@@ -1214,8 +1475,86 @@ mod tests {
     }
 
     #[test]
-    fn arg_spec_default_is_vacuous() {
-        assert!(ArgSpec::default().is_vacuous());
+    fn arg_spec_default_covers_only_the_zero_argument_invocation() {
+        // The default ArgSpec is not a meaningless placeholder to reject
+        // -- it is "no extra argument at all," a legitimate and often
+        // correct declaration once nothing carries an argument into a
+        // rewrite target (operator correction 2026-09-16).
+        let spec = ArgSpec::default();
+        assert_eq!(spec.untranslatable(&args(&[])), None);
+        assert_eq!(spec.untranslatable(&args(&["foo"])), Some("foo"));
+    }
+
+    // -- Rewrite target placeholders: only {repo} is supported
+    // (FR-CMD-008, operator correction 2026-09-16) ------------------------
+
+    #[test]
+    fn rewrite_target_with_the_repo_placeholder_parses() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo}",
+                         "reason": "why", "translatable": {"max_operands": 2}}}
+        ]}}}}}"#;
+        let policy = parse_policy(text).expect("the {repo} placeholder should parse");
+        match policy.tools.get(&ToolKind::Bash) {
+            Some(ToolRules::Bash { families, .. }) => {
+                let rule = &families.get("gh issue").expect("gh issue family").rules[0];
+                match &rule.decision {
+                    Decision::Rewrite { target, .. } => {
+                        assert_eq!(target.as_str(), "legion issue list --repo {repo}")
+                    }
+                    other => panic!("expected Rewrite, got {other:?}"),
+                }
+            }
+            other => panic!("expected Bash families, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_target_with_an_unsupported_placeholder_is_rejected_with_pointer() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list --label {label}",
+                         "reason": "why", "translatable": {"max_operands": 2}}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::UnsupportedRewriteTargetPlaceholder {
+                pointer,
+                placeholder,
+            } => {
+                assert_eq!(
+                    pointer,
+                    "/tools/Bash/families/gh issue/rules/0/outcome/target"
+                );
+                assert_eq!(placeholder, "label");
+            }
+            other => panic!("expected UnsupportedRewriteTargetPlaceholder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_target_with_an_unterminated_placeholder_is_rejected() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo",
+                         "reason": "why", "translatable": {"max_operands": 2}}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        assert!(matches!(
+            err,
+            PolicyError::UnsupportedRewriteTargetPlaceholder { .. }
+        ));
+    }
+
+    #[test]
+    fn rewrite_target_with_no_placeholder_at_all_parses() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list",
+                         "reason": "why", "translatable": {"max_operands": 2}}}
+        ]}}}}}"#;
+        assert!(parse_policy(text).is_ok());
     }
 
     // -- A tool kind's rules must be shaped for that kind -------------------
