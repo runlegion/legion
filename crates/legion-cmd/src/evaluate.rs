@@ -135,16 +135,16 @@ fn bash_tool_rules(
     }
 }
 
-/// The first non-flag argument in `inv.args`, skipping `binary`'s own
-/// global options that take a separate value word (e.g. `git -C <dir>`)
-/// so a global option's value is never mistaken for the subcommand.
-/// `None` when no non-flag argument remains (or exists at all) --
-/// `binary` was invoked with no subcommand.
-/// The resolved subcommand word (if any) and whether that resolution is
-/// doubtful: `true` when at least one flag was skipped before settling on
-/// the verb that was not in `binary`'s declared `global_value_options`,
-/// meaning an unlisted option could have consumed the next word as its
-/// own value rather than that word being the real subcommand.
+/// The first non-flag argument in `inv.args` -- `binary`'s subcommand, if
+/// any -- found by skipping `binary`'s own global options that take a
+/// separate value word (e.g. `git -C <dir>`) so a global option's value
+/// is never mistaken for the subcommand. `None` when no non-flag argument
+/// remains (or exists at all): `binary` was invoked with no subcommand.
+/// Also returns whether that resolution is doubtful: `true` when at least
+/// one flag was skipped before settling on the verb that was not in
+/// `binary`'s declared `global_value_options`, meaning an unlisted option
+/// could have consumed the next word as its own value rather than that
+/// word being the real subcommand.
 fn subcommand_word<'a>(
     binaries: &BTreeMap<String, BinaryOptions>,
     inv: &'a Invocation,
