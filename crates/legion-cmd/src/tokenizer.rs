@@ -18,20 +18,23 @@
 
 use tables::{Tables, WrapperMatch};
 
-/// Tool knowledge for the bounded tokenizer: which names are inline
-/// wrappers, shells, interpreters, or script extensions, and how each
+/// Tool knowledge for the bounded tokenizer: every specific name this
+/// module treats specially -- inline wrappers, shells, interpreters,
+/// script extensions, `eval`, `source`/`.`, and `find` -- plus how each
 /// wrapper's own flags are shaped (FR-CMD-007's Behavior section names
 /// this exact set).
 ///
-/// This is deliberately the only place in this file that names a specific
-/// tool. Every other function in the tokenizer resolves shell grammar
-/// (quoting, operators, substitutions, depth) generically over whatever
-/// [`Tables`] hands it -- one declarative structure a generic resolver
-/// reads, mirroring the policy-as-data shape FR-CMD-011 requires of
+/// Every specific tool name the tokenizer resolves lives here, as data a
+/// generic resolver reads, not as a name literal scattered through the
+/// grammar -- mirroring the policy-as-data shape FR-CMD-011 requires of
 /// `route`'s later policy file. `route` itself (#1227) reads a much
 /// larger, externally supplied policy for managed-binary rules; this
 /// table is smaller and fixed, because it exists only to resolve grammar
-/// positions, never to decide anything about the resolved command.
+/// positions, never to decide anything about the resolved command. The
+/// resolver's own code still names the shell keywords that guard a
+/// wrapper's target (`if`, `while`, `until`) directly: those are shell
+/// grammar, the scanner's own concern (RESEARCH-CMD-bounded-tokenizer),
+/// not tool knowledge.
 mod tables {
     /// One inline wrapper's shape: which of its own flags take a
     /// following value (so that value is never mistaken for the wrapped
@@ -71,10 +74,7 @@ mod tables {
         /// the wrapper is an ordinary command, not a wrapper here.
         NoTarget,
         /// A flag's value is itself a full command line (e.g. `env -S`).
-        CommandLine {
-            consumed: usize,
-            line_word: Option<&'a super::Word>,
-        },
+        CommandLine { line_word: Option<&'a super::Word> },
         /// The remaining words, starting at the wrapped command.
         Target(&'a [super::Word]),
     }
@@ -84,6 +84,15 @@ mod tables {
         shells: Vec<&'static str>,
         interpreters: Vec<(&'static str, InterpreterSpec)>,
         script_extensions: Vec<&'static str>,
+        /// Names that make the resolver treat their whole argument list as
+        /// an unparsed `Opaque::Eval` region (FR-CMD-007).
+        eval_names: Vec<&'static str>,
+        /// Names that make the resolver treat their argument as an
+        /// `Opaque::Sourced` file or substitution (FR-CMD-007).
+        source_names: Vec<&'static str>,
+        /// The name whose `-exec`/`-execdir` argument spec the resolver
+        /// follows as a nested command (FR-CMD-007's `find` case).
+        find_name: &'static str,
     }
 
     impl Default for Tables {
@@ -339,6 +348,9 @@ mod tables {
                 script_extensions: vec![
                     ".sh", ".bash", ".py", ".rb", ".js", ".mjs", ".cjs", ".pl", ".php", ".lua",
                 ],
+                eval_names: vec!["eval"],
+                source_names: vec!["source", "."],
+                find_name: "find",
             }
         }
     }
@@ -363,6 +375,18 @@ mod tables {
             self.script_extensions
                 .iter()
                 .any(|ext| binary.ends_with(ext))
+        }
+
+        pub fn is_eval(&self, binary: &str) -> bool {
+            self.eval_names.contains(&binary)
+        }
+
+        pub fn is_source(&self, binary: &str) -> bool {
+            self.source_names.contains(&binary)
+        }
+
+        pub fn is_find(&self, binary: &str) -> bool {
+            self.find_name == binary
         }
     }
 }
@@ -422,8 +446,17 @@ pub enum Opaque {
     StdinScript,
     /// `source` / `.` of a file or substitution.
     Sourced,
+    /// A shell alias definition invoked by name (e.g. `git -c
+    /// alias.s='!grep -rn foo src' s`). No current path constructs this
+    /// variant: an alias expansion is semantic, not grammatical
+    /// (RESEARCH-CMD-bounded-tokenizer), so the honest bounded result is
+    /// an ordinary invocation with the alias definition as a literal
+    /// argument (see the `silent-miss-git-bang-alias` fixture).
     Alias,
-    /// A wrapper outside the table.
+    /// A wrapper outside the table. No current path constructs this
+    /// variant: the scanner recognizes a wrapper only by table lookup
+    /// (FR-CMD-011), so it has no generic rule for "this binary is a
+    /// wrapper but is not in the table" to detect one it does not know.
     UnknownWrapper,
     /// Anything beyond depth 2.
     TooDeep,
@@ -599,27 +632,11 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
 
     /// Drives the whole list: repeatedly skips separators, reads one
     /// simple command, classifies it, then looks at what follows to decide
-    /// the next command's [`Position`].
+    /// the next command's [`Position`]. Equivalent to
+    /// [`Self::run_as`]-with-`None`, kept as its own name since it is the
+    /// common entry point ([`scan`] and subshell groups).
     fn run(&mut self) -> Result<(), ScanError> {
-        let mut next_position = Position::First;
-        loop {
-            self.skip_insignificant()?;
-            if self.pos >= self.end {
-                return self.finish();
-            }
-            if self.at_closing_keyword() {
-                return self.finish();
-            }
-            let command = self.read_simple_command(next_position)?;
-            if let Some(command) = command {
-                self.classify(command)?;
-            }
-            self.skip_insignificant()?;
-            match self.consume_separator()? {
-                Some(pos) => next_position = pos,
-                None => return self.finish(),
-            }
-        }
+        self.run_with(None)
     }
 
     /// Called at every exit point of [`Self::run`]/[`Self::run_as`]: a
@@ -776,14 +793,17 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         // body), since `consume_separator` only recognizes them when they
         // sit between two already-read commands.
         loop {
-            match self.peek_keyword().as_deref() {
-                Some("then") | Some("do") | Some("else") | Some("elif") | Some("if")
-                | Some("while") | Some("until") => {
-                    let len = self.peek_keyword().expect("just matched").chars().count();
-                    self.pos += len;
+            match self.peek_keyword() {
+                Some(kw)
+                    if matches!(
+                        kw.as_str(),
+                        "then" | "do" | "else" | "elif" | "if" | "while" | "until"
+                    ) =>
+                {
+                    self.pos += kw.chars().count();
                     self.skip_insignificant()?;
                 }
-                Some("{") => {
+                Some(kw) if kw == "{" => {
                     self.pos += 1;
                     self.skip_insignificant()?;
                 }
@@ -820,7 +840,6 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                 "function" => {
                     self.pos += word.chars().count();
                     self.skip_insignificant()?;
-                    let name = self.peek_keyword();
                     self.skip_word_no_classify()?;
                     self.skip_insignificant()?;
                     // An optional `()` after the name, e.g. `function g() { ... }`.
@@ -831,7 +850,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                     if self.peek_keyword().as_deref() == Some("{") {
                         self.pos += 1;
                     }
-                    self.parse_function_body(name)?;
+                    self.parse_function_body()?;
                     return Ok(None);
                 }
                 "case" => {
@@ -1267,7 +1286,9 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         let mut i = self.pos;
         let mut name = String::new();
         while i < self.end {
-            let c = *self.ctx.chars.get(i).expect("i < end checked above");
+            let Some(&c) = self.ctx.chars.get(i) else {
+                break;
+            };
             if c.is_alphanumeric() || c == '_' || c == '-' || c == '.' {
                 name.push(c);
                 i += 1;
@@ -1290,11 +1311,11 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
             return Ok(None);
         }
         self.pos += 1;
-        self.parse_function_body(Some(name))?;
+        self.parse_function_body()?;
         Ok(Some(self.pos))
     }
 
-    fn parse_function_body(&mut self, _name: Option<String>) -> Result<(), ScanError> {
+    fn parse_function_body(&mut self) -> Result<(), ScanError> {
         let open = self.byte_here();
         let body_end = find_balanced_brace(self.ctx, self.pos, self.end, open)?;
         if self.depth >= MAX_DEPTH {
@@ -1383,8 +1404,11 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                 }
                 let line_start = self.pos;
                 let mut line = String::new();
-                while self.pos < self.end && self.peek() != Some('\n') {
-                    line.push(self.peek().expect("pos < end checked above"));
+                while let Some(c) = self.peek() {
+                    if c == '\n' {
+                        break;
+                    }
+                    line.push(c);
                     self.pos += 1;
                 }
                 let trimmed = if heredoc.strip_tabs {
@@ -1436,38 +1460,15 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
 
     /// Classifies one fully-read [`SimpleCommand`]: splits off leading
     /// assignments, resolves wrapper unwrapping, and emits either an
-    /// [`Invocation`] or an [`Opaque`] region.
+    /// [`Invocation`] or an [`Opaque`] region. The position derives from
+    /// assignment/operator context, per [`Self::classify_with`].
     fn classify(&mut self, command: SimpleCommand) -> Result<(), ScanError> {
-        let words = command.words;
-        let mut had_assignment = false;
-        let mut i = 0;
-        while i < words.len() && words[i].is_assignment {
-            had_assignment = true;
-            i += 1;
-        }
-        let words = &words[i..];
-        if words.is_empty() {
-            return Ok(());
-        }
-        let position = if had_assignment {
-            Position::AfterAssignment
-        } else {
-            command.position
-        };
-        self.resolve_from(words, position, false)
+        self.classify_with(command, None)
     }
 
     /// Resolves an already-assignment-stripped word list into an
-    /// invocation or opaque region, following wrapper chains. `in_wrapper`
-    /// is true once at least one wrapper layer has been unwrapped, so the
-    /// final resolved command is always labeled `Position::Wrapper`
-    /// regardless of the caller's original position.
-    fn resolve_from(
-        &mut self,
-        words: &[Word],
-        position: Position,
-        in_wrapper: bool,
-    ) -> Result<(), ScanError> {
+    /// invocation or opaque region, following wrapper chains.
+    fn resolve_from(&mut self, words: &[Word], position: Position) -> Result<(), ScanError> {
         let head = &words[0];
         if head.has_dynamic_fragment || head.text.is_empty() {
             self.ctx.opaque.push(Opaque::DynamicCommand);
@@ -1475,30 +1476,22 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         }
         let binary = basename(&head.text);
 
-        if binary == "eval" {
+        if self.ctx.tables.is_eval(&binary) {
             self.ctx.opaque.push(Opaque::Eval);
             return Ok(());
         }
-        if binary == "source" || binary == "." {
+        if self.ctx.tables.is_source(&binary) {
             self.ctx.opaque.push(Opaque::Sourced);
             return Ok(());
         }
 
         if let Some(spec) = self.ctx.tables.wrapper(&binary) {
             match wrapper_match(spec, &words[1..]) {
-                WrapperMatch::Suppressed => {
+                WrapperMatch::Suppressed | WrapperMatch::NoTarget => {
                     self.emit_invocation(binary, &words[1..], position);
                     return Ok(());
                 }
-                WrapperMatch::NoTarget => {
-                    self.emit_invocation(binary, &words[1..], position);
-                    return Ok(());
-                }
-                WrapperMatch::CommandLine {
-                    consumed,
-                    line_word,
-                } => {
-                    let _ = consumed;
+                WrapperMatch::CommandLine { line_word } => {
                     if let Some(line) = line_word {
                         self.scan_wrapper_command_line(&line.text)?;
                     } else {
@@ -1516,14 +1509,14 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                     // keyword"): the keyword itself is not a command, so
                     // skip it rather than treat it as the wrapped binary.
                     if matches!(rest[0].text.as_str(), "if" | "while" | "until") {
-                        return self.resolve_from(&rest[1..], Position::Wrapper, true);
+                        return self.resolve_from(&rest[1..], Position::Wrapper);
                     }
-                    return self.resolve_from(rest, Position::Wrapper, true);
+                    return self.resolve_from(rest, Position::Wrapper);
                 }
             }
         }
 
-        if let Some(shell_name) = self.ctx.tables.shell(&binary) {
+        if self.ctx.tables.shell(&binary).is_some() {
             if let Some(script_arg) = find_flag_value(&words[1..], "-c") {
                 self.scan_inline_shell(&script_arg.text)?;
                 return Ok(());
@@ -1534,7 +1527,6 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                 self.ctx.opaque.push(Opaque::ScriptFile);
                 return Ok(());
             }
-            let _ = shell_name;
             self.emit_invocation(binary, &words[1..], position);
             return Ok(());
         }
@@ -1570,14 +1562,13 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
             return Ok(());
         }
 
-        let _ = in_wrapper;
         let script_extension_hit = self.ctx.tables.has_script_extension(&binary);
         if script_extension_hit {
             self.ctx.opaque.push(Opaque::ScriptFile);
             return Ok(());
         }
 
-        if binary == "find"
+        if self.ctx.tables.is_find(&binary)
             && let Some(spec_words) = find_exec_spec(&words[1..])
         {
             self.emit_invocation(binary, &words[1..], position);
@@ -1586,7 +1577,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                     self.ctx.opaque.push(Opaque::TooDeep);
                 } else {
                     self.depth += 1;
-                    let result = self.resolve_from(spec_words, Position::FindExec, false);
+                    let result = self.resolve_from(spec_words, Position::FindExec);
                     self.depth -= 1;
                     result?;
                 }
@@ -1607,9 +1598,12 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         });
     }
 
-    /// Parses the string argument of `sh -c` / `bash -c` as a new command
-    /// list at `depth + 1`, labeling every invocation found `InlineShell`.
-    fn scan_inline_shell(&mut self, script: &str) -> Result<(), ScanError> {
+    /// Parses `script` as a new command list at `depth + 1`, labeling
+    /// every invocation found with `label`. Shared by
+    /// [`Self::scan_inline_shell`] (`sh -c` / `bash -c`, labeled
+    /// `InlineShell`) and [`Self::scan_wrapper_command_line`] (`env -S`,
+    /// labeled `Wrapper`), which differ only in that label.
+    fn scan_command_line_as(&mut self, script: &str, label: Position) -> Result<(), ScanError> {
         if self.depth >= MAX_DEPTH {
             self.ctx.opaque.push(Opaque::TooDeep);
             return Ok(());
@@ -1626,11 +1620,17 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         };
         {
             let mut parser = ListParser::new(&mut nested_ctx, 0, chars.len(), self.depth + 1);
-            parser.run_as(Position::InlineShell)?;
+            parser.run_as(label)?;
         }
         self.ctx.invocations.extend(nested_ctx.invocations);
         self.ctx.opaque.extend(nested_ctx.opaque);
         Ok(())
+    }
+
+    /// Parses the string argument of `sh -c` / `bash -c` as a new command
+    /// list at `depth + 1`, labeling every invocation found `InlineShell`.
+    fn scan_inline_shell(&mut self, script: &str) -> Result<(), ScanError> {
+        self.scan_command_line_as(script, Position::InlineShell)
     }
 
     /// `env -S "<command line>"`: the value is a whitespace/quote-split
@@ -1638,64 +1638,47 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
     /// `sh -c`, labeled `Wrapper` since `env` (not a shell) is doing the
     /// unwrapping.
     fn scan_wrapper_command_line(&mut self, script: &str) -> Result<(), ScanError> {
-        if self.depth >= MAX_DEPTH {
-            self.ctx.opaque.push(Opaque::TooDeep);
-            return Ok(());
-        }
-        let chars: Vec<char> = script.chars().collect();
-        let byte_offsets = char_byte_offsets(script);
-        let mut nested_ctx = ScanCtx {
-            chars: &chars,
-            byte_offsets: &byte_offsets,
-            end_byte: script.len(),
-            tables: self.ctx.tables,
-            invocations: Vec::new(),
-            opaque: Vec::new(),
-        };
-        {
-            let mut parser = ListParser::new(&mut nested_ctx, 0, chars.len(), self.depth + 1);
-            parser.run_as(Position::Wrapper)?;
-        }
-        self.ctx.invocations.extend(nested_ctx.invocations);
-        self.ctx.opaque.extend(nested_ctx.opaque);
-        Ok(())
+        self.scan_command_line_as(script, Position::Wrapper)
     }
 
-    /// Like [`run`](Self::run), but every command found at this level uses
-    /// `first_position` instead of [`Position::First`] for the initial
-    /// command (subsequent commands after an operator still get
-    /// `Position::AfterOperator` -- overridden the same way by the caller
-    /// when the whole nested region shares one label, as substitutions,
-    /// wrappers, and inline shells do).
+    /// Like [`run`](Self::run), but every command found at this level is
+    /// labeled `first_position` -- never re-derived from an operator or an
+    /// assignment prefix -- since the whole region shares one [`Position`]
+    /// label, as substitutions, wrappers, inline shells, heredoc shells,
+    /// and function bodies do.
     fn run_as(&mut self, first_position: Position) -> Result<(), ScanError> {
-        self.skip_insignificant()?;
-        if self.pos >= self.end {
-            return self.finish();
-        }
-        let command = self.read_simple_command(first_position)?;
-        if let Some(command) = command {
-            self.classify_with_label(command, first_position)?;
-        }
+        self.run_with(Some(first_position))
+    }
+
+    /// Shared driver behind [`Self::run`] (`label` is `None`: each
+    /// command's position is derived from what precedes it) and
+    /// [`Self::run_as`] (`label` is `Some(position)`: every command in the
+    /// region is forced to `position`, and the separator's own position
+    /// never overrides it).
+    fn run_with(&mut self, label: Option<Position>) -> Result<(), ScanError> {
+        let mut position = label.unwrap_or(Position::First);
         loop {
             self.skip_insignificant()?;
             if self.pos >= self.end || self.at_closing_keyword() {
-                break;
+                return self.finish();
             }
+            let command = self.read_simple_command(position)?;
+            if let Some(command) = command {
+                match label {
+                    Some(forced) => self.classify_with_label(command, forced)?,
+                    None => self.classify(command)?,
+                }
+            }
+            self.skip_insignificant()?;
             match self.consume_separator()? {
-                Some(_) => {
-                    self.skip_insignificant()?;
-                    if self.pos >= self.end {
-                        break;
-                    }
-                    let command = self.read_simple_command(first_position)?;
-                    if let Some(command) = command {
-                        self.classify_with_label(command, first_position)?;
+                Some(next) => {
+                    if label.is_none() {
+                        position = next;
                     }
                 }
-                None => break,
+                None => return self.finish(),
             }
         }
-        self.finish()
     }
 
     /// Like [`classify`](Self::classify), but forces `label` as the
@@ -1708,15 +1691,34 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         command: SimpleCommand,
         label: Position,
     ) -> Result<(), ScanError> {
+        self.classify_with(command, Some(label))
+    }
+
+    /// Shared by [`Self::classify`] and [`Self::classify_with_label`]:
+    /// splits off leading assignments, then resolves the remaining words
+    /// at either a forced `label` or, when `label` is `None`, at
+    /// `Position::AfterAssignment` (an assignment prefix was stripped) or
+    /// the command's own recorded position.
+    fn classify_with(
+        &mut self,
+        command: SimpleCommand,
+        label: Option<Position>,
+    ) -> Result<(), ScanError> {
         let mut i = 0;
         while i < command.words.len() && command.words[i].is_assignment {
             i += 1;
         }
+        let had_assignment = i > 0;
         let words = &command.words[i..];
         if words.is_empty() {
             return Ok(());
         }
-        self.resolve_from(words, label, false)
+        let position = label.unwrap_or(if had_assignment {
+            Position::AfterAssignment
+        } else {
+            command.position
+        });
+        self.resolve_from(words, position)
     }
 }
 
@@ -1825,7 +1827,6 @@ fn find_substitution_end(
             _ => i += 1,
         }
     }
-    let _ = open;
     Err(ScanError::UnterminatedSubstitution(open))
 }
 
@@ -1850,8 +1851,7 @@ fn skip_heredoc_as_literal(ctx: &ScanCtx, at: usize, end: usize) -> Result<usize
     }
     let mut delimiter = String::new();
     match ctx.chars.get(i) {
-        Some('\'') | Some('"') => {
-            let quote = *ctx.chars.get(i).expect("checked Some above");
+        Some(&quote @ ('\'' | '"')) => {
             i += 1;
             while ctx.chars.get(i) != Some(&quote) {
                 if i >= end {
@@ -1886,7 +1886,6 @@ fn skip_heredoc_as_literal(ctx: &ScanCtx, at: usize, end: usize) -> Result<usize
     }
     i += 1; // the newline ending the operator's own line
     loop {
-        let line_start = i;
         let mut line = String::new();
         while i < end && ctx.chars.get(i) != Some(&'\n') {
             line.push(ctx.chars[i]);
@@ -1898,7 +1897,6 @@ fn skip_heredoc_as_literal(ctx: &ScanCtx, at: usize, end: usize) -> Result<usize
             line.as_str()
         };
         if trimmed == delimiter {
-            let _ = line_start;
             if i < end {
                 i += 1;
             }
@@ -1914,11 +1912,19 @@ fn skip_heredoc_as_literal(ctx: &ScanCtx, at: usize, end: usize) -> Result<usize
     }
 }
 
-fn find_balanced_paren(
+/// Finds the byte offset of `close_ch` matching an `open_ch` already
+/// consumed at `open`, scanning `chars[start..end]` and skipping quoted
+/// text. Shared by [`find_balanced_paren`] and [`find_balanced_brace`],
+/// which differ only in which character pair they balance; both report
+/// [`ScanError::UnbalancedParen`], the only such variant `ScanError`
+/// defines.
+fn find_balanced(
     ctx: &ScanCtx,
     start: usize,
     end: usize,
     open: usize,
+    open_ch: char,
+    close_ch: char,
 ) -> Result<usize, ScanError> {
     let mut i = start;
     let mut depth = 1i32;
@@ -1942,11 +1948,11 @@ fn find_balanced_paren(
                 }
                 i += 1;
             }
-            '(' => {
+            c if c == open_ch => {
                 depth += 1;
                 i += 1;
             }
-            ')' => {
+            c if c == close_ch => {
                 depth -= 1;
                 i += 1;
                 if depth == 0 {
@@ -1959,49 +1965,22 @@ fn find_balanced_paren(
     Err(ScanError::UnbalancedParen(open))
 }
 
+fn find_balanced_paren(
+    ctx: &ScanCtx,
+    start: usize,
+    end: usize,
+    open: usize,
+) -> Result<usize, ScanError> {
+    find_balanced(ctx, start, end, open, '(', ')')
+}
+
 fn find_balanced_brace(
     ctx: &ScanCtx,
     start: usize,
     end: usize,
     open: usize,
 ) -> Result<usize, ScanError> {
-    let mut i = start;
-    let mut depth = 1i32;
-    while i < end {
-        match ctx.chars[i] {
-            '\'' => {
-                i += 1;
-                while i < end && ctx.chars[i] != '\'' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            '"' => {
-                i += 1;
-                while i < end {
-                    match ctx.chars[i] {
-                        '"' => break,
-                        '\\' => i += 2,
-                        _ => i += 1,
-                    }
-                }
-                i += 1;
-            }
-            '{' => {
-                depth += 1;
-                i += 1;
-            }
-            '}' => {
-                depth -= 1;
-                i += 1;
-                if depth == 0 {
-                    return Ok(i - 1);
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    Err(ScanError::UnbalancedParen(open))
+    find_balanced(ctx, start, end, open, '{', '}')
 }
 
 fn wrapper_match<'a>(spec: &tables::WrapperSpec, rest: &'a [Word]) -> WrapperMatch<'a> {
@@ -2020,14 +1999,8 @@ fn wrapper_match<'a>(spec: &tables::WrapperSpec, rest: &'a [Word]) -> WrapperMat
             if spec.suppress_flags.contains(&w.text.as_str()) {
                 return WrapperMatch::Suppressed;
             }
-            if let Some(flag) = spec
-                .command_line_flags
-                .iter()
-                .find(|f| **f == w.text.as_str())
-            {
-                let _ = flag;
+            if spec.command_line_flags.contains(&w.text.as_str()) {
                 return WrapperMatch::CommandLine {
-                    consumed: i + 1,
                     line_word: rest.get(i + 1),
                 };
             }

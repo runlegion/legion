@@ -1178,6 +1178,9 @@
         "First"
       ]
     ],
+    "forbidden": [
+      "grep"
+    ],
     "source": "FR-CMD-007 known false positive: git log --grep-reflog=x"
   },
   {

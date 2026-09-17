@@ -17,14 +17,26 @@
 //! field). An `error` row asserts `scan` returns `Err`, never a partial
 //! `Scan` (Error Handling: malformed input never yields a partial `Scan`).
 
-use legion_cmd::{Opaque, Position, scan};
+use legion_cmd::{Opaque, scan};
 use serde::Deserialize;
+
+/// A row's expected verdict. `#[serde(rename_all = "lowercase")]` makes an
+/// unrecognized string in `battery.json` a deserialize error at parse time,
+/// rather than a runtime panic reached only once the row is evaluated.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Verdict {
+    Visible,
+    Opaque,
+    Benign,
+    Error,
+}
 
 #[derive(Debug, Deserialize)]
 struct Row {
     id: String,
     cmd: String,
-    expected: String,
+    expected: Verdict,
     #[serde(default)]
     managed: Vec<(String, String)>,
     #[serde(default)]
@@ -36,20 +48,6 @@ struct Row {
 }
 
 const BATTERY_JSON: &str = include_str!("fixtures/battery.json");
-
-fn position_name(position: Position) -> &'static str {
-    match position {
-        Position::First => "First",
-        Position::AfterOperator => "AfterOperator",
-        Position::AfterAssignment => "AfterAssignment",
-        Position::Wrapper => "Wrapper",
-        Position::InlineShell => "InlineShell",
-        Position::HeredocShell => "HeredocShell",
-        Position::FindExec => "FindExec",
-        Position::FunctionBody => "FunctionBody",
-        Position::Substitution => "Substitution",
-    }
-}
 
 fn opaque_matches(entry: &Opaque, expected: &str) -> bool {
     match entry {
@@ -102,25 +100,25 @@ fn battery_matches_expected_verdict_per_row() {
 
     for row in &rows {
         let result = scan(&row.cmd);
-        match row.expected.as_str() {
-            "error" => {
-                assert!(
-                    result.is_err(),
-                    "row {}: expected ScanError, got {:?}",
-                    row.id,
-                    result
-                );
-                continue;
-            }
-            "visible" | "benign" | "opaque" => {}
-            other => panic!("row {}: unknown expected verdict {other:?}", row.id),
+        if row.expected == Verdict::Error {
+            assert!(
+                result.is_err(),
+                "row {}: expected ScanError, got {:?}",
+                row.id,
+                result
+            );
+            continue;
         }
 
+        // A row that expected a `Scan` but got a `ScanError` counts
+        // against the kill condition's parse-error rate; collect it and
+        // move on rather than panicking here, so the rate printed below
+        // reflects every such row, not just the first one hit.
         let scanned = match result {
             Ok(scanned) => scanned,
             Err(e) => {
-                unexpected_errors.push(row.id.clone());
-                panic!("row {}: unexpected ScanError: {e}", row.id);
+                unexpected_errors.push(format!("row {}: unexpected ScanError: {e}", row.id));
+                continue;
             }
         };
 
@@ -128,7 +126,7 @@ fn battery_matches_expected_verdict_per_row() {
             let found = scanned
                 .invocations
                 .iter()
-                .any(|inv| &inv.binary == binary && position_name(inv.position) == position);
+                .any(|inv| &inv.binary == binary && format!("{:?}", inv.position) == *position);
             assert!(
                 found,
                 "row {}: expected invocation {binary:?} at {position} not found in {:?}",
@@ -160,7 +158,7 @@ fn battery_matches_expected_verdict_per_row() {
             );
         }
 
-        if row.expected == "opaque" {
+        if row.expected == Verdict::Opaque {
             assert!(
                 !scanned.opaque.is_empty(),
                 "row {}: expected at least one opaque region",
@@ -172,12 +170,11 @@ fn battery_matches_expected_verdict_per_row() {
     // RESEARCH-CMD-bounded-tokenizer's kill condition: a parse-error rate
     // above 0.1 percent on cooperative input. This battery's expected
     // errors (malformed input) do not count against it; only a row that
-    // expected a `Scan` and got a `ScanError` does, and any such row
-    // already panicked above -- this makes the rate visible either way.
+    // expected a `Scan` and got a `ScanError` does, collected above.
     let rate = (unexpected_errors.len() as f64 / total as f64) * 100.0;
     println!(
         "battery parse-error rate: {rate:.3}% ({} of {total} rows)",
         unexpected_errors.len()
     );
-    assert!(unexpected_errors.is_empty(), "{unexpected_errors:?}");
+    assert!(unexpected_errors.is_empty(), "{unexpected_errors:#?}");
 }
