@@ -1,34 +1,62 @@
 ---
 name: sd-ecosystem-imagine
 description: |
-  The imagination step of service design: five light perspective passes over the intent and
-  supported insights -- actor-walk, boundary-walk, second-order, value-lifecycle,
-  evidence-adversarial -- unioned and weighted by cross-lens convergence, landing one
-  schema-valid Ecosystem document plus a register of flagged unknowns. The one step that
-  earns multi-pass cost. Invoke after sd-discover lands the Discovery.
-version: 0.1.0
+  The step where service design asks and answers every question about what turns the intent
+  into a product -- who chooses it, who carries the risk, what it depends on, how value moves,
+  what must be trusted, where it breaks -- and lands one schema-valid Ecosystem document
+  with the answers built in. Five perspective passes find the questions; the step answers
+  them from its own design reasoning and the Discovery, asks real people through eavesdrop
+  what neither can settle, and brings the operator only strategy and values choices, each
+  with a recommendation. Invoke after sd-discover lands the Discovery.
+version: 0.2.0
 user-invocable: true
 allowed-tools: Bash, Read
 ---
 
-# Ecosystem-imagine: five lenses, one map
+# Ecosystem: what makes the intent a product
 
-Imagination is where confabulation is cheapest to commit and most expensive to keep, so
-this step alone runs multi-pass. The five lenses are not a tunable parameter; they are
-what service design is made of -- actors, boundaries, consequences, value over time, and
-evidence -- and a single open pass has been measured to find roughly a quarter of what the
-five find together.
+The intent says what the thing is. This step interrogates it until the answer is a
+product: a service someone chooses, relies on, pays for in some currency, and can be let
+down by. It is the narrowing half of the first diamond, so its job is to decide. A pass
+that comes back with a list of open questions has moved its work onto the operator; the
+2026-09 smugglr ecosystem did exactly that, with 41 questions and no account of how any
+of it happens.
+
+An ecosystem is whatever makes this product work -- people, agents, other products,
+standards, credentials, data stores, communities, money. No template decides which; the
+intent does.
 
 ## Inputs
 
-The intent document and the landed Discovery, by id. Nothing else: the lenses ground in
-supported insights and intent facts, and flag everything they cannot ground.
+The intent document and the landed Discovery, by id. Contradicted insights the operator
+has not yet ruled on stop this step: wait for the rulings (sd-service-design, Park and
+resume).
 
-## The five passes
+## The questions
 
-Run each as a LIGHT pass -- one seat, one instruction: "find edges, ground what you can,
-flag what you cannot." No edge-answers in the prompt, no honesty scaffolding (the model
-polices its own confabulation; the structure that matters is the seat).
+The questions come from this intent, not from a list. These are the ground any product
+has to cover; write the specific questions this intent raises under each:
+
+- **Choosing.** Who chooses it, how do they find it, what do they replace, and why would
+  anyone switch?
+- **Benefit and risk.** Who benefits, who carries the risk, and are they the same party?
+- **Dependence.** What does it depend on, who controls that, and what happens when it
+  changes?
+- **Value.** How does value -- money, time, attention, data -- enter, accrue, and leak over
+  the life of the relationship?
+- **Trust.** What must be trusted, by whom, and what earns it?
+- **Governance.** What governs it: credentials, boundaries, audit, who may see what.
+- **Failure.** Where does it break, who notices, what do they see, and how do they recover?
+
+When the customer is an agent (sd-service-design, "The customer may be an agent"), ask
+each question twice: once for the agent that uses the product and once for the human who
+may never know it exists.
+
+## Five passes find the questions
+
+Run five light passes, one seat each, each told to find and answer questions about this
+intent from its own angle. A single open pass has been measured to find roughly a quarter
+of what the five find together.
 
 1. **actor-walk** -- walk each actor through their day with the service; where do they
    enter, hand off, get stuck, leave.
@@ -38,16 +66,45 @@ polices its own confabulation; the structure that matters is the seat).
    inherits it.
 4. **value-lifecycle** -- where value and money enter, accrue, and leak, over the life of
    the relationship, not the session.
-5. **evidence-adversarial** -- attack the map with the Discovery: which claimed
+5. **evidence-adversarial** -- attack the answers with the Discovery: which claimed
    exchanges have no supported insight underneath, which supported insights have no
    exchange serving them.
 
+No answers or examples go into the pass prompts; the seat is the structure.
+
+## Answer them
+
+Every question goes to whoever can answer it, in this order:
+
+1. **Design reasoning -- most of them.** This step is the designer. Decide from the intent,
+   the Discovery, and how services like this one work, and write the answer down with its
+   reason. "How does a user find it?" has an answer a designer can give; give it.
+2. **The Discovery -- some of them.** Where a supported or bounded insight answers the
+   question, the answer cites it. A contradicted insight never grounds an answer.
+3. **Real people, through eavesdrop -- what neither can settle.** A question whose answer
+   depends on how people actually behave, and which the Discovery does not reach, becomes
+   a question eavesdrop asks on the right lens. `legion signal` the eavesdrop agent with
+   the question and the lens, land the ecosystem as a `draft` with the answers so far,
+   and park (sd-service-design, Park and resume). When answers arrive, fold them in and
+   redraw.
+4. **The operator -- only strategy and values.** What the product should be, whom it
+   serves first, what it refuses to do. Each such choice goes up with a recommended
+   answer and its reasoning, so the operator can agree in one line. Expect a handful, not
+   dozens; a long list means steps 1 to 3 were skipped.
+
+The answers must say how things happen. "Users sync their data" is not an answer; say who
+starts the sync, through what, under whose credentials, what they see while it runs, and
+what they see when it fails.
+
 ## Union, weight, land
 
-- Union the five edge lists and dedup. An edge found independently by three or more
-  lenses is CORE -- convergence is the confidence weighting, free; no separate ranking
-  step. An edge found by one lens is the diversity payoff; keep it, marked single-lens.
-- Build the Ecosystem payload from the union. The schema requires `meta` (with `title`
+- Union the five passes' questions and answers and dedup. An answer three or more passes
+  reached independently is CORE -- convergence is the confidence weighting, free; no
+  separate ranking step. An answer one pass reached is the diversity payoff; keep it,
+  marked single-lens.
+- Build the Ecosystem payload from the answers: actors, channels, and value exchanges
+  carry what was decided, and moments of truth and failure modes carry where it wins and
+  breaks. The schema requires `meta` (with `title`
   and `core_service`), `actors` tiered as `primary`/`secondary`/`tertiary` (primary
   required; each PRIMARY actor carries `entry_point` -- where they first touch the
   service -- and `need` -- what they need from it, one line; the `persona` field is null
@@ -70,14 +127,14 @@ legion document create --doc-type ecosystem --owner <agent> --surface <surface> 
 schema's meta also requires `status`, `date`, and `author` alongside `title` and
 `core_service`; status enum draft/review/done, `author` = the invoking agent.)
 
-- **The register:** everything flagged-not-grounded, split in two: unknowns the world can
-  answer (candidate crawls or queries -- feed them back toward sd-discover) and questions
-  only the operator can answer. Where the register routes automatically (T7) is
-  unconverged design -- until that converges, write the register into the ecosystem
-  document's `failure_modes` entries, in the order you will report them, and report it
-  to whoever invoked you. Dispatch nothing.
+- **The register:** what is still open when the document lands -- questions out to real
+  people through eavesdrop, and choices waiting on the operator, each with its
+  recommendation. Nothing else belongs here: a question this step could answer is
+  answered, not registered. Write each entry into the document's `failure_modes`, in the
+  order you will report them, naming the question and where it went, and report the
+  register to whoever invoked you.
 - **Emit the predictions** (Instrumentation below), once the create returns an id: one
-  per register entry, staking whether it materializes. Then report to whoever invoked
+  per register entry, staking whether its drafted answer holds. Then report to whoever invoked
   you: the ecosystem id, the register, and beside each entry its prediction id and the
   claimed confidence.
 
@@ -85,16 +142,16 @@ schema's meta also requires `status`, `date`, and `author` alongside `title` and
 
 Convergence is already this step's confidence weighting; the engine turns that heuristic
 into a measurement. The union, the dedup, and the actor tiers are derivations and get no
-emission. The register does: one prediction per flagged edge or unknown, that it
-materializes -- that downstream work confirms it as a real edge of the service rather
-than dropping it as one lens's invention. Grounded edges are not predictions here: the
-Discovery already carries their evidence, and the crit scores the document as a whole.
+emission. The register does: one prediction per open entry, that the drafted answer
+holds -- that the people eavesdrop asks, or the operator, confirm it rather than
+overturn it. Answered questions are not predictions here: their reasons are in the
+document, and the crit scores the document as a whole.
 
 Claimed confidence starts from the lens count, and the mapping is fixed so the estimator
 can see the heuristic tested: one lens 0.3, two lenses 0.5, three or more 0.7. Then move
 by evidence, one step at most, to a cap of 0.85: up when a supported or bounded insight
-touches the edge's actor or channel without grounding the edge itself; down when the
-evidence-adversarial lens flagged the edge as having no insight under it, or when its
+touches the entry's actor or channel without settling the question; down when the
+evidence-adversarial pass found no insight under the drafted answer, or when its
 only ground is a `needs_pressure_test` proposal. Put the lens count and names in the
 payload; the mapping is worthless if the count is not on the row.
 
@@ -115,29 +172,30 @@ check is each fingerprint against the landed `failure_modes` order, and the repo
 carries the ids beside the register, with each entry's route, for the conductor to hand
 to the blueprint writers.
 
-**Who witnesses, and when.** An edge materializes or does not at a named point
-downstream, and each point has an owner:
+**Who witnesses, and when.** An open entry is settled when its answer arrives, and each
+kind of answer has an owner:
 
-- The **crit** on the ecosystem, once it exists as a skill, witnesses every register
-  entry it rules on: kept as a real edge is `shipped` at 1.0, cut is `abandoned` at 0.0.
-- Until then, **sd-write-blueprint** witnesses entries routed to the world, because the
-  blueprint is where an edge meets machinery: an entry that lands as a step's fail point,
-  friction, or backstage seam materialized (`shipped`, 1.0); an entry the actor's journey
-  and blueprint could not carry, reported dropped, did not (`abandoned`, 0.0). An entry
-  a later listening pass answers first is witnessed by that pass under sd-discover's
-  verdict rule, since by then it is a claim.
-- The **conductor** witnesses entries routed to the operator, at the ecosystem revision
-  that records them resolved (sd-service-design, "When the intent revises"): answered as
-  real is `shipped` at 1.0, answered as not a thing is `abandoned` at 0.0.
+- **Entries sent to real people** are witnessed by the conductor when it wakes this step
+  on the answers and the redrawn ecosystem lands: an answer that confirms the drafted
+  one is `shipped` at 1.0, an answer that changes it in part is `scoped-down` at 0.5, an
+  answer that overturns it is `abandoned` at 0.0. The redraw itself never witnesses; it
+  is the same step judging its own stake.
+- **Entries sent to the operator** are witnessed by the conductor at the ecosystem
+  revision that records the ruling (sd-service-design, "When the intent revises"): the
+  recommendation accepted is `shipped` at 1.0, accepted with changes `scoped-down` at
+  0.5, rejected `abandoned` at 0.0.
 
 Every witness confirms the id by rebuilding `<ecosystem-id>:edge:<n>` from the report's
-register. An entry nobody reaches orphans, the right fate for an unknown nobody looked at.
+register. An entry nobody answers orphans, the right fate for a question nobody took up.
 
 ## Refuses
 
-- Running the lens passes with edge-answers or examples baked into the prompt.
-- Promoting a single-lens edge to core, or dropping it for being single-lens.
-- Grounding an exchange on a contradicted claim, or on evidence not in the Discovery.
-- Dispatching the register anywhere.
-- Witnessing its own edge predictions. The lenses stake them; the crit, the blueprint
-  writer, and the conductor score them.
+- Landing a document whose register holds questions this step could have answered, or
+  sending the operator a question the world can answer.
+- Sending the operator a choice without a recommended answer.
+- Answering with what happens but not how it happens.
+- Running the passes with answers or examples baked into the prompt.
+- Promoting a single-lens answer to core, or dropping it for being single-lens.
+- Grounding an answer on a contradicted claim, or on evidence not in the Discovery.
+- Witnessing its own register predictions, including on a redraw. The passes stake
+  them; the conductor scores them.

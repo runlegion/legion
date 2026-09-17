@@ -2,9 +2,10 @@
 name: sd-write-spec
 description: |
   Write a scope's full requirement set -- FR and NFR documents -- from the intent/discovery
-  layer, in one pass. The Deliver-edge writer: it crystallizes the IEEE 830-style requirement set the executor
-  consumes, every SHALL naming what earned it and every gap escalated rather than resolved
-  in-body. Two input modes: from an intent alone (system work) or from a landed service
+  layer, in one pass. The narrowing step of the engineering diamond, the third of legion's
+  three: it crystallizes the IEEE 830-style requirement set the executor consumes, every
+  SHALL naming what earned it and every gap escalated rather than resolved in-body. It is
+  not part of the sd-service-design pipeline and has its own entry point. Two input modes: from an intent alone (system work) or from a landed service
   design (product work). Invoke when a scope is ready to move from discovery to a buildable
   spec.
 version: 0.2.0
@@ -14,9 +15,11 @@ allowed-tools: Bash, Read
 
 # Spec writer: the intent/discovery layer in, a buildable requirement set out
 
-This is the seam between the two halves of the diamond. Upstream is judgment -- claims,
-insights, the abductive leap. Downstream is execution -- an agent that follows the spec
-without needing to have done the thinking. The spec is where the judgment becomes rules,
+Legion's work runs three diamonds: the problem (discover, define), the solution design
+(develop, deliver design assets and the design system), and the engineering (research and
+toys, then spec and build). This skill is where the engineering diamond narrows. Upstream
+is judgment -- claims, insights, design, the abductive leap. Downstream is execution -- an
+agent that follows the spec without needing to have done the thinking. The spec is where the judgment becomes rules,
 and its whole worth is that a rule-follower can execute it without a hole to fall into. So
 the spec is complete or it is escalated; it is never left ambiguous for someone who cannot
 resolve the ambiguity.

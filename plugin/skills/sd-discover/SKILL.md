@@ -1,10 +1,12 @@
 ---
 name: sd-discover
 description: |
-  The evidence step of service design: take the research agenda's claims to test, query
-  eavesdrop's discourse corpus, apply the 0.40 disconfirm rule, surface emergent insights the
-  intent missed, and land one schema-valid Discovery document. Parks on a missing corpus
-  rather than treating no evidence as a verdict. Invoke after sd-intent-review.
+  The evidence step of service design: take the research agenda's claims to test, listen to
+  real discourse through eavesdrop, judge each claim against a same-lens control, ask the
+  world what the corpus cannot settle, surface emergent insights the intent missed, and land
+  one schema-valid Discovery document. Never cuts a claim: a contradicted or unevidenced
+  claim is a finding the operator rules on. Parks on a missing corpus or an open question
+  rather than guessing. Invoke after sd-intent-review.
 version: 0.1.0
 user-invocable: true
 allowed-tools: Bash, Read
@@ -14,8 +16,9 @@ allowed-tools: Bash, Read
 
 This is the step that talks to the world. Its authority comes from being willing to lose:
 a claim the intent asserted gets CONTRADICTED here when the discourse does not support it, and it
-stays contradicted downstream. It is also the step most likely to park, because corpora take
-hours to build.
+stays contradicted downstream. Losing a claim is not cutting it: this step reports what the
+world says, and the operator decides what the product does about it. It is also the step
+most likely to park, because corpora take hours to build and people take days to answer.
 
 ## Probe the corpus first
 
@@ -50,8 +53,10 @@ defer -- never clear it. The authoritative scoring pass runs on the wake, over t
 day of re-crawl has built. Only the authoritative pass clears the defer
 (`legion undefer --work-item <id>` -- it takes no `--repo`). A completed crawl whose slice
 turns out unusable (spam-dominated, off-topic) is a third park state, distinct from
-missing-corpus: name it `blocked on source depth`, keep the insights blocked, and escalate
-the source-mix decision to the operator -- more crawl time will not fix the wrong net.
+missing-corpus: name it `blocked on source depth`, keep the insights blocked, and signal
+the eavesdrop agent, who owns the lens, with the sources that failed and the population
+the claims need. More crawl time will not fix the wrong net, and choosing where to listen
+is the listener's call before it is the operator's.
 
 ## Score what the corpus can answer
 
@@ -59,13 +64,41 @@ For each claim with evidence available:
 
 - Query the corpus for the claim's target; read what people actually say, not what the
   intent hoped they would say.
-- **The 0.40 disconfirm rule:** an on-topic relevance score under 0.40 for an
-  intent-asserted claim is CONTRADICTED. State it so, in the Discovery, with the score --
-  never soften a contradiction into "weak support."
-- Score surviving claims into insights on the schema's five axes -- frequency, intensity,
-  friction, urgency, fit -- each 0 to 5, plus the weighted composite; the document's
-  top-level `weights` object carries the axis weights (0 to 1) used for that composite,
-  and `meta.threshold` carries the disconfirm bar (0.40). Each insight carries its
+- **A verdict is a difference, never a bar.** No eavesdrop score has a meaningful fixed
+  cutoff: `score` is a cosine similarity (in practice about 0.2 to 1.0), and the
+  `rerank_score` that `--claim` adds is a cross-encoder logit, unbounded and comparable
+  only within one call. So judge a claim against a control: run the claim's probe and a
+  null-control probe on the same lens, rerank both candidate sets against the claim in
+  ONE call, and read how the claim's hits rank against the control's. Claim hits that
+  outrank the control support the claim; hits that rank no better than the control do
+  not. The null is the hard part and nobody has validated one for claims yet (an
+  off-topic null measures writing register, not coverage, and cosine cannot see negation,
+  so a negated claim lands on the same text). Record the null query you used and how the
+  ranking came out in the insight's `evidence.gaps`, and never put a number bar on any
+  score or on the ranking.
+- **Absence only from a census.** "Nobody says this" is a count, not a ranking:
+  `eavesdrop search <lens> -t "<token>" -n 100000 --json`. The default `-n` is 10, so a
+  count is a census only when it comes back below `-n`. It counts spellings, not ideas:
+  list every spelling you counted ("200ms", "200 ms", "0.2s") in `evidence.gaps`.
+- **Contradicted is a finding, never a cut.** A claim the discourse argues against is
+  `contradicted`, with the rows that argue it -- never softened into "weak support," and
+  never dropped. This step does not remove, weaken, or rewrite any claim or feature of
+  the intent. Every contradicted or `saturated-unevidenced` insight goes to the operator:
+  land the Discovery at `review`, list those insights in your report, each with a
+  recommended ruling (keep, revise, or cut) and the evidence behind it, and park per the
+  sd-service-design protocol until the operator rules. The intent's owner makes any
+  change.
+- **Ask the world what the corpus cannot settle.** When a claim needs an answer the
+  corpus does not hold -- a population the lens never reached, a question nobody has
+  asked in public -- draft the question and `legion signal` the eavesdrop agent to ask it
+  on the right lens. Park with the question named in `evidence.next_probe` and in the
+  anchor; the answer's arrival is the wake. A question the world can answer never goes to
+  the operator.
+- Score each claim with evidence into an insight on the schema's five axes -- frequency,
+  intensity, friction, urgency, fit -- each 0 to 5, plus the weighted composite; the
+  document's top-level `weights` object carries the axis weights (0 to 1) used for that
+  composite. The schema still requires `meta.threshold` from the retired bar: set it to
+  `0` and say in the report that it carries no meaning. Each insight carries its
   `status` verdict -- supported, bounded, contradicted, blocked, or saturated-unevidenced
   -- with `emergent` as orthogonal provenance -- and its `workaround`:
   what people do about this claim today, which is half the evidence the friction is
@@ -74,8 +107,8 @@ For each claim with evidence available:
   structural, not prose: each insight's `evidence.eavesdrop` array carries
   `{source, url, score, text}` rows with the speakers' own words in `text`.
 - **Emergent insights:** discourse that keeps returning to something the intent never
-  claimed is a finding, not noise. Add it as an insight, `emergent: true`, with the same
-  evidence bar and any verdict it earns.
+  claimed is a finding, not noise. Add it as an insight, `emergent: true`, held to the
+  same evidence rules, with any verdict it earns.
 
 ## The inverse pass (required)
 
@@ -84,7 +117,7 @@ the final land. An orientation draft parks without it -- its supported insights 
 provisional until the wake, and the counter-probes would be spent against a slice.
 At the authoritative pass, attack your own supported insights. An all-supported
 Discovery is unfalsified, not confirmed: probes written by a theme's author score their own
-topic on-topic, so the 0.40 rule never faced real risk (the first live audit found nine
+topic on-topic, so the verdict never faced real risk (the first live audit found nine
 of nine supported and called it a smell -- the inverse pass then materially bounded three of
 them). For each SUPPORTED insight:
 
@@ -121,8 +154,10 @@ legion document create --doc-type discovery --owner <agent> --surface <surface> 
 `--surface` is the service surface -- the same surface the intent document carries (the
 product name, not a git repo). The store refuses a schema violation on every path, so a
 refusal here means the payload is wrong, not that the gate is optional. Contradicted claims
-appear in the document as contradicted insights with their disconfirming score --
-deleting them would erase the finding.
+appear in the document as contradicted insights with the rows that argue against them --
+deleting them would erase the finding. A Discovery that carries any contradicted or
+saturated-unevidenced insight lands at `review` and parks for the operator's rulings
+(above); only a Discovery with none of those, past its authoritative pass, lands at `done`.
 
 **Then emit and witness** (Instrumentation below), once the create returns an id: one
 prediction per insight that carries a verdict, at the authoritative pass only, and a
@@ -144,23 +179,24 @@ draft's verdicts are provisional by definition, and staking a number you already
 replace is noise. Blocked and saturated-unevidenced insights carry no verdict to hold and
 get no emission.
 
-The confidence comes from spread this step already has, not a fresh feeling: the count
-of on-topic evidence rows, how far their scores sit from the 0.40 bar, and what the
-counter-probes returned. Anchors: a supported insight on five or more rows scoring above
-0.6, whose counter-probes found nothing on-topic, sits near 0.8; supported on two or
-three rows near the bar, or bounded with rows on both sides, sits near 0.6; a verdict
-resting on one row, in either direction, starts near 0.4. A contradiction follows the
-same shape from below the bar: several on-topic rows well under 0.40 earn 0.8, one row
-just under it earns 0.4. An emergent insight caps at 0.6 until a later pass sees it
-again: its probes were written after the discourse was read, the opposite of a
-disconfirmable test. Put the row count and the score range in the payload; they are what
-the number rests on.
+The confidence comes from what this step already has, not a fresh feeling: how many
+independent voices (distinct author and thread) the evidence rows carry, how cleanly the
+claim's hits separated from the null control, and what the counter-probes returned.
+Anchors: a supported insight on five or more independent voices, whose hits clearly
+outranked the control and whose counter-probes found nothing on-topic, sits near 0.8;
+two or three voices with a mixed ranking, or bounded with rows on both sides, sits near
+0.6; a verdict resting on one voice, in either direction, starts near 0.4. A
+contradiction follows the same shape: several independent voices arguing against the
+claim earn 0.8, one voice earns 0.4. An emergent insight caps at 0.6 until a later pass
+sees it again: its probes were written after the discourse was read, the opposite of a
+disconfirmable test. Put the voice count and the null query in the payload; they are
+what the number rests on.
 
 ```
 legion uncertainty emit --surface legion.sd --feature-key sd.discover.insight \
   --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 \
   --input-fingerprint <discovery-id>:insight:<insight-id> --claimed-confidence <p> \
-  --payload '{"insight":"<insight-id>","verdict":"<status>","rows":<n>,"scores":"<lo>-<hi>"}'
+  --payload '{"insight":"<insight-id>","verdict":"<status>","voices":<n>,"null":"<null query>"}'
 ```
 
 The emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan window,
@@ -194,7 +230,7 @@ entry scored, take the entry's `prediction` id from the agenda, confirm it by re
 - `blocked`: leave it. No verdict was reached, the wake may still reach one, and if the
   corpus never does the orphan sweep retires a prediction that was never tested.
 - `saturated-unevidenced`: leave it, and say why in the report. Silence argues against
-  the claim without being discourse under the bar; scoring it 0.0 would teach the
+  the claim without being discourse that argues against it; scoring it 0.0 would teach the
   estimator that silence is contradiction, the confusion the no-evidence rule exists to
   prevent.
 
@@ -207,7 +243,12 @@ for no stated reason has skipped a step; say so in the report.
 - Landing a FINAL Discovery whose supported insights never faced a counter-probe -- the inverse
   pass is a step, not a suggestion. (An orientation draft parks without it; its supported
   insights are provisional.)
-- Softening a sub-0.40 contradiction, or omitting a contradicted insight from the document.
+- Putting a fixed number bar on any score, including a bar on a rerank logit or on the
+  claim-versus-control ranking, or comparing rerank scores from two separate calls.
+- Softening a contradiction, omitting a contradicted insight from the document, or
+  cutting, weakening, or rewriting any intent claim or feature: the operator rules, the
+  intent's owner edits.
+- Sending the operator a question the world can answer: that question goes to eavesdrop.
 - Carrying evidence anywhere except this Discovery -- downstream artifacts cite insights,
   they do not re-argue evidence.
 - Waiting synchronously on a crawl: a crawl in flight is a park, never a blocked session.

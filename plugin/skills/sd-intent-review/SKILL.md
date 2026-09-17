@@ -49,8 +49,9 @@ goes back to its writer, not forward to a review.
 3. Derive **claims_to_test**: for each claim the intent asserts or implies (start from its `claims[]` test cards where present), one entry
    `{claim, who, evidence_target, right_if}` where `evidence_target` names the
    lens (or lens-to-be) and the query that would surface it, and `right_if`
-   states what result confirms or kills it (the standing rule downstream: an on-topic score under 0.40
-   is a contradiction). Every entry names the intent field it came from. When the only lens is the
+   states what result confirms or kills it, as a comparison sd-discover can run (the
+   claim's hits against a same-lens control, or a census count), never a score bar.
+   Every entry names the intent field it came from. When the only lens is the
    intent's `crawl_topic` (`needs_crawl` true), label that lens-to-be CRAWL and define the
    mapping once at the top of the agenda so downstream steps can match on it. An
    unresolved open_question lands as a claim when it doubts a need, as a service test when
@@ -116,7 +117,7 @@ limits is still support), `contradicted` is `abandoned` at 0.0. A `blocked` insi
 leaves the prediction unwitnessed: no verdict was reached, the wake may still reach one,
 and a corpus that never does lets the orphan sweep retire it, which is right for a claim
 never tested. A `saturated-unevidenced` insight also leaves it unwitnessed: silence
-argues against the claim without being discourse under the bar, and scoring it 0.0 would
+argues against the claim without being discourse that argues against it, and scoring it 0.0 would
 teach the estimator that silence is contradiction, the confusion the no-evidence rule
 exists to prevent. The discover report names each claim left unwitnessed and why.
 
