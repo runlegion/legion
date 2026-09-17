@@ -7,14 +7,22 @@
 //!
 //! The shipped policy's one rewrite rule (`gh issue list` -> `legion issue
 //! list`) needs no arguments appended: the target string alone is already
-//! the complete replacement. `facts.paths` is folded in here for a future
-//! rewrite rule whose target needs the file operand carried forward (e.g.
-//! rewriting a single-file command); no shipped rule exercises that path
-//! today. `facts.verb`/`facts.issue_numbers`/`facts.keywords` are not
-//! folded in -- the documents (FR-CMD-003) fix only that `route` returns
-//! these facts and the adapter builds the command from them without
-//! re-parsing, not a composition algorithm, so this is a deliberately
-//! narrow starting point, not a claim that no other fact ever matters.
+//! the complete replacement, and `facts.paths` is empty for it. `facts` is
+//! still taken and checked here -- not merely accepted and ignored -- for
+//! `facts.paths`: `facts_from_scan` collects path-shaped operands across
+//! EVERY invocation in a compound command, not just the one whose rule
+//! matched (see `crate::evaluate::facts_from_scan` upstream, and
+//! `fold`'s strictest-decision selection), so blindly appending them would
+//! silently attach an unrelated invocation's operand to the rewrite
+//! target -- exactly the failure class
+//! `plugin/hooks/lib/emit.sh`'s `emit_rewrite` header documents paying for
+//! (#883: `git push && echo done` rewrote to `legion push --branch echo`).
+//! `route` names a target with no notion of "the operand this rule's own
+//! invocation carried" versus "an operand some other part of the command
+//! carried", so the only lossless choice here is to refuse rather than
+//! guess: a rewrite whose facts carry any path is denied, not silently
+//! composed. Lossless composition of a matched invocation's own operands
+//! into its rewrite target is #1228's lane, not this one's.
 
 use legion_cmd::{Facts, ManagedTarget};
 use serde_json::Value;
@@ -28,14 +36,24 @@ pub(crate) enum ReplacementError {
     /// issue's own ask/rewrite tests do) with an invalid `ManagedTarget`.
     #[error("rewrite target is empty; nothing to run in place of the command")]
     EmptyTarget,
+
+    /// `route`'s extracted facts carry one or more path operands. Nothing
+    /// here can tell which invocation in a (possibly compound) command
+    /// that path belongs to, so appending it risks attaching an unrelated
+    /// invocation's operand to the rewrite target -- refusing is the only
+    /// choice that cannot silently run something other than what was
+    /// rewritten.
+    #[error("rewrite facts carry {0} path operand(s), which this rewrite cannot safely compose")]
+    UnhandledPathFacts(usize),
 }
 
 /// Builds the replacement `tool_input` for a rewrite: the managed target's
-/// command, with any path facts appended, patched into `original` so
-/// sibling Bash fields (`description`, `timeout`, `run_in_background`) are
-/// preserved rather than dropped (the whole-object `updatedInput` bug
-/// `plugin/hooks/lib/emit.sh`'s `emit_rewrite` already paid for -- see its
-/// header comment).
+/// command, patched into `original` so sibling Bash fields (`description`,
+/// `timeout`, `run_in_background`) are preserved rather than dropped (the
+/// whole-object `updatedInput` bug `plugin/hooks/lib/emit.sh`'s
+/// `emit_rewrite` already paid for -- see its header comment). Refuses
+/// when `facts.paths` is non-empty (see the module doc); the shipped
+/// policy's one rewrite rule never carries any.
 pub(crate) fn build_replacement(
     target: &ManagedTarget,
     facts: &Facts,
@@ -44,27 +62,16 @@ pub(crate) fn build_replacement(
     if target.as_str().is_empty() {
         return Err(ReplacementError::EmptyTarget);
     }
-
-    let mut command = target.as_str().to_string();
-    for path in &facts.paths {
-        command.push(' ');
-        command.push_str(&shell_quote(path));
+    if !facts.paths.is_empty() {
+        return Err(ReplacementError::UnhandledPathFacts(facts.paths.len()));
     }
 
     let mut patched = match original {
         Value::Object(map) => Value::Object(map.clone()),
         _ => Value::Object(serde_json::Map::new()),
     };
-    patched["command"] = Value::String(command);
+    patched["command"] = Value::String(target.as_str().to_string());
     Ok(patched)
-}
-
-/// Single-quotes `arg` for safe inclusion in a shell command line, escaping
-/// any embedded single quote with the standard `'\''` sequence. Only used
-/// for facts already extracted from a parsed command, never for raw
-/// caller-supplied text.
-fn shell_quote(arg: &str) -> String {
-    format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]
@@ -104,33 +111,36 @@ mod tests {
     }
 
     #[test]
-    fn path_facts_are_appended_shell_quoted() {
+    fn path_facts_are_refused_not_silently_appended() {
+        // `facts.paths` can carry an operand from a DIFFERENT invocation
+        // in a compound command than the one the matched rule governs
+        // (facts_from_scan collects across the whole scan); appending it
+        // here would risk attaching an unrelated path to the rewrite
+        // target, so this must refuse rather than compose (see module
+        // doc, and #883 in `emit.sh`'s `emit_rewrite` header for the bug
+        // class this avoids).
         let target = ManagedTarget::new("legion sym def");
         let facts = Facts {
             paths: vec!["src/main.rs".to_string()],
             ..Facts::default()
         };
         let original = serde_json::json!({"command": "grep -rn foo src/main.rs"});
-        let replaced = build_replacement(&target, &facts, &original).expect("builds");
-        assert_eq!(
-            replaced,
-            serde_json::json!({"command": "legion sym def 'src/main.rs'"})
-        );
+        let err = build_replacement(&target, &facts, &original)
+            .expect_err("a rewrite with path facts must refuse, not guess composition");
+        assert_eq!(err, ReplacementError::UnhandledPathFacts(1));
     }
 
     #[test]
-    fn a_path_containing_a_single_quote_is_escaped() {
+    fn multiple_path_facts_are_also_refused() {
         let target = ManagedTarget::new("legion sym def");
         let facts = Facts {
-            paths: vec!["it's/mine.rs".to_string()],
+            paths: vec!["a.rs".to_string(), "b.rs".to_string()],
             ..Facts::default()
         };
-        let original = serde_json::json!({"command": "cat it's/mine.rs"});
-        let replaced = build_replacement(&target, &facts, &original).expect("builds");
-        assert_eq!(
-            replaced,
-            serde_json::json!({"command": r"legion sym def 'it'\''s/mine.rs'"})
-        );
+        let original = serde_json::json!({"command": "grep -rn foo a.rs b.rs"});
+        let err = build_replacement(&target, &facts, &original)
+            .expect_err("every path fact must be refused, not just the first");
+        assert_eq!(err, ReplacementError::UnhandledPathFacts(2));
     }
 
     #[test]

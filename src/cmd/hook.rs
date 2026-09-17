@@ -8,8 +8,9 @@
 //! allow and never a process exit that leaves the harness to fail open on
 //! its own hook timeout.
 //!
-//! Hook contract used here (Claude Code docs, `https://code.claude.com/docs/en/hooks.md`,
-//! verified 2026-09-16 -- researched fresh for this issue, not assumed from
+//! Hook contract used here (Claude Code docs,
+//! `https://code.claude.com/docs/en/hooks.md`, verbatim quotes below
+//! confirmed against the raw page -- 2026-09-16 -- not assumed from
 //! `plugin/hooks/lib/emit.sh`):
 //! - Input: `tool_name`, `tool_input`, `session_id`, `cwd`, `tool_use_id`
 //!   (Input JSON Schema). Only the fields this adapter reads are modeled
@@ -17,22 +18,41 @@
 //! - Output: `hookSpecificOutput` with `hookEventName`, `permissionDecision`,
 //!   `permissionDecisionReason`, `additionalContext`, `updatedInput`
 //!   (Output JSON Schema).
-//! - `permissionDecision`'s documented values are exactly `"allow"` and
-//!   `"deny"` (Decision Control table) -- there is no documented `"ask"`
-//!   value for PreToolUse. Exit 0 with no `permissionDecision` at all
-//!   (either no JSON, or `hookSpecificOutput` carrying only
-//!   `additionalContext`) is the documented way to express "no opinion,"
-//!   which is how the harness's own permission prompt (interactive `ask`)
-//!   is reached: by every PreToolUse hook declining to decide, not by this
-//!   adapter emitting a decision value named "ask." This is why
-//!   `Decision::Allow` and the confirmed-and-marked `Decision::Ask` path
-//!   both omit `permissionDecision` below, rather than sending `"allow"`
-//!   for the former (FR-CMD-002's "an allow never grants a permission the
-//!   harness would not") -- `Decision::Rewrite` is the one path that must
-//!   set `permissionDecision: "allow"` explicitly, since `updatedInput`
-//!   has no effect without it (`plugin/hooks/lib/emit.sh`'s `emit_rewrite`
-//!   pairs them, and that pairing is the only place this adapter borrows
-//!   from emit.sh's shape rather than the docs directly).
+//! - The Decision Control table's `permissionDecision` field for
+//!   PreToolUse is `allow`/`deny`/`ask`/`defer`, quoting the field table
+//!   verbatim: `"allow"` skips the permission prompt, except for the
+//!   actions no mode auto-approves; `"deny"` prevents the tool call;
+//!   `"ask"` prompts the user to confirm; `"defer"` exits gracefully so
+//!   the tool can be resumed later. "Deny and ask rules are still
+//!   evaluated regardless of what the hook returns." When multiple
+//!   PreToolUse hooks return different decisions, "precedence is
+//!   `deny` > `defer` > `ask` > `allow`."
+//! - `permissionDecisionReason`'s visibility depends on the decision it
+//!   rides with, quoting verbatim: for `"allow"` and `"ask"`, "shown to
+//!   the user but not Claude"; for `"deny"`, "shown to Claude"; for
+//!   `"defer"`, "ignored". This is why the agent-facing ask path below
+//!   (no operator mark, or a mark with no confirmation yet) must be a
+//!   `"deny"`, never an `"ask"` -- an `"ask"`'s reason never reaches the
+//!   agent at all, and FR-CMD-006 requires the agent to see the question
+//!   and reason. The operator-marked, agent-confirmed path is the
+//!   opposite case: `"ask"` is correct there specifically because its
+//!   reason is shown to the operator (not Claude), which is exactly who
+//!   this path exists to reach.
+//! - `"defer"` is not "no opinion" or a neutral default -- it ends a
+//!   non-interactive run outright. Nothing in this adapter ever emits it;
+//!   `Decision::Allow` with no rewrite omits `permissionDecision`
+//!   entirely instead (which the docs' own multi-hook rule treats as
+//!   `"allow"`-equivalent for precedence, not as `"defer"`), so an allow
+//!   never grants a permission the harness would not on its own
+//!   (FR-CMD-002) and never risks ending the run.
+//! - `Decision::Rewrite` sends `"allow"` + `updatedInput` explicitly.
+//!   `"allow"` here deliberately skips the permission prompt for the
+//!   rewritten legion command (per the field table above) -- the point of
+//!   a rewrite is to substitute an already-audited command and let it run
+//!   immediately, not to gate it a second time. `plugin/hooks/lib/emit.sh`'s
+//!   `emit_rewrite` already pairs `"allow"` with `updatedInput` in a
+//!   proven, shipped hook, which is the one place this adapter borrows
+//!   from emit.sh's shape rather than the docs directly.
 //! - Exit codes: 0 reads the JSON response; 2 blocks regardless of JSON
 //!   content; any other non-zero is a non-blocking error (Exit Codes).
 //!   `run_hook` always returns 0 -- our own deny JSON is the authoritative
@@ -43,13 +63,9 @@
 //!   adapter enforces a deadline well under the harness's own hook
 //!   timeout and returns its own deny before the harness's timeout could
 //!   ever fire.
-//! - Whether `"ask"`'s operator-prompt carries the agent's confirmation
-//!   reason INSIDE the interactive prompt UI itself is not documented
-//!   (there is no `"ask"` output value to carry it on). This adapter
-//!   carries the reason in `additionalContext` instead, which is
-//!   documented and visible to the agent; #1229's own scope does not
-//!   include the confirmation store (#1237), so this path is exercised
-//!   here only through a stubbed `confirmed` flag, never a real one.
+//! - #1229's own scope does not include the confirmation store (#1237),
+//!   so the marked-and-confirmed ask path above is exercised here only
+//!   through a stubbed `confirmed` flag, never a real one.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -136,12 +152,30 @@ pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) -> ExitCode {
 /// channel-disconnect detection, and every other failure is an explicit
 /// `Result` this function maps to a deny.
 fn build_response(payload_text: &str) -> Value {
+    build_response_with(payload_text, resolve_policy_path(), |repo| {
+        Arc::new(RealLookupRunner { repo })
+    })
+}
+
+/// The testable core of `build_response`: `policy_path` and the
+/// `LookupRunner` factory are both injected rather than resolved from the
+/// environment, so a unit test drives every branch (a missing/unreadable
+/// policy, a specific lookup outcome) directly, with no process-wide
+/// `std::env::set_var` -- `cargo test` runs one process with threaded
+/// tests, and mutating a process environment variable across tests is a
+/// real race (Rust 2024 marks `set_var` `unsafe` for exactly this reason),
+/// not merely a hypothetical one worth accepting for test convenience.
+fn build_response_with(
+    payload_text: &str,
+    policy_path: Result<PathBuf, AdapterError>,
+    make_runner: impl FnOnce(String) -> Arc<dyn LookupRunner + Send + Sync>,
+) -> Value {
     let payload: HookPayload = match serde_json::from_str(payload_text) {
         Ok(payload) => payload,
         Err(e) => return deny_for_error(&AdapterError::Payload(e.to_string()), None),
     };
 
-    let policy_path = match resolve_policy_path() {
+    let policy_path = match policy_path {
         Ok(path) => path,
         Err(e) => return deny_for_error(&e, Some(&payload)),
     };
@@ -168,7 +202,7 @@ fn build_response(payload_text: &str) -> Value {
         input: payload.tool_input.clone(),
     };
     let repo = repo_from_cwd(payload.cwd.as_deref());
-    let runner: Arc<dyn LookupRunner + Send + Sync> = Arc::new(RealLookupRunner { repo });
+    let runner = make_runner(repo);
 
     let outcome = decide(settings.deadline, move || {
         decide_inner(&policy, &call, runner.as_ref())
@@ -394,12 +428,15 @@ fn deny_json(reason: &str) -> Value {
     })
 }
 
-/// FR-CMD-006: an ask refuses the command with a question and a reason,
-/// naming how to confirm, UNLESS the matched policy entry marked the
-/// command as needing the operator AND the agent has already confirmed --
-/// only then does the harness's own permission prompt run, by this adapter
-/// declining to decide at all. `confirmed` has no real source yet (#1237);
-/// it is `false` on every call from `run_hook`.
+/// FR-CMD-006: an ask denies the command with a question and a reason,
+/// naming how to confirm -- `"deny"` because a deny's reason is the only
+/// one the docs say reaches the agent (`"ask"`'s reason is shown to the
+/// user, not Claude; see the module doc) -- UNLESS the matched policy
+/// entry marked the command as needing the operator AND the agent has
+/// already confirmed. Only then does this send `"ask"`, which forces the
+/// harness's own interactive prompt and shows the agent's reason to the
+/// operator. `confirmed` has no real source yet (#1237); it is `false` on
+/// every call from `run_hook`.
 fn ask_response(
     details: &AskDetails,
     entry: &DecidingEntry,
@@ -417,10 +454,8 @@ fn ask_response(
         return json!({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "additionalContext": format!(
-                    "legion-cmd: awaiting operator confirmation -- {}",
-                    details.reason()
-                )
+                "permissionDecision": "ask",
+                "permissionDecisionReason": details.reason()
             }
         });
     }
@@ -463,13 +498,33 @@ fn deny_for_error(err: &AdapterError, payload: Option<&HookPayload>) -> Value {
 mod tests {
     use super::*;
     use legion_cmd::{AskDetails, DenyDetails, Facts};
-    use std::sync::Mutex;
 
-    // Serializes tests that mutate process-wide env vars
-    // (`LEGION_CMD_POLICY`/`CLAUDE_PLUGIN_ROOT`); `cargo test` runs a
-    // single process with threaded tests, so unsynchronized env mutation
-    // across tests is a real race, not a hypothetical one.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// A `LookupRunner` that answers every query with a fixed outcome,
+    /// for tests that never touch the real database/index.
+    struct StubLookupRunner(Result<Lookup, String>);
+
+    impl LookupRunner for StubLookupRunner {
+        fn run(&self, _query: &RequiredQuery) -> Result<Lookup, String> {
+            self.0.clone()
+        }
+    }
+
+    fn respond(payload_text: &str, policy_text: &str) -> Value {
+        respond_with_runner(payload_text, policy_text, |_repo| {
+            Arc::new(StubLookupRunner(Ok(Lookup::Empty)))
+        })
+    }
+
+    fn respond_with_runner(
+        payload_text: &str,
+        policy_text: &str,
+        make_runner: impl FnOnce(String) -> Arc<dyn LookupRunner + Send + Sync>,
+    ) -> Value {
+        let dir = tempdir();
+        let policy_path = dir.join("policy.json");
+        std::fs::write(&policy_path, policy_text).expect("write fixture policy");
+        build_response_with(payload_text, Ok(policy_path), make_runner)
+    }
 
     fn payload_json(tool_name: &str, command: &str) -> String {
         serde_json::json!({
@@ -490,7 +545,9 @@ mod tests {
 
     #[test]
     fn malformed_payload_denies_with_a_reason() {
-        let response = build_response("not json");
+        let response = build_response_with("not json", Ok(PathBuf::from("/unused")), |_| {
+            Arc::new(StubLookupRunner(Ok(Lookup::Empty)))
+        });
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "deny");
         assert!(
@@ -502,13 +559,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_policy_env_vars_deny_with_a_reason() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var(POLICY_PATH_ENV);
-            std::env::remove_var(PLUGIN_ROOT_ENV);
-        }
-        let response = build_response(&payload_json("Bash", "echo hi"));
+    fn missing_policy_denies_with_a_reason() {
+        let payload = payload_json("Bash", "echo hi");
+        let response = build_response_with(
+            &payload,
+            Err(AdapterError::PolicyRead(
+                "neither env var is set".to_string(),
+            )),
+            |_| Arc::new(StubLookupRunner(Ok(Lookup::Empty))),
+        );
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "deny");
         assert!(
@@ -521,14 +580,12 @@ mod tests {
 
     #[test]
     fn unreadable_policy_path_denies_with_a_reason() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var(POLICY_PATH_ENV, "/nonexistent/legion-cmd-policy.json");
-        }
-        let response = build_response(&payload_json("Bash", "echo hi"));
-        unsafe {
-            std::env::remove_var(POLICY_PATH_ENV);
-        }
+        let payload = payload_json("Bash", "echo hi");
+        let response = build_response_with(
+            &payload,
+            Ok(PathBuf::from("/nonexistent/legion-cmd-policy.json")),
+            |_| Arc::new(StubLookupRunner(Ok(Lookup::Empty))),
+        );
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "deny");
         assert!(
@@ -547,82 +604,40 @@ mod tests {
 
     #[test]
     fn malformed_policy_json_denies_with_a_reason() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempdir();
-        let policy_path = dir.join("policy.json");
-        std::fs::write(&policy_path, "{ this is not json").expect("write fixture policy");
-        unsafe {
-            std::env::set_var(POLICY_PATH_ENV, &policy_path);
-        }
-        let response = build_response(&payload_json("Bash", "echo hi"));
-        unsafe {
-            std::env::remove_var(POLICY_PATH_ENV);
-        }
+        let response = respond(&payload_json("Bash", "echo hi"), "{ this is not json");
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "deny");
     }
 
     #[test]
     fn empty_policy_denies_every_command_fr_cmd_016() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempdir();
-        let policy_path = dir.join("policy.json");
-        std::fs::write(&policy_path, "{}").expect("write fixture policy");
-        unsafe {
-            std::env::set_var(POLICY_PATH_ENV, &policy_path);
-        }
-        let response = build_response(&payload_json("Bash", "echo hi"));
-        unsafe {
-            std::env::remove_var(POLICY_PATH_ENV);
-        }
+        let response = respond(&payload_json("Bash", "echo hi"), "{}");
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "deny");
     }
 
     #[test]
     fn a_command_no_rule_governs_allows_with_no_permission_decision() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempdir();
-        let policy_path = dir.join("policy.json");
-        std::fs::write(
-            &policy_path,
+        let response = respond(
+            &payload_json("Bash", "ls -la"),
             r#"{"tools": {"Bash": {"kind": "bash", "families": {"chmod": {"rules": [
                 {"id": "r1", "predicate": {"operand_contains": "777"},
                  "outcome": {"kind": "deny", "reason": "no", "instead": "chmod 755"}}
             ]}}}}}"#,
-        )
-        .expect("write fixture policy");
-        unsafe {
-            std::env::set_var(POLICY_PATH_ENV, &policy_path);
-        }
-        let response = build_response(&payload_json("Bash", "ls -la"));
-        unsafe {
-            std::env::remove_var(POLICY_PATH_ENV);
-        }
+        );
         let out = hook_specific(&response);
         assert!(out.get("permissionDecision").is_none());
     }
 
     #[test]
     fn a_governed_command_denies_with_reason_and_instead() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempdir();
-        let policy_path = dir.join("policy.json");
-        std::fs::write(
-            &policy_path,
+        let response = respond(
+            &payload_json("Bash", "chmod 777 x"),
             r#"{"tools": {"Bash": {"kind": "bash", "families": {"chmod": {"rules": [
                 {"id": "r1", "predicate": {"operand_contains": "777"},
                  "outcome": {"kind": "deny", "reason": "opens the tree", "instead": "chmod 755"}}
             ]}}}}}"#,
-        )
-        .expect("write fixture policy");
-        unsafe {
-            std::env::set_var(POLICY_PATH_ENV, &policy_path);
-        }
-        let response = build_response(&payload_json("Bash", "chmod 777 x"));
-        unsafe {
-            std::env::remove_var(POLICY_PATH_ENV);
-        }
+        );
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "deny");
         let reason = out["permissionDecisionReason"].as_str().unwrap();
@@ -632,30 +647,19 @@ mod tests {
 
     #[test]
     fn a_rewrite_patches_updated_input_and_sets_allow() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempdir();
-        let policy_path = dir.join("policy.json");
-        std::fs::write(
-            &policy_path,
-            r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
-                {"id": "gh-issue-list", "predicate": {"arg_equals": "list"},
-                 "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "duplicate surface"}}
-            ]}}}}}"#,
-        )
-        .expect("write fixture policy");
-        unsafe {
-            std::env::set_var(POLICY_PATH_ENV, &policy_path);
-        }
         let payload = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": {"command": "gh issue list", "description": "list issues", "timeout": 5000},
             "cwd": "/repo/legion"
         })
         .to_string();
-        let response = build_response(&payload);
-        unsafe {
-            std::env::remove_var(POLICY_PATH_ENV);
-        }
+        let response = respond(
+            &payload,
+            r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+                {"id": "gh-issue-list", "predicate": {"arg_equals": "list"},
+                 "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "duplicate surface"}}
+            ]}}}}}"#,
+        );
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(out["updatedInput"]["command"], "legion issue list");
@@ -664,25 +668,35 @@ mod tests {
     }
 
     #[test]
+    fn a_rewrite_whose_facts_carry_a_path_denies_instead_of_guessing() {
+        // `chmod` never rewrites in the shipped policy, but a hand-built
+        // fixture proves the seam: a matched rule's operand looks like a
+        // path, `build_replacement` refuses it, and the refusal reaches
+        // the agent as a deny naming the replacement failure -- never a
+        // silently wrong rewrite (see `cmd::replacement`'s module doc).
+        let response = respond(
+            &payload_json("Bash", "grep -rn foo src/main.rs"),
+            r#"{"tools": {"Bash": {"kind": "bash", "families": {"grep": {"rules": [
+                {"id": "grep-rewrite", "predicate": "always",
+                 "outcome": {"kind": "rewrite", "target": "legion sym etc find-content", "reason": "use sym"}}
+            ]}}}}}"#,
+        );
+        let out = hook_specific(&response);
+        assert_eq!(out["permissionDecision"], "deny");
+        let reason = out["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("legion-cmd adapter failed closed"));
+        assert!(reason.contains("could not build the replacement command"));
+    }
+
+    #[test]
     fn an_unconfirmed_ask_denies_with_question_reason_and_confirm_hint() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempdir();
-        let policy_path = dir.join("policy.json");
-        std::fs::write(
-            &policy_path,
+        let response = respond(
+            &payload_json("Bash", "gh pr merge 42 --admin"),
             r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh pr": {"rules": [
                 {"id": "gh-pr-merge-admin", "predicate": {"arg_equals": "--admin"},
                  "outcome": {"kind": "ask", "question": "bypass branch protection?", "reason": "skips checks", "needs_operator": true}}
             ]}}}}}"#,
-        )
-        .expect("write fixture policy");
-        unsafe {
-            std::env::set_var(POLICY_PATH_ENV, &policy_path);
-        }
-        let response = build_response(&payload_json("Bash", "gh pr merge 42 --admin"));
-        unsafe {
-            std::env::remove_var(POLICY_PATH_ENV);
-        }
+        );
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "deny");
         let reason = out["permissionDecisionReason"].as_str().unwrap();
@@ -694,27 +708,79 @@ mod tests {
 
     #[test]
     fn a_parse_error_asks_and_is_refused_the_same_as_any_other_ask() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempdir();
-        let policy_path = dir.join("policy.json");
-        std::fs::write(
-            &policy_path,
+        // An unbalanced single quote cannot be tokenized.
+        let response = respond(
+            &payload_json("Bash", "echo '"),
             r#"{"tools": {"Bash": {"kind": "bash", "families": {"chmod": {"rules": [
                 {"id": "r1", "predicate": "always",
                  "outcome": {"kind": "allow", "note": null}}
             ]}}}}}"#,
-        )
-        .expect("write fixture policy");
-        unsafe {
-            std::env::set_var(POLICY_PATH_ENV, &policy_path);
-        }
-        // An unbalanced single quote cannot be tokenized.
-        let response = build_response(&payload_json("Bash", "echo '"));
-        unsafe {
-            std::env::remove_var(POLICY_PATH_ENV);
-        }
+        );
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "deny");
+    }
+
+    #[test]
+    fn a_proxy_decision_runs_unchanged_and_is_visible() {
+        // `python3 -c "import subprocess; ..."` matches no sym job in the
+        // empty-sym-jobs fixture and carries an opaque interpreter body,
+        // so `evaluate` proxies it (FR-CMD-004) rather than denying or
+        // allowing silently.
+        let response = respond(
+            &payload_json(
+                "Bash",
+                r#"python3 -c "import subprocess; print(subprocess.run(['ls']).stdout)""#,
+            ),
+            r#"{"tools": {"Bash": {"kind": "bash", "families": {"chmod": {"rules": [
+                {"id": "r1", "predicate": {"operand_contains": "777"},
+                 "outcome": {"kind": "deny", "reason": "no", "instead": "chmod 755"}}
+            ]}}}}}"#,
+        );
+        let out = hook_specific(&response);
+        assert!(out.get("permissionDecision").is_none());
+        let context = out["additionalContext"].as_str().unwrap();
+        assert!(context.contains("opaque"));
+    }
+
+    #[test]
+    fn a_required_lookup_that_errors_denies_closed() {
+        let response = respond_with_runner(
+            &payload_json("Bash", "gh issue close 42"),
+            r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+                {"id": "gh-issue-close", "predicate": {"arg_equals": "close"}, "requires": ["recall"],
+                 "outcome": {"kind": "deny", "reason": "needs recall", "instead": "legion issue close"}}
+            ]}}}}}"#,
+            |_repo| Arc::new(StubLookupRunner(Err("db unavailable".to_string()))),
+        );
+        let out = hook_specific(&response);
+        assert_eq!(out["permissionDecision"], "deny");
+        let reason = out["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("legion-cmd adapter failed closed"));
+        assert!(reason.contains("db unavailable"));
+    }
+
+    #[test]
+    fn a_required_lookup_that_succeeds_reaches_the_rules_real_outcome() {
+        // With the lookup satisfied (`Lookup::Found`), the rule's own
+        // `deny` outcome fires -- proving `ctx.recall` is actually wired
+        // from the lookup result into `route`, not merely accepted and
+        // discarded.
+        let response = respond_with_runner(
+            &payload_json("Bash", "gh issue close 42"),
+            r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+                {"id": "gh-issue-close", "predicate": {"arg_equals": "close"}, "requires": ["recall"],
+                 "outcome": {"kind": "deny", "reason": "needs recall first", "instead": "legion issue close"}}
+            ]}}}}}"#,
+            |_repo| {
+                Arc::new(StubLookupRunner(Ok(Lookup::Found(vec![
+                    "prior note".to_string(),
+                ]))))
+            },
+        );
+        let out = hook_specific(&response);
+        assert_eq!(out["permissionDecision"], "deny");
+        let reason = out["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("needs recall first"));
     }
 
     #[test]
@@ -794,7 +860,16 @@ mod tests {
     }
 
     #[test]
-    fn marked_and_confirmed_ask_omits_permission_decision_for_the_harness_prompt() {
+    fn marked_and_confirmed_ask_sends_permission_decision_ask_with_the_agents_reason() {
+        // permissionDecision "ask" invokes the harness's own interactive
+        // permission prompt and shows permissionDecisionReason to the
+        // operator, not Claude (Claude Code hooks docs, Decision Control /
+        // field tables -- see the module doc for the verbatim quotes).
+        // Omitting permissionDecision here instead would be unsafe: a
+        // command already covered by an `allow` rule in the operator's own
+        // settings would then auto-approve through the harness's normal
+        // flow, and the operator would never see the prompt this path
+        // exists to force.
         let details = AskDetails::new("run it?", "bypasses review").expect("valid ask");
         let entry = DecidingEntry::Rule {
             id: "r1".to_string(),
@@ -804,16 +879,11 @@ mod tests {
             serde_json::from_str(&payload_json("Bash", "gh pr merge 1")).expect("valid payload");
         let response = ask_response(&details, &entry, &payload, true);
         let out = hook_specific(&response);
-        assert!(
-            out.get("permissionDecision").is_none(),
-            "a confirmed, marked ask must defer to the harness's own permission prompt"
+        assert_eq!(
+            out["permissionDecision"], "ask",
+            "a confirmed, marked ask must force the harness's own permission prompt, not defer to its default flow"
         );
-        assert!(
-            out["additionalContext"]
-                .as_str()
-                .unwrap()
-                .contains("bypasses review")
-        );
+        assert_eq!(out["permissionDecisionReason"], "bypasses review");
     }
 
     // -- No-go deny carries the fixed instead text unchanged ---------------
