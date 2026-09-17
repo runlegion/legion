@@ -33,7 +33,8 @@ const FIXTURE_POLICY: &str = r#"{
             {
               "id": "gh-issue-list",
               "predicate": { "arg_equals": "list" },
-              "outcome": { "kind": "rewrite", "target": "legion issue list", "reason": "duplicate surface" }
+              "outcome": { "kind": "rewrite", "target": "legion issue list --repo {repo}",
+                           "reason": "duplicate surface", "exact_args": ["issue", "list"] }
             }
           ]
         },
@@ -124,22 +125,25 @@ fn a_rewrite_returns_updated_input_and_allow() {
     assert!(out.status.success());
     let out_value = hook_specific(&out.stdout);
     assert_eq!(out_value["permissionDecision"], "allow");
-    assert_eq!(out_value["updatedInput"]["command"], "legion issue list");
+    // `cwd: "/repo/legion"` resolves to repo "legion" (repo_from_cwd),
+    // substituted for the target's `{repo}` placeholder.
+    assert_eq!(
+        out_value["updatedInput"]["command"],
+        "legion issue list --repo legion"
+    );
 }
 
-// -- Known gap (simplify finding, HIGH): a Rewrite replaces the WHOLE
-// command string, so a compound command, a pipe, a redirect, or an extra
-// flag on the matched invocation is silently dropped rather than refused.
-// The fix belongs in `route` (#1228: a rewrite is lossless only for a
-// single simple command whose args are all declared translatable); the
-// adapter must not build that check itself (FR-CMD-014). These tests
-// document today's actual (unsafe) behavior in their names and assert the
-// DENY #1228 should produce instead -- `#[ignore]`d so they fail loudly
-// and switch on the moment #1228 lands, rather than silently passing
-// against behavior that was never fixed.
+// -- #1228's lossless-rewrite rule (route's own gate): a Rewrite replaces
+// the WHOLE command string, so a compound command, a pipe, a redirect, or
+// an extra/untranslated flag on the matched invocation would silently
+// drop the rest of the command if route allowed the rewrite through.
+// #1228 landed the fix in `route` itself (`gate_rewrite_on_whole_command`
+// for compound/piped/redirected shapes, `exact_args` + `first_differing_arg`
+// for an extra flag on the matched invocation) -- these tests, previously
+// `#[ignore]`d as "needs #1228", are now enabled and assert the DENY
+// `route` produces for each shape.
 
 #[test]
-#[ignore = "needs #1228's lossless-rewrite rule"]
 fn a_compound_rewrite_target_denies_instead_of_dropping_the_other_command() {
     let tmp = TempDir::new().expect("tempdir");
     let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
@@ -149,8 +153,9 @@ fn a_compound_rewrite_target_denies_instead_of_dropping_the_other_command() {
         .arg("--hook")
         .env("LEGION_CMD_POLICY", &policy_path)
         .env_remove("CLAUDE_PLUGIN_ROOT");
-    // Today this silently rewrites to a bare `legion issue list`, dropping
-    // the `cd x &&` entirely. #1228 should make `route` deny this instead.
+    // `cd x &&` makes this a compound command, not a single simple one;
+    // `route`'s whole-command gate denies rather than rewriting and
+    // dropping the `cd`.
     let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "cd x && gh issue list"));
 
     assert!(out.status.success());
@@ -159,7 +164,6 @@ fn a_compound_rewrite_target_denies_instead_of_dropping_the_other_command() {
 }
 
 #[test]
-#[ignore = "needs #1228's lossless-rewrite rule"]
 fn a_piped_rewrite_target_denies_instead_of_dropping_the_pipe() {
     let tmp = TempDir::new().expect("tempdir");
     let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
@@ -169,8 +173,8 @@ fn a_piped_rewrite_target_denies_instead_of_dropping_the_pipe() {
         .arg("--hook")
         .env("LEGION_CMD_POLICY", &policy_path)
         .env_remove("CLAUDE_PLUGIN_ROOT");
-    // Today this silently rewrites to a bare `legion issue list`, dropping
-    // `| head` entirely.
+    // `| head` makes this a compound command; denies rather than
+    // rewriting and dropping the pipe.
     let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "gh issue list | head"));
 
     assert!(out.status.success());
@@ -179,7 +183,6 @@ fn a_piped_rewrite_target_denies_instead_of_dropping_the_pipe() {
 }
 
 #[test]
-#[ignore = "needs #1228's lossless-rewrite rule"]
 fn a_redirected_rewrite_target_denies_instead_of_dropping_the_redirect() {
     let tmp = TempDir::new().expect("tempdir");
     let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
@@ -189,8 +192,9 @@ fn a_redirected_rewrite_target_denies_instead_of_dropping_the_redirect() {
         .arg("--hook")
         .env("LEGION_CMD_POLICY", &policy_path)
         .env_remove("CLAUDE_PLUGIN_ROOT");
-    // Today this silently rewrites to a bare `legion issue list`, dropping
-    // `> out.txt` entirely -- the agent believes its output was captured.
+    // `> out.txt` makes this a compound command; denies rather than
+    // rewriting and dropping the redirect (which would otherwise leave
+    // the agent believing its output was captured).
     let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "gh issue list > out.txt"));
 
     assert!(out.status.success());
@@ -199,7 +203,6 @@ fn a_redirected_rewrite_target_denies_instead_of_dropping_the_redirect() {
 }
 
 #[test]
-#[ignore = "needs #1228's lossless-rewrite rule"]
 fn a_rewrite_target_with_an_untranslated_flag_denies_instead_of_dropping_it() {
     let tmp = TempDir::new().expect("tempdir");
     let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
@@ -209,13 +212,10 @@ fn a_rewrite_target_with_an_untranslated_flag_denies_instead_of_dropping_it() {
         .arg("--hook")
         .env("LEGION_CMD_POLICY", &policy_path)
         .env_remove("CLAUDE_PLUGIN_ROOT");
-    // Today this silently rewrites to a bare `legion issue list`, dropping
-    // `--state open` -- the rewritten command lists every issue instead of
-    // just the open ones the agent asked for. (Deliberately not a
-    // slash-containing value like `--repo other/org`: that would trip
-    // `build_replacement`'s unrelated path-facts refusal and pass today
-    // for the wrong reason, masking the actual flag-dropping gap this
-    // test exists to document.)
+    // `--state open` is not in the rule's declared `exact_args` (["issue",
+    // "list"]), so `route`'s `first_differing_arg` check denies naming the
+    // target rather than rewriting and dropping the flag (which would
+    // otherwise list every issue instead of just the open ones).
     let out = run_with_stdin(
         &mut cmd,
         &hook_payload("Bash", "gh issue list --state open"),

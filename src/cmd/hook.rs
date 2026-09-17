@@ -208,13 +208,14 @@ fn build_response_with(
         input: payload.tool_input.clone(),
     };
     let repo = repo_from_cwd(payload.cwd.as_deref());
-    let runner = make_runner(repo);
+    let runner = make_runner(repo.clone());
 
+    let repo_for_ctx = repo.clone();
     let outcome = decide(settings.deadline, move || {
-        decide_inner(&policy, &call, runner.as_ref())
+        decide_inner(&policy, &call, &repo_for_ctx, runner.as_ref())
     });
     match outcome {
-        Ok(routed) => apply_decision(&routed, &payload, false),
+        Ok(routed) => apply_decision(&routed, &payload, &repo, false),
         Err(e) => deny_for_error(&e, Some(&payload)),
     }
 }
@@ -255,9 +256,13 @@ where
 fn decide_inner(
     policy: &Policy,
     call: &ToolCall,
+    repo: &str,
     runner: &dyn LookupRunner,
 ) -> Result<Routed, AdapterError> {
-    let mut ctx = Context::default();
+    let mut ctx = Context {
+        repo: Some(repo.to_string()),
+        ..Context::default()
+    };
     for query in required_lookups(policy, call) {
         let lookup = runner.run(&query).map_err(AdapterError::Lookup)?;
         match query.lookup {
@@ -333,37 +338,72 @@ fn resolve_policy_path() -> Result<PathBuf, AdapterError> {
     )))
 }
 
-/// The repo name recall/consult scope lookups to: the hook payload's `cwd`
-/// basename, or a fixed placeholder when `cwd` is absent. This adapter does
-/// not replicate `prelude.sh`'s `--git-common-dir` worktree resolution
-/// (FR-CMD-016 already fails a rule closed when its lookup errors, so a
-/// wrong repo name here costs a possibly-empty recall, not a wrong
-/// decision).
+/// The sentinel `repo_from_cwd` returns when the hook payload's `cwd` is
+/// absent or its basename cannot be read as UTF-8. Never substitute this
+/// into a runnable rewrite command (see `crate::cmd::replacement`'s
+/// `ReplacementError::UnknownRepo`) -- it is a "could not determine"
+/// marker, not a real repo name.
+pub(crate) const UNKNOWN_REPO: &str = "(unknown)";
+
+/// The repo name recall/consult scope lookups to, and the value a rewrite
+/// target's `{repo}` placeholder is substituted with (reflection
+/// 01a0ae13): the hook payload's `cwd` basename, or [`UNKNOWN_REPO`] when
+/// `cwd` is absent. This adapter does not replicate `prelude.sh`'s
+/// `--git-common-dir` worktree resolution (FR-CMD-016 already fails a rule
+/// closed when its lookup errors, so a wrong repo name here costs a
+/// possibly-empty recall, not a wrong decision; a rewrite additionally
+/// fails closed on exactly the `UNKNOWN_REPO` sentinel via
+/// `ReplacementError::UnknownRepo`, so an unresolved repo never reaches a
+/// runnable command either).
 fn repo_from_cwd(cwd: Option<&str>) -> String {
     cwd.and_then(|c| std::path::Path::new(c).file_name())
         .and_then(|n| n.to_str())
-        .unwrap_or("(unknown)")
+        .unwrap_or(UNKNOWN_REPO)
         .to_string()
 }
 
+/// Substitutes `{repo}` in `text` for display only -- used for a deny's
+/// `reason` and `instead` text, both of which can embed a rewrite
+/// target's `{repo}` placeholder verbatim when `route` denies a would-be
+/// rewrite naming the target (e.g. `gate_rewrite_on_whole_command`'s
+/// whole-command gate, or an `exact_args` mismatch) rather than
+/// substituting anything itself -- `route` has no way to know the calling
+/// repo (FR-CMD-005 still requires both fields to be readable). Unlike
+/// `build_replacement`'s substitution, this NEVER fails: a deny is already
+/// the terminal refusal, so denying the deny over an unresolved repo would
+/// be circular. When the repo is unknown, `{repo}` becomes the literal
+/// `<repo>` placeholder instead of `route`'s original token or the
+/// `UNKNOWN_REPO` sentinel, so the agent sees an obviously-unfilled slot
+/// rather than either raw `{repo}` or a repo confusingly named
+/// "(unknown)".
+fn substitute_repo_for_display(text: &str, repo: &str) -> String {
+    if !text.contains("{repo}") {
+        return text.to_string();
+    }
+    let shown = if repo == UNKNOWN_REPO { "<repo>" } else { repo };
+    text.replace("{repo}", shown)
+}
+
 /// Turns a `Routed` decision into the hook response JSON (FR-CMD-017).
-/// `confirmed` is always `false` on the real path -- there is no
-/// confirmation store yet (#1237) -- and exists only so a test can exercise
-/// the marked-and-confirmed ask path without one.
-fn apply_decision(routed: &Routed, payload: &HookPayload, confirmed: bool) -> Value {
+/// `repo` is the caller's resolved repo name (see `repo_from_cwd`), used
+/// to fill a rewrite target's `{repo}` placeholder and any deny
+/// instead-text built from one. `confirmed` is always `false` on the real
+/// path -- there is no confirmation store yet (#1237) -- and exists only
+/// so a test can exercise the marked-and-confirmed ask path without one.
+fn apply_decision(routed: &Routed, payload: &HookPayload, repo: &str, confirmed: bool) -> Value {
     match &routed.decision {
         Decision::Allow { note } => allow_response(note.as_deref()),
         Decision::Proxy { reason } => proxy_response(*reason),
         Decision::Rewrite { target, reason } => {
-            match build_replacement(target, &routed.facts, &payload.tool_input) {
+            match build_replacement(target, &routed.facts, &payload.tool_input, repo) {
                 Ok(updated_input) => rewrite_response(&updated_input, reason, target),
                 Err(e) => deny_for_error(&AdapterError::Replacement(e.to_string()), Some(payload)),
             }
         }
         Decision::Deny(details) => deny_json(&format!(
             "{} (instead: {})",
-            details.reason(),
-            details.instead()
+            substitute_repo_for_display(details.reason(), repo),
+            substitute_repo_for_display(details.instead(), repo)
         )),
         Decision::Ask(details) => ask_response(details, &routed.entry, payload, confirmed),
     }
@@ -679,28 +719,39 @@ mod tests {
             &payload,
             r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
                 {"id": "gh-issue-list", "predicate": {"arg_equals": "list"},
-                 "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "duplicate surface"}}
+                 "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo}",
+                             "reason": "duplicate surface", "exact_args": ["issue", "list"]}}
             ]}}}}}"#,
         );
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "allow");
-        assert_eq!(out["updatedInput"]["command"], "legion issue list");
+        // `cwd: "/repo/legion"` resolves to repo "legion" (repo_from_cwd),
+        // substituted for the target's `{repo}` placeholder.
+        assert_eq!(
+            out["updatedInput"]["command"],
+            "legion issue list --repo legion"
+        );
         assert_eq!(out["updatedInput"]["description"], "list issues");
         assert_eq!(out["updatedInput"]["timeout"], 5000);
     }
 
     #[test]
     fn a_rewrite_whose_facts_carry_a_path_denies_instead_of_guessing() {
-        // `chmod` never rewrites in the shipped policy, but a hand-built
-        // fixture proves the seam: a matched rule's operand looks like a
-        // path, `build_replacement` refuses it, and the refusal reaches
-        // the agent as a deny naming the replacement failure -- never a
-        // silently wrong rewrite (see `cmd::replacement`'s module doc).
+        // The fixture's `exact_args` matches this invocation's args
+        // exactly (a single simple command, so #1228's whole-command gate
+        // does not override it either), so `route` genuinely returns
+        // Decision::Rewrite here -- this proves `build_replacement`'s
+        // path-facts refusal as a real defense-in-depth backstop, not a
+        // hand-built `Routed` route itself would never produce. The
+        // refusal reaches the agent as a deny naming the replacement
+        // failure -- never a silently wrong rewrite (see
+        // `cmd::replacement`'s module doc).
         let response = respond(
             &payload_json("Bash", "grep -rn foo src/main.rs"),
             r#"{"tools": {"Bash": {"kind": "bash", "families": {"grep": {"rules": [
                 {"id": "grep-rewrite", "predicate": "always",
-                 "outcome": {"kind": "rewrite", "target": "legion sym etc find-content", "reason": "use sym"}}
+                 "outcome": {"kind": "rewrite", "target": "legion sym etc find-content", "reason": "use sym",
+                             "exact_args": ["-rn", "foo", "src/main.rs"]}}
             ]}}}}}"#,
         );
         let out = hook_specific(&response);
@@ -708,6 +759,54 @@ mod tests {
         let reason = out["permissionDecisionReason"].as_str().unwrap();
         assert!(reason.contains("legion-cmd adapter failed closed"));
         assert!(reason.contains("could not build the replacement command"));
+    }
+
+    #[test]
+    fn a_rewrite_downgraded_to_deny_substitutes_repo_in_the_instead_text() {
+        // A compound command trips #1228's whole-command gate
+        // (`gate_rewrite_on_whole_command`): `route` denies naming the
+        // target verbatim, `{repo}` and all, since it never substitutes
+        // anything itself. The adapter must fill it in for display even
+        // on this deny path, not only on an actual rewrite.
+        let response = respond(
+            &payload_json("Bash", "cd x && gh issue list"),
+            r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+                {"id": "gh-issue-list", "predicate": {"arg_equals": "list"},
+                 "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo}",
+                             "reason": "duplicate surface", "exact_args": ["issue", "list"]}}
+            ]}}}}}"#,
+        );
+        let out = hook_specific(&response);
+        assert_eq!(out["permissionDecision"], "deny");
+        let reason = out["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("legion issue list --repo legion"));
+        assert!(!reason.contains("{repo}"));
+    }
+
+    #[test]
+    fn a_rewrite_downgraded_to_deny_shows_a_placeholder_when_the_repo_is_unknown() {
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd x && gh issue list"}
+            // no "cwd" at all -> repo_from_cwd resolves to UNKNOWN_REPO
+        })
+        .to_string();
+        let response = respond(
+            &payload,
+            r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+                {"id": "gh-issue-list", "predicate": {"arg_equals": "list"},
+                 "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo}",
+                             "reason": "duplicate surface", "exact_args": ["issue", "list"]}}
+            ]}}}}}"#,
+        );
+        let out = hook_specific(&response);
+        // Still a deny -- never a second-order failure over the unknown
+        // repo, and never allow.
+        assert_eq!(out["permissionDecision"], "deny");
+        let reason = out["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("legion issue list --repo <repo>"));
+        assert!(!reason.contains("{repo}"));
+        assert!(!reason.contains("(unknown)"));
     }
 
     #[test]

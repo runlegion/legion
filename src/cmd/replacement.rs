@@ -5,48 +5,52 @@
 //! actual command string -- without re-scanning the command `route` already
 //! parsed.
 //!
-//! IMPORTANT: refusing a path-carrying rewrite (below) does NOT make a
-//! rewrite safe on its own -- it only closes one specific hole. The
-//! `updatedInput` this module returns replaces the tool call's WHOLE
-//! command string (the hook contract has no field-level patch), so a
-//! rewrite is lossless only when the original command was a single simple
-//! invocation whose every argument the target can express. `route` today
-//! does not check that: `cd x && gh issue list`, `gh issue list | head`,
-//! `gh issue list > out.txt`, and `gh issue list --repo other/org` all
-//! still rewrite to a bare `legion issue list`, silently dropping the
-//! `cd`, the pipe, the redirect, or the flag. The real fix -- route
-//! returning `Deny` for anything but a single simple command whose args
-//! are all declared translatable -- is #1228's lossless-rewrite rule, not
-//! this module's; building that check here, working around `route`'s
-//! Facts-only contract, would duplicate policy logic the adapter must not
-//! own (FR-CMD-014). `tests/integration/cmd_check.rs` has `#[ignore]`d
-//! cases naming exactly these gaps, to switch on once #1228 lands.
+//! #1228 landed route's own lossless-rewrite gate: `route` now returns
+//! `Decision::Rewrite` only for a single simple command whose arguments
+//! match a rule's declared `exact_args` exactly (reflection 01a0ae1c), so
+//! the compound/piped/redirected/extra-flag gaps this module's doc used to
+//! warn about are now `route`'s responsibility, not this adapter's --
+//! `tests/integration/cmd_check.rs`'s four `#[ignore]`d cases for those
+//! shapes are enabled and passing once more (they assert the DENY `route`
+//! now produces).
 //!
-//! What this module DOES refuse, and why it is a narrower guarantee than
-//! "the rewrite is safe": the shipped policy's one rewrite rule (`gh issue
-//! list` -> `legion issue list`) needs no arguments appended -- the target
-//! string alone is already the complete replacement, and `facts.paths` is
-//! empty for it. `facts` is still taken and checked here for
-//! `facts.paths`: `facts_from_scan` collects path-shaped operands across
-//! EVERY invocation in a compound command, not just the one whose rule
-//! matched (see `crate::evaluate::facts_from_scan` upstream, and
-//! `fold`'s strictest-decision selection), so blindly appending them would
-//! silently attach an unrelated invocation's operand to the rewrite
-//! target -- exactly the failure class
-//! `plugin/hooks/lib/emit.sh`'s `emit_rewrite` header documents paying for
-//! (#883: `git push && echo done` rewrote to `legion push --branch echo`).
-//! `route` names a target with no notion of "the operand this rule's own
-//! invocation carried" versus "an operand some other part of the command
-//! carried", so the only lossless choice here is to refuse rather than
-//! guess: a rewrite whose facts carry any path is denied, not silently
-//! composed. This catches one shape of unsafe rewrite (an appended path
-//! from the wrong invocation); it does not catch a compound command, a
-//! pipe, a redirect, or a dropped flag on the matched invocation itself --
-//! those need #1228's fact (a single-simple-command confirmation from
-//! `route`) to refuse safely, which does not exist yet.
+//! What THIS module still does, now that `route`'s gate exists:
+//!
+//! 1. Substitutes `{repo}` in the target string (reflection 01a0ae13):
+//!    legion's verbs require `--repo`, so a rewrite target that needs one
+//!    is declared with a literal `{repo}` placeholder (e.g. `"legion issue
+//!    list --repo {repo}"`) rather than a real name `route` has no way to
+//!    know. `repo` is the caller's resolved repo name (from the hook
+//!    payload's `cwd`, via `crate::cmd::hook::repo_from_cwd`). When the
+//!    placeholder is present and the repo could not be resolved (the
+//!    `"(unknown)"` sentinel `repo_from_cwd` returns), this FAILS CLOSED
+//!    with `ReplacementError::UnknownRepo` rather than run a command
+//!    against a bogus or literal `"(unknown)"` repo. A target with no
+//!    `{repo}` placeholder is unaffected either way.
+//! 2. Refuses (defense in depth) when `route`'s extracted `facts.paths` is
+//!    non-empty. With `exact_args` enforced, a real `Decision::Rewrite`
+//!    from `route` should never carry a path fact any more -- any
+//!    invocation with an extra path-shaped argument now fails the
+//!    `exact_args` match and denies before reaching a rewrite at all -- so
+//!    this should be unreachable via `route` today. It stays as a backstop
+//!    against a `Routed` value a caller builds directly (or a future
+//!    policy shape this module has not seen) carrying facts inconsistent
+//!    with a safe rewrite; `facts_from_scan` collects path-shaped operands
+//!    across EVERY invocation in a compound command, not just the one
+//!    whose rule matched, so appending one on trust risks attaching an
+//!    unrelated invocation's operand to the target -- exactly the failure
+//!    class `plugin/hooks/lib/emit.sh`'s `emit_rewrite` header documents
+//!    paying for (#883: `git push && echo done` rewrote to `legion push
+//!    --branch echo`).
 
 use legion_cmd::{Facts, ManagedTarget};
 use serde_json::Value;
+
+/// The literal placeholder a rewrite target names when it needs the
+/// caller's repo (reflection 01a0ae13): legion's verbs require `--repo`,
+/// and `route` has no way to know the calling repo, so it declares the
+/// need with this token instead.
+const REPO_PLACEHOLDER: &str = "{repo}";
 
 /// Errors building a `Decision::Rewrite`'s replacement command.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -66,19 +70,30 @@ pub(crate) enum ReplacementError {
     /// rewritten.
     #[error("rewrite facts carry {0} path operand(s), which this rewrite cannot safely compose")]
     UnhandledPathFacts(usize),
+
+    /// The target names `{repo}` but the calling repo could not be
+    /// resolved from the hook payload's `cwd`. Never substitute the
+    /// `"(unknown)"` sentinel into a runnable command -- that would run
+    /// against a repo literally named "(unknown)", not merely an
+    /// unhelpful one.
+    #[error("rewrite target names {{repo}} but the calling repo could not be determined")]
+    UnknownRepo,
 }
 
 /// Builds the replacement `tool_input` for a rewrite: the managed target's
-/// command, patched into `original` so sibling Bash fields (`description`,
-/// `timeout`, `run_in_background`) are preserved rather than dropped (the
+/// command with `{repo}` substituted (see module doc), patched into
+/// `original` so sibling Bash fields (`description`, `timeout`,
+/// `run_in_background`) are preserved rather than dropped (the
 /// whole-object `updatedInput` bug `plugin/hooks/lib/emit.sh`'s
 /// `emit_rewrite` already paid for -- see its header comment). Refuses
-/// when `facts.paths` is non-empty (see the module doc); the shipped
-/// policy's one rewrite rule never carries any.
+/// when `facts.paths` is non-empty (see the module doc; should be
+/// unreachable via `route` post-#1228) or when the target needs `{repo}`
+/// and `repo` is the `"(unknown)"` sentinel.
 pub(crate) fn build_replacement(
     target: &ManagedTarget,
     facts: &Facts,
     original: &Value,
+    repo: &str,
 ) -> Result<Value, ReplacementError> {
     if target.as_str().is_empty() {
         return Err(ReplacementError::EmptyTarget);
@@ -87,11 +102,20 @@ pub(crate) fn build_replacement(
         return Err(ReplacementError::UnhandledPathFacts(facts.paths.len()));
     }
 
+    let command = if target.as_str().contains(REPO_PLACEHOLDER) {
+        if repo == crate::cmd::hook::UNKNOWN_REPO {
+            return Err(ReplacementError::UnknownRepo);
+        }
+        target.as_str().replace(REPO_PLACEHOLDER, repo)
+    } else {
+        target.as_str().to_string()
+    };
+
     let mut patched = match original {
         Value::Object(map) => Value::Object(map.clone()),
         _ => Value::Object(serde_json::Map::new()),
     };
-    patched["command"] = Value::String(target.as_str().to_string());
+    patched["command"] = Value::String(command);
     Ok(patched)
 }
 
@@ -99,11 +123,14 @@ pub(crate) fn build_replacement(
 mod tests {
     use super::*;
 
+    const REPO: &str = "legion";
+
     #[test]
     fn target_alone_replaces_command_with_no_facts() {
         let target = ManagedTarget::new("legion issue list");
         let original = serde_json::json!({"command": "gh issue list"});
-        let replaced = build_replacement(&target, &Facts::default(), &original).expect("builds");
+        let replaced =
+            build_replacement(&target, &Facts::default(), &original, REPO).expect("builds");
         assert_eq!(
             replaced,
             serde_json::json!({"command": "legion issue list"})
@@ -119,7 +146,8 @@ mod tests {
             "timeout": 5000,
             "run_in_background": false
         });
-        let replaced = build_replacement(&target, &Facts::default(), &original).expect("builds");
+        let replaced =
+            build_replacement(&target, &Facts::default(), &original, REPO).expect("builds");
         assert_eq!(
             replaced,
             serde_json::json!({
@@ -146,7 +174,7 @@ mod tests {
             ..Facts::default()
         };
         let original = serde_json::json!({"command": "grep -rn foo src/main.rs"});
-        let err = build_replacement(&target, &facts, &original)
+        let err = build_replacement(&target, &facts, &original, REPO)
             .expect_err("a rewrite with path facts must refuse, not guess composition");
         assert_eq!(err, ReplacementError::UnhandledPathFacts(1));
     }
@@ -159,7 +187,7 @@ mod tests {
             ..Facts::default()
         };
         let original = serde_json::json!({"command": "grep -rn foo a.rs b.rs"});
-        let err = build_replacement(&target, &facts, &original)
+        let err = build_replacement(&target, &facts, &original, REPO)
             .expect_err("every path fact must be refused, not just the first");
         assert_eq!(err, ReplacementError::UnhandledPathFacts(2));
     }
@@ -168,7 +196,7 @@ mod tests {
     fn empty_target_is_rejected() {
         let target = ManagedTarget::new("");
         let original = serde_json::json!({"command": "gh issue list"});
-        let err = build_replacement(&target, &Facts::default(), &original)
+        let err = build_replacement(&target, &Facts::default(), &original, REPO)
             .expect_err("empty target must not silently build a blank command");
         assert_eq!(err, ReplacementError::EmptyTarget);
     }
@@ -177,7 +205,51 @@ mod tests {
     fn a_non_object_original_input_still_produces_a_valid_replacement() {
         let target = ManagedTarget::new("legion issue list");
         let original = Value::Null;
-        let replaced = build_replacement(&target, &Facts::default(), &original).expect("builds");
+        let replaced =
+            build_replacement(&target, &Facts::default(), &original, REPO).expect("builds");
+        assert_eq!(
+            replaced,
+            serde_json::json!({"command": "legion issue list"})
+        );
+    }
+
+    #[test]
+    fn a_repo_placeholder_is_substituted_with_the_resolved_repo() {
+        let target = ManagedTarget::new("legion issue list --repo {repo}");
+        let original = serde_json::json!({"command": "gh issue list"});
+        let replaced =
+            build_replacement(&target, &Facts::default(), &original, "my-repo").expect("builds");
+        assert_eq!(
+            replaced,
+            serde_json::json!({"command": "legion issue list --repo my-repo"})
+        );
+    }
+
+    #[test]
+    fn a_repo_placeholder_with_an_unknown_repo_fails_closed() {
+        let target = ManagedTarget::new("legion issue list --repo {repo}");
+        let original = serde_json::json!({"command": "gh issue list"});
+        let err = build_replacement(
+            &target,
+            &Facts::default(),
+            &original,
+            crate::cmd::hook::UNKNOWN_REPO,
+        )
+        .expect_err("an unresolved repo must never be substituted into a runnable command");
+        assert_eq!(err, ReplacementError::UnknownRepo);
+    }
+
+    #[test]
+    fn a_target_with_no_placeholder_is_unaffected_by_an_unknown_repo() {
+        let target = ManagedTarget::new("legion issue list");
+        let original = serde_json::json!({"command": "gh issue list"});
+        let replaced = build_replacement(
+            &target,
+            &Facts::default(),
+            &original,
+            crate::cmd::hook::UNKNOWN_REPO,
+        )
+        .expect("a target with no placeholder never needs a repo");
         assert_eq!(
             replaced,
             serde_json::json!({"command": "legion issue list"})

@@ -471,6 +471,90 @@ fn dynamic_command_from_positional_args_array_is_opaque() {
 }
 
 #[test]
+fn dynamic_command_from_an_embedded_unquoted_parameter_expansion_is_opaque() {
+    // The shell expands `${IFS}` (commonly whitespace) and then
+    // word-splits the result, turning one token into the governed
+    // `gh issue list` -- resolvable only by executing it, so it must
+    // never be silently allowed as an unrecognized literal binary.
+    let scan = scan("gh${IFS}issue${IFS}list").expect("valid");
+    assert!(
+        scan.invocations.is_empty(),
+        "must not resolve an invocation"
+    );
+    assert!(
+        scan.opaque
+            .iter()
+            .any(|o| matches!(o, Opaque::DynamicCommand))
+    );
+}
+
+#[test]
+fn dynamic_command_from_a_mixed_quoted_and_live_substitution_is_opaque() {
+    // `'lit'$(cmd)`: the `'lit'` part is quoted (word-level `quoted` is
+    // `true`), but the `$(cmd)` part is a live, unquoted command
+    // substitution -- `live_expansion` tracks that precisely, where a
+    // word-level `!quoted` check would have missed it. The `$(cmd)`
+    // substitution's own body ("cmd") is still separately recursed into
+    // (a command substitution's inner source is always resolved, whether
+    // or not the outer word ends up naming a command), so it is the one
+    // invocation expected here -- the literal head "lit$(...)" must not
+    // also resolve as a second invocation.
+    let scan = scan("'lit'$(cmd) -rn foo").expect("valid");
+    assert!(
+        invocation(&scan, "cmd").is_some(),
+        "the substitution body itself still resolves"
+    );
+    assert!(
+        invocation(&scan, "lit$(...)").is_none(),
+        "the literal head must not resolve as a command"
+    );
+    assert!(
+        scan.opaque
+            .iter()
+            .any(|o| matches!(o, Opaque::DynamicCommand))
+    );
+}
+
+#[test]
+fn dynamic_command_from_a_double_quoted_prefix_with_an_expansion_is_opaque() {
+    // `"gh"${IFS}x`: the `"gh"` part is double-quoted, `${IFS}` follows
+    // it unquoted -- still a live expansion, so the whole word is opaque.
+    let scan = scan("\"gh\"${IFS}x").expect("valid");
+    assert!(
+        scan.invocations.is_empty(),
+        "must not resolve an invocation"
+    );
+    assert!(
+        scan.opaque
+            .iter()
+            .any(|o| matches!(o, Opaque::DynamicCommand))
+    );
+}
+
+#[test]
+fn a_fully_single_quoted_dollar_command_name_is_an_ordinary_literal() {
+    // `'$literal'` as a command name: entirely single-quoted, so the `$`
+    // is inert text, never an expansion -- unlike the mixed-quoting case
+    // above, this must resolve as a plain (if unusual) invocation, not
+    // `Opaque::DynamicCommand`.
+    let scan = scan("'$literal' -x").expect("valid");
+    let inv = invocation(&scan, "$literal").expect("resolved as a literal binary name");
+    assert_eq!(inv.args, vec!["-x"]);
+    assert!(scan.opaque.is_empty());
+}
+
+#[test]
+fn a_quoted_dollar_inside_an_argument_stays_an_ordinary_argument() {
+    // Only the command-name word is checked for an unquoted expansion;
+    // a quoted `$` in an ARGUMENT is inert text and must resolve as a
+    // plain argument, not trigger anything.
+    let scan = scan("grep '$PATTERN' file.txt").expect("valid");
+    let inv = invocation(&scan, "grep").expect("grep resolved");
+    assert_eq!(inv.args, vec!["$PATTERN", "file.txt"]);
+    assert!(scan.opaque.is_empty());
+}
+
+#[test]
 fn sourced_substitution_is_opaque() {
     let scan = scan("source <(echo \"grep -rn foo src\")").expect("valid");
     assert!(scan.opaque.iter().any(|o| matches!(o, Opaque::Sourced)));
@@ -645,4 +729,122 @@ fn scan_error_display_names_the_construct_and_offset() {
     let err = scan("grep -n 'oops src").expect_err("unterminated quote");
     assert!(err.to_string().contains("unterminated single quote"));
     assert!(err.to_string().contains("byte"));
+}
+
+// -- Scan::is_single_simple_command (FR-CMD-008): a rewrite replaces the
+// whole command string, so route only rewrites when the invocation it
+// targets IS the whole command -- no operator, redirect, substitution,
+// heredoc, or opaque sibling part.
+
+#[test]
+fn a_bare_command_is_a_single_simple_command() {
+    let scan = scan("gh issue list").expect("valid command");
+    assert!(scan.is_single_simple_command);
+}
+
+#[test]
+fn a_pipeline_is_not_a_single_simple_command() {
+    let scan = scan("gh issue list | head").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn an_and_and_compound_is_not_a_single_simple_command() {
+    let scan = scan("cd x && gh issue list").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn a_semicolon_compound_is_not_a_single_simple_command() {
+    let scan = scan("gh issue list; echo done").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn a_trailing_semicolon_alone_is_still_a_single_simple_command() {
+    // A lone trailing `;` (or newline) ends the command with no other
+    // effect -- semantically identical to the bare command -- unlike a
+    // trailing `&`, which backgrounds it.
+    let scan = scan("gh issue list;").expect("valid command");
+    assert!(scan.is_single_simple_command);
+}
+
+#[test]
+fn a_trailing_background_operator_is_not_a_single_simple_command() {
+    // The group count alone cannot catch this: nothing follows the `&`,
+    // so there is still only one top-level group, but backgrounding
+    // changes what the command does -- a rewrite that drops it is not
+    // lossless.
+    let scan = scan("gh issue list &").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn a_redirect_is_not_a_single_simple_command() {
+    // The redirect target is dropped by the tokenizer (never kept as a
+    // word or an invocation), so this can only be caught by the
+    // dedicated `has_redirect` trace -- an invocation-count check alone
+    // would miss it.
+    let scan = scan("gh issue list > out.txt").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn an_input_redirect_is_not_a_single_simple_command() {
+    let scan = scan("grep foo < input.txt").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn a_command_substitution_is_not_a_single_simple_command() {
+    let scan = scan("echo $(rm -rf /)").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn a_command_with_an_opaque_sibling_is_not_a_single_simple_command() {
+    let scan = scan("grep -rn foo | ./notify.sh").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn a_wrapper_around_a_single_command_is_not_a_single_simple_command() {
+    // `record` (this module) records an invocation for every resolved
+    // command position, including a wrapper's own (`sh` here, not just
+    // the `grep` it wraps) -- so `sh -c '...'` yields two invocations,
+    // not one. Conservative, not a bug: nothing requires a wrapped
+    // command to be rewrite-eligible, and failing closed here never lets
+    // an unsafe rewrite through.
+    let scan = scan("sh -c 'grep -rn foo src'").expect("valid command");
+    assert_eq!(scan.invocations.len(), 2);
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn an_empty_command_is_not_a_single_simple_command() {
+    let scan = scan("").expect("empty command parses");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn a_stderr_redirect_with_no_target_word_is_not_a_single_simple_command() {
+    // `>&2` never reaches the `Tok::Word` branch that used to be
+    // `has_redirect`'s only source -- it must still be caught.
+    let scan = scan("gh issue list >&2").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn a_digit_glued_redirect_is_not_a_single_simple_command() {
+    let scan = scan("gh issue list 2>/dev/null").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn an_assignment_prefix_is_not_a_single_simple_command() {
+    // `FOO=1` is part of the command string a rewrite would replace, but
+    // it is not visible in the invocation's own `args` -- so it would be
+    // silently dropped, the same loss a redirect or operator causes.
+    let scan = scan("FOO=1 gh issue list").expect("valid command");
+    assert!(!scan.is_single_simple_command);
 }

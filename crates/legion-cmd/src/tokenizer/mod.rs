@@ -135,6 +135,16 @@ pub struct Invocation {
 pub struct Scan {
     pub invocations: Vec<Invocation>,
     pub opaque: Vec<Opaque>,
+    /// True when `command` is a single simple command and nothing else --
+    /// no operator (`;`, `&&`, `||`, `|`), redirect, substitution, heredoc,
+    /// or opaque sibling part -- so it resolved to exactly one invocation
+    /// and left nothing unseen (FR-CMD-008). A rewrite Decision replaces
+    /// the whole command string, so route only rewrites when this is
+    /// `true`; otherwise it would silently drop whatever else the command
+    /// did. `false` by default (`Scan::default()`), the fail-closed
+    /// direction: a caller that never ran `scan` gets "not provably
+    /// atomic," not a false claim of safety.
+    pub is_single_simple_command: bool,
 }
 
 /// A malformed command. `scan` returns this instead of a partial [`Scan`]
