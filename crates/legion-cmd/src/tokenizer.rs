@@ -80,25 +80,32 @@ mod tables {
     }
 
     pub(super) struct Tables {
-        wrappers: Vec<WrapperSpec>,
-        shells: Vec<&'static str>,
-        interpreters: Vec<(&'static str, InterpreterSpec)>,
-        script_extensions: Vec<&'static str>,
+        wrappers: &'static [WrapperSpec],
+        shells: &'static [&'static str],
+        interpreters: &'static [(&'static str, InterpreterSpec)],
+        script_extensions: &'static [&'static str],
         /// Names that make the resolver treat their whole argument list as
         /// an unparsed `Opaque::Eval` region (FR-CMD-007).
-        eval_names: Vec<&'static str>,
+        eval_names: &'static [&'static str],
         /// Names that make the resolver treat their argument as an
         /// `Opaque::Sourced` file or substitution (FR-CMD-007).
-        source_names: Vec<&'static str>,
+        source_names: &'static [&'static str],
         /// The name whose `-exec`/`-execdir` argument spec the resolver
         /// follows as a nested command (FR-CMD-007's `find` case).
         find_name: &'static str,
     }
 
-    impl Default for Tables {
-        fn default() -> Self {
+    /// The tokenizer's whole tool-knowledge table, built once as a
+    /// compile-time constant so [`scan`](super::scan) borrows it instead
+    /// of reallocating roughly twenty `Vec`s per call -- RESEARCH-CMD-
+    /// bounded-tokenizer measured the scanner at p99 12 microseconds per
+    /// command, a budget a per-call allocation ate into for no reason.
+    pub(super) static TABLES: Tables = Tables::new();
+
+    impl Tables {
+        const fn new() -> Self {
             Self {
-                wrappers: vec![
+                wrappers: &[
                     WrapperSpec {
                         name: "env",
                         value_flags: &["-u", "-C", "-P", "-chdir"],
@@ -272,8 +279,8 @@ mod tables {
                         subcommand_gate: Some(&["exec"]),
                     },
                 ],
-                shells: vec!["sh", "bash", "zsh", "ksh", "dash"],
-                interpreters: vec![
+                shells: &["sh", "bash", "zsh", "ksh", "dash"],
+                interpreters: &[
                     (
                         "python",
                         InterpreterSpec {
@@ -345,11 +352,11 @@ mod tables {
                         },
                     ),
                 ],
-                script_extensions: vec![
+                script_extensions: &[
                     ".sh", ".bash", ".py", ".rb", ".js", ".mjs", ".cjs", ".pl", ".php", ".lua",
                 ],
-                eval_names: vec!["eval"],
-                source_names: vec!["source", "."],
+                eval_names: &["eval"],
+                source_names: &["source", "."],
                 find_name: "find",
             }
         }
@@ -506,12 +513,11 @@ const MAX_DEPTH: u8 = 2;
 pub fn scan(command: &str) -> Result<Scan, ScanError> {
     let chars: Vec<char> = command.chars().collect();
     let byte_offsets: Vec<usize> = char_byte_offsets(command);
-    let tables = Tables::default();
     let mut ctx = ScanCtx {
         chars: &chars,
         byte_offsets: &byte_offsets,
         end_byte: command.len(),
-        tables: &tables,
+        tables: &tables::TABLES,
         invocations: Vec::new(),
         opaque: Vec::new(),
     };
@@ -632,9 +638,10 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
 
     /// Drives the whole list: repeatedly skips separators, reads one
     /// simple command, classifies it, then looks at what follows to decide
-    /// the next command's [`Position`]. Equivalent to
-    /// [`Self::run_as`]-with-`None`, kept as its own name since it is the
-    /// common entry point ([`scan`] and subshell groups).
+    /// the next command's [`Position`]. Used at the top level ([`scan`])
+    /// and for subshell groups, where each command's own position must be
+    /// derived from what precedes it rather than forced to a single
+    /// label -- see [`Self::run_as`] for the forced-label case.
     fn run(&mut self) -> Result<(), ScanError> {
         self.run_with(None)
     }
@@ -1411,12 +1418,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                     line.push(c);
                     self.pos += 1;
                 }
-                let trimmed = if heredoc.strip_tabs {
-                    line.trim_start_matches('\t')
-                } else {
-                    line.as_str()
-                };
-                if trimmed == heredoc.delimiter {
+                if heredoc_line_closes(&line, &heredoc.delimiter, heredoc.strip_tabs) {
                     let body_end = line_start;
                     if heredoc.shell_owner {
                         if self.depth >= MAX_DEPTH {
@@ -1493,7 +1495,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                 }
                 WrapperMatch::CommandLine { line_word } => {
                     if let Some(line) = line_word {
-                        self.scan_wrapper_command_line(&line.text)?;
+                        self.scan_command_line_as(&line.text, Position::Wrapper)?;
                     } else {
                         self.ctx.opaque.push(Opaque::DynamicCommand);
                     }
@@ -1518,7 +1520,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
 
         if self.ctx.tables.shell(&binary).is_some() {
             if let Some(script_arg) = find_flag_value(&words[1..], "-c") {
-                self.scan_inline_shell(&script_arg.text)?;
+                self.scan_command_line_as(&script_arg.text, Position::InlineShell)?;
                 return Ok(());
             }
             if words[1..].iter().any(|w| !w.text.starts_with('-')) {
@@ -1599,10 +1601,10 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
     }
 
     /// Parses `script` as a new command list at `depth + 1`, labeling
-    /// every invocation found with `label`. Shared by
-    /// [`Self::scan_inline_shell`] (`sh -c` / `bash -c`, labeled
-    /// `InlineShell`) and [`Self::scan_wrapper_command_line`] (`env -S`,
-    /// labeled `Wrapper`), which differ only in that label.
+    /// every invocation found with `label`: `sh -c` / `bash -c` labels it
+    /// `InlineShell`, `env -S` labels it `Wrapper` since `env` (not a
+    /// shell) is doing the unwrapping. Both are a whitespace/quote-split
+    /// command line embedded in one argument, structurally the same shape.
     fn scan_command_line_as(&mut self, script: &str, label: Position) -> Result<(), ScanError> {
         if self.depth >= MAX_DEPTH {
             self.ctx.opaque.push(Opaque::TooDeep);
@@ -1625,20 +1627,6 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         self.ctx.invocations.extend(nested_ctx.invocations);
         self.ctx.opaque.extend(nested_ctx.opaque);
         Ok(())
-    }
-
-    /// Parses the string argument of `sh -c` / `bash -c` as a new command
-    /// list at `depth + 1`, labeling every invocation found `InlineShell`.
-    fn scan_inline_shell(&mut self, script: &str) -> Result<(), ScanError> {
-        self.scan_command_line_as(script, Position::InlineShell)
-    }
-
-    /// `env -S "<command line>"`: the value is a whitespace/quote-split
-    /// command line env will itself run, structurally the same shape as
-    /// `sh -c`, labeled `Wrapper` since `env` (not a shell) is doing the
-    /// unwrapping.
-    fn scan_wrapper_command_line(&mut self, script: &str) -> Result<(), ScanError> {
-        self.scan_command_line_as(script, Position::Wrapper)
     }
 
     /// Like [`run`](Self::run), but every command found at this level is
@@ -1665,7 +1653,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
             let command = self.read_simple_command(position)?;
             if let Some(command) = command {
                 match label {
-                    Some(forced) => self.classify_with_label(command, forced)?,
+                    Some(forced) => self.classify_with(command, Some(forced))?,
                     None => self.classify(command)?,
                 }
             }
@@ -1681,24 +1669,14 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         }
     }
 
-    /// Like [`classify`](Self::classify), but forces `label` as the
-    /// position for the resolved invocation instead of deriving it from
-    /// assignment/operator context (used by regions -- substitution,
-    /// wrapper, inline shell, heredoc shell, find -exec, function body --
-    /// whose whole contents share one [`Position`] label).
-    fn classify_with_label(
-        &mut self,
-        command: SimpleCommand,
-        label: Position,
-    ) -> Result<(), ScanError> {
-        self.classify_with(command, Some(label))
-    }
-
-    /// Shared by [`Self::classify`] and [`Self::classify_with_label`]:
-    /// splits off leading assignments, then resolves the remaining words
+    /// Splits off leading assignments, then resolves the remaining words
     /// at either a forced `label` or, when `label` is `None`, at
     /// `Position::AfterAssignment` (an assignment prefix was stripped) or
-    /// the command's own recorded position.
+    /// the command's own recorded position. Shared by [`Self::classify`]
+    /// (label `None`) and [`Self::run_with`]'s forced-label branch (used
+    /// by regions -- substitution, wrapper, inline shell, heredoc shell,
+    /// find -exec, function body -- whose whole contents share one
+    /// [`Position`] label).
     fn classify_with(
         &mut self,
         command: SimpleCommand,
@@ -1768,6 +1746,36 @@ fn find_flag_value<'a>(words: &'a [Word], flag: &str) -> Option<&'a Word> {
     None
 }
 
+/// Skips a single-quoted span opened at `chars[start]` (the opening `'`),
+/// returning the index just past the closing quote, or `None` if `end` is
+/// reached first. Shared by [`find_substitution_end`] and [`find_balanced`]
+/// so the two scans cannot disagree on where a single-quoted span ends.
+fn skip_single_quoted(chars: &[char], start: usize, end: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < end && chars[i] != '\'' {
+        i += 1;
+    }
+    if i < end { Some(i + 1) } else { None }
+}
+
+/// Skips a double-quoted span opened at `chars[start]` (the opening `"`),
+/// returning the index just past the closing quote, or the overrun index
+/// (used for the error offset) if `end` is reached first. Shared by
+/// [`find_substitution_end`] and [`find_balanced`] so the two scans cannot
+/// disagree on where a double-quoted span ends, including its
+/// backslash-escaping rule.
+fn skip_double_quoted(chars: &[char], start: usize, end: usize) -> Result<usize, usize> {
+    let mut i = start + 1;
+    while i < end {
+        match chars[i] {
+            '"' => break,
+            '\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    if i < end { Ok(i + 1) } else { Err(i) }
+}
+
 /// Finds the byte offset of the `)` matching a `$(` / `<(` / `>(` opened at
 /// `open` (used for the error message), scanning `chars[start..end]`.
 /// Handles nested parens, quotes, and skips heredoc bodies as literal text
@@ -1784,28 +1792,12 @@ fn find_substitution_end(
     while i < end {
         match ctx.chars[i] {
             '\'' => {
-                i += 1;
-                while i < end && ctx.chars[i] != '\'' {
-                    i += 1;
-                }
-                if i >= end {
-                    return Err(ScanError::UnterminatedSingleQuote(ctx.byte_at(i)));
-                }
-                i += 1;
+                i = skip_single_quoted(ctx.chars, i, end)
+                    .ok_or_else(|| ScanError::UnterminatedSingleQuote(ctx.byte_at(end)))?;
             }
             '"' => {
-                i += 1;
-                while i < end {
-                    match ctx.chars[i] {
-                        '"' => break,
-                        '\\' => i += 2,
-                        _ => i += 1,
-                    }
-                }
-                if i >= end {
-                    return Err(ScanError::UnterminatedDoubleQuote(ctx.byte_at(i)));
-                }
-                i += 1;
+                i = skip_double_quoted(ctx.chars, i, end)
+                    .map_err(|overrun| ScanError::UnterminatedDoubleQuote(ctx.byte_at(overrun)))?;
             }
             '\\' => {
                 i += 2;
@@ -1828,6 +1820,21 @@ fn find_substitution_end(
         }
     }
     Err(ScanError::UnterminatedSubstitution(open))
+}
+
+/// True when `line` is the line that closes a heredoc opened with
+/// `delimiter`, applying the `<<-` tab-stripping rule when `strip_tabs` is
+/// set. Shared by [`ListParser::drain_pending_heredocs`] (a heredoc
+/// consumed as real input) and [`skip_heredoc_as_literal`] (one skipped as
+/// literal text inside a substitution), so the two heredoc readers cannot
+/// drift on what counts as a closing line.
+fn heredoc_line_closes(line: &str, delimiter: &str, strip_tabs: bool) -> bool {
+    let trimmed = if strip_tabs {
+        line.trim_start_matches('\t')
+    } else {
+        line
+    };
+    trimmed == delimiter
 }
 
 /// Skips a `<<DELIM`/`<<'DELIM'`/`<<-DELIM` heredoc as literal text,
@@ -1891,12 +1898,7 @@ fn skip_heredoc_as_literal(ctx: &ScanCtx, at: usize, end: usize) -> Result<usize
             line.push(ctx.chars[i]);
             i += 1;
         }
-        let trimmed = if strip_tabs {
-            line.trim_start_matches('\t')
-        } else {
-            line.as_str()
-        };
-        if trimmed == delimiter {
+        if heredoc_line_closes(&line, &delimiter, strip_tabs) {
             if i < end {
                 i += 1;
             }
@@ -1914,10 +1916,13 @@ fn skip_heredoc_as_literal(ctx: &ScanCtx, at: usize, end: usize) -> Result<usize
 
 /// Finds the byte offset of `close_ch` matching an `open_ch` already
 /// consumed at `open`, scanning `chars[start..end]` and skipping quoted
-/// text. Shared by [`find_balanced_paren`] and [`find_balanced_brace`],
-/// which differ only in which character pair they balance; both report
+/// text (via the same [`skip_single_quoted`]/[`skip_double_quoted`] helpers
+/// [`find_substitution_end`] uses, so the two never disagree on where a
+/// quote ends). Unlike a substitution, an unterminated quote here is not
+/// itself reported: the outer loop simply runs out and reports
 /// [`ScanError::UnbalancedParen`], the only such variant `ScanError`
-/// defines.
+/// defines. Shared by [`find_balanced_paren`] and [`find_balanced_brace`],
+/// which differ only in which character pair they balance.
 fn find_balanced(
     ctx: &ScanCtx,
     start: usize,
@@ -1931,22 +1936,10 @@ fn find_balanced(
     while i < end {
         match ctx.chars[i] {
             '\'' => {
-                i += 1;
-                while i < end && ctx.chars[i] != '\'' {
-                    i += 1;
-                }
-                i += 1;
+                i = skip_single_quoted(ctx.chars, i, end).unwrap_or(end);
             }
             '"' => {
-                i += 1;
-                while i < end {
-                    match ctx.chars[i] {
-                        '"' => break,
-                        '\\' => i += 2,
-                        _ => i += 1,
-                    }
-                }
-                i += 1;
+                i = skip_double_quoted(ctx.chars, i, end).unwrap_or_else(|overrun| overrun);
             }
             c if c == open_ch => {
                 depth += 1;
@@ -2342,6 +2335,25 @@ mod tests {
     fn unterminated_quote_is_an_error() {
         let result = scan("grep -n 'oops src");
         assert!(matches!(result, Err(ScanError::UnterminatedSingleQuote(_))));
+    }
+
+    #[test]
+    fn unterminated_quote_inside_substitution_is_reported() {
+        // find_substitution_end reports an unterminated quote directly.
+        let result = scan("echo $(grep -n 'oops src)");
+        assert!(matches!(result, Err(ScanError::UnterminatedSingleQuote(_))));
+    }
+
+    #[test]
+    fn unterminated_quote_inside_brace_group_is_unbalanced() {
+        // find_balanced (used for function bodies/brace groups) does not
+        // report the unterminated quote itself: it runs past it and the
+        // outer scan reports the brace as never closing instead. This is
+        // the documented divergence from find_substitution_end -- the two
+        // callers of the shared quote-skip helpers choose different
+        // errors on purpose, not by accident.
+        let result = scan("foo() { echo 'oops");
+        assert!(matches!(result, Err(ScanError::UnbalancedParen(_))));
     }
 
     #[test]
