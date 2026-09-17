@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use crate::decision::{
     Context, DecidingEntry, Decision, Facts, Lookup, ProxyReason, Routed, ToolCall,
 };
-use crate::policy::{Family, MatchInput, Policy, RequiredLookup, Rule, ToolKind, ToolRules};
+use crate::policy::{
+    Family, MatchInput, Policy, RequiredLookup, Rule, SymJob, SymJobMatcher, ToolKind, ToolRules,
+};
 use crate::tokenizer::{self, Invocation, Opaque, Scan};
 
 /// The message every FR-CMD-016 default carries, so the agent always sees
@@ -229,13 +231,13 @@ fn opaque_part() -> (Decision, DecidingEntry) {
 /// lists a job's more specific match before a broader one so the more
 /// specific job wins when both would otherwise match the same command.
 fn find_sym_job(
-    sym_jobs: &[crate::policy::SymJob],
+    sym_jobs: &[SymJob],
     invocations: &[Invocation],
     opaque: &[Opaque],
 ) -> Option<(String, String, String)> {
     for job in sym_jobs {
         match &job.matcher {
-            crate::policy::SymJobMatcher::Invocation { binary, predicate } => {
+            SymJobMatcher::Invocation { binary, predicate } => {
                 let matched = invocations.iter().find(|inv| {
                     &inv.binary == binary && predicate.matches(MatchInput::Args(&inv.args))
                 });
@@ -244,7 +246,7 @@ fn find_sym_job(
                     return Some((job.id.clone(), job.sym_command.clone(), description));
                 }
             }
-            crate::policy::SymJobMatcher::InterpreterPatterns(patterns) => {
+            SymJobMatcher::InterpreterPatterns(patterns) => {
                 // `parse_policy` already rejects a sym job with an empty
                 // `interpreter_patterns` list (`PolicyError::EmptySymPatterns`),
                 // so every job reaching here has at least one pattern to

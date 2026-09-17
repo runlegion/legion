@@ -97,16 +97,8 @@ fn grep_on_a_single_named_file_is_not_a_sym_job() {
     assert!(matches!(routed.decision, Decision::Allow { .. }));
 }
 
-// -- rg/ag: a second, targeted recall pass on #1227's invocation sym jobs.
-// rg/ag recurse from a directory by default with no flag, so the shape
-// that matters is the last operand, not a recursive flag. Measured on the
-// real corpus: a bare "." (already covered) and a directory-looking last
-// operand together outnumbered it by roughly 10:1 and hand-checked clean;
-// "no path operand at all" looked material too (33 hits) but hand-checking
-// it found it firing on `rg --version` (no search at all) and on `rg
-// pattern` fed by a preceding pipe (searching piped text, not files on
-// disk) far more often than on a genuine implicit-cwd search, so that
-// shape was left out rather than forced in.
+// -- rg/ag: since they recurse from a directory by default with no flag,
+// the shape that matters is the last operand, not a recursive flag.
 
 #[test]
 fn rg_bare_dot_reaches_find_content() {

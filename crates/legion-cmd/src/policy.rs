@@ -169,21 +169,13 @@ pub enum Predicate {
     ArgAbsent(String),
     /// Some argument contains `needle` as a substring.
     OperandContains(String),
-    /// True when the invocation has a second non-flag argument (treating
-    /// the first non-flag argument as the search pattern) whose final
-    /// `/`-separated segment does not look like a single file
-    /// (`name.extension`). Built for a tool like `rg`/`ag` that recurses
-    /// from a directory by default with no `-r` flag needed, so a
-    /// directory-looking last operand -- e.g. `rg foo src` -- is content
-    /// search territory (FR-CMD-007's second recall pass on #1227) while a
-    /// file-looking one -- `rg foo src/main.rs` -- stays excluded as
-    /// single-file territory. A missing second operand does NOT match:
-    /// though `rg`/`ag` search the current directory by default when given
-    /// no path, that same shape is indistinguishable from `rg pattern` fed
-    /// by a preceding pipe (searching piped text, not files on disk) or
-    /// `rg --version` (no search at all) using args alone, and the
-    /// corpus measurement that motivated this predicate found both firing
-    /// on real commands.
+    /// Treats the first non-flag argument as the search pattern. Matches
+    /// when a later non-flag operand's final `/`-separated segment does
+    /// not look like `name.extension`. A missing later operand does not
+    /// match: args alone cannot tell a bare current-directory search apart
+    /// from piped input or a flag like `--version`. A flag's value word
+    /// can be miscounted as an operand (accepted, as with
+    /// [`Predicate::OperandContains`]).
     TargetLooksLikeDirectory,
     /// The named top-level JSON field, read as a string, equals `equals`.
     Field {
@@ -254,24 +246,7 @@ impl Predicate {
     }
 }
 
-/// Implements [`Predicate::TargetLooksLikeDirectory`]: treats the first
-/// non-flag argument as the search pattern and, if a second non-flag
-/// argument exists, checks whether its final path segment has a
-/// `name.extension` shape. No second operand at all does NOT match, even
-/// though a tool like `rg`/`ag` recurses from the current directory by
-/// default when given no path -- measuring this predicate's "no operand"
-/// case on a real corpus (#1227's second recall pass) found it firing on
-/// `rg --version` (no pattern, no search at all) and on `rg pattern` fed
-/// by a preceding pipe (`git branch -a | rg 1058`, searching piped text,
-/// not files on disk, the same territory `cat f | grep foo` is already
-/// excluded from). `Predicate` sees only args, not tokenizer `Position`,
-/// so it cannot tell an implicit-cwd search apart from either of those --
-/// requiring an explicit second operand is what keeps this predicate from
-/// matching them. This is a naive, args-only check consistent with the
-/// rest of `Predicate` -- it does not know which flags consume a
-/// following value word, so a flag argument (e.g. `--glob '*.rs'`) can
-/// itself be miscounted as an operand. That is an accepted imprecision,
-/// the same kind `OperandContains` already carries.
+/// Implements [`Predicate::TargetLooksLikeDirectory`].
 fn target_looks_like_directory(args: &[String]) -> bool {
     let mut operands = args.iter().filter(|a| !a.starts_with('-'));
     let _pattern = operands.next();
