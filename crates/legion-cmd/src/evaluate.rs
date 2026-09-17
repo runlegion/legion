@@ -140,28 +140,35 @@ fn bash_tool_rules(
 /// so a global option's value is never mistaken for the subcommand.
 /// `None` when no non-flag argument remains (or exists at all) --
 /// `binary` was invoked with no subcommand.
+/// The resolved subcommand word (if any) and whether that resolution is
+/// doubtful: `true` when at least one flag was skipped before settling on
+/// the verb that was not in `binary`'s declared `global_value_options`,
+/// meaning an unlisted option could have consumed the next word as its
+/// own value rather than that word being the real subcommand.
 fn subcommand_word<'a>(
     binaries: &BTreeMap<String, BinaryOptions>,
     inv: &'a Invocation,
-) -> Option<&'a str> {
+) -> (Option<&'a str>, bool) {
     let value_options: &[String] = binaries
         .get(&inv.binary)
         .map(|b| b.global_value_options.as_slice())
         .unwrap_or(&[]);
     let mut index = 0;
+    let mut doubtful = false;
     while index < inv.args.len() {
         let arg = &inv.args[index];
         if arg.starts_with('-') {
-            index += if value_options.iter().any(|opt| opt == arg) {
-                2
+            if value_options.iter().any(|opt| opt == arg) {
+                index += 2;
             } else {
-                1
-            };
+                doubtful = true;
+                index += 1;
+            }
             continue;
         }
-        return Some(arg);
+        return (Some(arg), doubtful);
     }
-    None
+    (None, doubtful)
 }
 
 /// Finds the family governing `inv`, trying the verb-scoped two-word key
@@ -171,28 +178,33 @@ fn subcommand_word<'a>(
 /// subcommand word is found by skipping `binary`'s own global value
 /// options (e.g. `git -C /tmp push` resolves to `"git push"`, not the
 /// undefined `"git -C"` a naive first-argument check would produce).
+/// Also returns whether that resolution is doubtful (see
+/// [`subcommand_word`]) -- the caller decides whether an unresolved,
+/// doubtful call is worth failing closed over.
 fn find_family<'p>(
     families: &'p BTreeMap<String, Family>,
     binaries: &BTreeMap<String, BinaryOptions>,
     inv: &Invocation,
-) -> Option<&'p Family> {
-    if let Some(verb) = subcommand_word(binaries, inv) {
+) -> (Option<&'p Family>, bool) {
+    let (verb, doubtful) = subcommand_word(binaries, inv);
+    if let Some(verb) = verb {
         let two_word = format!("{} {verb}", inv.binary);
         if let Some(family) = families.get(&two_word) {
-            return Some(family);
+            return (Some(family), doubtful);
         }
     }
-    families.get(&inv.binary)
+    (families.get(&inv.binary), doubtful)
 }
 
 /// True when `families` governs at least one subcommand of `inv.binary`
 /// (a key of the form `"<binary> <verb>"`) and that verb literally
-/// appears somewhere in `inv.args` -- even though [`find_family`] could
-/// not resolve a family for this call (e.g. an unlisted global option
-/// confused [`subcommand_word`] into treating that option's value as the
-/// subcommand). Used to fail closed rather than fall through to the
-/// no-managed-binary allow default when a governed verb is plainly
-/// present but not where the resolver expected it (FR-CMD-016).
+/// appears somewhere in `inv.args`. Consulted only when [`find_family`]'s
+/// resolution came back both unresolved and doubtful (an unlisted global
+/// option could have consumed the real verb as its own value, e.g.
+/// `git --unlisted-opt value push`) -- an unresolved but *confident*
+/// resolution (the verb was found with no doubt, e.g. `git branch -d
+/// push`, a branch named `push`) is trusted and never fails closed on an
+/// unrelated word (FR-CMD-016).
 fn governed_subcommand_present(families: &BTreeMap<String, Family>, inv: &Invocation) -> bool {
     let prefix = format!("{} ", inv.binary);
     families.keys().any(|key| {
@@ -207,19 +219,26 @@ fn evaluate_invocation(
     inv: &Invocation,
     ctx: &Context,
 ) -> (Decision, DecidingEntry) {
-    if let Some(family) = find_family(families, binaries, inv) {
+    let (family, resolution_is_doubtful) = find_family(families, binaries, inv);
+    if let Some(family) = family {
         return evaluate_rules(&family.rules, MatchInput::Args(&inv.args), ctx);
     }
-    if governed_subcommand_present(families, inv) {
-        // FR-CMD-016: a governed subcommand word is present but the
-        // family resolver could not confirm it -> fail closed, deny.
+    if resolution_is_doubtful && governed_subcommand_present(families, inv) {
+        // FR-CMD-016: the subcommand resolver skipped an unlisted flag
+        // before settling on a verb, so that verb could really be a
+        // skipped option's value -- and a governed verb is plainly
+        // present in the args anyway. Fail closed, deny, rather than
+        // trust a resolution that was already in doubt.
         return (
             deny_default(default_messages::UNRESOLVED_MANAGED_RULE),
             DecidingEntry::Default,
         );
     }
     // FR-CMD-016: no managed binary and no matching rule -> allow,
-    // surfaced to the agent.
+    // surfaced to the agent. This also covers a confident resolution that
+    // simply named an ungoverned verb (e.g. `git status`, or `push` as a
+    // `git branch -d push` operand, not a subcommand) -- no reason to
+    // second-guess a resolution nothing cast doubt on.
     (
         allow_default(default_messages::NO_MANAGED_BINARY),
         DecidingEntry::Default,

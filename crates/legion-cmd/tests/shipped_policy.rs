@@ -410,6 +410,32 @@ fn git_with_an_unlisted_global_flag_still_fails_closed_to_deny() {
 }
 
 #[test]
+fn git_grep_option_naming_a_governed_verb_still_allows() {
+    // subcommand_word finds "log" as the very first argument -- no flag
+    // was skipped, so the resolution is confident, not doubtful. "push"
+    // only appears as --grep's search text, not a real subcommand, so
+    // the fail-closed net must not fire on it.
+    let routed = route(
+        &policy(),
+        &bash_call("git log --grep push"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
+#[test]
+fn git_branch_operand_naming_a_governed_verb_still_allows() {
+    // Same shape: "branch" resolves confidently as the first argument,
+    // and "push" here is a branch name being deleted, not a subcommand.
+    let routed = route(
+        &policy(),
+        &bash_call("git branch -d push"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
+#[test]
 fn chmod_777_denies() {
     assert_eq!(deny_instead("chmod 777 x"), "chmod 755");
 }
