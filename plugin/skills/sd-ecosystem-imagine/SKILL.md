@@ -191,7 +191,7 @@ kind of answer has an owner:
   answer that overturns it is `abandoned` at 0.0. The redraw itself never witnesses; it
   is the same step judging its own stake.
 - **Entries sent to the operator** are witnessed by the conductor at the ecosystem
-  revision that records the ruling (sd-service-design, "When the intent revises"): the
+  revision that records the ruling (this skill, "A redraw revises in place"): the
   recommendation accepted is `shipped` at 1.0, accepted with changes `scoped-down` at
   0.5, rejected `abandoned` at 0.0.
 
