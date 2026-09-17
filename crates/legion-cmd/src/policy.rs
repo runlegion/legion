@@ -79,6 +79,15 @@ pub enum PolicyError {
     /// A sym job's `invocation` matcher names an empty `binary`.
     #[error("{pointer}: sym job's invocation matcher must name a non-empty binary")]
     EmptySymJobBinary { pointer: String },
+
+    /// A predicate uses a leaf kind (recursing through `all`/`any`/`not`)
+    /// that does not belong in its context: an `Args` predicate
+    /// (`arg_equals`, `arg_absent`, `operand_contains`,
+    /// `target_looks_like_directory`) on a Fields rule, or a `Field`/
+    /// `field_contains` predicate on a Bash family rule or a sym job's
+    /// invocation matcher.
+    #[error("{pointer}: {message}")]
+    MismatchedPredicateKind { pointer: String, message: String },
 }
 
 /// The tool kinds the policy can route on (FR-CMD-011). A `Bash` call
@@ -117,11 +126,30 @@ impl ToolKind {
 
 /// One tool kind's rules (FR-CMD-011). `Bash` is organized by managed-binary
 /// family, since a command string can name any binary; the rest route on
-/// their own fields with one flat rule list.
+/// their own fields with one flat rule list. `binaries` names each
+/// managed binary's own global options that take a separate value word
+/// (e.g. `git -C <dir>`, `gh --repo <owner/repo>`), so the evaluator can
+/// skip past them to find the real subcommand word instead of hard-coding
+/// per-binary option knowledge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolRules {
-    Bash { families: BTreeMap<String, Family> },
-    Fields { rules: Vec<Rule> },
+    Bash {
+        families: BTreeMap<String, Family>,
+        binaries: BTreeMap<String, BinaryOptions>,
+    },
+    Fields {
+        rules: Vec<Rule>,
+    },
+}
+
+/// A managed binary's own global options that take a separate value word
+/// (FR-CMD-011), read by the evaluator to find a compound binary's real
+/// subcommand word (e.g. skipping `-C <dir>` in `git -C /tmp push`)
+/// rather than mistaking the option's value for the subcommand.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct BinaryOptions {
+    #[serde(default)]
+    pub global_value_options: Vec<String>,
 }
 
 /// One managed-binary family's argument-level rules (FR-CMD-011). The key
@@ -246,6 +274,60 @@ impl Predicate {
     }
 }
 
+/// Which kind of input a predicate is allowed to read, checked once at
+/// parse time rather than left to `Predicate::matches`'s silent
+/// wrong-kind-never-matches behavior -- that behavior is correct at
+/// evaluation time (a policy author can combine predicates freely without
+/// a panic), but a predicate of the wrong kind for its rule is a policy
+/// authoring mistake that should fail to parse, not silently match
+/// everything (a `Not` over a wrong-kind predicate, e.g. `Not(Field {..})`
+/// on a Bash rule, always evaluates to `true`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PredicateContext {
+    /// A Bash family rule or a sym job's invocation matcher: may use
+    /// `Always`, `ArgEquals`, `ArgAbsent`, `OperandContains`, or
+    /// `TargetLooksLikeDirectory`.
+    Args,
+    /// A Fields rule: may use `Always`, `Field`, or `FieldContains`.
+    Fields,
+}
+
+/// Validates that every leaf of `predicate` -- recursing through `All`,
+/// `Any`, and `Not` -- belongs to `context`. `Always` is valid in either
+/// context.
+fn validate_predicate_context(
+    pointer: &str,
+    context: PredicateContext,
+    predicate: &Predicate,
+) -> Result<(), PolicyError> {
+    match predicate {
+        Predicate::Always => Ok(()),
+        Predicate::ArgEquals(_)
+        | Predicate::ArgAbsent(_)
+        | Predicate::OperandContains(_)
+        | Predicate::TargetLooksLikeDirectory => match context {
+            PredicateContext::Args => Ok(()),
+            PredicateContext::Fields => Err(PolicyError::MismatchedPredicateKind {
+                pointer: pointer.to_string(),
+                message: "a Fields rule may only use \"always\", \"field\", or \"field_contains\""
+                    .to_string(),
+            }),
+        },
+        Predicate::Field { .. } | Predicate::FieldContains { .. } => match context {
+            PredicateContext::Fields => Ok(()),
+            PredicateContext::Args => Err(PolicyError::MismatchedPredicateKind {
+                pointer: pointer.to_string(),
+                message: "a Bash family rule or sym job invocation matcher may only use \"always\", \"arg_equals\", \"arg_absent\", \"operand_contains\", or \"target_looks_like_directory\""
+                    .to_string(),
+            }),
+        },
+        Predicate::All(parts) | Predicate::Any(parts) => parts
+            .iter()
+            .try_for_each(|part| validate_predicate_context(pointer, context, part)),
+        Predicate::Not(inner) => validate_predicate_context(pointer, context, inner),
+    }
+}
+
 /// Implements [`Predicate::TargetLooksLikeDirectory`].
 fn target_looks_like_directory(args: &[String]) -> bool {
     let mut operands = args.iter().filter(|a| !a.starts_with('-'));
@@ -365,6 +447,8 @@ struct RawPolicy {
 enum RawToolRules {
     Bash {
         families: BTreeMap<String, RawFamily>,
+        #[serde(default)]
+        binaries: BTreeMap<String, BinaryOptions>,
     },
     Fields {
         rules: Vec<RawRule>,
@@ -443,6 +527,11 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
                         pointer: format!("{job_pointer}/invocation/binary"),
                     });
                 }
+                validate_predicate_context(
+                    &format!("{job_pointer}/invocation/predicate"),
+                    PredicateContext::Args,
+                    &invocation.predicate,
+                )?;
                 SymJobMatcher::Invocation {
                     binary: invocation.binary,
                     predicate: invocation.predicate,
@@ -487,15 +576,20 @@ fn convert_tool_rules(
     raw: RawToolRules,
 ) -> Result<ToolRules, PolicyError> {
     match (kind, raw) {
-        (ToolKind::Bash, RawToolRules::Bash { families }) => {
+        (ToolKind::Bash, RawToolRules::Bash { families, binaries }) => {
             let mut converted = BTreeMap::new();
             for (name, raw_family) in families {
                 let family_pointer = format!("{pointer}/families/{name}");
-                let rules = convert_rules(&format!("{family_pointer}/rules"), raw_family.rules)?;
+                let rules = convert_rules(
+                    &format!("{family_pointer}/rules"),
+                    PredicateContext::Args,
+                    raw_family.rules,
+                )?;
                 converted.insert(name, Family { rules });
             }
             Ok(ToolRules::Bash {
                 families: converted,
+                binaries,
             })
         }
         (ToolKind::Bash, RawToolRules::Fields { .. }) => {
@@ -505,7 +599,7 @@ fn convert_tool_rules(
             })
         }
         (_, RawToolRules::Fields { rules }) => Ok(ToolRules::Fields {
-            rules: convert_rules(&format!("{pointer}/rules"), rules)?,
+            rules: convert_rules(&format!("{pointer}/rules"), PredicateContext::Fields, rules)?,
         }),
         (_, RawToolRules::Bash { .. }) => Err(PolicyError::MismatchedToolRulesShape {
             pointer: pointer.to_string(),
@@ -516,12 +610,21 @@ fn convert_tool_rules(
     }
 }
 
-fn convert_rules(pointer: &str, raw_rules: Vec<RawRule>) -> Result<Vec<Rule>, PolicyError> {
+fn convert_rules(
+    pointer: &str,
+    context: PredicateContext,
+    raw_rules: Vec<RawRule>,
+) -> Result<Vec<Rule>, PolicyError> {
     raw_rules
         .into_iter()
         .enumerate()
         .map(|(index, raw_rule)| {
             let rule_pointer = format!("{pointer}/{index}");
+            validate_predicate_context(
+                &format!("{rule_pointer}/predicate"),
+                context,
+                &raw_rule.predicate,
+            )?;
             let (decision, needs_operator) =
                 convert_decision(&format!("{rule_pointer}/outcome"), &raw_rule.outcome)?;
             Ok(Rule {
@@ -695,7 +798,7 @@ mod tests {
         assert!(!policy.is_empty());
         assert_eq!(policy.sym_jobs.len(), 1);
         match policy.tools.get(&ToolKind::Bash) {
-            Some(ToolRules::Bash { families }) => assert!(families.contains_key("git push")),
+            Some(ToolRules::Bash { families, .. }) => assert!(families.contains_key("git push")),
             other => panic!("expected Bash families, got {other:?}"),
         }
         match policy.tools.get(&ToolKind::Edit) {
@@ -774,7 +877,7 @@ mod tests {
         ]}}}}}"#;
         let policy = parse_policy(text).expect("valid proxy reason should parse");
         match policy.tools.get(&ToolKind::Bash) {
-            Some(ToolRules::Bash { families }) => {
+            Some(ToolRules::Bash { families, .. }) => {
                 let rule = &families.get("gh").expect("gh family").rules[0];
                 assert_eq!(
                     rule.decision,
@@ -950,6 +1053,97 @@ mod tests {
         ]}}}}}"#;
         let err = parse_policy(text).unwrap_err();
         assert!(matches!(err, PolicyError::InvalidOutcome { .. }));
+    }
+
+    // -- A predicate's leaf kind must fit its context (correctness review
+    // on PR #1240): a Bash/invocation predicate is Args-only, a Fields
+    // predicate is Field-only, and a `Not` over a wrong-kind predicate
+    // must not silently match everything.
+
+    #[test]
+    fn bash_rule_with_a_field_predicate_is_rejected_with_pointer() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh": {"rules": [
+            {"id": "r1", "predicate": {"field": {"path": "file_path", "equals": "x"}},
+             "outcome": {"kind": "allow", "note": null}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::MismatchedPredicateKind { pointer, .. } => {
+                assert_eq!(pointer, "/tools/Bash/families/gh/rules/0/predicate");
+            }
+            other => panic!("expected MismatchedPredicateKind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fields_rule_with_an_arg_equals_predicate_is_rejected_with_pointer() {
+        let text = r#"{"tools": {"Edit": {"kind": "fields", "rules": [
+            {"id": "r1", "predicate": {"arg_equals": "-r"},
+             "outcome": {"kind": "allow", "note": null}}
+        ]}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::MismatchedPredicateKind { pointer, .. } => {
+                assert_eq!(pointer, "/tools/Edit/rules/0/predicate");
+            }
+            other => panic!("expected MismatchedPredicateKind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_over_a_field_predicate_on_a_bash_rule_is_rejected() {
+        // Before this validation, `matches` on a wrong-kind predicate
+        // always returns false, so `Not` over it always returns true --
+        // a rule that silently matches every command. This must be
+        // caught at parse time instead.
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh": {"rules": [
+            {"id": "r1", "predicate": {"not": {"field": {"path": "x", "equals": "y"}}},
+             "outcome": {"kind": "allow", "note": null}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        assert!(matches!(err, PolicyError::MismatchedPredicateKind { .. }));
+    }
+
+    #[test]
+    fn field_predicate_nested_in_all_on_a_bash_rule_is_rejected() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh": {"rules": [
+            {"id": "r1", "predicate": {"all": [
+                {"arg_equals": "pr"},
+                {"field": {"path": "x", "equals": "y"}}
+            ]},
+             "outcome": {"kind": "allow", "note": null}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        assert!(matches!(err, PolicyError::MismatchedPredicateKind { .. }));
+    }
+
+    #[test]
+    fn sym_job_invocation_matcher_with_a_field_predicate_is_rejected_with_pointer() {
+        let text = r#"{"sym_jobs": [{
+            "id": "job-1",
+            "sym_command": "legion sym etc find-content",
+            "invocation": {"binary": "grep", "predicate": {"field": {"path": "x", "equals": "y"}}}
+        }]}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::MismatchedPredicateKind { pointer, .. } => {
+                assert_eq!(pointer, "/sym_jobs/0/invocation/predicate");
+            }
+            other => panic!("expected MismatchedPredicateKind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn always_predicate_is_valid_in_either_context() {
+        let bash_text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh": {"rules": [
+            {"id": "r1", "predicate": "always", "outcome": {"kind": "allow", "note": null}}
+        ]}}}}}"#;
+        parse_policy(bash_text).expect("always is valid on a Bash rule");
+
+        let fields_text = r#"{"tools": {"Edit": {"kind": "fields", "rules": [
+            {"id": "r1", "predicate": "always", "outcome": {"kind": "allow", "note": null}}
+        ]}}}"#;
+        parse_policy(fields_text).expect("always is valid on a Fields rule");
     }
 
     #[test]
