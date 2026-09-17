@@ -233,7 +233,7 @@ entry scored, take the entry's `prediction` id from the agenda, confirm it by re
 - `blocked`: leave it. No verdict was reached, the wake may still reach one, and if the
   corpus never does the orphan sweep retires a prediction that was never tested.
 - `saturated-unevidenced`: leave it, and say why in the report. Silence argues against
-  the claim without being discourse that argues against it; scoring it 0.0 would teach the
+  the claim without being discourse that disputes it; scoring it 0.0 would teach the
   estimator that silence is contradiction, the confusion the no-evidence rule exists to
   prevent.
 

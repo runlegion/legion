@@ -117,7 +117,7 @@ limits is still support), `contradicted` is `abandoned` at 0.0. A `blocked` insi
 leaves the prediction unwitnessed: no verdict was reached, the wake may still reach one,
 and a corpus that never does lets the orphan sweep retire it, which is right for a claim
 never tested. A `saturated-unevidenced` insight also leaves it unwitnessed: silence
-argues against the claim without being discourse that argues against it, and scoring it 0.0 would
+argues against the claim without being discourse that disputes it, and scoring it 0.0 would
 teach the estimator that silence is contradiction, the confusion the no-evidence rule
 exists to prevent. The discover report names each claim left unwitnessed and why.
 
