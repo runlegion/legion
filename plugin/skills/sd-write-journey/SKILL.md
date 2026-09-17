@@ -16,6 +16,11 @@ A journey is a persona moving through a real scenario, phase by phase, with what
 touch, and feel at each phase. The feelings are the part most tempting to invent, so the
 rule is structural: emotions are data.
 
+**When the customer is an agent.** For an agent persona (sd-service-design, "The customer
+may be an agent"), the journey follows the agent: its actions, the output it reads, where
+it guesses or recovers. The human behind it appears only as a thin line of outcomes --
+what they asked for and what they got -- never as touchpoints with the product.
+
 ## Procedure
 
 1. Read the inputs by id: the persona document this journey walks, the Discovery, the
