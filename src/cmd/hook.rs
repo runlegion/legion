@@ -194,7 +194,7 @@ fn build_response(payload_text: &str) -> Value {
 fn build_response_with(
     payload_text: &str,
     policy_path: Result<PathBuf, AdapterError>,
-    make_runner: impl FnOnce(String) -> Arc<dyn LookupRunner + Send + Sync>,
+    make_runner: impl FnOnce(String) -> Arc<dyn LookupRunner + Send + Sync> + Send + 'static,
 ) -> Value {
     let payload: HookPayload = match serde_json::from_str(payload_text) {
         Ok(payload) => payload,
@@ -227,15 +227,23 @@ fn build_response_with(
         tool: payload.tool_name.clone(),
         input: payload.tool_input.clone(),
     };
-    let repo = repo_from_cwd(payload.cwd.as_deref());
-    let runner = make_runner(repo.clone());
+    let cwd = payload.cwd.clone();
 
-    let repo_for_ctx = repo.clone();
+    // `repo_from_cwd` is resolved HERE, inside the deadline-bound worker,
+    // not before `decide` starts: its worktree-aware path shells out to
+    // `git rev-parse --git-common-dir`, and a slow or hung `git` must
+    // count against the same deadline as `route` and the lookup pre-pass,
+    // not run unbounded ahead of it. `make_runner` is called here too,
+    // once `repo` is known, since the runner needs it to scope its own
+    // lookups.
     let outcome = decide(settings.deadline, move || {
-        decide_inner(&policy, &call, &repo_for_ctx, runner.as_ref())
+        let repo = repo_from_cwd(cwd.as_deref());
+        let runner = make_runner(repo.clone());
+        let routed = decide_inner(&policy, &call, &repo, runner.as_ref())?;
+        Ok((routed, repo))
     });
     match outcome {
-        Ok(routed) => apply_decision(&routed, &payload, &repo, false),
+        Ok((routed, repo)) => apply_decision(&routed, &payload, &repo, false),
         Err(e) => deny_for_error(&e, Some(&payload)),
     }
 }
@@ -258,9 +266,10 @@ fn build_response_with(
 /// long-lived process (a daemon, a server loop) without adding real
 /// cancellation -- there, a leaked worker outlives the request it was
 /// spawned for and keeps consuming a thread indefinitely.
-fn decide<F>(deadline: Duration, work: F) -> Result<Routed, AdapterError>
+fn decide<T, F>(deadline: Duration, work: F) -> Result<T, AdapterError>
 where
-    F: FnOnce() -> Result<Routed, AdapterError> + Send + 'static,
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, AdapterError> + Send + 'static,
 {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -405,6 +414,13 @@ const LEGION_REPO_ENV: &str = "LEGION_REPO";
 /// instead of whatever was actually resolved, which both of those splice
 /// sites already treat as "fail closed" / "show `<repo>`" -- validating
 /// here, once, is what makes both of them safe.
+///
+/// The worktree-aware path shells out to `git`, so this function's
+/// caller MUST run it inside `decide`'s deadline-bound worker, never
+/// before `decide` starts -- a slow or hung `git` must count against the
+/// same deadline as `route` and the lookup pre-pass, not run unbounded
+/// ahead of it (`build_response_with` does this correctly: `repo` is
+/// resolved inside the closure `decide` spawns).
 fn repo_from_cwd(cwd: Option<&str>) -> String {
     let legion_repo = std::env::var(LEGION_REPO_ENV).ok();
     repo_for(legion_repo.as_deref(), cwd)
@@ -656,8 +672,8 @@ fn deny_for_error(err: &AdapterError, payload: Option<&HookPayload>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::git_in;
     use legion_cmd::{AskDetails, DenyDetails, Facts};
-    use std::path::Path;
 
     /// A `LookupRunner` that answers every query with a fixed outcome,
     /// for tests that never touch the real database/index.
@@ -678,7 +694,7 @@ mod tests {
     fn respond_with_runner(
         payload_text: &str,
         policy_text: &str,
-        make_runner: impl FnOnce(String) -> Arc<dyn LookupRunner + Send + Sync>,
+        make_runner: impl FnOnce(String) -> Arc<dyn LookupRunner + Send + Sync> + Send + 'static,
     ) -> Value {
         let dir = tempdir();
         let policy_path = dir.join("policy.json");
@@ -1228,48 +1244,5 @@ mod tests {
             "main-repo",
             "a worktree's own folder name must never leak in as the repo"
         );
-    }
-
-    /// A minimal, isolated `git` invocation for the worktree test above:
-    /// its own global/system config (never the real user config, which in
-    /// this environment has a broken commit signer) and `commit.gpgsign`
-    /// off explicitly, since `worktree add -b` needs a real commit to
-    /// branch from.
-    fn git_in(dir: &Path, args: &[&str]) {
-        let (global, system) = isolated_git_config_paths();
-        let mut full_args: Vec<&str> = vec![
-            "-c",
-            "user.name=Legion Test Fixture",
-            "-c",
-            "user.email=legion-test-fixture@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-        ];
-        full_args.extend_from_slice(args);
-        let out = std::process::Command::new("git")
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", global)
-            .env("GIT_CONFIG_SYSTEM", system)
-            .args(&full_args)
-            .output()
-            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn in {dir:?}: {e}"));
-        assert!(
-            out.status.success(),
-            "git {args:?} failed in {dir:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    fn isolated_git_config_paths() -> &'static (PathBuf, PathBuf) {
-        static ISOLATED_GIT_CONFIG: std::sync::OnceLock<(PathBuf, PathBuf)> =
-            std::sync::OnceLock::new();
-        ISOLATED_GIT_CONFIG.get_or_init(|| {
-            let dir = tempdir();
-            let global = dir.join("global.gitconfig");
-            let system = dir.join("system.gitconfig");
-            std::fs::write(&global, "").expect("write isolated global gitconfig");
-            std::fs::write(&system, "").expect("write isolated system gitconfig");
-            (global, system)
-        })
     }
 }

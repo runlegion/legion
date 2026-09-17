@@ -85,20 +85,33 @@ assert_contains "a broken binary (non-zero exit) still denies" "$OUT" '"permissi
 OUT=$(FAKE_CMD_CHECK_EMPTY=1 run_hook_with_bin "$FAKE_LEGION")
 assert_contains "a silent binary (empty stdout) still denies" "$OUT" '"permissionDecision":"deny"'
 
+# within_seconds DESC MAX_SECS -- run the rest of the pipeline via stdin,
+# asserting the elapsed wall time is at most MAX_SECS, using the shared
+# assert_eq helper (a boolean-as-string comparison, not a hand-rolled
+# PASS/FAIL count) rather than a bespoke numeric assertion.
+within_seconds() {
+  local desc="$1" max_secs="$2" elapsed="$3"
+  local verdict="too slow"
+  [ "$elapsed" -le "$max_secs" ] && verdict="within budget"
+  assert_eq "$desc (${elapsed}s elapsed, budget ${max_secs}s)" "$verdict" "within budget"
+}
+
+# -- a fast-answering binary returns well under a second, not delayed by
+#    the timeout machinery itself ---------------------------------------
+
+START=$(date +%s)
+OUT=$(run_hook_with_bin "$FAKE_LEGION")
+END=$(date +%s)
+assert_contains "a fast binary's response passes through" "$OUT" '"hookSpecificOutput"'
+within_seconds "a fast binary is not delayed by the timeout watcher" 1 "$((END - START))"
+
 # -- a hung binary is killed and denied within the configured timeout -------
 
 START=$(date +%s)
 OUT=$(FAKE_CMD_CHECK_HANG=1 LEGION_CMD_HOOK_TIMEOUT_SECS=1 run_hook_with_bin "$FAKE_LEGION")
 END=$(date +%s)
-ELAPSED=$((END - START))
 assert_contains "a hung binary still denies with a reason" "$OUT" '"permissionDecision":"deny"'
-if [ "$ELAPSED" -le 10 ]; then
-  PASS=$((PASS + 1))
-  echo "  PASS: a hung binary is killed well before its own 30s sleep finishes (${ELAPSED}s elapsed)"
-else
-  FAIL=$((FAIL + 1))
-  echo "  FAIL: a hung binary is killed well before its own 30s sleep finishes (${ELAPSED}s elapsed, expected <=10s)" >&2
-fi
+within_seconds "a hung binary is killed well before its own 30s sleep finishes" 10 "$((END - START))"
 
 # -- the wrapper itself always exits 0, even on every failure path above ----
 

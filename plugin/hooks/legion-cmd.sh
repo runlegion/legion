@@ -30,10 +30,20 @@
 STATIC_DENY='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"legion-cmd hook wrapper could not reach the legion binary -- failing closed rather than allowing an unrouted command"}}'
 
 # Seconds to wait for `legion cmd-check --hook` before killing it and
-# emitting the static deny -- well under the harness's own hook timeout
-# (see src/cmd/hook.rs's module doc), so a hung binary is backstopped
-# here rather than relying on the harness's fail-OPEN timeout behavior.
-LEGION_CMD_HOOK_TIMEOUT_SECS="${LEGION_CMD_HOOK_TIMEOUT_SECS:-8}"
+# emitting the static deny. Three numbers have to stay ordered:
+#   Rust adapter deadline (route.deadline_ms, default 7000ms = 7s, see
+#     src/cmd/hook.rs's module doc)
+#     < this wrapper's own timeout (9s: a 2s buffer over the adapter's
+#       own deadline, for process startup and stdout-serialization time
+#       the Rust deadline itself does not cover)
+#     < the harness's configured hook timeout for this entry in
+#       hooks.json, once #1236 registers it.
+# Today's existing Bash hook entries in hooks.json use 5-6s timeouts --
+# BELOW even the Rust adapter's own 7s deadline. #1236 (the cutover) must
+# raise this hook's own hooks.json timeout above this wrapper's 9s, not
+# merely above 7000ms, or the harness would kill (and fail OPEN on) a
+# call this wrapper was about to answer correctly.
+LEGION_CMD_HOOK_TIMEOUT_SECS="${LEGION_CMD_HOOK_TIMEOUT_SECS:-9}"
 
 resolve_legion_bin() {
   if [ -n "${LEGION_BIN:-}" ]; then
@@ -81,13 +91,45 @@ printf '%s' "$INPUT" > "$INPUT_FILE"
 
 "$LEGION_BIN_PATH" cmd-check --hook < "$INPUT_FILE" > "$OUTPUT_FILE" 2>/dev/null &
 CHILD=$!
+
+# The watcher subshell's `sleep` and `kill` are both backgrounded with the
+# SUBSHELL's own stdout/stderr redirected to /dev/null -- NOT inherited
+# from this script. Without that, killing the watcher (below, on the fast
+# path where CHILD finishes first) leaves its `sleep` orphaned and
+# running for the rest of the timeout, and an orphaned process that
+# inherited THIS SCRIPT's own stdout keeps that pipe open for its
+# remaining lifetime -- the harness reading this script's stdout blocks
+# until EOF, which does not arrive until every such holder exits.
+# Measured: without the redirect, a FAST binary's response was delayed by
+# the full configured timeout even though the binary itself answered
+# immediately, because the leftover `sleep` held the pipe open.
+#
+# `sleep` and `kill` run sequentially INSIDE one subshell (not `sleep &`
+# as a separate top-level job the subshell then `wait`s on): a subshell
+# can only `wait` on its own direct children, not a sibling the outer
+# script forked -- an earlier version of this script split them and
+# `wait`ed on the sibling from inside the subshell, which fails
+# immediately (not a child of that shell) and killed CHILD right away
+# regardless of the configured timeout. Keeping both steps as one
+# subshell's own sequential children avoids that failure mode entirely.
+#
+# On the fast path, `kill "$WATCHER"` below interrupts the subshell while
+# it is still inside its own `sleep`, orphaning that `sleep` rather than
+# killing it directly (there is no portable, job-control-free way to
+# reach a subshell's own child PID from outside it). That orphan is
+# harmless, not just tolerated: its stdout/stderr were already redirected
+# away from this script's real stdout, so it cannot block the harness --
+# it simply finishes counting down and exits on its own, well after this
+# script has already returned its answer.
 (
   sleep "$LEGION_CMD_HOOK_TIMEOUT_SECS"
   kill -TERM "$CHILD" 2>/dev/null
-) &
+) >/dev/null 2>&1 &
 WATCHER=$!
+
 wait "$CHILD" 2>/dev/null
 STATUS=$?
+
 kill "$WATCHER" 2>/dev/null
 wait "$WATCHER" 2>/dev/null
 OUTPUT=$(cat "$OUTPUT_FILE")
