@@ -2,6 +2,7 @@
 //! Domain handlers live in the sibling modules; `main.rs` owns dispatch.
 
 pub(crate) mod autonomy;
+pub(crate) mod cmd_check;
 pub(crate) mod commit;
 pub(crate) mod datadir;
 pub(crate) mod document;
@@ -1188,6 +1189,16 @@ pub(crate) enum Commands {
         /// Output as JSON instead of a human-readable table
         #[arg(long)]
         json: bool,
+    },
+
+    /// The legion-cmd router's adapter surface (#1229). Only `--hook` mode
+    /// exists today; the operator and scripting modes ship in the
+    /// cmd-check issue.
+    CmdCheck {
+        /// Read one PreToolUse hook payload (JSON) on stdin and write one
+        /// hook response (JSON) on stdout. Always exits 0 with a response.
+        #[arg(long)]
+        hook: bool,
     },
 }
 
