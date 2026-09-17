@@ -284,15 +284,23 @@ fn find_sym_job(
                     &inv.binary == binary && predicate.matches(MatchInput::Args(&inv.args))
                 });
                 if let Some(inv) = matched {
-                    if let Some(rewrite) = &job.rewrite
-                        && rewrite.translatable.covers(&inv.args)
-                    {
-                        return Some(SymJobOutcome::Rewrite {
-                            job_id: job.id.clone(),
-                            sym_command: job.sym_command.clone(),
-                        });
-                    }
-                    let description = format!("invocation of {binary}");
+                    let untranslatable = job
+                        .rewrite
+                        .as_ref()
+                        .and_then(|rewrite| rewrite.translatable.untranslatable(&inv.args));
+                    let description = match (&job.rewrite, untranslatable) {
+                        (Some(_), None) => {
+                            return Some(SymJobOutcome::Rewrite {
+                                job_id: job.id.clone(),
+                                sym_command: job.sym_command.clone(),
+                            });
+                        }
+                        (Some(_), Some(bad_arg)) => format!(
+                            "invocation of {binary}, argument {bad_arg:?} has no lossless translation to {}",
+                            job.sym_command
+                        ),
+                        (None, _) => format!("invocation of {binary}"),
+                    };
                     return Some(SymJobOutcome::Deny {
                         job_id: job.id.clone(),
                         sym_command: job.sym_command.clone(),
@@ -825,6 +833,19 @@ mod tests {
     }
 
     // -- Lossless sym-job rewrite (FR-CMD-008) -------------------------
+    //
+    // This test policy exercises the mechanism (`ArgSpec` coverage
+    // deciding Rewrite vs. Deny) with a synthetic `translatable`
+    // declaration on the real `grep` -> `legion sym etc find-content` sym
+    // job. It is not a claim that this declaration is what should ship:
+    // real `grep -r` searches the invoking shell's cwd tree and sees
+    // gitignored/hidden files, while `find-content` searches every repo
+    // in `watch.toml` and excludes both by default -- a scope and
+    // ignore-semantics gap no flag or operand count can close. Whether
+    // any real `grep` invocation is losslessly translatable at all, and
+    // what `plugin/legion-cmd/policy.json` should declare, is left to the
+    // hook-parity issue that owns which rewrite rules exist for which
+    // binaries; today it ships no `rewrite` declaration for this job.
 
     const LOSSLESS_REWRITE_POLICY: &str = r#"{
         "sym_jobs": [
@@ -890,7 +911,15 @@ mod tests {
         );
         match &routed.decision {
             Decision::Deny(details) => {
-                assert_eq!(details.instead(), "legion sym etc find-content")
+                assert_eq!(details.instead(), "legion sym etc find-content");
+                // The reason names the exact untranslatable argument, not
+                // just "something didn't translate" -- the issue's own
+                // fallback wording (FR-CMD-005's depends_on).
+                assert!(
+                    details.reason().contains("\"-l\""),
+                    "reason should name the untranslatable flag: {}",
+                    details.reason()
+                );
             }
             other => panic!("expected Deny naming sym, got {other:?}"),
         }
@@ -907,7 +936,12 @@ mod tests {
         );
         match &routed.decision {
             Decision::Deny(details) => {
-                assert_eq!(details.instead(), "legion sym etc find-content")
+                assert_eq!(details.instead(), "legion sym etc find-content");
+                assert!(
+                    details.reason().contains("\"src\""),
+                    "reason should name the untranslatable operand: {}",
+                    details.reason()
+                );
             }
             other => panic!("expected Deny naming sym, got {other:?}"),
         }

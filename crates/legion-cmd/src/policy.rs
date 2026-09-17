@@ -360,25 +360,28 @@ pub struct ArgSpec {
 }
 
 impl ArgSpec {
-    /// True when every one of `args` is covered by this declaration: each
-    /// flag must be named in `flags`, and the count of non-flag operands
-    /// must not exceed `max_operands`. This reads the specific arguments
-    /// the invocation carries, never the binary or verb (FR-CMD-008).
-    pub fn covers(&self, args: &[String]) -> bool {
+    /// The first argument in `args` this declaration does not cover, or
+    /// `None` when every one does (FR-CMD-008): each flag must be named in
+    /// `flags`, and the count of non-flag operands must not exceed
+    /// `max_operands`. This reads the specific arguments the invocation
+    /// carries, never the binary or verb -- and, on a miss, names the
+    /// exact argument so the deny built from it (FR-CMD-005) tells the
+    /// agent what to drop, not just that something was untranslatable.
+    pub fn untranslatable<'a>(&self, args: &'a [String]) -> Option<&'a str> {
         let mut operand_count = 0usize;
         for arg in args {
             if arg.starts_with('-') {
                 if !self.flags.contains(arg) {
-                    return false;
+                    return Some(arg);
                 }
             } else {
                 operand_count += 1;
                 if operand_count > self.max_operands {
-                    return false;
+                    return Some(arg);
                 }
             }
         }
-        true
+        None
     }
 
     /// True when this declaration covers nothing at all: no flag and no
@@ -1066,39 +1069,45 @@ mod tests {
         }
     }
 
-    // -- ArgSpec::covers is a function of the specific arguments, not the
-    // verb (FR-CMD-008) -----------------------------------------------------
+    // -- ArgSpec::untranslatable is a function of the specific arguments,
+    // not the verb (FR-CMD-008) ----------------------------------------
 
     #[test]
-    fn arg_spec_covers_an_invocation_within_its_declared_flags_and_operands() {
+    fn arg_spec_finds_nothing_untranslatable_within_its_declared_flags_and_operands() {
         let spec = ArgSpec {
             flags: BTreeSet::from(["-r".to_string(), "-n".to_string()]),
             max_operands: 1,
         };
-        assert!(spec.covers(&args(&["-r", "-n", "pattern"])));
+        assert_eq!(spec.untranslatable(&args(&["-r", "-n", "pattern"])), None);
     }
 
     #[test]
-    fn arg_spec_does_not_cover_a_flag_outside_its_declared_set() {
+    fn arg_spec_names_a_flag_outside_its_declared_set() {
         let spec = ArgSpec {
             flags: BTreeSet::from(["-r".to_string()]),
             max_operands: 1,
         };
         // "-l" (files-only) has no equivalent the target expresses, so an
         // invocation carrying it is not covered even though "-r" and the
-        // single operand both are.
-        assert!(!spec.covers(&args(&["-r", "-l", "pattern"])));
+        // single operand both are -- and the returned argument names it.
+        assert_eq!(
+            spec.untranslatable(&args(&["-r", "-l", "pattern"])),
+            Some("-l")
+        );
     }
 
     #[test]
-    fn arg_spec_does_not_cover_more_operands_than_declared() {
+    fn arg_spec_names_an_operand_beyond_the_declared_count() {
         let spec = ArgSpec {
             flags: BTreeSet::from(["-r".to_string()]),
             max_operands: 1,
         };
         // A second operand (e.g. a directory to search) has no declared
         // translation, even though every flag is covered.
-        assert!(!spec.covers(&args(&["-r", "pattern", "some/dir"])));
+        assert_eq!(
+            spec.untranslatable(&args(&["-r", "pattern", "some/dir"])),
+            Some("some/dir")
+        );
     }
 
     #[test]
