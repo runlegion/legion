@@ -36,6 +36,10 @@ fi
 if [ "${FAKE_CMD_CHECK_EMPTY:-}" = "1" ]; then
   exit 0
 fi
+if [ "${FAKE_CMD_CHECK_HANG:-}" = "1" ]; then
+  sleep 30
+  exit 0
+fi
 if [ "${1:-}" = "cmd-check" ] && [ "${2:-}" = "--hook" ]; then
   if [ -n "${FAKE_CMD_CHECK_RESPONSE:-}" ]; then
     printf '%s\n' "$FAKE_CMD_CHECK_RESPONSE"
@@ -80,6 +84,21 @@ assert_contains "a broken binary (non-zero exit) still denies" "$OUT" '"permissi
 
 OUT=$(FAKE_CMD_CHECK_EMPTY=1 run_hook_with_bin "$FAKE_LEGION")
 assert_contains "a silent binary (empty stdout) still denies" "$OUT" '"permissionDecision":"deny"'
+
+# -- a hung binary is killed and denied within the configured timeout -------
+
+START=$(date +%s)
+OUT=$(FAKE_CMD_CHECK_HANG=1 LEGION_CMD_HOOK_TIMEOUT_SECS=1 run_hook_with_bin "$FAKE_LEGION")
+END=$(date +%s)
+ELAPSED=$((END - START))
+assert_contains "a hung binary still denies with a reason" "$OUT" '"permissionDecision":"deny"'
+if [ "$ELAPSED" -le 10 ]; then
+  PASS=$((PASS + 1))
+  echo "  PASS: a hung binary is killed well before its own 30s sleep finishes (${ELAPSED}s elapsed)"
+else
+  FAIL=$((FAIL + 1))
+  echo "  FAIL: a hung binary is killed well before its own 30s sleep finishes (${ELAPSED}s elapsed, expected <=10s)" >&2
+fi
 
 # -- the wrapper itself always exits 0, even on every failure path above ----
 

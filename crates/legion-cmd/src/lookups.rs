@@ -32,14 +32,17 @@ pub struct RequiredQuery {
 /// `policy` declare. Empty when no rule matches, or when every matching
 /// rule declares no requirement (the shipped policy today).
 ///
-/// `Context` (which `route` reads) carries exactly one `Lookup` per kind
-/// (`recall`, `consult`), not one per rule, so a compound command whose
-/// invocations resolve to two different rules that both `require` the
-/// same kind gets one query for that kind -- from the first candidate
-/// rule (scan order) that declares it. Two governed invocations in one
-/// compound command each needing a *different* lookup query is a real
-/// but unexercised edge case: no shipped rule declares `requires` at all
-/// today.
+/// `query` is always the whole command text (or, for a non-Bash call, the
+/// whole JSON `tool_input`) -- the identical string on every
+/// `RequiredQuery` this returns, regardless of which candidate rule
+/// declared the requirement; there is no per-invocation query text to
+/// derive. `Context` (which `route` reads) also carries exactly one
+/// `Lookup` per kind (`recall`, `consult`), not one per rule, so a
+/// compound command whose invocations resolve to two different rules that
+/// both `require` the same kind still produces exactly one entry for
+/// it -- the dedup below keeps the first declaration in scan order, which
+/// changes nothing observable here since every entry's `query` is the
+/// same string regardless.
 pub fn required_lookups(policy: &Policy, call: &ToolCall) -> Vec<RequiredQuery> {
     let query = query_text(call);
     let mut seen_recall = false;

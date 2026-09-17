@@ -84,6 +84,14 @@ pub(crate) enum ReplacementError {
 /// when `facts.paths` is non-empty (see the module doc; should be
 /// unreachable via `route` post-#1228) or when the target needs `{repo}`
 /// and `repo` is the `"(unknown)"` sentinel.
+///
+/// `repo` is spliced directly into the returned command with no quoting
+/// or escaping of its own -- this function trusts it completely. That
+/// trust is only safe because `crate::cmd::hook::repo_from_cwd` validates
+/// every repo name (`is_safe_repo_name`: ASCII letters, digits, `-`, `_`,
+/// `.`, never starting with `.`) before returning anything other than the
+/// `UNKNOWN_REPO` sentinel this function already refuses on. Never call
+/// this with a `repo` from any other source.
 pub(crate) fn build_replacement(
     target: &ManagedTarget,
     facts: &Facts,

@@ -168,10 +168,15 @@ pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) {
     let _ = writeln!(stdout, "{body}");
 }
 
-/// Builds the hook response for one raw payload string. Never panics past
-/// this boundary: a panic inside `route` itself is caught by `decide`'s
-/// channel-disconnect detection, and every other failure is an explicit
-/// `Result` this function maps to a deny.
+/// Builds the hook response for one raw payload string. Only the work
+/// `decide` runs on its own thread (`route` and the lookup pre-pass) is
+/// panic-guarded, via `decide`'s channel-disconnect detection -- a panic
+/// anywhere else in this function (payload parsing, policy reading, JSON
+/// serialization of the response) is NOT caught here. The real backstop
+/// for that case is outside this process entirely:
+/// `plugin/hooks/legion-cmd.sh` treats a non-zero exit or empty stdout
+/// from this binary (which is what an uncaught panic here produces) as a
+/// broken adapter and emits its own static deny, never an allow.
 fn build_response(payload_text: &str) -> Value {
     build_response_with(payload_text, resolve_policy_path(), |repo| {
         Arc::new(RealLookupRunner { repo })
@@ -243,6 +248,16 @@ fn build_response_with(
 /// a panic is. This requires the crate not build with `panic = "abort"`
 /// (it does not; see `Cargo.toml`'s `[profile.release]`, which sets
 /// neither `panic` nor overrides the default `unwind`).
+///
+/// On an overrun, `decide` returns immediately but the worker thread is
+/// NOT cancelled -- it keeps running until it finishes or the process
+/// exits, whichever comes first. This is safe only because `run_hook` is
+/// a one-shot process (`legion cmd-check --hook` exits once its response
+/// is written): the leaked worker's lifetime is bounded by the process's
+/// own, not by anything `decide` does. `decide` must not be reused from a
+/// long-lived process (a daemon, a server loop) without adding real
+/// cancellation -- there, a leaked worker outlives the request it was
+/// spawned for and keeps consuming a thread indefinitely.
 fn decide<F>(deadline: Duration, work: F) -> Result<Routed, AdapterError>
 where
     F: FnOnce() -> Result<Routed, AdapterError> + Send + 'static,
@@ -360,21 +375,90 @@ fn resolve_policy_path() -> Result<PathBuf, AdapterError> {
 /// marker, not a real repo name.
 pub(crate) const UNKNOWN_REPO: &str = "(unknown)";
 
+/// `plugin/hooks/lib/prelude.sh`'s env var (#614): when set and non-empty,
+/// it takes precedence over any `cwd`-based resolution in every hook, so
+/// an operator gets the same repo identity from this adapter as from
+/// every other one.
+const LEGION_REPO_ENV: &str = "LEGION_REPO";
+
 /// The repo name recall/consult scope lookups to, and the value a rewrite
-/// target's `{repo}` placeholder is substituted with (reflection
-/// 01a0ae13): the hook payload's `cwd` basename, or [`UNKNOWN_REPO`] when
-/// `cwd` is absent. This adapter does not replicate `prelude.sh`'s
-/// `--git-common-dir` worktree resolution (FR-CMD-016 already fails a rule
-/// closed when its lookup errors, so a wrong repo name here costs a
-/// possibly-empty recall, not a wrong decision; a rewrite additionally
-/// fails closed on exactly the `UNKNOWN_REPO` sentinel via
-/// `ReplacementError::UnknownRepo`, so an unresolved repo never reaches a
-/// runnable command either).
+/// target's `{repo}` placeholder is substituted with (reflection 01a0ae13).
+/// Resolved in the same precedence `prelude.sh`'s `legion_hook_parse` uses
+/// (#614): `LEGION_REPO` when set and non-empty; otherwise the main
+/// checkout's directory name via `git rev-parse --git-common-dir` (so an
+/// agent worktree's own folder name, e.g. `agent-<hash>`, never becomes
+/// the repo -- reuses `crate::inventory::git_common_dir`, the same
+/// worktree-identity primitive #1186's divergence guard already built,
+/// rather than a second implementation of it); otherwise the `cwd`
+/// basename.
+///
+/// Whatever that resolution produces is then validated
+/// (`is_safe_repo_name`) before this function ever returns it: a `cwd`
+/// (or, for that matter, a `LEGION_REPO`) an attacker or a misconfigured
+/// caller shaped to contain `;`, a space, `$(...)`, backticks, or similar
+/// must never become part of a runnable command. A present-but-unsafe
+/// name is NOT a "costs an empty recall" problem -- left unvalidated, it
+/// would splice straight into a rewrite's `--repo` argument
+/// (`build_replacement`) or a denied rewrite's displayed instead-text
+/// (`substitute_repo_for_display`), either of which an agent could then
+/// run. Anything that fails validation becomes exactly [`UNKNOWN_REPO`]
+/// instead of whatever was actually resolved, which both of those splice
+/// sites already treat as "fail closed" / "show `<repo>`" -- validating
+/// here, once, is what makes both of them safe.
 fn repo_from_cwd(cwd: Option<&str>) -> String {
-    cwd.and_then(|c| std::path::Path::new(c).file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or(UNKNOWN_REPO)
-        .to_string()
+    let legion_repo = std::env::var(LEGION_REPO_ENV).ok();
+    repo_for(legion_repo.as_deref(), cwd)
+}
+
+/// The testable core of `repo_from_cwd`: `legion_repo_env` is passed in
+/// rather than read from the environment, so a unit test drives every
+/// precedence tier directly with no process-wide `std::env::set_var` (see
+/// `build_response_with`'s doc for why that matters under threaded
+/// `cargo test`).
+fn repo_for(legion_repo_env: Option<&str>, cwd: Option<&str>) -> String {
+    let candidate = legion_repo_env
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| cwd.and_then(repo_from_worktree_aware_cwd))
+        .or_else(|| {
+            cwd.and_then(|c| std::path::Path::new(c).file_name())
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        });
+    match candidate {
+        Some(name) if is_safe_repo_name(&name) => name,
+        _ => UNKNOWN_REPO.to_string(),
+    }
+}
+
+/// The main checkout's directory name for `cwd`, or `None` when `cwd` is
+/// not inside a git checkout at all (`git` missing, not a repo, or any
+/// other reason `git_common_dir` returns `None`). `git_common_dir`
+/// already resolves a linked worktree to its ORIGINAL repo's `.git`
+/// (canonicalized, absolute) regardless of which worktree `cwd` is in, so
+/// this only needs that path's parent's own name -- the same
+/// `--git-common-dir` + parent-directory approach `prelude.sh`'s
+/// `legion_hook_parse` uses, reusing the crate's own primitive instead of
+/// a second implementation of it.
+fn repo_from_worktree_aware_cwd(cwd: &str) -> Option<String> {
+    let common_dir = crate::inventory::git_common_dir(std::path::Path::new(cwd))?;
+    let repo_root = common_dir.parent()?;
+    repo_root.file_name()?.to_str().map(str::to_string)
+}
+
+/// True when `name` is safe to splice into a rewrite command or its
+/// display text without itself needing shell quoting: ASCII letters,
+/// digits, `-`, `_`, `.`, and not starting with `.` (rules out `.`, `..`,
+/// and a hidden-name-shaped value). A `cwd` basename or a `LEGION_REPO`
+/// value can be anything a caller or an attacker chooses; this is the one
+/// gate every resolved repo name passes through before `repo_from_cwd`
+/// returns it.
+fn is_safe_repo_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Substitutes `{repo}` in `text` for display only -- used for a deny's
@@ -390,7 +474,10 @@ fn repo_from_cwd(cwd: Option<&str>) -> String {
 /// `<repo>` placeholder instead of `route`'s original token or the
 /// `UNKNOWN_REPO` sentinel, so the agent sees an obviously-unfilled slot
 /// rather than either raw `{repo}` or a repo confusingly named
-/// "(unknown)".
+/// "(unknown)". This function does no validation of its own -- it relies
+/// entirely on `repo` already being either a name `repo_from_cwd`'s
+/// `is_safe_repo_name` check passed, or exactly `UNKNOWN_REPO`. Never call
+/// this with an unvalidated string.
 fn substitute_repo_for_display(text: &str, repo: &str) -> String {
     if !text.contains(crate::cmd::replacement::REPO_PLACEHOLDER) {
         return text.to_string();
@@ -570,6 +657,7 @@ fn deny_for_error(err: &AdapterError, payload: Option<&HookPayload>) -> Value {
 mod tests {
     use super::*;
     use legion_cmd::{AskDetails, DenyDetails, Facts};
+    use std::path::Path;
 
     /// A `LookupRunner` that answers every query with a fixed outcome,
     /// for tests that never touch the real database/index.
@@ -1054,5 +1142,134 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    // -- repo_from_cwd / repo_for: LEGION_REPO precedence, worktree
+    // resolution, and the safe-name validation both splice sites rely on
+    // (review gate 01a0ae97) ------------------------------------------
+
+    #[test]
+    fn legion_repo_env_wins_over_cwd() {
+        assert_eq!(repo_for(Some("legion"), Some("/some/other/dir")), "legion");
+    }
+
+    #[test]
+    fn an_invalid_legion_repo_fails_closed_rather_than_falling_back_to_cwd() {
+        // An explicit LEGION_REPO that fails validation must not silently
+        // fall through to a cwd-based guess -- it fails closed, the same
+        // as any other unsafe candidate.
+        assert_eq!(
+            repo_for(Some("bad;name"), Some("/repo/legion")),
+            UNKNOWN_REPO
+        );
+    }
+
+    #[test]
+    fn a_cwd_with_no_git_repo_falls_back_to_its_basename() {
+        assert_eq!(repo_for(None, Some("/repo/legion")), "legion");
+    }
+
+    #[test]
+    fn an_unsafe_cwd_basename_fails_closed_to_unknown_repo() {
+        for cwd in [
+            "/tmp/legion; touch pwned",
+            "/tmp/legion pwned",
+            "/tmp/legion$(touch pwned)",
+            "/tmp/legion`touch pwned`",
+        ] {
+            assert_eq!(
+                repo_for(None, Some(cwd)),
+                UNKNOWN_REPO,
+                "cwd {cwd:?} must fail closed, not resolve to an unsafe repo name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malicious_cwd_never_reaches_an_allowed_rewrite_command() {
+        // End-to-end proof, not just repo_for in isolation: a cwd shaped
+        // to inject shell metacharacters must deny the rewrite (via
+        // build_replacement's UnknownRepo fail-closed path), never allow
+        // it with an injected command in updatedInput.
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue list"},
+            "cwd": "/tmp/legion; touch pwned"
+        })
+        .to_string();
+        let response = respond(
+            &payload,
+            r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+                {"id": "gh-issue-list", "predicate": {"arg_equals": "list"},
+                 "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo}",
+                             "reason": "duplicate surface", "exact_args": ["issue", "list"]}}
+            ]}}}}}"#,
+        );
+        let out = hook_specific(&response);
+        assert_eq!(out["permissionDecision"], "deny");
+        assert!(out.get("updatedInput").is_none());
+    }
+
+    #[test]
+    fn a_worktree_cwd_resolves_to_the_main_repos_name() {
+        let base = tempdir();
+        let repo_dir = base.join("main-repo");
+        std::fs::create_dir_all(&repo_dir).expect("create repo dir");
+        git_in(&repo_dir, &["init", "-q", "-b", "main"]);
+        git_in(
+            &repo_dir,
+            &["commit", "--allow-empty", "-q", "-m", "initial"],
+        );
+        git_in(&repo_dir, &["worktree", "add", "wt", "-b", "feature"]);
+        let worktree_dir = repo_dir.join("wt");
+
+        assert_eq!(
+            repo_for(None, worktree_dir.to_str()),
+            "main-repo",
+            "a worktree's own folder name must never leak in as the repo"
+        );
+    }
+
+    /// A minimal, isolated `git` invocation for the worktree test above:
+    /// its own global/system config (never the real user config, which in
+    /// this environment has a broken commit signer) and `commit.gpgsign`
+    /// off explicitly, since `worktree add -b` needs a real commit to
+    /// branch from.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let (global, system) = isolated_git_config_paths();
+        let mut full_args: Vec<&str> = vec![
+            "-c",
+            "user.name=Legion Test Fixture",
+            "-c",
+            "user.email=legion-test-fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        full_args.extend_from_slice(args);
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", global)
+            .env("GIT_CONFIG_SYSTEM", system)
+            .args(&full_args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn in {dir:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed in {dir:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn isolated_git_config_paths() -> &'static (PathBuf, PathBuf) {
+        static ISOLATED_GIT_CONFIG: std::sync::OnceLock<(PathBuf, PathBuf)> =
+            std::sync::OnceLock::new();
+        ISOLATED_GIT_CONFIG.get_or_init(|| {
+            let dir = tempdir();
+            let global = dir.join("global.gitconfig");
+            let system = dir.join("system.gitconfig");
+            std::fs::write(&global, "").expect("write isolated global gitconfig");
+            std::fs::write(&system, "").expect("write isolated system gitconfig");
+            (global, system)
+        })
     }
 }
