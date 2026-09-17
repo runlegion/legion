@@ -69,7 +69,6 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -113,6 +112,21 @@ struct HookPayload {
     cwd: Option<String>,
 }
 
+impl HookPayload {
+    /// The Bash command text this payload carries, or `None` when
+    /// `tool_input` has no non-empty string `"command"` field (a non-Bash
+    /// tool, or a Bash call somehow missing one). Shared by every message
+    /// that echoes the failing/asked-about command back to the agent
+    /// (`ask_response`'s confirm hint, `deny_for_error`'s context), so the
+    /// extraction and the empty-string guard are written once.
+    fn command(&self) -> Option<&str> {
+        self.tool_input
+            .get("command")
+            .and_then(Value::as_str)
+            .filter(|cmd| !cmd.is_empty())
+    }
+}
+
 /// Every way the adapter itself can fail closed (FR-CMD-009). Each variant
 /// maps to a deny whose reason names the variant and its detail.
 #[derive(Debug, thiserror::Error)]
@@ -132,11 +146,13 @@ enum AdapterError {
 }
 
 /// Reads one PreToolUse payload from `stdin` and writes one hook response
-/// to `stdout`. Always exits 0 (FR-CMD-009): every failure this function
-/// can observe becomes a deny JSON body, never a non-zero exit and never a
-/// silently empty stdout that leaves the harness's own hook-timeout fail
-/// open to decide instead.
-pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) -> ExitCode {
+/// to `stdout`. The caller (`legion cmd-check --hook`) always exits 0
+/// (FR-CMD-009): every failure this function can observe becomes a deny
+/// JSON body, never a non-zero exit and never a silently empty stdout
+/// that leaves the harness's own hook-timeout fail open to decide
+/// instead -- so there is no exit code for this function itself to
+/// report.
+pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) {
     let mut input = String::new();
     let response = match stdin.read_to_string(&mut input) {
         Ok(_) => build_response(&input),
@@ -150,7 +166,6 @@ pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) -> ExitCode {
     // its own static deny (never allow), so the fail-closed contract
     // holds even if this write is dropped.
     let _ = writeln!(stdout, "{body}");
-    ExitCode::SUCCESS
 }
 
 /// Builds the hook response for one raw payload string. Never panics past
@@ -377,11 +392,11 @@ fn repo_from_cwd(cwd: Option<&str>) -> String {
 /// rather than either raw `{repo}` or a repo confusingly named
 /// "(unknown)".
 fn substitute_repo_for_display(text: &str, repo: &str) -> String {
-    if !text.contains("{repo}") {
+    if !text.contains(crate::cmd::replacement::REPO_PLACEHOLDER) {
         return text.to_string();
     }
     let shown = if repo == UNKNOWN_REPO { "<repo>" } else { repo };
-    text.replace("{repo}", shown)
+    text.replace(crate::cmd::replacement::REPO_PLACEHOLDER, shown)
 }
 
 /// Turns a `Routed` decision into the hook response JSON (FR-CMD-017).
@@ -511,12 +526,7 @@ fn ask_response(
     // running the command, not copy-paste the policy's justification for
     // asking in the first place -- a pre-filled reason defeats the
     // question.
-    let command = payload
-        .tool_input
-        .get("command")
-        .and_then(Value::as_str)
-        .filter(|cmd| !cmd.is_empty());
-    let command_hint = match command {
+    let command_hint = match payload.command() {
         Some(cmd) => shell_single_quote(cmd),
         None => "<command>".to_string(),
     };
@@ -547,11 +557,7 @@ fn shell_single_quote(s: &str) -> String {
 /// (shell-quoted, same escaping as the confirm hint in `ask_response`)
 /// for context, not as something to run.
 fn deny_for_error(err: &AdapterError, payload: Option<&HookPayload>) -> Value {
-    let command = payload
-        .and_then(|p| p.tool_input.get("command"))
-        .and_then(Value::as_str)
-        .filter(|cmd| !cmd.is_empty());
-    let context = match command {
+    let context = match payload.and_then(HookPayload::command) {
         Some(cmd) => format!(" while deciding {}", shell_single_quote(cmd)),
         None => String::new(),
     };
@@ -1021,11 +1027,15 @@ mod tests {
     #[test]
     fn a_no_go_style_deny_carries_its_instead_text_through_unchanged() {
         let details = DenyDetails::no_go("never runs").expect("valid no-go deny");
-        let response = deny_json(&format!(
-            "{} (instead: {})",
-            details.reason(),
-            details.instead()
-        ));
+        let routed = Routed {
+            decision: Decision::Deny(details),
+            facts: Facts::default(),
+            entry: DecidingEntry::Default,
+        };
+        let payload: HookPayload =
+            serde_json::from_str(&payload_json("Bash", "some-no-go-command"))
+                .expect("valid payload");
+        let response = apply_decision(&routed, &payload, "legion", false);
         let out = hook_specific(&response);
         assert!(
             out["permissionDecisionReason"]

@@ -5,16 +5,9 @@
 //! actual command string -- without re-scanning the command `route` already
 //! parsed.
 //!
-//! #1228 landed route's own lossless-rewrite gate: `route` now returns
-//! `Decision::Rewrite` only for a single simple command whose arguments
-//! match a rule's declared `exact_args` exactly (reflection 01a0ae1c), so
-//! the compound/piped/redirected/extra-flag gaps this module's doc used to
-//! warn about are now `route`'s responsibility, not this adapter's --
-//! `tests/integration/cmd_check.rs`'s four `#[ignore]`d cases for those
-//! shapes are enabled and passing once more (they assert the DENY `route`
-//! now produces).
-//!
-//! What THIS module still does, now that `route`'s gate exists:
+//! `route` guarantees `Decision::Rewrite` only for a single simple command
+//! whose arguments equal a rule's declared `exact_args` exactly (reflection
+//! 01a0ae1c), so this module's own job is narrower:
 //!
 //! 1. Substitutes `{repo}` in the target string (reflection 01a0ae13):
 //!    legion's verbs require `--repo`, so a rewrite target that needs one
@@ -49,8 +42,10 @@ use serde_json::Value;
 /// The literal placeholder a rewrite target names when it needs the
 /// caller's repo (reflection 01a0ae13): legion's verbs require `--repo`,
 /// and `route` has no way to know the calling repo, so it declares the
-/// need with this token instead.
-const REPO_PLACEHOLDER: &str = "{repo}";
+/// need with this token instead. `pub(crate)` so `crate::cmd::hook`'s
+/// display-only substitution (`substitute_repo_for_display`) uses the
+/// same literal rather than a second hard-coded copy.
+pub(crate) const REPO_PLACEHOLDER: &str = "{repo}";
 
 /// Errors building a `Decision::Rewrite`'s replacement command.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -6,12 +6,37 @@
 
 use crate::common::{legion_cmd, run_with_stdin};
 use std::path::Path;
+use std::process::Output;
 use tempfile::TempDir;
 
 fn write_policy(dir: &Path, contents: &str) -> std::path::PathBuf {
     let path = dir.join("policy.json");
     std::fs::write(&path, contents).expect("write fixture policy");
     path
+}
+
+/// Runs `legion cmd-check --hook` once with `payload` on stdin, in a fresh
+/// tempdir. `policy` is written as `LEGION_CMD_POLICY` when given; `None`
+/// leaves it (and `CLAUDE_PLUGIN_ROOT`) unset, exercising the
+/// no-policy-configured path. Every test in this file drives the same
+/// binary boundary through this one helper so the process/env/stdin
+/// wiring is written once.
+fn run_hook_cli(policy: Option<&str>, payload: &[u8]) -> Output {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut cmd = legion_cmd(tmp.path());
+    cmd.arg("cmd-check")
+        .arg("--hook")
+        .env_remove("CLAUDE_PLUGIN_ROOT");
+    match policy {
+        Some(contents) => {
+            let policy_path = write_policy(tmp.path(), contents);
+            cmd.env("LEGION_CMD_POLICY", &policy_path);
+        }
+        None => {
+            cmd.env_remove("LEGION_CMD_POLICY");
+        }
+    }
+    run_with_stdin(&mut cmd, payload)
 }
 
 const FIXTURE_POLICY: &str = r#"{
@@ -75,15 +100,7 @@ fn hook_specific(stdout: &[u8]) -> serde_json::Value {
 
 #[test]
 fn an_unmatched_command_allows_with_no_permission_decision() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
-    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "ls -la"));
+    let out = run_hook_cli(Some(FIXTURE_POLICY), &hook_payload("Bash", "ls -la"));
 
     assert!(out.status.success(), "run_hook always exits 0");
     let out_value = hook_specific(&out.stdout);
@@ -92,15 +109,7 @@ fn an_unmatched_command_allows_with_no_permission_decision() {
 
 #[test]
 fn a_governed_command_denies_naming_reason_and_instead() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
-    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "chmod 777 x"));
+    let out = run_hook_cli(Some(FIXTURE_POLICY), &hook_payload("Bash", "chmod 777 x"));
 
     assert!(out.status.success());
     let out_value = hook_specific(&out.stdout);
@@ -112,15 +121,7 @@ fn a_governed_command_denies_naming_reason_and_instead() {
 
 #[test]
 fn a_rewrite_returns_updated_input_and_allow() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
-    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "gh issue list"));
+    let out = run_hook_cli(Some(FIXTURE_POLICY), &hook_payload("Bash", "gh issue list"));
 
     assert!(out.status.success());
     let out_value = hook_specific(&out.stdout);
@@ -137,26 +138,16 @@ fn a_rewrite_returns_updated_input_and_allow() {
 // the WHOLE command string, so a compound command, a pipe, a redirect, or
 // an extra/untranslated flag on the matched invocation would silently
 // drop the rest of the command if route allowed the rewrite through.
-// #1228 landed the fix in `route` itself (`gate_rewrite_on_whole_command`
-// for compound/piped/redirected shapes, `exact_args` + `first_differing_arg`
-// for an extra flag on the matched invocation) -- these tests, previously
-// `#[ignore]`d as "needs #1228", are now enabled and assert the DENY
-// `route` produces for each shape.
 
 #[test]
 fn a_compound_rewrite_target_denies_instead_of_dropping_the_other_command() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
     // `cd x &&` makes this a compound command, not a single simple one;
     // `route`'s whole-command gate denies rather than rewriting and
     // dropping the `cd`.
-    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "cd x && gh issue list"));
+    let out = run_hook_cli(
+        Some(FIXTURE_POLICY),
+        &hook_payload("Bash", "cd x && gh issue list"),
+    );
 
     assert!(out.status.success());
     let out_value = hook_specific(&out.stdout);
@@ -165,17 +156,12 @@ fn a_compound_rewrite_target_denies_instead_of_dropping_the_other_command() {
 
 #[test]
 fn a_piped_rewrite_target_denies_instead_of_dropping_the_pipe() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
     // `| head` makes this a compound command; denies rather than
     // rewriting and dropping the pipe.
-    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "gh issue list | head"));
+    let out = run_hook_cli(
+        Some(FIXTURE_POLICY),
+        &hook_payload("Bash", "gh issue list | head"),
+    );
 
     assert!(out.status.success());
     let out_value = hook_specific(&out.stdout);
@@ -184,18 +170,13 @@ fn a_piped_rewrite_target_denies_instead_of_dropping_the_pipe() {
 
 #[test]
 fn a_redirected_rewrite_target_denies_instead_of_dropping_the_redirect() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
     // `> out.txt` makes this a compound command; denies rather than
     // rewriting and dropping the redirect (which would otherwise leave
     // the agent believing its output was captured).
-    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "gh issue list > out.txt"));
+    let out = run_hook_cli(
+        Some(FIXTURE_POLICY),
+        &hook_payload("Bash", "gh issue list > out.txt"),
+    );
 
     assert!(out.status.success());
     let out_value = hook_specific(&out.stdout);
@@ -204,20 +185,12 @@ fn a_redirected_rewrite_target_denies_instead_of_dropping_the_redirect() {
 
 #[test]
 fn a_rewrite_target_with_an_untranslated_flag_denies_instead_of_dropping_it() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
     // `--state open` is not in the rule's declared `exact_args` (["issue",
     // "list"]), so `route`'s `first_differing_arg` check denies naming the
     // target rather than rewriting and dropping the flag (which would
     // otherwise list every issue instead of just the open ones).
-    let out = run_with_stdin(
-        &mut cmd,
+    let out = run_hook_cli(
+        Some(FIXTURE_POLICY),
         &hook_payload("Bash", "gh issue list --state open"),
     );
 
@@ -228,15 +201,10 @@ fn a_rewrite_target_with_an_untranslated_flag_denies_instead_of_dropping_it() {
 
 #[test]
 fn an_unconfirmed_ask_is_refused_with_a_confirm_hint() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
-    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "gh pr merge 42 --admin"));
+    let out = run_hook_cli(
+        Some(FIXTURE_POLICY),
+        &hook_payload("Bash", "gh pr merge 42 --admin"),
+    );
 
     assert!(out.status.success());
     let out_value = hook_specific(&out.stdout);
@@ -248,15 +216,7 @@ fn an_unconfirmed_ask_is_refused_with_a_confirm_hint() {
 
 #[test]
 fn a_malformed_hook_payload_denies_never_allows() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
-    let out = run_with_stdin(&mut cmd, b"not json at all");
+    let out = run_hook_cli(Some(FIXTURE_POLICY), b"not json at all");
 
     assert!(out.status.success(), "always exits 0 even on bad input");
     let out_value = hook_specific(&out.stdout);
@@ -265,15 +225,10 @@ fn a_malformed_hook_payload_denies_never_allows() {
 
 #[test]
 fn a_broken_policy_file_denies_never_allows() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(tmp.path(), "{ this is not valid json");
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
-    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "ls -la"));
+    let out = run_hook_cli(
+        Some("{ this is not valid json"),
+        &hook_payload("Bash", "ls -la"),
+    );
 
     assert!(out.status.success());
     let out_value = hook_specific(&out.stdout);
@@ -284,14 +239,7 @@ fn a_broken_policy_file_denies_never_allows() {
 
 #[test]
 fn no_policy_configured_at_all_denies_never_allows() {
-    let tmp = TempDir::new().expect("tempdir");
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env_remove("LEGION_CMD_POLICY")
-        .env_remove("CLAUDE_PLUGIN_ROOT");
-    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "ls -la"));
+    let out = run_hook_cli(None, &hook_payload("Bash", "ls -la"));
 
     assert!(out.status.success());
     let out_value = hook_specific(&out.stdout);
@@ -306,18 +254,10 @@ fn no_policy_configured_at_all_denies_never_allows() {
 /// router's own (microsecond) speed.
 #[test]
 fn a_zero_deadline_always_overruns_and_denies() {
-    let tmp = TempDir::new().expect("tempdir");
-    let policy_path = write_policy(
-        tmp.path(),
-        r#"{"route": {"deadline_ms": 0}, "tools": {}, "sym_jobs": []}"#,
+    let out = run_hook_cli(
+        Some(r#"{"route": {"deadline_ms": 0}, "tools": {}, "sym_jobs": []}"#),
+        &hook_payload("Bash", "ls -la"),
     );
-
-    let mut cmd = legion_cmd(tmp.path());
-    cmd.arg("cmd-check")
-        .arg("--hook")
-        .env("LEGION_CMD_POLICY", &policy_path)
-        .env_remove("CLAUDE_PLUGIN_ROOT");
-    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "ls -la"));
 
     assert!(out.status.success(), "always exits 0 even on overrun");
     let out_value = hook_specific(&out.stdout);

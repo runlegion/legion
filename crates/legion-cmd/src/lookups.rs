@@ -6,17 +6,16 @@
 //! (FR-CMD-016: a required lookup `route` cannot see is a missing-lookup
 //! deny, not a silent skip).
 //!
-//! This module used to duplicate a small first-match rule-selection walk
-//! of its own; now that [`crate::evaluate::candidate_rules`] exposes
-//! `evaluate`'s real rule-selection step (sym-job precedence, the
-//! family/global-value-option-aware subcommand resolver, everything),
-//! this module is a thin consumer of it and can never disagree with what
-//! `route` actually consults. It has no filesystem, network, database, or
-//! process dependency (NFR-CMD-001), same as the rest of this crate --
-//! running the lookups it names is the adapter's job.
+//! A thin consumer of [`crate::evaluate::candidate_rules`], which exposes
+//! `evaluate`'s own rule-selection step (sym-job precedence, the
+//! family/global-value-option-aware subcommand resolver, everything), so
+//! this module can never disagree with what `route` actually consults. It
+//! has no filesystem, network, database, or process dependency
+//! (NFR-CMD-001), same as the rest of this crate -- running the lookups
+//! it names is the adapter's job.
 
 use crate::decision::ToolCall;
-use crate::evaluate::candidate_rules;
+use crate::evaluate::{bash_command, candidate_rules};
 use crate::policy::{Policy, RequiredLookup};
 
 /// One lookup a matched rule requires, with the free-text query to run it.
@@ -68,12 +67,7 @@ pub fn required_lookups(policy: &Policy, call: &ToolCall) -> Vec<RequiredQuery> 
 
 fn query_text(call: &ToolCall) -> String {
     if call.tool == "Bash" {
-        return call
-            .input
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        return bash_command(call).to_string();
     }
     call.input.to_string()
 }

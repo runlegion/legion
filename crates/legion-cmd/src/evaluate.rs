@@ -46,13 +46,7 @@ pub fn evaluate(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
 // -- Bash: scan, sym-job precedence, per-invocation rules, then fold -------
 
 fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
-    let command = call
-        .input
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-
-    let scan = match tokenizer::scan(command) {
+    let scan = match tokenizer::scan(bash_command(call)) {
         Ok(scan) => scan,
         Err(err) => {
             // FR-CMD-006: a parse error routes ask unconditionally. This is
@@ -334,10 +328,11 @@ fn evaluate_rules(
 
 /// The first rule in `rules` (declared order) whose predicate matches
 /// `input`, ignoring lookup availability and the `exact_args` lossless
-/// check entirely. Factored out of [`evaluate_rules`] so
-/// [`candidate_rules`] can name the same rule a real `evaluate` call
-/// would reach for, without a second implementation of "which rule
-/// matches" that could silently diverge from this one.
+/// check entirely. Used by both [`evaluate_rules`] (which goes on to
+/// apply those checks) and [`candidate_rules`] (which stops here, naming
+/// the same rule without deciding anything), so "which rule matches" has
+/// one implementation shared by both instead of two that could silently
+/// diverge.
 fn first_predicate_match<'p>(rules: &'p [Rule], input: MatchInput<'_>) -> Option<&'p Rule> {
     rules.iter().find(|rule| rule.predicate.matches(input))
 }
@@ -362,9 +357,15 @@ fn first_predicate_match<'p>(rules: &'p [Rule], input: MatchInput<'_>) -> Option
 /// policy is empty; a sym job matches first (sym jobs carry no `requires`
 /// at all, and matching one means `evaluate_bash` returns before any
 /// family rule is ever considered); no Bash invocation resolves to a
-/// governed family; or a non-Bash tool has no vocabulary or no `Fields`
-/// rule list in the policy.
+/// governed family; a resolution came back both unresolved and doubtful
+/// (see [`find_family`]) -- that path denies-by-doubt in `evaluate`
+/// without ever consulting a rule, so it needs no lookup and is skipped
+/// here too; or a non-Bash tool has no vocabulary or no `Fields` rule
+/// list in the policy.
 pub(crate) fn candidate_rules<'p>(policy: &'p Policy, call: &ToolCall) -> Vec<&'p Rule> {
+    if policy.is_empty() {
+        return Vec::new();
+    }
     if call.tool == "Bash" {
         return candidate_bash_rules(policy, call);
     }
@@ -372,15 +373,7 @@ pub(crate) fn candidate_rules<'p>(policy: &'p Policy, call: &ToolCall) -> Vec<&'
 }
 
 fn candidate_bash_rules<'p>(policy: &'p Policy, call: &ToolCall) -> Vec<&'p Rule> {
-    if policy.is_empty() {
-        return Vec::new();
-    }
-    let command = call
-        .input
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let Ok(scan) = tokenizer::scan(command) else {
+    let Ok(scan) = tokenizer::scan(bash_command(call)) else {
         return Vec::new();
     };
     if find_sym_job(&policy.sym_jobs, &scan.invocations, &scan.opaque).is_some() {
@@ -397,19 +390,37 @@ fn candidate_bash_rules<'p>(policy: &'p Policy, call: &ToolCall) -> Vec<&'p Rule
 }
 
 fn candidate_field_rules<'p>(policy: &'p Policy, call: &ToolCall) -> Vec<&'p Rule> {
-    if policy.is_empty() {
+    let Some(rules) = fields_rules(policy, call) else {
         return Vec::new();
-    }
-    let Some(kind) = ToolKind::from_tool_name(&call.tool) else {
-        return Vec::new();
-    };
-    let rules: &[Rule] = match policy.tools.get(&kind) {
-        Some(ToolRules::Fields { rules }) => rules,
-        _ => return Vec::new(),
     };
     first_predicate_match(rules, MatchInput::Json(&call.input))
         .into_iter()
         .collect()
+}
+
+/// The Bash command text `call` carries, or empty when its `tool_input`
+/// has no string `"command"` field. Shared by every path that needs the
+/// raw command text before scanning it: `evaluate_bash`,
+/// `candidate_bash_rules`, and `crate::lookups::required_lookups`'s query
+/// text.
+pub(crate) fn bash_command(call: &ToolCall) -> &str {
+    call.input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+/// The `Fields` rule list `call`'s tool kind maps to, or `None` when the
+/// tool has no vocabulary in the policy at all, or the policy governs it
+/// as `Bash` instead. Shared by `evaluate_fields` and
+/// `candidate_field_rules` so "which rule list a Fields call reads" has
+/// one implementation.
+fn fields_rules<'p>(policy: &'p Policy, call: &ToolCall) -> Option<&'p [Rule]> {
+    let kind = ToolKind::from_tool_name(&call.tool)?;
+    match policy.tools.get(&kind) {
+        Some(ToolRules::Fields { rules }) => Some(rules),
+        _ => None,
+    }
 }
 
 /// The first argument where `args` differs from `exact_args`, or `None`
@@ -551,25 +562,15 @@ fn evaluate_fields(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         return routed_default_deny(default_messages::EMPTY_POLICY, facts);
     }
 
-    let Some(kind) = ToolKind::from_tool_name(&call.tool) else {
-        // A tool the policy has no vocabulary for at all is simply outside
-        // its concern -- the same allow default as an unmanaged binary.
+    let Some(rules) = fields_rules(policy, call) else {
+        // A tool the policy has no vocabulary for at all, or one it
+        // governs as Bash instead, is simply outside its concern here --
+        // the same allow default as an unmanaged binary.
         return Routed {
             decision: allow_default(default_messages::NO_MANAGED_BINARY),
             facts,
             entry: DecidingEntry::Default,
         };
-    };
-
-    let rules: &[Rule] = match policy.tools.get(&kind) {
-        Some(ToolRules::Fields { rules }) => rules,
-        Some(ToolRules::Bash { .. }) | None => {
-            return Routed {
-                decision: allow_default(default_messages::NO_MANAGED_BINARY),
-                facts,
-                entry: DecidingEntry::Default,
-            };
-        }
     };
 
     let (decision, entry) = evaluate_rules(rules, MatchInput::Json(&call.input), ctx);

@@ -21,10 +21,6 @@ pub(crate) fn handle_cmd_check(hook: bool) -> error::Result<()> {
     }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    // `run_hook` always returns `ExitCode::SUCCESS` -- it turns every
-    // failure it can observe into a deny JSON body rather than a non-zero
-    // exit (FR-CMD-009), so there is nothing here to propagate as an
-    // `Err`.
-    let _ = run_hook(stdin.lock(), stdout.lock());
+    run_hook(stdin.lock(), stdout.lock());
     Ok(())
 }
