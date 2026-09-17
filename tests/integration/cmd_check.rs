@@ -127,6 +127,105 @@ fn a_rewrite_returns_updated_input_and_allow() {
     assert_eq!(out_value["updatedInput"]["command"], "legion issue list");
 }
 
+// -- Known gap (simplify finding, HIGH): a Rewrite replaces the WHOLE
+// command string, so a compound command, a pipe, a redirect, or an extra
+// flag on the matched invocation is silently dropped rather than refused.
+// The fix belongs in `route` (#1228: a rewrite is lossless only for a
+// single simple command whose args are all declared translatable); the
+// adapter must not build that check itself (FR-CMD-014). These tests
+// document today's actual (unsafe) behavior in their names and assert the
+// DENY #1228 should produce instead -- `#[ignore]`d so they fail loudly
+// and switch on the moment #1228 lands, rather than silently passing
+// against behavior that was never fixed.
+
+#[test]
+#[ignore = "needs #1228's lossless-rewrite rule"]
+fn a_compound_rewrite_target_denies_instead_of_dropping_the_other_command() {
+    let tmp = TempDir::new().expect("tempdir");
+    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
+
+    let mut cmd = legion_cmd(tmp.path());
+    cmd.arg("cmd-check")
+        .arg("--hook")
+        .env("LEGION_CMD_POLICY", &policy_path)
+        .env_remove("CLAUDE_PLUGIN_ROOT");
+    // Today this silently rewrites to a bare `legion issue list`, dropping
+    // the `cd x &&` entirely. #1228 should make `route` deny this instead.
+    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "cd x && gh issue list"));
+
+    assert!(out.status.success());
+    let out_value = hook_specific(&out.stdout);
+    assert_eq!(out_value["permissionDecision"], "deny");
+}
+
+#[test]
+#[ignore = "needs #1228's lossless-rewrite rule"]
+fn a_piped_rewrite_target_denies_instead_of_dropping_the_pipe() {
+    let tmp = TempDir::new().expect("tempdir");
+    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
+
+    let mut cmd = legion_cmd(tmp.path());
+    cmd.arg("cmd-check")
+        .arg("--hook")
+        .env("LEGION_CMD_POLICY", &policy_path)
+        .env_remove("CLAUDE_PLUGIN_ROOT");
+    // Today this silently rewrites to a bare `legion issue list`, dropping
+    // `| head` entirely.
+    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "gh issue list | head"));
+
+    assert!(out.status.success());
+    let out_value = hook_specific(&out.stdout);
+    assert_eq!(out_value["permissionDecision"], "deny");
+}
+
+#[test]
+#[ignore = "needs #1228's lossless-rewrite rule"]
+fn a_redirected_rewrite_target_denies_instead_of_dropping_the_redirect() {
+    let tmp = TempDir::new().expect("tempdir");
+    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
+
+    let mut cmd = legion_cmd(tmp.path());
+    cmd.arg("cmd-check")
+        .arg("--hook")
+        .env("LEGION_CMD_POLICY", &policy_path)
+        .env_remove("CLAUDE_PLUGIN_ROOT");
+    // Today this silently rewrites to a bare `legion issue list`, dropping
+    // `> out.txt` entirely -- the agent believes its output was captured.
+    let out = run_with_stdin(&mut cmd, &hook_payload("Bash", "gh issue list > out.txt"));
+
+    assert!(out.status.success());
+    let out_value = hook_specific(&out.stdout);
+    assert_eq!(out_value["permissionDecision"], "deny");
+}
+
+#[test]
+#[ignore = "needs #1228's lossless-rewrite rule"]
+fn a_rewrite_target_with_an_untranslated_flag_denies_instead_of_dropping_it() {
+    let tmp = TempDir::new().expect("tempdir");
+    let policy_path = write_policy(tmp.path(), FIXTURE_POLICY);
+
+    let mut cmd = legion_cmd(tmp.path());
+    cmd.arg("cmd-check")
+        .arg("--hook")
+        .env("LEGION_CMD_POLICY", &policy_path)
+        .env_remove("CLAUDE_PLUGIN_ROOT");
+    // Today this silently rewrites to a bare `legion issue list`, dropping
+    // `--state open` -- the rewritten command lists every issue instead of
+    // just the open ones the agent asked for. (Deliberately not a
+    // slash-containing value like `--repo other/org`: that would trip
+    // `build_replacement`'s unrelated path-facts refusal and pass today
+    // for the wrong reason, masking the actual flag-dropping gap this
+    // test exists to document.)
+    let out = run_with_stdin(
+        &mut cmd,
+        &hook_payload("Bash", "gh issue list --state open"),
+    );
+
+    assert!(out.status.success());
+    let out_value = hook_specific(&out.stdout);
+    assert_eq!(out_value["permissionDecision"], "deny");
+}
+
 #[test]
 fn an_unconfirmed_ask_is_refused_with_a_confirm_hint() {
     let tmp = TempDir::new().expect("tempdir");

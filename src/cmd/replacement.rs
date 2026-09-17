@@ -5,10 +5,28 @@
 //! actual command string -- without re-scanning the command `route` already
 //! parsed.
 //!
-//! The shipped policy's one rewrite rule (`gh issue list` -> `legion issue
-//! list`) needs no arguments appended: the target string alone is already
-//! the complete replacement, and `facts.paths` is empty for it. `facts` is
-//! still taken and checked here -- not merely accepted and ignored -- for
+//! IMPORTANT: refusing a path-carrying rewrite (below) does NOT make a
+//! rewrite safe on its own -- it only closes one specific hole. The
+//! `updatedInput` this module returns replaces the tool call's WHOLE
+//! command string (the hook contract has no field-level patch), so a
+//! rewrite is lossless only when the original command was a single simple
+//! invocation whose every argument the target can express. `route` today
+//! does not check that: `cd x && gh issue list`, `gh issue list | head`,
+//! `gh issue list > out.txt`, and `gh issue list --repo other/org` all
+//! still rewrite to a bare `legion issue list`, silently dropping the
+//! `cd`, the pipe, the redirect, or the flag. The real fix -- route
+//! returning `Deny` for anything but a single simple command whose args
+//! are all declared translatable -- is #1228's lossless-rewrite rule, not
+//! this module's; building that check here, working around `route`'s
+//! Facts-only contract, would duplicate policy logic the adapter must not
+//! own (FR-CMD-014). `tests/integration/cmd_check.rs` has `#[ignore]`d
+//! cases naming exactly these gaps, to switch on once #1228 lands.
+//!
+//! What this module DOES refuse, and why it is a narrower guarantee than
+//! "the rewrite is safe": the shipped policy's one rewrite rule (`gh issue
+//! list` -> `legion issue list`) needs no arguments appended -- the target
+//! string alone is already the complete replacement, and `facts.paths` is
+//! empty for it. `facts` is still taken and checked here for
 //! `facts.paths`: `facts_from_scan` collects path-shaped operands across
 //! EVERY invocation in a compound command, not just the one whose rule
 //! matched (see `crate::evaluate::facts_from_scan` upstream, and
@@ -21,8 +39,11 @@
 //! invocation carried" versus "an operand some other part of the command
 //! carried", so the only lossless choice here is to refuse rather than
 //! guess: a rewrite whose facts carry any path is denied, not silently
-//! composed. Lossless composition of a matched invocation's own operands
-//! into its rewrite target is #1228's lane, not this one's.
+//! composed. This catches one shape of unsafe rewrite (an appended path
+//! from the wrong invocation); it does not catch a compound command, a
+//! pipe, a redirect, or a dropped flag on the matched invocation itself --
+//! those need #1228's fact (a single-simple-command confirmation from
+//! `route`) to refuse safely, which does not exist yet.
 
 use legion_cmd::{Facts, ManagedTarget};
 use serde_json::Value;

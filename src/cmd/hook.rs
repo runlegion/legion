@@ -143,6 +143,12 @@ pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) -> ExitCode {
         Err(e) => deny_for_error(&AdapterError::Payload(e.to_string()), None),
     };
     let body = serde_json::to_string(&response).unwrap_or_else(|_| FALLBACK_DENY_JSON.to_string());
+    // A failed write here has no in-process recovery: stdout is the only
+    // channel back to the harness, and there is nothing left to write it
+    // to. This is still covered, not silently lost -- `plugin/hooks/legion-cmd.sh`
+    // treats empty stdout from this binary as a broken adapter and emits
+    // its own static deny (never allow), so the fail-closed contract
+    // holds even if this write is dropped.
     let _ = writeln!(stdout, "{body}");
     ExitCode::SUCCESS
 }
@@ -460,37 +466,57 @@ fn ask_response(
         });
     }
 
+    // The confirm hint deliberately does NOT pre-fill the rule's own
+    // reason (FR-CMD-026): the agent must state its own reason for
+    // running the command, not copy-paste the policy's justification for
+    // asking in the first place -- a pre-filled reason defeats the
+    // question.
     let command = payload
         .tool_input
         .get("command")
         .and_then(Value::as_str)
-        .unwrap_or("<command>");
+        .filter(|cmd| !cmd.is_empty());
+    let command_hint = match command {
+        Some(cmd) => shell_single_quote(cmd),
+        None => "<command>".to_string(),
+    };
     let reason = format!(
-        "{} ({}). To confirm: legion cmd confirm --reason \"{}\" -- {command}",
+        "{} ({}). To confirm: legion cmd confirm --reason \"<why you need this>\" -- {command_hint}",
         details.question(),
-        details.reason(),
         details.reason()
     );
     deny_json(&reason)
 }
 
+/// Single-quotes `s` for safe inclusion in a shell command line, escaping
+/// any embedded single quote with the standard `'\''` sequence. Shared by
+/// every place this adapter echoes a caller-supplied command back into a
+/// message meant to be run.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// Builds the deny response for an adapter-internal failure (FR-CMD-005,
-/// FR-CMD-009): the reason names the failing variant, and `instead` is
-/// `legion cmd-check -- '<command>'` when the original command is known,
-/// or a bare rerun hint when it is not (a payload the adapter could not
-/// even parse carries no recoverable command text).
+/// FR-CMD-009): the reason names the failing variant. `instead` cannot
+/// name a replacement command to run -- `legion cmd-check` without
+/// `--hook` (the operator/scripting mode that could otherwise inspect a
+/// command by hand) is `NotImplemented` until #1230, so suggesting it
+/// here would tell the agent to run something that does not work yet.
+/// Instead it names what to fix: the failure `err` already describes.
+/// When the original command is recoverable from `payload`, it is named
+/// (shell-quoted, same escaping as the confirm hint in `ask_response`)
+/// for context, not as something to run.
 fn deny_for_error(err: &AdapterError, payload: Option<&HookPayload>) -> Value {
     let command = payload
         .and_then(|p| p.tool_input.get("command"))
-        .and_then(Value::as_str);
-    let instead = match command {
-        Some(cmd) if !cmd.is_empty() => {
-            format!("legion cmd-check -- '{}'", cmd.replace('\'', r"'\''"))
-        }
-        _ => "legion cmd-check --hook".to_string(),
+        .and_then(Value::as_str)
+        .filter(|cmd| !cmd.is_empty());
+    let context = match command {
+        Some(cmd) => format!(" while deciding {}", shell_single_quote(cmd)),
+        None => String::new(),
     };
     deny_json(&format!(
-        "legion-cmd adapter failed closed: {err} (instead: {instead})"
+        "legion-cmd adapter failed closed{context}: {err} (instead: none: fix the failure named above and retry)"
     ))
 }
 
@@ -588,18 +614,14 @@ mod tests {
         );
         let out = hook_specific(&response);
         assert_eq!(out["permissionDecision"], "deny");
-        assert!(
-            out["permissionDecisionReason"]
-                .as_str()
-                .unwrap()
-                .contains("legion-cmd adapter failed closed")
-        );
-        assert!(
-            out["permissionDecisionReason"]
-                .as_str()
-                .unwrap()
-                .contains("legion cmd-check -- 'echo hi'")
-        );
+        let reason = out["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("legion-cmd adapter failed closed"));
+        // The failing command is named for context, quoted...
+        assert!(reason.contains("'echo hi'"));
+        // ...but `legion cmd-check` (non-hook mode) is NotImplemented
+        // until #1230, so the reason must never tell the agent to run it.
+        assert!(!reason.contains("legion cmd-check --"));
+        assert!(reason.contains("instead: none: fix the failure named above and retry"));
     }
 
     #[test]
@@ -701,9 +723,18 @@ mod tests {
         assert_eq!(out["permissionDecision"], "deny");
         let reason = out["permissionDecisionReason"].as_str().unwrap();
         assert!(reason.contains("bypass branch protection?"));
+        // The rule's own reason is shown once, for context on why the
+        // question was asked...
         assert!(reason.contains("skips checks"));
         assert!(reason.contains("legion cmd confirm"));
-        assert!(reason.contains("gh pr merge 42 --admin"));
+        // ...but the confirm hint itself (FR-CMD-026) must NOT pre-fill
+        // that reason as the agent's own -- a copy-pasted `--reason
+        // "skips checks"` would defeat the question. Exactly one
+        // occurrence of "skips checks" confirms it appears only in the
+        // question's own context, not duplicated into the hint.
+        assert_eq!(reason.matches("skips checks").count(), 1);
+        assert!(reason.contains("--reason \"<why you need this>\""));
+        assert!(reason.contains("'gh pr merge 42 --admin'"));
     }
 
     #[test]
