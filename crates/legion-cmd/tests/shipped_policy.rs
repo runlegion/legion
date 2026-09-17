@@ -36,6 +36,67 @@ fn shipped_policy_parses_and_is_not_empty() {
     assert!(!policy.sym_jobs.is_empty());
 }
 
+// -- Invocation sym jobs (FR-CMD-007): a visible grep/find invocation
+// reaches sym without going through an interpreter body at all.
+
+#[test]
+fn grep_recursive_piped_into_head_reaches_find_content() {
+    assert_eq!(
+        deny_instead("grep -rn foo . | head"),
+        "legion sym etc find-content"
+    );
+}
+
+#[test]
+fn sh_c_grep_recursive_reaches_find_content() {
+    assert_eq!(
+        deny_instead("sh -c 'grep -rn foo src'"),
+        "legion sym etc find-content"
+    );
+}
+
+#[test]
+fn grep_recursive_precedes_a_sibling_opaque_part() {
+    // The sym-job precedence step checks invocations before folding, so a
+    // sibling opaque region (which would otherwise proxy) cannot change
+    // the outcome -- the same invariant `sym_job_decision_is_never_overridden_by_a_weaker_or_stronger_sibling_part`
+    // in evaluate.rs's tests proves for the interpreter-body case.
+    assert_eq!(
+        deny_instead("grep -rn foo . | ./notify.sh"),
+        "legion sym etc find-content"
+    );
+}
+
+#[test]
+fn find_by_name_reaches_find_file() {
+    assert_eq!(
+        deny_instead("find . -name '*.rs'"),
+        "legion sym etc find-file"
+    );
+}
+
+// -- Negative: plain grep usage is not sym territory -----------------------
+
+#[test]
+fn grep_reading_a_pipe_is_not_a_sym_job() {
+    let routed = route(
+        &policy(),
+        &bash_call("cat f | grep foo"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
+#[test]
+fn grep_on_a_single_named_file_is_not_a_sym_job() {
+    let routed = route(
+        &policy(),
+        &bash_call("grep foo src/main.rs"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
 // -- Every declared sym job is reachable, in the order it is declared -----
 
 #[test]

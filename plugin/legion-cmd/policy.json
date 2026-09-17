@@ -72,6 +72,90 @@
   },
   "sym_jobs": [
     {
+      "id": "invocation-find-content-grep",
+      "sym_command": "legion sym etc find-content",
+      "invocation": {
+        "binary": "grep",
+        "predicate": {
+          "any": [
+            { "arg_equals": "-r" },
+            { "arg_equals": "-R" },
+            { "arg_equals": "--recursive" },
+            { "arg_equals": "-rn" },
+            { "arg_equals": "-nr" },
+            { "arg_equals": "-rl" },
+            { "arg_equals": "-lr" },
+            { "arg_equals": "-ri" },
+            { "arg_equals": "-ir" },
+            { "arg_equals": "-rw" },
+            { "arg_equals": "-wr" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "invocation-find-content-egrep",
+      "sym_command": "legion sym etc find-content",
+      "invocation": {
+        "binary": "egrep",
+        "predicate": {
+          "any": [
+            { "arg_equals": "-r" },
+            { "arg_equals": "-R" },
+            { "arg_equals": "--recursive" },
+            { "arg_equals": "-rn" },
+            { "arg_equals": "-nr" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "invocation-find-content-fgrep",
+      "sym_command": "legion sym etc find-content",
+      "invocation": {
+        "binary": "fgrep",
+        "predicate": {
+          "any": [
+            { "arg_equals": "-r" },
+            { "arg_equals": "-R" },
+            { "arg_equals": "--recursive" },
+            { "arg_equals": "-rn" },
+            { "arg_equals": "-nr" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "invocation-find-content-rg",
+      "sym_command": "legion sym etc find-content",
+      "invocation": {
+        "binary": "rg",
+        "predicate": { "arg_equals": "." }
+      }
+    },
+    {
+      "id": "invocation-find-content-ag",
+      "sym_command": "legion sym etc find-content",
+      "invocation": {
+        "binary": "ag",
+        "predicate": { "arg_equals": "." }
+      }
+    },
+    {
+      "id": "invocation-find-file-find",
+      "sym_command": "legion sym etc find-file",
+      "invocation": {
+        "binary": "find",
+        "predicate": {
+          "any": [
+            { "arg_equals": "-name" },
+            { "arg_equals": "-iname" },
+            { "arg_equals": "-path" }
+          ]
+        }
+      }
+    },
+    {
       "id": "interpreter-find-content-pathlib",
       "sym_command": "legion sym etc find-content",
       "interpreter_patterns": ["rglob(", "read_text()"]

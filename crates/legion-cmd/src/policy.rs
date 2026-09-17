@@ -68,6 +68,17 @@ pub enum PolicyError {
     /// this is rejected here rather than silently treated as ungoverned.
     #[error("{pointer}: {message}")]
     MismatchedToolRulesShape { pointer: String, message: String },
+
+    /// A sym job names neither `interpreter_patterns` nor `invocation`, or
+    /// names both. Exactly one matcher shape is required, since a job
+    /// otherwise has no defined way to recognize a command as its own (or
+    /// two conflicting ways to).
+    #[error("{pointer}: {message}")]
+    AmbiguousSymJobMatcher { pointer: String, message: String },
+
+    /// A sym job's `invocation` matcher names an empty `binary`.
+    #[error("{pointer}: sym job's invocation matcher must name a non-empty binary")]
+    EmptySymJobBinary { pointer: String },
 }
 
 /// The tool kinds the policy can route on (FR-CMD-011). A `Bash` call
@@ -238,20 +249,39 @@ pub struct Rule {
 }
 
 /// One job `legion sym` serves (FR-CMD-007): the sym command that job maps
-/// to, and the search-shaped patterns that mark an interpreter one-liner's
-/// opaque body as that job. All of `interpreter_patterns` must appear in
-/// the body for this job to match -- the evaluator gets the "any of these
-/// shapes" behavior by declaring more than one `SymJob` for the same
-/// `sym_command`, not by treating this list as a disjunction. A body that
-/// merely reads a file (`read_text()`) without also traversing a tree
-/// (`rglob(`, `os.walk(`, ...) is not a search: requiring both tokens in
-/// one job, rather than matching on either alone, is what keeps that
-/// negative from false-positiving.
+/// to, and how a command's job is recognized as this one -- either a
+/// resolved [`crate::Invocation`] (a visible binary the tokenizer already
+/// split into args, e.g. `grep -rn foo src` at any position or depth), or
+/// the raw text of an [`crate::Opaque::Interpreter`] body the tokenizer
+/// cannot parse into args at all (e.g. a Python one-liner).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymJob {
     pub id: String,
     pub sym_command: String,
-    pub interpreter_patterns: Vec<String>,
+    pub matcher: SymJobMatcher,
+}
+
+/// How a [`SymJob`] recognizes a command as its job (FR-CMD-007).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymJobMatcher {
+    /// Matches a resolved invocation of `binary` whose args satisfy
+    /// `predicate` -- visible at any position (first, after a pipe, inside
+    /// `sh -c`, ...) since the evaluator checks every invocation the
+    /// tokenizer resolved, not just the first.
+    Invocation {
+        binary: String,
+        predicate: Predicate,
+    },
+
+    /// Matches an interpreter one-liner's opaque body: all of `patterns`
+    /// must appear in the body for this job to match -- the evaluator gets
+    /// the "any of these shapes" behavior by declaring more than one
+    /// `SymJob` for the same `sym_command`, not by treating this list as a
+    /// disjunction. A body that merely reads a file (`read_text()`)
+    /// without also traversing a tree (`rglob(`, `os.walk(`, ...) is not a
+    /// search: requiring both tokens in one job, rather than matching on
+    /// either alone, is what keeps that negative from false-positiving.
+    InterpreterPatterns(Vec<String>),
 }
 
 /// The parsed policy (FR-CMD-011): organized by tool kind, then within Bash
@@ -322,7 +352,16 @@ struct RawSymJob {
     id: String,
     sym_command: String,
     #[serde(default)]
-    interpreter_patterns: Vec<String>,
+    interpreter_patterns: Option<Vec<String>>,
+    #[serde(default)]
+    invocation: Option<RawSymJobInvocation>,
+}
+
+#[derive(Deserialize)]
+struct RawSymJobInvocation {
+    binary: String,
+    #[serde(default)]
+    predicate: Predicate,
 }
 
 /// Parses policy text into a [`Policy`] (FR-CMD-011). Pure: the caller
@@ -350,15 +389,47 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
                 pointer: format!("{job_pointer}/sym_command"),
             });
         }
-        if raw_job.interpreter_patterns.is_empty() {
-            return Err(PolicyError::EmptySymPatterns {
-                pointer: format!("{job_pointer}/interpreter_patterns"),
-            });
-        }
+        let matcher = match (raw_job.interpreter_patterns, raw_job.invocation) {
+            (Some(patterns), None) => {
+                if patterns.is_empty() {
+                    return Err(PolicyError::EmptySymPatterns {
+                        pointer: format!("{job_pointer}/interpreter_patterns"),
+                    });
+                }
+                SymJobMatcher::InterpreterPatterns(patterns)
+            }
+            (None, Some(invocation)) => {
+                if invocation.binary.is_empty() {
+                    return Err(PolicyError::EmptySymJobBinary {
+                        pointer: format!("{job_pointer}/invocation/binary"),
+                    });
+                }
+                SymJobMatcher::Invocation {
+                    binary: invocation.binary,
+                    predicate: invocation.predicate,
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(PolicyError::AmbiguousSymJobMatcher {
+                    pointer: job_pointer,
+                    message:
+                        "a sym job must name exactly one of \"interpreter_patterns\" or \"invocation\", found both"
+                            .to_string(),
+                });
+            }
+            (None, None) => {
+                return Err(PolicyError::AmbiguousSymJobMatcher {
+                    pointer: job_pointer,
+                    message:
+                        "a sym job must name exactly one of \"interpreter_patterns\" or \"invocation\", found neither"
+                            .to_string(),
+                });
+            }
+        };
         sym_jobs.push(SymJob {
             id: raw_job.id,
             sym_command: raw_job.sym_command,
-            interpreter_patterns: raw_job.interpreter_patterns,
+            matcher,
         });
     }
 
@@ -720,14 +791,76 @@ mod tests {
 
     #[test]
     fn sym_job_without_interpreter_patterns_is_rejected_with_pointer() {
-        let text =
-            r#"{"sym_jobs": [{"id": "job-1", "sym_command": "legion sym etc find-content"}]}"#;
+        let text = r#"{"sym_jobs": [{"id": "job-1", "sym_command": "legion sym etc find-content", "interpreter_patterns": []}]}"#;
         let err = parse_policy(text).unwrap_err();
         match err {
             PolicyError::EmptySymPatterns { pointer } => {
                 assert_eq!(pointer, "/sym_jobs/0/interpreter_patterns");
             }
             other => panic!("expected EmptySymPatterns, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sym_job_with_neither_matcher_is_rejected_with_pointer() {
+        let text =
+            r#"{"sym_jobs": [{"id": "job-1", "sym_command": "legion sym etc find-content"}]}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::AmbiguousSymJobMatcher { pointer, .. } => {
+                assert_eq!(pointer, "/sym_jobs/0");
+            }
+            other => panic!("expected AmbiguousSymJobMatcher, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sym_job_with_both_matchers_is_rejected_with_pointer() {
+        let text = r#"{"sym_jobs": [{
+            "id": "job-1",
+            "sym_command": "legion sym etc find-content",
+            "interpreter_patterns": ["rglob("],
+            "invocation": {"binary": "grep"}
+        }]}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::AmbiguousSymJobMatcher { pointer, .. } => {
+                assert_eq!(pointer, "/sym_jobs/0");
+            }
+            other => panic!("expected AmbiguousSymJobMatcher, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sym_job_invocation_matcher_with_empty_binary_is_rejected_with_pointer() {
+        let text = r#"{"sym_jobs": [{
+            "id": "job-1",
+            "sym_command": "legion sym etc find-content",
+            "invocation": {"binary": ""}
+        }]}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::EmptySymJobBinary { pointer } => {
+                assert_eq!(pointer, "/sym_jobs/0/invocation/binary");
+            }
+            other => panic!("expected EmptySymJobBinary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sym_job_invocation_matcher_parses() {
+        let text = r#"{"sym_jobs": [{
+            "id": "grep-recursive",
+            "sym_command": "legion sym etc find-content",
+            "invocation": {"binary": "grep", "predicate": {"operand_contains": "-r"}}
+        }]}"#;
+        let policy = parse_policy(text).expect("valid invocation sym job should parse");
+        match &policy.sym_jobs[0].matcher {
+            SymJobMatcher::Invocation { binary, predicate } => {
+                assert_eq!(binary, "grep");
+                assert_eq!(predicate, &Predicate::OperandContains("-r".to_string()));
+            }
+            other => panic!("expected Invocation matcher, got {other:?}"),
         }
     }
 

@@ -90,16 +90,14 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     // alongside an unrelated Proxy part would wrongly lose to the Proxy.
     // Deciding the sym job first, outside the fold, keeps "never allowed
     // or proxied" true regardless of what #1228 changes.
-    if let Some((job_id, sym_command, matched_patterns)) =
-        find_sym_job(&policy.sym_jobs, &scan.opaque)
+    if let Some((job_id, sym_command, matched_description)) =
+        find_sym_job(&policy.sym_jobs, &scan.invocations, &scan.opaque)
     {
         // `sym_command` is non-empty because `parse_policy` already
         // rejects an empty one (`PolicyError::EmptySymCommand`), and the
         // reason is a non-empty format! -- both non-empty by construction.
         let decision = Decision::deny_infallible(
-            format!(
-                "this command's job is one legion sym serves (matched patterns: {matched_patterns})"
-            ),
+            format!("this command's job is one legion sym serves ({matched_description})"),
             sym_command,
         );
         return Routed {
@@ -221,31 +219,48 @@ fn opaque_part() -> (Decision, DecidingEntry) {
     )
 }
 
-/// Checks every [`Opaque::Interpreter`] region against every sym job, in
-/// declared order, returning the first job whose patterns all appear in
-/// the body. Declared order matters: a policy author lists a job's more
-/// specific (content-checking) patterns before a broader (traversal-only)
-/// job so the more specific job wins when both would otherwise match the
-/// same body.
+/// Checks every sym job against the whole command, in declared order,
+/// returning the first one that matches. An [`crate::policy::SymJobMatcher::Invocation`]
+/// job is checked against every resolved [`Invocation`] (any position or
+/// depth, so `sh -c` and pipelines count); an
+/// [`crate::policy::SymJobMatcher::InterpreterPatterns`] job is checked
+/// against every [`Opaque::Interpreter`] body, requiring all of its
+/// patterns to appear. Declared order matters for both: a policy author
+/// lists a job's more specific match before a broader one so the more
+/// specific job wins when both would otherwise match the same command.
 fn find_sym_job(
     sym_jobs: &[crate::policy::SymJob],
+    invocations: &[Invocation],
     opaque: &[Opaque],
 ) -> Option<(String, String, String)> {
-    for region in opaque {
-        let Opaque::Interpreter { body, .. } = region else {
-            continue;
-        };
-        for job in sym_jobs {
-            // `parse_policy` already rejects a sym job with an empty
-            // `interpreter_patterns` list (`PolicyError::EmptySymPatterns`),
-            // so every job reaching here has at least one pattern to check.
-            if job
-                .interpreter_patterns
-                .iter()
-                .all(|pattern| body.contains(pattern.as_str()))
-            {
-                let patterns = job.interpreter_patterns.join(", ");
-                return Some((job.id.clone(), job.sym_command.clone(), patterns));
+    for job in sym_jobs {
+        match &job.matcher {
+            crate::policy::SymJobMatcher::Invocation { binary, predicate } => {
+                let matched = invocations.iter().find(|inv| {
+                    &inv.binary == binary && predicate.matches(MatchInput::Args(&inv.args))
+                });
+                if matched.is_some() {
+                    let description = format!("invocation of {binary}");
+                    return Some((job.id.clone(), job.sym_command.clone(), description));
+                }
+            }
+            crate::policy::SymJobMatcher::InterpreterPatterns(patterns) => {
+                // `parse_policy` already rejects a sym job with an empty
+                // `interpreter_patterns` list (`PolicyError::EmptySymPatterns`),
+                // so every job reaching here has at least one pattern to
+                // check.
+                let matched = opaque.iter().any(|region| {
+                    let Opaque::Interpreter { body, .. } = region else {
+                        return false;
+                    };
+                    patterns
+                        .iter()
+                        .all(|pattern| body.contains(pattern.as_str()))
+                });
+                if matched {
+                    let description = patterns.join(", ");
+                    return Some((job.id.clone(), job.sym_command.clone(), description));
+                }
             }
         }
     }
