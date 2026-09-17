@@ -59,7 +59,7 @@
                 "kind": "rewrite",
                 "target": "legion issue list --repo {repo}",
                 "reason": "gh issue list duplicates legion's own issue tracking surface",
-                "translatable": { "max_operands": 2 }
+                "exact_args": ["issue", "list"]
               }
             }
           ]
