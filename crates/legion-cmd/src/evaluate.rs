@@ -46,13 +46,7 @@ pub fn evaluate(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
 // -- Bash: scan, sym-job precedence, per-invocation rules, then fold -------
 
 fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
-    let command = call
-        .input
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-
-    let scan = match tokenizer::scan(command) {
+    let scan = match tokenizer::scan(bash_command(call)) {
         Ok(scan) => scan,
         Err(err) => {
             // FR-CMD-006: a parse error routes ask unconditionally. This is
@@ -282,57 +276,151 @@ fn evaluate_invocation(
 /// `exact_args` is declared (FR-CMD-008) is checked against `input`'s
 /// arguments before its decision is trusted: the invocation's arguments
 /// must equal `exact_args` exactly, or it denies naming the rewrite's
-/// target instead of rewriting. `exact_args` is `None` for a Fields
-/// rule's Rewrite (`parse_policy` forbids it there), so this never runs
-/// against `MatchInput::Json`.
+/// target instead of rewriting. A Fields rule never carries a Rewrite
+/// (`parse_policy` rejects one outright, `RewriteUnsupportedOnFieldsRule`),
+/// so this check never runs against `MatchInput::Json`.
 fn evaluate_rules(
     rules: &[Rule],
     input: MatchInput<'_>,
     ctx: &Context,
 ) -> (Decision, DecidingEntry) {
-    for rule in rules {
-        if !rule.predicate.matches(input) {
-            continue;
-        }
-        if missing_required_lookup(&rule.requires, ctx) {
-            return (
-                deny_default(default_messages::MISSING_LOOKUP),
-                DecidingEntry::Default,
-            );
-        }
-        if let (Decision::Rewrite { target, .. }, MatchInput::Args(args), Some(exact_args)) =
-            (&rule.decision, input, &rule.exact_args)
-            && let Some(bad_arg) = first_differing_arg(exact_args, args)
-        {
-            let decision = Decision::deny_infallible(
-                format!(
-                    "argument {bad_arg:?} has no lossless translation to {}",
-                    target.as_str()
-                ),
-                target.as_str().to_string(),
-            );
-            return (
-                decision,
-                DecidingEntry::Rule {
-                    id: rule.id.clone(),
-                    needs_operator: false,
-                },
-            );
-        }
+    let Some(rule) = first_predicate_match(rules, input) else {
+        // FR-CMD-016: a managed rule (this binary/field set is governed by
+        // a family or a Fields rule list) that cannot resolve -> deny.
         return (
-            rule.decision.clone(),
+            deny_default(default_messages::UNRESOLVED_MANAGED_RULE),
+            DecidingEntry::Default,
+        );
+    };
+    if missing_required_lookup(&rule.requires, ctx) {
+        return (
+            deny_default(default_messages::MISSING_LOOKUP),
+            DecidingEntry::Default,
+        );
+    }
+    if let (Decision::Rewrite { target, .. }, MatchInput::Args(args), Some(exact_args)) =
+        (&rule.decision, input, &rule.exact_args)
+        && let Some(bad_arg) = first_differing_arg(exact_args, args)
+    {
+        let decision = Decision::deny_infallible(
+            format!(
+                "argument {bad_arg:?} has no lossless translation to {}",
+                target.as_str()
+            ),
+            target.as_str().to_string(),
+        );
+        return (
+            decision,
             DecidingEntry::Rule {
                 id: rule.id.clone(),
-                needs_operator: rule.needs_operator,
+                needs_operator: false,
             },
         );
     }
-    // FR-CMD-016: a managed rule (this binary/field set is governed by a
-    // family or a Fields rule list) that cannot resolve -> deny.
     (
-        deny_default(default_messages::UNRESOLVED_MANAGED_RULE),
-        DecidingEntry::Default,
+        rule.decision.clone(),
+        DecidingEntry::Rule {
+            id: rule.id.clone(),
+            needs_operator: rule.needs_operator,
+        },
     )
+}
+
+/// The first rule in `rules` (declared order) whose predicate matches
+/// `input`, ignoring lookup availability and the `exact_args` lossless
+/// check entirely. Used by both [`evaluate_rules`] (which goes on to
+/// apply those checks) and [`candidate_rules`] (which stops here, naming
+/// the same rule without deciding anything), so "which rule matches" has
+/// one implementation shared by both instead of two that could silently
+/// diverge.
+fn first_predicate_match<'p>(rules: &'p [Rule], input: MatchInput<'_>) -> Option<&'p Rule> {
+    rules.iter().find(|rule| rule.predicate.matches(input))
+}
+
+/// Every [`Rule`] a real `evaluate(policy, call, ctx)` call would consult
+/// while deciding `call`, for ANY `ctx` -- i.e. the predicate-matched rule
+/// for each Bash invocation (or the single matched rule for a Fields
+/// call), found through the same sym-job precedence and family/global-
+/// value-option resolution `evaluate_bash`/`evaluate_fields` use,
+/// entirely before any lookup-availability or `exact_args` check is
+/// applied.
+///
+/// This is `route`'s own candidate-rule step, exposed so
+/// [`crate::lookups`]'s pure pre-pass (#1229) can pre-fetch exactly the
+/// lookups those rules require, rather than re-implementing rule
+/// selection a second time and risking it disagreeing with `route`. It is
+/// not a second decision path: nothing here reads `ctx`, builds a
+/// `Decision`, or folds severities -- it only names which rules are in
+/// play.
+///
+/// Empty when: the tool is Bash and the command cannot be tokenized; the
+/// policy is empty; a sym job matches first (sym jobs carry no `requires`
+/// at all, and matching one means `evaluate_bash` returns before any
+/// family rule is ever considered); no Bash invocation resolves to a
+/// governed family; a resolution came back both unresolved and doubtful
+/// (see [`find_family`]) -- that path denies-by-doubt in `evaluate`
+/// without ever consulting a rule, so it needs no lookup and is skipped
+/// here too; or a non-Bash tool has no vocabulary or no `Fields` rule
+/// list in the policy.
+pub(crate) fn candidate_rules<'p>(policy: &'p Policy, call: &ToolCall) -> Vec<&'p Rule> {
+    if policy.is_empty() {
+        return Vec::new();
+    }
+    if call.tool == "Bash" {
+        return candidate_bash_rules(policy, call);
+    }
+    candidate_field_rules(policy, call)
+}
+
+fn candidate_bash_rules<'p>(policy: &'p Policy, call: &ToolCall) -> Vec<&'p Rule> {
+    let Ok(scan) = tokenizer::scan(bash_command(call)) else {
+        return Vec::new();
+    };
+    if find_sym_job(&policy.sym_jobs, &scan.invocations, &scan.opaque).is_some() {
+        return Vec::new();
+    }
+    let (families, binaries) = bash_tool_rules(policy);
+    scan.invocations
+        .iter()
+        .filter_map(|inv| {
+            let (family, _doubtful) = find_family(families, binaries, inv);
+            first_predicate_match(&family?.rules, MatchInput::Args(&inv.args))
+        })
+        .collect()
+}
+
+fn candidate_field_rules<'p>(policy: &'p Policy, call: &ToolCall) -> Vec<&'p Rule> {
+    let Some(rules) = fields_rules(policy, call) else {
+        return Vec::new();
+    };
+    first_predicate_match(rules, MatchInput::Json(&call.input))
+        .into_iter()
+        .collect()
+}
+
+/// The Bash command text `call` carries, or empty when its `tool_input`
+/// has no string `"command"` field. Shared by every path that needs the
+/// raw command text before scanning it: `evaluate_bash`,
+/// `candidate_bash_rules`, and `crate::lookups::required_lookups`'s query
+/// text.
+pub(crate) fn bash_command(call: &ToolCall) -> &str {
+    call.input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+/// The `Fields` rule list `call`'s tool kind maps to, or `None` when the
+/// tool has no vocabulary in the policy at all, or the policy governs it
+/// as `Bash` instead. Shared by `evaluate_fields` and
+/// `candidate_field_rules` so "which rule list a Fields call reads" has
+/// one implementation.
+fn fields_rules<'p>(policy: &'p Policy, call: &ToolCall) -> Option<&'p [Rule]> {
+    let kind = ToolKind::from_tool_name(&call.tool)?;
+    match policy.tools.get(&kind) {
+        Some(ToolRules::Fields { rules }) => Some(rules),
+        _ => None,
+    }
 }
 
 /// The first argument where `args` differs from `exact_args`, or `None`
@@ -474,25 +562,15 @@ fn evaluate_fields(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         return routed_default_deny(default_messages::EMPTY_POLICY, facts);
     }
 
-    let Some(kind) = ToolKind::from_tool_name(&call.tool) else {
-        // A tool the policy has no vocabulary for at all is simply outside
-        // its concern -- the same allow default as an unmanaged binary.
+    let Some(rules) = fields_rules(policy, call) else {
+        // A tool the policy has no vocabulary for at all, or one it
+        // governs as Bash instead, is simply outside its concern here --
+        // the same allow default as an unmanaged binary.
         return Routed {
             decision: allow_default(default_messages::NO_MANAGED_BINARY),
             facts,
             entry: DecidingEntry::Default,
         };
-    };
-
-    let rules: &[Rule] = match policy.tools.get(&kind) {
-        Some(ToolRules::Fields { rules }) => rules,
-        Some(ToolRules::Bash { .. }) | None => {
-            return Routed {
-                decision: allow_default(default_messages::NO_MANAGED_BINARY),
-                facts,
-                entry: DecidingEntry::Default,
-            };
-        }
     };
 
     let (decision, entry) = evaluate_rules(rules, MatchInput::Json(&call.input), ctx);

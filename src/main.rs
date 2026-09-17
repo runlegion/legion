@@ -3,6 +3,7 @@ mod board;
 mod card_parse;
 mod channel;
 mod cluster;
+mod cmd;
 mod css;
 mod daemon;
 mod db;
@@ -354,6 +355,7 @@ fn run() -> error::Result<()> {
             all_hosts,
             json,
         } => cli::ops::handle_health(history, all_hosts, json)?,
+        Commands::CmdCheck { hook } => cli::cmd_check::handle_cmd_check(hook)?,
     }
 
     Ok(())

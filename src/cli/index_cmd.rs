@@ -2189,63 +2189,7 @@ mod freshness_tests {
 #[cfg(test)]
 mod worktree_divergence_tests {
     use super::*;
-
-    /// Suite-wide isolated (always-empty) `GIT_CONFIG_GLOBAL`/
-    /// `GIT_CONFIG_SYSTEM` file paths for this module's fixture git
-    /// invocations, mirroring `inventory::tests::isolated_git_config_paths`
-    /// (that one is private to its own module, so it is not reusable here
-    /// even though both live in the same crate). Without this, `git_in`'s
-    /// `-c` overrides only pin identity/signing -- config *values* like a
-    /// developer's real `core.hooksPath` or `init.defaultBranch` would
-    /// still leak in from `~/.gitconfig`. The backing tempdir is
-    /// deliberately leaked: it must outlive every test in this binary, and
-    /// process exit reclaims it like any other tempfile.
-    fn isolated_git_config_paths() -> &'static (std::path::PathBuf, std::path::PathBuf) {
-        static ISOLATED_GIT_CONFIG: std::sync::OnceLock<(std::path::PathBuf, std::path::PathBuf)> =
-            std::sync::OnceLock::new();
-        ISOLATED_GIT_CONFIG.get_or_init(|| {
-            let dir = tempfile::tempdir().expect("create isolated git config dir");
-            let global = dir.path().join("global.gitconfig");
-            let system = dir.path().join("system.gitconfig");
-            std::fs::write(&global, "").expect("write isolated global gitconfig");
-            std::fs::write(&system, "").expect("write isolated system gitconfig");
-            std::mem::forget(dir);
-            (global, system)
-        })
-    }
-
-    /// Run `git` in `dir` with an isolated global/system config (never a
-    /// real `git config` write, and never reading the developer's real
-    /// `~/.gitconfig`) but WITHOUT `common::fixture_git_command`'s
-    /// `GIT_DIR`/`GIT_WORK_TREE` overrides: those are hardcoded to `<dir>/
-    /// .git`, which is a plain FILE (not a directory) inside a linked
-    /// worktree, so forcing them would break every fixture command run
-    /// there. Plain directory-based discovery (`current_dir` only) resolves
-    /// both a primary checkout and a linked worktree correctly.
-    fn git_in(dir: &std::path::Path, args: &[&str]) {
-        let (global, system) = isolated_git_config_paths();
-        let mut full_args: Vec<&str> = vec![
-            "-c",
-            "user.name=Legion Test Fixture",
-            "-c",
-            "user.email=legion-test-fixture@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-        ];
-        full_args.extend_from_slice(args);
-        let out = std::process::Command::new("git")
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", global)
-            .env("GIT_CONFIG_SYSTEM", system)
-            .args(&full_args)
-            .output()
-            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn in {dir:?}: {e}"));
-        assert!(
-            out.status.success(),
-            "git {args:?} exited non-zero in {dir:?}\nstderr: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    use crate::testutil::{git_in, isolated_git_config_paths};
 
     /// Read-only counterpart to `git_in`, sharing the same config
     /// isolation, for a query whose stdout the caller needs (`rev-parse

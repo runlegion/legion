@@ -13,6 +13,7 @@
 
 mod decision;
 mod evaluate;
+mod lookups;
 mod policy;
 mod route;
 mod tokenizer;
@@ -21,6 +22,7 @@ pub use decision::{
     AskDetails, Context, ContractError, DecidingEntry, Decision, DenyDetails, Facts, Lookup,
     ManagedTarget, NO_GO_INSTEAD, ProxyReason, Routed, ToolCall,
 };
+pub use lookups::{RequiredQuery, required_lookups};
 pub use policy::{
     BinaryOptions, Family, MatchInput, Policy, PolicyError, Predicate, RequiredLookup, Rule,
     SymJob, SymJobMatcher, ToolKind, ToolRules, parse_policy,
